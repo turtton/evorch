@@ -5,4 +5,10 @@ pub mod event;
 pub mod ring;
 pub mod usage;
 
-// TODO: モジュール実装後に公開型の再エクスポートを追加する。
+pub use bus::{EventBus, EventReceiver, RecvError};
+pub use event::{
+    Event, EventKind, EventMeta, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent,
+    SCHEMA_VERSION, ToolEvent, UsageEvent,
+};
+pub use ring::RingBuffer;
+pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};
