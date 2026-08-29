@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl_stream_text","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_stream_text","choices":[{"index":0,"delta":{"content":" from"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_stream_text","choices":[{"index":0,"delta":{"content":" OpenAI."},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl_stream_text","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":3}}}
+
+data: [DONE]

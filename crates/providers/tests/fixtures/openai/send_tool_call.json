@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl_tool",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"Tokyo\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 9,
+    "total_tokens": 22,
+    "prompt_tokens_details": {
+      "cached_tokens": 4
+    }
+  }
+}
