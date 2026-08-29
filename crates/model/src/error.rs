@@ -14,4 +14,7 @@ pub enum ModelError {
     /// カタログキャッシュの読み書きに失敗した。
     #[error("catalog cache failed: {0}")]
     Cache(String),
+    /// カタログ更新履歴の記録に失敗した。
+    #[error("catalog history recording failed: {0}")]
+    History(String),
 }

@@ -74,13 +74,32 @@ impl CatalogCache {
         if age >= self.ttl {
             return None;
         }
-        let body = fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&body).ok()
+        self.read_cache_file()
+    }
+
+    /// TTL に関わらずキャッシュからカタログ項目の列を読み込む。
+    ///
+    /// 外部カタログの取得に失敗したときのフォールバック
+    /// (`crate::refresh` の `ModelCatalog::refresh`) で使われます。
+    /// [`Self::load`] と異なり mtime の TTL 判定を行わないため、期限切れの
+    /// キャッシュも読み込みます。キャッシュファイルが存在しない場合や、
+    /// ファイル内容が JSON として解析できない場合は `None` を返します
+    /// (いずれもエラーにはしません)。
+    pub fn load_ignoring_ttl(&self) -> Option<Vec<CatalogEntry>> {
+        self.read_cache_file()
     }
 
     /// キャッシュファイルのパスを返す。
     fn cache_file(&self) -> PathBuf {
         self.dir.join(CACHE_FILE_NAME)
+    }
+
+    /// キャッシュファイルを読み込んで解析する。
+    ///
+    /// 読み込み・解析に失敗した場合は `None` を返します。
+    fn read_cache_file(&self) -> Option<Vec<CatalogEntry>> {
+        let body = fs::read_to_string(self.cache_file()).ok()?;
+        serde_json::from_str(&body).ok()
     }
 }
 
@@ -161,6 +180,26 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(cache.load().is_none(), "TTL 超過後の load は None");
+    }
+
+    // Given: TTL 1 ミリ秒のキャッシュに保存済みの項目
+    // When: TTL を超過するまで待機して load_ignoring_ttl する
+    // Then: 期限を無視して項目を読み込める
+    #[test]
+    fn cache_load_ignoring_ttl_reads_expired_cache() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+        let cache = CatalogCache::new(dir.path(), Duration::from_millis(1));
+        let entries = sample_entries();
+
+        cache.store(&entries).expect("store は成功する");
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(cache.load().is_none(), "TTL 超過後の load は None");
+        assert_eq!(
+            cache.load_ignoring_ttl(),
+            Some(entries),
+            "期限を無視すれば読み込める"
+        );
     }
 
     // Given: キャッシュファイル位置に不正な JSON が存在する
