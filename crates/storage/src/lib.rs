@@ -10,4 +10,5 @@ mod repo;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};
+pub use db::{Database, watch_exclusions};
 pub use error::StorageError;
