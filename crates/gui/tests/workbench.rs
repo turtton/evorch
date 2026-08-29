@@ -250,6 +250,11 @@ fn tasks_row_updates_after_state_change_event() {
         harness.state().tasks().rows()[0].status,
         AgentRunPhase::Done
     );
+    // And: every acceptance column (name/role/status/model) is populated
+    let row = &harness.state().tasks().rows()[0];
+    assert_eq!(row.name, "worker");
+    assert_eq!(row.role, "worker");
+    assert_eq!(row.model, "test-model");
 }
 
 #[test]
