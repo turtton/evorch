@@ -25,6 +25,15 @@ OpenCode / pi / senpi は prompt injection を「防げない」と公式に明�
 
 既存 harness 同様、injection は「低減するが根除しない」ものと位置づける（product/overview.md の non-goals 参照予定）。
 
+## v0.1 標準5ツールの実装確定（2026-08-29）
+
+read / edit / grep / shell / git_diff の 5 ツールが `crates/tools/` にコード確定（PR #14、issue #5）。統一 `Tool` trait（`name` / JSON Schema `schema` / `permissions` / async `execute`）+ `ToolExecutor` が `ToolStarted` / `ToolCompleted` を event stream へ emit。要点:
+
+- **制御マーカー エスケープの適用位置**: ディスク書き込みはバイト一致（ファイルは絶対に書き換えない）。エスケープ（`<system-reminder>` / `</system-reminder>` の `<` の直後に `\` 挿入、冪等）は `ToolExecutor` の結果正規化でのみ行う（ADR 0008 整合）
+- **edit**: 同一親ディレクトリ上の一時ファイル + `persist` による atomic rename
+- **shell**: 非 interactive = `tokio::process::Command`、interactive = portable-pty（one-shot）
+- **引数検証**: 各ツールの JSON Schema で実施（新規依存 jsonschema 0.52 no-default-features）
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T14:36:43.2221797+00:00",
+  "updated_at": "2026-08-29T15:46:56.099984+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -105,7 +105,7 @@
     {
       "execution_unit": "v01-tool-layer",
       "title": "v0.1: tool \u57FA\u76E4\u3068 read / edit / grep / shell / git_diff \u30C4\u30FC\u30EB\u3092\u5B9F\u88C5\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-scaffold",
         "v01-event-stream"
@@ -122,6 +122,7 @@
         "number": 5,
         "url": "https://github.com/turtton/evorch/issues/5"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/14",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
