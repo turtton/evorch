@@ -6,3 +6,18 @@ publish = false
 
 [lib]
 name = "runtime"
+
+[dependencies]
+agents = { path = "../agents" }
+async-trait = { workspace = true }
+event-bus = { path = "../event-bus" }
+providers = { path = "../providers" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tools = { path = "../tools" }
+tokio = { workspace = true, features = ["rt", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

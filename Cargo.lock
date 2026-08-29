@@ -1412,6 +1412,18 @@ dependencies = [
 [[package]]
 name = "runtime"
 version = "0.1.0"
+dependencies = [
+ "agents",
+ "async-trait",
+ "event-bus",
+ "providers",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+]
 
 [[package]]
 name = "rusqlite"
