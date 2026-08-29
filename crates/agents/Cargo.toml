@@ -1,0 +1,11 @@
+[package]
+name = "agents"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "agents"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
