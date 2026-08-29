@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T06:50:08.191809+00:00",
+  "updated_at": "2026-08-29T07:47:50.2574067+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -18,6 +18,210 @@
         "repo": "turtton/evorch",
         "number": 1,
         "url": "https://github.com/turtton/evorch/issues/1"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-event-stream",
+      "title": "v0.1: \u578B\u4ED8\u304D Event Bus\uFF08event stream\uFF09\u30B3\u30A2\u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-scaffold"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-event-stream/implementation.md",
+        "review_context": ".intent-cli/issues/v01-event-stream/review-context.md",
+        "yaml": ".intent-cli/issues/v01-event-stream/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 2,
+        "url": "https://github.com/turtton/evorch/issues/2"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-session-storage",
+      "title": "v0.1: SQLite session \u6C38\u7D9A\u5316\u3068 entity schema \u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-scaffold",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-session-storage/implementation.md",
+        "review_context": ".intent-cli/issues/v01-session-storage/review-context.md",
+        "yaml": ".intent-cli/issues/v01-session-storage/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 3,
+        "url": "https://github.com/turtton/evorch/issues/3"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-provider-client",
+      "title": "v0.1: provider \u62BD\u8C61\u3068 OpenAI / Anthropic / OpenAI-compatible \u30B9\u30C8\u30EA\u30FC\u30DF\u30F3\u30B0\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-scaffold",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-provider-client/implementation.md",
+        "review_context": ".intent-cli/issues/v01-provider-client/review-context.md",
+        "yaml": ".intent-cli/issues/v01-provider-client/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 4,
+        "url": "https://github.com/turtton/evorch/issues/4"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-tool-layer",
+      "title": "v0.1: tool \u57FA\u76E4\u3068 read / edit / grep / shell / git_diff \u30C4\u30FC\u30EB\u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-scaffold",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-tool-layer/implementation.md",
+        "review_context": ".intent-cli/issues/v01-tool-layer/review-context.md",
+        "yaml": ".intent-cli/issues/v01-tool-layer/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 5,
+        "url": "https://github.com/turtton/evorch/issues/5"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-sandbox-approval",
+      "title": "v0.1: sandbox \u002B approval \u4E8C\u5C64\u30BB\u30AD\u30E5\u30EA\u30C6\u30A3\u3068 credential \u9694\u96E2\u30FBnetwork deny \u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-scaffold",
+        "v01-tool-layer",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-sandbox-approval/implementation.md",
+        "review_context": ".intent-cli/issues/v01-sandbox-approval/review-context.md",
+        "yaml": ".intent-cli/issues/v01-sandbox-approval/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 6,
+        "url": "https://github.com/turtton/evorch/issues/6"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-agent-roles",
+      "title": "v0.1: Orchestrator / Explorer / Worker / Reviewer \u306E role \u5B9F\u884C\u3068 background agent \u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-event-stream",
+        "v01-session-storage",
+        "v01-provider-client",
+        "v01-tool-layer",
+        "v01-sandbox-approval"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-agent-roles/implementation.md",
+        "review_context": ".intent-cli/issues/v01-agent-roles/review-context.md",
+        "yaml": ".intent-cli/issues/v01-agent-roles/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 7,
+        "url": "https://github.com/turtton/evorch/issues/7"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-routing-profiles",
+      "title": "v0.1: provider profile\u30FBsimple fallback\u30FBmodel catalog\u30FBTOML config \u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-provider-client",
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-routing-profiles/implementation.md",
+        "review_context": ".intent-cli/issues/v01-routing-profiles/review-context.md",
+        "yaml": ".intent-cli/issues/v01-routing-profiles/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 8,
+        "url": "https://github.com/turtton/evorch/issues/8"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-gui-panes",
+      "title": "v0.1: egui \u002B egui_dock \u57FA\u672C pane\uFF08agent / terminal / tasks\uFF09\u3092\u5B9F\u88C5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-agent-roles",
+        "v01-event-stream",
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-gui-panes/implementation.md",
+        "review_context": ".intent-cli/issues/v01-gui-panes/review-context.md",
+        "yaml": ".intent-cli/issues/v01-gui-panes/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 9,
+        "url": "https://github.com/turtton/evorch/issues/9"
       },
       "worker_role": "implementation",
       "review_role": "review",
