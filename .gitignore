@@ -1,0 +1,2 @@
+.intent-cli/supervision/**/cycles.jsonl
+.intent-cli/supervision/**/stalls.jsonl

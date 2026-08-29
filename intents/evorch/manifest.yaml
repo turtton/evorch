@@ -1,0 +1,19 @@
+version: "1"
+layout_version: tree-v1
+project_type: product-app
+target_repo: turtton/evorch
+branch_policy: direct-main
+metadata_policy: host-metadata
+entrypoints:
+  - identity/mission.md
+  - README.md
+categories:
+  identity: identity/
+  product: product/
+  features: features/
+  technology: technology/
+  operations: operations/
+  decisions: decisions/
+  clarifications: clarifications/
+  packets: packets/
+  links: links/

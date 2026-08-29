@@ -1,0 +1,5 @@
+[project]
+domain = "evorch"
+artifact_root = ".intent-cli"
+worktree_root = ".intent-cli/worktrees"
+base_branch_policy = "direct-main"

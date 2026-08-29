@@ -1,0 +1,8 @@
+# G301 host binding record. Other intent-cli commands consult this to
+# detect wrong-host operation (e.g. publishing a domain from a host
+# repo whose remote does not match `host_repo`). Empty values are
+# treated as "not yet bound" and skip the wrong-host check.
+[host]
+domain = "evorch"
+host_repo = ""
+target_repo = "turtton/evorch"

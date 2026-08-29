@@ -1,0 +1,3 @@
+.intent-cli/runs.jsonl merge=union
+.intent-cli/**/*.jsonl merge=union
+.intent-cli/claims/** -merge
