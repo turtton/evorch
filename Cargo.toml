@@ -18,11 +18,13 @@ portable-pty = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 wiremock = "0.6"

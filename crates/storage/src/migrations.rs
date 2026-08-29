@@ -7,7 +7,7 @@ use crate::StorageError;
 #[path = "migrations/sql.rs"]
 mod sql;
 
-pub(crate) const MIGRATIONS: &[&str] = &[sql::V1];
+pub(crate) const MIGRATIONS: &[&str] = &[sql::V1, sql::V2];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
     let current = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;

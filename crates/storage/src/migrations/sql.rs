@@ -63,3 +63,13 @@ CREATE TABLE downsampled_metrics (
     PRIMARY KEY (window_start, provider, model)
 );
 "#;
+
+pub(super) const V2: &str = r#"
+CREATE TABLE catalog_updates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source         TEXT NOT NULL,
+    model_count    INTEGER NOT NULL,
+    detail         TEXT NOT NULL,
+    recorded_at_ns INTEGER NOT NULL
+);
+"#;
