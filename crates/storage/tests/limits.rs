@@ -226,7 +226,7 @@ fn accepted_events_round_trip_with_exact_timestamps() {
 
 #[test]
 fn cjk_session_size_counts_utf8_bytes() {
-    // Given: 日本語 100 文字のメッセージ差分を持つイベントと既存セッション
+    // Given: 日本語 100 文字のイベントと直後の追記でちょうど上限を超えるセッション
     let temp_dir = TempDir::new().expect("temporary directory must be created");
     let connection = open_connection(&temp_dir);
     insert_session(&connection, "s1");
@@ -236,45 +236,44 @@ fn cjk_session_size_counts_utf8_bytes() {
         },
         1,
     );
+    let small_event = event_at(MessageEvent::MessageDelta { delta: "ok".into() }, 2);
     let cjk_bytes = payload_len(&cjk_event);
+    let small_bytes = payload_len(&small_event);
     let limits = HardLimits {
-        max_session_bytes: cjk_bytes - 1,
+        max_session_bytes: cjk_bytes + small_bytes - 1,
         ..HardLimits::default()
     };
-    let mut accounting = EventAccounting::default();
 
-    // When: 文字数ではなくバイト長で上限を超えるイベントを追記する
-    let error = append_event(
+    // When: 日本語イベントを受理する
+    append_event(
         &connection,
         Some("s1"),
         &cjk_event,
         &limits,
-        &mut accounting,
+        &mut EventAccounting::default(),
     )
-    .expect_err("cjk event must exceed byte limit");
+    .expect("first cjk event must fit");
 
-    // Then: 直列化バイト長を伴う SessionSize 超過になる
-    assert_eq!(
-        error,
-        StorageError::LimitExceeded {
-            limit: LimitKind::SessionSize,
-            actual: cjk_bytes,
-            max: limits.max_session_bytes,
-        }
-    );
-
-    // And when: バイト長が上限未満の小さいイベントを追記する
-    let small_event = event_at(MessageEvent::MessageDelta { delta: "ok".into() }, 2);
-    append_event(
+    // And when: DB からバイト単位で再シードした直後に小さいイベントを追記する
+    let error = append_event(
         &connection,
         Some("s1"),
         &small_event,
         &limits,
-        &mut accounting,
+        &mut EventAccounting::default(),
     )
-    .expect("small event must fit");
+    .expect_err("seeded byte total must exceed the limit");
 
-    // Then: 小さいイベントだけが永続化される
+    // Then: 文字数ではなく直列化バイト長の合計で拒否される
+    // (LENGTH ベースの文字数シードでは実バイトの約 1/3 しか見ず受理されてしまう)
+    assert_eq!(
+        error,
+        StorageError::LimitExceeded {
+            limit: LimitKind::SessionSize,
+            actual: cjk_bytes + small_bytes,
+            max: limits.max_session_bytes,
+        }
+    );
     assert_eq!(list_by_session(&connection, "s1").unwrap().len(), 1);
 }
 
