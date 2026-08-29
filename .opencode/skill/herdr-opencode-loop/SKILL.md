@@ -97,7 +97,35 @@ worker の opencode sandbox は対象 repo の `.git` を read-only mount し `/
     -   契約ファイルの置き場所: host repo 内の `.opencode/<slice>-contract.md` 等。`/tmp/opencode` は opencode から読めないことがある（herdr-opencode-loop 実績）。
 -   **返答送り先の lead pane ID を明記**: 初回委譲プロンプトと契約ファイルの両方に、リレー先の lead pane ID（例: `w2:p1`）を書く。複数の opencode セッションが併存する環境では worker が画面タイトルや focused 状態で送り先を推測して誤リレーし得るため、「他の opencode pane が見えても送り先は `<lead-pane>` 固定」と明示し、着手時に送り先確認リレー（例: `[herdr-relay] <unit>: 着手 (送り先 <lead-pane> を確認)`）を送らせて配線を検証する（herdr-opencode-loop 実績: 2 セッション併存環境で正しく配送されることを実測）。
 -   **完了時リレーを必須手順として明記**: `herdr agent prompt <lead-pane> "[herdr-relay] <結果要約>"`。結果要約に `$` や backtick が混入し得るため、任意テキストをコマンド文字列へ直接埋め込まず、シェル変数経由で渡す: `relay="[herdr-relay] $summary"; herdr agent prompt "$lead_pane" "$relay"`
--   worker に `intent-cli` を叩かせる場合はバイナリの絶対パスを明記する。本環境は nix profile 管理（0.26.0）。実行時に `command -v intent-cli` で解決した絶対パスを記載する運用とする（例: `/nix/store/bhn4d645q3f0nc7m7k0iw20phizrsw5i-intent-cli-0.26.0/bin/intent-cli`）。
+- worker に `intent-cli` を叩かせる場合はバイナリの絶対パスを明記する。本環境は nix profile 管理（0.26.0）。実行時に `command -v intent-cli` で解決した絶対パスを記載する運用とする（例: `/nix/store/bhn4d645q3f0nc7m7k0iw20phizrsw5i-intent-cli-0.26.0/bin/intent-cli`）。
+
+### Reviewer Gate テンプレート（worker セルフレビュー、2026-08-30 導入）
+
+worker のシステムプロンプトには **Reviewer Gate（条件付き発動・非任意）** があり、発動条件は「user が "strictly / rigorously / properly review" 等と発言」「3+ files 触れる or 20+ turns or 30+ 分」「refactor / migration / perf / security 作業」。slice 実装は常に 3+ files なので実質発動するが、確実に発動させるため委譲プロンプトには **"rigorously" を必ず含める**。procedure:
+
+1. `task(category="ultrabrain", subagent_type="plan", run_in_background=false, prompt="<goal + 主要シナリオ + 検証証拠 + 対象 diff + notepad パス>")` で reviewer spawn
+2. reviewer concern は「成功基準を具体引用しているもの」のみ blocker。基準未引用は note（1行理由）で記録
+3. criterion-cited blocker は全修正 → 影響シナリオ QA のみ再実行 → 差分の新規証拠
+4. 同一 reviewer に最大 2 回まで再提出（差分 diff + blocker + 承認済み基準は out-of-scope 明示）。note のみの承認は承認として扱う
+5. 2 回再レビュー後に criterion-cited blocker が残る場合: 完了宣言せずリレーで lead に報告
+
+契約ファイルに以下のブロックを含めること（notepad は global gitignore 済み `.opencode/` 配下なので commit されない）:
+
+```markdown
+## Reviewer Gate（セルフレビュー、必須）
+
+完了宣言・PR 作成の**前に** Reviewer Gate を実施する。本タスクは 3+ files を触れるため発動条件を満たす。
+
+1. reviewer 起動: `task(category="ultrabrain", subagent_type="plan", run_in_background=false, prompt="<goal + 主要シナリオ + 検証証拠 + 対象 diff + notepad パス>")`（task/subagent が使えない環境では自身でレビュー観点チェックリストを実行し、PR body に観点一覧と結果を明記）
+2. concern は「成功基準を具体引用しているもの」のみ blocker。基準未引用は note（1行理由）で記録
+3. criterion-cited blocker は全て修正。影響を受けたシナリオ QA のみ再実行し差分の新規証拠を取得
+4. 同一 reviewer に最大 2 回まで再提出（差分 diff + blocker + 承認済み基準は out-of-scope 明示）。note のみの承認は承認扱い
+5. 2 回再レビュー後に criterion-cited blocker が残る場合: 完了宣言・PR 作成はせず `[herdr-relay]` で lead に報告
+
+レビュー notepad: `.opencode/<slice>-review-notepad.md`
+```
+
+完了リレーには「Reviewer Gate 実施結果（blocker 修正数・note 数・承認状態）」を必ず含める。
 
 ### プロンプト例
 

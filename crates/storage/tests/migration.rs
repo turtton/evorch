@@ -7,8 +7,9 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 6] = [
+const EXPECTED_TABLES: [&str; 7] = [
     "agent_runs",
+    "catalog_updates",
     "downsampled_metrics",
     "events",
     "messages",
@@ -48,7 +49,7 @@ fn schema_objects(connection: &Connection, object_type: &str) -> BTreeSet<String
 }
 
 #[test]
-fn fresh_open_applies_version_one_schema() {
+fn fresh_open_applies_latest_schema() {
     // Given: 空の一時ディレクトリに置くデータベースパス
     let temp_dir = TempDir::new().expect("temporary directory must be created");
     let path = database_path(&temp_dir);
@@ -56,13 +57,13 @@ fn fresh_open_applies_version_one_schema() {
     // When: データベースを初めて開く
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
 
-    // Then: v1 と定義済みテーブル・インデックスだけが作成される
+    // Then: v2 と定義済みテーブル・インデックスだけが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        1
+        2
     );
     assert_eq!(
         schema_objects(&connection, "table"),
@@ -75,8 +76,8 @@ fn fresh_open_applies_version_one_schema() {
 }
 
 #[test]
-fn reopening_version_one_database_is_idempotent() {
-    // Given: v1 へ移行済みのデータベース
+fn reopening_latest_database_is_idempotent() {
+    // Given: 最新版へ移行済みのデータベース
     let temp_dir = TempDir::new().expect("temporary directory must be created");
     let path = database_path(&temp_dir);
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
@@ -84,15 +85,15 @@ fn reopening_version_one_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v1 のまま維持される
+    // Then: スキーマは重複せず v2 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        1
+        2
     );
-    assert_eq!(schema_objects(&connection, "table").len(), 6);
+    assert_eq!(schema_objects(&connection, "table").len(), 7);
     assert_eq!(schema_objects(&connection, "index").len(), 6);
 }
 
@@ -115,7 +116,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 1,
+            supported: 2,
         }
     );
 }

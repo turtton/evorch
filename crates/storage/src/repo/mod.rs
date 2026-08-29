@@ -4,6 +4,7 @@
 //! 同一 DB ファイルを storage 外から直接開くと ADR 0012 の single-writer 規約が破綻します。
 
 pub mod agent_run;
+pub mod catalog;
 pub mod event;
 pub mod message;
 pub mod metrics;

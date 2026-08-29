@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, types::FromSql};
 
 use crate::migrations::apply_migrations;
-use crate::{StorageConfig, StorageError};
+use crate::repo::catalog;
+use crate::{CatalogUpdateRecord, StorageConfig, StorageError};
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 
@@ -45,6 +46,24 @@ impl Database {
     /// 接続の整数 PRAGMA 値を返します。
     pub fn pragma_i64(&self, name: &str) -> Result<i64, StorageError> {
         self.pragma_value(name)
+    }
+
+    /// カタログ更新履歴を保存します。
+    ///
+    /// # Errors
+    ///
+    /// SQLite 操作に失敗した場合にエラーを返します。
+    pub fn record_catalog_update(&self, record: &CatalogUpdateRecord) -> Result<(), StorageError> {
+        catalog::record(&self.conn, record)
+    }
+
+    /// カタログ更新履歴を挿入順で返します。
+    ///
+    /// # Errors
+    ///
+    /// SQLite 操作または保存済みモデル数の変換に失敗した場合にエラーを返します。
+    pub fn catalog_updates(&self) -> Result<Vec<CatalogUpdateRecord>, StorageError> {
+        catalog::list(&self.conn)
     }
 
     fn pragma_value<T: FromSql>(&self, name: &str) -> Result<T, StorageError> {

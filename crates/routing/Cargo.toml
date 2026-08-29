@@ -6,3 +6,9 @@ publish = false
 
 [lib]
 name = "routing"
+
+[dependencies]
+config = { path = "../config" }
+model = { path = "../model" }
+providers = { path = "../providers" }
+thiserror = { workspace = true }
