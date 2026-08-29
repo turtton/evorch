@@ -16,6 +16,10 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 - **Session affinity**: prompt cache のため同一 task / session で profile に留まる。429 / 5xx / timeout / quota / auth で cooldown 管理。Retry-After を優先
 - **provider health / cooldown 管理**（v0.4 で拡張）
 
+## v0.1 provider 3 種の実装確定（2026-08-29）
+
+OpenAI / Anthropic / OpenAI-compatible が `ProviderClient` 実装としてコード確定（PR #13、issue #4）。canonical message 正規化と wire 変換は [ADR 0020](../../decisions/0020-canonical-message-normalization.md)。usage イベントは `UsageEmitter` 経由で event stream へ emit され、`UsageAggregator`（ADR 0012）→ storage（ADR 0018）にそのまま繋がる。検証は wiremock 契約テスト（ADR 0015 第1層、実 API 不使用）。subscription 系は v0.3 で re-evaluation。
+
 ## サブスクリプション系 provider の実装方針（2026-08 再評価済み）
 
 - **anthropic-subscription**: senpi（code-yeongyu/senpi）方式。正規 OAuth authorization-code + PKCE（`claude.ai/oauth/authorize` → `platform.claude.com/v1/oauth/token`、scope に `user:sessions:claude_code`）。access token を Messages API の apiKey として使用。Claude Code 風 tool 命名の模倣（Stealth mode）を実装。refresh は期限 5 分前に provider 単位 lock 下で実施。pi-mono も同経路を現役で保持。
@@ -36,6 +40,7 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 
 - [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
 - [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
+- [ADR 0020: canonical message 正規化と OpenAI / Anthropic / OpenAI-compatible 変換](../../decisions/0020-canonical-message-normalization.md)
 
 ## Open questions
 

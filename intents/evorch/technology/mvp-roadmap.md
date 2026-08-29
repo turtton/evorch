@@ -89,6 +89,6 @@ test harness instance
 ## Open questions
 
 - v0.1 の GUI は egui + egui_dock で基本 pane（agent / terminal / tasks）とする（ADR 0007 で確定）。Floem 評価用 prototype は必須ではなく任意の並行調査
-- v0.1 で用意する provider は OpenAI / Anthropic / OpenAI-compatible の3種で確定か
+- ~~v0.1 で用意する provider は OpenAI / Anthropic / OpenAI-compatible の3種で確定か~~ → 2026-08-29 確定（PR #13 で `ProviderClient` 3 実装としてコード化、ADR 0020）
 - Planner / Multimodal role の導入 version
 - 各 version のリリース基準（tag / ブランチ戦略）

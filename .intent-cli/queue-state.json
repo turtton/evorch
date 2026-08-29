@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T12:43:00.2679701+00:00",
+  "updated_at": "2026-08-29T14:36:43.2221797+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -79,7 +79,7 @@
     {
       "execution_unit": "v01-provider-client",
       "title": "v0.1: provider \u62BD\u8C61\u3068 OpenAI / Anthropic / OpenAI-compatible \u30B9\u30C8\u30EA\u30FC\u30DF\u30F3\u30B0\u30AF\u30E9\u30A4\u30A2\u30F3\u30C8\u3092\u5B9F\u88C5\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-scaffold",
         "v01-event-stream"
@@ -96,6 +96,7 @@
         "number": 4,
         "url": "https://github.com/turtton/evorch/issues/4"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/13",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
