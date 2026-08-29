@@ -17,6 +17,12 @@ Agents: Orchestrator / Explorer / Worker / Reviewer
 
 Tools: read / edit / grep / shell / git diff
 
+Security (ADR 0008 v0.1):
+  sandbox + approval 二層分離
+  credential 隔離（keychain 優先 / 0600 fallback）
+  network egress 既定 deny
+  制御マーカー エスケープ
+
 Features:
   independent agent contexts
   background agent
@@ -35,7 +41,8 @@ Features:
 Librarian / Oracle
 Role / Category separation
 Tree-sitter / LSP
-sandbox
+ContentOrigin 実装（ADR 0008）
+project trust（ロード制御、ADR 0008）
 provider affinity
 cache metrics
 ```

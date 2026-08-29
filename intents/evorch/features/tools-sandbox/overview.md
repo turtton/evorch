@@ -15,6 +15,16 @@ Tool は統一 interface（name / schema / permissions / execute）とし、Role
 - **Sandbox**: agent ごとの能力に応じた sandbox policy（Codex 的）。Explorer = workspace read-only / network optional、Librarian = read-only / network allowed、Worker = workspace read-write / outside denied / network denied by default、Orchestrator = mutation tools unavailable。プラットフォーム候補: macOS Seatbelt / Linux Landlock・seccomp・namespaces(bwrap) / Windows restricted token・job object
 - **MCP**: rmcp を利用
 
+## 脅威モデル（ADR 0008、2026-08-29 確定）
+
+OpenCode / pi / senpi は prompt injection を「防げない」と公式に明記し、Codex CLI 以外は OS-level sandbox を持たない調査結果を踏まえ、以下を段階導入する。
+
+- **v0.1**: approval policy（on-request/on-failure/never）と OS enforcement（fs allowlist / network deny / workspace write scope）の二層分離（Codex 方式。承認しても sandbox 外は実行不可）／ credential を agent プロセス・子プロセス・環境変数へ渡さない（keychain 優先、0600 fallback）／ network egress 既定 deny（provider endpoint のみ allowlist）／ tool result 内の `<system-reminder>` 等の制御マーカーをエスケープ
+- **v0.1 設計に組み込み・v0.2 実装**: tool result の `ContentOrigin` 型付け（RepositoryUntrusted / WebUntrusted / ToolTrusted 等）／ project trust（`AGENTS.md` / skills / MCP 設定等を未承認時はロードしない。pi/senpi の「trust 解決前に context file を読む」弱点は避ける）
+- **v0.3**: untrusted mode（fs read-only / 一時コピー / network deny / credential 不可 / project 拡張無効）
+
+既存 harness 同様、injection は「低減するが根除しない」ものと位置づける（product/overview.md の non-goals 参照予定）。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること
