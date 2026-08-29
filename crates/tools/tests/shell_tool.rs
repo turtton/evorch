@@ -4,10 +4,17 @@
 //! 出力キャプチャ・終了コード・タイムアウト・作業ディレクトリの契約を検証する。
 
 use std::future::Future;
+use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
+use sandbox::DirectSandbox;
 use serde_json::json;
 use tools::{Shell, Tool, ToolError};
+
+fn shell() -> Shell {
+    Shell::new(Arc::new(DirectSandbox))
+}
 
 /// PTY テスト全体の安全網。
 ///
@@ -23,7 +30,7 @@ async fn with_pty_deadline<F: Future>(future: F) -> F::Output {
 // Given: stdout と stderr の両方に出力する sh コマンド / When: 非対話モードで実行 / Then: 終了コード 0 と両方の出力がセクション見出し付きで返る
 #[tokio::test]
 async fn shell_captures_stdout_stderr_and_exit_code() {
-    let result = Shell
+    let result = shell()
         .execute(json!({
             "command": "sh",
             "args": ["-c", "echo out; echo err >&2"]
@@ -42,7 +49,7 @@ async fn shell_captures_stdout_stderr_and_exit_code() {
 // Given: 終了コード 3 で終了する sh コマンド / When: 非対話モードで実行 / Then: ToolError ではなく is_error: true の ToolResult が返る
 #[tokio::test]
 async fn shell_nonzero_exit_is_error_result_not_tool_error() {
-    let result = Shell
+    let result = shell()
         .execute(json!({
             "command": "sh",
             "args": ["-c", "exit 3"]
@@ -57,7 +64,7 @@ async fn shell_nonzero_exit_is_error_result_not_tool_error() {
 // Given: 存在しないバイナリ名 / When: 非対話モードで実行 / Then: 起動失敗として SpawnFailed が返る
 #[tokio::test]
 async fn shell_missing_binary_is_spawn_failed() {
-    let error = Shell
+    let error = shell()
         .execute(json!({
             "command": "definitely-not-a-real-binary-xyz"
         }))
@@ -76,7 +83,7 @@ async fn shell_missing_binary_is_spawn_failed() {
 // Given: 5 秒かかる sleep と 100ms の制限時間 / When: 非対話モードで実行 / Then: 子プロセスが殺されて Timeout エラーが返る
 #[tokio::test]
 async fn shell_timeout_kills_and_returns_timeout() {
-    let error = Shell
+    let error = shell()
         .execute(json!({
             "command": "sleep",
             "args": ["5"],
@@ -93,7 +100,7 @@ async fn shell_timeout_kills_and_returns_timeout() {
 async fn shell_respects_cwd() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できるはずです");
 
-    let result = Shell
+    let result = shell()
         .execute(json!({
             "command": "pwd",
             "cwd": dir.path()
@@ -109,7 +116,7 @@ async fn shell_respects_cwd() {
 #[tokio::test]
 async fn shell_interactive_runs_in_pty_and_returns_output() {
     with_pty_deadline(async {
-        let result = Shell
+        let result = shell()
             .execute(json!({
                 "command": "echo",
                 "args": ["hello"],
@@ -128,7 +135,7 @@ async fn shell_interactive_runs_in_pty_and_returns_output() {
 #[tokio::test]
 async fn shell_interactive_reports_exit_code() {
     with_pty_deadline(async {
-        let result = Shell
+        let result = shell()
             .execute(json!({
                 "command": "sh",
                 "args": ["-c", "exit 7"],
@@ -147,7 +154,7 @@ async fn shell_interactive_reports_exit_code() {
 #[tokio::test]
 async fn shell_interactive_timeout_kills_via_child_killer() {
     with_pty_deadline(async {
-        let error = Shell
+        let error = shell()
             .execute(json!({
                 "command": "sleep",
                 "args": ["5"],
@@ -160,4 +167,40 @@ async fn shell_interactive_timeout_kills_via_child_killer() {
         assert_eq!(error, ToolError::Timeout { timeout_ms: 100 });
     })
     .await;
+}
+
+// Given: 親テストプロセスだけに秘密環境変数がある / When: DirectSandbox 経由で sh を実行 / Then: PATH は利用できるが秘密値は子へ渡らない
+#[test]
+fn shell_direct_sandbox_scrubs_parent_secret_and_keeps_path() {
+    const CHILD_FLAG: &str = "TOOLS_ENV_SCRUB_CHILD";
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("テスト用ランタイムを構築できるはずです");
+        let result = runtime
+            .block_on(shell().execute(json!({
+                "command": "sh",
+                "args": ["-c", "printf %s \"$FAKE_SECRET\""]
+            })))
+            .expect("PATH 経由で sh を起動できるはずです");
+        assert!(result.content.contains("--- stdout ---\n\n--- stderr ---"));
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("テスト実行ファイルを取得できる"))
+        .args([
+            "--exact",
+            "shell_direct_sandbox_scrubs_parent_secret_and_keeps_path",
+            "--nocapture",
+        ])
+        .env(CHILD_FLAG, "1")
+        .env("FAKE_SECRET", "漏えいしてはいけない値")
+        .output()
+        .expect("環境付き子テストを起動できるはずです");
+    assert!(
+        output.status.success(),
+        "環境スクラブ子テストが失敗しました: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

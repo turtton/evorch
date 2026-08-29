@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use event_bus::{Event, EventBus, ToolEvent};
+use sandbox::{
+    Action, ApprovalGate, ApprovalOutcome, ApprovalPolicy, Capabilities, Sandbox, resolve,
+};
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
@@ -40,6 +43,10 @@ pub struct ToolExecutor {
     event_bus: Arc<EventBus>,
     /// ツール名から登録エントリへの対応。
     tools: HashMap<&'static str, RegisteredTool>,
+    /// ツール能力を実行操作へ分類する方針。
+    policy: ApprovalPolicy,
+    /// 利用者の承認応答を待つ任意のゲート。
+    gate: Option<ApprovalGate>,
 }
 
 impl ToolExecutor {
@@ -48,6 +55,8 @@ impl ToolExecutor {
         Self {
             event_bus,
             tools: HashMap::new(),
+            policy: ApprovalPolicy::allow_all(),
+            gate: None,
         }
     }
 
@@ -74,21 +83,34 @@ impl ToolExecutor {
     /// 標準ツールのスキーマがコンパイルできない場合のみ panic する。標準ツールの
     /// スキーマは `tools::tools::tests::all_standard_tool_schemas_compile` で
     /// コンパイル可能を検証済みのため、到達しない経路である。
-    pub fn with_standard_tools(event_bus: Arc<EventBus>) -> Self {
+    pub fn with_standard_tools(event_bus: Arc<EventBus>, sandbox: Arc<dyn Sandbox>) -> Self {
         let mut executor = Self::new(event_bus);
         let standard: [Arc<dyn Tool>; 5] = [
             Arc::new(Read),
             Arc::new(Edit),
             Arc::new(Grep),
-            Arc::new(Shell),
-            Arc::new(GitDiff),
+            Arc::new(Shell::new(Arc::clone(&sandbox))),
+            Arc::new(GitDiff::new(sandbox)),
         ];
         for tool in standard {
             executor
                 .register(tool)
+                // SAFE-EXPECT: 標準スキーマは全件をクレート内テストでコンパイル検証している。
                 .expect("標準ツールのスキーマは all_standard_tool_schemas_compile でコンパイル可能を検証済み");
         }
         executor
+    }
+
+    /// 実行判定に使う承認方針を設定する。
+    pub fn set_policy(&mut self, policy: ApprovalPolicy) -> &mut Self {
+        self.policy = policy;
+        self
+    }
+
+    /// 利用者承認を待つゲートを設定する。
+    pub fn set_approval_gate(&mut self, gate: ApprovalGate) -> &mut Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// ツールを実行する。
@@ -120,8 +142,50 @@ impl ToolExecutor {
             return Err(error);
         }
 
-        let tool = Arc::clone(&registered.tool);
-        match tool.execute(args).await {
+        let permissions = registered.tool.permissions();
+        let capabilities = Capabilities {
+            fs_read: permissions.fs_read,
+            fs_write: permissions.fs_write,
+            process_spawn: permissions.process_spawn,
+        };
+        let action = resolve(
+            self.policy.classify(tool_name, &capabilities),
+            self.policy.mode(),
+        );
+        let outcome = match action {
+            Action::Proceed => registered.tool.execute(args).await,
+            Action::Deny => {
+                return self.deny(tool_name, call_id, "policy により拒否されました");
+            }
+            Action::AskFirst => {
+                let Some(gate) = &self.gate else {
+                    return self.deny(tool_name, call_id, "承認ゲートが未設定のため拒否されました");
+                };
+                match gate.request(tool_name, call_id).await {
+                    ApprovalOutcome::Approved => registered.tool.execute(args).await,
+                    ApprovalOutcome::Denied => {
+                        return self.deny(tool_name, call_id, "承認要求が拒否されました");
+                    }
+                    ApprovalOutcome::TimedOut => {
+                        return self.deny(tool_name, call_id, "承認応答がタイムアウトしました");
+                    }
+                }
+            }
+            Action::AskOnFailure => {
+                let first = registered.tool.execute(args.clone()).await;
+                if !is_failure(&first) {
+                    first
+                } else if let Some(gate) = &self.gate {
+                    match gate.request(tool_name, call_id).await {
+                        ApprovalOutcome::Approved => registered.tool.execute(args).await,
+                        ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
+                    }
+                } else {
+                    first
+                }
+            }
+        };
+        match outcome {
             Ok(result) => {
                 let content = escape_control_markers(&result.content);
                 self.emit_completed(tool_name, call_id, result.is_error);
@@ -144,5 +208,25 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             is_error,
         }));
+    }
+
+    fn deny<T>(&self, tool_name: &str, call_id: &str, reason: &str) -> Result<T, ToolError> {
+        self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {
+            tool_name: tool_name.to_string(),
+            call_id: call_id.to_string(),
+            reason: reason.to_string(),
+        }));
+        self.emit_completed(tool_name, call_id, true);
+        Err(ToolError::ExecutionDenied {
+            tool_name: tool_name.to_string(),
+            reason: reason.to_string(),
+        })
+    }
+}
+
+fn is_failure(outcome: &Result<ToolResult, ToolError>) -> bool {
+    match outcome {
+        Ok(result) => result.is_error,
+        Err(_) => true,
     }
 }

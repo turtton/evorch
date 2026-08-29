@@ -4,8 +4,11 @@
 //! portable-pty 経由の擬似端末（PTY）上で 1 回限りの実行を行う。
 
 use std::io::Read;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use sandbox::{CommandSpec, Sandbox, WrappedCommand};
 use serde::Deserialize;
 
 use crate::error::ToolError;
@@ -13,8 +16,17 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool};
 
 /// コマンドを実行するツール。
-#[derive(Debug, Clone, Copy)]
-pub struct Shell;
+#[derive(Clone)]
+pub struct Shell {
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl Shell {
+    /// 指定したサンドボックスでコマンドを実行する shell ツールを生成する。
+    pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
+        Self { sandbox }
+    }
+}
 
 /// shell ツールの引数。
 ///
@@ -69,10 +81,21 @@ impl Tool for Shell {
             serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
                 detail: error.to_string(),
             })?;
+        let wrapped = self
+            .sandbox
+            .wrap(CommandSpec {
+                program: args.command.clone(),
+                args: args.args.clone(),
+                cwd: args.cwd.as_ref().map(PathBuf::from),
+                extra_env: Vec::new(),
+            })
+            .map_err(|error| ToolError::SandboxUnavailable {
+                detail: error.to_string(),
+            })?;
         if args.interactive {
-            run_interactive(&args).await
+            run_interactive(&wrapped, args.timeout_ms).await
         } else {
-            run_process(&args).await
+            run_process(&wrapped, args.timeout_ms).await
         }
     }
 }
@@ -93,14 +116,21 @@ fn io_failed(error: impl std::fmt::Display) -> ToolError {
 }
 
 /// 非対話モード: tokio::process で子プロセスを実行する。
-async fn run_process(args: &ShellArgs) -> Result<ToolResult, ToolError> {
-    let mut command = tokio::process::Command::new(&args.command);
-    command.args(&args.args).kill_on_drop(true);
-    if let Some(cwd) = &args.cwd {
+async fn run_process(
+    wrapped: &WrappedCommand,
+    timeout_ms: Option<u64>,
+) -> Result<ToolResult, ToolError> {
+    let mut command = tokio::process::Command::new(&wrapped.program);
+    command
+        .args(&wrapped.args)
+        .env_clear()
+        .envs(wrapped.env.iter().cloned())
+        .kill_on_drop(true);
+    if let Some(cwd) = &wrapped.cwd {
         command.current_dir(cwd);
     }
 
-    let spawned = match args.timeout_ms {
+    let spawned = match timeout_ms {
         Some(timeout_ms) => {
             tokio::time::timeout(Duration::from_millis(timeout_ms), command.output())
                 .await
@@ -108,7 +138,7 @@ async fn run_process(args: &ShellArgs) -> Result<ToolResult, ToolError> {
         }
         None => command.output().await,
     };
-    let output = spawned.map_err(|error| spawn_failed(&args.command, error))?;
+    let output = spawned.map_err(|error| spawn_failed(&wrapped.program, error))?;
 
     let content = format!(
         "exit_code: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -127,7 +157,10 @@ async fn run_process(args: &ShellArgs) -> Result<ToolResult, ToolError> {
 ///
 /// wezterm の whoami.rs 例と同じ手順を踏む。スレーブとライターを即座に捨てて
 /// 子プロセス側に EOF を見せないと、リーダーの読み取りが終端せずデッドロックする。
-async fn run_interactive(args: &ShellArgs) -> Result<ToolResult, ToolError> {
+async fn run_interactive(
+    wrapped: &WrappedCommand,
+    timeout_ms: Option<u64>,
+) -> Result<ToolResult, ToolError> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(portable_pty::PtySize {
@@ -136,17 +169,23 @@ async fn run_interactive(args: &ShellArgs) -> Result<ToolResult, ToolError> {
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|error| spawn_failed(&args.command, error))?;
+        .map_err(|error| spawn_failed(&wrapped.program, error))?;
     let portable_pty::PtyPair { master, slave } = pair;
 
-    let mut command = portable_pty::CommandBuilder::new(&args.command);
-    command.args(&args.args);
-    if let Some(cwd) = &args.cwd {
+    let mut command = portable_pty::CommandBuilder::new(&wrapped.program);
+    command.args(&wrapped.args);
+    command.env_clear();
+    for (key, value) in &wrapped.env {
+        command.env(key, value);
+    }
+    if let Some(cwd) = &wrapped.cwd {
         command.cwd(cwd);
+    } else {
+        command.cwd(std::env::current_dir().map_err(io_failed)?);
     }
     let mut child = slave
         .spawn_command(command)
-        .map_err(|error| spawn_failed(&args.command, error))?;
+        .map_err(|error| spawn_failed(&wrapped.program, error))?;
     drop(slave);
 
     let mut reader = master.try_clone_reader().map_err(io_failed)?;
@@ -172,7 +211,7 @@ async fn run_interactive(args: &ShellArgs) -> Result<ToolResult, ToolError> {
         Ok((status.exit_code(), output))
     });
 
-    let waited = match args.timeout_ms {
+    let waited = match timeout_ms {
         Some(timeout_ms) => {
             match tokio::time::timeout(Duration::from_millis(timeout_ms), &mut blocking).await {
                 Ok(joined) => joined.map_err(io_failed)?,

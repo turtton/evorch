@@ -4,7 +4,9 @@
 //! 返す。v0.1 では差分の算出を git 本体に委ねる。
 
 use std::process::Stdio;
+use std::sync::Arc;
 
+use sandbox::{CommandSpec, Sandbox};
 use tokio::process::Command;
 
 use crate::error::ToolError;
@@ -12,8 +14,17 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool};
 
 /// Git の差分を取得するツール。
-#[derive(Debug, Clone, Copy)]
-pub struct GitDiff;
+#[derive(Clone)]
+pub struct GitDiff {
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl GitDiff {
+    /// 指定したサンドボックスで git を実行する差分ツールを生成する。
+    pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
+        Self { sandbox }
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for GitDiff {
@@ -50,24 +61,41 @@ impl Tool for GitDiff {
             .unwrap_or(".");
         let path = args.get("path").and_then(serde_json::Value::as_str);
 
-        let mut command = Command::new("git");
+        let mut command_args = vec!["diff".to_string()];
+        if let Some(path) = path {
+            command_args.extend(["--".to_string(), path.to_string()]);
+        }
+        let wrapped = self
+            .sandbox
+            .wrap(CommandSpec {
+                program: "git".to_string(),
+                args: command_args,
+                cwd: Some(cwd.into()),
+                extra_env: vec![
+                    ("GIT_PAGER".to_string(), "cat".to_string()),
+                    ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+                ],
+            })
+            .map_err(|error| ToolError::SandboxUnavailable {
+                detail: error.to_string(),
+            })?;
+
+        let mut command = Command::new(&wrapped.program);
         command
-            .arg("diff")
-            .current_dir(cwd)
-            // ユーザーの pager / 認証プロンプト設定が差分取得を妨げないようにする。
-            .env("GIT_PAGER", "cat")
-            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(&wrapped.args)
+            .env_clear()
+            .envs(wrapped.env)
             // git diff は標準入力を読まない。フック等が読んでも即時 EOF にする。
             .stdin(Stdio::null());
-        if let Some(path) = path {
-            command.arg("--").arg(path);
+        if let Some(cwd) = wrapped.cwd {
+            command.current_dir(cwd);
         }
 
         let output = command
             .output()
             .await
             .map_err(|error| ToolError::SpawnFailed {
-                command: "git".to_string(),
+                command: wrapped.program,
                 detail: error.to_string(),
             })?;
 
