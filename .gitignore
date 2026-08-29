@@ -1,2 +1,6 @@
 .intent-cli/supervision/**/cycles.jsonl
 .intent-cli/supervision/**/stalls.jsonl
+
+# project skills (trackable)
+.opencode/*
+!.opencode/skill/
