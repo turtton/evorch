@@ -1,12 +1,4 @@
 //! エージェント実行記録のリポジトリを定義します。
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "storage services consume this staged crate-private repository in the next task"
-    )
-)]
-
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::StorageError;

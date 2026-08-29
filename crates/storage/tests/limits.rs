@@ -4,50 +4,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{Event, EventMeta, LifecycleEvent, MessageEvent};
 use rusqlite::Connection;
-use storage::{Database, StorageConfig};
-pub use storage::{HardLimits, LimitKind, StorageError};
+use storage::repo::event::{EventAccounting, append_event, list_by_session};
+use storage::{Database, HardLimits, LimitKind, StorageConfig, StorageError};
 use tempfile::TempDir;
-
-mod db {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    use crate::StorageError;
-
-    pub(crate) fn system_time_to_ns(time: SystemTime) -> Result<i64, StorageError> {
-        let nanos = time
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| StorageError::OutOfRange("wall_clock before epoch"))?
-            .as_nanos();
-        i64::try_from(nanos).map_err(|_| StorageError::OutOfRange("wall_clock nanoseconds"))
-    }
-
-    pub(crate) fn ns_to_system_time(nanos: i64) -> SystemTime {
-        let nanos = u64::try_from(nanos).unwrap_or(0);
-        UNIX_EPOCH + Duration::from_nanos(nanos)
-    }
-}
-
-#[path = "../src/repo/event.rs"]
-mod event_repo;
-
-mod migrations {
-    use rusqlite::Connection;
-
-    use crate::StorageError;
-
-    pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
-        conn.execute_batch(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT NOT NULL, \
-             total_event_bytes INTEGER NOT NULL DEFAULT 0, created_at_ns INTEGER NOT NULL, \
-             updated_at_ns INTEGER NOT NULL); \
-             CREATE TABLE events (id INTEGER PRIMARY KEY, session_id TEXT, schema_version INTEGER NOT NULL, \
-             monotonic_ns INTEGER NOT NULL, wall_clock_ns INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL);",
-        )?;
-        Ok(())
-    }
-}
-
-use event_repo::{EventAccounting, append_event, list_by_session};
 
 fn open_connection(temp_dir: &TempDir) -> Connection {
     let path = temp_dir.path().join("limits.db");

@@ -3,33 +3,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
-pub use storage::{StorageConfig, StorageError};
-use tempfile::TempDir;
-
-#[path = "../src/repo/agent_run.rs"]
-pub mod agent_run;
-#[path = "../src/db.rs"]
-mod db;
-#[path = "../src/entity.rs"]
-pub mod entity;
-#[path = "../src/repo/message.rs"]
-pub mod message;
-#[path = "../src/migrations.rs"]
-mod migrations;
-#[path = "../src/repo/session.rs"]
-pub mod session;
-#[path = "../src/repo/task.rs"]
-pub mod task;
-
-mod repo {
-    pub use crate::session;
-}
-
-pub use db::Database;
-use entity::{
+use storage::entity::{
     AgentRunRecord, AgentRunStatus, MessageRecord, MessageRole, SessionRecord, SessionStatus,
     TaskRecord, TaskStatus,
 };
+use storage::repo::{agent_run, message, session, task};
+use storage::{Database, StorageConfig, StorageError};
+use tempfile::TempDir;
 
 fn open_connection(temp_dir: &TempDir) -> Connection {
     let path = temp_dir.path().join("storage.db");

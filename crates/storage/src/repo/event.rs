@@ -1,12 +1,4 @@
 //! イベントログの追記と復元を管理します。
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "single-writer integration lands in the next storage task"
-    )
-)]
-
 use std::time::{Duration, SystemTime};
 
 use event_bus::{Event, EventKind};
@@ -27,7 +19,7 @@ pub struct StoredEvent {
 
 /// writer が保持するイベント容量のキャッシュです。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct EventAccounting {
+pub struct EventAccounting {
     pub session_bytes: u64,
     pub day_bytes: u64,
     seeded_session_id: Option<String>,

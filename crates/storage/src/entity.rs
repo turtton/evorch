@@ -1,12 +1,4 @@
 //! 永続化するエンティティを定義します。
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "repository APIs consume these staged crate-private entities in the next task"
-    )
-)]
-
 use std::time::SystemTime;
 
 macro_rules! string_enum {

@@ -1,12 +1,12 @@
 //! セッション、ログなどのデータを永続化する層です。
 
-mod config;
-mod db;
-mod entity;
-mod error;
-mod migrations;
-mod projection;
-mod repo;
+pub mod config;
+pub mod db;
+pub mod entity;
+pub mod error;
+pub mod migrations;
+pub mod projection;
+pub mod repo;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};

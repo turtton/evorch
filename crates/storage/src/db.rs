@@ -61,40 +61,23 @@ fn pragma_init(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "writer capacity checks consume this staged crate-private API in the next task"
-    )
-)]
-pub(crate) struct FileSizes {
+/// SQLite データベースファイル群（本体 / WAL / SHM）のサイズです。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSizes {
     pub db: u64,
     pub wal: u64,
     pub shm: u64,
 }
 
 impl FileSizes {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "writer capacity checks consume this staged crate-private API in the next task"
-        )
-    )]
+    /// db / -wal / -shm の合計バイト数を返します。
     pub fn total(&self) -> u64 {
         self.db.saturating_add(self.wal).saturating_add(self.shm)
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "writer capacity checks consume this staged crate-private API in the next task"
-    )
-)]
-pub(crate) fn file_sizes(db_path: &Path) -> Result<FileSizes, StorageError> {
+/// データベース本体と WAL / SHM ファイルのサイズを返します。存在しないファイルは 0 として扱います。
+pub fn file_sizes(db_path: &Path) -> Result<FileSizes, StorageError> {
     Ok(FileSizes {
         db: file_size(db_path)?,
         wal: file_size(&suffixed_path(db_path, "-wal"))?,
@@ -102,13 +85,6 @@ pub(crate) fn file_sizes(db_path: &Path) -> Result<FileSizes, StorageError> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the staged file_sizes API before its writer consumer lands"
-    )
-)]
 fn file_size(path: &Path) -> Result<u64, StorageError> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
@@ -134,14 +110,7 @@ fn suffixed_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "event persistence consumes this staged crate-private API in the next task"
-    )
-)]
-pub(crate) fn system_time_to_ns(time: SystemTime) -> Result<i64, StorageError> {
+pub fn system_time_to_ns(time: SystemTime) -> Result<i64, StorageError> {
     let nanos = time
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StorageError::OutOfRange("wall_clock before epoch"))?
@@ -149,14 +118,7 @@ pub(crate) fn system_time_to_ns(time: SystemTime) -> Result<i64, StorageError> {
     i64::try_from(nanos).map_err(|_| StorageError::OutOfRange("wall_clock nanoseconds"))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "event persistence consumes this staged crate-private API in the next task"
-    )
-)]
-pub(crate) fn ns_to_system_time(ns: i64) -> SystemTime {
+pub fn ns_to_system_time(ns: i64) -> SystemTime {
     if ns >= 0 {
         UNIX_EPOCH + Duration::from_nanos(ns.unsigned_abs())
     } else {

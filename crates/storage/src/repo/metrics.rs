@@ -1,12 +1,4 @@
 //! ダウンサンプリング済みメトリクスを永続化します。
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "single-writer integration lands in the next storage task"
-    )
-)]
-
 use event_bus::{BucketKey, UsageBucket};
 use rusqlite::{Connection, params};
 
