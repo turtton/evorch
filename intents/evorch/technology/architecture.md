@@ -35,7 +35,8 @@ crates/
   storage/        sqlite, events
   diagnostics/    fault-bus, crash-spool, issue-reporter
   workspace-ui/   panel, layout, action, semantic-tree
-  gui/            floem
+  gui/            egui_dock        (第一候補。ADR 0007)
+  gui-floem-proto/ floem           (docking 評価用 prototype。必須ではない)
 ```
 
 ## 想定技術スタック

@@ -19,7 +19,7 @@
 - [orchestration](../features/orchestration/overview.md) — Intent Gate、Execution Shape、Role capability boundary、delegation policy、Agent 5軸分解
 - [provider-routing](../features/provider-routing/overview.md) — Provider Type/Profile 分離、Logical Model、API Protocol、fallback、session affinity、capability
 - [context-engine](../features/context-engine/overview.md) — Stable Prefix、cache metrics、cache-aware wait、compaction、memory
-- [gui-workbench](../features/gui-workbench/overview.md) — Floem workbench、workspace model 分離、semantic UI API、subagent 可視化、UI 自己改善
+- [gui-workbench](../features/gui-workbench/overview.md) — egui + egui_dock workbench（ADR 0007）、workspace model 分離、semantic UI API、subagent 可視化、UI 自己改善
 - [tools-sandbox](../features/tools-sandbox/overview.md) — tool trait、shell/PTY、code intelligence、sandbox policy、MCP
 - [storage-memory](../features/storage-memory/overview.md) — SQLite event sourcing、entity 群、memory パイプライン、session/task 構造
 - [diagnostics-self-improvement](../features/diagnostics-self-improvement/overview.md) — DiagnosticBus、自動 Issue 化、crash spool、introspection API、自己改善 loop
@@ -37,6 +37,10 @@
 - [0004-provider-routing-separation.md](../decisions/0004-provider-routing-separation.md) — Provider Type/Profile/Logical Model/API Protocol の分離
 - [0005-headless-kernel-and-gui-separation.md](../decisions/0005-headless-kernel-and-gui-separation.md) — Headless Agent Kernel と GUI の分離
 - [0006-self-improvement-and-diagnostics.md](../decisions/0006-self-improvement-and-diagnostics.md) — Harness 自身の診断と自己改善
+
+## decisions/（ADR）
+
+- [0001](decisions/0001-no-fixed-workflow.md) 固定 workflow 不採用 / [0002](decisions/0002-role-capability-boundaries.md) Role capability boundary / [0003](decisions/0003-cache-first-context-engine.md) cache-first context engine / [0004](decisions/0004-provider-routing-separation.md) provider routing 分離 / [0005](decisions/0005-headless-kernel-and-gui-separation.md) headless kernel と GUI 分離 / [0006](decisions/0006-self-improvement-and-diagnostics.md) 診断と自己改善 / [0007](decisions/0007-gui-framework-egui-first.md) GUI 第一候補 egui+egui_dock
 
 ## 未配置カテゴリ
 

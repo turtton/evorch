@@ -25,7 +25,7 @@ GUI Renderer
 - Agent Kernel は headless な runtime 中核とする。
 - GUI は Event Stream を購読するのみ。
 - Workspace Model / Layout は framework-independent data として保持する。
-- 第一 GUI 候補は Floem（fallback: egui + egui_dock）。
+- 第一 GUI 候補は Floem（fallback: egui + egui_dock）。→ **Superseded by [ADR 0007](0007-gui-framework-egui-first.md)（2026-08-29）: 第一候補は egui + egui_dock、Floem は評価用 prototype に限定。層構造自体（本 ADR の Decision の主体）は維持。**
 
 ## Consequences
 
