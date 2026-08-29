@@ -35,6 +35,12 @@ Agent Kernel
 - event stream が外部から購読でき、GUI 無しに runtime の挙動を観測できること
 - background agent の起動・完了・キャンセルが event として観測できること
 
+## Related decisions
+
+- [ADR 0001: 固定 workflow を採用しない](../../decisions/0001-no-fixed-workflow.md)
+- [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
+- [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
+
 ## Open questions
 
 - AgentRun の最大同時起動数の既定値

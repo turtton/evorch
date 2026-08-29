@@ -21,6 +21,11 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 - cache hit ratio が閾値を下回った場合に CacheRegression 診断が発行されること
 - compact_context が control-flow primitive として動作し、checkpoint から resume できること
 
+## Related decisions
+
+- [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
+- [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
+
 ## Open questions
 
 - cache TTL の各 provider 差異の抽象化方法

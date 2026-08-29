@@ -21,6 +21,11 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 - Orchestrator に mutation tool が無いこと（runtime レベルで拒否されること）
 - delegation の理由が説明可能であること
 
+## Related decisions
+
+- [ADR 0001: 固定 workflow を採用しない](../../decisions/0001-no-fixed-workflow.md)
+- [ADR 0002: Role は capability boundary とし、prompt discipline ではなく権限で分離する](../../decisions/0002-role-capability-boundaries.md)
+
 ## Open questions
 
 - Explorer / Librarian / Reviewer の runtime レベル capability 制限の具体設定（network の role-dependent 扱いの細部）

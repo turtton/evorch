@@ -19,6 +19,10 @@ SQLite を中心とした event-sourced runtime とする。Event Log を source
 - memory が task boundary で stable prefix に snapshot として反映されること
 - provider_health の記録が routing の cooldown 判断に使えること
 
+## Related decisions
+
+- [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
+
 ## Open questions
 
 - event log のスキーマ詳細（messages と tool_calls の正規化方法）

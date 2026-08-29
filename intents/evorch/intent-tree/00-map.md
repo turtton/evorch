@@ -29,6 +29,15 @@
 - [architecture.md](../technology/architecture.md) — Agent Kernel 構成、crate 分割案、技術スタック
 - [mvp-roadmap.md](../technology/mvp-roadmap.md) — v0.1–v0.5 の段階的ロードマップと成功基準
 
+## decisions/
+
+- [0001-no-fixed-workflow.md](../decisions/0001-no-fixed-workflow.md) — 固定 workflow を採用しない
+- [0002-role-capability-boundaries.md](../decisions/0002-role-capability-boundaries.md) — Role を capability boundary とし、権限で分離する
+- [0003-cache-first-context-engine.md](../decisions/0003-cache-first-context-engine.md) — Cache-first Context Engine
+- [0004-provider-routing-separation.md](../decisions/0004-provider-routing-separation.md) — Provider Type/Profile/Logical Model/API Protocol の分離
+- [0005-headless-kernel-and-gui-separation.md](../decisions/0005-headless-kernel-and-gui-separation.md) — Headless Agent Kernel と GUI の分離
+- [0006-self-improvement-and-diagnostics.md](../decisions/0006-self-improvement-and-diagnostics.md) — Harness 自身の診断と自己改善
+
 ## 未配置カテゴリ
 
-- operations/ / decisions/ / clarifications/ / packets/ / links/ — 実装・運用が進むにつれて追加する。decisions/ には ADR（`<NNNN>-<slug>.md`）を、packets/ には roadmap/backlog/waves を配置する。
+- operations/ / clarifications/ / packets/ / links/ — 実装・運用が進むにつれて追加する。packets/ には roadmap/backlog/waves を配置する。

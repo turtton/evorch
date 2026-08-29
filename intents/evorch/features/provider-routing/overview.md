@@ -16,13 +16,24 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 - **Session affinity**: prompt cache のため同一 task / session で profile に留まる。429 / 5xx / timeout / quota / auth で cooldown 管理。Retry-After を優先
 - **provider health / cooldown 管理**（v0.4 で拡張）
 
+## サブスクリプション系 provider の実装方針（2026-08 再評価済み）
+
+- **anthropic-subscription**: senpi（code-yeongyu/senpi）方式。正規 OAuth authorization-code + PKCE（`claude.ai/oauth/authorize` → `platform.claude.com/v1/oauth/token`、scope に `user:sessions:claude_code`）。access token を Messages API の apiKey として使用。Claude Code 風 tool 命名の模倣（Stealth mode）を実装。refresh は期限 5 分前に provider 単位 lock 下で実施。pi-mono も同経路を現役で保持。
+- **openai-codex**: OpenCode / pi 方式。公式 codex_cli_simplified_flow OAuth（browser PKCE + device code 両対応）、`originator` ヘッダーに自アプリ名を明示。endpoint は `chatgpt.com/backend-api/codex/responses`、JWT 由来の `ChatGPT-Account-Id` ヘッダー必須。`openai`（API key 経由）とは別 type として実装。Codex backend の body 制約変化（store/stream/max_output_tokens）には追随テストが必須。
+- **github-copilot**: device code OAuth（`api.githubcopilot.com/chat/completions`）。2026-06 から usage-based 課金（AI Credits 制）に移行済みで「定額無制限」前提はない旨をユーザー向け表示に反映。
+
 ## 受け入れ基準
 
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
 - fallback が「同じ model の別 profile → 別 logical model」の順で試行されること
 - 同一 session で provider affinity が保たれ、失敗時のみ cooldown 付きで切り替わること
 
+## Related decisions
+
+- [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
+- [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
+
 ## Open questions
 
-- subscription 系 provider（anthropic-subscription / openai-codex / github-copilot）の認証フロー詳細
+- subscription 系 provider の認証フロー詳細（実装方式は [再評価ノート](../../technology/re-evaluation-2026-08.md) §1 で確定済み。Codex backend の body 制約変化への追随テスト方針）
 - capability の未対応時の degrading 方針（cache 非対応 provider での扱い等）

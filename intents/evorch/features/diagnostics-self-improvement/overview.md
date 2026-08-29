@@ -20,6 +20,11 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 - harness bug と分類された診断が GitHub Issue として作成されること
 - session-end hook 非実行時も crash spool に記録され、次回起動時に処理されること
 
+## Related decisions
+
+- [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
+- [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
+
 ## Open questions
 
 - 自動 Issue 化の抑制条件（誤検出の multi-fire 防止）

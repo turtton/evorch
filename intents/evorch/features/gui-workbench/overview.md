@@ -34,6 +34,11 @@ Panel は left / right / bottom / tabs / floating / separate OS window に自由
 - Workspace Model が framework 非依存データとして保持され、GUI なしに layout を検証できること
 - semantic UI API 経由で agent が panel を操作できること
 
+## Related decisions
+
+- [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
+- [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
+
 ## Open questions
 
 - Floem prototype の評価結果次第での egui 切り替え基準
