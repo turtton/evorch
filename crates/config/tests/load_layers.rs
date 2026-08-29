@@ -286,6 +286,100 @@ fn future_version_is_rejected() {
     }
 }
 
+// Given: metrics セクションを持たないバージョン 1 のプロジェクト設定 / When: 読み込む
+// Then: バージョン 2 へ移行され、metrics は既定値で補完される
+#[test]
+fn migrate_v1_file_gains_metrics_defaults() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let project = tmp.path().join("project");
+    write_file(&project.join("evorch.toml"), "version = 1\n");
+
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(project),
+        user_config_dir: Some(empty_user_dir(&tmp)),
+        read_env: false,
+        ..LoadOptions::default()
+    })
+    .expect("バージョン 1 の設定を移行して読み込める");
+
+    assert_eq!(config.version, CURRENT_VERSION);
+    assert_eq!(config.metrics, config::MetricsConfig::default());
+}
+
+// Given: enabled のみを上書きしたバージョン 1 の metrics 設定 / When: 読み込む
+// Then: ユーザ値を維持し、未指定の retention_days は既定値で補完される
+#[test]
+fn v1_file_with_partial_metrics_keeps_user_values() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let project = tmp.path().join("project");
+    write_file(
+        &project.join("evorch.toml"),
+        "version = 1\n\n[metrics]\nenabled = false\n",
+    );
+
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(project),
+        user_config_dir: Some(empty_user_dir(&tmp)),
+        read_env: false,
+        ..LoadOptions::default()
+    })
+    .expect("部分的な metrics を持つバージョン 1 の設定を移行して読み込める");
+
+    assert!(!config.metrics.enabled);
+    assert_eq!(
+        config.metrics.retention_days,
+        config::MetricsConfig::default().retention_days
+    );
+}
+
+// Given: metrics を上書きするバージョン 1 のユーザ層とバージョン 2 のプロジェクト層 / When: 読み込む
+// Then: 各ファイルがマージ前に移行され、プロジェクト層がユーザ層へ優先する
+#[test]
+fn mixed_version_layers_each_migrated_before_merge() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let user = tmp.path().join("user");
+    let project = tmp.path().join("project");
+    write_file(
+        &user.join("config.toml"),
+        "version = 1\n\n[metrics]\nenabled = false\n",
+    );
+    write_file(
+        &project.join("evorch.toml"),
+        "version = 2\n\n[metrics]\nretention_days = 7\n",
+    );
+
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(project),
+        user_config_dir: Some(user),
+        read_env: false,
+        ..LoadOptions::default()
+    })
+    .expect("混在バージョンのレイヤーを読み込める");
+
+    assert_eq!(config.version, CURRENT_VERSION);
+    assert!(!config.metrics.enabled);
+    assert_eq!(config.metrics.retention_days, 7);
+}
+
+// Given: version キーを持たず metrics を上書きする設定 / When: 読み込む
+// Then: 現行バージョンとして扱われ、metrics の上書き値を維持する
+#[test]
+fn missing_version_treated_as_current() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let project = tmp.path().join("project");
+    write_file(&project.join("evorch.toml"), "[metrics]\nenabled = false\n");
+
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(project),
+        user_config_dir: Some(empty_user_dir(&tmp)),
+        read_env: false,
+        ..LoadOptions::default()
+    })
+    .expect("version がない設定を現行として読み込める");
+
+    assert!(!config.metrics.enabled);
+}
+
 // Given: リーフパスが衝突する 2 つの環境変数 / When: 読み込む
 // Then: InvalidEnvValue エラーになり、処理中の変数名が報告される
 #[test]

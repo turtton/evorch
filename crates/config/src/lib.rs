@@ -10,10 +10,12 @@ pub mod error;
 pub mod load;
 mod merge;
 mod migrate;
+mod schema;
 pub mod types;
 
 pub use error::ConfigError;
 pub use load::LoadOptions;
+pub use schema::json_schema;
 pub use types::{
     ApiProtocolConfig, CURRENT_VERSION, Config, CredentialRefConfig, DiagnosticsConfig,
     MetricsConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
