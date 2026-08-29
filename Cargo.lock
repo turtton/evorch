@@ -1523,6 +1523,12 @@ dependencies = [
 [[package]]
 name = "routing"
 version = "0.1.0"
+dependencies = [
+ "config",
+ "model",
+ "providers",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "rsqlite-vfs"
