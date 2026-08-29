@@ -12,7 +12,7 @@ use event_bus::{Event, EventBus, UsageEvent};
 use crate::error::ProviderError;
 use crate::message::Usage;
 
-mod stream;
+pub(crate) mod stream;
 
 /// 接続確立のタイムアウト。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
