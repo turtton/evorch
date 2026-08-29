@@ -16,6 +16,16 @@ fn event(kind: impl Into<event_bus::EventKind>, seconds: u64) -> Event { Event {
 fn append(conn: &Connection, session: Option<&str>, value: &Event) { event::append_event(conn, session, value, &HardLimits::default(), &mut event::EventAccounting::default()).expect("event must append"); }
 fn started() -> LifecycleEvent { LifecycleEvent::Started { session_id: "s1".into() } }
 fn running() -> SessionSnapshot { SessionSnapshot { session_id: "s1".into(), status: SessionStatus::Running, failure_reason: None, delegated_to: None, pending_message: String::new(), pending_reasoning: String::new(), open_tool_calls: Vec::new(), task_ids: Vec::new() } }
+fn total_event_bytes(conn: &Connection, session_id: &str) -> u64 {
+    let total: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .expect("session payload total must read");
+    u64::try_from(total).expect("total must be nonnegative")
+}
 
 #[test]
 fn interrupted_session_restores_pending_output_and_open_tool_call() {
@@ -49,7 +59,7 @@ fn failed_session_restores_reason() {
 fn background_task_reconciles_completed_task_and_session_rows() {
     /* Given: 完了済みタスクを持つセッション */ let temp = TempDir::new().unwrap(); let conn = open(&temp); append(&conn, Some("s1"), &event(started(), 1)); append(&conn, Some("s1"), &event(LifecycleEvent::BackgroundTaskStarted { task_id: "t1".into() }, 2)); append(&conn, Some("s1"), &event(LifecycleEvent::BackgroundTaskCompleted { task_id: "t1".into() }, 3));
     /* When: 復元して再調整する */ let snapshot = restore_session(&conn, "s1").unwrap(); let summary = reconcile(&conn).unwrap();
-    /* Then: 全フィールドをイベント状態へ揃える */ assert_eq!(snapshot, Some(SessionSnapshot { task_ids: vec!["t1".into()], ..running() })); assert_eq!(summary, ReconcileSummary { sessions_upserted: 1, tasks_upserted: 1 }); assert_eq!(session::get(&conn, "s1").unwrap(), Some(SessionRecord { id: "s1".into(), parent_id: None, status: SessionStatus::Running, failure_reason: None, delegated_to: None, total_event_bytes: 0, created_at: UNIX_EPOCH + Duration::from_secs(1), updated_at: UNIX_EPOCH + Duration::from_secs(3) })); assert_eq!(task::get(&conn, "t1").unwrap(), Some(TaskRecord { id: "t1".into(), session_id: Some("s1".into()), status: TaskStatus::Completed, created_at: UNIX_EPOCH + Duration::from_secs(2), updated_at: UNIX_EPOCH + Duration::from_secs(3) }));
+    /* Then: 全フィールドをイベント状態へ揃える */ assert_eq!(snapshot, Some(SessionSnapshot { task_ids: vec!["t1".into()], ..running() })); assert_eq!(summary, ReconcileSummary { sessions_upserted: 1, tasks_upserted: 1 }); assert_eq!(session::get(&conn, "s1").unwrap(), Some(SessionRecord { id: "s1".into(), parent_id: None, status: SessionStatus::Running, failure_reason: None, delegated_to: None, total_event_bytes: total_event_bytes(&conn, "s1"), created_at: UNIX_EPOCH + Duration::from_secs(1), updated_at: UNIX_EPOCH + Duration::from_secs(3) })); assert_eq!(task::get(&conn, "t1").unwrap(), Some(TaskRecord { id: "t1".into(), session_id: Some("s1".into()), status: TaskStatus::Completed, created_at: UNIX_EPOCH + Duration::from_secs(2), updated_at: UNIX_EPOCH + Duration::from_secs(3) }));
 }
 
 #[test]

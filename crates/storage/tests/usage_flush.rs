@@ -250,6 +250,69 @@ fn db_size_suspension_rejects_events_but_allows_usage() {
 }
 
 #[test]
+fn suspended_writer_restats_db_size_before_rejecting() {
+    // Given: DB 上限を極小にした Storage
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let mut config = config(&temp_dir);
+    config.hard_limits = HardLimits {
+        max_db_bytes: 1,
+        ..HardLimits::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open in suspended mode");
+    let handle = storage.handle();
+    let event = event(
+        LifecycleEvent::Completed {
+            session_id: "s1".into(),
+        },
+        1,
+    );
+
+    // When: 中断状態で append_event する
+    let first = handle
+        .append_event(None, &event)
+        .expect_err("suspended append must fail");
+    let first_actual = match first {
+        StorageError::LimitExceeded {
+            limit: LimitKind::DbSize,
+            actual,
+            ..
+        } => actual,
+        other => panic!("expected DbSize limit exceeded, got {other:?}"),
+    };
+
+    // Then: 生の第二接続で events テーブルを肥大させ TRUNCATE checkpoint する
+    let raw = Connection::open(&config.db_path).expect("raw connection must open");
+    let big_payload = "x".repeat(50_000);
+    raw.execute(
+        "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) VALUES (NULL, 1, 0, 0, 'Message', ?1)",
+        [&big_payload],
+    )
+    .expect("raw insert must succeed");
+    raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("raw checkpoint must truncate");
+
+    // When: 再び append_event する
+    let second = handle
+        .append_event(None, &event)
+        .expect_err("suspended append must still fail");
+    let second_actual = match second {
+        StorageError::LimitExceeded {
+            limit: LimitKind::DbSize,
+            actual,
+            ..
+        } => actual,
+        other => panic!("expected DbSize limit exceeded, got {other:?}"),
+    };
+
+    // Then: 最新サイズを再取得して増加を検出する
+    assert!(
+        second_actual > first_actual,
+        "re-stat must see fresh size: {second_actual} > {first_actual}"
+    );
+    storage.close();
+}
+
+#[test]
 fn checkpoint_now_passive_preserves_reopenable_database() {
     // Given: file-backed writer による一件の書き込み
     let temp_dir = TempDir::new().expect("temporary directory must be created");

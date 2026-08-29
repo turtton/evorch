@@ -1,6 +1,4 @@
 //! イベントログの追記と復元を管理します。
-// single-writer integration lands in the next storage task
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::Duration;
 

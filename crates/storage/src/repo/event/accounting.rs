@@ -1,6 +1,4 @@
 //! イベント容量の遅延シードと上限判定を担当します。
-// single-writer integration lands in the next storage task
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::SystemTime;
 
@@ -18,7 +16,7 @@ pub(crate) fn session_event_bytes(
 ) -> Result<u64, StorageError> {
     sum_payload_bytes(
         conn,
-        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM events WHERE session_id = ?1",
+        "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = ?1",
         rusqlite::params![session_id],
     )
 }
@@ -27,7 +25,7 @@ pub(crate) fn session_event_bytes(
 pub(crate) fn day_event_bytes(conn: &Connection, day_start_ns: i64) -> Result<u64, StorageError> {
     sum_payload_bytes(
         conn,
-        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM events WHERE wall_clock_ns >= ?1",
+        "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE wall_clock_ns >= ?1",
         rusqlite::params![day_start_ns],
     )
 }

@@ -225,6 +225,60 @@ fn accepted_events_round_trip_with_exact_timestamps() {
 }
 
 #[test]
+fn cjk_session_size_counts_utf8_bytes() {
+    // Given: 日本語 100 文字のメッセージ差分を持つイベントと既存セッション
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let connection = open_connection(&temp_dir);
+    insert_session(&connection, "s1");
+    let cjk_event = event_at(
+        MessageEvent::MessageDelta {
+            delta: "日".repeat(100),
+        },
+        1,
+    );
+    let cjk_bytes = payload_len(&cjk_event);
+    let limits = HardLimits {
+        max_session_bytes: cjk_bytes - 1,
+        ..HardLimits::default()
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: 文字数ではなくバイト長で上限を超えるイベントを追記する
+    let error = append_event(
+        &connection,
+        Some("s1"),
+        &cjk_event,
+        &limits,
+        &mut accounting,
+    )
+    .expect_err("cjk event must exceed byte limit");
+
+    // Then: 直列化バイト長を伴う SessionSize 超過になる
+    assert_eq!(
+        error,
+        StorageError::LimitExceeded {
+            limit: LimitKind::SessionSize,
+            actual: cjk_bytes,
+            max: limits.max_session_bytes,
+        }
+    );
+
+    // And when: バイト長が上限未満の小さいイベントを追記する
+    let small_event = event_at(MessageEvent::MessageDelta { delta: "ok".into() }, 2);
+    append_event(
+        &connection,
+        Some("s1"),
+        &small_event,
+        &limits,
+        &mut accounting,
+    )
+    .expect("small event must fit");
+
+    // Then: 小さいイベントだけが永続化される
+    assert_eq!(list_by_session(&connection, "s1").unwrap().len(), 1);
+}
+
+#[test]
 fn event_without_session_appends_without_foreign_key_target() {
     // Given: セッションに属さないイベント
     let temp_dir = TempDir::new().expect("temporary directory must be created");

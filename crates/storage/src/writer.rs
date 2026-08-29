@@ -32,10 +32,22 @@ impl Storage {
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;
         log_size_state(initial_size, &config.hard_limits, writes_suspended);
+        let soft_warned = !writes_suspended
+            && initial_size as f64
+                >= config.hard_limits.max_db_bytes as f64 * config.hard_limits.soft_warn_ratio;
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
-            .spawn(move || run_writer(database.conn, rx, config, writes_suspended))
+            .spawn(move || {
+                run_writer(
+                    database.conn,
+                    rx,
+                    config,
+                    writes_suspended,
+                    soft_warned,
+                    writes_suspended,
+                )
+            })
             .map_err(|error| StorageError::Io(error.to_string()))?;
         Ok(Self(StorageHandle(tx), Some(writer)))
     }
@@ -125,6 +137,8 @@ struct WriterState {
     config: StorageConfig,
     pending: HashMap<BucketKey, UsageBucket>,
     writes_suspended: bool,
+    soft_warned: bool,
+    suspend_logged: bool,
     next_flush_at: Instant,
     next_checkpoint_at: Instant,
 }
@@ -134,6 +148,8 @@ fn run_writer(
     rx: Receiver<Command>,
     config: StorageConfig,
     writes_suspended: bool,
+    soft_warned: bool,
+    suspend_logged: bool,
 ) {
     let now = Instant::now();
     let mut state = WriterState {
@@ -143,6 +159,8 @@ fn run_writer(
         config,
         pending: HashMap::new(),
         writes_suspended,
+        soft_warned,
+        suspend_logged,
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
@@ -150,24 +168,9 @@ fn run_writer(
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
             Ok(Command::AppendEvent(session_id, event, reply)) => {
                 let result = if state.writes_suspended {
-                    file_sizes(&state.config.db_path).and_then(|sizes| {
-                        Err(StorageError::LimitExceeded {
-                            limit: LimitKind::DbSize,
-                            actual: sizes.total(),
-                            max: state.config.hard_limits.max_db_bytes,
-                        })
-                    })
+                    handle_suspended_append(&mut state, &session_id, &event)
                 } else {
-                    // セッション切替と日次集計を常に DB から再シードし、キャッシュ不整合を避けます。
-                    let mut accounting = event::EventAccounting::default();
-                    event::append_event(
-                        &state.conn,
-                        session_id.as_deref(),
-                        &event,
-                        &state.config.hard_limits,
-                        &mut accounting,
-                    )
-                    .map(|_| ())
+                    append_event_to_conn(&mut state, &session_id, &event)
                 };
                 let _ = reply.send(result);
             }
@@ -243,6 +246,48 @@ fn flush_usage(state: &mut WriterState) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn append_event_to_conn(
+    state: &mut WriterState,
+    session_id: &Option<String>,
+    event: &Event,
+) -> Result<(), StorageError> {
+    // セッション切替と日次集計を常に DB から再シードし、キャッシュ不整合を避けます。
+    let mut accounting = event::EventAccounting::default();
+    event::append_event(
+        &state.conn,
+        session_id.as_deref(),
+        event,
+        &state.config.hard_limits,
+        &mut accounting,
+    )
+    .map(|_| ())
+}
+
+fn handle_suspended_append(
+    state: &mut WriterState,
+    session_id: &Option<String>,
+    event: &Event,
+) -> Result<(), StorageError> {
+    let sizes = file_sizes(&state.config.db_path)?;
+    if sizes.total() < state.config.hard_limits.max_db_bytes {
+        state.writes_suspended = false;
+        state.soft_warned = false;
+        state.suspend_logged = false;
+        tracing::info!(
+            total_bytes = sizes.total(),
+            max_bytes = state.config.hard_limits.max_db_bytes,
+            "event writes resumed"
+        );
+        append_event_to_conn(state, session_id, event)
+    } else {
+        Err(StorageError::LimitExceeded {
+            limit: LimitKind::DbSize,
+            actual: sizes.total(),
+            max: state.config.hard_limits.max_db_bytes,
+        })
+    }
+}
+
 fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
     state.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")?;
     let mut sizes = file_sizes(&state.config.db_path)?;
@@ -258,12 +303,34 @@ fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
         sizes = file_sizes(&state.config.db_path)?;
     }
     let suspended = sizes.total() >= state.config.hard_limits.max_db_bytes;
-    if suspended != state.writes_suspended {
-        log_size_state(sizes.total(), &state.config.hard_limits, suspended);
-        state.writes_suspended = suspended;
+    let threshold =
+        state.config.hard_limits.max_db_bytes as f64 * state.config.hard_limits.soft_warn_ratio;
+    if suspended {
+        if !state.suspend_logged {
+            tracing::error!(
+                total_bytes = sizes.total(),
+                max_bytes = state.config.hard_limits.max_db_bytes,
+                "event writes suspended"
+            );
+            state.suspend_logged = true;
+        }
+        state.soft_warned = false;
     } else {
-        log_size_state(sizes.total(), &state.config.hard_limits, false);
+        state.suspend_logged = false;
+        if sizes.total() as f64 >= threshold {
+            if !state.soft_warned {
+                tracing::warn!(
+                    total_bytes = sizes.total(),
+                    max_bytes = state.config.hard_limits.max_db_bytes,
+                    "storage soft limit"
+                );
+                state.soft_warned = true;
+            }
+        } else {
+            state.soft_warned = false;
+        }
     }
+    state.writes_suspended = suspended;
     Ok(())
 }
 

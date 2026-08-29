@@ -18,7 +18,13 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     pub failure_reason: Option<String>,
     pub delegated_to: Option<String>,
+    /// セッションに蓄積されたメッセージ差分です。
+    /// イベント語彙に finalize イベントがないため、完了後も全文を保持します。
+    /// 「保留」は中断されたセッションを復元する場合に限り末尾の未完了分として解釈してください。
     pub pending_message: String,
+    /// セッションに蓄積された推論差分です。
+    /// イベント語彙に finalize イベントがないため、完了後も全文を保持します。
+    /// 「保留」は中断されたセッションを復元する場合に限り末尾の未完了分として解釈してください。
     pub pending_reasoning: String,
     pub open_tool_calls: Vec<(String, String)>,
     pub task_ids: Vec<String>,
@@ -203,8 +209,12 @@ pub fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageError> {
     };
     let tx = conn.unchecked_transaction()?;
     for value in state.sessions.into_values() {
+        // イベント語彙は親セッションを持たないため parent_id は常に NULL です。
         tx.execute(
-            "INSERT INTO sessions (id,parent_id,status,failure_reason,delegated_to,total_event_bytes,created_at_ns,updated_at_ns) VALUES (?1,NULL,?2,?3,?4,0,?5,?6) ON CONFLICT(id) DO UPDATE SET status=excluded.status,failure_reason=excluded.failure_reason,delegated_to=excluded.delegated_to,updated_at_ns=excluded.updated_at_ns",
+            "INSERT INTO sessions \
+             (id,parent_id,status,failure_reason,delegated_to,total_event_bytes,created_at_ns,updated_at_ns) \
+             VALUES (?1,NULL,?2,?3,?4,(SELECT COALESCE(SUM(OCTET_LENGTH(payload)),0) FROM events WHERE session_id = ?1),?5,?6) \
+             ON CONFLICT(id) DO UPDATE SET status=excluded.status,failure_reason=excluded.failure_reason,delegated_to=excluded.delegated_to,total_event_bytes=excluded.total_event_bytes,updated_at_ns=excluded.updated_at_ns",
             params![value.snapshot.session_id, value.snapshot.status.as_str(), value.snapshot.failure_reason, value.snapshot.delegated_to, system_time_to_ns(value.first_seen)?, system_time_to_ns(value.last_seen)?],
         )?;
     }
