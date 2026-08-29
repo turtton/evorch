@@ -183,3 +183,16 @@ pub struct AgentRunRecord {
     /// 終了日時です。
     pub finished_at: Option<SystemTime>,
 }
+
+/// カタログ更新の永続化レコードです。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogUpdateRecord {
+    /// 更新元を識別する文字列です。
+    pub source: String,
+    /// 更新後のモデル数です。
+    pub model_count: u32,
+    /// 更新の詳細です。
+    pub detail: String,
+    /// 更新を記録した Unix epoch ナノ秒です。
+    pub recorded_at_ns: i64,
+}
