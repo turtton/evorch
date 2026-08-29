@@ -66,15 +66,18 @@ description: "herdr 経由で opencode ワーカーを駆動する跨ハーネ�
 
 ### 3. 完了・マージ
 
+**重要: `intent-cli closeout pr` は記録専用で GitHub 上の merge は行わない**（CLI help: "Records the queue/runs closeout"。`--pr-merged false` 指定時は拒否する G297 チェックのみ）。**必ず merge → 検証 → closeout の順**で実行する。
+
 1.  `intent-cli automation pr-transition --transition approved --write` で `intent-pr-approved` を付与。
 2.  `gh pr view <n> --json isDraft,state,mergedAt,mergeCommit,baseRefOid` で `isDraft=false` を確認し、`baseRefOid`（base SHA）を控える。draft のままなら `gh pr ready <n>` で draft を外す。
-3.  `intent-cli closeout pr --pr <n> --write` で merge ・ host durable state 更新。
-4.  closeout 後に実マージを検証する（squash merge 対応。後述の落とし穴参照）:
+3.  `gh pr merge <n> --squash`（または repo のマージポリシーに従う）で**実 merge を先行**する。
+4.  `gh pr view <n> --json state` で `state=MERGED` を確認してから `intent-cli closeout pr --pr <n> --repo <owner/repo> --pr-merged true --write` で host durable state 更新（`--pr-merged true` は G297 の明示チェック。省略すると未 merge でも記録が先行して queue=completed になり事故る）。
+5.  closeout 後に実マージを検証する（squash merge 対応。後述の落とし穴参照）:
     -   `git fetch origin main` で最新の remote-tracking ref を取得
     -   `gh pr view <n> --json state,mergedAt,mergeCommit` で `state=MERGED`
     -   `git log origin/main --oneline -1` が squash commit（`... (#<n>)`）と一致
     -   `git diff <base-sha>..origin/main --stat` に想定 diff が出る（`<base-sha>` は手順 2 で控えた base SHA）
-5.  ADR / backlog writeback は host 側で実施し、host repo へ commit/push する（host repo ポリシー: 変更前に `git pull --ff-only`、変更後は commit → push。workflow ラベル遷移は intent-cli 経由のみ）。
+6.  ADR / backlog writeback は host 側で実施し、host repo へ commit/push する（host repo ポリシー: 変更前に `git pull --ff-only`、変更後は commit → push。workflow ラベル遷移は intent-cli 経由のみ）。
 
 ### 4. sandbox 内で commit/push できない場合（bundle 運用）
 
@@ -136,7 +139,7 @@ Fix review comments in PR #2. In src/lib.rs, remove the unused import flagged by
 | `herdr agent start --kind opencode` が timeout を返す | 実体は新 workspace で起動していることがある（opencode は独自 window を開く）。`herdr agent list` で確認してから retry しないと二重起動する（herdr 0.8.0 実測）。 |
 | goal 達成済み opencode への新 `/goal` 送信 | 「Replace current goal」ダイアログで止まる。`herdr agent send-keys <pane> Enter` で承認（herdr-opencode-loop 実績）。 |
 | issue title の fallback | `issue publish-flow` が title を `<unit> (untitled)` に fallback することがある（packet.yaml の issue_title は正しいのに発生。原因未特定。`issue draft` は別スキーマ（root `execution_unit` 必須）を要求し現行 packet と非互換）。発生したら `gh issue edit` で修正する。**本環境（turtton/evorch）でも 2026-08-29 に再発確認済み**。 |
-| draft PR のまま `intent-cli closeout pr` | pr-merged が記録されるが GitHub 上の merge は行われない。closeout 前に `gh pr ready` で draft を外し、closeout 後に merged state を必ず検証する（herdr-opencode-loop 実績で実害発生: draft のまま closeout されコード未マージのまま queue=completed となり後日発覚。superseded close + 別 unit として再適用する recovery を実施。closeout 後の実マージ検証を closeout 手順に組み込むこと）。 |
+| draft PR のまま `intent-cli closeout pr` | **closeout pr は記録専用で merge しない**（G297: `--pr-merged false` 指定時のみ拒否。省略時は未 merge でも記録が先行し queue=completed になる）。**必ず `gh pr merge` 先行 → MERGED 確認 → closeout（`--pr-merged true`）→ 実マージ検証**（2026-08-29、v01-scaffold / PR #10 で未 merge のまま closeout 記録が先行したのを実マージ検証で捕捉・再発防止として本手順を確定。過去実績では draft のまま closeout されコード未マージのまま queue=completed となり後日発覚。superseded close + 別 unit として再適用する recovery を実施。closeout 後の実マージ検証を closeout 手順に組み込むこと）。 |
 | closeout 後の実マージ検証（squash merge 対応） | `git cherry origin/main <branch>` は squash merge では全コミットが `+`（未マージ扱い）になり誤判定する。正しい検証: (0) `git fetch origin main` で最新の remote-tracking ref を取得 (1) `gh pr view <n> --json state,mergedAt,mergeCommit` で state=MERGED を確認 (2) `git log origin/main --oneline -1` が squash commit（`... (#<n>)`）と一致 (3) `git diff <base-sha>..origin/main --stat` に想定 diff が出ること（herdr-opencode-loop 実績）。 |
 | CI blocked 中の worker の自律行動 | hold 指示を送っても in-flight の判断（fix commit の push 等）は止まらないことがある。並行して別経路の修正 PR を出す場合は「ブランチに触れるな」を先に明示する（herdr-opencode-loop 実績）。 |
 | worker sandbox の git read-only 制約 | worker の opencode sandbox は対象 repo の `.git` を read-only mount し `/tmp` を隔離するため、sandbox 内から commit/push ができない。bundle export 運用（worker が copy gitdir 上に commit し `git bundle create`、lead が sandbox 外で fetch+push+PR 作成）で対応（herdr-opencode-loop 実績）。 |

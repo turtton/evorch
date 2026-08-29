@@ -21,6 +21,10 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 
 ## Rust Workspace 構成案（crates/）
 
+**v0.1 実 crate（2026-08-29 確定、ADR 0016）**: `runtime` / `event-bus` / `storage` / `providers` / `tools` / `sandbox` / `routing` / `model` / `config` / `gui` + バイナリ `evorch`。外部依存ゼロの骨格で、依存は各 slice の実装に応じて `[workspace.dependencies]` へ集約する。
+
+以下は v0.1 完了後の再編で目指す目標構成（未配置 crate を含む）:
+
 ```text
 crates/
   runtime/        agent, session, task, event
@@ -80,5 +84,4 @@ struct ProviderCapabilities {
 
 ## Open questions
 
-- crate 分割の初期 granularity（v0.1 で全 crate 作るか、必要なものから作るか）
 - Event Bus の transport 実装（in-process channel のみか、将来の分散を見越すか）

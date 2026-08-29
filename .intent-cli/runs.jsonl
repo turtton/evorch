@@ -16,3 +16,5 @@
 {"ts":"2026-08-29T07:47:43.4204466+00:00","execution_unit":"v01-routing-profiles","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#8","reason":"https://github.com/turtton/evorch/issues/8"}
 {"ts":"2026-08-29T07:47:47.9172597+00:00","execution_unit":"v01-gui-panes","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v01-gui-panes/"}
 {"ts":"2026-08-29T07:47:50.2574067+00:00","execution_unit":"v01-gui-panes","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#9","reason":"https://github.com/turtton/evorch/issues/9"}
+{"ts":"2026-08-29T08:32:21.3355477+00:00","execution_unit":"v01-scaffold","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":10}
+{"ts":"2026-08-29T08:32:21.3355477+00:00","execution_unit":"v01-scaffold","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":10}
