@@ -10,6 +10,7 @@ publish = false
 name = "gui"
 
 [dependencies]
+eframe = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 event-bus = { path = "../event-bus" }
@@ -22,4 +23,6 @@ tracing = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
