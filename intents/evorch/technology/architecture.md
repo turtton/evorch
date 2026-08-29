@@ -44,7 +44,7 @@ crates/
 |---|---|
 | Language | Rust |
 | Async Runtime | Tokio |
-| GUI | Floem（fallback: egui + egui_dock） |
+| GUI | egui + egui_dock（ADR 0007。Floem は評価用 prototype に限定、GPUI + gpui-component は長期 watch） |
 | HTTP | reqwest |
 | Serialization | serde / serde_json |
 | CLI | clap |

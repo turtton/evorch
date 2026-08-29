@@ -7,7 +7,7 @@
 ## v0.1 — 最小構成の動くもの
 
 ```text
-Rust / Tokio / SQLite / Floem prototype
+Rust / Tokio / SQLite / egui + egui_dock prototype（ADR 0007）
 
 Native Agent Runtime
 

@@ -68,7 +68,7 @@
 
 Rust / Tokio / reqwest / serde / clap / SQLite / tracing — いずれも現状で妥当。
 
-## 確定待ちの事項
+## 確定事項（2026-08-29 確定）
 
-1. GUI 第一候補の egui + egui_dock への入れ替え（構想書 §22 および gui-workbench feature の更新）
-2. ~~v0.3 のサブスクリプションプロバイダ（anthropic-subscription / openai-codex）スコープ~~ → **解決: 構想どおり v0.3 に維持（senpi / OpenCode / pi 方式で実装可能）**
+1. GUI 第一候補を **egui + egui_dock** に入れ替え、Floem は「docking 評価用 prototype」に限定（構想書 §22 更新、ADR 0007）。GPUI + gpui-component は長期 watch
+2. v0.3 のサブスクリプションプロバイダ（anthropic-subscription / openai-codex）— **構想どおり v0.3 に維持**（senpi / OpenCode / pi 方式で実装可能）
