@@ -1,8 +1,25 @@
 [package]
 name = "gui"
+description = "egui + egui_dock workbench GUI for evorch"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lib]
 name = "gui"
+
+[dependencies]
+egui = { workspace = true }
+egui_dock = { workspace = true }
+event-bus = { path = "../event-bus" }
+portable-pty = { workspace = true }
+runtime = { path = "../runtime" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+workspace-ui = { path = "../workspace-ui" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
