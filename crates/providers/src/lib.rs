@@ -9,3 +9,12 @@ pub mod provider;
 pub mod sse;
 pub mod stream;
 pub mod wire;
+
+pub use auth::ProviderAuth;
+pub use client::ProviderClient;
+pub use error::ProviderError;
+pub use message::{
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ProviderCapabilities, Role,
+    ToolResultContent, ToolSpec, Usage,
+};
+pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};
