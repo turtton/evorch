@@ -6,6 +6,7 @@ use agents::Role;
 use event_bus::{AgentRunPhase, Event, EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, FinishReason};
 use runtime::{AgentRuntime, RunConfig};
+use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
@@ -14,7 +15,10 @@ use support::{ScriptedModel, text_response, tool_response, tool_responses};
 
 fn runtime_with(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(128));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus)));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox),
+    ));
     (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
 }
 

@@ -6,6 +6,7 @@ use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
+use sandbox::DirectSandbox;
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
@@ -13,7 +14,10 @@ use support::{ScriptedModel, collect_events, text_response};
 
 fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(64));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus)));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox),
+    ));
     (
         AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(model)),
         bus,
