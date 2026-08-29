@@ -4,3 +4,5 @@
 # project skills (trackable)
 .opencode/*
 !.opencode/skill/
+# worker delegation contracts (herdr-opencode-loop)
+!.opencode/*-contract.md
