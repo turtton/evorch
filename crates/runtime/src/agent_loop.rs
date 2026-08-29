@@ -32,9 +32,10 @@ pub(crate) struct LoopShared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
+    pub(crate) runtime: Weak<Shared>,
 }
 
-struct LoopState {
+pub(crate) struct LoopState {
     task: RunTask,
     shared: LoopShared,
     channels: LoopChannels,
@@ -71,6 +72,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
 }
 
 impl LoopState {
+    pub(crate) fn runtime(&self) -> Option<crate::AgentRuntime> {
+        crate::AgentRuntime::from_weak(&self.shared.runtime)
+    }
+
     async fn execute(&mut self) {
         loop {
             if self.cancelled() {
@@ -175,7 +180,11 @@ impl LoopState {
         self.transition(AgentRunPhase::Running, None).is_ok()
     }
 
-    fn transition(&mut self, phase: AgentRunPhase, reason: Option<String>) -> Result<(), ()> {
+    pub(crate) fn transition(
+        &mut self,
+        phase: AgentRunPhase,
+        reason: Option<String>,
+    ) -> Result<(), ()> {
         let event = self
             .run_state
             .transition(self.task.run_id, phase, reason)
@@ -191,11 +200,21 @@ impl LoopState {
             .send_replace(self.context.messages.len());
     }
 
+    pub(crate) fn push_final_result(&mut self, result: &str) {
+        self.context.push_assistant(providers::Message {
+            role: providers::Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: result.to_string(),
+            }],
+        });
+        self.publish_message_count();
+    }
+
     fn cancelled(&self) -> bool {
         *self.channels.cancel_rx.borrow()
     }
 
-    fn finish_success(&mut self) {
+    pub(crate) fn finish_success(&mut self) {
         if self.transition(AgentRunPhase::Done, None).is_ok() {
             self.shared
                 .bus

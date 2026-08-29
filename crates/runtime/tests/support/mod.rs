@@ -16,6 +16,7 @@ use tokio::time::{Duration, timeout};
 pub struct ScriptedModel {
     script: Mutex<VecDeque<Result<ChatResponse, RuntimeError>>>,
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
+    observed: Mutex<Vec<Vec<Message>>>,
     gate: Option<Arc<Notify>>,
 }
 
@@ -24,6 +25,7 @@ impl ScriptedModel {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             keyed: Mutex::new(HashMap::new()),
+            observed: Mutex::new(Vec::new()),
             gate: None,
         }
     }
@@ -35,6 +37,7 @@ impl ScriptedModel {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             keyed: Mutex::new(HashMap::new()),
+            observed: Mutex::new(Vec::new()),
             gate: Some(gate),
         }
     }
@@ -49,6 +52,10 @@ impl ScriptedModel {
             .await
             .insert(marker.to_string(), script.into_iter().collect());
     }
+
+    pub async fn observed(&self) -> Vec<Vec<Message>> {
+        self.observed.lock().await.clone()
+    }
 }
 
 #[async_trait]
@@ -59,6 +66,7 @@ impl AgentModel for ScriptedModel {
         messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.observed.lock().await.push(messages.to_vec());
         if let Some(gate) = &self.gate {
             gate.notified().await;
         }
@@ -106,6 +114,21 @@ pub fn tool_response(id: &str, name: &str, input: serde_json::Value) -> ChatResp
             name: name.to_string(),
             input,
         }],
+        FinishReason::ToolUse,
+    )
+}
+
+pub fn tool_responses(
+    uses: impl IntoIterator<Item = (&'static str, &'static str, serde_json::Value)>,
+) -> ChatResponse {
+    response(
+        uses.into_iter()
+            .map(|(id, name, input)| ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input,
+            })
+            .collect(),
         FinishReason::ToolUse,
     )
 }

@@ -2,9 +2,7 @@ use providers::ToolSpec;
 use tools::ToolResult;
 
 use super::LoopState;
-use crate::is_meta_op;
-
-const META_OP_PLACEHOLDER: &str = "メタ操作は v0.2 ディスパッチャで提供予定";
+use crate::{META_OPS, is_meta_op, meta};
 
 impl LoopState {
     pub(super) async fn execute_tools(
@@ -16,10 +14,18 @@ impl LoopState {
                 self.finish_cancelled();
                 return false;
             }
-            let result = if is_meta_op(&name) {
-                ToolResult::error(META_OP_PLACEHOLDER)
-            } else if let Err(error) = self.policy.authorize(&name) {
+            let result = if let Err(error) = self.policy.authorize(&name) {
                 ToolResult::error(error.to_string())
+            } else if is_meta_op(&name) {
+                let dispatch = meta::dispatch(self, &name, input).await;
+                self.context.push_tool_result(id, dispatch.result);
+                self.publish_message_count();
+                if let Some(result) = dispatch.finish {
+                    self.push_final_result(&result);
+                    self.finish_success();
+                    return false;
+                }
+                continue;
             } else {
                 let execution = tokio::select! {
                     biased;
@@ -47,6 +53,7 @@ impl LoopState {
 pub(super) fn standard_tool_specs() -> Vec<ToolSpec> {
     ["read", "edit", "grep", "shell", "git_diff"]
         .into_iter()
+        .chain(META_OPS.iter().copied())
         .map(|name| ToolSpec {
             name: name.to_string(),
             description: format!("{name} tool"),

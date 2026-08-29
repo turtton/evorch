@@ -44,6 +44,10 @@ struct RunEntry {
 }
 
 impl AgentRuntime {
+    pub(crate) fn from_weak(shared: &Weak<Shared>) -> Option<Self> {
+        shared.upgrade().map(|shared| Self { shared })
+    }
+
     /// 共有イベントバス・ツール実行器・モデル境界からランタイムを生成する。
     pub fn new(
         bus: Arc<EventBus>,
@@ -225,5 +229,6 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         bus: Arc::clone(&shared.bus),
         executor: Arc::clone(&shared.executor),
         model: Arc::clone(&shared.model),
+        runtime: Arc::downgrade(&shared),
     })
 }

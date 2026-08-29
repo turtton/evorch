@@ -18,6 +18,7 @@
 mod agent_loop;
 pub mod context;
 pub mod error;
+mod meta;
 pub mod model;
 pub mod policy;
 pub mod run;
