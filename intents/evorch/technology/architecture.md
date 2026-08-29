@@ -82,6 +82,10 @@ struct ProviderCapabilities {
 }
 ```
 
+## Event Bus transport（2026-08-29 解決）
+
+in-process tokio broadcast 固定（ADR 0017）。将来の分散化は gateway subscriber で serde_json bridge し、イベント型と購読 API は不変。
+
 ## Open questions
 
-- Event Bus の transport 実装（in-process channel のみか、将来の分散を見越すか）
+（現在なし）
