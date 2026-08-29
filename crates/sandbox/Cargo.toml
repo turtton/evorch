@@ -6,3 +6,19 @@ publish = false
 
 [lib]
 name = "sandbox"
+
+[features]
+keychain = ["dep:keyring"]
+
+[dependencies]
+event-bus = { path = "../event-bus" }
+keyring = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
