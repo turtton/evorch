@@ -15,11 +15,13 @@
 //!   v01-routing-profiles が [`model::AgentModel`] 境界の実装として提供する。
 //!   runtime は model 名を一切持たない。
 
+mod agent_loop;
 pub mod context;
 pub mod error;
 pub mod model;
 pub mod policy;
 pub mod run;
+pub mod runtime;
 pub mod state;
 
 pub use context::AgentContext;
@@ -28,4 +30,5 @@ pub use event_bus::AgentRunPhase;
 pub use model::AgentModel;
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
+pub use runtime::AgentRuntime;
 pub use state::{RunState, is_valid_transition};
