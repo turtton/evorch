@@ -1,5 +1,28 @@
 {
   "schema_version": "1",
-  "updated_at": "1970-01-01T00:00:00+00:00",
-  "items": []
+  "updated_at": "2026-08-29T06:50:08.191809+00:00",
+  "items": [
+    {
+      "execution_unit": "v01-scaffold",
+      "title": "v0.1: Cargo workspace\u30FBcrate \u9AA8\u683C\u30FBnix devShell\u30FBCI \u3092\u6574\u5099\u3059\u308B",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-scaffold/implementation.md",
+        "review_context": ".intent-cli/issues/v01-scaffold/review-context.md",
+        "yaml": ".intent-cli/issues/v01-scaffold/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 1,
+        "url": "https://github.com/turtton/evorch/issues/1"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    }
+  ]
 }

@@ -1,0 +1,2 @@
+{"ts":"2026-08-29T06:49:58.608162+00:00","execution_unit":"v01-scaffold","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v01-scaffold/"}
+{"ts":"2026-08-29T06:50:08.191809+00:00","execution_unit":"v01-scaffold","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#1","reason":"https://github.com/turtton/evorch/issues/1"}
