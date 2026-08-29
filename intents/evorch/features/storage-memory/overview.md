@@ -23,6 +23,10 @@ SQLite を中心とした event-sourced runtime とする。Event Log を source
 
 - [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
 
+## 計測の保存（ADR 0012）
+
+Codex の SQLite 問題（raw 高頻度イベントの永続化で 640 TB/年規模）の教訓を踏まえ、計測は「メモリ ring buffer で raw 保持 → downsampled 集計値のみを単一 writer がバッチ書き込み」。生 SSE / tool output / prompt 全文は永続化しない。WAL 運用ポリシー・ハード上限・自己参照防止・起動時安全検査を実装。外部委譲は optional OTLP export（追加 sink）。
+
 ## Open questions
 
 - event log のスキーマ詳細（messages と tool_calls の正規化方法）

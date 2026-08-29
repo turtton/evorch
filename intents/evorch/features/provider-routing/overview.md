@@ -22,6 +22,10 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 - **openai-codex**: OpenCode / pi 方式。公式 codex_cli_simplified_flow OAuth（browser PKCE + device code 両対応）、`originator` ヘッダーに自アプリ名を明示。endpoint は `chatgpt.com/backend-api/codex/responses`、JWT 由来の `ChatGPT-Account-Id` ヘッダー必須。`openai`（API key 経由）とは別 type として実装。Codex backend の body 制約変化（store/stream/max_output_tokens）には追随テストが必須。
 - **github-copilot**: device code OAuth（`api.githubcopilot.com/chat/completions`）。2026-06 から usage-based 課金（AI Credits 制）に移行済みで「定額無制限」前提はない旨をユーザー向け表示に反映。
 
+## モデルカタログ（ADR 0013）
+
+モデル情報は4供給源のハイブリッド: ①組み込みデフォルト（属性・価格）②起動時 fetch（models.dev 等、キャッシュ+オフラインフォールバック）③プロバイダ検出（openai-compatible の `/v1/models`、属性未確定フラグ付きマージ）④サブスクリプション系の auth 状態動的フィルタ。ModelCatalog は domain transform 対象（ADR 0010）。価格カタログはコスト計算（ADR 0012）と同一ソース。
+
 ## 受け入れ基準
 
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
