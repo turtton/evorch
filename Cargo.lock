@@ -1691,6 +1691,7 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "event-bus",
+ "image",
  "portable-pty",
  "runtime",
  "serde",

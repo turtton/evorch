@@ -5,6 +5,7 @@
 pub mod app;
 pub mod dock;
 pub mod events;
+pub mod headless;
 pub mod keymap;
 pub mod model;
 pub mod panes;
