@@ -29,6 +29,16 @@ Agent Kernel
 - background agent を一級機能とする（delegate_background / send_message / wait / cancel）
 - Session より下に Task 境界を持ち、1 conversation = 1 task に固定しない長寿命 workspace とする
 
+## v0.1 role 実行 runtime の実装確定（2026-08-30）
+
+`crates/agents/`（Role / RoleCapabilities / NetworkAccess・ADR 0002 capability 行列を `Role::capabilities()` にコード化）と `crates/runtime/`（AgentRun の 5 相状態遷移 Pending/Running/Waiting/Done/Error を EventBus へ event-sourced で emit）がコード確定（PR #16、issue #7）。要点:
+
+- **capability 強制**: runtime は `RoleCapabilities` のみを消費し `Role` にマッチしない。Librarian / Oracle 追加は Role 定義 + capability 表の追加だけ（v0.2）
+- **independent context**: `AgentContext` は run タスク専有で、複数 AgentRun が同時並行動作
+- **background agent**: `delegate_background` / `send_message` / `wait` / `cancel` を `BackgroundTaskStarted` / `Completed` / `Cancelled` イベントで観測（GUI 非依存）
+- **routing 委譲境界**: `AgentModel` trait が role → model routing の境界。v01-routing-profiles（実装中）が本 trait を実装する
+- **orchestrator meta 操作**: 委譲系操作は ToolUse dispatch として runtime 内で処理
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと

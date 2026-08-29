@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T17:00:20.3068954+00:00",
+  "updated_at": "2026-08-29T17:41:21.179812+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -158,7 +158,7 @@
     {
       "execution_unit": "v01-agent-roles",
       "title": "v0.1: Orchestrator / Explorer / Worker / Reviewer \u306E role \u5B9F\u884C\u3068 background agent \u3092\u5B9F\u88C5\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-event-stream",
         "v01-session-storage",
@@ -178,6 +178,7 @@
         "number": 7,
         "url": "https://github.com/turtton/evorch/issues/7"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/16",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
