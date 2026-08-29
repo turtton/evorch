@@ -111,6 +111,21 @@ impl From<FaultEvent> for EventKind {
     }
 }
 
+/// エージェント実行のライフサイクル位相。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRunPhase {
+    /// 実行開始を待機中です。
+    Pending,
+    /// 実行中です。
+    Running,
+    /// 外部要因（ツール結果や入力）の到着を待機中です。
+    Waiting,
+    /// 正常終了しました。
+    Done,
+    /// 異常終了しました。
+    Error,
+}
+
 /// セッションおよびタスクのライフサイクルに関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
@@ -136,6 +151,22 @@ pub enum LifecycleEvent {
     BackgroundTaskCompleted {
         /// 完了したタスクの ID。
         task_id: String,
+    },
+    /// バックグラウンドタスクがキャンセルされた。
+    BackgroundTaskCancelled {
+        /// キャンセルされたタスクの ID。
+        task_id: String,
+    },
+    /// エージェント実行の位相が遷移した。
+    AgentRunStateChanged {
+        /// 状態が変化した実行の ID。
+        run_id: String,
+        /// 遷移前の位相。
+        from: AgentRunPhase,
+        /// 遷移後の位相。
+        to: AgentRunPhase,
+        /// 遷移理由。`to` が [`AgentRunPhase::Error`] のときに設定されます。
+        reason: Option<String>,
     },
     /// セッションが完了した。
     Completed {
@@ -287,6 +318,23 @@ mod tests {
             ),
             (
                 "Lifecycle",
+                LifecycleEvent::BackgroundTaskCancelled {
+                    task_id: "task-1".into(),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::AgentRunStateChanged {
+                    run_id: "run-1".into(),
+                    from: AgentRunPhase::Running,
+                    to: AgentRunPhase::Error,
+                    reason: Some("boom".into()),
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
                 LifecycleEvent::Completed {
                     session_id: "session-1".into(),
                 }
@@ -392,6 +440,70 @@ mod tests {
                 value["kind"]["payload"]["payload"].is_object(),
                 "inner payload missing: category={category}"
             );
+        }
+    }
+
+    // Given: Running から Error へ遷移し理由を持つエージェント実行状態変化イベント。
+    // When: Event を JSON 文字列へシリアライズして復元する。
+    // Then: 元のイベントと等しく、隣接タグ "AgentRunStateChanged" を保つ。
+    #[test]
+    fn agent_run_state_changed_round_trips_with_error_reason() {
+        let event = Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-1".to_string(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Error,
+            reason: Some("boom".to_string()),
+        });
+
+        let json = serde_json::to_string(&event).expect("serialize Event");
+        let restored: Event = serde_json::from_str(&json).expect("deserialize Event");
+        assert_eq!(event, restored);
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            value["kind"]["payload"]["kind"], "AgentRunStateChanged",
+            "inner tag mismatch"
+        );
+    }
+
+    // Given: 理由を持たないバックグラウンドタスクのキャンセルイベント。
+    // When: Event を JSON 文字列へシリアライズして復元する。
+    // Then: 元のイベントと等しく、隣接タグ "BackgroundTaskCancelled" を保つ。
+    #[test]
+    fn background_task_cancelled_round_trips() {
+        let event = Event::new(LifecycleEvent::BackgroundTaskCancelled {
+            task_id: "task-1".to_string(),
+        });
+
+        let json = serde_json::to_string(&event).expect("serialize Event");
+        let restored: Event = serde_json::from_str(&json).expect("deserialize Event");
+        assert_eq!(event, restored);
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            value["kind"]["payload"]["kind"], "BackgroundTaskCancelled",
+            "inner tag mismatch"
+        );
+    }
+
+    // Given: AgentRunPhase の全 5 位相。
+    // When: 各位相を JSON 文字列へシリアライズして復元する。
+    // Then: いずれの位相も往復前後で等しい。
+    #[test]
+    fn agent_run_phase_round_trips_every_variant() {
+        let phases = [
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+            AgentRunPhase::Waiting,
+            AgentRunPhase::Done,
+            AgentRunPhase::Error,
+        ];
+
+        for phase in phases {
+            let json = serde_json::to_string(&phase).expect("serialize AgentRunPhase");
+            let restored: AgentRunPhase =
+                serde_json::from_str(&json).expect("deserialize AgentRunPhase");
+            assert_eq!(phase, restored, "round-trip mismatch: {json}");
         }
     }
 
