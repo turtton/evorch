@@ -1,0 +1,68 @@
+implementation_issue_packet:
+  issue_title: "v0.1: egui + egui_dock 基本 pane（agent / terminal / tasks）を実装する"
+  issue_kind: feature
+  source_execution_unit: v01-gui-panes
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/gui/, crates/workspace-ui/
+  target_part: "GUI アプリ・workspace model・基本 pane"
+  dependencies:
+    - v01-agent-roles
+    - v01-event-stream
+    - v01-session-storage
+  technical_baseline:
+    - "v01-scaffold により crates/gui/ と crates/workspace-ui/ が空 crate として Scaffold 済みであること"
+    - "v01-agent-roles が AgentRun・role capability boundary・background agent 実行を提供し、AgentRun 一覧と状態遷移が event として観測できること"
+    - "v01-event-stream が EventBus と AgentEvent の subscribe API（transcript の message / reasoning / tool 実行）を提供すること"
+    - "v01-session-storage が永続化された session / AgentRun の参照 API を提供すること"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0007-gui-framework-egui-first.md
+    - intents/evorch/decisions/0009-platform-linux-first-gui-only.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "egui + egui_dock（anhosh/egui_dock 0.21.x）で agent / terminal / tasks の基本3 pane が表示でき、dock / undock / resize / tab 移動・floating window が動作する"
+    - "Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造を守り、Workspace Model が crates/workspace-ui/ に framework 非依存データ（Split / Tabs / Panel / Floating / Window）として保持され、GUI 無しに layout を検証・保存できる"
+    - "agent pane が event stream の transcript（message / reasoning / tool 実行）を描画する"
+    - "terminal pane が portable-pty で PTY を生成・操作できる"
+    - "tasks pane が AgentRun 一覧（name / role / status / model 等）を表示し、v01-agent-roles の背景タスク状態と連動する"
+    - "offscreen レンダリング（ADR 0009）でフレームを capture でき、ヘッドレス起動できる"
+    - "panel layout・keybind が config 公開される（ADR 0014 の v0.1 設定領域）"
+    - "semantic UI の introspection（v0.5）と Cost / Cache Inspector・Diagnostics 等の高度 pane（v0.2 以降）は実装しないことが明示される"
+
+# G461: optional packet-time intent-maintenance metadata.
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+  new_intent_needed: false
+  placement_rationale: "基本的3 pane・Workspace Model 分離・offscreen レンダリングは gui-workbench の既存受け入れ基準に対応。新規 intent node は不要。intent-tree は 00-map.md 単一構成のため feature overview を intent node として参照する。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規ノード不要。gui-workbench の受け入れ基準（dock / workspace model 分離 / offscreen）を本 packet が充足する。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。GUI 第一候補は ADR 0007、Linux 先行・offscreen は ADR 0009 で確定済み。本 packet はその実装のみ。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "必須の書き戻しなし。実際の egui_dock レイアウト構成（nested split 3 pane）が good に確定した場合のみ gui-workbench の open questions を更新する。"
+closeout_learning:
+  expected: "egui_dock の binary split 制約（3分割以上・grid 非標準）で初期3 pane を nested split 実現した具体構成と、offscreen レンダリングによるフレーム capture の確定方式"
+  write_back_required: false
+  write_back_targets: []
+# G645: 本スライスはユーザー対向の GUI アプリ（evorch GUI workbench）という新規 role-facing
+# surface を追加する。future の role が guide 経由でこの surface に到達できるよう route を宣言する。
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: the evorch GUI app（egui workbench、ユーザー対向面）

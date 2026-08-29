@@ -1,0 +1,72 @@
+implementation_issue_packet:
+  issue_title: "v0.1: 型付き Event Bus（event stream）コアを実装する"
+  issue_kind: feature
+  source_execution_unit: v01-event-stream
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/event-bus/"
+  target_part: "Agent Kernel のイベントバックボーン"
+  dependencies:
+    - v01-scaffold
+  technical_baseline:
+    - "v01-scaffold で crate 骨格が存在し workspace がビルド可能であること"
+    - "ADR 0012 で計測語彙（OTel Metrics API）・bounded ring buffer による raw 保持・downsampled 保存・TTFT/throughput 自動集計が決定済み"
+    - "architecture.md の Open questions「Event Bus の transport 実装」は本 slice で ADR 0017 として確定する"
+    - "Async runtime は Tokio（技術スタック確定）"
+  intent_references:
+    - "intents/evorch/technology/architecture.md"
+    - "intents/evorch/features/agent-runtime-kernel/overview.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+  acceptance_criteria:
+    - "agent-runtime-kernel の event-driven 設計に基づく具象 event 型（lifecycle / message / tool call / token usage / provider request-response / fault の各カテゴリ）を定義し、emit した event を複数 subscriber が受信できる"
+    - "in-process transport は tokio broadcast channel ベースとし、subscriber が追従できない場合の挙動（Lagged 検知と drop ポリシー）が定義され、fault event + tracing warning として表面化する"
+    - "全 event 型が serde の serialize / deserialize round-trip を通る"
+    - "token usage / TTFT 計測に必要な timestamp（monotonic + wall-clock）フィールドが event schema に含まれる"
+    - "ADR 0012 の bounded ring buffer による raw 保持（最古 drop）の実装が event-bus に含まれる"
+    - "transport を in-process のみに確定し、理由と将来拡張方針を ADR 0017 として host に記録する"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/technology/architecture.md
+    - intents/evorch/decisions/0012-metrics-architecture.md
+  new_intent_needed: false
+  placement_rationale: "agent-runtime-kernel の event-driven runtime（ADR 0005 の kernel / GUI 分離）と ADR 0012 の計測収集層を具体化する slice。transport 方式は architecture / roadmap 上の Open questions であり、本 slice の決定を ADR 0017 に記録するため新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規 intent node は不要。既存 agent-runtime-kernel feature を具体化する slice。"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0017-event-bus-transport.md
+    decision_title: "Event Bus の transport を in-process tokio broadcast に確定し、schema versioning による将来の分散対応方針を記録する"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/technology/architecture.md
+    summary: "ADR 0017 確定後に architecture.md の Open questions「Event Bus の transport 実装」を解決済みとして更新する。"
+closeout_learning:
+  expected: "ADR 0017（event transport）を生成し、architecture.md の transport Open question を解決済みとして更新する。選定根拠（v0.1 は単一プロセス内での観測・GUI subscription が主用途で、分散は broad-cast の枠を超えた別設計）と schema 拡張点（event type の versioning）を併記する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0017-event-bus-transport.md
+    - intents/evorch/technology/architecture.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

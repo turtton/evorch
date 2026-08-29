@@ -1,0 +1,70 @@
+implementation_issue_packet:
+  issue_title: "v0.1: Orchestrator / Explorer / Worker / Reviewer の role 実行と background agent を実装する"
+  issue_kind: feature
+  source_execution_unit: v01-agent-roles
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/runtime/, crates/agents/
+  target_part: "AgentRun・role capability boundary・background 実行"
+  dependencies:
+    - v01-event-stream
+    - v01-session-storage
+    - v01-provider-client
+    - v01-tool-layer
+    - v01-sandbox-approval
+  technical_baseline:
+    - "v01-scaffold により crates/runtime/ と crates/agents/ が空 crate として Scaffold 済みであること"
+    - "v01-event-stream が EventBus と AgentEvent（Started / MessageDelta / ToolStarted / Completed / Failed / BackgroundTaskStarted / BackgroundTaskCompleted 等）の送受信 API を提供すること"
+    - "v01-session-storage が SQLite による session / AgentRun / task の永続化 API を提供すること"
+    - "v01-provider-client が ProviderProfile 抽象とプロバイダ呼び出し API を提供すること"
+    - "v01-tool-layer が tool trait と read / edit / grep / shell / git diff 等の実装を提供すること"
+    - "v01-sandbox-approval が批准 permission 判定を提供し、tool 実行時の承認要求を決定すること"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "Orchestrator / Explorer / Worker / Reviewer の4 role が ADR 0002 の capability boundary で分離され、runtime レベルで許可 tool セット・network 扱いが role ごとに強制される（Orchestrator に write / edit / apply_patch / arbitrary shell / git commit が無く、Explorer に write / edit / delegate が無い等）"
+    - "各 role の capability boundary がユニットテストで検証できる（tool 権限の許可/拒否と network 既定 deny の検査）"
+    - "AgentRun が event-sourced に状態遷移（pending / running / waiting / done / error）を event stream へ emit する"
+    - "background 起動した AgentRun が GUI 無しに継続し、背景タスクの開始・完了・キャンセルが event として観測できる"
+    - "各 AgentRun が独立した agent context を持ち、複数 agent が Tokio task として同時に並行動作する"
+    - "Orchestrator が delegate / delegate_background / send_message / wait / cancel を持つ背景起動型の振る舞いを見せる"
+    - "Librarian / Oracle（v0.2 追加 role）が既存の capability boundary 機構への role 定義追加で拡張できることが実装構造で示される"
+    - "role → model の対応とフォールバックは v01-routing-profiles に委譲し、本 packet ではルーティングを自前実装しない"
+
+# G461: optional packet-time intent-maintenance metadata.
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+  new_intent_needed: false
+  placement_rationale: "AgentRun の実行・independent agent contexts・background agent は agent-runtime-kernel、4 role の capability 分離は orchestration の既存 intent が対象。新規 intent ノードは不要。intent-tree は 00-map.md 単一構成のため、feature overview を intent node として参照する。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規ノード不要。agent-runtime-kernel / orchestration の受け入れ基準を本 packet が充足する実装とする。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。role の capability boundary は ADR 0002 で確定済みであり、本 packet はその実行面の実装のみ。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "必須の書き戻しなし。closeout 時に独立 context・background の実装方式が確定した場合のみ mvp-roadmap の open questions を更新する。"
+closeout_learning:
+  expected: "4 role の capability 設定値の実測結果（特に network の role-dependent 扱いと Explorer の network optional の扱い）と、AgentRun 状態遷移の確定パターン"
+  write_back_required: false
+  write_back_targets: []
+# G645: role 実行自体は runtime カーネル内部であり、role が guide 経由で対向する新規の
+# user-facing surface（CLI / GUI / 公開契約）を追加しない。ユーザー対向面は v01-gui-panes が追加する。
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

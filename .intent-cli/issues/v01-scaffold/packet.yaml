@@ -1,0 +1,72 @@
+implementation_issue_packet:
+  issue_title: "v0.1: Cargo workspace・crate 骨格・nix devShell・CI を整備する"
+  issue_kind: feature
+  source_execution_unit: v01-scaffold
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "Cargo.toml, crates/, flake.nix, rust-toolchain.toml, .github/workflows/ci.yml"
+  target_part: "Rust workspace の初期構成と開発基盤"
+  dependencies: []
+  technical_baseline:
+    - "Rust 実装は未存在（Cargo.toml / crates/ / rust-toolchain.toml / .github/workflows/ はいずれも未作成）"
+    - "flake.nix / flake.lock / .envrc / .gitignore は既存。devShells.default は bashInteractive + intent-cli のみで Rust toolchain 未含"
+    - "architecture.md の「Rust Workspace 構成案（crates/）」は構成案であり、v0.1 初期 crate セットは本 slice で ADR 0016 として確定する"
+    - "前提として ADR 0007（GUI は egui + egui_dock）/ ADR 0014（config アーキテクチャ）/ ADR 0015（検証2層運用）が採択済み"
+  intent_references:
+    - "intents/evorch/technology/architecture.md"
+    - "intents/evorch/technology/mvp-roadmap.md"
+  acceptance_criteria:
+    - "crates/ 配下に v0.1 crate セットの骨格（Cargo.toml + src/lib.rs、バイナリ crate は src/main.rs）が存在する: runtime / event-bus / storage / providers / tools / sandbox / routing / model / config / gui / evorch（バイナリ）"
+    - "ルート Cargo.toml が virtual workspace として crates/* を member に持ち、`cargo build --workspace` が通る"
+    - "`cargo test --workspace` が通る"
+    - "`cargo clippy --workspace -- -D warnings` が通る"
+    - "`cargo fmt --check` が workspace 全体で通る"
+    - "rust-toolchain.toml で toolchain channel と components（rustfmt / clippy）が固定されている"
+    - "flake.nix の devShell に Rust toolchain（cargo / rustfmt / clippy）が追加され、`nix develop` でシェルが立ち上がり `cargo build` が実行できる"
+    - ".github/workflows/ci.yml が fmt --check / clippy -D warnings / test を実行する"
+    - "crate 分割の初期粒度を確定し、ADR 0016 として host に記録する"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/technology/architecture.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+  new_intent_needed: false
+  placement_rationale: "Rust workspace 初期構成は architecture の「Rust Workspace 構成案（crates/）」を具体化し mvp-roadmap の v0.1 成功基準に先立つ土台になる。crate 分割の Open questions を本 slice で v0.1 初期セットとして確定し ADR 0016 に記録するため、新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規 intent node は不要。既存の technology/architecture.md・technology/mvp-roadmap.md を具体化する slice。"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0016-crate-granularity.md
+    decision_title: "v0.1 Cargo crate 分割の初期粒度（runtime / event-bus / storage / providers / tools / sandbox / routing / model / config / gui + バイナリ crate evorch）を確定する"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/technology/architecture.md
+    summary: "ADR 0016 確定後に「Rust Workspace 構成案」節の初期セット反映と Open questions「crate 分割の初期 granularity」の解決済み化を行う。"
+closeout_learning:
+  expected: "ADR 0016（crate 粒度）を生成し、architecture.md の Open questions から「crate 分割の初期 granularity」を解決済みとして更新する。crate セット選択の根拠（v0.1 slice の依存関係から導出）も併記する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0016-crate-granularity.md
+    - intents/evorch/technology/architecture.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "v0.1: provider profile・simple fallback・model catalog・TOML config を実装する"
+  issue_kind: feature
+  source_execution_unit: v01-routing-profiles
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/routing/, crates/model/, crates/config/
+  target_part: "プロバイダ選択・フォールバック・モデル情報・設定読み込み"
+  dependencies:
+    - v01-provider-client
+    - v01-session-storage
+  technical_baseline:
+    - "v01-scaffold により crates/routing/・crates/model/・crates/config/ が空 crate として Scaffold 済みであること"
+    - "v01-provider-client が ProviderProfile 抽象（type / credential instance / API protocol）と ProviderCapabilities 型を提供すること"
+    - "v01-session-storage が SQLite を提供し、model catalog の更新履歴の保持に利用できること"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0013-model-catalog.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+  acceptance_criteria:
+    - "TOML config が CLI 引数/環境変数 > project（./evorch.toml）> user（~/.config/evorch/config.toml、XDG）> builtin defaults の優先順位でマルチソース読み込みされ、config.d/*.toml を辞書順 deep merge（後勝ち）できる"
+    - "config に version フィールドがあり、version migration 関数で旧 version の config を新 schema へ移行できる"
+    - "schemars で config 構造体から JSON Schema が生成される（公開ファイルとして出力され、$schema 補完に利用できる）"
+    - "model catalog（ADR 0013）が builtin デフォルト（主要モデルの属性・価格）をオフラインで返し、起動時 fetch（models.dev 等）は失敗時 builtin へフォールバックする"
+    - "model catalog が openai-compatible の /v1/models 検出結果を「属性未確定フラグ付き」でマージできる（mock provider によるテスト）"
+    - "provider profile を TOML で複数定義でき、logical model → route → provider profile → 実モデル ID へ解決できる（ADR 0004 の4層分離）"
+    - "primary profile 失敗時に simple fallback（同じ logical model の別 profile → 別 logical model の順）へ切り替わる（429 / 5xx / timeout / quota / auth）"
+    - "subscription 系の auth 状態による動的フィルタ（工数として 4 番目の供給源）が v0.1 対象外であることが計画上明示される"
+
+# G461: optional packet-time intent-maintenance metadata.
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/technology/architecture.md
+  new_intent_needed: false
+  placement_rationale: "provider profile / fallback / model catalog は ADR 0013 が provider-routing feature に追加した節の実装。config 層は ADR 0014 が architecture の crate 構成に追加した領域。新規 intent node は不要。intent-tree は 00-map.md 単一構成のため feature overview を intent node として参照する。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規ノード不要。provider-routing の受け入れ基準を本 packet が充足する実装とする。models.dev fetch・/ v1/models 検出は mock 前提のため、将来の実ネットワーク化で v0.2 以降の intent 更新を検討。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。model catalog の供給源は ADR 0013、config アーキテクチャは ADR 0014 で確定済み。本 packet はその実装のみ。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/operations/config-reference.md
+    summary: "ADR 0014 の consequences（operations/ に config リファレンス配置予定：v0.1 実装時）に従い、config の配置・優先順位・version migration・config.d/ の節を持つ config リファレンスを closeout で作成する。"
+closeout_learning:
+  expected: "config マルチソース deep merge・version migration の実装で確定した仕様と、model catalog の /v1/models 検出マージの実測知見（属性未確定の扱いと優先度）"
+  write_back_required: false
+  write_back_targets: []
+# G645: config.toml と生成 JSON Schema はオペレータ向けの設定面であり、guide の role が
+# 経由で対向する新規の role-facing surface（CLI / GUI / 公開契約）を追加しない。
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

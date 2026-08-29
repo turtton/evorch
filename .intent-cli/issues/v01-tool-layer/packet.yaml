@@ -1,0 +1,79 @@
+implementation_issue_packet:
+  issue_title: "v0.1: tool 基盤と read / edit / grep / shell / git_diff ツールを実装する"
+  issue_kind: feature
+  source_execution_unit: v01-tool-layer
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/tools/
+  target_part: "tool trait・標準ツールセット"
+  dependencies: [v01-scaffold, v01-event-stream]
+  technical_baseline:
+    - "Rust + Tokio async runtime（architecture.md）"
+    - "portable-pty（shell ツールの PTY 実行）"
+    - "tokio::process::Command（非 interactive な通常 command。Shell/PTY 分離）"
+    - "serde / serde_json（JSON Schema 記述と結果正規化）"
+    - "tracing（構造化ログ）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/technology/architecture.md
+  acceptance_criteria:
+    - "統一 Tool trait（name / schema / execute / 結果正規化）を定義し、read / edit / grep / shell / git_diff の5標準ツールが実装する"
+    - "各ツールが JSON Schema を返し、モデルからの tool call 引数に対して検証できる"
+    - "read / grep が存在しない path に typed error を返す"
+    - "edit が一時ファイル + rename で atomic に書き込み、ADR 0008 の制御マーカー（<system-reminder> 等）エスケープを tool result へ適用する"
+    - "shell が非 interactive は tokio::process::Command、interactive は portable-pty で擬端末実行する（Shell/PTY 分離）"
+    - "git_diff が working tree の diff を返す"
+    - "tool 実行結果が event stream へ emit される（v01-event-stream の tool_result イベントへ接続）"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+  new_intent_needed: false
+  placement_rationale: "tools-sandbox feature の v0.1 スコープ（標準5ツール + shell/PTY 分離 + 制御マーカー エスケープ）を実装する slice。overview の tool trait 要件（name / schema / permissions / execute）を具体化する。新規 intent node は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "v0.1 標準5ツール（read / edit / grep / shell / git_diff）の確定、edit への制御マーカー エスケープ適用、tool result の event stream への emit を記録"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "tools-sandbox overview に v0.1 標準5ツールと制御マーカー エスケープの適用位置を記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

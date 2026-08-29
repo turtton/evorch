@@ -1,0 +1,83 @@
+implementation_issue_packet:
+  issue_title: "v0.1: provider 抽象と OpenAI / Anthropic / OpenAI-compatible ストリーミングクライアントを実装する"
+  issue_kind: feature
+  source_execution_unit: v01-provider-client
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/providers/
+  target_part: "provider trait・メッセージ変換・API クライアント"
+  dependencies: [v01-scaffold, v01-event-stream]
+  technical_baseline:
+    - "Rust + Tokio async runtime（architecture.md）"
+    - "reqwest（HTTP / SSE ストリーミング）"
+    - "serde / serde_json（wire 形式変換）"
+    - "tracing（構造化ログ）"
+    - "wiremock（dev-dependency。ADR 0015 第1層の mock 契約テスト）"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/technology/re-evaluation-2026-08.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "統一 ProviderClient trait（send / stream）を OpenAI / Anthropic / OpenAI-compatible の3実装が実装し、ProviderCapabilities を返す"
+    - "provider 非依存の canonical Message 正規化と wire 形式変換を持ち、OpenAI ↔ Anthropic の round-trip テストで検証できる"
+    - "mock HTTP server（wiremock、recorded response fixture）で SSE ストリーミング応答の parse・delta 結合が検証される（ADR 0015 第1層）"
+    - "tool call が provider 別 wire 形式から canonical tool_call へ変換される"
+    - "Usage（input / output / cache read / cache write token 数）が parse され、event stream へ usage イベントとして emit される（ADR 0012 の入力）"
+    - "HTTP 4xx/5xx・429（Retry-After）・timeout・不正 SSE に対して typed error を返す"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+  new_intent_needed: false
+  placement_rationale: "provider-routing feature の v0.1 スコープ（OpenAI / Anthropic / OpenAI-compatible の3種）を実装する slice。ADR 0004 の provider type / API protocol 分離を具体化する。roadmap の Open question『3種で確定か』は本 packet の closeout で解消を記録するため、新規 intent node は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/technology/mvp-roadmap.md
+    summary: "canonical message 正規化形式、v0.1 実装 provider 3種の確定（roadmap の Open question 解消）、Usage イベントの event stream への接続を記録"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0016-provider-message-normalization.md
+    decision_title: "統一 canonical message 正規化と OpenAI / Anthropic / OpenAI-compatible 変換"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "ADR 0016（canonical message 正規化）を新設し、provider-routing overview と mvp-roadmap の v0.1 provider 3種を確定記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0016-provider-message-normalization.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

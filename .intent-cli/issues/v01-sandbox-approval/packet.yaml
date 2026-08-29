@@ -1,0 +1,81 @@
+implementation_issue_packet:
+  issue_title: "v0.1: sandbox + approval 二層セキュリティと credential 隔離・network deny を実装する"
+  issue_kind: feature
+  source_execution_unit: v01-sandbox-approval
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/sandbox/
+  target_part: "実行ポリシー・sandbox 実行・承認フロー・credential 隔離"
+  dependencies: [v01-scaffold, v01-tool-layer, v01-event-stream]
+  technical_baseline:
+    - "Rust + Tokio async runtime（architecture.md）"
+    - "bubblewrap（bwrap、Linux sandbox 第一実装。本 slice 冒頭で ADR 化して確定）"
+    - "serde / serde_json（policy 記述と結果正規化）"
+    - "tracing（構造化ログ）"
+    - "keyring / 0600 平文 JSON fallback（credential 隔離。ADR 0008）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "approval 層が tool 実行を policy で分類し、auto-allow / ask / deny を適用。ask は GUI/CLI の承認応答を待ってから実行する"
+    - "deny された操作は実行されない（拒否が観測可能なイベントとして emit される）"
+    - "credential ファイル・env を sandbox 子プロセスから参照できないことをテストで検証する（env は credential を除去、ファイルは sandbox 外に置く）"
+    - "network egress が既定 deny で、provider endpoint のみ allowlist を通ることをテストで検証する"
+    - "dangerous 操作が Linux sandbox（bwrap）で実行され、承認しても sandbox 外では実行されない（二層分離）"
+    - "Landlock vs bwrap の選択結果が ADR 0017 として記録されている"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0009-platform-linux-first-gui-only.md
+    - intents/evorch/technology/mvp-roadmap.md
+  new_intent_needed: false
+  placement_rationale: "tools-sandbox feature の v0.1 security 層（二層分離 / credential 隔離 / network deny / マーカー エスケープは tool-layer）を実装する slice。ADR 0008 で既定済み。overview の Open question『Linux sandbox の第一実装（Landlock vs bwrap）』が本 slice 冒頭で解消されるため、closeout で ADR 化して記録する"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "Linux 第一 sandbox 実装（bwrap）の確定を overview の Open question から解消し、二層分離・credential 隔離・network deny の v0.1 実装内容を記録"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0017-sandbox-linux-bwrap.md
+    decision_title: "Linux v0.1 sandbox 第一実装として bubblewrap（bwrap）を採用"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "ADR 0017（bwrap 採用）を新設し、tools-sandbox overview の Open question（Landlock vs bwrap）の解消を記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0017-sandbox-linux-bwrap.md
+    - intents/evorch/features/tools-sandbox/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

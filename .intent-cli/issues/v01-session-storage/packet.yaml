@@ -1,0 +1,76 @@
+implementation_issue_packet:
+  issue_title: "v0.1: SQLite session 永続化と entity schema を実装する"
+  issue_kind: feature
+  source_execution_unit: v01-session-storage
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/"
+  target_part: "session / task / message / agent_run / event の永続化"
+  dependencies:
+    - v01-scaffold
+    - v01-event-stream
+  technical_baseline:
+    - "v01-scaffold で workspace 骨格、v01-event-stream で event schema / ring buffer / in-memory 観測の土台が存在する"
+    - "ADR 0012 で SQLite 運用ポリシー（synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint / ハード上限 / 自己参照防止 / 起動時安全検査）と single-writer + downsampled 保存が決定済み"
+    - "ADR 0008 で credential 隔離方針が決定済み（storage に credential を永続化しない）"
+    - "architecture.md は Storage を「SQLite」とだけ記載しており、アクセス層（rusqlite / sqlx 等）の選択は本 packet で確定する"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/technology/architecture.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+    - "intents/evorch/decisions/0008-threat-model-phased-adoption.md"
+  acceptance_criteria:
+    - "migration 適用により sessions / tasks / messages / agent_runs / events / downsampled_metrics の各テーブルが作成される"
+    - "session / task / message / agent_run / event の CRUD が動く"
+    - "プロセス再起動後に session が復元できる（event log → state projection の再現）"
+    - "ADR 0012 の WAL 運用（synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）とハード上限（DB・WAL・event サイズ等）が PRAGMA 初期化および設定として実装されている"
+    - "raw 高頻度計測イベントは直接永続化せず、single-writer + バッチ flush で downsampled_metrics（1分バケット per provider/model）のみ書き込む経路がある"
+    - "downsampled_metrics テーブル（1分バケット per provider/model）の定義がある"
+    - "credential（API key 等）が storage に書き込まれないこと（ADR 0008）を型 / テストで保証する"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory/overview.md
+  supporting_intents:
+    - intents/evorch/technology/architecture.md
+    - intents/evorch/decisions/0012-metrics-architecture.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+  new_intent_needed: false
+  placement_rationale: "storage-memory feature の event-sourced 永続化（event log → state projection）を v0.1 で実装する slice。ADR 0012（WAL 運用・downsampled・single-writer）と ADR 0008（credential 非永続化）を実装に落とす。SQLite アクセス層とスキーマ詳細は本 slice で確定し ADR 0018 に記録するため新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規 intent node は不要。既存 storage-memory feature を具体化する slice。"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0018-sqlite-storage-schema.md
+    decision_title: "SQLite アクセス層（rusqlite・single-writer）と storage schema（event log / downsampled_metrics / WAL 運用）を確定する"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/storage-memory/overview.md
+    summary: "ADR 0018 確定後に storage-memory/overview.md の Open questions「event log のスキーマ詳細（messages と tool_calls の正規化方法）」を決定済みとして更新し、関連 ADR へのリンクを追加する。"
+closeout_learning:
+  expected: "ADR 0018（SQLite アクセス層・schema・WAL 運用）を生成し、storage-memory/overview.md の Open questions を解決済みとして更新する。rusqlite 選択の根拠（single-writer タスクで sync 接続を閉じ込める設計が ADR 0012 のバッチ flush と整合）も併記する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0018-sqlite-storage-schema.md
+    - intents/evorch/features/storage-memory/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Explicit no-surface form:
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
