@@ -29,5 +29,5 @@ Codex の SQLite 問題（raw 高頻度イベントの永続化で 640 TB/年規
 
 ## Open questions
 
-- event log のスキーマ詳細（messages と tool_calls の正規化方法）
+- ~~event log のスキーマ詳細（messages と tool_calls の正規化方法）~~ → 2026-08-29 解決（ADR 0018-sqlite-storage-schema、PR #12）
 - memory の検索（Relevant Memory Retrieval）の実現方式

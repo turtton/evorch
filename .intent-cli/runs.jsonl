@@ -20,3 +20,5 @@
 {"ts":"2026-08-29T08:32:21.3355477+00:00","execution_unit":"v01-scaffold","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":10}
 {"ts":"2026-08-29T10:08:44.0171813+00:00","execution_unit":"v01-event-stream","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":11}
 {"ts":"2026-08-29T10:08:44.0171813+00:00","execution_unit":"v01-event-stream","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":11}
+{"ts":"2026-08-29T12:43:00.2555755+00:00","execution_unit":"v01-session-storage","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":12}
+{"ts":"2026-08-29T12:43:00.2555755+00:00","execution_unit":"v01-session-storage","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":12}
