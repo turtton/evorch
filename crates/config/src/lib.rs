@@ -6,6 +6,7 @@
 //! 列挙型はこのクレート内で独自に定義します (ADR 0004)。
 
 pub mod error;
+mod merge;
 pub mod types;
 
 pub use error::ConfigError;
