@@ -10,8 +10,14 @@ rust-version = "1.97"
 [workspace.dependencies]
 async-trait = "0.1"
 bytes = "1"
+# v01 GUI dependencies pinned for the workspace UI and GUI crates.
+eframe = "0.36"
+egui = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+egui_kittest = { version = "0.36", features = ["wgpu"] }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 jsonschema = { version = "0.52", default-features = false }
 keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }
 portable-pty = "0.9"
@@ -24,6 +30,7 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+# Used by workspace-ui for development-time configuration serialization.
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"

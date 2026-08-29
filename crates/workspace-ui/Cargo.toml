@@ -1,0 +1,16 @@
+[package]
+name = "workspace-ui"
+description = "Framework-independent workspace layout model for the evorch GUI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
