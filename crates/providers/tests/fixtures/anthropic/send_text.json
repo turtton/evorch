@@ -1,0 +1,17 @@
+{
+  "id": "msg_01",
+  "type": "message",
+  "model": "claude-test",
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "こんにちは。" }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 9,
+    "output_tokens": 5,
+    "cache_creation_input_tokens": 4,
+    "cache_read_input_tokens": 2
+  }
+}
