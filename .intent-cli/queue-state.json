@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T15:46:56.099984+00:00",
+  "updated_at": "2026-08-29T17:00:20.3068954+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -131,7 +131,7 @@
     {
       "execution_unit": "v01-sandbox-approval",
       "title": "v0.1: sandbox \u002B approval \u4E8C\u5C64\u30BB\u30AD\u30E5\u30EA\u30C6\u30A3\u3068 credential \u9694\u96E2\u30FBnetwork deny \u3092\u5B9F\u88C5\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-scaffold",
         "v01-tool-layer",
@@ -149,6 +149,7 @@
         "number": 6,
         "url": "https://github.com/turtton/evorch/issues/6"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/15",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
