@@ -1,5 +1,12 @@
 # AI-Native Agent Harness 構想
 
+> **注記（2026-08-29）**: 本ドキュメントは構想段階の起源記録（why）である。
+> 現行の正確な意思決定・技術選定は `intents/evorch/` の intent tree、
+> `decisions/` の ADR（0001–0007）、`technology/re-evaluation-2026-08.md` に従う。
+> 本書と tree / ADR が矛盾する場合は **tree / ADR が優先**。
+> 例: GUI 第一候補は Floem ではなく egui + egui_dock（ADR 0007）、
+> サブスクリプションプロバイダは実装可能として v0.3 維持（re-evaluation §1）。
+
 ## 1. 概要
 
 本構想は、OpenCode + oh-my-opencode（omo）で得られる高品質なマルチエージェント体験をベースにしつつ、以下の問題を根本から解消するための **ネイティブ AI Agent Harness / Agent Workbench** を新規に設計するものである。
