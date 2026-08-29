@@ -151,6 +151,11 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
                     .retain(|(_, id)| id != call_id);
             }
         }
+        EventKind::Tool(
+            ToolEvent::ApprovalRequested { .. }
+            | ToolEvent::ApprovalResolved { .. }
+            | ToolEvent::ExecutionDenied { .. },
+        ) => {}
         EventKind::Usage(_) | EventKind::Provider(_) | EventKind::Fault(_) => {}
     }
 }
@@ -257,6 +262,9 @@ mod tests {
     #[test] fn reasoning_delta_appends() { /* Given/When: 推論差分を適用する */ let state = apply(MessageEvent::ReasoningDelta { delta: "r".into() }, Some("s1")); /* Then: 保留推論へ追加する */ assert_eq!(session(&state).map(|v| v.pending_reasoning.as_str()), Some("r")); }
     #[test] fn tool_started_opens_call() { /* Given/When: ツール開始を適用する */ let state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into() }, Some("s1")); /* Then: 未完了呼び出しへ追加する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.clone()), Some(vec![("x".into(), "c".into())])); }
     #[test] fn tool_completed_closes_call() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into() }, Some("s1")); /* When: 完了を適用する */ apply_event(&mut state, &stored(ToolEvent::ToolCompleted { tool_name: "x".into(), call_id: "c".into(), is_error: false }, Some("s1"))); /* Then: 未完了一覧から除く */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([].as_slice())); }
+    #[test] fn approval_requested_does_not_mutate_open_calls() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into() }, Some("s1")); /* When: 承認要求を適用する */ apply_event(&mut state, &stored(ToolEvent::ApprovalRequested { tool_name: "y".into(), call_id: "d".into() }, Some("s1"))); /* Then: 未完了一覧を保持する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([("x".into(), "c".into())].as_slice())); }
+    #[test] fn approval_resolved_does_not_mutate_open_calls() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into() }, Some("s1")); /* When: 承認応答を適用する */ apply_event(&mut state, &stored(ToolEvent::ApprovalResolved { call_id: "c".into(), approved: true }, Some("s1"))); /* Then: 未完了一覧を保持する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([("x".into(), "c".into())].as_slice())); }
+    #[test] fn execution_denied_does_not_mutate_open_calls() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into() }, Some("s1")); /* When: 実行拒否を適用する */ apply_event(&mut state, &stored(ToolEvent::ExecutionDenied { tool_name: "y".into(), call_id: "d".into(), reason: "policy".into() }, Some("s1"))); /* Then: 未完了一覧を保持する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([("x".into(), "c".into())].as_slice())); }
     noop_test!(usage_does_not_mutate, UsageEvent::Usage { provider: "p".into(), model: "m".into(), input_tokens: 1, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 4 });
     noop_test!(cache_stats_does_not_mutate, UsageEvent::CacheStats { provider: "p".into(), model: "m".into(), cache_hits: 1, cache_misses: 2 });
     noop_test!(provider_does_not_mutate, ProviderEvent::ProviderFallback { from_provider: "a".into(), to_provider: "b".into(), reason: "r".into() });

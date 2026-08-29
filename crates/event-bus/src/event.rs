@@ -187,6 +187,16 @@ pub enum ToolEvent {
         /// ツールがエラーで終了したかどうか。
         is_error: bool,
     },
+    /// ツール実行の承認が要求された。
+    ApprovalRequested { tool_name: String, call_id: String },
+    /// 承認要求への応答（承認 UI / CLI 側が emit する）。
+    ApprovalResolved { call_id: String, approved: bool },
+    /// ポリシーまたは承認結果によりツール実行が拒否された。
+    ExecutionDenied {
+        tool_name: String,
+        call_id: String,
+        reason: String,
+    },
 }
 
 /// トークン使用量に関するイベント。
@@ -393,6 +403,75 @@ mod tests {
                 "inner payload missing: category={category}"
             );
         }
+    }
+
+    #[test]
+    fn approval_requested_uses_nested_adjacent_tags() {
+        let event = Event::new(ToolEvent::ApprovalRequested {
+            tool_name: "shell".into(),
+            call_id: "c1".into(),
+        });
+        let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+        let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+        assert_eq!(event, restored);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSONを読み取れる");
+
+        assert_eq!(
+            value["kind"],
+            serde_json::json!({
+                "kind": "Tool",
+                "payload": {
+                    "kind": "ApprovalRequested",
+                    "payload": {"tool_name": "shell", "call_id": "c1"}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn approval_resolved_round_trips_with_nested_adjacent_tags() {
+        let event = Event::new(ToolEvent::ApprovalResolved {
+            call_id: "c1".into(),
+            approved: true,
+        });
+        let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+
+        let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+
+        assert_eq!(event, restored);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSONを読み取れる");
+        assert_eq!(
+            value["kind"]["payload"],
+            serde_json::json!({
+                "kind": "ApprovalResolved",
+                "payload": {"call_id": "c1", "approved": true}
+            })
+        );
+    }
+
+    #[test]
+    fn execution_denied_uses_nested_adjacent_tags() {
+        let event = Event::new(ToolEvent::ExecutionDenied {
+            tool_name: "shell".into(),
+            call_id: "c1".into(),
+            reason: "policy".into(),
+        });
+        let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+        let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+        assert_eq!(event, restored);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSONを読み取れる");
+
+        assert_eq!(
+            value["kind"]["payload"],
+            serde_json::json!({
+                "kind": "ExecutionDenied",
+                "payload": {
+                    "tool_name": "shell",
+                    "call_id": "c1",
+                    "reason": "policy"
+                }
+            })
+        );
     }
 
     #[test]
