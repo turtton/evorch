@@ -5,11 +5,15 @@
 //! 追加されます (ADR 0014)。model クレートに依存しないリーフ構造を維持するため、
 //! 列挙型はこのクレート内で独自に定義します (ADR 0004)。
 
+mod env;
 pub mod error;
+pub mod load;
 mod merge;
+mod migrate;
 pub mod types;
 
 pub use error::ConfigError;
+pub use load::LoadOptions;
 pub use types::{
     ApiProtocolConfig, CURRENT_VERSION, Config, CredentialRefConfig, DiagnosticsConfig,
     MetricsConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
