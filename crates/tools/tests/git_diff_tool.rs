@@ -5,8 +5,14 @@
 //! リポジトリ外のエラー経路を検証する。
 
 use std::path::Path;
+use std::sync::Arc;
 
+use sandbox::DirectSandbox;
 use tools::{GitDiff, Tool, ToolError};
+
+fn git_diff() -> GitDiff {
+    GitDiff::new(Arc::new(DirectSandbox))
+}
 
 /// 一時ディレクトリをカレントにして git サブコマンドを実行する。
 ///
@@ -45,7 +51,7 @@ async fn git_diff_returns_worktree_diff() {
     std::fs::write(&file, "modified\n").unwrap();
 
     // When: cwd だけを指定して git_diff を実行
-    let result = GitDiff
+    let result = git_diff()
         .execute(serde_json::json!({ "cwd": repo.path().to_string_lossy() }))
         .await
         .unwrap();
@@ -78,7 +84,7 @@ async fn git_diff_scopes_to_path_argument() {
     std::fs::write(&beta, "beta modified\n").unwrap();
 
     // When: path に alpha.txt を指定して git_diff を実行
-    let result = GitDiff
+    let result = git_diff()
         .execute(serde_json::json!({
             "cwd": repo.path().to_string_lossy(),
             "path": "alpha.txt",
@@ -107,7 +113,7 @@ async fn git_diff_clean_tree_is_empty_success() {
     let repo = init_repo();
 
     // When: cwd を指定して git_diff を実行
-    let result = GitDiff
+    let result = git_diff()
         .execute(serde_json::json!({ "cwd": repo.path().to_string_lossy() }))
         .await
         .unwrap();
@@ -124,7 +130,7 @@ async fn git_diff_outside_repo_is_not_a_git_repository() {
     let dir = tempfile::tempdir().unwrap();
 
     // When: cwd にそのディレクトリを指定して git_diff を実行
-    let error = GitDiff
+    let error = git_diff()
         .execute(serde_json::json!({ "cwd": dir.path().to_string_lossy() }))
         .await
         .unwrap_err();

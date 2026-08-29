@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
+use sandbox::DirectSandbox;
 use tempfile::tempdir;
 use tools::{Permissions, Read, Tool, ToolError, ToolExecutor, ToolResult};
 
@@ -18,7 +19,7 @@ use tools::{Permissions, Read, Tool, ToolError, ToolExecutor, ToolResult};
 fn setup_executor() -> (Arc<EventBus>, ToolExecutor, EventReceiver) {
     let bus = Arc::new(EventBus::new(16));
     let receiver = bus.subscribe();
-    let executor = ToolExecutor::with_standard_tools(Arc::clone(&bus));
+    let executor = ToolExecutor::with_standard_tools(Arc::clone(&bus), Arc::new(DirectSandbox));
     (bus, executor, receiver)
 }
 
