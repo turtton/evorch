@@ -1,4 +1,4 @@
-# ADR 0017: runtime reload セマンティクス — 2層分離・validate-then-swap・明示 /reload 起点
+# ADR 0018: runtime reload セマンティクス — 2層分離・validate-then-swap・明示 /reload 起点
 
 ## Status
 

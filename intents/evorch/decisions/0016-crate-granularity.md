@@ -22,7 +22,7 @@ v0.1 の初期 crate セットは **10 lib crate + 1 バイナリ crate** とし
 | `sandbox` | コマンド実行サンドボックス |
 | `routing` | メッセージ・タスクの振り分け |
 | `model` | 共有データモデル・型定義 |
-| `config` | 設定読み込み・検証（ADR 0014。reload engine は本 crate 配下、ADR 0017 参照） |
+| `config` | 設定読み込み・検証（ADR 0014。reload engine は本 crate 配下、ADR 0018 参照） |
 | `gui` | egui ベース GUI（ADR 0007。骨格のみ） |
 | `evorch` | バイナリエントリポイント |
 
