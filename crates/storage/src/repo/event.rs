@@ -1,11 +1,17 @@
 //! イベントログの追記と復元を管理します。
-use std::time::{Duration, SystemTime};
+// single-writer integration lands in the next storage task
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::time::Duration;
 
 use event_bus::{Event, EventKind};
 use rusqlite::{Connection, Row, params};
 
 use crate::db::{ns_to_system_time, system_time_to_ns};
 use crate::{HardLimits, LimitKind, StorageError};
+
+mod accounting;
+use accounting::{day_start_ns, enforce_limit};
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 
@@ -43,14 +49,14 @@ pub fn append_event(
     let mut next_accounting = accounting.clone();
     if next_accounting.seeded_session_id.as_deref() != session_id {
         next_accounting.session_bytes = match session_id {
-            Some(id) => session_event_bytes(conn, id)?,
+            Some(id) => accounting::session_event_bytes(conn, id)?,
             None => 0,
         };
         next_accounting.seeded_session_id = session_id.map(String::from);
     }
     let day_start = day_start_ns(event.meta.wall_clock)?;
     if next_accounting.seeded_day_start_ns != Some(day_start) {
-        next_accounting.day_bytes = day_event_bytes(conn, day_start)?;
+        next_accounting.day_bytes = accounting::day_event_bytes(conn, day_start)?;
         next_accounting.seeded_day_start_ns = Some(day_start);
     }
 
@@ -117,20 +123,12 @@ pub fn append_event(
 
 /// セッションに属するイベント payload の累積バイト数を返します。
 pub fn session_event_bytes(conn: &Connection, session_id: &str) -> Result<u64, StorageError> {
-    sum_payload_bytes(
-        conn,
-        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM events WHERE session_id = ?1",
-        rusqlite::params![session_id],
-    )
+    accounting::session_event_bytes(conn, session_id)
 }
 
 /// 指定 UTC 日の開始以降に記録された payload の累積バイト数を返します。
 pub fn day_event_bytes(conn: &Connection, day_start_ns: i64) -> Result<u64, StorageError> {
-    sum_payload_bytes(
-        conn,
-        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM events WHERE wall_clock_ns >= ?1",
-        rusqlite::params![day_start_ns],
-    )
+    accounting::day_event_bytes(conn, day_start_ns)
 }
 
 /// セッションのイベントを採番順で返します。
@@ -195,27 +193,6 @@ pub(crate) fn row_to_event(row: &Row<'_>) -> Result<StoredEvent, StorageError> {
     })
 }
 
-fn day_start_ns(time: SystemTime) -> Result<i64, StorageError> {
-    let nanos = system_time_to_ns(time)?;
-    Ok(nanos / NANOS_PER_DAY * NANOS_PER_DAY)
-}
-
-fn enforce_limit(limit: LimitKind, actual: u64, max: u64) -> Result<(), StorageError> {
-    if actual > max {
-        return Err(StorageError::LimitExceeded { limit, actual, max });
-    }
-    Ok(())
-}
-
-fn sum_payload_bytes<P: rusqlite::Params>(
-    conn: &Connection,
-    sql: &str,
-    params: P,
-) -> Result<u64, StorageError> {
-    let total: i64 = conn.query_row(sql, params, |row| row.get(0))?;
-    u64::try_from(total).map_err(|_| StorageError::OutOfRange("event payload byte total"))
-}
-
 const fn kind_name(kind: &EventKind) -> &'static str {
     match kind {
         EventKind::Lifecycle(_) => "Lifecycle",
@@ -228,112 +205,4 @@ const fn kind_name(kind: &EventKind) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use event_bus::{EventMeta, LifecycleEvent};
-    use std::time::UNIX_EPOCH;
-
-    fn fixture() -> Connection {
-        let connection = Connection::open_in_memory().unwrap();
-        crate::migrations::apply_migrations(&connection).unwrap();
-        connection
-    }
-
-    fn event(nanos: u64) -> Event {
-        Event {
-            meta: EventMeta {
-                schema_version: 1,
-                monotonic: Duration::from_nanos(nanos),
-                wall_clock: UNIX_EPOCH + Duration::from_nanos(nanos),
-            },
-            kind: LifecycleEvent::Started {
-                session_id: "s1".into(),
-            }
-            .into(),
-        }
-    }
-
-    #[test]
-    fn append_then_list_preserves_full_event() {
-        // Given: 移行済み DB と完全な時計情報を持つイベント
-        let connection = fixture();
-        let expected = event(42);
-        let mut accounting = EventAccounting::default();
-
-        // When: イベントを追記して全件取得する
-        append_event(
-            &connection,
-            Some("s1"),
-            &expected,
-            &HardLimits::default(),
-            &mut accounting,
-        )
-        .unwrap();
-        let stored = list_by_session(&connection, "s1").unwrap();
-
-        // Then: イベント全体が一致する
-        assert_eq!(stored[0].event, expected);
-    }
-
-    #[test]
-    fn rejected_event_does_not_advance_accounting() {
-        // Given: payload より小さい単一イベント上限
-        let connection = fixture();
-        connection
-            .execute(
-                "INSERT INTO sessions (id, status, created_at_ns, updated_at_ns) \
-                 VALUES ('s1', 'running', 0, 0)",
-                [],
-            )
-            .unwrap();
-        let accepted = event(1);
-        let event_len =
-            u64::try_from(serde_json::to_string(&accepted.kind).unwrap().len()).unwrap();
-        let limits = HardLimits {
-            max_session_bytes: event_len,
-            ..HardLimits::default()
-        };
-        let mut accounting = EventAccounting::default();
-        append_event(&connection, Some("s1"), &accepted, &limits, &mut accounting).unwrap();
-        let before = accounting.clone();
-
-        // When: 上限を超えるイベントを追記する
-        let result = append_event(&connection, Some("s1"), &event(2), &limits, &mut accounting);
-
-        // Then: キャッシュと DB は変更されない
-        assert!(matches!(
-            result,
-            Err(StorageError::LimitExceeded {
-                limit: LimitKind::SessionSize,
-                ..
-            })
-        ));
-        assert_eq!(accounting, before);
-        assert_eq!(list_all_ordered(&connection).unwrap().len(), 1);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT total_event_bytes FROM sessions WHERE id = 's1'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            i64::try_from(event_len).unwrap()
-        );
-    }
-
-    #[test]
-    fn day_start_floors_to_utc_midnight_and_rejects_overflow() {
-        // Given: UTC 二日目の途中と i64 範囲外の壁時計
-        let second_day = UNIX_EPOCH + Duration::from_nanos(NANOS_PER_DAY as u64 + 7);
-        let overflow = UNIX_EPOCH + Duration::from_nanos(i64::MAX as u64 + 1);
-
-        // When: 日の開始を算出する
-        let start = day_start_ns(second_day).unwrap();
-        let error = day_start_ns(overflow).unwrap_err();
-
-        // Then: UTC 深夜へ切り捨て、範囲外は拒否する
-        assert_eq!(start, NANOS_PER_DAY);
-        assert_eq!(error, StorageError::OutOfRange("wall_clock nanoseconds"));
-    }
-}
+mod tests;
