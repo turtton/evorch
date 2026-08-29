@@ -17,6 +17,10 @@ pub use shell::Shell;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use sandbox::DirectSandbox;
+
     use super::{Edit, GitDiff, Grep, Read, Shell};
     use crate::tool::Tool;
 
@@ -27,8 +31,14 @@ mod tests {
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
             (Grep.name(), Grep.schema()),
-            (Shell.name(), Shell.schema()),
-            (GitDiff.name(), GitDiff.schema()),
+            (
+                Shell::new(Arc::new(DirectSandbox)).name(),
+                Shell::new(Arc::new(DirectSandbox)).schema(),
+            ),
+            (
+                GitDiff::new(Arc::new(DirectSandbox)).name(),
+                GitDiff::new(Arc::new(DirectSandbox)).schema(),
+            ),
         ];
 
         assert_eq!(schemas.len(), 5);

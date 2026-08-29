@@ -44,8 +44,9 @@ read / edit / grep / shell / git_diff の 5 ツールが `crates/tools/` にコ�
 
 - [ADR 0002: Role は capability boundary とし、prompt discipline ではなく権限で分離する](../../decisions/0002-role-capability-boundaries.md)
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
+- [ADR 0021: Linux v0.1 sandbox 第一実装に bwrap を採用](../../decisions/0021-bwrap-linux-sandbox.md)
 
 ## Open questions
 
-- Linux sandbox の第一実装の選択（Landlock vs bwrap）
+- ~~Linux sandbox の第一実装の選択（Landlock vs bwrap）~~ → 2026-08-30 解決（bwrap 採用、ADR 0021。Landlock は network 隔離不可のため不採用）
 - MCP server の接続単位（session ごと / workspace ごと）

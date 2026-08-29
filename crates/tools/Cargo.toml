@@ -13,6 +13,7 @@ event-bus = { path = "../event-bus" }
 jsonschema = { workspace = true }
 portable-pty = { workspace = true }
 regex = { workspace = true }
+sandbox = { path = "../sandbox" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

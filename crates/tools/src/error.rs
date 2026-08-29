@@ -63,6 +63,20 @@ pub enum ToolError {
         /// 制限時間（ミリ秒）。
         timeout_ms: u64,
     },
+    /// 承認方針または承認応答により実行を拒否された。
+    #[error("ツールの実行が拒否されました: {tool_name}: {reason}")]
+    ExecutionDenied {
+        /// 拒否されたツール名。
+        tool_name: String,
+        /// 拒否理由。
+        reason: String,
+    },
+    /// コマンドを実行するサンドボックスを準備できない。
+    #[error("サンドボックスを利用できません: {detail}")]
+    SandboxUnavailable {
+        /// 利用できない理由。
+        detail: String,
+    },
     /// 指定されたパスが Git リポジトリの作業ツリーではない。
     #[error("Git リポジトリではありません: {path}")]
     NotAGitRepository {
@@ -140,6 +154,19 @@ mod tests {
                 "コマンドがタイムアウトしました: 1500ms",
             ),
             (
+                ToolError::ExecutionDenied {
+                    tool_name: "shell".to_string(),
+                    reason: "方針".to_string(),
+                },
+                "ツールの実行が拒否されました: shell: 方針",
+            ),
+            (
+                ToolError::SandboxUnavailable {
+                    detail: "bwrap なし".to_string(),
+                },
+                "サンドボックスを利用できません: bwrap なし",
+            ),
+            (
                 ToolError::NotAGitRepository {
                     path: "/tmp/x".to_string(),
                 },
@@ -153,7 +180,7 @@ mod tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 13);
         for (error, expected) in cases {
             assert_eq!(error.to_string(), expected);
         }

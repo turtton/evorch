@@ -13,6 +13,7 @@ bytes = "1"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 jsonschema = { version = "0.52", default-features = false }
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }
 portable-pty = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
