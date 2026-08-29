@@ -38,7 +38,7 @@ description: "herdr 経由で opencode ワーカーを駆動する跨ハーネ�
     -   初回のみ `<project>/.git/info/exclude` に `.worktrees/` を追記し、`git -C <project> status --short` に worktree ディレクトリが出ないことを確認する（main checkout の untracked 混入防止。rg 等の gitignore 準拠ツールにも効く。`.gitignore` への commit は不要）。
     -   `touch <project>/.worktrees/<unit>/.writetest && rm <project>/.worktrees/<unit>/.writetest` で lead 側環境からの書き込み可否を確認する。
     -   プロジェクト配下に置く理由: opencode-sandbox は対象プロジェクトを rw bind するため worker から chdir 可能で、lead の bash sandbox からも rw で見える。プロジェクト外（`/tmp`、`~/worktrees`、隣接の `<project>-worktrees/` 等）は sandbox の chdir 拒否や ro mount で失敗する（既知の落とし穴「worktree の置き場所」参照）。
-3.  worker を起動・確認する: `herdr agent list` で pane の存在を確認。必要なら `herdr agent start --kind pi ...` で起動する。start が timeout を返しても実体は新 workspace で起動していることがあるため、`herdr agent list` で再確認してから retry する（二重起動を防ぐ）。
+3.  worker を起動・確認する: `herdr agent list` で pane の存在を確認。必要なら `herdr agent start --kind opencode ...` で起動する。start が timeout を返しても実体は新 workspace で起動していることがあるため、`herdr agent list` で再確認してから retry する（二重起動を防ぐ）。
 4.  lead が `herdr agent prompt <worker> ...` で、`/goal` + `ulw` 形式・契約ファイルパス・**返答送り先の lead pane ID**・完了時リレー手順を含むプロンプトを worker pane へ送信する。lead pane ID は送信前に `herdr agent list` で自セッションの pane を特定して得る（複数 opencode 併存環境では terminal\_title / cwd / セッション内容で自 pane を判別する）。
 5.  worker が issue-to-pr フローを実行し、PR 作成後に `[herdr-relay] ...` で lead を起こす。
 6.  lead は composite gate で完了を検証する:
@@ -133,7 +133,7 @@ Fix review comments in PR #2. In src/lib.rs, remove the unused import flagged by
 | ファイル置き場所 `/tmp/opencode` | opencode から読めない可能性あり。host repo 内の `.opencode/` 等を使う。 |
 | `--until idle` | 完了後は `done` になる。`--until done --until blocked` を使う。 |
 | herdr 0.8.0 の `--until` 記法 | カンマ区切りは拒否される。`--until done --until blocked` と repeat する（0.8.0 実測）。 |
-| `herdr agent start --kind pi` が timeout を返す | 実体は新 workspace で起動していることがある（opencode は独自 window を開く）。`herdr agent list` で確認してから retry しないと二重起動する（herdr 0.8.0 実測）。 |
+| `herdr agent start --kind opencode` が timeout を返す | 実体は新 workspace で起動していることがある（opencode は独自 window を開く）。`herdr agent list` で確認してから retry しないと二重起動する（herdr 0.8.0 実測）。 |
 | goal 達成済み opencode への新 `/goal` 送信 | 「Replace current goal」ダイアログで止まる。`herdr agent send-keys <pane> Enter` で承認（herdr-opencode-loop 実績）。 |
 | issue title の fallback | `issue publish-flow` が title を `<unit> (untitled)` に fallback することがある（packet.yaml の issue_title は正しいのに発生。原因未特定。`issue draft` は別スキーマ（root `execution_unit` 必須）を要求し現行 packet と非互換）。発生したら `gh issue edit` で修正する。**本環境（turtton/evorch）でも 2026-08-29 に再発確認済み**。 |
 | draft PR のまま `intent-cli closeout pr` | pr-merged が記録されるが GitHub 上の merge は行われない。closeout 前に `gh pr ready` で draft を外し、closeout 後に merged state を必ず検証する（herdr-opencode-loop 実績で実害発生: draft のまま closeout されコード未マージのまま queue=completed となり後日発覚。superseded close + 別 unit として再適用する recovery を実施。closeout 後の実マージ検証を closeout 手順に組み込むこと）。 |
