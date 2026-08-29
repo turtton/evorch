@@ -1,0 +1,22 @@
+{
+  "id": "msg_02",
+  "type": "message",
+  "model": "claude-test",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_1",
+      "name": "get_weather",
+      "input": { "city": "Tokyo", "unit": "celsius" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 11,
+    "output_tokens": 7,
+    "cache_creation_input_tokens": 3,
+    "cache_read_input_tokens": 6
+  }
+}
