@@ -19,6 +19,11 @@
       {
         devShells.default = pkgs.mkShell { packages = [
           pkgs.bashInteractive
+          pkgs.rustc
+          pkgs.cargo
+          pkgs.rustfmt
+          pkgs.clippy
+          pkgs.rust-analyzer
           intent-system
         ]; };
       }

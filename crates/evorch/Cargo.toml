@@ -1,0 +1,9 @@
+[package]
+name = "evorch"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "evorch"
+path = "src/main.rs"

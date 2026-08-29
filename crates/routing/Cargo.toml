@@ -1,0 +1,8 @@
+[package]
+name = "routing"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "routing"

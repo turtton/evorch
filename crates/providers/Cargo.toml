@@ -1,0 +1,8 @@
+[package]
+name = "providers"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "providers"
