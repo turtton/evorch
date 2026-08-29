@@ -40,7 +40,7 @@
 
 ## decisions/（ADR）
 
-- [0001](decisions/0001-no-fixed-workflow.md) 固定 workflow 不採用 / [0002](decisions/0002-role-capability-boundaries.md) Role capability boundary / [0003](decisions/0003-cache-first-context-engine.md) cache-first context engine / [0004](decisions/0004-provider-routing-separation.md) provider routing 分離 / [0005](decisions/0005-headless-kernel-and-gui-separation.md) headless kernel と GUI 分離 / [0006](decisions/0006-self-improvement-and-diagnostics.md) 診断と自己改善 / [0007](decisions/0007-gui-framework-egui-first.md) GUI 第一候補 egui+egui_dock
+- [0001](../decisions/0001-no-fixed-workflow.md) 固定 workflow 不採用 / [0002](../decisions/0002-role-capability-boundaries.md) Role capability boundary / [0003](../decisions/0003-cache-first-context-engine.md) cache-first context engine / [0004](../decisions/0004-provider-routing-separation.md) provider routing 分離 / [0005](../decisions/0005-headless-kernel-and-gui-separation.md) headless kernel と GUI 分離 / [0006](../decisions/0006-self-improvement-and-diagnostics.md) 診断と自己改善 / [0007](../decisions/0007-gui-framework-egui-first.md) GUI 第一候補 egui+egui_dock
 
 ## 未配置カテゴリ
 
