@@ -17,7 +17,7 @@ egui_dock = { version = "0.21", features = ["serde"] }
 egui_kittest = { version = "0.36", features = ["wgpu"] }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 jsonschema = { version = "0.52", default-features = false }
 keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }
 portable-pty = "0.9"

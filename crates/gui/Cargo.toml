@@ -14,11 +14,12 @@ eframe = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 event-bus = { path = "../event-bus" }
+image = { workspace = true, default-features = false, features = ["png"] }
 portable-pty = { workspace = true }
 runtime = { path = "../runtime" }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
