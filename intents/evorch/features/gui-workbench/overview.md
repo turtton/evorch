@@ -35,6 +35,7 @@ Panel は left / right / bottom / tabs / floating / separate OS window に自由
 - Workspace Model が framework 非依存データとして保持され、GUI なしに layout を検証できること
 - semantic UI API 経由で agent が panel を操作できること
 - 仮想化 transcript widget が1万行規模の transcriptで操作が追従すること
+- **offscreen レンダリングによるヘッドレス起動**が可能であること（自己改善の test instance / capture_ui 用。ADR 0009）
 
 ## Related decisions
 
