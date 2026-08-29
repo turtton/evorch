@@ -20,6 +20,14 @@ Provider は Agent Runtime と完全に分離する。Agent SDK を中心に据�
 
 OpenAI / Anthropic / OpenAI-compatible が `ProviderClient` 実装としてコード確定（PR #13、issue #4）。canonical message 正規化と wire 変換は [ADR 0020](../../decisions/0020-canonical-message-normalization.md)。usage イベントは `UsageEmitter` 経由で event stream へ emit され、`UsageAggregator`（ADR 0012）→ storage（ADR 0018）にそのまま繋がる。検証は wiremock 契約テスト（ADR 0015 第1層、実 API 不使用）。subscription 系は v0.3 で re-evaluation。
 
+## v0.1 config / model / routing 層の実装確定（2026-08-30）
+
+`crates/config/` + `crates/model/` + `crates/routing/` がコード確定（PR #17、issue #8）。要点:
+
+- **config**: TOML マルチソース読み込み（CLI/環境変数 > project `./evorch.toml` > user `~/.config/evorch/config.toml` > builtin defaults）+ `config.d/*.toml` 辞書順 deep merge（後勝ち）+ version フィールドと migration 関数 + schemars JSON Schema 生成。v0.1 設定領域の typed struct（provider profiles / model routing / panel layout・keybind / diagnostics / permission preset / 計測）。GUI（v01-gui-panes）の panel layout・keybind は workspace-ui 内の最小設定型で先行実装されており、本 config 層への統合は後続 slice
+- **model**: ModelCatalog の4供給源のうち v0.1 実装分 — builtin デフォルト（オフライン返却）+ models.dev 起動時 fetch（キャッシュ + builtin フォールバック）+ `/v1/models` 検出マージ（属性未確定フラグ付き）。subscription 系の auth 状態動的フィルタは v0.3。更新履歴は SQLite `catalog_updates` テーブル（migration V2、append-only）
+- **routing**: TOML の複数 provider profile（credential は参照のみ・config 非書き込み）→ logical model → route → profile → 実モデル ID 解決。simple fallback（current profile → 同じ logical model の別 profile → 別 logical model。429 / 5xx / timeout / quota / auth で遷移）+ session affinity の基礎。health / cooldown 高度化は v0.4
+
 ## サブスクリプション系 provider の実装方針（2026-08 再評価済み）
 
 - **anthropic-subscription**: senpi（code-yeongyu/senpi）方式。正規 OAuth authorization-code + PKCE（`claude.ai/oauth/authorize` → `platform.claude.com/v1/oauth/token`、scope に `user:sessions:claude_code`）。access token を Messages API の apiKey として使用。Claude Code 風 tool 命名の模倣（Stealth mode）を実装。refresh は期限 5 分前に provider 単位 lock 下で実施。pi-mono も同経路を現役で保持。
