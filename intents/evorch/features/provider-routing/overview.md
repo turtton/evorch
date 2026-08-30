@@ -56,6 +56,13 @@ config ロード経路が fail-closed 化され、未知キーと平文 credenti
 - **token accounting**: `RequestCompleted` の token counts は同一 attempt の `UsageEvent::Usage` の観測用複製。集計 canonical は UsageEvent のみ（二重計上禁止、wire 順序 `Started → Usage → Completed` で相関。UsageEvent に request ID は持たせない wire 不変制約）
 - **FallbackTriggered**: `Router::next_fallback` の選択境界のみ発行（`with_event_bus` で接続）。候補枯渇（None 返却）では発行しない。順序・policy は不変で観測追加のみ
 
+## v0.1.1 usage exactly-once 契約の実装確定（2026-08-30、PR #40 / issue #39）
+
+- **発行所有権**: 完了した provider attempt の経路だけが `UsageEvent` をちょうど 1 回発行する。非ストリームは `ChatCompletionsClient::send` 成功末尾、ストリームは `SsePump` の completion signal 受理が唯一の発行地点。失敗・timeout・invalid JSON/SSE・completion signal 不落 EOF・Completed 前 drop の attempt は 0 件。retry/fallback のコーディネータ（`Router::next_fallback` 等）は usage を発行・再発行しない。`UsageEmitter` / `SsePump` / `adapt_sse_stream` / `send` / `stream` / `next_fallback` の rustdoc に明文化済み
+- **境界表**（wiremock 契約テストで固定）: send 成功=1 件（二件目不在）／stream 成功=1 件（複数 usage frame・[DONE] 後 frame・二重 [DONE] でも 1 件、wire 順序 Started→FirstToken→Usage→Completed も固定）／全失敗経路=0 件（失敗は `RequestFailed` として観測されるのみ）
+- **fallback harness**（crates/routing/tests/fallback_usage_contract.rs）: 敗者 attempt 0 件・勝者 1 件・論理リクエストで exactly-once。.expect(1) で HTTP attempt 数も固定。勝者の profile label/model が usage に乗る（居住再 pin は同一 protocol 前提のアドレス切替）
+- src 差分は doc のみ（挙動変更なし）。routing dev-deps に wiremock/futures-util/tokio rt-multi-thread を追加（すべて workspace 既存管理）
+
 ## 受け入れ基準
 
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
@@ -65,6 +72,7 @@ config ロード経路が fail-closed 化され、未知キーと平文 credenti
 - credential が config に平文で書けず、Keyring/Env 参照への remediation 付きで拒否されること（ADR 0014 の load-time 強制。PR #24）
 - 全 provider client の request attempt が request ID 相関の開始/終端観測イベントとして bus に流れること、streaming は TTFT（上記契約通り）も高々 1 回流れること（PR #32）
 - fallback 選択が FallbackTriggered として観測でき、失敗分類が型付き（ProviderFailureKind）であること（PR #32）
+- 1 論理リクエストで UsageEvent がちょうど 1 件発行され、失敗 attempt では 0 件、retry/fallback 経路でも勝者 attempt の label/model のみが記録されること（PR #40）
 
 ## Related decisions
 

@@ -32,6 +32,15 @@ v0.1 inspect の slice #4 で低 severity の検証 gap が見つかった。実
 - event receiver の二件目不在は bounded timeout で確認し、request mock の `.expect(1)` で HTTP attempt 数も固定する。
 - `cargo check --workspace` と `git diff --check`。
 
+## 実装確定（2026-08-30、PR #40 / issue #39）
+
+usage 発行の exactly-once 契約がテストと rustdoc で pin された。要点:
+
+- **src 差分は doc のみ**（挙動変更なし）。`UsageEmitter` / `SsePump` / `adapt_sse_stream` / `ChatCompletionsClient::{send,stream}` / `Router::next_fallback` に発行所有権の rustdoc を明文化: 完了した attempt のみ 1 回発行、失敗経路 0 件、コーディネータは発行・再発行しない
+- **providers 契約テスト**（tests/openai_compatible_contract.rs、13 ケース相当）: send 成功強化（二件目不在）/ stream exactly-once ×2（複数 usage frame・post-DONE frame・二重 [DONE]、Started→FirstToken→Usage→Completed の wire 順序も固定）/ 失敗 0 件 ×8 種（HTTP 500/timeout/invalid JSON × send・HTTP 500/invalid JSON frame/invalid SSE/completion 不落 EOF/consumer drop × stream）。constexpr fixture DUPLICATE_USAGE_SSE / NO_COMPLETION_SIGNAL_SSE
+- **provider/routing 境界 harness**（crates/routing/tests/fallback_usage_contract.rs）: run_send_with_fallback / run_stream_with_fallback を coordinator として直接実装し × 4 test（fallback send 勝者 1 件・同一 profile retry 勝者のみ・枯渇 0 件・fallback stream 勝者 1 件）。wiremock `.expect(1)` で HTTP attempt 数を固定、勝者 profile label/model を確認
+- routing dev-deps に wiremock / futures-util / tokio rt-multi-thread を追加（すべて workspace 既存管理・PR body 開示済み。Cargo.lock に新規外部 package なし）
+
 ## Knowledge Maintenance (G461, optional)
 
 - Intent placement: provider-routing を primary、ADR 0004 を supporting とする。新規 node は不要。
