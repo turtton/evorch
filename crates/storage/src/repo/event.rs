@@ -6,6 +6,7 @@ use event_bus::{Event, EventKind};
 use rusqlite::{Connection, Row, params};
 
 use crate::db::{ns_to_system_time, system_time_to_ns};
+use crate::entity::SecretGuard;
 use crate::{HardLimits, LimitKind, StorageError};
 
 mod accounting;
@@ -41,6 +42,10 @@ pub fn append_event(
     if matches!(event.kind, EventKind::Usage(_)) {
         return Err(StorageError::RawUsageEventNotPersisted);
     }
+    // heuristic secret guard (ADR 0008 defense-in-depth)。serialize・INSERT・
+    // accounting 更新より前に拒否し、DB 行・event accounting・session bytes を
+    // 変更しない。
+    SecretGuard::from_env().check_event_kind(&event.kind)?;
     let payload = serde_json::to_string(&event.kind)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let event_len = u64::try_from(payload.len())
@@ -199,3 +204,108 @@ const fn kind_name(kind: &EventKind) -> &'static str {
 mod limits_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod secret_guard_tests {
+    use std::time::UNIX_EPOCH;
+
+    use event_bus::{EventMeta, LifecycleEvent, MessageEvent};
+
+    use super::*;
+
+    fn fixture() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        crate::migrations::apply_migrations(&connection).unwrap();
+        connection
+    }
+
+    fn event_with(kind: EventKind) -> Event {
+        Event {
+            meta: EventMeta {
+                schema_version: event_bus::SCHEMA_VERSION,
+                monotonic: Duration::from_nanos(1),
+                wall_clock: UNIX_EPOCH,
+            },
+            kind,
+        }
+    }
+
+    #[test]
+    fn append_rejects_secret_shaped_text_without_changing_db_or_accounting() {
+        // Given: 既存セッションへ一件イベントが保存済みの状態
+        let connection = fixture();
+        connection
+            .execute(
+                "INSERT INTO sessions (id, status, created_at_ns, updated_at_ns) \
+                 VALUES ('s1', 'running', 0, 0)",
+                [],
+            )
+            .unwrap();
+        let mut accounting = EventAccounting::default();
+        let accepted = event_with(
+            LifecycleEvent::Started {
+                session_id: "s1".into(),
+            }
+            .into(),
+        );
+        append_event(
+            &connection,
+            Some("s1"),
+            &accepted,
+            &HardLimits::default(),
+            &mut accounting,
+        )
+        .unwrap();
+        let accounting_before = accounting.clone();
+        let rows_before: i64 = connection
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let bytes_before: i64 = connection
+            .query_row(
+                "SELECT total_event_bytes FROM sessions WHERE id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // When: secret 形状の delta を持つイベントを追記する
+        let bad = event_with(
+            MessageEvent::MessageDelta {
+                delta: "leak sk-test-evorch-9f8e7d6c5b4a3f2e1d".into(),
+            }
+            .into(),
+        );
+        let Err(error) = append_event(
+            &connection,
+            Some("s1"),
+            &bad,
+            &HardLimits::default(),
+            &mut accounting,
+        ) else {
+            panic!("secret-shaped delta must be rejected");
+        };
+
+        // Then: field 名付きで拒否され、DB 行・accounting・session bytes は不変
+        assert!(matches!(
+            error,
+            StorageError::SecretDetected {
+                entity: "event",
+                field: "MessageDelta.delta",
+                ..
+            }
+        ));
+        assert_eq!(accounting, accounting_before);
+        let rows_after: i64 = connection
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let bytes_after: i64 = connection
+            .query_row(
+                "SELECT total_event_bytes FROM sessions WHERE id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows_after, rows_before);
+        assert_eq!(bytes_after, bytes_before);
+    }
+}
