@@ -63,6 +63,14 @@ pub struct StorageConfig {
     pub flush_max_pending: usize,
     /// WAL チェックポイントを実行する間隔です。
     pub checkpoint_interval: Duration,
+    /// freelist page 数がこの値以上の tick で `PRAGMA incremental_vacuum` を実行する閾値です。
+    pub vacuum_freelist_threshold_pages: u64,
+    /// 1 maintenance tick あたりに `PRAGMA incremental_vacuum(N)` へ渡す page budget です。
+    /// 0 を指定すると freelist 回収を無効化します。
+    pub vacuum_page_budget_per_tick: u64,
+    /// SQLite 管理 temp 副産物（rollback journal `<db>-journal`）の合計バイト数が
+    /// この値以上で警告を出す閾値です。警告は閾値の超過/復帰の遷移時にのみ 1 回出ます。
+    pub temp_warn_bytes: u64,
 }
 
 impl Default for StorageConfig {
@@ -74,6 +82,9 @@ impl Default for StorageConfig {
             flush_interval: Duration::from_secs(5),
             flush_max_pending: 64,
             checkpoint_interval: Duration::from_secs(60),
+            vacuum_freelist_threshold_pages: 1_024,
+            vacuum_page_budget_per_tick: 256,
+            temp_warn_bytes: 268_435_456,
         }
     }
 }
@@ -112,5 +123,8 @@ mod tests {
         assert_eq!(config.flush_interval, Duration::from_secs(5));
         assert_eq!(config.flush_max_pending, 64);
         assert_eq!(config.checkpoint_interval, Duration::from_secs(60));
+        assert_eq!(config.vacuum_freelist_threshold_pages, 1_024);
+        assert_eq!(config.vacuum_page_budget_per_tick, 256);
+        assert_eq!(config.temp_warn_bytes, 268_435_456);
     }
 }
