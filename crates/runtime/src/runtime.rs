@@ -1,6 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -11,7 +12,9 @@ use tokio::task::JoinHandle;
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
-use crate::{AgentInspection, AgentModel, AgentSummary, RunConfig, RunId, RuntimeError};
+use crate::{
+    AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunConfig, RunId, RuntimeError,
+};
 
 const INBOX_CAPACITY: usize = 32;
 
@@ -36,6 +39,8 @@ pub(crate) struct Shared {
 
 struct RunEntry {
     role: Role,
+    name: String,
+    model: String,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<String>,
@@ -65,9 +70,36 @@ impl AgentRuntime {
         }
     }
 
+    /// production 構成のランタイムを生成する。
+    ///
+    /// `build_sandbox(&ExecutionPolicy, workspace)` 経由で role の network
+    /// capability を bwrap policy へ伝播し、標準ツールを持つ ToolExecutor に注入する
+    /// composition root (PR #22 の fail-closed 経路 / implementation.md:48)。
+    /// bwrap の検出・検証に失敗した場合はエラーをそのまま伝播する。
+    /// DirectSandbox へのフォールバック経路は存在しない (ADR 0021)。
+    pub fn production(
+        bus: Arc<EventBus>,
+        policy: &ExecutionPolicy,
+        workspace_root: PathBuf,
+        model: Arc<dyn AgentModel>,
+    ) -> Result<Self, RuntimeError> {
+        let sandbox = crate::network::build_sandbox(policy, workspace_root).map_err(|error| {
+            RuntimeError::Sandbox {
+                detail: error.to_string(),
+            }
+        })?;
+        let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
+        Ok(Self::new(bus, executor, model))
+    }
+
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
     pub fn delegate_background(&self, role: Role, prompt: String, config: RunConfig) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let name = config
+            .name
+            .clone()
+            .unwrap_or_else(|| role.name().to_string());
+        let model = self.shared.model.selected_model(role);
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
@@ -88,6 +120,8 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 role,
+                name,
+                model,
                 phase_rx,
                 message_count_rx,
                 inbox_tx,
@@ -151,12 +185,14 @@ impl AgentRuntime {
     /// run を開始して終端まで待つ簡易 foreground API。
     ///
     /// 委譲元セッションは v0.1 では固定文字列 `runtime` として記録する。
+    /// 実行設定 (表示名など) は [`RunConfig`] で委譲先 run へ渡す。
     pub async fn delegate(
         &self,
         role: Role,
         prompt: String,
+        config: RunConfig,
     ) -> Result<AgentRunPhase, RuntimeError> {
-        let run_id = self.delegate_background(role, prompt, RunConfig::default());
+        let run_id = self.delegate_background(role, prompt, config);
         self.shared.bus.emit(Event::new(LifecycleEvent::Delegated {
             session_id: "runtime".to_string(),
             target: run_id.to_string(),
@@ -171,8 +207,10 @@ impl AgentRuntime {
             .iter()
             .map(|(run_id, entry)| AgentSummary {
                 run_id: *run_id,
+                name: entry.name.clone(),
                 role_name: entry.role.name().to_string(),
                 phase: *entry.phase_rx.borrow(),
+                model: entry.model.clone(),
             })
             .collect();
         summaries.sort_by_key(|summary| summary.run_id.get());

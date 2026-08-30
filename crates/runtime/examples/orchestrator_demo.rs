@@ -172,6 +172,10 @@ impl AgentModel for ScriptedModel {
         }
         Ok(response)
     }
+
+    fn selected_model(&self, _role: Role) -> String {
+        "demo-script".to_string()
+    }
 }
 
 fn tool(id: &str, name: &str, input: Value) -> ContentBlock {

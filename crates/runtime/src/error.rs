@@ -49,4 +49,8 @@ pub enum RuntimeError {
     /// ツール実行の失敗。
     #[error(transparent)]
     Tool(#[from] tools::ToolError),
+
+    /// サンドボックス構築に失敗した (fail-closed, ADR 0021)。
+    #[error("サンドボックス構築に失敗しました: {detail}")]
+    Sandbox { detail: String },
 }

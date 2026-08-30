@@ -120,7 +120,10 @@ async fn interactive_run_waits_for_message_then_completes() {
         Ok(text_response("answer", FinishReason::Stop)),
     ]));
     let mut events = bus.subscribe();
-    let config = RunConfig { interactive: true };
+    let config = RunConfig {
+        interactive: true,
+        ..RunConfig::default()
+    };
 
     // When
     let run_id = runtime.delegate_background(Role::Reviewer, "review".to_string(), config);

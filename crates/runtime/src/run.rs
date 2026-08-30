@@ -31,10 +31,12 @@ impl fmt::Display for RunId {
 }
 
 /// AgentRun の実行設定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。
     pub interactive: bool,
+    /// run の表示名。`None` の場合はロール名へフォールバックする。
+    pub name: Option<String>,
 }
 
 /// AgentRun の要約 (一覧表示用 DTO)。
@@ -42,10 +44,14 @@ pub struct RunConfig {
 pub struct AgentSummary {
     /// 実行 ID。
     pub run_id: RunId,
+    /// 表示名。`RunConfig::name` 未指定時はロール名。
+    pub name: String,
     /// ロール名識別子。
     pub role_name: String,
     /// 現在の位相。
     pub phase: AgentRunPhase,
+    /// 選択済みモデル識別子。
+    pub model: String,
 }
 
 /// 単一 AgentRun の詳細検査 (検査用 DTO)。
@@ -90,5 +96,11 @@ mod tests {
     #[test]
     fn run_config_defaults_to_non_interactive() {
         assert!(!RunConfig::default().interactive);
+    }
+
+    // Given: RunConfig / When: Default / Then: name は None (表示名未指定が既定)
+    #[test]
+    fn run_config_default_has_no_name() {
+        assert!(RunConfig::default().name.is_none());
     }
 }
