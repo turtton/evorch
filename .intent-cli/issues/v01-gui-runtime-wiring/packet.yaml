@@ -1,0 +1,75 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: 製品 GUI を実 Agent Runtime と共有 Event Bus へ接続する"
+  issue_kind: feature
+  source_execution_unit: v01-gui-runtime-wiring
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/gui/, crates/runtime/
+  target_part: "evorch-gui 起動配線・AgentSummary identity・tasks pane runtime 表示"
+  dependencies:
+    - v01-gui-panes
+    - v01-agent-roles
+    - v01-event-stream
+  technical_baseline:
+    - "workspace は Rust edition 2024 / rust-version 1.97、Tokio 1、serde 1、tracing 0.1 を使用する（Cargo.toml:5-8,28,32,35）"
+    - "GUI は eframe / egui 0.36 と egui_dock 0.21（serde feature）を使用する（Cargo.toml:13-17）"
+    - "製品 binary は独自 EventBus を生成する一方、EmptyAgentSource を WorkbenchState へ渡しており、実 AgentRuntime の AgentRun 一覧を表示しない（crates/gui/src/bin/evorch-gui.rs:30-37,114-122）"
+    - "AgentRuntime は Arc<EventBus>・ToolExecutor・AgentModel を受け取って構築され、delegate_background が run 登録と lifecycle event 発行を行う（crates/runtime/src/runtime.rs:51-69,87-116）"
+    - "GUI 側には AgentRuntime を AgentRunSource として読む adapter が既にある（crates/gui/src/model/tasks.rs:57-65）"
+    - "実 wiring の参照実装は共有 EventBus・ToolExecutor・AgentModel から AgentRuntime を作る orchestrator demo である（crates/runtime/examples/orchestrator_demo.rs:196-208,249-255）"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "`evorch-gui` が EmptyAgentSource ではなく実 AgentRuntime を所有・共有し、runtime と EventPump が同一の Arc<EventBus> を使用する。Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の境界を崩さない"
+    - "製品 GUI の起動時に、外部 AI provider を必要としない決定的な runtime session を開始でき、Orchestrator と background AgentRun が tasks pane に live 表示される。手動確認手順（起動コマンド、操作、期待する agent 行・状態遷移）をリポジトリ内文書または binary の help に記載する"
+    - "AgentSummary が表示名 `name` と実行に選択された `model` を role_name / phase と別フィールドで保持し、AgentRuntime::list_agents が各 RunEntry の実データから両フィールドを設定する"
+    - "tasks model は AgentSummary の name / role_name / model をそのまま TaskRow へ写し、role_name の name への複製と WorkbenchState / TasksModel コンストラクタへ渡す固定 model label を削除する"
+    - "AgentSummary の identity 追加に伴う runtime の一覧・meta-op serialization と GUI tasks mapping の focused unit test が、異なる name / role / model を区別し、状態イベント後も同じ identity を保持することを検証する"
+    - "共有 EventBus 上の AgentRunStateChanged / BackgroundTaskStarted / message / tool event が既存 EventPump を通って GUI model に反映されることを、headless/offscreen または統合テストで可能な範囲まで検証する"
+    - "`crates/runtime/examples/orchestrator_demo.rs` の共有 EventBus wiring と実行シナリオに挙動変更がなく、既存 runtime / GUI tests と demo の compile/run verification が通る"
+    - "新規 pane・orchestrator ロジック変更・GUI redesign・semantic UI・provider routing 変更を含めない"
+
+# G461: v0.1 inspect で見つかった既存 intent の実装接続 gap を閉じる packet。
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench/overview.md
+  supporting_intents:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+  new_intent_needed: false
+  placement_rationale: "gui-workbench が要求する Subagent 可視化と Event Stream 購読、および roadmap v0.1 成功基準の『background 起動を event stream で観測し GUI で表示』を、既存 kernel / GUI 分離のまま実装へ接続する修正である。新しい product capability や設計判断は追加しないため新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規 node は不要。既存 gui-workbench / agent-runtime-kernel 間の製品 wiring gap を閉じる。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。共有 EventBus と headless kernel / GUI 分離は ADR 0005 で決定済み。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/gui-workbench/overview.md
+      - intents/evorch/technology/mvp-roadmap.md
+    summary: "製品 evorch-gui から実 runtime session を起動して live AgentRun を確認する手順と、v0.1 成功基準の実装接続が確定したことを記録する。"
+closeout_learning:
+  expected: "製品 GUI と AgentRuntime が共有 EventBus を所有する具体的な起動 lifecycle、AgentSummary に name/model を供給する runtime 境界、および headless test と手動 GUI 確認の分担を記録する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+# G645: 既存 GUI surface を実 runtime に接続して operator が live agent を観測できるようにするため route form。
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: the evorch GUI app（実 AgentRuntime session と live tasks pane）

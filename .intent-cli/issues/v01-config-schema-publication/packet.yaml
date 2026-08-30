@@ -1,0 +1,61 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: config JSON Schema を版管理して公開する"
+  issue_kind: bug
+  source_execution_unit: v01-config-schema-publication
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ docs/config/ .github/workflows/ci.yml intents/evorch/operations/config-reference.md"
+  target_part: "Config v2 JSON Schema artifact の生成・公開・同期検証"
+  dependencies:
+    - v01-routing-profiles
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、schemars 1、serde 1、serde_json 1、toml 1。schemarsはCargo.toml:27とcrates/config/Cargo.toml:10-15ですでに採用済みのため新規schema libraryは追加しない"
+    - "crates/config/src/types/mod.rs:20-44 は CURRENT_VERSION=2 と JsonSchema derive済みConfigを定義し、crates/config/src/schema.rs:1-14 はschemars::schema_for!(Config)を整形JSONへ生成する"
+    - "crates/config/examples/dump_schema.rs:1-5 にstdout generatorがあるが、versioned artifactは未追跡。config-reference.md:94-96も『生成可能』とだけ記し公開pathを示さない"
+    - ".github/workflows/ci.yml:7-19 の通常CIはfmt/clippy/testのみで、生成結果とchecked-in schemaの同期を検査しない"
+  intent_references:
+    - "intents/evorch/features/provider-routing/overview.md"
+    - "intents/evorch/decisions/0014-config-architecture.md"
+    - "intents/evorch/operations/config-reference.md"
+  acceptance_criteria:
+    - "Config CURRENT_VERSION=2から生成したJSON Schemaが安定したversioned path（docs/config/evorch-config-v2.schema.json等）へchecked-inされる"
+    - "artifactは有効なJSON Schemaで、Configのversion/providers/routing/panel/diagnostics/permissions/metricsとnested enum/credential参照を反映する"
+    - "schema生成は既存schemars 1とconfig::json_schemaを単一sourceとして再現可能なcommandまたはxtask/scriptで行い、別handwritten schemaを持たない"
+    - "CIはschemaを再生成してchecked-in artifactとの差分を検査し、Config型変更後にartifact更新を忘れると失敗する"
+    - "intents/evorch/operations/config-reference.mdのJSON Schema節が公開artifact path、再生成command、エディタでの利用方法を参照する"
+    - "schema artifactまたは生成testがversion constとartifact filename/schema metadataのv2整合を検証する"
+    - "既存config parsing/deep merge/migration動作とunknown-key方針を変更しない"
+
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/operations/config-reference.md
+  new_intent_needed: false
+  placement_rationale: "issue #8 / v01-routing-profiles のv0.1 inspectで見つかった、ADR 0014の『生成し公開』に対するpublication gap。既存config intentを完成させるため新規node不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "既存provider-routing/config領域内のartifact公開でありtree変更なし。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "schemars採用と公開要件はADR 0014で決定済み。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/operations/config-reference.md
+    summary: "JSON Schema節を、実在するv2 artifact path・再生成command・エディタ利用方法へ更新する。"
+closeout_learning:
+  expected: "公開artifactの確定path、deterministic generation command、CI drift checkをconfig-reference.mdへwrite backし、schema versioning手順をcloseoutに記録する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/operations/config-reference.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

@@ -1,0 +1,61 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: SQLite vacuum と temp 容量診断を完成する"
+  issue_kind: bug
+  source_execution_unit: v01-storage-maintenance-completion
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/src/config.rs crates/storage/src/db.rs crates/storage/src/writer.rs crates/storage/src/error.rs crates/storage/tests/ crates/event-bus/src/event.rs intents/evorch/features/storage-memory/overview.md"
+  target_part: "予算付きincremental_vacuumとtemp storage容量診断"
+  dependencies:
+    - v01-session-storage
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、rusqlite 0.40.2 bundled、tracing 0.1、serde 1。writerはstd::thread + mpscで定期workを実行する"
+    - "crates/storage/src/writer.rs:222-238,291-335 は定期PASSIVE checkpoint、WAL上限時TRUNCATE、DB合計検査を行うがvacuumを実行しない"
+    - "crates/storage/src/db.rs:83-105 のFileSizes/file_sizesはdb/-wal/-shmだけを測り、temp path/SQLite temp usageを含めない"
+    - "crates/storage/src/config.rs:21-66 のHardLimits/StorageConfigにはtemp thresholdとvacuum page budget/trigger設定がない"
+    - "ADR 0012:21-29 はretention後の予算付きincremental_vacuumと起動時DB/WAL/temp検査を要求する"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+  acceptance_criteria:
+    - "SQLite connectionをincremental vacuum可能なauto_vacuum設定へ安全に初期化/移行し、既存DBでも互換性を保つ"
+    - "writer maintenanceはfreelist/retention後等の明示thresholdを満たした時だけ、1 tick当たり設定可能なpage budgetでPRAGMA incremental_vacuum(N)を実行する"
+    - "vacuumは通常のwrite/readを無制限にblockせず、各tickの実行結果・回収前後page数をsecret-free diagnostics/tracingへ出す"
+    - "起動時と定期maintenanceでtemp storage使用量を測定し、設定可能threshold超過時にtyped diagnostics eventまたは既存diagnostics sinkへ警告をemitする"
+    - "temp threshold未満ではwarningをemitせず、threshold state transitionで重複stormを防ぐ"
+    - "一時DBでfreelistを生成してbudget内incremental vacuumが段階的に回収するtestと、低いtemp thresholdでdiagnosticを捕捉するtestがある"
+    - "既存PASSIVE/TRUNCATE checkpoint、DB/WAL hard limits、event/metrics動作を維持する"
+    - "storage-memory overviewにmaintenance trigger/budget/temp diagnosticの確定実装を記録する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0012-metrics-architecture.md
+  new_intent_needed: false
+  placement_rationale: "issue #3 / v01-session-storageのv0.1 inspectで見つかったADR 0012 maintenance実装漏れ。既存storage intentを完成させるため新規node不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "既存storage-memory maintenance要件のcompletion。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "ADR 0012がincremental vacuum/temp検査を既決。具体値はoverviewへ実装記録する。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/storage-memory/overview.md
+    summary: "vacuum trigger/page budget/temp thresholdとdiagnostic挙動を実装値として追記する。"
+closeout_learning:
+  expected: "実装したauto_vacuum互換方針、trigger、page budget、temp計測定義、diagnostic state transitionをstorage-memory overviewへwrite backする。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/storage-memory/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

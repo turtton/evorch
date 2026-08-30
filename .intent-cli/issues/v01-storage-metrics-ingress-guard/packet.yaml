@@ -1,0 +1,56 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: raw usage event の直接永続化を防止する"
+  issue_kind: bug
+  source_execution_unit: v01-storage-metrics-ingress-guard
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/src/writer.rs crates/storage/src/repo/event.rs crates/storage/tests/"
+  target_part: "storage ingress における raw UsageEvent と downsampled metrics の書き込み境界"
+  dependencies:
+    - v01-session-storage
+  technical_baseline:
+    - "Rust 1.97 / edition 2024。workspace は event-bus の Event / UsageEvent / UsageBucket を storage から利用する"
+    - "rusqlite 0.40.2 (bundled)、serde 1、serde_json 1、tracing 0.1 を workspace dependency として使用する。tokio 1 は sync feature のみだが storage writer は std::thread + std::sync::mpsc で動作する"
+    - "crates/storage/src/writer.rs:81-97 の StorageHandle::append_event は任意の event_bus::Event を受け取り、crates/storage/src/repo/event.rs:34-45,194-202 は EventKind::Usage を他イベントと同様に serialize / INSERT できる"
+    - "正規の metrics 経路は crates/storage/src/writer.rs:118-132 の UsageSink::submit と同:241-246 の UsageBucket batch flush。ADR 0012 は raw をメモリだけに保持し downsampled 集計値のみ永続化すると定める"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+  acceptance_criteria:
+    - "StorageHandle の公開イベント書き込み入口へ EventKind::Usage を渡すと、SQLite INSERT 前に型または明示的な storage error で拒否される"
+    - "repo::event::append_event を crate 内から直接呼ぶ経路でも EventKind::Usage を永続化できず、events テーブルの行数が増えない"
+    - "UsageEvent は UsageAggregator / UsageSink が生成する UsageBucket の downsampling 経路へだけ流れ、raw payload を events テーブルへ迂回保存する代替 API を追加しない"
+    - "UsageSink::submit から送った UsageBucket は従来どおり single-writer の batch flush 後に downsampled_metrics へ保存される"
+    - "Lifecycle / Message / Tool / Provider / Fault の非 usage event は既存の append / read と projection 契約を維持する"
+    - "直接 raw usage 書き込み拒否、DB非変更、downsampled書き込み成功を focused tests で検証する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0012-metrics-architecture.md
+  new_intent_needed: false
+  placement_rationale: "issue #3 / v01-session-storage の v0.1 inspect で見つかった、既存 ADR 0012 の実装漏れを閉じる内部境界修正。新しい能力や intent node は追加しない。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "既存 storage-memory intent の invariant を実装で満たすため intent tree 更新は不要。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "ADR 0012 / 0018 の既決事項を実装するため新規 ADR は不要。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "storage-memory/overview.md:26-28 と ADR 0012:21-29 が既に raw 非永続化経路を明記している。"
+closeout_learning:
+  expected: "raw UsageEvent を拒否した境界（公開 handle と repo 防御）および downsampled 回帰テストの結果を closeout evidence に記録する。既存 intent の変更は不要。"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

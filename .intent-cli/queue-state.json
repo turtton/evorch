@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-29T20:01:29.655629+00:00",
+  "updated_at": "2026-08-30T02:35:14.6915793+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -236,6 +236,220 @@
       "review_role": "review",
       "priority": "high",
       "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-role-network-enforcement",
+      "title": "v0.1.1: Role \u306E network capability \u3092 sandbox policy \u5F37\u5236\u306B\u63A5\u7D9A\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-sandbox-approval",
+        "v01-agent-roles"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-role-network-enforcement/implementation.md",
+        "review_context": ".intent-cli/issues/v01-role-network-enforcement/review-context.md",
+        "yaml": ".intent-cli/issues/v01-role-network-enforcement/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-secure-tool-composition-root",
+      "title": "v0.1.1: tool \u5B9F\u884C\u306E composition root \u3092 fail-closed \u306B\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-sandbox-approval",
+        "v01-tool-layer"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-secure-tool-composition-root/implementation.md",
+        "review_context": ".intent-cli/issues/v01-secure-tool-composition-root/review-context.md",
+        "yaml": ".intent-cli/issues/v01-secure-tool-composition-root/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-config-secret-field-rejection",
+      "title": "v0.1.1: config \u306E\u5E73\u6587 credential field \u3092\u660E\u793A\u62D2\u5426\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-routing-profiles"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-config-secret-field-rejection/implementation.md",
+        "review_context": ".intent-cli/issues/v01-config-secret-field-rejection/review-context.md",
+        "yaml": ".intent-cli/issues/v01-config-secret-field-rejection/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-storage-metrics-ingress-guard",
+      "title": "v0.1.1: raw usage event \u306E\u76F4\u63A5\u6C38\u7D9A\u5316\u3092\u9632\u6B62\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-storage-metrics-ingress-guard/implementation.md",
+        "review_context": ".intent-cli/issues/v01-storage-metrics-ingress-guard/review-context.md",
+        "yaml": ".intent-cli/issues/v01-storage-metrics-ingress-guard/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-storage-writer-boundary",
+      "title": "v0.1.1: SQLite \u66F8\u304D\u8FBC\u307F\u3092 single-writer \u5883\u754C\u3078\u9589\u3058\u8FBC\u3081\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-storage-writer-boundary/implementation.md",
+        "review_context": ".intent-cli/issues/v01-storage-writer-boundary/review-context.md",
+        "yaml": ".intent-cli/issues/v01-storage-writer-boundary/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-gui-runtime-wiring",
+      "title": "v0.1.1: \u88FD\u54C1 GUI \u3092\u5B9F Agent Runtime \u3068\u5171\u6709 Event Bus \u3078\u63A5\u7D9A\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-gui-panes",
+        "v01-agent-roles",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-gui-runtime-wiring/implementation.md",
+        "review_context": ".intent-cli/issues/v01-gui-runtime-wiring/review-context.md",
+        "yaml": ".intent-cli/issues/v01-gui-runtime-wiring/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v01-event-provider-observation-schema",
+      "title": "v0.1.1: provider request/response \u89B3\u6E2C\u30A4\u30D9\u30F3\u30C8\u3068 TTFT \u5951\u7D04\u3092\u8FFD\u52A0\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-provider-client",
+        "v01-event-stream"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-event-provider-observation-schema/implementation.md",
+        "review_context": ".intent-cli/issues/v01-event-provider-observation-schema/review-context.md",
+        "yaml": ".intent-cli/issues/v01-event-provider-observation-schema/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "normal",
+      "priority_revision": 1
+    },
+    {
+      "execution_unit": "v01-config-schema-publication",
+      "title": "v0.1.1: config JSON Schema \u3092\u7248\u7BA1\u7406\u3057\u3066\u516C\u958B\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-routing-profiles"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-config-schema-publication/implementation.md",
+        "review_context": ".intent-cli/issues/v01-config-schema-publication/review-context.md",
+        "yaml": ".intent-cli/issues/v01-config-schema-publication/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "normal",
+      "priority_revision": 1
+    },
+    {
+      "execution_unit": "v01-storage-secret-boundary",
+      "title": "v0.1.1: storage \u3078\u306E credential \u6DF7\u5165\u3092 ingress \u3067\u62D2\u5426\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-storage-secret-boundary/implementation.md",
+        "review_context": ".intent-cli/issues/v01-storage-secret-boundary/review-context.md",
+        "yaml": ".intent-cli/issues/v01-storage-secret-boundary/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "normal",
+      "priority_revision": 1
+    },
+    {
+      "execution_unit": "v01-storage-maintenance-completion",
+      "title": "v0.1.1: SQLite vacuum \u3068 temp \u5BB9\u91CF\u8A3A\u65AD\u3092\u5B8C\u6210\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-session-storage"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-storage-maintenance-completion/implementation.md",
+        "review_context": ".intent-cli/issues/v01-storage-maintenance-completion/review-context.md",
+        "yaml": ".intent-cli/issues/v01-storage-maintenance-completion/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "normal",
+      "priority_revision": 1
+    },
+    {
+      "execution_unit": "v01-provider-compatible-usage-contract",
+      "title": "v0.1.1: OpenAI-compatible usage \u306E exactly-once \u5951\u7D04\u3092\u56FA\u5B9A\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v01-provider-client"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v01-provider-compatible-usage-contract/implementation.md",
+        "review_context": ".intent-cli/issues/v01-provider-compatible-usage-contract/review-context.md",
+        "yaml": ".intent-cli/issues/v01-provider-compatible-usage-contract/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "low",
+      "priority_revision": 1
     }
   ]
 }

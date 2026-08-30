@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: config の平文 credential field を明示拒否する"
+  issue_kind: feature
+  source_execution_unit: v01-config-secret-field-rejection
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ intents/evorch/operations/config-reference.md"
+  target_part: "typed TOML config tree の unknown field 拒否と credential-like field の actionable error"
+  dependencies: [v01-routing-profiles]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024（workspace Cargo.toml）"
+    - "TOML 1 + serde typed schema / deny_unknown_fields（ADR 0014、crates/config）"
+    - "schemars 1（config 型から JSON Schema 生成。ただし schema publication は別 slice）"
+    - "thiserror 2（typed config load / validation errors）"
+    - "serde_json（migration / schema / config intermediate representation）"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/operations/config-reference.md
+  acceptance_criteria:
+    - "Config root と全 nested typed config structs に未知 field 拒否が適用され、root/provider/routing/panel/diagnostics/permissions/metrics の typo が silently ignored されず path を含む parse error になる"
+    - "providers.<profile> に api_key / api-key / token / secret / password / credential_value 等の plaintext credential-like field を置くと、Keyring または Env の credential reference を使うよう案内する actionable error で拒否される"
+    - "credential = { type = \"keyring\", service = \"evorch\", account = \"...\" } と credential = { type = \"env\", var = \"...\" } の valid forms は引き続き parse / roundtrip できる"
+    - "CredentialRefConfig 自体も variant ごとの未知 field を拒否し、keyring に value/token、env に api_key/value 等を追加した混在 object を受理しない"
+    - "tests が root unknown field、provider api_key、nested credential-like aliases、通常 typo、valid Keyring、valid Env を覆い、error message に config path と remediation が含まれることを検証する"
+    - "multi-source deep merge と version migration の後に最終 typed parse が同じ strict rejection を適用し、drop-in / project / user / CLI のどの source でも plaintext secret を通さない"
+    - "runtime credential resolution、keyring/env lookup、provider auth injection の挙動を変更しない"
+    - "canonical config reference を実コードに合わせて更新し、unknown key が許容されるという記述を撤回し、Env form の field 名を name ではなく var として示す"
+
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/operations/config-reference.md
+  new_intent_needed: false
+  placement_rationale: "v0.1 inspect が issue #8 / v01-routing-profiles の typed config に unknown-field tolerance を発見し、ADR 0014 の『credential は config に書かない』境界が plaintext api_key 等を silent ignore する状態だった。provider-routing intent と canonical operations reference の既存契約を強制する修正で、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+    summary: "config type tree の strict unknown-field rejection と plaintext credential-like field の actionable rejection を v0.1.1 security invariant として記録する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/operations/config-reference.md
+    summary: "unknown key は無視されず error になること、credential は Keyring/Env reference のみであること、Env variant の正しい var field と actionable error 例を記録する"
+closeout_learning:
+  expected: "strict rejection を適用した型範囲、credential-like field の正規 denylist/alias と error wording、canonical config reference の unknown-key 方針および Env field 名 var の修正を記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/operations/config-reference.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

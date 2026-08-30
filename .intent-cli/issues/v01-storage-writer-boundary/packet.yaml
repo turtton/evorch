@@ -1,0 +1,57 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: SQLite 書き込みを single-writer 境界へ閉じ込める"
+  issue_kind: bug
+  source_execution_unit: v01-storage-writer-boundary
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/src/lib.rs crates/storage/src/db.rs crates/storage/src/repo/ crates/storage/src/writer.rs crates/storage/tests/"
+  target_part: "公開read APIとwriter所有権によるSQLite mutation境界"
+  dependencies:
+    - v01-session-storage
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、rusqlite 0.40.2 bundled、serde 1、tracing 0.1。storage writerはstd::thread + std::sync::mpscでConnectionを所有する"
+    - "crates/storage/src/lib.rs:10-17 は db / entity / migrations / projection / repo をpublic moduleとして公開し、同:19-23はDatabaseとStorageHandleを再exportする"
+    - "crates/storage/src/repo/mod.rs:1-12 はsingle-writer管理下でのみ使うとdoc commentに書く一方、全mutation moduleをpub公開しており、型では強制していない"
+    - "crates/storage/src/db.rs:16-29 のDatabaseはConnectionをcrate-privateに保持するが、public repo関数は外部で別rusqlite::Connectionを開けば呼べる。ADR 0018:13-16 はwriter threadだけがConnectionを所有すると決定済み"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/decisions/0018-sqlite-storage-schema.md"
+  acceptance_criteria:
+    - "外部crateからstorage::repoのcreate/update/delete/append/upsert mutation関数へ到達できないvisibilityまたはsealed capabilityになる"
+    - "SQLite Connectionへの書き込み権限はStorage/専用writerが所有する非clone可能なtokenまたは同等の型境界に限定される"
+    - "session / task / message / agent_run / event / metricsの必要なread pathはConnectionを公開せず、明示的なread-only public APIから利用できる"
+    - "StorageHandleをcloneしてもwriter command送信能力だけが共有され、raw Connectionやrepo mutation権限は取得できない"
+    - "既存のevent append、downsampled metrics flush、catalog update等の正規mutationはsingle-writer経由で動作する"
+    - "compile-fail testまたは別test crateで、storage外からrepo mutationをimport/executeできないことを証明する"
+    - "runtime testsで公開read pathとwriter経由mutationが従来どおり成功する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0018-sqlite-storage-schema.md
+  new_intent_needed: false
+  placement_rationale: "issue #3 / v01-session-storage のv0.1 inspectで見つかったADR 0018 single-writer決定の型境界漏れを修正する。新規intent nodeは不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "既存storage-memory intentの実装境界修正。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "ADR 0018の既決single-writer所有権を実装するため新規ADR不要。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "公開APIの内部リファクタでrole-facing docs更新なし。"
+closeout_learning:
+  expected: "採用したwriter capability/read-only API境界とcompile-fail evidenceをcloseoutに記録する。既存ADRの意味を変えないためwriteback不要。"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

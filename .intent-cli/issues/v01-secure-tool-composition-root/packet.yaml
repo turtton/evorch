@@ -1,0 +1,62 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: tool 実行の composition root を fail-closed にする"
+  issue_kind: feature
+  source_execution_unit: v01-secure-tool-composition-root
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/sandbox/ crates/tools/ crates/runtime/examples/orchestrator_demo.rs"
+  target_part: "DirectSandbox の明示的 opt-out 化と production tool executor の安全な構築入口"
+  dependencies: [v01-sandbox-approval, v01-tool-layer]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "bubblewrap（bwrap）0.11.2 + Sandbox trait / BwrapSandbox（Linux fail-closed OS enforcement、ADR 0021）"
+    - "ToolExecutor + Arc<dyn Sandbox>（標準 shell / git_diff への sandbox dependency injection）"
+    - "serde / serde_json（tool schema・result・event payload）"
+    - "tracing（sandbox/tool execution の構造化ログ）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+  acceptance_criteria:
+    - "DirectSandbox を unit-like public value として無条件に構築できず、隔離無効化には private/sealed constructor または明示的な unsafe-policy token/argument が必須になる"
+    - "production 用 composition root が workspace root と必要な policy を受け、BwrapSandbox::detect 失敗時に DirectSandbox へ fallback せず error を返す"
+    - "production の標準 ToolExecutor 構築が composition root を経由し、shell / git_diff に fail-closed sandbox を注入する。任意 Arc<dyn Sandbox> 注入は test-only または明示的低レベル API として区別される"
+    - "crates/runtime/examples/orchestrator_demo.rs が Arc::new(DirectSandbox) を直接使わず、新しい composition root を用いて構築される"
+    - "compile-fail test または同等の API visibility test により、呼び出し側が permissive sandbox を policy 明示なしで構築できないことを証明する"
+    - "unit/integration tests が bwrap 利用可能時の安全な構築成功、利用不可時の fail-closed error、明示 opt-out の限定経路を検証する"
+    - "orchestrator_demo が既存の deterministic scripted model と runtime flow を保ったまま実行完了し、sandbox exec semantics と approval semantics は変更されない"
+    - "gVisor 等の新 backend、macOS / Windows 対応、sandbox argv / filesystem / network semantics の再設計を含めない"
+
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+  new_intent_needed: false
+  placement_rationale: "v0.1 inspect が issue #6 の security layer と issue #5 の tool layer の composition point に、public DirectSandbox による fail-open construction を発見した修正 slice。既存 tools-sandbox intent と ADR 0008/0021 の二層分離・fail-closed 方針を construction API に反映するため、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "production tool composition は bwrap detect failure で停止し、DirectSandbox は明示的な非 production opt-out に限定される構築契約を記録する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "production composition root の最終 API、DirectSandbox の限定された opt-out 手段、bwrap unavailable 時に fallback せず返す error surface を tools-sandbox intent へ記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

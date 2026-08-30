@@ -1,0 +1,60 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: storage への credential 混入を ingress で拒否する"
+  issue_kind: bug
+  source_execution_unit: v01-storage-secret-boundary
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/src/entity.rs crates/storage/src/repo/message.rs crates/storage/src/repo/event.rs crates/storage/src/writer.rs crates/storage/src/error.rs crates/storage/tests/ intents/evorch/features/storage-memory/overview.md"
+  target_part: "message/event text のcredential検出と保存前拒否"
+  dependencies:
+    - v01-session-storage
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、regex 1、serde 1、serde_json 1、tracing 0.1。rusqliteは0.40.2 bundled"
+    - "crates/storage/src/entity.rs:153-170 のMessageRecordはcontent: String / reasoning: Option<String>を無制限に保持し、repo/message.rs:10-16,31-40は検査せずINSERT/UPDATEする"
+    - "crates/event-bus/src/event.rs:168-181,185-199,225-230,265-277 のreason/delta等も自由文字列で、crates/storage/src/repo/event.rs:34-45はEventKind全体を検査せずJSON化する"
+    - "既存credential_payload test (crates/storage/tests/credential_payload.rs:100-151) はJSON key allowlistのみを検査し、String value中のcredential materialは検出しない"
+    - "ADR 0008:21-26はcredential隔離をv0.1要件とする。これはheuristic defense-in-depthでありsecret非漏洩の完全保証ではない"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/decisions/0008-threat-model-phased-adoption.md"
+  acceptance_criteria:
+    - "MessageRecordのcontentとreasoningはcreate/updateのSQLite mutation前にsecret guardを通り、既知credential値または明白なAPI-key-shaped文字列を含む場合は拒否される"
+    - "永続化対象Eventのhuman-readable text（MessageDelta/ReasoningDeltaおよびreason系field）はserialize/INSERT前に同じguardを通り、検出時は拒否される"
+    - "guardは既知credential値を明示的な設定/constructor入力または限定されたcredential env名から取り込み、値本体をerror・tracing・Debug出力へ含めない"
+    - "拒否error/diagnosticはentity種別とfield/検出規則を識別できるが、secret候補はredacted fingerprintまたは非可逆情報だけを出す"
+    - "拒否されたmessage/eventはDB行、event accounting、session bytesを変更しない"
+    - "通常の文章や短いtoken-like文字列を過剰拒否しないnegative testsと、代表的API key形状/既知env値のpositive testsがある"
+    - "storage-memory overviewにheuristic defense-in-depthであり完全保証ではないこと、対象field、拒否/診断方針を記録する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+  new_intent_needed: false
+  placement_rationale: "issue #3 / v01-session-storageのv0.1 inspectで見つかったcredential value混入gapを既存storage/threat-model intent内で閉じる。新規node不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "既存storage-memoryとADR 0008の防御を具体化する。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "heuristic guardはADR 0008を補強する実装詳細で新規ADR不要。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/storage-memory/overview.md
+    summary: "credential guardの対象text field、拒否/診断、heuristicで完全保証ではない限界を追記する。"
+closeout_learning:
+  expected: "採用した検出規則、false-positive境界、known-value注入方法、redacted診断、保証しない範囲をstorage-memory overviewへwrite backする。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/storage-memory/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

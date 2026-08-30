@@ -1,0 +1,66 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: Role の network capability を sandbox policy 強制に接続する"
+  issue_kind: feature
+  source_execution_unit: v01-role-network-enforcement
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/agents/ crates/runtime/ crates/tools/ crates/sandbox/"
+  target_part: "RoleCapabilities.network から sandboxed tool execution の bwrap network namespace 方針への強制配線"
+  dependencies: [v01-sandbox-approval, v01-agent-roles]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml、crates/runtime/Cargo.toml）"
+    - "bubblewrap（bwrap）0.11.2 の Linux sandbox。Network 制御は --unshare-net による全拒否か親 netns 継承による全許可の二値（ADR 0021）"
+    - "serde / serde_json（RoleCapabilities と runtime/tool 境界の型・イベントデータ）"
+    - "tracing（runtime / sandbox の構造化ログ）"
+    - "ToolExecutor + Sandbox trait + BwrapConfig（承認層と OS enforcement の二層分離）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+  acceptance_criteria:
+    - "RoleCapabilities.network（Denied / OptIn / Allowed）が sandboxed tool execution の構築・dispatch 経路で消費され、network 判定が宣言だけで終わらない"
+    - "Denied の role は BwrapConfig の network deny（--unshare-net）で sandboxed shell / git_diff を実行し、親側で到達可能な TCP endpoint への接続が sandbox 内では失敗する統合テストがある"
+    - "Allowed の role は ADR 0021 の v0.1 二値モデルに従い親 network namespace を継承し、同じ endpoint への接続を維持できる統合テストがある"
+    - "OptIn の扱いが fail-closed な明示規則として型・policy mapping に定義され、明示 opt-in がない場合は Denied と同じ network deny になることをユニットテストで検証する"
+    - "ExecutionPolicy / role-to-sandbox policy mapping のユニットテストが全 NetworkAccess variant を網羅し、tool capability の既存 authorize/filter 挙動を変えない"
+    - "OpenAI / Anthropic 等の provider API 呼び出しは bwrap 外の main process と per-call auth injection のままで、provider client path の挙動・認証注入に変更がない"
+    - "bwrap が利用できない環境で crates/sandbox/tests/bwrap.rs が eprintln + return により成功扱いにならず、skip がテスト出力で明示的かつ pass と区別して観測できる"
+    - "v0.1 では per-destination allowlist / proxy egress を実装せず、deny は --unshare-net、allow は親 netns 継承という ADR 0021 の full-open/full-deny 境界を保持する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+  new_intent_needed: false
+  placement_rationale: "v0.1 inspect が issue #7 / v01-agent-roles の role network capability と issue #6 / v01-sandbox-approval の bwrap policy の間に未接続を発見した修正 slice。既存 tools-sandbox と orchestration intent、および ADR 0002/0021 の境界を実装に接続するため、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+      - intents/evorch/features/orchestration/overview.md
+    summary: "role-dependent network policy の実装確定と、v0.1 が per-destination allowlist ではなく bwrap の full-deny/full-open 二値強制であることを記録する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "issue #6 AC4 の『provider endpoint allowlist』表現を ADR 0021 の実態（v0.1 は deny=--unshare-net / allow=親 netns の full-open、selective egress は v0.2）へ host 側で整合し、role network mapping の確定挙動と明示的な bwrap test skip 観測方法を記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/orchestration/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

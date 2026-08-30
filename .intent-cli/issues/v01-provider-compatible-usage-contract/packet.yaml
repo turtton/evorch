@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: OpenAI-compatible usage の exactly-once 契約を固定する"
+  issue_kind: feature
+  source_execution_unit: v01-provider-compatible-usage-contract
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/providers/, crates/routing/
+  target_part: "OpenAI-compatible usage accounting contract tests・retry/fallback attempt accounting"
+  dependencies: [v01-provider-client]
+  technical_baseline:
+    - "workspace は Rust edition 2024 / rust-version 1.97、Tokio 1、serde 1、reqwest 0.12、wiremock 0.6 を使用する（Cargo.toml:5-8,25,28,32,37）"
+    - "OpenAI-compatible client は OpenAI と同じ ChatCompletionsClient を共有し、custom base URL と provider label だけを差し替える（crates/providers/src/provider/openai_compatible.rs:19-78; crates/providers/src/provider/openai.rs:100-133）"
+    - "non-stream send は canonical response 変換後に UsageEmitter::emit_usage を1回呼び、stream は completion signal で accumulator を確定した時に1回呼ぶ（crates/providers/src/provider/openai.rs:136-171; crates/providers/src/http/stream.rs:156-171）"
+    - "UsageEmitter の契約コメントは1 requestにつき emit_usage をちょうど1回とするが、発行器自身は deduplication key/state を持たない（crates/providers/src/http.rs:114-150）"
+    - "既存 SSE unit test はstream completion後に二件目usageが来ないことを確認する（crates/providers/src/http/stream/tests.rs:124-176）"
+    - "OpenAI-compatible contract test はnon-stream usageのlabel/modelを確認するが二件目不在を確認せず、stream testは EventBus を渡していない（crates/providers/tests/openai_compatible_contract.rs:34-102）"
+    - "routing の Router::next_fallback は次候補選択とaffinity再pinを行うだけで、provider request/retry実行やusage集計は行わない（crates/routing/src/router.rs:150-218）"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+  acceptance_criteria:
+    - "OpenAI-compatible non-streaming の成功 request 1件につき、正しい provider label / model / input/output/cache token counts を持つ UsageEvent がちょうど1件だけ発行される contract test を追加する"
+    - "OpenAI-compatible streaming の Completed response 1件につき UsageEvent がちょうど1件だけ発行され、複数 delta、usage frame、DONE、完了後 frame、stream tail のいずれでも重複しない contract test を追加する"
+    - "HTTP error・timeout/transport error・invalid JSON/SSE・completion signal 無し・consumer が Completed 前に stream をdropした場合は completed request usage を発行しないことを contract test で固定する"
+    - "retry/fallback scenario では各失敗 attempt の usage を0件、最終的に完了した attempt の usage を1件とし、logical request 全体の completed usage が exactly once になる test harness を provider/routing 境界に追加する"
+    - "fallback 先が同一 OpenAI-compatible protocolでも provider profile label と model が勝者 attempt の値になり、敗者 attempt や再試行から二重発行されない"
+    - "UsageEmitter / ChatCompletionsClient / SSE completion の責務を rustdoc または provider docs に記録し、『完了した provider attemptだけがusageを1回発行し、retry/fallback coordinatorは再発行しない』保証を明文化する"
+    - "既存 OpenAI / Anthropic usage tests と共通 ChatCompletionsClient の挙動を壊さず、実 API / credential を使わない wiremock テストで検証する"
+    - "routing/fallback order・retry policy・new provider・usage schema / aggregation semantics の変更を含めない"
+
+# G461: v0.1 provider client の既存 usage emission を contract test と責務文書で固定する修正。
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+  new_intent_needed: false
+  placement_rationale: "OpenAI-compatible は provider/profile と API protocol を分離する ADR 0004 の既存実装であり、本 packet は usage accounting の低リスク未検証点を contract test で閉じる。新しい capability・schema・routing policy は追加しないため新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "新規 node は不要。provider-routing の既存 v0.1 実装保証を強化する。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。provider/profile/protocol 分離は ADR 0004 で確定済み。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+    summary: "completed attemptだけがusageを1回発行し、retry/fallback coordinatorは再発行しないexactly-once accounting保証と検証範囲を記録する。"
+closeout_learning:
+  expected: "OpenAI-compatible streaming/non-streamingとretry/fallbackでexactly-onceを成立させる発行所有者、completed attemptの定義、失敗/drop時の0件保証、勝者provider/model labelの確定方法を記録する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/provider-routing/overview.md
+# G645: contract testsと内部accounting保証のみで新しいrole-facing surfaceはない。
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

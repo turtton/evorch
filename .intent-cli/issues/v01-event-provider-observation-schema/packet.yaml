@@ -1,0 +1,71 @@
+implementation_issue_packet:
+  issue_title: "v0.1.1: provider request/response 観測イベントと TTFT 契約を追加する"
+  issue_kind: feature
+  source_execution_unit: v01-event-provider-observation-schema
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/event-bus/, crates/providers/, crates/routing/
+  target_part: "typed provider observation schema・provider client/fallback emission・TTFT measurement contract"
+  dependencies: [v01-provider-client, v01-event-stream]
+  technical_baseline:
+    - "workspace は Rust edition 2024 / rust-version 1.97、Tokio 1、serde 1、reqwest 0.12、tracing 0.1 を使用する（Cargo.toml:5-8,25,28,32,35）"
+    - "Event は schema_version 1 と monotonic / wall-clock timestamp を持ち、EventKind は serde の kind/payload 隣接タグ形式である（crates/event-bus/src/event.rs:9-24,41-76）"
+    - "ProviderEvent は現在 ProviderFallback だけで、request start/end・TTFT・error の typed variant がない（crates/event-bus/src/event.rs:265-278）"
+    - "UsageEvent::Usage は provider/model と input/output/cache token 数を保持し、UsageEmitter が provider client の完了時に発行する（crates/event-bus/src/event.rs:233-263; crates/providers/src/http.rs:114-150）"
+    - "OpenAI / OpenAI-compatible は共通 ChatCompletionsClient を使用し、非streamは応答変換後、streamは完了 frame の accumulator 確定時に usage を emit する（crates/providers/src/provider/openai.rs:100-210; crates/providers/src/http/stream.rs:156-171）"
+    - "provider tests は Tokio multi-thread + wiremock 0.6 で実 API を使わず HTTP/SSE 契約を検証する（crates/providers/Cargo.toml:23-27）"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/diagnostics-self-improvement/overview.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0017-event-bus-transport.md
+  acceptance_criteria:
+    - "EventKind::Provider 配下に、相関可能な request start・request completed・time-to-first-token・request error・fallback triggered の typed event を定義し、provider/profile/protocol/model/request ID と結果判定に必要なフィールドを持たせる"
+    - "TTFT の測定契約を rustdoc と intent/docs writeback に明記する。開始点は HTTP request attempt を送信する直前、終了点は provider wire stream から最初の user-visible content delta または tool-call delta を正常に解釈した瞬間とし、HTTP headers 到着・usage-only frame・keepalive・空 delta・reasoning-only delta は first token に数えない"
+    - "OpenAI・Anthropic・OpenAI-compatible の send / stream が、成功・HTTP error・timeout/transport error・invalid JSON/SSE を含む各 attempt について start と終端 event を同じ request ID で emit し、streaming 成功では TTFT を高々1回 emit する"
+    - "request completed event が streaming / non-streaming の token counts を保持するか既存 UsageEvent と request ID で明確に相関でき、二重計上を誘発しない schema 契約を持つ"
+    - "routing の fallback 選択境界から fallback triggered event を発行し、from/to provider profile、model、failure reason、元 attempt との相関を保持する。候補順序や retry/fallback policy 自体は変更しない"
+    - "追加した全 ProviderEvent variant が serde serialize/deserialize round-trip と schema_version 互換テストを通る"
+    - "wiremock と paused/deterministic time を用いた provider 契約テストが、各 client の event 順序・request ID 相関・TTFT 一回性・token counts・error/fallback payload を実 API 無しで検証する"
+    - "raw event の downsampling / 永続化、provider 追加、routing policy / retry 回数の変更を含めない"
+
+# G461: v0.1 event-stream が宣言した provider request-response / TTFT 語彙の実装欠落を閉じる。
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement/overview.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0017-event-bus-transport.md
+  new_intent_needed: false
+  placement_rationale: "provider attempt と fallback の観測は provider-routing の既存要件を event schema に表す修正であり、diagnostics が将来消費する typed timeline を提供する。transport と schema versioning は ADR 0017、provider/profile/protocol 分離は ADR 0004 で決定済みなので新規 intent node は不要。"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/features/diagnostics-self-improvement/overview.md
+    summary: "provider attempt observation の event 語彙、request correlation、TTFT の開始点/終了点、fallback event の責務境界を記録する。"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: "なし。transport/versioning は ADR 0017、routing separation は ADR 0004 で決定済み。本 packet は不足 schema と measurement contract の具体化。"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/features/diagnostics-self-improvement/overview.md
+    summary: "request start → first observable token → completed/error/fallback の event sequence と TTFT 定義を記録する。"
+closeout_learning:
+  expected: "provider 3実装で共通化できた attempt lifecycle の発行境界、request ID の生成・伝播方法、TTFT first-token 判定、UsageEvent と completion event の token accounting 関係を intent に書き戻す。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/diagnostics-self-improvement/overview.md
+# G645: schema と内部 emission を追加するだけで新しい role-facing surface はない。
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
