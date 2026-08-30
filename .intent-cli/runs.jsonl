@@ -67,3 +67,5 @@
 {"ts":"2026-08-30T06:20:11.5052672+00:00","execution_unit":"v01-storage-metrics-ingress-guard","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":26}
 {"ts":"2026-08-30T06:26:28.284458+00:00","execution_unit":"v01-storage-writer-boundary","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#27","reason":"https://github.com/turtton/evorch/issues/27"}
 {"ts":"2026-08-30T07:47:44.0273768+00:00","execution_unit":"v01-storage-writer-boundary","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":28}
+{"ts":"2026-08-30T07:49:03.4732035+00:00","execution_unit":"v01-storage-writer-boundary","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":28}
+{"ts":"2026-08-30T07:49:03.4732035+00:00","execution_unit":"v01-storage-writer-boundary","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":28}

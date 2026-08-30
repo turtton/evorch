@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T07:47:44.0146391+00:00",
+  "updated_at": "2026-08-30T07:49:03.4821888+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -342,7 +342,7 @@
     {
       "execution_unit": "v01-storage-writer-boundary",
       "title": "v0.1.1: SQLite \u66F8\u304D\u8FBC\u307F\u3092 single-writer \u5883\u754C\u3078\u9589\u3058\u8FBC\u3081\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-session-storage"
       ],
