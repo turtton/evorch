@@ -29,6 +29,14 @@ pub enum ConfigError {
     /// 設定のマイグレーションに失敗した。
     #[error("config migration failed: {0}")]
     Migration(String),
+    /// 設定値に許可されていないフィールド (未知キー / 平文 credential) が現れた。
+    #[error("invalid config field `{path}`: {message}")]
+    InvalidField {
+        /// ドット区切りの config path (例: `providers.foo.api_key`)。
+        path: String,
+        /// 拒否理由と remediation 案内。
+        message: String,
+    },
     /// 環境変数の値が不正だった。
     #[error("invalid value for environment variable {key}: {value}")]
     InvalidEnvValue {

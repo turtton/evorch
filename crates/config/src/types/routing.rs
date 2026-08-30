@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// ルーティング設定。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RoutingConfig {
     /// ルート名から候補リスト (フォールバック順) へのマップ。
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
@@ -15,7 +15,7 @@ pub struct RoutingConfig {
 
 /// ルートの候補 1 件分の設定。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RouteCandidateConfig {
     /// 使用するプロバイダプロファイル名。
     pub profile: String,

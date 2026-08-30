@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// パネル UI の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PanelConfig {
     /// レイアウト名。
     pub layout: String,

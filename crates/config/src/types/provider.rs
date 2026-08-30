@@ -55,7 +55,7 @@ pub enum ApiProtocolConfig {
 /// 秘密情報そのものは一切保持せず、取得先 (キーリングのサービス名・アカウント名、
 /// または環境変数名) のみを表現します。この型が秘密素材を含まないことは
 /// このクレートのハードな契約です。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum CredentialRefConfig {
     /// OS のキーリングから取得する。
@@ -72,6 +72,48 @@ pub enum CredentialRefConfig {
     },
 }
 
+// serde は内部タグ付き enum で未知フィールドを拒否できないため、秘密素材を含まない
+// ハードな契約を各 variant の厳格なミラー構造体で保証する。
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum CredentialRefDe {
+    Keyring(KeyringRefDe),
+    Env(EnvRefDe),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyringRefDe {
+    service: String,
+    account: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvRefDe {
+    var: String,
+}
+
+impl From<CredentialRefDe> for CredentialRefConfig {
+    fn from(value: CredentialRefDe) -> Self {
+        match value {
+            CredentialRefDe::Keyring(KeyringRefDe { service, account }) => {
+                Self::Keyring { service, account }
+            }
+            CredentialRefDe::Env(EnvRefDe { var }) => Self::Env { var },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialRefConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        CredentialRefDe::deserialize(deserializer).map(Into::into)
+    }
+}
+
 impl Default for CredentialRefConfig {
     fn default() -> Self {
         Self::Env {
@@ -84,7 +126,7 @@ impl Default for CredentialRefConfig {
 ///
 /// [`super::Config`] の `providers` マップのキーがプロファイル名になります。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProviderProfileConfig {
     /// プロバイダの種別。
     pub provider_type: ProviderTypeConfig,
@@ -145,5 +187,55 @@ mod tests {
         let env_parsed: CredentialRefConfig =
             toml::from_str(&env_toml).expect("env 参照を解析できる");
         assert_eq!(env_parsed, env);
+    }
+
+    // Given: keyring 参照に不明な value フィールドを含む TOML / When: CredentialRefConfig にパースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn credential_keyring_extra_field_rejected() {
+        let doc = "type = \"keyring\"\nservice = \"evorch\"\naccount = \"a\"\nvalue = \"x\"";
+
+        let result = toml::from_str::<CredentialRefConfig>(doc);
+
+        assert!(
+            result.is_err(),
+            "keyring の不明なフィールドは拒否される: {result:?}"
+        );
+    }
+
+    // Given: env 参照に不明な api_key フィールドを含む TOML / When: CredentialRefConfig にパースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn credential_env_extra_field_rejected() {
+        let doc = "type = \"env\"\nvar = \"V\"\napi_key = \"x\"";
+
+        let result = toml::from_str::<CredentialRefConfig>(doc);
+
+        assert!(
+            result.is_err(),
+            "env の不明なフィールドは拒否される: {result:?}"
+        );
+    }
+
+    // Given: 不明なフィールドを含む完全なプロバイダプロファイル TOML / When: パースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn provider_profile_unknown_field_rejected() {
+        let doc = r#"
+provider_type = "anthropic"
+api_protocol = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = { type = "env", var = "ANTHROPIC_API_KEY" }
+models = ["claude-sonnet-4-5"]
+default_model = "claude-sonnet-4-5"
+unknown_extra = true
+"#;
+
+        let result = toml::from_str::<ProviderProfileConfig>(doc);
+
+        assert!(
+            result.is_err(),
+            "プロファイルの不明なフィールドは拒否される: {result:?}"
+        );
     }
 }
