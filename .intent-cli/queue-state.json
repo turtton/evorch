@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T14:53:16.765215+00:00",
+  "updated_at": "2026-08-30T14:54:21.1719662+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -445,7 +445,7 @@
     {
       "execution_unit": "v01-storage-secret-boundary",
       "title": "v0.1.1: storage \u3078\u306E credential \u6DF7\u5165\u3092 ingress \u3067\u62D2\u5426\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-session-storage"
       ],
