@@ -66,6 +66,14 @@ pub(crate) trait WireStreamInterpreter: Send {
 /// 渡して解釈結果をキューイングする。完了シグナル受理時には
 /// アキュムレータを確定させて usage を発行し、[`StreamEvent::Completed`]
 /// をキューイングして以降の入力を無視する。
+///
+/// usage 発行の所有権はこのポンプの完了シグナル受理にのみ属し、受理時に
+/// ちょうど 1 回発行してポンプは終了する。完了後に届いたフレームは解釈せず
+/// 破棄する。完了シグナル不落の EOF・トランスポートエラー・インタプリタ
+/// エラー・`Completed` 受領前のコンシューマドロップでは usage を 1 件も
+/// 発行しない。これらの経路で発行される観測イベント
+/// [`event_bus::ProviderEvent::RequestFailed`] は観測面の出来事であり、
+/// usage ではない。
 pub(crate) struct SsePump<I> {
     parser: SseParser,
     interpreter: I,
@@ -211,6 +219,13 @@ impl<I: WireStreamInterpreter> SsePump<I> {
 /// 場合は `Completed` を流さずにストリームを終える。この中途 EOF は
 /// canonical 契約上は静かな終了だが、attempt 観測上は Transport の
 /// [`event_bus::ProviderEvent::RequestFailed`] として発行される。
+///
+/// usage 発行の所有権は完了シグナルの受理にのみ属し、受理時にちょうど
+/// 1 回発行してポンプは終了する。完了後に届いたフレームは解釈せず破棄する。
+/// 完了シグナル不落の EOF・トランスポートエラー・インタプリタエラー・
+/// `Completed` 受領前のコンシューマドロップでは usage を 1 件も発行しない
+/// (これらの経路の [`event_bus::ProviderEvent::RequestFailed`] は観測面の
+/// 出来事であり usage ではない)。
 #[allow(dead_code)] // TODO(T5/T6): provider 実装が利用するまでの一時許可
 pub(crate) fn adapt_sse_stream<I>(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,

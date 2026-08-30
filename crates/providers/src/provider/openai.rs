@@ -148,6 +148,11 @@ impl ChatCompletionsClient {
 
     /// 非ストリーミング Chat Completions を送信する。
     ///
+    /// usage は HTTP ステータス成功・ボディ読み取り・JSON パース・canonical
+    /// 変換のすべてが成功した後にちょうど 1 回だけ発行する。どのエラー経路も
+    /// 発行前に return するため、失敗した attempt の usage 発行件数は 0 に
+    /// なる。このメソッドが非ストリーミング経路で唯一の usage 発行地点である。
+    ///
     /// # Errors
     /// 送信、HTTP応答、JSON解析、canonical変換に失敗した場合 [`ProviderError`] を返す。
     pub(crate) async fn send(
@@ -211,6 +216,10 @@ impl ChatCompletionsClient {
     }
 
     /// Chat Completions SSE を canonical 差分ストリームへ変換する。
+    ///
+    /// ストリーミングの usage 発行は SSE 完了ポンプ ([`adapt_sse_stream`]) が
+    /// 担う。このメソッド自体は usage を発行せず、Err を返した場合はその
+    /// attempt の usage 発行件数は 0 になる。
     ///
     /// # Errors
     /// リクエスト送信またはHTTP応答に失敗した場合 [`ProviderError`] を返す。
