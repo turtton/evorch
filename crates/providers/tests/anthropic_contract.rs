@@ -4,7 +4,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use event_bus::{EventBus, UsageEvent};
+use event_bus::{EventBus, ProviderEvent, UsageEvent};
 use futures_util::StreamExt;
 use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
 use providers::{
@@ -12,7 +12,7 @@ use providers::{
     ProviderClient, ProviderError, Role, StreamEvent, Usage,
 };
 use serde_json::json;
-use support::{fixture, json_response, next_usage_event, sse_response};
+use support::{fixture, json_response, next_provider_event, next_usage_event, sse_response};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
@@ -294,6 +294,13 @@ async fn send_emits_usage_event() {
         .await
         .expect("send は成功する");
 
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestStarted {
+            streaming: false,
+            ..
+        }
+    ));
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         Usage {
@@ -303,6 +310,13 @@ async fn send_emits_usage_event() {
             cache_write_tokens: 4,
         },
     );
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestCompleted {
+            streaming: false,
+            ..
+        }
+    ));
 }
 
 // Given: EventBus 接続済み client / When: stream を完了まで読む / Then: 4 token field を持つ usage が 1 件届く
@@ -326,6 +340,17 @@ async fn stream_emits_usage_event() {
         .await;
 
     assert!(events.iter().all(Result::is_ok));
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestStarted {
+            streaming: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::FirstTokenObserved { .. }
+    ));
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         Usage {
@@ -335,6 +360,13 @@ async fn stream_emits_usage_event() {
             cache_write_tokens: 4,
         },
     );
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestCompleted {
+            streaming: true,
+            ..
+        }
+    ));
 }
 
 // Given: 400/429/500 応答 / When: send / Then: 共通 HTTP エラー写像が適用される

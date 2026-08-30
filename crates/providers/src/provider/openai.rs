@@ -12,6 +12,7 @@ use crate::error::ProviderError;
 use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
 use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
 use crate::message::{ChatRequest, ChatResponse, FinishReason, ProviderCapabilities};
+use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
 use crate::stream::DeltaStream;
 use crate::wire::openai::{
@@ -20,6 +21,7 @@ use crate::wire::openai::{
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_PROVIDER_LABEL: &str = "openai";
+const OPENAI_PROTOCOL: &str = "openai-chat-completions";
 
 /// OpenAI Chat Completions クライアントの設定。
 #[derive(Clone)]
@@ -59,8 +61,15 @@ impl OpenAiClient {
                 provider_label: OPENAI_PROVIDER_LABEL.to_string(),
                 timeout: config.timeout,
                 event_bus: config.event_bus,
+                profile: None,
             })?,
         })
+    }
+
+    /// 観測イベントへ記録する provider profile を設定する。
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.inner.profile = Some(profile.into());
+        self
     }
 }
 
@@ -107,6 +116,8 @@ pub(crate) struct ChatCompletionsConfig {
     pub(crate) timeout: Duration,
     /// usage イベントの発行先。
     pub(crate) event_bus: Option<Arc<EventBus>>,
+    /// 観測イベントへ記録する provider profile。
+    pub(crate) profile: Option<String>,
 }
 
 /// OpenAI wire 形式を共有する Chat Completions HTTP クライアント。
@@ -116,6 +127,7 @@ pub(crate) struct ChatCompletionsClient {
     provider_label: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
+    pub(crate) profile: Option<String>,
 }
 
 impl ChatCompletionsClient {
@@ -130,6 +142,7 @@ impl ChatCompletionsClient {
             provider_label: config.provider_label,
             timeout: config.timeout,
             event_bus: config.event_bus,
+            profile: config.profile,
         })
     }
 
@@ -144,6 +157,14 @@ impl ChatCompletionsClient {
     ) -> Result<ChatResponse, ProviderError> {
         let model = request.model.clone();
         let wire_request = to_wire_request(request, false);
+        let mut observer = AttemptObserver::new(
+            self.event_bus.clone(),
+            self.provider_label.clone(),
+            self.profile.clone(),
+            OPENAI_PROTOCOL,
+            model.clone(),
+            false,
+        );
         let request = self
             .http
             .post(&self.endpoint)
@@ -152,22 +173,40 @@ impl ChatCompletionsClient {
             .timeout(self.timeout)
             .build()
             .map_err(map_request_error)?;
+        observer.emit_started();
         let response = self
             .http
             .execute(request)
             .await
-            .map_err(map_request_error)?;
-        if !response.status().is_success() {
-            return Err(map_response_error(response).await);
-        }
-        let bytes = response.bytes().await.map_err(map_request_error)?;
-        let wire_response: WireChatResponse =
-            serde_json::from_slice(&bytes).map_err(|error| ProviderError::InvalidJson {
-                detail: format!("OpenAI response の解析に失敗しました: {error}"),
+            .map_err(map_request_error)
+            .inspect_err(|error| {
+                observer.emit_failed(error);
             })?;
-        let response = from_wire_response(&wire_response)?;
+        if !response.status().is_success() {
+            let error = map_response_error(response).await;
+            observer.emit_failed(&error);
+            return Err(error);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(map_request_error)
+            .inspect_err(|error| {
+                observer.emit_failed(error);
+            })?;
+        let wire_response: WireChatResponse = serde_json::from_slice(&bytes)
+            .map_err(|error| ProviderError::InvalidJson {
+                detail: format!("OpenAI response の解析に失敗しました: {error}"),
+            })
+            .inspect_err(|error| {
+                observer.emit_failed(error);
+            })?;
+        let response = from_wire_response(&wire_response).inspect_err(|error| {
+            observer.emit_failed(error);
+        })?;
         UsageEmitter::new(self.event_bus.clone(), self.provider_label.clone())
             .emit_usage(&model, &response.usage);
+        observer.emit_completed(&response.usage, response.finish_reason.clone());
         Ok(response)
     }
 
@@ -186,6 +225,14 @@ impl ChatCompletionsClient {
     {
         let model = request.model.clone();
         let wire_request = to_wire_request(request, true);
+        let mut observer = AttemptObserver::new(
+            self.event_bus.clone(),
+            self.provider_label.clone(),
+            self.profile.clone(),
+            OPENAI_PROTOCOL,
+            model.clone(),
+            true,
+        );
         let request = self
             .http
             .post(&self.endpoint)
@@ -193,19 +240,26 @@ impl ChatCompletionsClient {
             .json(&wire_request)
             .build()
             .map_err(map_request_error)?;
+        observer.emit_started();
         let response = self
             .http
             .execute(request)
             .await
-            .map_err(map_request_error)?;
+            .map_err(map_request_error)
+            .inspect_err(|error| {
+                observer.emit_failed(error);
+            })?;
         if !response.status().is_success() {
-            return Err(map_response_error(response).await);
+            let error = map_response_error(response).await;
+            observer.emit_failed(&error);
+            return Err(error);
         }
         Ok(adapt_sse_stream(
             response.bytes_stream(),
             interpreter,
             UsageEmitter::new(self.event_bus.clone(), self.provider_label.clone()),
             model,
+            observer,
         ))
     }
 }

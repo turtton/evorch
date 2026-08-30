@@ -262,7 +262,49 @@ pub enum UsageEvent {
     },
 }
 
-/// プロバイダ切替に関するイベント。
+/// プロバイダリクエスト attempt の失敗を型付きで分類する。
+///
+/// 観測イベント用の分類であり、エラーレスポンス本文・詳細メッセージ・
+/// credential は含めない (イベントは bus と storage に流れるため)。
+/// `#[serde(tag = "kind")]` の内部タグ形式で、unit バリアントは
+/// `{"kind": "Timeout"}`、データ付きバリアントは
+/// `{"kind": "Http", "status": 500}` と一貫した形状になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ProviderFailureKind {
+    /// HTTP 429 (レート制限)。
+    RateLimited,
+    /// 429 以外の HTTP エラーステータスをプロバイダから観測した。
+    Http {
+        /// HTTP ステータスコード。
+        status: u16,
+    },
+    /// リクエストのタイムアウト。
+    Timeout,
+    /// レスポンス形式が不正 (不正な JSON / SSE / canonical 変換の失敗)。
+    InvalidResponse,
+    /// トランスポート層の失敗 (接続エラー / ストリームの中途 EOF 等)。
+    Transport,
+    /// プロバイダ側サーバーエラー (routing の FailureKind::Server 分類由来)。
+    Server,
+    /// 支払いまたはクォータ上限 (routing の FailureKind::Quota 分類由来)。
+    Quota,
+    /// 認証または認可の失敗 (routing の FailureKind::Auth 分類由来)。
+    Auth,
+    /// 上記に分類できない失敗。
+    Other,
+}
+
+/// プロバイダ切替とリクエスト attempt 観測に関するイベント。
+///
+/// attempt 観測イベント (`RequestStarted` / `FirstTokenObserved` /
+/// `RequestCompleted` / `RequestFailed`) は attempt ごとに一意な
+/// `request_id` を共有し、これで相互に相関する。`request_id` は
+/// `req-{プロセス起動時刻ミリ秒}-{プロセス内単調カウンタ}` 形式で、
+/// 同一プロセス内での一意性を保証し、プロセス再起動をまたいだ衝突も
+/// 起動時刻成分で実用上避ける。attempt 開始イベントは HTTP request を
+/// 送信する直前に、終端イベントは成功・失敗を問わず attempt 終了時に
+/// ちょうど 1 回発行される (start ⇒ terminal の対応が常に取れる)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ProviderEvent {
@@ -274,6 +316,130 @@ pub enum ProviderEvent {
         to_provider: String,
         /// 切替理由。
         reason: String,
+    },
+    /// プロバイダへのリクエスト attempt を開始した。
+    RequestStarted {
+        /// attempt 相関用の request ID (同一 attempt の全イベントで同一)。
+        request_id: String,
+        /// プロバイダ識別子 (usage イベントと同じラベル)。
+        provider: String,
+        /// routing の provider profile 名。profile に紐付けられていない
+        /// 構築経路では `None`。
+        profile: Option<String>,
+        /// wire プロトコル識別子 (例: `openai-chat-completions` /
+        /// `anthropic-messages`)。
+        protocol: String,
+        /// モデル識別子。
+        model: String,
+        /// ストリーミング attempt かどうか。
+        streaming: bool,
+    },
+    /// ストリーミング attempt で最初の user-visible delta を観測した (TTFT)。
+    ///
+    /// TTFT 測定契約:
+    /// - 開始点: HTTP request attempt を**送信する直前**。
+    /// - 終了点: provider wire stream から**最初の user-visible content
+    ///   delta (空でないテキスト差分) または tool-call delta を正常に解釈
+    ///   した瞬間**。
+    /// - **first token に数えないもの**: HTTP headers 到着、usage-only
+    ///   frame、keepalive、空 delta、reasoning-only delta。
+    /// - 1 回の streaming attempt で**高々 1 回**だけ発行される。
+    /// - 非ストリーミング (`send`) attempt では発行されない。
+    FirstTokenObserved {
+        /// attempt 相関用の request ID。
+        request_id: String,
+        /// プロバイダ識別子。
+        provider: String,
+        /// routing の provider profile 名 (不明なら `None`)。
+        profile: Option<String>,
+        /// wire プロトコル識別子。
+        protocol: String,
+        /// モデル識別子。
+        model: String,
+        /// time-to-first-token (ミリ秒)。
+        ttft_ms: u64,
+    },
+    /// リクエスト attempt が成功して完了した。
+    ///
+    /// token accounting 契約: 本イベントの token counts は、**同じ
+    /// attempt について発行される [`UsageEvent::Usage`] の値をそのまま
+    /// 写した観測用の複製**である。トークン消費の集計は常に
+    /// [`UsageEvent::Usage`] だけを canonical な集計入力とし、本イベントの
+    /// counts と合算してはならない (二重計上になる)。wire 上の相関は
+    /// 「同一 provider / model で、同一 request の bus 順序が
+    /// `RequestStarted` → [`UsageEvent::Usage`] → `RequestCompleted` と
+    /// なる」ことで担保される ([`UsageEvent`] に request ID は持たせない:
+    /// wire format 不変制約のため)。
+    RequestCompleted {
+        /// attempt 相関用の request ID。
+        request_id: String,
+        /// プロバイダ識別子。
+        provider: String,
+        /// routing の provider profile 名 (不明なら `None`)。
+        profile: Option<String>,
+        /// wire プロトコル識別子。
+        protocol: String,
+        /// モデル識別子。
+        model: String,
+        /// ストリーミング attempt かどうか。
+        streaming: bool,
+        /// attempt 開始 (送信直前) からの経過時間 (ミリ秒)。
+        duration_ms: u64,
+        /// 入力トークン数 ([`UsageEvent::Usage`] と同値)。
+        input_tokens: u64,
+        /// 出力トークン数 ([`UsageEvent::Usage`] と同値)。
+        output_tokens: u64,
+        /// キャッシュ読み取りトークン数 ([`UsageEvent::Usage`] と同値)。
+        cache_read_tokens: u64,
+        /// キャッシュ書き込みトークン数 ([`UsageEvent::Usage`] と同値)。
+        cache_write_tokens: u64,
+        /// canonical finish reason (snake_case: `stop` / `length` /
+        /// `tool_use` / `content_filter`)。
+        finish_reason: String,
+    },
+    /// リクエスト attempt が失敗して終了した。
+    ///
+    /// 失敗の詳細は型付き分類のみを保持し、エラーレスポンス本文・
+    /// 詳細メッセージ・credential は**含めない**。
+    RequestFailed {
+        /// attempt 相関用の request ID。
+        request_id: String,
+        /// プロバイダ識別子。
+        provider: String,
+        /// routing の provider profile 名 (不明なら `None`)。
+        profile: Option<String>,
+        /// wire プロトコル識別子。
+        protocol: String,
+        /// モデル識別子。
+        model: String,
+        /// ストリーミング attempt かどうか。
+        streaming: bool,
+        /// attempt 開始 (送信直前) から失敗までの経過時間 (ミリ秒)。
+        duration_ms: u64,
+        /// 型付き失敗分類。
+        failure: ProviderFailureKind,
+    },
+    /// routing の fallback 選択境界でフォールバック先が選択された。
+    ///
+    /// 候補順序や retry/fallback policy 自体は変化させず、選択の観測のみを
+    /// 行う。失敗した元 attempt との相関は `request_id` (attempt の request
+    /// ID を呼び出し側が把握している場合) と `session_id` / `logical_model`
+    /// で保持する。
+    FallbackTriggered {
+        /// 失敗したプロバイダプロファイル名。
+        from_provider: String,
+        /// 選択されたフォールバック先プロバイダプロファイル名。
+        to_provider: String,
+        /// フォールバック先の実モデル ID。
+        to_model: String,
+        /// 元の論理モデル名。
+        logical_model: String,
+        /// 障害が発生したセッションの ID。
+        session_id: String,
+        /// 元 attempt の失敗分類。
+        failure: ProviderFailureKind,
+        /// 失敗した元 attempt の request ID (把握している場合のみ)。
+        request_id: Option<String>,
     },
 }
 
@@ -622,5 +788,143 @@ mod tests {
             event.kind,
             EventKind::Lifecycle(LifecycleEvent::Started { .. })
         ));
+    }
+
+    // Given: 観測系として追加する全 ProviderEvent バリアント。
+    // When: それぞれ Event として JSON 往復する。
+    // Then: 値が保存され、内側タグ名が期待どおりになる (request ID 相関の土台)。
+    #[test]
+    fn provider_observation_variants_round_trip() {
+        let cases: Vec<(&'static str, ProviderEvent)> = vec![
+            (
+                "RequestStarted",
+                ProviderEvent::RequestStarted {
+                    request_id: "req-1700000000000-1".into(),
+                    provider: "openai".into(),
+                    profile: Some("primary".into()),
+                    protocol: "openai-chat-completions".into(),
+                    model: "gpt-contract".into(),
+                    streaming: false,
+                },
+            ),
+            (
+                "FirstTokenObserved",
+                ProviderEvent::FirstTokenObserved {
+                    request_id: "req-1700000000000-2".into(),
+                    provider: "anthropic".into(),
+                    profile: None,
+                    protocol: "anthropic-messages".into(),
+                    model: "claude-contract".into(),
+                    ttft_ms: 42,
+                },
+            ),
+            (
+                "RequestCompleted",
+                ProviderEvent::RequestCompleted {
+                    request_id: "req-1700000000000-3".into(),
+                    provider: "openai-compatible".into(),
+                    profile: Some("secondary".into()),
+                    protocol: "openai-chat-completions".into(),
+                    model: "local-model".into(),
+                    streaming: true,
+                    duration_ms: 500,
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_read_tokens: 3,
+                    cache_write_tokens: 1,
+                    finish_reason: "stop".into(),
+                },
+            ),
+            (
+                "RequestFailed",
+                ProviderEvent::RequestFailed {
+                    request_id: "req-1700000000000-4".into(),
+                    provider: "anthropic".into(),
+                    profile: None,
+                    protocol: "anthropic-messages".into(),
+                    model: "claude-contract".into(),
+                    streaming: true,
+                    duration_ms: 120,
+                    failure: ProviderFailureKind::Http { status: 500 },
+                },
+            ),
+            (
+                "FallbackTriggered",
+                ProviderEvent::FallbackTriggered {
+                    from_provider: "primary".into(),
+                    to_provider: "secondary".into(),
+                    to_model: "model-b".into(),
+                    logical_model: "summary".into(),
+                    session_id: "session-1".into(),
+                    failure: ProviderFailureKind::Timeout,
+                    request_id: Some("req-1700000000000-5".into()),
+                },
+            ),
+        ];
+
+        for (inner_tag, event) in cases {
+            let outer = Event::new(event);
+            let json = serde_json::to_string(&outer).expect("serialize Event");
+            let restored: Event = serde_json::from_str(&json).expect("deserialize Event");
+            assert_eq!(outer, restored, "round-trip mismatch: {inner_tag}");
+
+            let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+            assert_eq!(value["kind"]["kind"], "Provider", "outer tag mismatch");
+            assert_eq!(
+                value["kind"]["payload"]["kind"], inner_tag,
+                "inner tag mismatch"
+            );
+        }
+    }
+
+    // Given: 失敗分類の全 ProviderFailureKind バリアント。
+    // When: それぞれ JSON 往復する。
+    // Then: 内部タグ形式の一貫した形状が保たれる (Http は status を保持する)。
+    #[test]
+    fn provider_failure_kind_round_trips_with_pinned_shapes() {
+        let http = ProviderFailureKind::Http { status: 429 };
+        let value = serde_json::to_value(http).expect("serialize Http failure");
+        assert_eq!(value, serde_json::json!({"kind": "Http", "status": 429}));
+        let restored: ProviderFailureKind =
+            serde_json::from_value(value).expect("deserialize Http failure");
+        assert_eq!(restored, http);
+
+        let unit_variants = [
+            (ProviderFailureKind::RateLimited, "RateLimited"),
+            (ProviderFailureKind::Timeout, "Timeout"),
+            (ProviderFailureKind::InvalidResponse, "InvalidResponse"),
+            (ProviderFailureKind::Transport, "Transport"),
+            (ProviderFailureKind::Server, "Server"),
+            (ProviderFailureKind::Quota, "Quota"),
+            (ProviderFailureKind::Auth, "Auth"),
+            (ProviderFailureKind::Other, "Other"),
+        ];
+        for (failure, tag) in unit_variants {
+            let value = serde_json::to_value(failure).expect("serialize unit failure");
+            assert_eq!(value, serde_json::json!({"kind": tag}), "shape: {tag}");
+            let restored: ProviderFailureKind =
+                serde_json::from_value(value).expect("deserialize unit failure");
+            assert_eq!(restored, failure, "round-trip: {tag}");
+        }
+    }
+
+    // Given: 既存 ProviderFallback の schema_version 1 wire スナップショット。
+    // When: 現在の Event として deserialize する。
+    // Then: 既存 variant の wire format は不変で復元でき、バージョンは 1 のまま。
+    #[test]
+    fn legacy_provider_fallback_snapshot_still_deserializes_and_schema_version_is_one() {
+        let snapshot = r#"{"meta":{"schema_version":1,"monotonic":{"secs":1,"nanos":0},"wall_clock":{"secs_since_epoch":1700000000,"nanos_since_epoch":0}},"kind":{"kind":"Provider","payload":{"kind":"ProviderFallback","payload":{"from_provider":"anthropic","to_provider":"openai","reason":"timeout"}}}}"#;
+
+        let event: Event = serde_json::from_str(snapshot).expect("legacy snapshot を復元できる");
+
+        assert_eq!(event.meta.schema_version, 1);
+        assert!(matches!(
+            event.kind,
+            EventKind::Provider(ProviderEvent::ProviderFallback { .. })
+        ));
+        assert_eq!(
+            SCHEMA_VERSION, 1,
+            "schema_version は追加のみで 1 を維持する"
+        );
     }
 }

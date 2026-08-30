@@ -34,6 +34,19 @@ impl From<&providers::ProviderError> for FailureKind {
     }
 }
 
+impl From<FailureKind> for event_bus::ProviderFailureKind {
+    fn from(value: FailureKind) -> Self {
+        match value {
+            FailureKind::RateLimited => Self::RateLimited,
+            FailureKind::Server => Self::Server,
+            FailureKind::Timeout => Self::Timeout,
+            FailureKind::Quota => Self::Quota,
+            FailureKind::Auth => Self::Auth,
+            FailureKind::Other => Self::Other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FailureKind;
@@ -100,6 +113,27 @@ mod tests {
                 body: String::new(),
             };
             assert_eq!(FailureKind::from(&error), expected, "status {status}");
+        }
+    }
+
+    // Given: FailureKind の全 6 variant。
+    // When: 観測イベント用の ProviderFailureKind へ変換する。
+    // Then: 同名の分類に写像される (Http ステータスは routing 層では保持しない)。
+    #[test]
+    fn failure_kind_maps_to_provider_failure_kind() {
+        use event_bus::ProviderFailureKind;
+
+        let cases = [
+            (FailureKind::RateLimited, ProviderFailureKind::RateLimited),
+            (FailureKind::Server, ProviderFailureKind::Server),
+            (FailureKind::Timeout, ProviderFailureKind::Timeout),
+            (FailureKind::Quota, ProviderFailureKind::Quota),
+            (FailureKind::Auth, ProviderFailureKind::Auth),
+            (FailureKind::Other, ProviderFailureKind::Other),
+        ];
+
+        for (failure, expected) in cases {
+            assert_eq!(ProviderFailureKind::from(failure), expected);
         }
     }
 }

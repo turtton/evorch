@@ -3698,9 +3698,11 @@ name = "routing"
 version = "0.1.0"
 dependencies = [
  "config",
+ "event-bus",
  "model",
  "providers",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

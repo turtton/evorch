@@ -1,6 +1,9 @@
 //! 論理モデルをプロバイダプロファイルと実モデル ID へ解決するルーターです。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use event_bus::{Event, EventBus, ProviderEvent};
 
 use crate::{FailureKind, ProviderProfile, RoutingError, SessionAffinity};
 use model::{LogicalModelId, ModelCatalog};
@@ -22,7 +25,7 @@ pub struct ResolvedRoute {
 /// ルートテーブルは [`BTreeMap`] で保持するため、論理モデルをまたぐ反復順序は
 /// 辞書順になります。ただし本実装の解決は 1 つの論理モデルを独立に扱い、
 /// 論理モデル間の順序付け (一括再解決など) は扱いません。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct Router {
     /// プロファイル名をキーとした検証済みプロバイダプロファイル。
     profiles: BTreeMap<String, ProviderProfile>,
@@ -30,6 +33,29 @@ pub struct Router {
     routes: BTreeMap<String, Vec<config::RouteCandidateConfig>>,
     /// 利用可否の判定に使用するモデルカタログ。
     catalog: ModelCatalog,
+    /// フォールバック選択の観測イベント発行先。未接続なら発行しない。
+    event_bus: Option<Arc<EventBus>>,
+}
+
+impl std::fmt::Debug for Router {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Router")
+            .field("profiles", &self.profiles)
+            .field("routes", &self.routes)
+            .field("catalog", &self.catalog)
+            .field("has_event_bus", &self.event_bus.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for Router {
+    /// 等価性はルーティング結果に関わるフィールドのみで判定する。
+    /// `event_bus` は観測配線の差し替え経路であり、等価性には含めない。
+    fn eq(&self, other: &Self) -> bool {
+        self.profiles == other.profiles
+            && self.routes == other.routes
+            && self.catalog == other.catalog
+    }
 }
 
 impl Router {
@@ -67,7 +93,18 @@ impl Router {
             profiles: profile_map,
             routes: routing.routes.clone(),
             catalog,
+            event_bus: None,
         })
+    }
+
+    /// フォールバック選択の観測イベントの発行先を接続する。
+    ///
+    /// 接続した場合、[`Router::next_fallback`] がフォールバック先を選択する
+    /// たびに [`ProviderEvent::FallbackTriggered`] を発行する。候補の選択
+    /// 順序や policy 自体は変化しない (観測の追加のみ)。
+    pub fn with_event_bus(mut self, event_bus: Option<Arc<EventBus>>) -> Self {
+        self.event_bus = event_bus;
+        self
     }
 
     /// セッションのアフィニティを考慮して論理モデルを具体ルートへ解決します。
@@ -175,8 +212,11 @@ impl Router {
     /// 見つからなかった場合はアフィニティを変更せず `None` を返します。
     ///
     /// `failure` は障害種別の観測と将来の順序付け改善のために受け取りますが、
-    /// v0.1 ではフォールバック順序には影響しません。本 crate はログ出力を行わない
-    /// ため、値自体も v0.1 では使用しません。
+    /// v0.1 ではフォールバック順序には影響しません (FallbackTriggered イベントの
+    /// payload として観測に使用します)。
+    ///
+    /// `request_id` は失敗した元 attempt の request ID で、観測イベントの相関に
+    /// のみ使用します。呼び出し側が把握していない場合は `None` を渡してください。
     pub fn next_fallback(
         &self,
         affinity: &mut SessionAffinity,
@@ -184,6 +224,7 @@ impl Router {
         logical: &LogicalModelId,
         failed_profile: &str,
         failure: FailureKind,
+        request_id: Option<&str>,
     ) -> Option<ResolvedRoute> {
         // v0.1 では failure は順序付けに使用しない (観測・将来利用のための引数)。
         let _ = failure;
@@ -197,6 +238,14 @@ impl Router {
             for candidate in remaining_after_failed {
                 if let Some(route) = self.available_route(candidate) {
                     affinity.pin(session_id, logical_name, &route.profile);
+                    self.emit_fallback_triggered(
+                        session_id,
+                        logical,
+                        failed_profile,
+                        failure,
+                        request_id,
+                        &route,
+                    );
                     return Some(route);
                 }
             }
@@ -209,12 +258,46 @@ impl Router {
             for candidate in candidates {
                 if let Some(route) = self.available_route(candidate) {
                     affinity.pin(session_id, logical_name, &route.profile);
+                    self.emit_fallback_triggered(
+                        session_id,
+                        logical,
+                        failed_profile,
+                        failure,
+                        request_id,
+                        &route,
+                    );
                     return Some(route);
                 }
             }
         }
 
         None
+    }
+
+    /// フォールバック選択を FallbackTriggered イベントとして発行する。
+    ///
+    /// バス未接続なら何もしない。候補の選択結果には影響しない (観測のみ)。
+    fn emit_fallback_triggered(
+        &self,
+        session_id: &str,
+        logical: &LogicalModelId,
+        failed_profile: &str,
+        failure: FailureKind,
+        request_id: Option<&str>,
+        route: &ResolvedRoute,
+    ) {
+        let Some(bus) = self.event_bus.as_ref() else {
+            return;
+        };
+        bus.emit(Event::new(ProviderEvent::FallbackTriggered {
+            from_provider: failed_profile.to_string(),
+            to_provider: route.profile.clone(),
+            to_model: route.model_id.clone(),
+            logical_model: logical.as_str().to_string(),
+            session_id: session_id.to_string(),
+            failure: failure.into(),
+            request_id: request_id.map(str::to_string),
+        }));
     }
 
     /// 候補の concrete model がカタログ上利用可能なら [`ResolvedRoute`] を返します。
@@ -676,6 +759,7 @@ mod tests {
                 &logical("summary"),
                 "a",
                 FailureKind::Server,
+                None,
             )
             .expect("失敗プロファイルより後続の候補へフォールバックできる");
         assert_eq!(
@@ -694,6 +778,7 @@ mod tests {
                 &logical("summary"),
                 "b",
                 FailureKind::Server,
+                None,
             )
             .expect("失敗プロファイルより後続の候補へフォールバックできる");
         assert_eq!(
@@ -742,6 +827,7 @@ mod tests {
                 &logical("summary"),
                 "a",
                 FailureKind::Server,
+                None,
             )
             .expect("利用可能な後続候補が 1 つ先にある");
 
@@ -790,6 +876,7 @@ mod tests {
                 &logical("summary"),
                 "first",
                 FailureKind::Server,
+                None,
             )
             .expect("別の論理モデルの候補へフォールバックできる");
 
@@ -833,6 +920,7 @@ mod tests {
             &logical("summary"),
             "only",
             FailureKind::Server,
+            None,
         );
 
         assert!(resolved.is_none(), "利用可能候補がどこにもないなら None");
@@ -870,6 +958,7 @@ mod tests {
                 &logical("summary"),
                 "a",
                 FailureKind::Server,
+                None,
             )
             .expect("次候補へフォールバックできる");
 
@@ -907,6 +996,7 @@ mod tests {
                 &logical("summary"),
                 "ghost",
                 FailureKind::Server,
+                None,
             )
             .expect("全候補が走査対象になる");
 
@@ -917,5 +1007,115 @@ mod tests {
                 model_id: "model-a".to_string(),
             }
         );
+    }
+
+    // Given: EventBus を接続した Router と宣言順 2 候補のルート。
+    // When: 失敗プロファイルの次候補が選ばれるフォールバックを request ID 付きで実行する。
+    // Then: FallbackTriggered が from/to profile・model・failure・相関情報を保持して 1 件だけ発行される。
+    #[tokio::test]
+    async fn fallback_emits_triggered_event_with_attempt_correlation() {
+        use event_bus::{EventBus, EventKind, ProviderEvent, ProviderFailureKind};
+        use std::sync::Arc;
+
+        let profiles = vec![profile("a", "model-a"), profile("b", "model-b")];
+        let routing =
+            routing_config(&[("summary", vec![candidate("a", None), candidate("b", None)])]);
+        let catalog = build_catalog(
+            &[
+                ("model-a", Availability::Available),
+                ("model-b", Availability::Available),
+            ],
+            &[],
+        );
+        let bus = Arc::new(EventBus::new(8));
+        let mut rx = bus.subscribe();
+        let router = Router::new(profiles, &routing, catalog)
+            .expect("有効な構成で Router を構築できる")
+            .with_event_bus(Some(bus));
+        let mut affinity = SessionAffinity::default();
+
+        let resolved = router
+            .next_fallback(
+                &mut affinity,
+                "session-1",
+                &logical("summary"),
+                "a",
+                FailureKind::Timeout,
+                Some("req-1700000000000-1"),
+            )
+            .expect("次候補へフォールバックできる");
+
+        assert_eq!(resolved.profile, "b", "候補選択の意味は変わらない");
+        let event = rx.recv().await.expect("イベントを受信できる");
+        let EventKind::Provider(ProviderEvent::FallbackTriggered {
+            from_provider,
+            to_provider,
+            to_model,
+            logical_model,
+            session_id,
+            failure,
+            request_id,
+        }) = event.kind
+        else {
+            panic!("FallbackTriggered イベントを期待しました: {:?}", event.kind);
+        };
+        assert_eq!(
+            (from_provider, to_provider, to_model),
+            ("a".to_string(), "b".to_string(), "model-b".to_string())
+        );
+        assert_eq!(logical_model, "summary");
+        assert_eq!(session_id, "session-1");
+        assert_eq!(failure, ProviderFailureKind::Timeout);
+        assert_eq!(request_id, Some("req-1700000000000-1".to_string()));
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "フォールバックイベントは選択 1 回につき 1 件"
+        );
+    }
+
+    // Given: EventBus を接続した Router だが、利用可能なフォールバック候補がどこにもない構成。
+    // When: フォールバック先を走査して None が返る。
+    // Then: 候補不在ではイベントを発行しない。
+    #[tokio::test]
+    async fn fallback_exhaustion_emits_no_event() {
+        use event_bus::EventBus;
+        use std::sync::Arc;
+
+        let profiles = vec![
+            profile("only", "model-only"),
+            profile("other", "model-other"),
+        ];
+        let routing = routing_config(&[
+            ("summary", vec![candidate("only", None)]),
+            ("other-logical", vec![candidate("other", None)]),
+        ]);
+        let catalog = build_catalog(
+            &[
+                ("model-only", Availability::Available),
+                ("model-other", Availability::Unavailable),
+            ],
+            &[],
+        );
+        let bus = Arc::new(EventBus::new(8));
+        let mut rx = bus.subscribe();
+        let router = Router::new(profiles, &routing, catalog)
+            .expect("有効な構成で Router を構築できる")
+            .with_event_bus(Some(bus));
+        let mut affinity = SessionAffinity::default();
+
+        let resolved = router.next_fallback(
+            &mut affinity,
+            "session-1",
+            &logical("summary"),
+            "only",
+            FailureKind::Server,
+            None,
+        );
+
+        assert!(resolved.is_none(), "利用可能候補がどこにもないなら None");
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(event.is_err(), "候補不在 (None) ではイベントを発行しない");
     }
 }

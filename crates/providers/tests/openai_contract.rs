@@ -4,7 +4,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use event_bus::{EventBus, UsageEvent};
+use event_bus::{EventBus, ProviderEvent, UsageEvent};
 use futures_util::StreamExt;
 use providers::provider::openai::{OpenAiClient, OpenAiConfig};
 use providers::{
@@ -12,7 +12,7 @@ use providers::{
     ProviderClient, ProviderError, Role, StreamEvent, Usage,
 };
 use serde_json::json;
-use support::{fixture, json_response, next_usage_event, sse_response};
+use support::{fixture, json_response, next_provider_event, next_usage_event, sse_response};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -267,11 +267,25 @@ async fn send_emits_usage_event() {
         .await
         .expect("send は成功する");
 
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestStarted {
+            streaming: false,
+            ..
+        }
+    ));
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         "openai",
         expected_usage(),
     );
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestCompleted {
+            streaming: false,
+            ..
+        }
+    ));
 }
 
 // Given: stream用EventBus購読 / When: DONEまで収集 / Then: openaiラベルのusageが4フィールド届く
@@ -289,11 +303,29 @@ async fn stream_emits_usage_event() {
         .collect()
         .await;
 
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestStarted {
+            streaming: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::FirstTokenObserved { .. }
+    ));
     assert_usage_event(
         next_usage_event(&mut receiver).await,
         "openai",
         expected_usage(),
     );
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestCompleted {
+            streaming: true,
+            ..
+        }
+    ));
 }
 
 async fn assert_http_error(status: u16) {

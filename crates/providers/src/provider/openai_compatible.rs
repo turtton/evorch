@@ -40,8 +40,15 @@ impl OpenAiCompatibleClient {
                 provider_label: provider_label.into(),
                 timeout,
                 event_bus,
+                profile: None,
             })?,
         })
+    }
+
+    /// 観測イベントへ記録する provider profile を設定する。
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.inner.profile = Some(profile.into());
+        self
     }
 }
 
