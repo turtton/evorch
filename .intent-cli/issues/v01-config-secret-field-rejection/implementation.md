@@ -48,3 +48,14 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): parser/error behavior と operations reference の修正で、新しい CLI / GUI / 対話 surface は追加しない。`no_role_facing_surface: true`
 
 `improve` (G456 / G460) は later safety net。packet-time で docs/intent writeback を宣言済み。
+## 実装確定（2026-08-30、PR #24 / issue #23）
+
+closeout learning どおり、以下がコード確定:
+
+- **strict 対象型**: Config root 全 nested struct をカバー。`deny_unknown_fields` 適用 8 struct = Config / ProviderProfileConfig / RoutingConfig / RouteCandidateConfig / PanelConfig / DiagnosticsConfig / PermissionConfig / MetricsConfig。`CredentialRefConfig` は内部タグ enum 制約のため serde 属性不可 → private ミラー構造体（`CredentialRefDe` + `KeyringRefDe`/`EnvRefDe`、各 `deny_unknown_fields`）+ 手動 `Deserialize` 委譲で variant 単位拒否。public enum の shape・`Serialize`・`JsonSchema`・wire format（`{ type = "keyring", ... }` 等）は不変
+- **denylist・エラー文言**: denylist は `strict.rs` の `CREDENTIAL_LIKE_KEYS`（api_key / apikey / api_token / access_token / auth_token / refresh_token / token / secret / client_secret / secret_key / api_secret / password / passphrase / credential_value / credentials / private_key / bearer_token）。照合は小文字化 + `-`→`_` 正規化（`API_Key`・`api-KEY` も一致）。credential-like 検出時のメッセージは固定文（「use the credential reference instead: credential = { type = "keyring", service = ..., account = ... } or { type = "env", var = ... }」）、それ以外の未知キーは `unknown field, expected one of: ...`。path は dotted（配列は `[i]` 添字。`routing.routes.fast[0].weight`）
+- **スコープ**: credential denylist は `providers.<profile>` 直下 + その `credential` テーブル内のみ適用（`check_credential_scope_keys`）。他の root セクションは通常の unknown-key 拒否。任意キー許容 map（providers のプロファイル名 / routing.routes の route 名 / panel.keybinds）は維持
+- **ロード経路**: `Config::load` が deep merge + version migration 後・`try_into` 直前で `crate::strict::validate_strict(&merged)` を呼ぶため、builtin / user / project / drop-in / env layer / CLI override の全ソース層由来が同一 strict 検査を通る。v1 ファイルの migration 後値にも適用（`v1_file_secret_rejected_after_migration` test）
+- **canonical reference 修正**: `intents/evorch/operations/config-reference.md` — 未知キー許容記述を strict rejection に撤回、Env example の field 名を `name` から正しい `var` に修正、平文 credential 拒否節（例・照合規則・remediation 例）追加、任意キー許容 map の明記
+- **挙動変更の留意**: strict 化により `EVORCH_API_KEY` 等の root 未知キー env var は load error になる（contract 意図、PR body 明記済み）。`strict.rs` allowlist 定数は struct 定義と手動同期（将来 field 追加時は strict.rs も更新）
+- **検証**: cargo test --workspace 0 failed（RED 11+4 → GREEN）、clippy -D warnings clean、fmt/diff --check clean。実 surface（providers.foo.api_key が path+remediation で拒否・valid keyring/env parse・dump_schema 健全）確認済み。CI pass。Reviewer Gate: plan reviewer 第1回 APPROVED（blocker 0 / note 12）

@@ -28,6 +28,16 @@ OpenAI / Anthropic / OpenAI-compatible が `ProviderClient` 実装としてコ�
 - **model**: ModelCatalog の4供給源のうち v0.1 実装分 — builtin デフォルト（オフライン返却）+ models.dev 起動時 fetch（キャッシュ + builtin フォールバック）+ `/v1/models` 検出マージ（属性未確定フラグ付き）。subscription 系の auth 状態動的フィルタは v0.3。更新履歴は SQLite `catalog_updates` テーブル（migration V2、append-only）
 - **routing**: TOML の複数 provider profile（credential は参照のみ・config 非書き込み）→ logical model → route → profile → 実モデル ID 解決。simple fallback（current profile → 同じ logical model の別 profile → 別 logical model。429 / 5xx / timeout / quota / auth で遷移）+ session affinity の基礎。health / cooldown 高度化は v0.4
 
+
+## v0.1.1 config strict field rejection の実装確定（2026-08-30）
+
+config ロード経路が fail-closed 化され、未知キーと平文 credential の黙殺が不可能になった（PR #24、issue #23）。要点:
+
+- **strict walker**: `crates/config/src/strict.rs` が deep merge + version migration 後・型パース直前のマージ済み値を歩き、Config root と全 nested struct の許可フィールドを allowlist 検査。エラーは `providers.foo.api_key` / `routing.routes.fast[0].weight` のような dotted config path 付き `ConfigError::InvalidField`。builtin / user / project / drop-in / env / CLI override の全ソース層に一様に適用される
+- **平文 credential の明示拒否**: `providers.<profile>` 直下と `credential` テーブル内で `api_key` / `api-key` / `token` / `secret` / `password` / `credential_value` 等を検出すると、Keyring/Env reference 形式への remediation 付きで拒否（ADR 0014 のロード経路強制）。キー照合は小文字化 + `-`→`_` 正規化。任意キーを許容する map は `providers` のプロファイル名・`routing.routes` の route 名・`panel.keybinds` のキーのみ
+- **型側防衛**: 8 struct（Config / ProviderProfileConfig / RoutingConfig / RouteCandidateConfig / PanelConfig / DiagnosticsConfig / PermissionConfig / MetricsConfig）に `deny_unknown_fields`。`CredentialRefConfig` は内部タグ enum で serde 属性が使えないため、private ミラー構造体 + 手動 Deserialize で variant 単位の拒否を実現（wire format・Serialize・JsonSchema は不変）
+- **留意**: strict.rs の allowlist 定数は struct 定義と手動同期（field 追加時は両方更新する）。`EVORCH_API_KEY` のような root 未知キー env による load が unknown-key エラーになるのは意図挙動
+
 ## サブスクリプション系 provider の実装方針（2026-08 再評価済み）
 
 - **anthropic-subscription**: senpi（code-yeongyu/senpi）方式。正規 OAuth authorization-code + PKCE（`claude.ai/oauth/authorize` → `platform.claude.com/v1/oauth/token`、scope に `user:sessions:claude_code`）。access token を Messages API の apiKey として使用。Claude Code 風 tool 命名の模倣（Stealth mode）を実装。refresh は期限 5 分前に provider 単位 lock 下で実施。pi-mono も同経路を現役で保持。
@@ -43,6 +53,8 @@ OpenAI / Anthropic / OpenAI-compatible が `ProviderClient` 実装としてコ�
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
 - fallback が「同じ model の別 profile → 別 logical model」の順で試行されること
 - 同一 session で provider affinity が保たれ、失敗時のみ cooldown 付きで切り替わること
+- config の未知キーが dotted config path 付きでロード時に拒否されること
+- credential が config に平文で書けず、Keyring/Env 参照への remediation 付きで拒否されること（ADR 0014 の load-time 強制。PR #24）
 
 ## Related decisions
 
