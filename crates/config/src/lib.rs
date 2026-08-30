@@ -11,6 +11,7 @@ pub mod load;
 mod merge;
 mod migrate;
 mod schema;
+mod strict;
 pub mod types;
 
 pub use error::ConfigError;
