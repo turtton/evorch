@@ -46,3 +46,12 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): 内部maintenance/diagnosticsのみでrole-facing surfaceなし。`no_role_facing_surface: true`。
 
 `improve` (G456 / G460) is the later safety net; packet-time maintenance is the normal path.
+
+## 実装確定（2026-08-30、PR #38 / issue #37）
+
+- **auto_vacuum 三分岐**: `db.rs::init_auto_vacuum` — 他 pragma（`journal_mode=WAL`）適用前に判定。新規 DB(`page_count==0`)→テーブル作成前に有効化。既存 DB の FULL(1)→INCREMENTAL(2) は pointer-map 互換のため full VACUUM なしで移行（info ログ）。既存 DB の NONE(0)・ページ保有は変更せず info ログのみ（起動時の全 DB 再書き込み block を回避）。
+- **budgeted vacuum**: `writer/state.rs::run_budgeted_vacuum` — maintenance tick ごとに `freelist_count >= vacuum_freelist_threshold_pages`（既定 1_024）のときのみ `PRAGMA incremental_vacuum(N)`（N=`vacuum_page_budget_per_tick` 既定 256、0 で無効化）。回収前後/回収量/budget を info ログ（secret-free）。
+- **temp 容量診断**: 管理対象 = rollback journal `<db>-journal` のみ（db/-wal/-shm は file_sizes の責務、OS 全体 temp は対象外）。起動時 + 全 maintenance tick で測定し `temp_warn_bytes`（既定 256 MiB）超過/復帰の**遷移時のみ 1 回** emit（`temp_exceeded`: bytes>0 かつ >= threshold）。emit は typed event ではなく tracing（既存 hard-limit 診断 `log_size_state` と同じ sink 選択）。
+- **テスト**: db.rs unit ×4（fresh 有効化/NONE 保持/FULL 移行で byte 不変/temp size）、state.rs unit ×5（budget 回収上限・threshold 下 no-op・budget0 無効・temp 遷移 1 回性・未満沈黙）、integration maintenance.rs ×4（tick 収束・起動時警告/沈黙 2 種）。tracing capture は LogBuffer パターン。
+- **確定実装値の記録**: storage-memory/overview.md に trigger/threshold/budget/遷移抑制/防御限界を worker が追記（AC⑧、closeout_learning target 充足）。
+- 環境修復（repo 外・worker 報告）: rustup gcc-ld shim の GC 済み nix パスを現行へ修正。
