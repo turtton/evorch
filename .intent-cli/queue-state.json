@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T06:20:11.5144483+00:00",
+  "updated_at": "2026-08-30T06:26:28.284458+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -352,6 +352,11 @@
         "implementation": ".intent-cli/issues/v01-storage-writer-boundary/implementation.md",
         "review_context": ".intent-cli/issues/v01-storage-writer-boundary/review-context.md",
         "yaml": ".intent-cli/issues/v01-storage-writer-boundary/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 27,
+        "url": "https://github.com/turtton/evorch/issues/27"
       },
       "worker_role": "implementation",
       "review_role": "review",
