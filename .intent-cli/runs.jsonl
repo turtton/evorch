@@ -62,3 +62,4 @@
 {"ts":"2026-08-30T05:47:56.2629776+00:00","execution_unit":"v01-config-secret-field-rejection","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":24}
 {"ts":"2026-08-30T05:47:56.2629776+00:00","execution_unit":"v01-config-secret-field-rejection","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":24}
 {"ts":"2026-08-30T05:51:04.4562662+00:00","execution_unit":"v01-storage-metrics-ingress-guard","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#25","reason":"https://github.com/turtton/evorch/issues/25"}
+{"ts":"2026-08-30T06:18:19.9085069+00:00","execution_unit":"v01-storage-metrics-ingress-guard","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":26}

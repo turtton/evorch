@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T05:51:04.4562662+00:00",
+  "updated_at": "2026-08-30T06:18:19.8949448+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -333,6 +333,7 @@
         "number": 25,
         "url": "https://github.com/turtton/evorch/issues/25"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/26",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
