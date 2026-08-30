@@ -85,6 +85,9 @@ impl StorageHandle {
         session_id: Option<&str>,
         event: &Event,
     ) -> Result<(), StorageError> {
+        if matches!(event.kind, event_bus::EventKind::Usage(_)) {
+            return Err(StorageError::RawUsageEventNotPersisted);
+        }
         let (reply, result) = mpsc::channel();
         self.0
             .send(Command::AppendEvent(
