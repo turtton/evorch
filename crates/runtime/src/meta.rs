@@ -21,12 +21,16 @@ struct DelegateBackgroundArgs {
     prompt: String,
     #[serde(default)]
     interactive: bool,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct DelegateArgs {
     role: String,
     prompt: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +89,7 @@ fn delegate_background(runtime: &AgentRuntime, input: serde_json::Value) -> Disp
         args.prompt,
         RunConfig {
             interactive: args.interactive,
+            name: args.name,
         },
     );
     success(run_id.to_string())
@@ -106,7 +111,16 @@ async fn delegate(
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
-    let result = runtime.delegate(role, args.prompt).await;
+    let result = runtime
+        .delegate(
+            role,
+            args.prompt,
+            RunConfig {
+                name: args.name,
+                ..RunConfig::default()
+            },
+        )
+        .await;
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }

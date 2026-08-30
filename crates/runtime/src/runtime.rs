@@ -36,6 +36,8 @@ pub(crate) struct Shared {
 
 struct RunEntry {
     role: Role,
+    name: String,
+    model: String,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<String>,
@@ -68,6 +70,11 @@ impl AgentRuntime {
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
     pub fn delegate_background(&self, role: Role, prompt: String, config: RunConfig) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let name = config
+            .name
+            .clone()
+            .unwrap_or_else(|| role.name().to_string());
+        let model = self.shared.model.selected_model(role);
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
@@ -88,6 +95,8 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 role,
+                name,
+                model,
                 phase_rx,
                 message_count_rx,
                 inbox_tx,
@@ -151,12 +160,14 @@ impl AgentRuntime {
     /// run を開始して終端まで待つ簡易 foreground API。
     ///
     /// 委譲元セッションは v0.1 では固定文字列 `runtime` として記録する。
+    /// 実行設定 (表示名など) は [`RunConfig`] で委譲先 run へ渡す。
     pub async fn delegate(
         &self,
         role: Role,
         prompt: String,
+        config: RunConfig,
     ) -> Result<AgentRunPhase, RuntimeError> {
-        let run_id = self.delegate_background(role, prompt, RunConfig::default());
+        let run_id = self.delegate_background(role, prompt, config);
         self.shared.bus.emit(Event::new(LifecycleEvent::Delegated {
             session_id: "runtime".to_string(),
             target: run_id.to_string(),
@@ -171,8 +182,10 @@ impl AgentRuntime {
             .iter()
             .map(|(run_id, entry)| AgentSummary {
                 run_id: *run_id,
+                name: entry.name.clone(),
                 role_name: entry.role.name().to_string(),
                 phase: *entry.phase_rx.borrow(),
+                model: entry.model.clone(),
             })
             .collect();
         summaries.sort_by_key(|summary| summary.run_id.get());

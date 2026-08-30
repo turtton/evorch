@@ -15,8 +15,10 @@ mod tests {
     fn summary(id: u64, role: &str, phase: AgentRunPhase) -> AgentSummary {
         AgentSummary {
             run_id: RunId::new(id),
+            name: role.into(),
             role_name: role.into(),
             phase,
+            model: "model-x".to_string(),
         }
     }
 

@@ -27,6 +27,13 @@ pub trait AgentModel: Send + Sync {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError>;
+
+    /// ロールに選択されたモデル識別子を報告する。
+    ///
+    /// 実装側 (routing profile 層) がロールごとの選択済みモデル identity を報告し、
+    /// runtime はそれをそのまま記録する。runtime は解決を行わない
+    /// (lib.rs の「ルーティングの委譲」契約と一貫)。
+    fn selected_model(&self, role: Role) -> String;
 }
 
 #[cfg(test)]
@@ -55,6 +62,10 @@ mod tests {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
             })
+        }
+
+        fn selected_model(&self, _role: Role) -> String {
+            "echo".to_string()
         }
     }
 

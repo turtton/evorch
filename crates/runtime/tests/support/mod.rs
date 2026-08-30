@@ -96,6 +96,10 @@ impl AgentModel for ScriptedModel {
             })
         })
     }
+
+    fn selected_model(&self, role: Role) -> String {
+        format!("scripted-{}", role.name().to_lowercase())
+    }
 }
 
 pub fn text_response(text: &str, finish_reason: FinishReason) -> ChatResponse {

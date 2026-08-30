@@ -55,7 +55,12 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
                 Ok(tool_response(
                     "spawn-interactive",
                     "delegate_background",
-                    json!({ "role": "explorer", "prompt": "HOLD", "interactive": true }),
+                    json!({
+                        "role": "explorer",
+                        "prompt": "HOLD",
+                        "interactive": true,
+                        "name": "held-explorer"
+                    }),
                 )),
                 Ok(tool_response("list", "list_agents", json!({}))),
                 Ok(tool_response(
@@ -119,6 +124,15 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
     assert!(!list_error);
     let summaries: serde_json::Value = serde_json::from_str(&list).expect("list JSON");
     assert_eq!(summaries.as_array().expect("summary array").len(), 3);
+    // Then: 一覧の identity 項目は meta-op 経由の委譲でも反映される
+    assert_eq!(summaries[2]["name"], json!("held-explorer"));
+    assert_eq!(summaries[2]["role_name"], json!("Explorer"));
+    assert!(
+        summaries[2]["model"]
+            .as_str()
+            .is_some_and(|model| !model.is_empty())
+    );
+    assert_eq!(summaries[0]["name"], json!("Orchestrator"));
     let (inspection, inspect_error) = tool_result(final_turn, "inspect").expect("inspect result");
     assert!(!inspect_error);
     let inspection: serde_json::Value = serde_json::from_str(&inspection).expect("inspection JSON");

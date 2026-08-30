@@ -218,8 +218,10 @@ fn tasks_row_updates_after_state_change_event() {
     let bus = EventBus::new(8);
     let source = MockSource(vec![AgentSummary {
         run_id: RunId::new(1),
+        name: "worker".into(),
         role_name: "worker".into(),
         phase: AgentRunPhase::Running,
+        model: "test-model".into(),
     }]);
     let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
     let pump = EventPump::spawn(
