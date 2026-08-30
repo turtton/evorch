@@ -41,4 +41,14 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Closeout learning: guardを置いた二つの境界と回帰テスト結果をcloseout evidenceに残す。`write_back_required: false`。
 - Guide reachability (G645): 内部storage APIの修正のみでrole-facing surfaceを追加しない。`no_role_facing_surface: true`。
 
+## 実装確定（2026-08-30、PR #26 / issue #25）
+
+- 新 error variant `StorageError::RawUsageEventNotPersisted`（`crates/storage/src/error.rs`）。Display に UsageSink 案内と ADR 0012 参照を含める（actionable）
+- 二層のガード: `StorageHandle::append_event`（`writer.rs`）と `repo::event::append_event`（`repo/event.rs`）双方で挿入前に `EventKind::Usage(_)` を拒否。公開 handle を迂回する crate 内直接呼び出しでも INSERT 不能
+- 拒否時は events table / event accounting / session total bytes を一切変更しない（INSERT 前に return）
+- 正規経路 `UsageSink for StorageHandle` → pending `UsageBucket` → `flush_usage` → `downsampled_metrics` は非変更で維持
+- tests: `crates/storage/tests/raw_usage_guard.rs` 新規 3 件（handle 拒否+非 usage 保存・repo 拒否+行数不変・UsageSink→downsampled_metrics 1 行）
+- 変更 4 ファイルのみ。新規 API 追加なし、raw usage 迂回 API なし
+- 後続 `v01-storage-writer-boundary` は本 guard を失わないよう merge 時に再確認すること（packet out of scope の指定どおり）
+
 `improve` (G456 / G460) is the later safety net; packet-time maintenance is the normal path.
