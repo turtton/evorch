@@ -91,3 +91,4 @@
 {"ts":"2026-08-30T16:25:15.8838696+00:00","execution_unit":"v01-storage-maintenance-completion","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":38}
 {"ts":"2026-08-30T16:26:14.2724497+00:00","execution_unit":"v01-storage-maintenance-completion","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":38}
 {"ts":"2026-08-30T16:26:14.2724497+00:00","execution_unit":"v01-storage-maintenance-completion","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":38}
+{"ts":"2026-08-30T16:29:18.6188515+00:00","execution_unit":"v01-provider-compatible-usage-contract","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#39","reason":"https://github.com/turtton/evorch/issues/39"}
