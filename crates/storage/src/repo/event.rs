@@ -38,6 +38,9 @@ pub fn append_event(
     limits: &HardLimits,
     accounting: &mut EventAccounting,
 ) -> Result<StoredEvent, StorageError> {
+    if matches!(event.kind, EventKind::Usage(_)) {
+        return Err(StorageError::RawUsageEventNotPersisted);
+    }
     let payload = serde_json::to_string(&event.kind)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let event_len = u64::try_from(payload.len())
