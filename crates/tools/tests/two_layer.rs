@@ -1,6 +1,5 @@
 //! 承認層と実行隔離層が独立して適用されることの統合テスト。
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,16 +44,6 @@ fn set_approval(executor: &mut ToolExecutor, bus: Arc<EventBus>) -> tokio::task:
     })
 }
 
-fn bwrap(workspace: PathBuf) -> Option<BwrapSandbox> {
-    match BwrapSandbox::detect(BwrapConfig::new(workspace)) {
-        Ok(sandbox) => Some(sandbox),
-        Err(_) => {
-            eprintln!("skip: bwrap 利用不可");
-            None
-        }
-    }
-}
-
 fn workspace_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("tools-bwrap-")
@@ -90,12 +79,12 @@ async fn approved_execution_still_routes_through_sandbox() {
 
 // Given: 一時ワークスペースを bind した bwrap / When: 外側と内側へ書き込み / Then: 外側は失敗しホストに現れず内側だけ成功する
 #[tokio::test]
+#[ignore = "bwrap 実行環境が必要"]
 async fn approved_bwrap_write_is_confined_to_workspace() {
     let workspace = workspace_dir();
     let outside = tempfile::tempdir().expect("外部領域を作成できるはずです");
-    let Some(sandbox) = bwrap(workspace.path().to_path_buf()) else {
-        return;
-    };
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap 実行環境が必要です");
     let bus = Arc::new(EventBus::new(32));
     let mut executor = ToolExecutor::with_standard_tools(Arc::clone(&bus), Arc::new(sandbox));
     let responder = set_approval(&mut executor, Arc::clone(&bus));
@@ -147,11 +136,11 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
 
 // Given: bwrap と対話 Shell / When: 承認後に PTY で echo を実行 / Then: 隔離内で正常終了して出力を返す
 #[tokio::test]
+#[ignore = "bwrap 実行環境が必要"]
 async fn interactive_shell_runs_inside_bwrap() {
     let workspace = workspace_dir();
-    let Some(sandbox) = bwrap(workspace.path().to_path_buf()) else {
-        return;
-    };
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap 実行環境が必要です");
     let bus = Arc::new(EventBus::new(16));
     let mut executor = ToolExecutor::with_standard_tools(Arc::clone(&bus), Arc::new(sandbox));
     let responder = set_approval(&mut executor, Arc::clone(&bus));
