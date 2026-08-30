@@ -8,7 +8,7 @@ pub mod usage;
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentRunPhase, Event, EventKind, EventMeta, FaultEvent, LifecycleEvent, MessageEvent,
-    ProviderEvent, SCHEMA_VERSION, ToolEvent, UsageEvent,
+    ProviderEvent, ProviderFailureKind, SCHEMA_VERSION, ToolEvent, UsageEvent,
 };
 pub use ring::RingBuffer;
 pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};
