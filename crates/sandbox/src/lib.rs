@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod bwrap;
+pub mod composition;
 pub mod credential;
 pub mod error;
 pub mod exec;
@@ -12,6 +13,7 @@ pub mod policy;
 
 pub use approval::{ApprovalGate, ApprovalOutcome};
 pub use bwrap::{BwrapConfig, BwrapSandbox};
+pub use composition::production_sandbox;
 pub use credential::{CredentialStore, FileCredentialStore, Secret, open_default};
 pub use error::{CredentialError, SandboxError};
 pub use exec::{CommandSpec, DirectSandbox, Sandbox, WrappedCommand};

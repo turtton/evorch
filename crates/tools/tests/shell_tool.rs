@@ -13,7 +13,7 @@ use serde_json::json;
 use tools::{Shell, Tool, ToolError};
 
 fn shell() -> Shell {
-    Shell::new(Arc::new(DirectSandbox))
+    Shell::new(Arc::new(DirectSandbox::new_unchecked()))
 }
 
 /// PTY テスト全体の安全網。

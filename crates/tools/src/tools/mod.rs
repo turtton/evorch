@@ -32,12 +32,12 @@ mod tests {
             (Edit.name(), Edit.schema()),
             (Grep.name(), Grep.schema()),
             (
-                Shell::new(Arc::new(DirectSandbox)).name(),
-                Shell::new(Arc::new(DirectSandbox)).schema(),
+                Shell::new(Arc::new(DirectSandbox::new_unchecked())).name(),
+                Shell::new(Arc::new(DirectSandbox::new_unchecked())).schema(),
             ),
             (
-                GitDiff::new(Arc::new(DirectSandbox)).name(),
-                GitDiff::new(Arc::new(DirectSandbox)).schema(),
+                GitDiff::new(Arc::new(DirectSandbox::new_unchecked())).name(),
+                GitDiff::new(Arc::new(DirectSandbox::new_unchecked())).schema(),
             ),
         ];
 

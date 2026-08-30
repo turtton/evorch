@@ -11,7 +11,7 @@ use sandbox::DirectSandbox;
 use tools::{GitDiff, Tool, ToolError};
 
 fn git_diff() -> GitDiff {
-    GitDiff::new(Arc::new(DirectSandbox))
+    GitDiff::new(Arc::new(DirectSandbox::new_unchecked()))
 }
 
 /// 一時ディレクトリをカレントにして git サブコマンドを実行する。

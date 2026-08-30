@@ -21,7 +21,7 @@ impl Sandbox for RecordingSandbox {
             .lock()
             .expect("記録ロックを取得できるはずです")
             .push(spec.clone());
-        DirectSandbox.wrap(spec)
+        DirectSandbox::new_unchecked().wrap(spec)
     }
 }
 

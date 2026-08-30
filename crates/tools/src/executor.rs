@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use event_bus::{Event, EventBus, ToolEvent};
 use sandbox::{
-    Action, ApprovalGate, ApprovalOutcome, ApprovalPolicy, Capabilities, Sandbox, resolve,
+    Action, ApprovalGate, ApprovalOutcome, ApprovalPolicy, BwrapConfig, Capabilities, Sandbox,
+    SandboxError, resolve,
 };
 
 use crate::error::ToolError;
@@ -78,6 +79,11 @@ impl ToolExecutor {
     /// read / edit / grep / shell / git_diff の 5 標準ツールを登録した実行器を
     /// 生成する。
     ///
+    /// 低レベルなサンドボックス注入 API である。渡された `Arc<dyn Sandbox>` は
+    /// 検証・変換されずそのまま使われるため、隔離なしの `DirectSandbox` も
+    /// 注入できる。テスト・記録用サンドボックス・独自統合向けであり、
+    /// production の呼び出し元は必ず `with_production_sandbox` を使うこと。
+    ///
     /// # Panics
     ///
     /// 標準ツールのスキーマがコンパイルできない場合のみ panic する。標準ツールの
@@ -99,6 +105,25 @@ impl ToolExecutor {
                 .expect("標準ツールのスキーマは all_standard_tool_schemas_compile でコンパイル可能を検証済み");
         }
         executor
+    }
+
+    /// read / edit / grep / shell / git_diff の 5 標準ツールを登録し、production 用の
+    /// fail-closed なサンドボックスを注入した実行器を生成する。
+    ///
+    /// `sandbox::production_sandbox`（composition root）経由で `BwrapSandbox` を
+    /// 構築する。bwrap の検出に失敗した場合はフォールバックせずエラーを返す。
+    ///
+    /// # Errors
+    ///
+    /// bwrap を検出・機能確認できない場合は `SandboxError` を返す。
+    pub fn with_production_sandbox(
+        event_bus: Arc<EventBus>,
+        config: BwrapConfig,
+    ) -> Result<Self, SandboxError> {
+        Ok(Self::with_standard_tools(
+            event_bus,
+            sandbox::production_sandbox(config)?,
+        ))
     }
 
     /// 実行判定に使う承認方針を設定する。
