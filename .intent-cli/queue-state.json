@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T16:25:15.8683402+00:00",
+  "updated_at": "2026-08-30T16:26:14.2815083+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -470,7 +470,7 @@
     {
       "execution_unit": "v01-storage-maintenance-completion",
       "title": "v0.1.1: SQLite vacuum \u3068 temp \u5BB9\u91CF\u8A3A\u65AD\u3092\u5B8C\u6210\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-session-storage"
       ],

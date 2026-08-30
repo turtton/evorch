@@ -88,3 +88,6 @@
 {"ts":"2026-08-30T15:05:35.1065306+00:00","execution_unit":"v01-storage-maintenance-completion","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#37","reason":"https://github.com/turtton/evorch/issues/37"}
 {"ts":"2026-08-30T15:43:23.3027509+00:00","execution_unit":"v02-otel-metrics-exporter","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-otel-metrics-exporter/"}
 {"ts":"2026-08-30T15:43:24.1292289+00:00","execution_unit":"v02-otel-span-exporter","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-otel-span-exporter/"}
+{"ts":"2026-08-30T16:25:15.8838696+00:00","execution_unit":"v01-storage-maintenance-completion","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":38}
+{"ts":"2026-08-30T16:26:14.2724497+00:00","execution_unit":"v01-storage-maintenance-completion","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":38}
+{"ts":"2026-08-30T16:26:14.2724497+00:00","execution_unit":"v01-storage-maintenance-completion","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":38}
