@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use event_bus::{Event, UsageBucket, UsageSink};
 
 use crate::db::file_sizes;
+use crate::entity::SecretGuard;
 use crate::{CatalogUpdateRecord, Database, ReconcileSummary, StorageConfig, StorageError};
 
 mod state;
@@ -86,7 +87,8 @@ impl StorageHandle {
     ///
     /// # Errors
     ///
-    /// raw usage event、容量上限超過、writer の終了、または永続化処理に失敗した場合に
+    /// raw usage event、容量上限超過、writer の終了、credential らしき値の検出
+    /// （heuristic、ADR 0008 defense-in-depth）、または永続化処理に失敗した場合に
     /// エラーを返します。
     pub fn append_event(
         &self,
@@ -96,6 +98,9 @@ impl StorageHandle {
         if matches!(event.kind, event_bus::EventKind::Usage(_)) {
             return Err(StorageError::RawUsageEventNotPersisted);
         }
+        // 公開 ingress で fail-fast に検査する。writer スレッド側の
+        // repo::event::append_event でも再検査される。
+        SecretGuard::from_env().check_event_kind(&event.kind)?;
         let (reply, result) = mpsc::channel();
         self.0
             .send(Command::AppendEvent(
