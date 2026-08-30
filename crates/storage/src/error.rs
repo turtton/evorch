@@ -48,6 +48,8 @@ pub enum StorageError {
     },
     /// 非同期書き込み担当が終了しました。
     WriterClosed,
+    /// raw usage event はイベントログへ永続化できません。
+    RawUsageEventNotPersisted,
     /// シリアライズまたはデシリアライズが失敗しました。
     Serialization(String),
     /// 値が許容範囲外でした。
@@ -74,6 +76,10 @@ impl fmt::Display for StorageError {
                 )
             }
             Self::WriterClosed => write!(formatter, "storage writer is closed"),
+            Self::RawUsageEventNotPersisted => write!(
+                formatter,
+                "raw usage events are not persisted; submit downsampled usage through UsageSink (ADR 0012)"
+            ),
             Self::Serialization(message) => write!(formatter, "serialization failed: {message}"),
             Self::OutOfRange(name) => write!(formatter, "value out of range: {name}"),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
@@ -90,6 +96,7 @@ impl std::error::Error for StorageError {
             | Self::SchemaTooNew { .. }
             | Self::LimitExceeded { .. }
             | Self::WriterClosed
+            | Self::RawUsageEventNotPersisted
             | Self::Serialization(_)
             | Self::OutOfRange(_) => None,
         }
