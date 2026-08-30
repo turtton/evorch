@@ -9,7 +9,7 @@ use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
 use runtime::{AgentModel, AgentRuntime, RunConfig, RuntimeError};
-use sandbox::DirectSandbox;
+use sandbox::BwrapConfig;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tools::ToolExecutor;
@@ -199,10 +199,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bus = Arc::new(EventBus::new(64));
     let reviewer_waiting = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::new(Arc::clone(&reviewer_waiting)));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(
+    let workspace_root = std::env::current_dir()?;
+    let executor = Arc::new(ToolExecutor::with_production_sandbox(
         Arc::clone(&bus),
-        Arc::new(DirectSandbox),
-    ));
+        BwrapConfig::new(workspace_root),
+    )?);
     let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
 
     let mut receiver = bus.subscribe();
