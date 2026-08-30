@@ -11,16 +11,6 @@ use std::{
 use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, Sandbox, WrappedCommand};
 use tempfile::{TempDir, tempdir, tempdir_in};
 
-fn available(workspace: &Path) -> Option<BwrapSandbox> {
-    match BwrapSandbox::detect(BwrapConfig::new(workspace.to_path_buf())) {
-        Ok(sandbox) => Some(sandbox),
-        Err(_) => {
-            eprintln!("skip: bwrap 利用不可");
-            None
-        }
-    }
-}
-
 fn workspace() -> TempDir {
     tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("作業領域を作成できるはずです")
 }
@@ -35,12 +25,18 @@ fn run(wrapped: WrappedCommand) -> Output {
 }
 
 // Given: 親環境の秘密変数と作業領域外の資格情報ファイル / When: 隔離シェルから読む / Then: どちらも取得できない
+#[ignore = "bwrap 実行環境が必要"]
 #[test]
 fn credentials_are_isolated() {
     if std::env::var_os("EVORCH_BWRAP_CHILD").is_none() {
         let output =
             Command::new(std::env::current_exe().expect("テスト実行ファイルを取得できるはずです"))
-                .args(["--exact", "credentials_are_isolated", "--nocapture"])
+                .args([
+                    "--exact",
+                    "credentials_are_isolated",
+                    "--nocapture",
+                    "--include-ignored",
+                ])
                 .env("EVORCH_BWRAP_CHILD", "1")
                 .env("FAKE_API_KEY", "parent-secret")
                 .output()
@@ -50,13 +46,16 @@ fn credentials_are_isolated() {
             "子テストが成功するはずです: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "子テストが実行されるはずです"
+        );
         return;
     }
 
     let workspace = workspace();
-    let Some(sandbox) = available(workspace.path()) else {
-        return;
-    };
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap 実行環境が必要です");
     let outside = tempdir().expect("資格情報領域を作成できるはずです");
     let credential = outside.path().join("credentials.json");
     fs::write(&credential, "secret-file").expect("資格情報 fixture を書けるはずです");
@@ -81,12 +80,12 @@ fn credentials_are_isolated() {
 }
 
 // Given: 親名前空間のローカル TCP 待受 / When: 隔離内外から接続 / Then: 外では成功し隔離内では失敗する
+#[ignore = "bwrap 実行環境が必要"]
 #[test]
 fn network_is_denied() {
     let workspace = workspace();
-    let Some(sandbox) = available(workspace.path()) else {
-        return;
-    };
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap 実行環境が必要です");
     let listener = TcpListener::bind("127.0.0.1:0").expect("ローカル待受を作成できるはずです");
     let address = listener
         .local_addr()
@@ -109,12 +108,12 @@ fn network_is_denied() {
 }
 
 // Given: 書き込み可能な作業領域と外部パス / When: 両方へファイルを作成 / Then: 作業領域だけホストへ反映される
+#[ignore = "bwrap 実行環境が必要"]
 #[test]
 fn writes_are_scoped_to_workspace() {
     let workspace = workspace();
-    let Some(sandbox) = available(workspace.path()) else {
-        return;
-    };
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+        .expect("bwrap 実行環境が必要です");
     let inside = workspace.path().join("inside.txt");
     let outside = format!("/tmp/evorch-bwrap-test-{}", std::process::id());
     let script = format!(
