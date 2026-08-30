@@ -217,6 +217,15 @@ impl Router {
     ///
     /// `request_id` は失敗した元 attempt の request ID で、観測イベントの相関に
     /// のみ使用します。呼び出し側が把握していない場合は `None` を渡してください。
+    ///
+    /// なお、このメソッドは次候補の選択と再ピンのみを行い、usage は一切発行
+    /// しません。usage 発行の所有権は各 provider attempt に留まり、成功した
+    /// 勝者 attempt がちょうど 1 回発行し、敗者 attempt は 1 件も発行しません。
+    /// したがってリトライ / フォールバックを駆動するコーディネータは usage を
+    /// 発行・再発行してはなりません。リトライやフォールバックを経て成功しても、
+    /// 1 つの論理リクエストはちょうど 1 件の
+    /// [`event_bus::UsageEvent`] (勝者 attempt のプロバイダラベルとモデルを
+    /// 載せたもの) に対応します。
     pub fn next_fallback(
         &self,
         affinity: &mut SessionAffinity,

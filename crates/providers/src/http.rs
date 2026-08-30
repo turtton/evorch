@@ -116,6 +116,18 @@ pub(crate) fn map_request_error(err: reqwest::Error) -> ProviderError {
 /// 呼び出し側 (send / stream の実装) は 1 リクエストにつき
 /// [`UsageEmitter::emit_usage`] をちょうど 1 回呼び出すこと。
 /// バスが未設定の場合は発行が no-op になる。
+///
+/// usage 発行の所有権は完了した provider attempt の経路にのみ属する。
+/// 非ストリーミングでは各 provider client の send 成功末尾
+/// (`ChatCompletionsClient::send` など) が、
+/// ストリーミングでは SSE ポンプ (`adapt_sse_stream`) の完了シグナル受理が
+/// 発行地点であり、完了した attempt が usage をちょうど 1 回発行する。
+/// 失敗・エラー・タイムアウト・JSON パース不正・完了シグナル不落・
+/// コンシューマ中断となった attempt では usage を 1 件も発行しない。
+/// リトライ / フォールバックのコーディネータは usage を発行・再発行しない
+/// (発行所有権は各 attempt に留まる)。このためリトライやフォールバックを
+/// 経て成功した論理リクエストでも usage イベントはちょうど 1 件だけ発行
+/// され、勝者 attempt のプロバイダラベルとモデルを載せる。
 pub struct UsageEmitter {
     bus: Option<Arc<EventBus>>,
     provider: String,
@@ -134,7 +146,8 @@ impl UsageEmitter {
 
     /// 1 リクエストのトークン使用量をバスへ発行する。
     ///
-    /// バスが未設定の場合は何もしない。
+    /// 完了した attempt につきちょうど 1 回呼び出すこと。失敗・中断された
+    /// attempt では呼び出さないこと。バスが未設定の場合は何もしない。
     pub fn emit_usage(&self, model: &str, usage: &Usage) {
         let Some(bus) = self.bus.as_ref() else {
             return;
