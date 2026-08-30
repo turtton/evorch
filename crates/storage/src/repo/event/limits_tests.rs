@@ -2,10 +2,10 @@
 
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::{EventAccounting, append_event, list_by_session};
+use crate::{Database, HardLimits, LimitKind, StorageConfig, StorageError};
 use event_bus::{Event, EventMeta, LifecycleEvent, MessageEvent};
 use rusqlite::Connection;
-use storage::repo::event::{EventAccounting, append_event, list_by_session};
-use storage::{Database, HardLimits, LimitKind, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 fn open_connection(temp_dir: &TempDir) -> Connection {

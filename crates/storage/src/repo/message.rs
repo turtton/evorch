@@ -8,6 +8,13 @@ use crate::entity::{MessageRecord, MessageRole};
 type MessageRow = (String, String, String, String, Option<String>, i64, i64);
 
 /// メッセージを作成します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn create(conn: &Connection, record: &MessageRecord) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO messages (id, session_id, role, content, reasoning, created_at_ns, updated_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -29,6 +36,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<MessageRecord>, Storage
 }
 
 /// メッセージの全フィールドを更新します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn update(conn: &Connection, record: &MessageRecord) -> Result<(), StorageError> {
     let changed = conn.execute(
         "UPDATE messages SET session_id = ?2, role = ?3, content = ?4, reasoning = ?5, created_at_ns = ?6, updated_at_ns = ?7 WHERE id = ?1",
@@ -41,6 +55,13 @@ pub fn update(conn: &Connection, record: &MessageRecord) -> Result<(), StorageEr
 }
 
 /// メッセージを削除し、削除件数が一件だったかを返します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn delete(conn: &Connection, id: &str) -> Result<bool, StorageError> {
     Ok(conn.execute("DELETE FROM messages WHERE id = ?1", [id])? == 1)
 }
