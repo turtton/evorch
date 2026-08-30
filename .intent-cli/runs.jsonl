@@ -85,3 +85,4 @@
 {"ts":"2026-08-30T14:53:16.7789287+00:00","execution_unit":"v01-storage-secret-boundary","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":36}
 {"ts":"2026-08-30T14:54:21.1621703+00:00","execution_unit":"v01-storage-secret-boundary","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":36}
 {"ts":"2026-08-30T14:54:21.1621703+00:00","execution_unit":"v01-storage-secret-boundary","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":36}
+{"ts":"2026-08-30T15:05:35.1065306+00:00","execution_unit":"v01-storage-maintenance-completion","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#37","reason":"https://github.com/turtton/evorch/issues/37"}
