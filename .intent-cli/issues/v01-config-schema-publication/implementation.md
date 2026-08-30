@@ -45,3 +45,12 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): artifact/docs追加はあるが新しいguide workflowやrole-facing操作surfaceではないため `no_role_facing_surface: true`。
 
 `improve` (G456 / G460) is the later safety net; packet-time maintenance is the normal path.
+
+## 実装確定（2026-08-30、PR #34 / issue #33）
+
+- 公開 artifact: `docs/config/evorch-config-v2.schema.json`（draft 2020-12、`Config` から schemars で自動生成）。`additionalProperties: false`・全 section・`CredentialRefConfig` keyring/env 参照を反映する
+- 再生成 command（deterministic、single source）: `cargo run -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json`（引数なしで stdout）
+- drift 防止: `crates/config/tests/schema_artifact.rs`（CURRENT_VERSION との v{n} 一致・byte-identical・meta-schema 有効性・section 網羅）+ CI job（再生成 → `git diff --exit-code`。stale artifact で exit 1 を実測済み）
+- version bump 手順: `CURRENT_VERSION` 更新 → 新 `v{n}` artifact を再生成して追加（test が不在を検知）
+- 依存: dev-dep に `jsonschema` を追加（workspace 既存管理の再利用、外部新規追加ではない）。Config 型定義・parsing/unknown-key 方針は無変更
+- `operations/config-reference.md` の JSON Schema 節も本 PR で更新済み（closeout_learning writeback target はこれで充足）
