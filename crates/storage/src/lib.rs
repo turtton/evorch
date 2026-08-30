@@ -13,6 +13,7 @@ pub mod entity;
 pub mod error;
 pub mod migrations;
 pub mod projection;
+mod read;
 pub mod repo;
 mod writer;
 
@@ -20,5 +21,6 @@ pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, watch_exclusions};
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
-pub use projection::ReconcileSummary;
+pub use projection::{ReconcileSummary, SessionSnapshot};
+pub use repo::event::StoredEvent;
 pub use writer::{Storage, StorageHandle};
