@@ -35,7 +35,7 @@ async fn concurrent_runs_keep_independent_histories_and_run_ids() {
     let bus = Arc::new(EventBus::new(64));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
-        Arc::new(DirectSandbox),
+        Arc::new(DirectSandbox::new_unchecked()),
     ));
     let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
     let mut events = bus.subscribe();

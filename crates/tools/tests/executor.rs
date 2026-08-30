@@ -19,7 +19,10 @@ use tools::{Permissions, Read, Tool, ToolError, ToolExecutor, ToolResult};
 fn setup_executor() -> (Arc<EventBus>, ToolExecutor, EventReceiver) {
     let bus = Arc::new(EventBus::new(16));
     let receiver = bus.subscribe();
-    let executor = ToolExecutor::with_standard_tools(Arc::clone(&bus), Arc::new(DirectSandbox));
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
     (bus, executor, receiver)
 }
 

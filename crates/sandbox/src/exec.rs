@@ -28,8 +28,18 @@ pub trait Sandbox: Send + Sync {
 }
 
 /// OS 隔離を明示的に無効化する実行方式。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DirectSandbox;
+///
+/// この型は公開 API 上の unit-like な value として構築できません。隔離の
+/// 無効化は [`DirectSandbox::new_unchecked`] による明示的な opt-out
+/// （非 production / テスト専用）のみで行えます。これは ADR 0021 の
+/// fail-closed 方針を construction API に適用したもので、policy 明示なしの
+/// permissive な構築経路を module visibility で構造的に塞ぐ invariant です
+/// （trybuild 等の compile-fail テストに代わり、本 doc と移行済みの
+/// テストで固定します）。
+#[derive(Debug, Clone, Copy)]
+pub struct DirectSandbox {
+    _sealed: (),
+}
 
 impl Sandbox for DirectSandbox {
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
@@ -39,6 +49,18 @@ impl Sandbox for DirectSandbox {
             cwd: spec.cwd,
             env: merge_environment(spec.extra_env),
         })
+    }
+}
+
+impl DirectSandbox {
+    /// OS 隔離を無効化する明示的な opt-out constructor。
+    ///
+    /// 非 production / テスト専用。production の tool 実行構築は
+    /// `composition::production_sandbox`（fail-closed composition root）を
+    /// 使うこと。ADR 0021 の方針により、隔離なし実行はこの API のような
+    /// 明示的な意図表明経由でのみ許可される。
+    pub const fn new_unchecked() -> Self {
+        Self { _sealed: () }
     }
 }
 
@@ -75,7 +97,7 @@ mod tests {
     // Given: 親環境に存在し得る秘密名 / When: 直接方式で包む / Then: 許可リスト外の環境は渡らない
     #[test]
     fn parent_secret_is_not_forwarded() {
-        let wrapped = DirectSandbox
+        let wrapped = DirectSandbox::new_unchecked()
             .wrap(spec())
             .expect("コマンドを包めるはずです");
         assert!(!wrapped.env.iter().any(|(key, _)| key == "FAKE_SECRET"));
@@ -84,7 +106,7 @@ mod tests {
     // Given: 親 PATH / When: 直接方式で包む / Then: PATH が引き継がれる
     #[test]
     fn path_is_forwarded() {
-        let wrapped = DirectSandbox
+        let wrapped = DirectSandbox::new_unchecked()
             .wrap(spec())
             .expect("コマンドを包めるはずです");
         assert_eq!(
@@ -100,7 +122,7 @@ mod tests {
     // Given: 追加環境 / When: 直接方式で包む / Then: 指定値が統合される
     #[test]
     fn extra_environment_is_merged() {
-        let wrapped = DirectSandbox
+        let wrapped = DirectSandbox::new_unchecked()
             .wrap(spec())
             .expect("コマンドを包めるはずです");
         assert!(
@@ -113,7 +135,7 @@ mod tests {
     // Given: 作業ディレクトリ付き仕様 / When: 直接方式で包む / Then: 作業ディレクトリが保持される
     #[test]
     fn cwd_is_preserved() {
-        let wrapped = DirectSandbox
+        let wrapped = DirectSandbox::new_unchecked()
             .wrap(spec())
             .expect("コマンドを包めるはずです");
         assert_eq!(wrapped.cwd, Some(PathBuf::from("/workspace")));

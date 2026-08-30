@@ -16,7 +16,7 @@ fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(128));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
-        Arc::new(DirectSandbox),
+        Arc::new(DirectSandbox::new_unchecked()),
     ));
     AgentRuntime::new(bus, executor, model)
 }
