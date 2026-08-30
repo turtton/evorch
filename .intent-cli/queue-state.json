@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T12:57:24.9489292+00:00",
+  "updated_at": "2026-08-30T12:59:20.2946385+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -420,7 +420,7 @@
     {
       "execution_unit": "v01-config-schema-publication",
       "title": "v0.1.1: config JSON Schema \u3092\u7248\u7BA1\u7406\u3057\u3066\u516C\u958B\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-routing-profiles"
       ],
