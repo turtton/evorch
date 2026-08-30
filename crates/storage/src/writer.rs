@@ -83,6 +83,11 @@ pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
     /// イベントを容量制限付きで追記します。
+    ///
+    /// # Errors
+    ///
+    /// raw usage event、容量上限超過、writer の終了、または永続化処理に失敗した場合に
+    /// エラーを返します。
     pub fn append_event(
         &self,
         session_id: Option<&str>,
@@ -126,11 +131,20 @@ impl StorageHandle {
     }
 
     /// 保留中の usage バケットを直ちに永続化します。
+    ///
+    /// # Errors
+    ///
+    /// writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
     pub fn flush_usage_now(&self) -> Result<(), StorageError> {
         self.request(Command::FlushUsage)
     }
 
     /// PASSIVE WAL checkpoint とサイズ状態の再評価を直ちに実行します。
+    ///
+    /// # Errors
+    ///
+    /// writer が終了済み、SQLite 操作、またはデータベース関連ファイルのサイズ取得に
+    /// 失敗した場合にエラーを返します。
     pub fn checkpoint_now(&self) -> Result<(), StorageError> {
         self.request(Command::Checkpoint)
     }
