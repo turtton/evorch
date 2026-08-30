@@ -44,12 +44,13 @@ Librarian / Oracle
 Role / Category separation
 Tree-sitter / LSP
 ContentOrigin 実装（ADR 0008）
+web_search / web_fetch（tools-sandbox 側ー v0.2 web ツール確定節参照）
 project trust（ロード制御、ADR 0008）
 provider affinity
 cache metrics
 ```
 
-**成功基準**: v0.1 の4 role（Orchestrator / Explorer / Worker / Reviewer）に Librarian / Oracle が追加され、計6 role が capability boundary として分離動作し、cache hit ratio が計測され、sandbox policy が role ごとに適用される。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
+**成功基準**: v0.1 の4 role（Orchestrator / Explorer / Worker / Reviewer）に Librarian / Oracle が追加され、計6 role が capability boundary として分離動作し、Librarian が web_search / web_fetch（tools-sandbox 側ー v0.2 web ツール確定）で外部調査でき、cache hit ratio が計測され、sandbox policy が role ごとに適用される。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
 
 ## v0.3 — プロバイダ拡張と cache 高度化
 

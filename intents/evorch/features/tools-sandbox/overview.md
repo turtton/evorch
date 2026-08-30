@@ -44,11 +44,30 @@ bwrap integration test（`crates/sandbox/tests/bwrap.rs`、`crates/tools/tests/t
 
 tool 実行の production 構築を fail-closed に閉じる composition root を `crates/sandbox/src/composition.rs` に確定（PR #22、issue #21）。`DirectSandbox` は private field `_sealed` で seal され `Default` derive を除去、隔離無効化は `DirectSandbox::new_unchecked()`（doc に非 production / テスト専用 opt-out を明記）経由のみ。production 入口は `sandbox::production_sandbox(BwrapConfig) -> Result<Arc<dyn Sandbox>, SandboxError>`（`BwrapSandbox::detect` 失敗時は error を返して DirectSandbox へ fallback しない）と `ToolExecutor::with_production_sandbox(event_bus, BwrapConfig) -> Result<Self, SandboxError>`。既存 `ToolExecutor::with_standard_tools` は挙動不変のまま doc により明示的低レベル注入 API として維持。`orchestrator_demo` は composition root 経由に移行済み（scripted flow / approval semantics は不変）。policy → network mode 伝播（`build_sandbox`）は `BwrapConfig` 入力として composition root と合成され、ExecutionPolicy からの consumer 配線は `v01-gui-runtime-wiring` の責務。bwrap 実環境テストは `#[ignore = "bwrap 実行環境が必要"]`（`crates/sandbox/tests/composition_root.rs`、`crates/tools/tests/production_sandbox.rs`）。
 
+## v0.2 web ツール（web_search / web_fetch）の実装確定（2026-08-31、grill web-tools-v02）
+
+v0.2 で Librarian の調査相棒として `web_search` / `web_fetch` を導入する（v0.2 roadmap の「Librarian/Oracle 追加」「ContentOrigin 実装」と対になる slice）。3 系統参考調査（OpenCode V2 / oh-my-opencode / pi・oh-my-pi・senpi）と interview `web-tools-v02`（10/10 accepted、`intents/evorch/interviews/web-tools-v02.json`）により以下が確定。
+
+- **ツール構成（q01）**: `web_search` と `web_fetch` の 2 本分離。fetch を `read` に統合する方式（omp 由来）は不採用 — external untrusted コンテンツと local ファイルで `ContentOrigin` 型付け・権限境界が曖昧になるため。
+- **検索の実装層（q02）**: builtin tool（統一 Tool trait 層）。内部 transport は keyless MCP endpoint 互換の JSON-RPC HTTP POST（OpenCode V2 同型）。キー提供時は provider REST API 直叩きへ切替可能な provider abstraction とする。汎用 rmcp client 層 / モデル依存 provider-native routing は v0.2 スコープ外。
+- **provider 範囲（q03）**: Exa keyless 既定 + Tavily keyless 一次 fallback。`SearchProvider` trait の抽象化のみ v0.2 で確定、key 必須系（Brave/Kagi/Perplexity）は trait 上の後続 slice。credential は環境変数経由。
+- **fetch 変換（q04）**: 明示 selector（`<article>`/`<main>`）優先 → Readability 系本文抽出 → full document fallback の extracter チェーン。`format: text | markdown | html` は参考系と同型（html は抽出スキップで生返却）。サイト専用 extractor（GitHub/arXiv 等）は v0.3+ backlog としてチェーン先頭に差し込める構造。
+- **size 制限（q05）**: response 上限 5MB（Content-Length + 実読み + 解凍後）、model-facing 上限 50KB UTF-8 安全 byte-prefix 切詰め。超過は失敗でなく truncation metadata（`truncated: true, original_bytes: N`）を返し、続き取得ヒントを添付。context window 連動の動的切詰め（omo 方式）は v0.3+ backlog。
+  - **spill-to-file 不採用の根拠**: untrusted web コンテンツを disk に落とすと「ローカルファイル」扱いで制御マーカー escape と `WebUntrusted` 型付けが外れ、ADR 0008 脅威モデルを実質破壊。worker の workspace 外 write denied とも衝突する。
+- **ContentOrigin 型付け（q06）**: `ToolExecutor` の結果正規化層で tool が要求する capability から機械導出（fail-closed、tool 自己申告は不可）。mapping: network 要求 tool → `WebUntrusted`、workspace read tool → `RepositoryUntrusted`、その他 → `ToolTrusted`。Q2 の transport 経路と非依存で保証。
+- **権限合成と実行位置（q07）**: 3 層 AND — role capability（ADR 0002、network allowed）∧ per-tool permission（allow/ask/deny）∧ session `NetworkAccess` mode（Denied → 拒否 / OptIn → 承認 / Allowed → 通過）。実行は bwrap 外 main process（v0.1.1 の provider client パターン拡張）。worker sandbox の NetworkAccess は引き締めたまま、web ツールのみ main process 経由で通信可能。provider credential は main process 環境変数のみ、worker sandbox 内非露出（ADR 0008 credential 分離の延長）。
+- **SSRF/redirect ガード（q08）**: main process 層に `NetworkGuard` として集約。 HTTPS 強制・redirect 最大 10 回で先も同一ガード再適用・DNS pinning（rebinding 対策）・size 両面チェック。遮断: link-local（169.254/16、AWS/GCP metadata endpoint）・CGNAT（100.64/10）・IPv6 link-local（fe80::/10）。許可: loopback（127/8, ::1, `localhost`）・RFC 1918 private IP（10/8, 172.16/12, 192.168/16、開発者の内部サービス到達のため）。
+- **browser escalation（q09）**: v0.2 では実装せず、capability facet を名前空間分離（`network` vs `network.browser`）して将来拡張点として予約。「network capability 保持 ≠ browser 実行可能」を型レベルで担保。
+- **観測性（q10）**: 既存 `ToolStarted`/`ToolCompleted` を継続し、tool-specific metadata を `ToolCompleted` の detail に包含（新規イベント種別は追加しない）。web_search: provider / request_id / latency_ms / result_count / used_fallback / fallback_attempts / credential_status。web_fetch: url / final_url / status_code / content_length / decompressed_bytes / truncated / original_bytes / redirect_count / redirect_blocked / extraction_method。
+
+v0.3+ backlog: サイト専用 extractor、key 必須 provider、provider-native routing、context window 連動切詰め、credential/usage attribution 高度化。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること
 - exec と pty が分離され、interactive process を扱えること
 - sandbox policy が role ごとに適用されること（v0.1.1 で network が OS 強制まで接続（PR #20）、production composition root も landed（PR #22）。残る consumer 配線は v01-gui-runtime-wiring）
+- web_search / web_fetch が v0.2 で Librarian から利用可能で、tool 実行が bwrap 外 main process で行われること、`ContentOrigin::WebUntrusted` が `ToolExecutor` 層で fail-closed に型付されること、truncation / fallback / redirect_blocked 等の metadata が `ToolCompleted` event detail に観測可能な形で流れること（v0.2 確定節参照）
 
 ## Related decisions
 
