@@ -9,6 +9,10 @@ name = "routing"
 
 [dependencies]
 config = { path = "../config" }
+event-bus = { path = "../event-bus" }
 model = { path = "../model" }
 providers = { path = "../providers" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

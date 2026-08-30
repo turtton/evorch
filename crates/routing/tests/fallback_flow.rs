@@ -92,6 +92,7 @@ fn fallback_after_pin_resolve_roundtrip() {
             &LogicalModelId::from("summary"),
             resolved.profile.as_str(),
             FailureKind::Server,
+            None,
         )
         .expect("失敗プロファイルの次候補へフォールバックできる");
     assert_eq!(fallback.profile, "secondary");
