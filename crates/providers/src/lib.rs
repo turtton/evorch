@@ -5,6 +5,7 @@ pub mod client;
 pub mod error;
 pub mod http;
 pub mod message;
+pub(crate) mod observe;
 pub mod provider;
 pub mod sse;
 pub mod stream;

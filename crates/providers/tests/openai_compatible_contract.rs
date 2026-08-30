@@ -3,14 +3,14 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use event_bus::{EventBus, UsageEvent};
+use event_bus::{EventBus, ProviderEvent, UsageEvent};
 use futures_util::StreamExt;
 use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use providers::{
     ChatRequest, ContentBlock, FinishReason, Message, ProviderAuth, ProviderClient, ProviderError,
     Role, StreamEvent,
 };
-use support::{fixture, json_response, next_usage_event, sse_response};
+use support::{fixture, json_response, next_provider_event, next_usage_event, sse_response};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
@@ -57,6 +57,13 @@ async fn send_uses_custom_base_url_and_provider_label() {
         .expect("send は成功する");
 
     assert_eq!(response.finish_reason, FinishReason::Stop);
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestStarted {
+            streaming: false,
+            ..
+        }
+    ));
     match next_usage_event(&mut receiver).await {
         UsageEvent::Usage {
             provider, model, ..
@@ -66,6 +73,13 @@ async fn send_uses_custom_base_url_and_provider_label() {
         }
         UsageEvent::CacheStats { .. } => panic!("Usage イベントを期待しました"),
     }
+    assert!(matches!(
+        next_provider_event(&mut receiver).await,
+        ProviderEvent::RequestCompleted {
+            streaming: false,
+            ..
+        }
+    ));
 }
 
 // Given: OpenAI互換SSE / When: stream / Then: text差分とCompletedを返す

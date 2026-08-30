@@ -17,6 +17,7 @@ use super::UsageEmitter;
 use super::map_request_error;
 use crate::error::ProviderError;
 use crate::message::{FinishReason, Usage};
+use crate::observe::AttemptObserver;
 use crate::sse::{SseFrame, SseParseError, SseParser};
 use crate::stream::{DeltaStream, StreamAccumulator, StreamEvent};
 
@@ -71,18 +72,20 @@ pub(crate) struct SsePump<I> {
     accumulator: StreamAccumulator,
     usage: UsageEmitter,
     model: String,
+    observer: AttemptObserver,
     pending: VecDeque<Result<StreamEvent, ProviderError>>,
     done: bool,
 }
 
 impl<I: WireStreamInterpreter> SsePump<I> {
-    fn new(interpreter: I, usage: UsageEmitter, model: String) -> Self {
+    fn new(interpreter: I, usage: UsageEmitter, model: String, observer: AttemptObserver) -> Self {
         Self {
             parser: SseParser::new(),
             interpreter,
             accumulator: StreamAccumulator::default(),
             usage,
             model,
+            observer,
             pending: VecDeque::new(),
             done: false,
         }
@@ -119,14 +122,26 @@ impl<I: WireStreamInterpreter> SsePump<I> {
         if !self.done {
             match self.interpreter.finish() {
                 Ok(interpretation) => self.absorb_interpretation(interpretation),
-                Err(err) => self.pending.push_back(Err(err)),
+                Err(err) => {
+                    self.observer.emit_failed(&err);
+                    self.pending.push_back(Err(err));
+                }
             }
+        }
+        // 完了シグナル無しの入力終了は、canonical イベント列には Err を流さず
+        // 従来どおり静かに終える (DeltaStream の契約は変更しない) が、attempt
+        // 観測上は中途 EOF として Transport 失敗を 1 件発行する。
+        if !self.done {
+            let error =
+                ProviderError::Request("stream ended without completion signal".to_string());
+            self.observer.emit_failed(&error);
         }
         self.done = true;
     }
 
     /// トランスポート層エラーをキューイングし、入力の消化を止める。
     fn push_transport_error(&mut self, err: ProviderError) {
+        self.observer.emit_failed(&err);
         self.pending.push_back(Err(err));
         self.done = true;
     }
@@ -145,6 +160,7 @@ impl<I: WireStreamInterpreter> SsePump<I> {
                     }
                 }
                 Err(err) => {
+                    self.observer.emit_failed(&err);
                     self.pending.push_back(Err(err));
                     self.done = true;
                     return;
@@ -159,6 +175,7 @@ impl<I: WireStreamInterpreter> SsePump<I> {
     /// [`StreamEvent::Completed`] を最後にキューイングする。
     fn absorb_interpretation(&mut self, interpretation: FrameInterpretation) {
         for event in interpretation.events {
+            self.observer.note_delta(&event);
             self.accumulator.feed(&event);
             self.pending.push_back(Ok(event));
         }
@@ -166,6 +183,8 @@ impl<I: WireStreamInterpreter> SsePump<I> {
             let accumulator = std::mem::take(&mut self.accumulator);
             let response = accumulator.finish(usage, finish_reason);
             self.usage.emit_usage(&self.model, &response.usage);
+            self.observer
+                .emit_completed(&response.usage, response.finish_reason.clone());
             self.pending
                 .push_back(Ok(StreamEvent::Completed { response }));
             self.done = true;
@@ -175,8 +194,9 @@ impl<I: WireStreamInterpreter> SsePump<I> {
     /// SSE 解析エラーを [`ProviderError::InvalidSse`] としてキューイングし、
     /// 入力の消化を止める。
     fn fail_with_sse_error(&mut self, err: SseParseError) {
-        self.pending
-            .push_back(Err(ProviderError::InvalidSse { detail: err.detail }));
+        let error = ProviderError::InvalidSse { detail: err.detail };
+        self.observer.emit_failed(&error);
+        self.pending.push_back(Err(error));
         self.done = true;
     }
 }
@@ -188,20 +208,26 @@ impl<I: WireStreamInterpreter> SsePump<I> {
 /// アキュムレータを確定させ、`usage` をちょうど 1 回発行して
 /// [`StreamEvent::Completed`] を流す。バス未設定の [`UsageEmitter`]
 /// を渡せば発行は no-op になる。完了シグナルが来ないまま入力が終了した
-/// 場合は `Completed` を流さずにストリームを終える。
+/// 場合は `Completed` を流さずにストリームを終える。この中途 EOF は
+/// canonical 契約上は静かな終了だが、attempt 観測上は Transport の
+/// [`event_bus::ProviderEvent::RequestFailed`] として発行される。
 #[allow(dead_code)] // TODO(T5/T6): provider 実装が利用するまでの一時許可
 pub(crate) fn adapt_sse_stream<I>(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     interpreter: I,
     usage: UsageEmitter,
     model: String,
+    observer: AttemptObserver,
 ) -> DeltaStream
 where
     I: WireStreamInterpreter + 'static,
 {
     let byte_stream: ByteStream = Box::pin(byte_stream);
     Box::pin(futures_util::stream::unfold(
-        (SsePump::new(interpreter, usage, model), byte_stream),
+        (
+            SsePump::new(interpreter, usage, model, observer),
+            byte_stream,
+        ),
         |(mut pump, mut byte_stream)| async move {
             loop {
                 if let Some(event) = pump.pop_pending() {
