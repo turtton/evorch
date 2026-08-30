@@ -113,7 +113,17 @@ claude-main = [
 
 ## JSON Schema
 
-`schemars` で生成可能（`examples/dump_schema.rs`）。エディタ補完・検証用として公開する際はこの出力を使う。
+`Config` から `schemars` で自動生成した JSON Schema を versioned artifact として公開している（ADR 0014）。
+
+- **公開 artifact**: [`docs/config/evorch-config-v2.schema.json`](../../../docs/config/evorch-config-v2.schema.json)。ファイル名の `v{n}` は `Config` の `CURRENT_VERSION` に対応する（version bump 時は新しい `v{n}` 名の artifact を追加する）。
+- **再生成**: `cargo run -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json`。生成は deterministic（byte-identical）で、CI が checked-in artifact との drift を検査するため手編集は不可。引数なしで実行すると標準出力に出る。
+- **エディタでの利用**: 設定ファイルの先頭に schema directive を書くと補完・検証が有効になる（taplo / Even Better TOML 拡張）。
+
+  ```toml
+  #:schema <このリポジトリへの相対パス>/docs/config/evorch-config-v2.schema.json
+  ```
+
+  `#:schema` には設定ファイルからの相対パスまたは URL を指定できる。
 
 ## 関連
 

@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "設定ファイルのルート構造。\n\n各セクションは [`serde(default)`] により省略可能ですが、未知のキーは拒否します。\nロード経路では [`crate::strict`] がドット区切りの設定パスを報告し、直接の serde\nパースでも `deny_unknown_fields` により拒否します。",
+  "type": "object",
+  "properties": {
+    "diagnostics": {
+      "description": "診断 (ログ) 設定。",
+      "$ref": "#/$defs/DiagnosticsConfig",
+      "default": {
+        "log_level": "info"
+      }
+    },
+    "metrics": {
+      "description": "メトリクス設定。",
+      "$ref": "#/$defs/MetricsConfig",
+      "default": {
+        "enabled": true,
+        "retention_days": 30
+      }
+    },
+    "panel": {
+      "description": "パネル UI 設定。",
+      "$ref": "#/$defs/PanelConfig",
+      "default": {
+        "keybinds": {},
+        "layout": "default"
+      }
+    },
+    "permissions": {
+      "description": "権限設定。",
+      "$ref": "#/$defs/PermissionConfig",
+      "default": {
+        "preset": "default"
+      }
+    },
+    "providers": {
+      "description": "プロバイダプロファイル (マップキーがプロファイル名)。",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderProfileConfig"
+      },
+      "default": {}
+    },
+    "routing": {
+      "description": "ルーティング設定。",
+      "$ref": "#/$defs/RoutingConfig",
+      "default": {
+        "routes": {}
+      }
+    },
+    "version": {
+      "description": "設定スキーマのバージョン。",
+      "type": "integer",
+      "format": "uint32",
+      "default": 2,
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ApiProtocolConfig": {
+      "description": "モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-messages`) です。\n`OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子\n(`openai-responses`・`openai-completions`) として直列化します (ADR 0004)。",
+      "oneOf": [
+        {
+          "description": "Anthropic Messages API。",
+          "type": "string",
+          "const": "anthropic-messages"
+        },
+        {
+          "description": "OpenAI Responses API。",
+          "type": "string",
+          "const": "openai-responses"
+        },
+        {
+          "description": "OpenAI Chat Completions API。",
+          "type": "string",
+          "const": "openai-completions"
+        }
+      ]
+    },
+    "CredentialRefConfig": {
+      "description": "認証情報の参照方法。\n\n秘密情報そのものは一切保持せず、取得先 (キーリングのサービス名・アカウント名、\nまたは環境変数名) のみを表現します。この型が秘密素材を含まないことは\nこのクレートのハードな契約です。",
+      "oneOf": [
+        {
+          "description": "OS のキーリングから取得する。",
+          "type": "object",
+          "properties": {
+            "account": {
+              "description": "キーリングのアカウント名。",
+              "type": "string"
+            },
+            "service": {
+              "description": "キーリングのサービス名。",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "keyring"
+            }
+          },
+          "required": [
+            "type",
+            "service",
+            "account"
+          ]
+        },
+        {
+          "description": "環境変数から取得する。",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "env"
+            },
+            "var": {
+              "description": "環境変数名。",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "var"
+          ]
+        }
+      ]
+    },
+    "DiagnosticsConfig": {
+      "description": "診断 (ログ出力) の設定。",
+      "type": "object",
+      "properties": {
+        "log_dir": {
+          "description": "ログ出力ディレクトリ。未指定の場合は既定の位置を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "log_level": {
+          "description": "ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。",
+          "type": "string",
+          "default": "info"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricsConfig": {
+      "description": "メトリクス収集の設定。",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "メトリクス収集の有効フラグ。",
+          "type": "boolean",
+          "default": true
+        },
+        "retention_days": {
+          "description": "メトリクスの保持日数。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PanelConfig": {
+      "description": "パネル UI の設定。",
+      "type": "object",
+      "properties": {
+        "keybinds": {
+          "description": "キーバインド (アクション名からキーへのマップ)。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "layout": {
+          "description": "レイアウト名。",
+          "type": "string",
+          "default": "default"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PermissionConfig": {
+      "description": "権限プリセットの設定。",
+      "type": "object",
+      "properties": {
+        "preset": {
+          "description": "権限プリセット名。",
+          "type": "string",
+          "default": "default"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderProfileConfig": {
+      "description": "プロバイダプロファイル 1 件分の設定。\n\n[`super::Config`] の `providers` マップのキーがプロファイル名になります。",
+      "type": "object",
+      "properties": {
+        "api_protocol": {
+          "description": "通信に用いる API プロトコル。",
+          "$ref": "#/$defs/ApiProtocolConfig",
+          "default": "anthropic-messages"
+        },
+        "base_url": {
+          "description": "API のベース URL。",
+          "type": "string",
+          "default": "https://api.anthropic.com"
+        },
+        "credential": {
+          "description": "認証情報の参照。",
+          "$ref": "#/$defs/CredentialRefConfig",
+          "default": {
+            "type": "env",
+            "var": "ANTHROPIC_API_KEY"
+          }
+        },
+        "default_model": {
+          "description": "既定で使用するモデル ID。",
+          "type": "string",
+          "default": "claude-sonnet-4-5"
+        },
+        "models": {
+          "description": "利用可能なモデル ID の一覧。",
+          "type": "array",
+          "default": [
+            "claude-sonnet-4-5"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider_type": {
+          "description": "プロバイダの種別。",
+          "$ref": "#/$defs/ProviderTypeConfig",
+          "default": "anthropic"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderTypeConfig": {
+      "description": "プロバイダの種別 (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-subscription`) です。\n`OpenAi` 系は語を分割しない識別子 (`openai`・`openai-codex`・\n`openai-compatible`) として直列化するため個別に rename します (ADR 0004)。",
+      "oneOf": [
+        {
+          "description": "Anthropic API (従量課金)。",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Anthropic サブスクリプション (Claude Pro / Max)。",
+          "type": "string",
+          "const": "anthropic-subscription"
+        },
+        {
+          "description": "OpenAI API。",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "OpenAI Codex (ChatGPT サブスクリプション連携)。",
+          "type": "string",
+          "const": "openai-codex"
+        },
+        {
+          "description": "GitHub Copilot。",
+          "type": "string",
+          "const": "github-copilot"
+        },
+        {
+          "description": "OpenRouter。",
+          "type": "string",
+          "const": "openrouter"
+        },
+        {
+          "description": "OpenAI 互換 API (汎用プレースホルダ)。",
+          "type": "string",
+          "const": "openai-compatible"
+        }
+      ]
+    },
+    "RouteCandidateConfig": {
+      "description": "ルートの候補 1 件分の設定。",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "モデル ID の上書き指定。省略時はプロファイルの `default_model` を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "description": "使用するプロバイダプロファイル名。",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoutingConfig": {
+      "description": "ルーティング設定。",
+      "type": "object",
+      "properties": {
+        "routes": {
+          "description": "ルート名から候補リスト (フォールバック順) へのマップ。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RouteCandidateConfig"
+            }
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

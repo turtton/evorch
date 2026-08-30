@@ -17,6 +17,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
+      # 再生成結果と checked-in artifact が一致しない場合は drift として失敗する。
+      - name: Check config schema artifact is up to date
+        run: |
+          cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
+          git diff --exit-code docs/config/evorch-config-v2.schema.json
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
