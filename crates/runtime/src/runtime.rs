@@ -1,6 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -11,7 +12,9 @@ use tokio::task::JoinHandle;
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
-use crate::{AgentInspection, AgentModel, AgentSummary, RunConfig, RunId, RuntimeError};
+use crate::{
+    AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunConfig, RunId, RuntimeError,
+};
 
 const INBOX_CAPACITY: usize = 32;
 
@@ -65,6 +68,28 @@ impl AgentRuntime {
                 runs: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// production 構成のランタイムを生成する。
+    ///
+    /// `build_sandbox(&ExecutionPolicy, workspace)` 経由で role の network
+    /// capability を bwrap policy へ伝播し、標準ツールを持つ ToolExecutor に注入する
+    /// composition root (PR #22 の fail-closed 経路 / implementation.md:48)。
+    /// bwrap の検出・検証に失敗した場合はエラーをそのまま伝播する。
+    /// DirectSandbox へのフォールバック経路は存在しない (ADR 0021)。
+    pub fn production(
+        bus: Arc<EventBus>,
+        policy: &ExecutionPolicy,
+        workspace_root: PathBuf,
+        model: Arc<dyn AgentModel>,
+    ) -> Result<Self, RuntimeError> {
+        let sandbox = crate::network::build_sandbox(policy, workspace_root).map_err(|error| {
+            RuntimeError::Sandbox {
+                detail: error.to_string(),
+            }
+        })?;
+        let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
+        Ok(Self::new(bus, executor, model))
     }
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
