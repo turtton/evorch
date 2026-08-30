@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T02:35:14.6915793+00:00",
+  "updated_at": "2026-08-30T02:38:17.8368746+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -251,6 +251,11 @@
         "implementation": ".intent-cli/issues/v01-role-network-enforcement/implementation.md",
         "review_context": ".intent-cli/issues/v01-role-network-enforcement/review-context.md",
         "yaml": ".intent-cli/issues/v01-role-network-enforcement/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 19,
+        "url": "https://github.com/turtton/evorch/issues/19"
       },
       "worker_role": "implementation",
       "review_role": "review",
