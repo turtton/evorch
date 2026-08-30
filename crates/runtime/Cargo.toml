@@ -14,12 +14,12 @@ event-bus = { path = "../event-bus" }
 providers = { path = "../providers" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sandbox = { path = "../sandbox" }
 thiserror = { workspace = true }
 tools = { path = "../tools" }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-sandbox = { path = "../sandbox" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

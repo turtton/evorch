@@ -30,7 +30,7 @@ pub use context::AgentContext;
 pub use error::RuntimeError;
 pub use event_bus::AgentRunPhase;
 pub use model::AgentModel;
-pub use network::{SandboxNetworkMode, sandbox_network_mode};
+pub use network::{SandboxNetworkMode, build_sandbox, sandbox_network_mode};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
 pub use runtime::AgentRuntime;

@@ -2,9 +2,13 @@
 //! (ADR 0002 / 0021)。
 //!
 //! このモジュールは [`NetworkAccess`] 要件を [`SandboxNetworkMode`] へ解決する
-//! 純粋な写像を提供する。サンドボックス化コマンドの実行方法 (executor) は扱わない。
+//! 純粋な写像と、その解決結果を [`build_sandbox`] で bwrap 構成へ伝達するシームを
+//! 提供する。サンドボックス化コマンドの実行方法 (executor) は扱わない。
+
+use std::{path::PathBuf, sync::Arc};
 
 use agents::NetworkAccess;
+use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxError};
 
 use crate::policy::ExecutionPolicy;
 
@@ -44,4 +48,27 @@ impl ExecutionPolicy {
     pub fn sandbox_network_mode(&self) -> SandboxNetworkMode {
         sandbox_network_mode(self.capabilities.network, false)
     }
+}
+
+/// [`ExecutionPolicy`] のネットワーク境界を強制する bwrap サンドボックスを構築する。
+///
+/// [`ExecutionPolicy::sandbox_network_mode`] の解決結果を
+/// [`BwrapConfig::allow_network`] へ伝達する。[`SandboxNetworkMode::Unshared`]
+/// は `--unshare-net` 付き、[`SandboxNetworkMode::ParentNetns`] はネットワーク
+/// 分離なしの構成になる。検証や構築のエラーはそのまま伝播する (fail-closed)。
+/// サンドボックスなしでの実行へのフォールバックは存在しない (ADR 0021)。
+///
+/// これは構成時点 (composition-time) のシームである。1 つの ToolExecutor /
+/// AgentRuntime インスタンスは 1 つのポリシーから構築された 1 つのサンドボックスを
+/// 受け取る。実行ごと・ロールごとのサンドボックス切替には executor API の
+/// 再設計が必要であり、それは v0.1 のスコープ外である (issue #19)。
+pub fn build_sandbox(
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+) -> Result<Arc<dyn Sandbox>, SandboxError> {
+    let config = BwrapConfig::new(workspace_root).allow_network(matches!(
+        policy.sandbox_network_mode(),
+        SandboxNetworkMode::ParentNetns
+    ));
+    BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
 }
