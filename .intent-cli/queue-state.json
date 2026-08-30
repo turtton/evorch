@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T06:18:19.8949448+00:00",
+  "updated_at": "2026-08-30T06:20:11.5144483+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -317,7 +317,7 @@
     {
       "execution_unit": "v01-storage-metrics-ingress-guard",
       "title": "v0.1.1: raw usage event \u306E\u76F4\u63A5\u6C38\u7D9A\u5316\u3092\u9632\u6B62\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-session-storage"
       ],
