@@ -51,3 +51,12 @@ Captured while the design context is fresh. Answer or explicitly decline:
 ## Closeout learning（2026-08-30、v01-role-network-enforcement / PR #20 より）
 
 `crates/runtime/src/network.rs` の `build_sandbox(&ExecutionPolicy, workspace)` が policy → `BwrapConfig.allow_network` 伝播の composition seam として存在する。本 unit では production composition root からこの関数を**必ず呼び**、role ごとの network mode（Denied = `--unshare-net`、Allowed = 親 netns 継承＝full-open）が sandboxed tool execution（shell / git_diff）へ伝播することを検証要件に含めること。allow は destination filter 非対応の full-open であり、provider client は main-process 経路のまま bwrap 外であることは変更しない。
+
+## 実装確定（2026-08-30、PR #22 / issue #21）
+
+- `DirectSandbox` は private field `_sealed` で seal し `Default` derive を除去。隔離無効化は `DirectSandbox::new_unchecked()`（`pub const`、doc に非 production / テスト専用 opt-out を明記、`crates/sandbox/src/exec.rs`）経由のみ。compile-fail test（trybuild）は追加せず、module visibility + doc comment + 移行済みテストで invariant を固定（packet scope の選択肢どおり）
+- production composition root は `crates/sandbox/src/composition.rs` の `sandbox::production_sandbox(BwrapConfig) -> Result<Arc<dyn Sandbox>, SandboxError>`。内部で `BwrapSandbox::detect` を呼び、失敗時は `SandboxError::BwrapUnavailable` をそのまま返して DirectSandbox へ fallback しない。テスト用の検出シームは非公開 `compose_with`（fail-closed 伝播・失敗プログラム・疑似 bwrap 成功の 3 unit tests）
+- production 標準 ToolExecutor 構築は `ToolExecutor::with_production_sandbox(event_bus, BwrapConfig) -> Result<Self, SandboxError>`（`crates/tools/src/executor.rs`）。既存 `with_standard_tools` は挙動不変のまま doc で明示的低レベル注入 API と区別し、既存テストは継続利用
+- `orchestrator_demo` は `with_production_sandbox` + `BwrapConfig::new(current_dir)` 経由に移行。scripted model / runtime flow / 出力 / approval semantics は不変
+- **network mode との合成方針**: composition root の入力は `BwrapConfig` であり `ExecutionPolicy` は受け取らない。policy → network mode 伝播（`build_sandbox`）の composition root との合成は呼び出し側で行い、consumer 配線は `v01-gui-runtime-wiring` の責務（前 closeout が同 unit packet に必須要件として追記済み）
+- bwrap 実環境テストは `#[ignore = "bwrap 実行環境が必要"]` 属性付きで `crates/sandbox/tests/composition_root.rs`（実 bwrap 構築）と `crates/tools/tests/production_sandbox.rs`（bwrap 内 pwd e2e）に確定

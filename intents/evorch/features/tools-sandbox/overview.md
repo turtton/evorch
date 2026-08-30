@@ -40,11 +40,15 @@ read / edit / grep / shell / git_diff の 5 ツールが `crates/tools/` にコ�
 
 bwrap integration test（`crates/sandbox/tests/bwrap.rs`、`crates/tools/tests/two_layer.rs`）の skip 観測方法: `#[ignore = "bwrap 実行環境が必要"]` 属性付き（既定 `cargo test` では pass ではなく ignored として集計され pass と区別可能）。bwrap 利用環境では `cargo test -- --include-ignored` で実行。子プロセス re-exec 系テストは `EVORCH_BWRAP_CHILD` 環境変数で二重 re-exec を防止。**follow-up**: CI に bwrap 利用 runner での `--include-ignored` job を追加する（T5。v0.1.1 scope 外で見送り）。
 
+## v0.1.1 production composition root の実装確定（2026-08-30）
+
+tool 実行の production 構築を fail-closed に閉じる composition root を `crates/sandbox/src/composition.rs` に確定（PR #22、issue #21）。`DirectSandbox` は private field `_sealed` で seal され `Default` derive を除去、隔離無効化は `DirectSandbox::new_unchecked()`（doc に非 production / テスト専用 opt-out を明記）経由のみ。production 入口は `sandbox::production_sandbox(BwrapConfig) -> Result<Arc<dyn Sandbox>, SandboxError>`（`BwrapSandbox::detect` 失敗時は error を返して DirectSandbox へ fallback しない）と `ToolExecutor::with_production_sandbox(event_bus, BwrapConfig) -> Result<Self, SandboxError>`。既存 `ToolExecutor::with_standard_tools` は挙動不変のまま doc により明示的低レベル注入 API として維持。`orchestrator_demo` は composition root 経由に移行済み（scripted flow / approval semantics は不変）。policy → network mode 伝播（`build_sandbox`）は `BwrapConfig` 入力として composition root と合成され、ExecutionPolicy からの consumer 配線は `v01-gui-runtime-wiring` の責務。bwrap 実環境テストは `#[ignore = "bwrap 実行環境が必要"]`（`crates/sandbox/tests/composition_root.rs`、`crates/tools/tests/production_sandbox.rs`）。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること
 - exec と pty が分離され、interactive process を扱えること
-- sandbox policy が role ごとに適用されること（v0.1.1 で network が OS 強制まで接続。残る production composition root 配線は v01-secure-tool-composition-root / v01-gui-runtime-wiring）
+- sandbox policy が role ごとに適用されること（v0.1.1 で network が OS 強制まで接続（PR #20）、production composition root も landed（PR #22）。残る consumer 配線は v01-gui-runtime-wiring）
 
 ## Related decisions
 
