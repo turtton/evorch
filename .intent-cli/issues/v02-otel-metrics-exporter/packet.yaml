@@ -1,47 +1,72 @@
 implementation_issue_packet:
-  issue_title: "v02-otel-metrics-exporter TODO short title"
+  issue_title: "OTLP metrics exporter: 写像層経由の GenAI 標準 + evorch.* 拡張属性エクスポート"
   issue_kind: feature
   source_execution_unit: v02-otel-metrics-exporter
   domain: evorch
   target_repo: turtton/evorch
-  target_path: <comma- or space-separated paths>
-  target_part: "<one-line target description>"
+  target_path: "crates/event-bus/"
+  target_part: "写像層（crates/event-bus 内の新規 module。domain event → OTel 属性変換）+ metrics OTLP exporter（feature-gated opt-in、既定 off として新規導入）。crate 分割が必要になった場合は ADR 0016 の crate 粒度基準に従う"
   dependencies: []
-  technical_baseline: []
-  intent_references: []
+  technical_baseline:
+    - "ADR 0012 で計測アーキテクチャ（OTel Metrics API 語彙、raw 非永続、downsampled 保存、任意 OTLP export）が決定済みだが、opentelemetry crate 依存は未導入。本 slice で feature-gated opt-in（既定 off）として新規導入する"
+    - "crates/event-bus に型付き event schema と tokio broadcast ベースの bus が landed 済み。provider 観測 event（request 開始 / response 完了 / usage 計測の観測点）は PR #32 で schema に追加済み"
+    - "event bus の transport は in-process tokio broadcast に確定済み（ADR 0017）で、複数 subscriber への配信が可能"
+    - "内部 event schema はドメイン語彙を保持し、OTel 属性への変換は専任写像層に集中させる（ADR 0023 決定 3）"
+    - "gen_ai semconv は v1.37.0 に pin。自動追従せず意図的 bump のみ（ADR 0023 決定 6）"
+  intent_references:
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/technology/mvp-roadmap.md"
+    - "intents/evorch/technology/architecture.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+    - "intents/evorch/decisions/0014-config-architecture.md"
+    - "intents/evorch/decisions/0015-verification-two-layer.md"
+    - "intents/evorch/decisions/0017-event-bus-transport.md"
+    - "intents/evorch/decisions/0023-otel-attribute-conventions.md"
   acceptance_criteria:
-    - "TODO: at least one acceptance criterion"
+    - "写像層が内部ドメイン event を OTel 属性（gen_ai.* 標準 + evorch.* 拡張）へ一義的に変換し、属性 mapping 表が pin された semconv リリース（v1.37.0）を明記する"
+    - "producer（provider / runtime / tool 各層）が opentelemetry crate を直接参照せず、OTel 変換が写像層 module に集中している"
+    - "metrics attribute が whitelist（集計軸 session / task / agent_run / profile + 最小構造軸 evorch.delegation.depth / evorch.delegation.role の低カーディナリティ列挙値のみ）に収まり、ID 系属性・自由文字列が metric label に含まれない"
+    - "検証が ADR 0023 決定 7 に従う: mapping 層の golden/snapshot test（pin 固定 fixture）＋ CI cardinality guard（metrics attribute whitelist 強制）＋ debug exporter 経由の最小 OTLP E2E が 1 本入る"
+    - "`otel-exporter` feature が feature-gated opt-in（既定 off）として新規導入され、feature off（既定）ビルドで既存の event 配信・bus 動作が回帰しない"
+    - "ADR 0023 確定版（決定 4 の evorch.* whitelist を最終属性で更新）と mvp-roadmap.md の v0.2「役割の深化と観測」への OTLP exporter（metrics）着手・完了の反映が本 slice に同梱される"
 
 # G461: optional packet-time intent-maintenance metadata. OPTIONAL and
 # backward-compatible — packets that omit this whole block stay valid.
 # Fill it in or explicitly decline each part while the design context is
 # fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
 intent_placement:
-  primary_intent: <intents/evorch/intent-tree/...>
-  supporting_intents: []
+  primary_intent: intents/evorch/features/diagnostics-self-improvement/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/features/gui-workbench/overview.md
   new_intent_needed: false
-  placement_rationale: ""
+  placement_rationale: "観測（observability）は自己改善機能の分析基盤としての役割を持つため（ADR 0023 Context / Consequences: 委譲軸は diagnostics-self-improvement のローカル downsampled 集計にも供給される）、primary は diagnostics-self-improvement、supporting は v0.2「役割の深化と観測」の mvp-roadmap と観測面の gui-workbench とする。独立した OTel 最上位 intent は作らない。将来 telemetry intent を top-level 化する再編の可能性のみ残す（ADR 0023 記載）。"
 knowledge_updates:
   intent_tree:
     required: false
     target_paths: []
-    summary: ""
+    summary: "新規 intent node は不要。既存 node（diagnostics-self-improvement primary、mvp-roadmap / gui-workbench supporting）に統合する。"
   adr:
-    required: false
-    target_paths: []
-    decision_title: ""
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0023-otel-attribute-conventions.md
+    decision_title: "OTel attribute 規約と写像層配置の採用"
   diagram:
     required: false
     target_paths: []
     diagram_type: none
   docs:
-    required: false
-    target_paths: []
-    summary: ""
+    required: true
+    target_paths:
+      - intents/evorch/technology/mvp-roadmap.md
+    summary: "v0.2「役割の深化と観測」の OTLP exporter（metrics）着手・完了を反映"
 closeout_learning:
-  expected: ""
-  write_back_required: false
-  write_back_targets: []
+  expected: "写像層の実装で確定した evorch.* 属性の最終 whitelist を ADR 0023 決定 4 に確定反映し、ADR 0023 を確定版として記録する。mvp-roadmap.md の v0.2「役割の深化と観測」に OTLP exporter（metrics）の着手・完了を反映する。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/decisions/0023-otel-attribute-conventions.md
+    - intents/evorch/technology/mvp-roadmap.md
 # G645/G661: guide reachability is explicit and checked at closeout.
 # Uncomment and complete EXACTLY ONE accepted form. Leaving this
 # commented is visibly undeclared; the scaffold never guesses that
@@ -59,3 +84,6 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

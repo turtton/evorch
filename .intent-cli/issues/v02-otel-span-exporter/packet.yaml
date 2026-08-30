@@ -1,31 +1,56 @@
 implementation_issue_packet:
-  issue_title: "v02-otel-span-exporter TODO short title"
+  issue_title: "OTLP span exporter: 委譲親子を span 親子に写像する GenAI 標準準拠エクスポート"
   issue_kind: feature
   source_execution_unit: v02-otel-span-exporter
   domain: evorch
   target_repo: turtton/evorch
-  target_path: <comma- or space-separated paths>
-  target_part: "<one-line target description>"
-  dependencies: []
-  technical_baseline: []
-  intent_references: []
+  target_path: "crates/event-bus/"
+  target_part: "写像層の span 化拡張 + span OTLP exporter"
+  dependencies:
+    - v02-otel-metrics-exporter
+  technical_baseline:
+    - "slice 1（v02-otel-metrics-exporter）完了が前提: `crates/event-bus/` 内に写像層（domain event → OTel 変換 module）と feature gate された OTLP metrics exporter が新規導入済みであること（opentelemetry crate 依存と feature gate 本体も slice 1 で導入される）"
+    - "event bus の in-process broadcast transport は ADR 0017 で確定済み。内部 event schema は `crates/event-bus/` に存在し、PR #32 で provider 観測 event が landed 済み（task_id / agent_run_id による相関を含む）。schema はドメイン語彙を保持する（ADR 0023 決定 3）"
+    - "委譲親子木の addressing は ADR 0022 で確立済み。span 親子写像の直接根拠とする"
+    - "ADR 0012 の計測ポリシー（OTel Metrics API 採用、raw 非永続、ハード上限、sampling 方針）確定済み。feature gate の config 構成は ADR 0014 の枠組みに従い既定 off を維持。exporter 設定の reload は ADR 0019 の runtime reload 枠組みに従う"
+    - "gen_ai semconv の pin は v1.37.0（ADR 0023 決定 6）。本 slice 着手時に bump を検討する（意図的 bump 手続き: release 差分精読 → 写像表差分 → 検証結果の明示表。自動追従しない）"
+  intent_references:
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/technology/mvp-roadmap.md"
+    - "intents/evorch/technology/architecture.md"
+    - "intents/evorch/decisions/0012-metrics-architecture.md"
+    - "intents/evorch/decisions/0014-config-architecture.md"
+    - "intents/evorch/decisions/0015-verification-two-layer.md"
+    - "intents/evorch/decisions/0017-event-bus-transport.md"
+    - "intents/evorch/decisions/0019-runtime-reload-semantics.md"
+    - "intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md"
+    - "intents/evorch/decisions/0023-otel-attribute-conventions.md"
   acceptance_criteria:
-    - "TODO: at least one acceptance criterion"
+    - "委譲親子が span 親子（parent span 紐付け）として写像される（task/run span → agent 実行 span → `invoke_agent` → child `chat` → `execute_tool` の階層）"
+    - "span 命名・属性が OTel GenAI semconv（gen_ai.*）registry に準拠する（invoke_agent / chat / execute_tool 階層。pin 対象 semconv リリースは写像表に明記、現基準 v1.37.0）"
+    - "evorch.* の span 属性に session / task / agent_run ID を保持する（metrics 側には載せない高カーディナリティ規律を維持）。構造軸は低カーディナリティ列挙（evorch.delegation.depth / evorch.delegation.role）に留める"
+    - "raw の LLM I/O・SSE 本文・message 本文・credential を span 属性・span event として含めない（ADR 0012 の raw 非永続ポリシーと整合）"
+    - "sampling hook と ADR 0012 のハード上限（件数/時間/byte 閾値）が span 経路にも実効する"
+    - "slice 1 で導入された写像層の golden/snapshot test（pin 固定 fixture）を span 親子構造 fixture へ拡張し、CI cardinality guard（ID 混入の静的ブロック）が span 属性に対しても効くこと"
+    - "debug exporter 経由の最小 OTLP E2E（span）が 1 本入り、wire レベル疎通を assertion できる"
 
 # G461: optional packet-time intent-maintenance metadata. OPTIONAL and
 # backward-compatible — packets that omit this whole block stay valid.
 # Fill it in or explicitly decline each part while the design context is
 # fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
 intent_placement:
-  primary_intent: <intents/evorch/intent-tree/...>
-  supporting_intents: []
+  primary_intent: intents/evorch/features/diagnostics-self-improvement/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/features/gui-workbench/overview.md
   new_intent_needed: false
-  placement_rationale: ""
+  placement_rationale: "metrics unit と同趣旨で独立した OTel intent は作らない。委譲まわりの計測・観測は自己改善機能の分析基盤（diagnostics-self-improvement）の入力源として具体化する（ADR 0023 Context 参照）とともに、mvp-roadmap v0.2「役割の深化と観測」を前進させる slice。gui-workbench 側の span 可視化は別 slice の責務。本 slice は slice 1 と同一 placement の span 側拡張。"
 knowledge_updates:
   intent_tree:
     required: false
     target_paths: []
-    summary: ""
+    summary: "新規 intent node は不要。既存 node（diagnostics-self-improvement primary、mvp-roadmap / gui-workbench supporting）に統合する slice 的拡張。"
   adr:
     required: false
     target_paths: []
@@ -35,13 +60,16 @@ knowledge_updates:
     target_paths: []
     diagram_type: none
   docs:
-    required: false
-    target_paths: []
-    summary: ""
+    required: true
+    target_paths:
+      - intents/evorch/technology/mvp-roadmap.md
+    summary: "v0.2「役割の深化と観測」の OTLP exporter（span 側まで含む）完了を反映"
 closeout_learning:
-  expected: ""
-  write_back_required: false
-  write_back_targets: []
+  expected: "mvp-roadmap.md の v0.2「役割の深化と観測」に OTLP exporter（span 側まで含む）の完了を反映する。ADR 0023 は確定済み前提とし、本 slice 実装中に semconv pin を bump した場合のみ ADR 0023 へ change-log 追記（「release 差分精読 → 写像表差分 → 検証結果」の明示表を残す）する。それ以外の ADR 更新は不要。"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0023-otel-attribute-conventions.md
 # G645/G661: guide reachability is explicit and checked at closeout.
 # Uncomment and complete EXACTLY ONE accepted form. Leaving this
 # commented is visibly undeclared; the scaffold never guesses that
@@ -59,3 +87,6 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
