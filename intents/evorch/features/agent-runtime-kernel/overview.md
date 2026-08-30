@@ -39,6 +39,45 @@ Agent Kernel
 - **routing 委譲境界**: `AgentModel` trait が role → model routing の境界。v01-routing-profiles（実装中）が本 trait を実装する
 - **orchestrator meta 操作**: 委譲系操作は ToolUse dispatch として runtime 内で処理
 
+v0.2 で messaging op 再編と workspace 隔離を予定している。後述の「v0.2 計画」節を参照。
+
+## v0.2 計画: メッセージング再編と workspace 隔離（grill subagent-internalization 確定、2026-08-30）
+
+oh-my-pi（can1357/oh-my-pi、commit 51f0380 調査）の設計をベースに、evorch の event sourcing（ADR 0018）・親子ツリー topology・Linux-first sandbox（ADR 0021/0009）へ合わせて改修して取り込む。以下は v0.2 ターゲットの計画であり、現行 v0.1 実装との gap を明示する。宛先規則（親子限定ツリー addressing）と `can_delegate` の Role capability 開放の決定自体は [ADR 0022](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md) を参照。
+
+### messaging op 再編（`crates/runtime/src/meta.rs`）
+
+- `send`: fire-and-forget。相手の応答や完了を待たない
+- `wait_reply`: timeout 付き reply waiter。返信が必要な場合のみ使用
+- `inbox`: 未読メッセージの pull 参照
+
+現行 `send_message` は送信後に相手 run の完了を待つ同期寄りの形であり、この 3 op 構成に再編する。宛先検証は delegation tree の親子関係で行う（ADR 0022）。
+
+### 配送语义
+
+- 相手が busy の場合、sender が親なら steering（実行中の turn に注入）、sender が親でなければ aside（step boundary まで保留）。親子ツリー規則と整合する注入 policy
+- 相手が Waiting / idle なら wake
+- parked（session 解放済み）なら DM で revive
+- 完了通知と mid-run relay の channel を分離する: `AgentMessage` イベントを `BackgroundTaskCompleted` / finish 結果の経路から独立させる（`crates/event-bus` 拡張）
+
+ADR 0018（SQLite event sourcing）上に置くため、oh-my-pi の cap 100 非 durable mailbox と異なり、メッセージの durable 化・監査・再送制御が構造的に可能。
+
+### RunConfig.workspace_mode と git worktree backend（`crates/runtime/src/run.rs`）
+
+- `workspace_mode = shared`: 親と同じ cwd で動作（現行相当）
+- `workspace_mode = isolated`: runtime が委譲時に git worktree を作成し run の cwd として绑定。bwrap fs sandbox（ADR 0021/0009、Linux-first）と組み合わせ、worktree を rw、それ以外を policy 通りに mount する
+- worktree の作成・破棄・merge は harness（evorch runtime）が所有する
+- merge mode: `patch`（差分を .patch artifact として親へ返す）と `branch`（`evorch/task/<run-id>` branch に commit し親が merge/cherry-pick）を両サポート。branch が既定（herdr-opencode-loop の実運用が branch + PR フローのため整合）
+- 並列 worker が同一 checkout を触る競合をツール側で防げるようになる
+
+### parked 状態
+
+AgentRunPhase に parked 相当の状態（または Done + revive 経路）を追加し、session を解放した agent が DM で revive できるようにする。
+
+### 参照
+
+oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく。参照ファイル: `registry/agent-lifecycle.ts`（idle → parked → revive）、`registry/agent-tree.ts`、`irc/bus.ts`（mailbox + waiter + delivery receipt）、`session/irc-bridge.ts`（steer / aside）、`task/engine.ts`、`config/agents-config.ts`、`messaging.ts`、`projections/pipeline.ts`。
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
@@ -50,8 +89,11 @@ Agent Kernel
 - [ADR 0001: 固定 workflow を採用しない](../../decisions/0001-no-fixed-workflow.md)
 - [ADR 0005: Headless Agent Kernel と GUI の分離](../../decisions/0005-headless-kernel-and-gui-separation.md)
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)
+- [ADR 0022: 親子限定ツリー addressing と can_delegate の Role capability 開放](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md)
 
 ## Open questions
 
 - AgentRun の最大同時起動数の既定値
 - Task boundary を自動検出するか、明示的なコマンドのみにするか
+- 最大委譲深度の確定値（ADR 0022 では推奨 2–3。実装時に確定）
+- parked run の状態保持方針（revive 可能な期限・event stream 上の扱い）

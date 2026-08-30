@@ -31,3 +31,4 @@ Role を personality ではなく capability boundary とする。
 - [features/orchestration](../features/orchestration/overview.md)
 - [features/tools-sandbox](../features/tools-sandbox/overview.md)
 - [identity/mission](../identity/mission.md)
+- [ADR 0022: 親子限定ツリー addressing と can_delegate の Role capability 開放](0022-parent-child-tree-addressing-and-nested-delegation.md) — `can_delegate` の適用範囲拡大（boundary 設計自体は不変）
