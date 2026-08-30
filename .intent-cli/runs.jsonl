@@ -71,3 +71,5 @@
 {"ts":"2026-08-30T07:49:03.4732035+00:00","execution_unit":"v01-storage-writer-boundary","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":28}
 {"ts":"2026-08-30T07:53:30.6628304+00:00","execution_unit":"v01-gui-runtime-wiring","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#29","reason":"https://github.com/turtton/evorch/issues/29"}
 {"ts":"2026-08-30T10:06:01.4020296+00:00","execution_unit":"v01-gui-runtime-wiring","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":30}
+{"ts":"2026-08-30T10:07:43.7794486+00:00","execution_unit":"v01-gui-runtime-wiring","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":30}
+{"ts":"2026-08-30T10:07:43.7794486+00:00","execution_unit":"v01-gui-runtime-wiring","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":30}

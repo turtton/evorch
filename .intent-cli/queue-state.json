@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T10:06:01.3885578+00:00",
+  "updated_at": "2026-08-30T10:07:43.7884463+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -367,7 +367,7 @@
     {
       "execution_unit": "v01-gui-runtime-wiring",
       "title": "v0.1.1: \u88FD\u54C1 GUI \u3092\u5B9F Agent Runtime \u3068\u5171\u6709 Event Bus \u3078\u63A5\u7D9A\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-gui-panes",
         "v01-agent-roles",
