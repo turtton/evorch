@@ -99,5 +99,5 @@ claude-main = [
 
 - [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../decisions/0004-provider-routing-separation.md)
 - [ADR 0008: 脅威モデル](../decisions/0008-threat-model-phased-adoption.md)
-- [ADR 0014: config マルチソース・migration](../decisions/0014-config-multi-source-migration.md)
+- [ADR 0014: config アーキテクチャ](../decisions/0014-config-architecture.md)
 - [features/provider-routing/overview](../features/provider-routing/overview.md)
