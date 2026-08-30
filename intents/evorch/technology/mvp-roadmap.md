@@ -35,6 +35,8 @@ Features:
 
 **成功基準**: Orchestrator が依頼を受け、Explorer/Worker/Reviewer を background 起動し、event stream が観測でき、GUI で複数 pane が表示され、session が SQLite に永続化される。
 
+**v0.1.1 進捗（2026-08-30、PR #30）**: 製品 GUI（`evorch-gui`）が実 AgentRuntime へ wiring 済み。`EmptyAgentSource` は廃止され、runtime と EventPump が同一 `Arc<EventBus>` を共有する。`--demo` は外部 AI provider 不要の決定的 scripted session で、tasks pane に name/role/status/model の live 表示と Pending→Running→Done 遷移を確認できる（手順は `evorch-gui --help` に同梱）。残る v0.1 GUI 側の gap は文字内容レイアウトの automated 検証（headless screenshot 基盤が前提）と実 provider 配線時の routing 実装。
+
 ## v0.2 — 役割の深化と観測
 
 ```text

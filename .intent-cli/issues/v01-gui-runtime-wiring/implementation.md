@@ -46,3 +46,13 @@ v0.1 inspect の slice #9 は pane 単体の実装ではなく roadmap の製品
 ## Closeout learning（2026-08-30、v01-role-network-enforcement / PR #20 より）
 
 製品 GUI entrypoint から実 AgentRuntime を組む際、`crates/runtime/src/network.rs` の `build_sandbox(&ExecutionPolicy, workspace)` を経由して role の network capability が bwrap policy へ伝播することを必須要件に含めること。allow は full-open（destination filter 非対応、selective egress は v0.2）。bwrap integration test は `#[ignore]` + `cargo test -- --include-ignored` で観測する。
+
+## 実装確定（2026-08-30、PR #30 / issue #29）
+
+- **製品 wiring**: `crates/gui/src/bin/evorch-gui.rs` が `EmptyAgentSource` 廃止、起動時に `AgentRuntime::production(bus, &ExecutionPolicy::for_role(Role::Orchestrator), current_dir, model)`（`crates/runtime/src/runtime.rs`）を組み、runtime・EventPump・GUI が同一 `Arc<EventBus>` を共有。bwrap 未検出時は `RuntimeError::Sandbox` で exit 1（fail-closed）
+- **AgentRuntime::production**: 内部は `network::build_sandbox(&policy, workspace)`（policy→network mode 伝播、PR #20 seam）で sandbox を構築し `ToolExecutor::with_standard_tools` へ注入。`sandbox::production_sandbox` / `with_production_sandbox`（PR #22 composition root）は BwrapConfig 直接受取りの sibling entry として残存。**注記**: packet の「production ToolExecutor は with_production_sandbox 経由」条項に対し、本実装は with_standard_tools + 構築済み sandbox 注入を選択（with_production_sandbox は network mode 付き BwrapConfig を build_sandbox 経由で組めない API 形状のため）。fail-closed 挙動は両経路で同等。API dedup は後続 micro-unit 候補として memory
+- **AgentSummary identity**: `{ run_id, name, role_name, phase, model }`。`RunConfig { interactive, name: Option<String> }`、name 未指定は role 名フォールバック。`AgentModel::selected_model(role)`（routing profile 層が報告）。meta-ops（delegate / delegate_background）に `name` 引数追加
+- **GUI tasks mapping**: `TasksModel` / `WorkbenchState::new` から `model_label` 固定引数を削除。TaskRow は AgentSummary の name/role_name/model を直接写像
+- **決定的 demo**: `evorch-gui --demo` が `DemoScriptModel`（marker-keyed script、外部 provider 不要）で orchestrator→background worker delegate session を起動。手動確認手順・期待 rows・bwrap 要件は `--help` に記載
+- **検証**: `runtime/tests/identity.rs`（name/role/model 区別 + serialization）、`gui/tests/runtime_wiring.rs`（実 runtime + EventPump + harness で 2 rows 収束、常時 CI）、`runtime/tests/composition.rs`（fail-closed、bwrap 環境限定 #[ignore]）。orchestrator_demo は ScriptedModel.selected_model 追加のみで wiring/挙動不変
+- **残留**: 文字内容レイアウトの automated 検証は headless screenshot 基盤に依存し別 unit

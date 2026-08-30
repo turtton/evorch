@@ -29,9 +29,19 @@ Panel は left / right / bottom / tabs / floating / separate OS window に自由
 - **GUI framework 選定（ADR 0007、2026-08 再評価で確定）**: 第一候補は **egui + egui_dock**（`anhosh/egui_dock` 0.21.x。tab 移動/resize/undock/floating window、DockEvent による layout persistence を標準提供、2026 年も活発リリース）。Floem は汎用 dock API を提供せず安定版が v0.2.0（2024-11）のままであるため「docking 評価用 prototype」に限定。**GPUI + gpui-component**（Zed 実戦系、dock/nested split/floating/syntax highlighting 対応）は長期 watch
 - **大容量 transcript の扱い**: 行単位 chunking + 差分更新 + 明示的 virtualization の自前 widget とし、framework 非依存設計にする（egui immediate mode の制約。Floem/GPUI への切り替え時も流用可能に）
 
+## v0.1.1 実 runtime wiring の実装確定（2026-08-30、PR #30 / issue #29）
+
+製品 GUI entrypoint（`crates/gui/src/bin/evorch-gui.rs`）が `EmptyAgentSource` を廃止し、実 `AgentRuntime` と同一 `Arc<EventBus>` を EventPump と共有する構成で landed。
+
+- **製品起動 lifecycle**: `evorch-gui` は起動時に `AgentRuntime::production(bus, policy, workspace_root, model)` を組み、失敗時（bwrap 未検出）は明確なエラーで exit 1（fail-closed）。`--demo` は外部 AI provider / credential 不要の決定的 scripted session（orchestrator が background worker を delegate）を起動し、各 row が Pending → Running → Done へ遷移する。手動確認手順は `--help` に同梱
+- **AgentSummary identity 境界**: `AgentSummary { name（表示名）, role_name（role）, model（実行 model）, phase }`。`RunConfig.name` 未指定時は name は role 名へフォールバック。model は `AgentModel::selected_model(role)`（routing profile 層が報告、runtime は解決しない）をそのまま記録。`list_agents` serialization と GUI tasks pane はこの identity を直接写像する（TaskRow への固定 label・role→name 複製は廃止）
+- **自動 / 手動検証の分担**: headless wiring test（`gui/tests/runtime_wiring.rs`: 実 runtime + EventPump + WorkbenchState で 2 rows 収束）は CI で常時実行。文字内容レイアウト（name/role/model の実表示）は headless screenshot 基盤が必要で別 unit。`--demo` の手順による目視は手動
+- **network capability 伝播**: production runtime は `runtime::network::build_sandbox(policy)` 経由で role の network mode を bwrap へ伝播する（PR #20 seam。`AgentRuntime::production` 内では `ToolExecutor::with_standard_tools` に構築済み sandbox を注入。`with_production_sandbox` は BwrapConfig 直接受取りの sibling entry として残存）
+
 ## 受け入れ基準
 
-- egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること
+- egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
+- 製品 GUI が実 AgentRuntime から tasks pane を live 表示できること（landed、PR #30。`--demo` で外部 provider 不要の確認経路あり）
 - Workspace Model が framework 非依存データとして保持され、GUI なしに layout を検証できること
 - semantic UI API 経由で agent が panel を操作できること
 - 仮想化 transcript widget が1万行規模の transcriptで操作が追従すること
