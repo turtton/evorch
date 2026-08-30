@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T13:02:44.7721637+00:00",
+  "updated_at": "2026-08-30T14:53:16.765215+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -461,10 +461,11 @@
         "number": 35,
         "url": "https://github.com/turtton/evorch/issues/35"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/36",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "normal",
-      "priority_revision": 1
+      "priority_revision": 0
     },
     {
       "execution_unit": "v01-storage-maintenance-completion",
