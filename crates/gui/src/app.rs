@@ -42,11 +42,7 @@ pub struct WorkbenchState<S> {
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// 設定と AgentRunSource から初期状態を構築します。
-    pub fn new(
-        source: S,
-        settings: &UiSettings,
-        model_label: impl Into<String>,
-    ) -> Result<Self, WorkbenchError> {
+    pub fn new(source: S, settings: &UiSettings) -> Result<Self, WorkbenchError> {
         let workspace = settings.layout.workspace.clone().unwrap_or_default();
         workspace
             .validate()
@@ -55,7 +51,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut state = Self {
             pump: None,
             transcript: TranscriptModel::new(),
-            tasks: TasksModel::new(source, model_label),
+            tasks: TasksModel::new(source),
             terminal: TerminalBuffer::new(10_000),
             pty: None,
             dock,

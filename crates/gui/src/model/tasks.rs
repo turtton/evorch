@@ -12,45 +12,55 @@ mod tests {
         }
     }
 
-    fn summary(id: u64, role: &str, phase: AgentRunPhase) -> AgentSummary {
+    // Fixture with distinct name / role_name / model values so any duplication
+    // between them is observable in the mapped row.
+    fn summary(id: u64, phase: AgentRunPhase) -> AgentSummary {
         AgentSummary {
             run_id: RunId::new(id),
-            name: role.into(),
-            role_name: role.into(),
+            name: "custom-name".into(),
+            role_name: "Reviewer".into(),
             phase,
-            model: "model-x".to_string(),
+            model: "model-y".to_string(),
         }
     }
 
     #[test]
-    fn update_maps_runtime_summary_to_gui_labels() {
-        let source = Source(vec![summary(2, "reviewer", AgentRunPhase::Running)]);
-        let mut model = TasksModel::new(source, "model-x");
+    fn update_maps_summary_identity_directly() {
+        // Given: a source summary with distinct name, role, and model values
+        let source = Source(vec![summary(2, AgentRunPhase::Running)]);
+        let mut model = TasksModel::new(source);
+        // When: the rows are refreshed from the summary
         model.refresh();
+        // Then: each row field maps directly to the summary identity
         assert_eq!(
             model.rows()[0],
             TaskRow {
                 run_id: RunId::new(2),
-                name: "reviewer".into(),
-                role: "reviewer".into(),
+                name: "custom-name".into(),
+                role: "Reviewer".into(),
                 status: AgentRunPhase::Running,
-                model: "model-x".into()
+                model: "model-y".into()
             }
         );
     }
 
     #[test]
     fn state_change_updates_known_row_and_unknown_refreshes() {
-        let source = Source(vec![summary(1, "worker", AgentRunPhase::Running)]);
-        let mut model = TasksModel::new(source, "m");
+        // Given: a refreshed row built from a summary with distinct identity values
+        let source = Source(vec![summary(1, AgentRunPhase::Running)]);
+        let mut model = TasksModel::new(source);
         model.refresh();
+        // When: a state-change event marks the run as Done
         model.apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-1".into(),
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
         }));
+        // Then: the status updates in place while name and model are preserved
         assert_eq!(model.rows()[0].status, AgentRunPhase::Done);
+        assert_eq!(model.rows()[0].name, "custom-name");
+        assert_eq!(model.rows()[0].model, "model-y");
     }
 }
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
@@ -77,15 +87,13 @@ pub struct TaskRow {
 
 pub struct TasksModel<S> {
     source: S,
-    model_label: String,
     rows: Vec<TaskRow>,
 }
 
 impl<S: AgentRunSource> TasksModel<S> {
-    pub fn new(source: S, model_label: impl Into<String>) -> Self {
+    pub fn new(source: S) -> Self {
         Self {
             source,
-            model_label: model_label.into(),
             rows: Vec::new(),
         }
     }
@@ -104,10 +112,10 @@ impl<S: AgentRunSource> TasksModel<S> {
             .iter()
             .map(|summary| TaskRow {
                 run_id: summary.run_id,
-                name: summary.role_name.clone(),
+                name: summary.name.clone(),
                 role: summary.role_name.clone(),
                 status: summary.phase,
-                model: self.model_label.clone(),
+                model: summary.model.clone(),
             })
             .collect();
         self.rows.sort_by_key(|row| row.run_id.get());

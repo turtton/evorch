@@ -69,7 +69,7 @@ fn collect_panel_ids(
 #[test]
 fn three_panes_render_with_titles() {
     // Given: a default workbench state
-    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
 
@@ -85,7 +85,7 @@ fn three_panes_render_with_titles() {
 #[test]
 fn focus_switching_via_keybind_changes_active_tab() {
     // Given: a layout where agent and terminal share a tab group
-    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
     harness.run();
@@ -122,7 +122,7 @@ fn focus_switching_via_keybind_changes_active_tab() {
 #[test]
 fn dock_undock_and_tab_move_operations_update_state() {
     // Given: a rendered default layout
-    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
     harness.run();
@@ -190,7 +190,7 @@ fn transcript_text_appears_after_bus_event() {
             let _ = repaint_tx.send(());
         })),
     );
-    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds")
         .with_pump(pump);
     let mut harness = build_harness(state);
@@ -218,10 +218,10 @@ fn tasks_row_updates_after_state_change_event() {
     let bus = EventBus::new(8);
     let source = MockSource(vec![AgentSummary {
         run_id: RunId::new(1),
-        name: "worker".into(),
-        role_name: "worker".into(),
+        name: "worker-w1".into(),
+        role_name: "Worker".into(),
         phase: AgentRunPhase::Running,
-        model: "test-model".into(),
+        model: "demo-worker".into(),
     }]);
     let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
     let pump = EventPump::spawn(
@@ -231,7 +231,7 @@ fn tasks_row_updates_after_state_change_event() {
             let _ = repaint_tx.send(());
         })),
     );
-    let state = WorkbenchState::new(source, &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(source, &UiSettings::default())
         .expect("default state builds")
         .with_pump(pump);
     let mut harness = build_harness(state);
@@ -254,9 +254,9 @@ fn tasks_row_updates_after_state_change_event() {
     );
     // And: every acceptance column (name/role/status/model) is populated
     let row = &harness.state().tasks().rows()[0];
-    assert_eq!(row.name, "worker");
-    assert_eq!(row.role, "worker");
-    assert_eq!(row.model, "test-model");
+    assert_eq!(row.name, "worker-w1");
+    assert_eq!(row.role, "Worker");
+    assert_eq!(row.model, "demo-worker");
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn save_layout_keybind_persists_workspace_json() {
     // Given: a workbench with a save path
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let path = temp_dir.path().join("workspace.json");
-    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default(), "test-model")
+    let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds")
         .with_save_path(&path);
     let mut harness = build_harness(state);

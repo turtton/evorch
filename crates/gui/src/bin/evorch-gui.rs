@@ -117,7 +117,7 @@ fn run() -> Result<(), GuiError> {
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
     let pump = spawn_event_bridge(Arc::clone(&bus))?;
     let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
-    let mut state = WorkbenchState::new(EmptyAgentSource, &settings, "runtime")?
+    let mut state = WorkbenchState::new(EmptyAgentSource, &settings)?
         .with_pump(pump)
         .with_pty(pty);
     if let Some(path) = arguments.save_layout {

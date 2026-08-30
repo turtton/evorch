@@ -15,7 +15,7 @@ impl gui::model::tasks::AgentRunSource for EmptySource {
 }
 
 fn workbench() -> HeadlessWorkbench<EmptySource> {
-    let state = WorkbenchState::new(EmptySource, &UiSettings::default(), "headless-test")
+    let state = WorkbenchState::new(EmptySource, &UiSettings::default())
         .expect("default workbench state must build");
     HeadlessWorkbench::new(state, [640.0, 360.0])
 }

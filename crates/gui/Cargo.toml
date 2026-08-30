@@ -10,6 +10,7 @@ publish = false
 name = "gui"
 
 [dependencies]
+async-trait = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
@@ -17,8 +18,10 @@ egui_kittest = { workspace = true }
 event-bus = { path = "../event-bus" }
 image = { workspace = true, default-features = false, features = ["png"] }
 portable-pty = { workspace = true }
+providers = { path = "../providers" }
 runtime = { path = "../runtime" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
@@ -26,4 +29,5 @@ workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tools = { path = "../tools" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

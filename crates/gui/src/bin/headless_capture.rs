@@ -20,7 +20,7 @@ impl AgentRunSource for EmptySource {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let output = output_path(env::args_os().skip(1))?;
-    let state = WorkbenchState::new(EmptySource, &UiSettings::default(), "headless-capture")?;
+    let state = WorkbenchState::new(EmptySource, &UiSettings::default())?;
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
     let frame = workbench.capture()?;

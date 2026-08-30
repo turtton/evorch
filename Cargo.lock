@@ -1700,6 +1700,7 @@ dependencies = [
 name = "gui"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "eframe",
  "egui",
  "egui_dock",
@@ -1707,11 +1708,14 @@ dependencies = [
  "event-bus",
  "image",
  "portable-pty",
+ "providers",
  "runtime",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tools",
  "tracing",
  "workspace-ui",
 ]
