@@ -2,19 +2,17 @@ use std::error::Error;
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{Event, EventMeta, LifecycleEvent, UsageAggregator, UsageEvent, UsageSink};
-use rusqlite::Connection;
-use storage::projection::restore_sessions;
-use storage::repo::metrics::list_range;
-use storage::{Storage, StorageConfig};
+use storage::{Database, Storage, StorageConfig};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Given: 一時 DB 上の single-writer と同一分に属する usage イベント
     let temp_dir = tempfile::tempdir()?;
     let db_path = temp_dir.path().join("storage-demo.db");
-    let storage = Storage::open(StorageConfig {
+    let config = StorageConfig {
         db_path: db_path.clone(),
         ..StorageConfig::default()
-    })?;
+    };
+    let storage = Storage::open(config.clone())?;
     let handle = storage.handle();
     let meta = EventMeta {
         schema_version: event_bus::SCHEMA_VERSION,
@@ -66,9 +64,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     storage.close();
 
     // Then: 第二接続から metrics と event projection を復元して表示する
-    let connection = Connection::open(&db_path)?;
-    let metrics = list_range(&connection, 0, i64::MAX as u64)?;
-    let sessions = restore_sessions(&connection)?;
+    let database = Database::open(&config)?;
+    let metrics = database.metrics_range(0, i64::MAX as u64)?;
+    let sessions = database.restore_sessions()?;
     println!("metrics: {metrics:#?}");
     println!("sessions: {sessions:#?}");
     println!("database: {}", db_path.display());

@@ -6,8 +6,7 @@ use event_bus::{
     BucketKey, Event, EventMeta, LifecycleEvent, MessageEvent, UsageBucket, UsageSink,
 };
 use rusqlite::Connection;
-use storage::repo::metrics::list_range;
-use storage::{HardLimits, LimitKind, Storage, StorageConfig, StorageError};
+use storage::{Database, HardLimits, LimitKind, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 fn config(temp_dir: &TempDir) -> StorageConfig {
@@ -46,8 +45,14 @@ fn event(kind: impl Into<event_bus::EventKind>, nanos: u64) -> Event {
 }
 
 fn read_buckets(path: &std::path::Path) -> Vec<UsageBucket> {
-    let connection = Connection::open(path).expect("database must reopen");
-    list_range(&connection, 0, i64::MAX as u64).expect("metrics must list")
+    let database = Database::open(&StorageConfig {
+        db_path: path.to_path_buf(),
+        ..StorageConfig::default()
+    })
+    .expect("database must reopen");
+    database
+        .metrics_range(0, i64::MAX as u64)
+        .expect("metrics must list")
 }
 
 #[test]

@@ -3,9 +3,7 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{BucketKey, Event, EventMeta, LifecycleEvent, UsageBucket, UsageEvent, UsageSink};
-use rusqlite::Connection;
-use storage::repo::{event, metrics};
-use storage::{Storage, StorageConfig, StorageError};
+use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 fn config(temp_dir: &TempDir) -> StorageConfig {
@@ -69,8 +67,8 @@ fn storage_handle_rejects_raw_usage_before_insert_and_preserves_non_usage_events
     let message = error.to_string();
     assert!(message.contains("raw usage events are not persisted"));
     assert!(message.contains("UsageSink"));
-    let connection = Connection::open(&config.db_path).expect("database must reopen");
-    let stored = event::list_all_ordered(&connection).expect("events must list");
+    let database = Database::open(&config).expect("database must reopen");
+    let stored = database.events_all_ordered().expect("events must list");
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].event, lifecycle);
     println!("raw_usage_error={message}");
@@ -106,8 +104,10 @@ fn usage_sink_still_persists_downsampled_metrics() {
     storage.close();
 
     // Then: downsampled_metrics に一行保存される
-    let connection = Connection::open(&config.db_path).expect("database must reopen");
-    let stored = metrics::list_range(&connection, 0, i64::MAX as u64).expect("metrics must list");
+    let database = Database::open(&config).expect("database must reopen");
+    let stored = database
+        .metrics_range(0, i64::MAX as u64)
+        .expect("metrics must list");
     assert_eq!(stored, [expected]);
     println!("downsampled_metrics_count={}", stored.len());
 }

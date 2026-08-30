@@ -1,6 +1,7 @@
 //! カタログ更新履歴の統合テスト。
 
-use storage::{CatalogUpdateRecord, Database};
+use storage::{CatalogUpdateRecord, Database, Storage, StorageConfig};
+use tempfile::TempDir;
 
 fn record(
     source: &str,
@@ -18,8 +19,14 @@ fn record(
 
 #[test]
 fn database_catalog_update_history_roundtrip() {
-    // Given: 二件のカタログ更新履歴を保存できるメモリ上データベース
-    let database = Database::open_in_memory().expect("database must open");
+    // Given: 二件のカタログ更新履歴を保存できるファイルDB writer
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let config = StorageConfig {
+        db_path: temp_dir.path().join("catalog-history.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    let handle = storage.handle();
     let records = [
         record("remote", 4, "refreshed", 100),
         record("cache", 2, "restored", 200),
@@ -27,10 +34,12 @@ fn database_catalog_update_history_roundtrip() {
 
     // When: 公開 API から履歴を保存して取得する
     for item in &records {
-        database
+        handle
             .record_catalog_update(item)
             .expect("catalog update must record");
     }
+    storage.close();
+    let database = Database::open(&config).expect("database must reopen");
     let actual = database
         .catalog_updates()
         .expect("catalog updates must list");
