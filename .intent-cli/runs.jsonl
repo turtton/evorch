@@ -81,3 +81,4 @@
 {"ts":"2026-08-30T12:57:25.0073973+00:00","execution_unit":"v01-config-schema-publication","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":34}
 {"ts":"2026-08-30T12:59:20.285286+00:00","execution_unit":"v01-config-schema-publication","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":34}
 {"ts":"2026-08-30T12:59:20.285286+00:00","execution_unit":"v01-config-schema-publication","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":34}
+{"ts":"2026-08-30T13:02:44.7721637+00:00","execution_unit":"v01-storage-secret-boundary","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#35","reason":"https://github.com/turtton/evorch/issues/35"}
