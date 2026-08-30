@@ -47,3 +47,13 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): 内部ingress guardのみでrole-facing surfaceなし。`no_role_facing_surface: true`。
 
 `improve` (G456 / G460) is the later safety net; packet-time maintenance is the normal path.
+
+## 実装確定（2026-08-30、PR #36 / issue #35）
+
+- **shape**: `crates/storage/src/entity.rs` に `pub(crate) struct SecretGuard { known_values: Vec<String> }`。`from_env()`（限定 credential env 名 `CREDENTIAL_ENV_NAMES` × 最小長 8）と `with_known_values()`（明示注入、`expect(dead_code, reason=…)` 注記付き）の 2 コンストラクタ。
+- **検査点**: `check_message_record`（content/reasoning）は `repo::message::{create,update}` の INSERT/UPDATE 前。`check_event_kind`（MessageDelta/ReasoningDelta の delta + Failed/AgentRunStateChanged/ExecutionDenied/ProviderFallback/RequestCompleted.finish_reason の reason 系）は `repo::event::append_event`（serialize・accounting 更新前）と `StorageHandle::append_event`（fail-fast、writer.rs）の二層。event 側は variant 明示列挙で、将来 text field 付き variant が追加されたらここへも追加する方針がコメントで固定。
+- **検出規則**: ①既知値の完全一致（既知値側を指すため、診断に前後コンテキストが紛れ込む経路を構造的に排除）②prefix 接頭辞＋最小長＋字種チェックの API key 形状（sk-/ghp_系/github_pat_/xox[baprs]-/AKIA/AIza/private key block ヘッダ/JWT 三区分 base64url）。接頭辞直前が英数字の語中一致は棄却（`ask-…`/`wordAKIA…`/`xsk-…`）。完全一致・形状とも deterministic、時刻・乱数非依存、新規 dep なし。
+- **拒否表現**: `StorageError::SecretDetected { entity, field, rule: SecretRule }`。規則名のみ（`known-credential-value` / 形状ラベル）で値本体・前後コンテキスト・決定的ハッシュ fingerprint は**一切含めない**（oracle 化防止のため R1 で除去。packet AC④ の「redacted fingerprint のみ」を「非包含」で上回る解釈とし worker R2 で承認）。`SecretGuard` の Debug は既知値の個数のみ手書き表示。
+- **状態不変性**: 拒否は serialize・INSERT・accounting 更新の前。repo 層テストで events 行数・EventAccounting clone 比較・sessions.total_event_bytes の不変を直接検証。
+- **検証**: in-crate unit test（entity.rs 3 + repo/message.rs 3 + repo/event.rs 1）+ 外部 integration `tests/secret_guard.rs` 4 test（形状 9 種・既知 env 値・accounting/bytes 不変・negative 10 件）。`GH_TOKEN` sentinel は unsafe env set/restore を SAFETY 注記付きで使用（同一 binary 内で sentinel を共有する他テストなし）。
+- **docs**: `intents/evorch/features/storage-memory/overview.md` に「ストレージ ingress の secret guard（ADR 0008 補強）」セクション（対象 field・検出 2 規則・拒否/診断方針・状態不変性・限界と非目標）を worker が追記（AC⑦ = closeout_learning write_back target 充足のため lead 側 overview 追記はなし）。
