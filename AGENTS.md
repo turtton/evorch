@@ -66,6 +66,29 @@ remove an entry only after verifying against a newer binary.
   record every answer durably before proceeding; stop only at a structured
   stop condition (backlog empty + rediscovery finds nothing →
   `今のところ追加質問はありません`).
+- **stack: queue seed path** (verified 0.26.0, 2026-08-30): `queue enqueue`
+  is NOT the entry for new packets — it errors ("Projection packet YAML must
+  contain root field 'execution_unit'") because it expects an existing
+  `publish.yaml`. Correct seed: `automation queue-seed-from-packet
+  --execution-unit <id> --domain <d> --target-repo <r> --write` (refuses
+  without `--target-repo`; default priority `high`). Reprioritize needs
+  `--reason` AND `--write` (run without `--write` for a preview). The CLI
+  leaves an empty `.intent-cli/queue-state.reprioritize.lock` behind — do
+  not commit it.
+- **stack: issue publish flow** (verified 0.26.0, 2026-08-30): G337 four
+  stages — `issue draft <unit>` (read-only) → `issue create <unit>` →
+  `issue publish-flow <unit> --repo <r> --domain <d> --write` (advances
+  publish.yaml + queue-state + runs.jsonl; run WITHOUT `--write` first as
+  the canonical preflight) → `automation issue-publish --repo <r> --issue
+  <n> --write` (the ONLY `intent-target` applier). Known quirk: publish-flow
+  ignores `issue_title` in packet.yaml and falls back to `<unit>
+  (untitled)` (v0.1 identical) — correct the title with `gh issue edit`
+  after publish-flow. `publish-recovery` without `--domain` reports
+  domain-underivable unsafe_stops; with `--domain`, queued-but-unpublished
+  units report missing-publish-artifact which is normal pre-publish state,
+  not a blocker. WIP cap G288: one `intent-target` issue/PR per domain.
+  Claims store is not configured (`claim verify` → not-configured), so no
+  G717 handoff is needed in this environment.
 
 ## Wrong-host detection (G301)
 
