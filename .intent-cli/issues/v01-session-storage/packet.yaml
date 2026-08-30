@@ -21,7 +21,7 @@ implementation_issue_packet:
     - "intents/evorch/decisions/0008-threat-model-phased-adoption.md"
   acceptance_criteria:
     - "migration 適用により sessions / tasks / messages / agent_runs / events / downsampled_metrics の各テーブルが作成される"
-    - "session / task / message / agent_run / event の CRUD が動く"
+    - "session / task / message / agent_run の CRUD と event の append / read（不変ログ）が動く"
     - "プロセス再起動後に session が復元できる（event log → state projection の再現）"
     - "ADR 0012 の WAL 運用（synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）とハード上限（DB・WAL・event サイズ等）が PRAGMA 初期化および設定として実装されている"
     - "raw 高頻度計測イベントは直接永続化せず、single-writer + バッチ flush で downsampled_metrics（1分バケット per provider/model）のみ書き込む経路がある"

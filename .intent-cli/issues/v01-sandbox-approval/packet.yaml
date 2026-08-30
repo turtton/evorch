@@ -23,7 +23,7 @@ implementation_issue_packet:
     - "credential ファイル・env を sandbox 子プロセスから参照できないことをテストで検証する（env は credential を除去、ファイルは sandbox 外に置く）"
     - "network egress が既定 deny で、provider endpoint のみ allowlist を通ることをテストで検証する"
     - "dangerous 操作が Linux sandbox（bwrap）で実行され、承認しても sandbox 外では実行されない（二層分離）"
-    - "Landlock vs bwrap の選択結果が ADR 0017 として記録されている"
+    - "Landlock vs bwrap の選択結果が ADR 0021 として記録されている"
 
 # G461: optional packet-time intent-maintenance metadata. OPTIONAL and
 # backward-compatible — packets that omit this whole block stay valid.
@@ -46,7 +46,7 @@ knowledge_updates:
   adr:
     required: true
     target_paths:
-      - intents/evorch/decisions/0017-sandbox-linux-bwrap.md
+      - intents/evorch/decisions/0021-sandbox-linux-bwrap.md
     decision_title: "Linux v0.1 sandbox 第一実装として bubblewrap（bwrap）を採用"
   diagram:
     required: false
@@ -57,10 +57,10 @@ knowledge_updates:
     target_paths: []
     summary: ""
 closeout_learning:
-  expected: "ADR 0017（bwrap 採用）を新設し、tools-sandbox overview の Open question（Landlock vs bwrap）の解消を記録する"
+  expected: "ADR 0021（bwrap 採用）を新設し、tools-sandbox overview の Open question（Landlock vs bwrap）の解消を記録する"
   write_back_required: true
   write_back_targets:
-    - intents/evorch/decisions/0017-sandbox-linux-bwrap.md
+    - intents/evorch/decisions/0021-sandbox-linux-bwrap.md
     - intents/evorch/features/tools-sandbox/overview.md
 # G645/G661: guide reachability is explicit and checked at closeout.
 # Uncomment and complete EXACTLY ONE accepted form. Leaving this

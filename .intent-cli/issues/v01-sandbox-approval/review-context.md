@@ -11,7 +11,7 @@ Flag findings if the implementation:
 
 ## Slice-specific review focus
 
-- 本 packet の最初のタスク（Linux sandbox 第一実装の選択）が完了し、ADR 0017（bwrap 採用）が記録されているか。bwrap 実行不可環境での fail-closed 方針が ADR で扱われているか
+- 本 packet の最初のタスク（Linux sandbox 第一実装の選択）が完了し、ADR 0021（bwrap 採用）が記録されているか。bwrap 実行不可環境での fail-closed 方針が ADR で扱われているか
 - approval 層が auto-allow / ask / deny を policy で分類し、deny では実行されないか。ask は承認応答を待つか
 - 二層分離: 承認しても sandbox 外の操作が実行されないか（approval と OS enforcement が分離しているか）
 - credential 隔離: agent プロセス・子プロセス・env へ credential が渡っていないか（keychain 優先 / 0600 fallback）
@@ -39,7 +39,7 @@ Flag findings if the implementation:
 
 `closeout_learning.write_back_required` は `true`。closeout で以下が記録されているか確認する（この PR 内 or follow-up packet として）。
 
-- ADR 0017（Linux v0.1 sandbox 第一実装: bubblewrap（bwrap）採用）の新設
+- ADR 0021（Linux v0.1 sandbox 第一実装: bubblewrap（bwrap）採用）の新設
 - `features/tools-sandbox/overview.md` の Open question『Linux sandbox の第一実装の選択（Landlock vs bwrap）』の解消記録
 
 記録が未実施の場合は知識 writeback が不足している旨を review 所見に残す。

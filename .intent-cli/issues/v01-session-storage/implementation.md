@@ -16,7 +16,7 @@ storage-memory feature は「SQLite 中心の event-sourced runtime。Event Log 
   - tables:
     - `sessions` / `tasks` / `messages` / `agent_runs` / `events`（event-sourced の domain event log。messages と tool_calls の正規化は ADR 0018 で確定した形に従う）
     - `downsampled_metrics`（1分バケット per provider/model: bucket_ts / provider / model / input_tokens / output_tokens / cache_read / cache_write / requests / ttft_sum 等、ADR 0012 の集計列）
-  - CRUD レイヤー: session / task / message / agent_run / event の insert / read / update / delete。
+  - 永続化レイヤー: session / task / message / agent_run の CRUD と event の append / read（不変ログ。ADR 0018）
   - 復元: events から session の状態を再現できる投影（read path）。再起動後の session resume をテストで保証。
   - ADR 0012 の運用:
     - PRAGMA: `journal_mode=WAL` / `synchronous=NORMAL` / `wal_autocheckpoint` 設定 / 定期 PASSIVE checkpoint / retention 後の予算付き `incremental_vacuum`
@@ -39,7 +39,7 @@ storage-memory feature は「SQLite 中心の event-sourced runtime。Event Log 
 
 - unit test:
   - migration 適用で全テーブルが作成される（テーブル一覧の確認）。
-  - session / task / message / agent_run / event の CRUD。
+  - session / task / message / agent_run の CRUD と event の append / read（不変ログ）。
   - セッション生成 → イベント追記 → ストレージ再オープン → 復元、が一連で通る（resume 検証）。
   - downsampled_metrics の集計書込み経路（in-memory バケット → バッチ flush → テーブル行）が通る。
   - ハード上限超過時に書込みが拒否される。

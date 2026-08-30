@@ -32,7 +32,7 @@ Target part: session / task / message / agent_run / event の永続化
 - rusqlite ベースの SQLite アクセス層（single-writer タスクが唯一の書き込み経路）。
 - version 管理された migration（起動時適用）。
 - テーブル: sessions / tasks / messages / agent_runs / events（event-sourced log）/ downsampled_metrics（1分バケット per provider/model）。
-- session / task / message / agent_run / event の CRUD。
+- session / task / message / agent_run の CRUD と event の append / read（不変ログ）。
 - events からの session 復元（state projection、再起動後 resume）。
 - ADR 0012 の運用: PRAGMA（WAL / synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）/ ハード上限設定 / 起動時サイズ検査 / 自己参照防止の設計。
 - metrics 書込経路: event-bus の集計スナップショット → single-writer が downsampled のみバッチ flush。
@@ -49,12 +49,12 @@ Target part: session / task / message / agent_run / event の永続化
 
 ## Standalone Child Issue Contract
 
-`turtton/evorch` の `crates/storage/` に SQLite 永続化層を実装する。**rusqlite** を採用し、single-writer タスクが唯一の書き込み経路を持つ。起動時 migration で sessions / tasks / messages / agent_runs / events / downsampled_metrics のテーブルを作成し、session / task / message / agent_run / event の CRUD と、events から session を再現する projection（プロセス再起動後の resume）を提供する。ADR 0012 に従い、raw 高頻度計測イベントは直接書かず、v01-event-stream の集計スナップショットを single-writer がバッチ flush して downsampled_metrics（1分バケット per provider/model）のみ書き込む経路を実装する。PRAGMA 初期化（WAL / synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）とハード上限設定（event / session / WAL / DB サイズ）を適用し、起動時サイズ安全検査を行う。credential は永続化しない（ADR 0008、型とテストで保証）。さらに、決定を `intents/evorch/decisions/0018-sqlite-storage-schema.md` として書き、`intents/evorch/features/storage-memory/overview.md` の「event log のスキーマ詳細」Open question を解決済みに更新する。
+`turtton/evorch` の `crates/storage/` に SQLite 永続化層を実装する。**rusqlite** を採用し、single-writer タスクが唯一の書き込み経路を持つ。起動時 migration で sessions / tasks / messages / agent_runs / events / downsampled_metrics のテーブルを作成し、session / task / message / agent_run の CRUD と event の append / read（不変ログ）、events から session を再現する projection（プロセス再起動後の resume）を提供する。ADR 0012 に従い、raw 高頻度計測イベントは直接書かず、v01-event-stream の集計スナップショットを single-writer がバッチ flush して downsampled_metrics（1分バケット per provider/model）のみ書き込む経路を実装する。PRAGMA 初期化（WAL / synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）とハード上限設定（event / session / WAL / DB サイズ）を適用し、起動時サイズ安全検査を行う。credential は永続化しない（ADR 0008、型とテストで保証）。さらに、決定を `intents/evorch/decisions/0018-sqlite-storage-schema.md` として書き、`intents/evorch/features/storage-memory/overview.md` の「event log のスキーマ詳細」Open question を解決済みに更新する。
 
 ## Acceptance Criteria
 
 - migration 適用で sessions / tasks / messages / agent_runs / events / downsampled_metrics が作成される。
-- session / task / message / agent_run / event の CRUD が動く。
+- session / task / message / agent_run の CRUD と event の append / read（不変ログ）が動く。
 - 再起動後に session が復元できる（event log → projection）。
 - WAL 運用（synchronous=NORMAL / wal_autocheckpoint / 定期 PASSIVE checkpoint）とハード上限が PRAGMA 初期化・設定として実装される。
 - raw 高頻度イベントの直接永続化をせず、single-writer + バッチ flush で downsampled のみ書く経路がある。
