@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T18:20:20.516712+00:00",
+  "updated_at": "2026-08-30T18:23:13.0571851+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -495,7 +495,7 @@
     {
       "execution_unit": "v01-provider-compatible-usage-contract",
       "title": "v0.1.1: OpenAI-compatible usage \u306E exactly-once \u5951\u7D04\u3092\u56FA\u5B9A\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-provider-client"
       ],
