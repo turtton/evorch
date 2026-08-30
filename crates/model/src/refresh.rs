@@ -7,7 +7,7 @@
 
 use std::time::SystemTime;
 
-use storage::{CatalogUpdateRecord, Database};
+use storage::{CatalogUpdateRecord, StorageHandle};
 
 use crate::cache::CatalogCache;
 use crate::catalog::ModelCatalog;
@@ -68,11 +68,11 @@ impl ModelCatalog {
     /// 4. キャッシュもなければ組み込みカタログをそのまま維持し、供給源
     ///    `builtin` として、詳細に取得エラーを含めて履歴に記録します。
     ///
-    /// 履歴の記録は `db.record_catalog_update` (型付きレコード API) のみを
+    /// 履歴の記録は `handle.record_catalog_update` (型付き writer API) のみを
     /// 使い、このクレートは SQL を直接扱いません。`model_count` にはマージ
     /// 後のカタログ項目数を、`recorded_at_ns` には [`SystemTime::now`] の
     /// UNIX epoch ナノ秒を記録します (時刻表現は `storage` の他レコードと
-    /// 共通のため、変換には `storage::db::system_time_to_ns` を使います)。
+    /// 共通のため、変換には `storage::system_time_to_ns` を使います)。
     ///
     /// # Errors
     ///
@@ -84,14 +84,14 @@ impl ModelCatalog {
         &mut self,
         fetcher: &dyn CatalogFetcher,
         cache: &CatalogCache,
-        db: &Database,
+        handle: &StorageHandle,
     ) -> Result<RefreshOutcome, ModelError> {
         // 1. TTL 内のキャッシュがあればネットワーク取得を行わない。
         if let Some(cached_entries) = cache.load() {
             self.merge_models_dev(cached_entries);
             let detail = "TTL 内のキャッシュを利用しました (外部カタログの取得をスキップしました)"
                 .to_string();
-            return self.record_refresh(db, RefreshSource::Cache, detail);
+            return self.record_refresh(handle, RefreshSource::Cache, detail);
         }
 
         // 2. 外部カタログを取得する。
@@ -104,13 +104,13 @@ impl ModelCatalog {
                     let detail = format!(
                         "外部カタログの取得に失敗したため期限切れのキャッシュを利用しました: {fetch_error}"
                     );
-                    return self.record_refresh(db, RefreshSource::CacheStale, detail);
+                    return self.record_refresh(handle, RefreshSource::CacheStale, detail);
                 }
                 // 4. キャッシュもなければ組み込みカタログを維持する。
                 let detail = format!(
                     "外部カタログの取得とキャッシュのいずれも利用できないため組み込みカタログを維持しました: {fetch_error}"
                 );
-                return self.record_refresh(db, RefreshSource::Builtin, detail);
+                return self.record_refresh(handle, RefreshSource::Builtin, detail);
             }
         };
 
@@ -124,7 +124,7 @@ impl ModelCatalog {
         }
         self.merge_models_dev(fetched);
         self.record_refresh(
-            db,
+            handle,
             RefreshSource::ModelsDev,
             "外部カタログ (models.dev) の取得に成功しました".to_string(),
         )
@@ -133,7 +133,7 @@ impl ModelCatalog {
     /// マージ後のカタログ状態をカタログ更新履歴へ記録し、結果を組み立てる。
     fn record_refresh(
         &self,
-        db: &Database,
+        handle: &StorageHandle,
         source: RefreshSource,
         detail: String,
     ) -> Result<RefreshOutcome, ModelError> {
@@ -143,7 +143,7 @@ impl ModelCatalog {
                 "カタログ項目数が u32 の範囲を超えました: {entry_count}"
             ))
         })?;
-        let recorded_at_ns = storage::db::system_time_to_ns(SystemTime::now())
+        let recorded_at_ns = storage::system_time_to_ns(SystemTime::now())
             .map_err(|err| ModelError::History(err.to_string()))?;
         let record = CatalogUpdateRecord {
             source: source.as_str().to_string(),
@@ -151,7 +151,8 @@ impl ModelCatalog {
             detail,
             recorded_at_ns,
         };
-        db.record_catalog_update(&record)
+        handle
+            .record_catalog_update(&record)
             .map_err(|err| ModelError::History(err.to_string()))?;
         Ok(RefreshOutcome {
             source,

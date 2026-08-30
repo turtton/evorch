@@ -2,8 +2,7 @@
 //! カタログ更新履歴記録の結合テストです。
 //!
 //! フェッチャーはネットワークに触れないインプロセスのモックで置き換え、
-//! キャッシュには一時ディレクトリ、履歴にはメモリ上の `storage::Database`
-//! を使います。
+//! キャッシュと履歴には一時ディレクトリ上のファイルを使います。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,7 +12,7 @@ use model::{
     Availability, CatalogCache, CatalogCapabilities, CatalogEntry, CatalogFetcher, CatalogSource,
     ModelCatalog, ModelError, ProviderType, RefreshSource,
 };
-use storage::Database;
+use storage::{Database, Storage, StorageConfig};
 
 /// 呼び出しの有無を記録し、固定の結果またはエラーを返すフェッチャー。
 struct MockFetcher {
@@ -73,6 +72,13 @@ fn test_entry(model_id: &str) -> CatalogEntry {
     }
 }
 
+fn storage_config(dir: &tempfile::TempDir) -> StorageConfig {
+    StorageConfig {
+        db_path: dir.path().join("catalog-history.db"),
+        ..StorageConfig::default()
+    }
+}
+
 // Given: 空のキャッシュと成功するフェッチャー、組み込みカタログ
 // When: refresh を実行する
 // Then: 取得項目がマージされキャッシュされ、履歴に source="models-dev" の
@@ -81,12 +87,13 @@ fn test_entry(model_id: &str) -> CatalogEntry {
 async fn refresh_success_merges_and_records_history() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let cache = CatalogCache::new(dir.path(), Duration::from_secs(3_600));
-    let db = Database::open_in_memory().expect("メモリ DB を開ける");
+    let config = storage_config(&dir);
+    let storage = Storage::open(config.clone()).expect("storage を開ける");
     let mut catalog = ModelCatalog::builtin();
     let fetcher = MockFetcher::ok(vec![test_entry("gemma-3-27b"), test_entry("gpt-4o")]);
 
     let outcome = catalog
-        .refresh(&fetcher, &cache, &db)
+        .refresh(&fetcher, &cache, &storage.handle())
         .await
         .expect("refresh は成功する");
 
@@ -109,7 +116,11 @@ async fn refresh_success_merges_and_records_history() {
     );
     assert!(cache.load().is_some(), "取得結果がキャッシュに保存される");
 
-    let records = db.catalog_updates().expect("履歴を一覧できる");
+    storage.close();
+    let records = Database::open(&config)
+        .expect("DB を再度開ける")
+        .catalog_updates()
+        .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "models-dev");
     assert_eq!(records[0].model_count, 6, "マージ後の項目数が記録される");
@@ -123,13 +134,14 @@ async fn refresh_success_merges_and_records_history() {
 async fn fetch_failure_falls_back_to_builtin_and_records_history() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let cache = CatalogCache::new(dir.path(), Duration::from_secs(3_600));
-    let db = Database::open_in_memory().expect("メモリ DB を開ける");
+    let config = storage_config(&dir);
+    let storage = Storage::open(config.clone()).expect("storage を開ける");
     let mut catalog = ModelCatalog::builtin();
     let before = catalog.entries().clone();
     let fetcher = MockFetcher::fail("boom: 模擬ネットワーク障害");
 
     let outcome = catalog
-        .refresh(&fetcher, &cache, &db)
+        .refresh(&fetcher, &cache, &storage.handle())
         .await
         .expect("refresh は成功する");
 
@@ -137,7 +149,11 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
     assert_eq!(outcome.merged_count, 5, "組み込みカタログのまま");
     assert_eq!(catalog.entries(), &before, "組み込みカタログは変更されない");
 
-    let records = db.catalog_updates().expect("履歴を一覧できる");
+    storage.close();
+    let records = Database::open(&config)
+        .expect("DB を再度開ける")
+        .catalog_updates()
+        .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "builtin");
     assert_eq!(records[0].model_count, 5, "維持した項目数が記録される");
@@ -156,7 +172,8 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
 async fn fresh_cache_skips_fetch() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let cache = CatalogCache::new(dir.path(), Duration::from_secs(3_600));
-    let db = Database::open_in_memory().expect("メモリ DB を開ける");
+    let config = storage_config(&dir);
+    let storage = Storage::open(config.clone()).expect("storage を開ける");
     cache
         .store(&[test_entry("cached-model"), test_entry("gpt-4o")])
         .expect("キャッシュを事前保存できる");
@@ -164,7 +181,7 @@ async fn fresh_cache_skips_fetch() {
     let fetcher = MockFetcher::fail("boom: 呼ばれてはならない");
 
     let outcome = catalog
-        .refresh(&fetcher, &cache, &db)
+        .refresh(&fetcher, &cache, &storage.handle())
         .await
         .expect("refresh は成功する");
 
@@ -182,7 +199,11 @@ async fn fresh_cache_skips_fetch() {
         .expect("キャッシュの項目がマージされる");
     assert_eq!(entry.source, CatalogSource::ModelsDev);
 
-    let records = db.catalog_updates().expect("履歴を一覧できる");
+    storage.close();
+    let records = Database::open(&config)
+        .expect("DB を再度開ける")
+        .catalog_updates()
+        .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache");
     assert_eq!(records[0].model_count, 6, "マージ後の項目数が記録される");
@@ -196,7 +217,8 @@ async fn fresh_cache_skips_fetch() {
 async fn stale_cache_used_when_fetch_fails() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let cache = CatalogCache::new(dir.path(), Duration::from_millis(1));
-    let db = Database::open_in_memory().expect("メモリ DB を開ける");
+    let config = storage_config(&dir);
+    let storage = Storage::open(config.clone()).expect("storage を開ける");
     cache
         .store(&[test_entry("stale-model")])
         .expect("キャッシュを事前保存できる");
@@ -206,7 +228,7 @@ async fn stale_cache_used_when_fetch_fails() {
     let fetcher = MockFetcher::fail("boom: 模擬ネットワーク障害");
 
     let outcome = catalog
-        .refresh(&fetcher, &cache, &db)
+        .refresh(&fetcher, &cache, &storage.handle())
         .await
         .expect("refresh は成功する");
 
@@ -225,7 +247,11 @@ async fn stale_cache_used_when_fetch_fails() {
         "期限切れキャッシュの項目がマージされる"
     );
 
-    let records = db.catalog_updates().expect("履歴を一覧できる");
+    storage.close();
+    let records = Database::open(&config)
+        .expect("DB を再度開ける")
+        .catalog_updates()
+        .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache-stale");
     assert_eq!(records[0].model_count, 6, "マージ後の項目数が記録される");

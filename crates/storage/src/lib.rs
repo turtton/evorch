@@ -18,7 +18,7 @@ pub mod repo;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};
-pub use db::{Database, watch_exclusions};
+pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
 pub use projection::{ReconcileSummary, SessionSnapshot};
