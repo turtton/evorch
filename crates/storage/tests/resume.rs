@@ -85,7 +85,7 @@ fn completed_tool_call_is_removed_from_open_calls() {
 #[test]
 fn reconcile_is_idempotent_and_reports_stable_counts() {
     /* Given: 完了済みタスクのログ */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(LifecycleEvent::BackgroundTaskStarted { task_id: "t1".into() }, 2)); append(&handle, Some("s1"), &event(LifecycleEvent::BackgroundTaskCompleted { task_id: "t1".into() }, 3));
-    /* When: 二度再調整する */ let first = handle.reconcile().unwrap(); let second = handle.reconcile().unwrap(); storage.close(); let db = Database::open(&config).unwrap(); let first_session = db.session("s1").unwrap(); let first_task = db.task("t1").unwrap();
+    /* When: 二度再調整する */ let first = handle.reconcile().unwrap(); let reader = Database::open(&config).expect("reader must open while writer runs"); let first_session = reader.session("s1").unwrap(); let first_task = reader.task("t1").unwrap(); drop(reader); let second = handle.reconcile().unwrap(); storage.close(); let db = Database::open(&config).unwrap();
     /* Then: 件数と行が変わらない */ assert_eq!(second, first); assert_eq!(db.session("s1").unwrap(), first_session); assert_eq!(db.task("t1").unwrap(), first_task);
 }
 }
