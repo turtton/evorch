@@ -20,6 +20,10 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 - harness bug と分類された診断が GitHub Issue として作成されること
 - session-end hook 非実行時も crash spool に記録され、次回起動時に処理されること
 
+## v0.1.1 provider request 観測イベントの下地確定（2026-08-30、PR #32 / issue #31）
+
+診断の入力源となる provider attempt 観測が event-bus schema に landed: request 開始/TTFT/完了/失敗（型付き `ProviderFailureKind` 分類）/fallback 選択が request ID 相関で bus に流れる。失敗 payload の診断情報（レスポンス本文・credential）は意図的に含めない（bus/storage に流れるため）。本 unit は観測の schema と発行境界のみで、DiagnosticBus への接続・Issue 化は本 feature の後続 unit の責務。詳細は provider-routing/overview.md の実装確定セクションを参照。
+
 ## Related decisions
 
 - [ADR 0006: Harness 自身の診断と自己改善](../../decisions/0006-self-improvement-and-diagnostics.md)

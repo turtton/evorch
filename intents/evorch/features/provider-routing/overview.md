@@ -48,6 +48,14 @@ config ロード経路が fail-closed 化され、未知キーと平文 credenti
 
 モデル情報は4供給源のハイブリッド: ①組み込みデフォルト（属性・価格）②起動時 fetch（models.dev 等、キャッシュ+オフラインフォールバック）③プロバイダ検出（openai-compatible の `/v1/models`、属性未確定フラグ付きマージ）④サブスクリプション系の auth 状態動的フィルタ。ModelCatalog は domain transform 対象（ADR 0010）。価格カタログはコスト計算（ADR 0012）と同一ソース。
 
+## v0.1.1 provider 観測イベントと TTFT 契約の実装確定（2026-08-30、PR #32 / issue #31）
+
+- `EventKind::Provider` 配下に attempt 観測 5 variant を追加（`RequestStarted` / `FirstTokenObserved` / `RequestCompleted` / `RequestFailed` / `FallbackTriggered`）＋失敗分類 `ProviderFailureKind`。全イベントは attempt ごと一意の `request_id`（`req-<プロセス起動ms>-<単調カウンタ>`）で相関。`SCHEMA_VERSION=1` 不変・追加のみ・legacy snapshot テストで後方互換を固定
+- **発行境界**: `AttemptObserver`（crates/providers/src/observe.rs）を attempt ごとに生成し、wire request 構築成功後・HTTP 送信直前に `RequestStarted`。成功・失敗併せて終端はちょうど 1 回（flag + Drop backstop で consumer drop は `Other` として終端化）。OpenAI / Anthropic / OpenAI-compatible 3 クライアントに同一配線
+- **TTFT 契約**: 開始=上記開始点、終了=最初の非空 text delta か tool-call delta の正常解釈。headers / usage-only / keepalive / 空 delta / reasoning-only は first token に数えない。streaming 成功で高々 1 回、非 streaming では発行しない
+- **token accounting**: `RequestCompleted` の token counts は同一 attempt の `UsageEvent::Usage` の観測用複製。集計 canonical は UsageEvent のみ（二重計上禁止、wire 順序 `Started → Usage → Completed` で相関。UsageEvent に request ID は持たせない wire 不変制約）
+- **FallbackTriggered**: `Router::next_fallback` の選択境界のみ発行（`with_event_bus` で接続）。候補枯渇（None 返却）では発行しない。順序・policy は不変で観測追加のみ
+
 ## 受け入れ基準
 
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
@@ -55,6 +63,8 @@ config ロード経路が fail-closed 化され、未知キーと平文 credenti
 - 同一 session で provider affinity が保たれ、失敗時のみ cooldown 付きで切り替わること
 - config の未知キーが dotted config path 付きでロード時に拒否されること
 - credential が config に平文で書けず、Keyring/Env 参照への remediation 付きで拒否されること（ADR 0014 の load-time 強制。PR #24）
+- 全 provider client の request attempt が request ID 相関の開始/終端観測イベントとして bus に流れること、streaming は TTFT（上記契約通り）も高々 1 回流れること（PR #32）
+- fallback 選択が FallbackTriggered として観測でき、失敗分類が型付き（ProviderFailureKind）であること（PR #32）
 
 ## Related decisions
 
