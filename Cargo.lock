@@ -3700,10 +3700,12 @@ version = "0.1.0"
 dependencies = [
  "config",
  "event-bus",
+ "futures-util",
  "model",
  "providers",
  "thiserror 2.0.18",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
