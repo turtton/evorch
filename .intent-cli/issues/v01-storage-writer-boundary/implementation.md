@@ -43,3 +43,18 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): role-facing surfaceなし。`no_role_facing_surface: true`。
 
 `improve` (G456 / G460) is the later safety net; packet-time maintenance is the normal path.
+
+## 実装確定（2026-08-30、PR #28 / issue #27）
+
+ADR 0018 の決定を型境界として実装した（squash commit `ef9c569`）。
+
+- **公開境界**: storage crate の module visibility を引き締め（`db` / `migrations` / `projection` / `repo` / `writer` は private、`config` / `entity` / `error` のみ `pub mod`）。公開 re-export は `Database` / `Storage` / `StorageHandle` / `system_time_to_ns` 等の時刻変換 / `CatalogUpdateRecord` / `ReconcileSummary` / `SessionSnapshot` / `StoredEvent`。
+- **read-only facade（13 method）**: `crates/storage/src/read.rs` で `impl Database` に session/task/message/agent_run 系 get・list、`events_by_session` / `events_all_ordered` / `metrics_range` / `restore_session(s)` を実装。`Database.conn` は `pub(crate)` のまま外部不可視。
+- **write は writer command のみ**: `StorageHandle` に `record_catalog_update(CatalogUpdateRecord)` と `reconcile() -> ReconcileSummary` の 2 command を追加（`crates/storage/src/writer.rs`、`Command::RecordCatalogUpdate` / `Command::Reconcile`）。writer 内部状態は `writer/state.rs` へ分離（挙動は line-for-line 維持）。
+- **repo CRUD の意味づけ**: `repo/*` の create/update/delete は production から非到達となったため `#[cfg_attr(not(test), expect(dead_code, reason = ...))]` で明示し、in-crate 契約テスト（`repo/crud_tests.rs` / `credential_tests.rs` / `event/limits_tests.rs` へ移動）で担保を継続。未使用の pub wrapper `session_event_bytes` / `day_event_bytes` は削除。
+- **Database::open は read + schema-init の正規境界として公開継続**（mutation method はゼロ、`record_catalog_update` メソッドは削除済み）。schema-init が DDL を書きうる残留リスクは PR #28 body に明記。
+- **compile-fail 証拠**: `lib.rs` doctest 5 件（`storage::repo` / `storage::repo::session::create` / `storage::projection::reconcile` の E0603、`db.conn` の E0616、`StorageHandle(_)` destructure の E0532）で外部到達不能を固定。
+- **consumer 移行**: `model::refresh` の履歴記録は `StorageHandle::record_catalog_update` 経由。storage 各 integration test（credential_surface / resume / raw_usage_guard / usage_flush / catalog_history）は公開経路（Storage + Database facade）へ移管され、assertion parity を保持（crud 22→22 / limits 14→14 / credential 12→12 / raw usage 4→4）。新規テスト: `tests/read_api.rs`（facade 13 method 全通り）、`tests/writer_commands.rs`（catalog / reconcile の writer 経由 roundtrip）。
+- raw usage 直接永続化ガード（issue #25）は handle・repo 両レベルで維持（repo レベルは in-crate `repo/event/tests.rs::repo_append_event_rejects_raw_usage_without_increasing_row_count` へ移動）。
+
+writeback: packet は `write_back_required: false`（intent tree / ADR / diagram / docs 全て不要判定）のため本実装確定セクションのみ。`overview.md` 更新なし。
