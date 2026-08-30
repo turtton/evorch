@@ -7,7 +7,8 @@ use rusqlite::Connection;
 
 use super::Command;
 use crate::db::file_sizes;
-use crate::repo::{event, metrics};
+use crate::projection;
+use crate::repo::{catalog, event, metrics};
 use crate::{HardLimits, LimitKind, StorageConfig, StorageError};
 
 struct WriterState {
@@ -51,6 +52,12 @@ pub(super) fn run_writer(
                     append_event_to_conn(&mut state, &session_id, &event)
                 };
                 let _ = reply.send(result);
+            }
+            Ok(Command::RecordCatalogUpdate(record, reply)) => {
+                let _ = reply.send(catalog::record(&state.conn, &record));
+            }
+            Ok(Command::Reconcile(reply)) => {
+                let _ = reply.send(projection::reconcile(&state.conn));
             }
             Ok(Command::FlushUsage(reply)) => {
                 let result = flush_usage(&mut state);

@@ -6,17 +6,20 @@ use std::thread::JoinHandle;
 use event_bus::{Event, UsageBucket, UsageSink};
 
 use crate::db::file_sizes;
-use crate::{Database, StorageConfig, StorageError};
+use crate::{CatalogUpdateRecord, Database, ReconcileSummary, StorageConfig, StorageError};
 
 mod state;
 
 use state::{log_size_state, run_writer};
 
 type ReplyTx = mpsc::Sender<Result<(), StorageError>>;
+type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
 enum Command {
     Usage(Vec<UsageBucket>),
     AppendEvent(Option<String>, Event, ReplyTx),
+    RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
+    Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
     Shutdown,
@@ -95,6 +98,29 @@ impl StorageHandle {
                 event.clone(),
                 reply,
             ))
+            .map_err(|_| StorageError::WriterClosed)?;
+        result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    /// カタログ更新履歴を writer 経由で保存します。
+    ///
+    /// # Errors
+    ///
+    /// writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
+    pub fn record_catalog_update(&self, record: &CatalogUpdateRecord) -> Result<(), StorageError> {
+        let record = record.clone();
+        self.request(|reply| Command::RecordCatalogUpdate(record, reply))
+    }
+
+    /// イベントログを正として session / task projection を再調整します。
+    ///
+    /// # Errors
+    ///
+    /// writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
+    pub fn reconcile(&self) -> Result<ReconcileSummary, StorageError> {
+        let (reply, result) = mpsc::channel();
+        self.0
+            .send(Command::Reconcile(reply))
             .map_err(|_| StorageError::WriterClosed)?;
         result.recv().map_err(|_| StorageError::WriterClosed)?
     }
