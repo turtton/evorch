@@ -40,6 +40,33 @@ Child implementation repos do NOT own this state.
 - When compressing long sessions, keep at most this one pointer in the
   summary; do NOT copy command catalogs into summaries (they go stale).
 
+## intent-cli known drifts & verified interfaces (ledger)
+
+Hard-won operational findings that compression must NOT lose. Each entry is
+pinned to the verified binary version + date. Entries are append-only;
+remove an entry only after verifying against a newer binary.
+
+- **Dual-check rule** (verified 0.26.0, 2026-08-30): for any unfamiliar
+  intent-cli workflow, consult BOTH `intent-cli <cmd> --help` (what the
+  binary implements) AND `intent-cli guide <topic>` / `intent-cli grill`
+  (the documented protocol). A contradiction between them is a real finding:
+  the binary wins for execution, and the drift is a bug-report candidate.
+  Neither source alone reveals the contradiction.
+- **interview record-answer** (verified 0.26.0, 2026-08-30): the binary
+  rejects the guide-documented `--question-id <id> --answer "..."` form.
+  Implemented form: `record-answer --session <id> --question <q> --from-file
+  <path> --write` (new questions additionally need `--prompt <text>`;
+  re-answering an existing id does not). `next-question` requires
+  `--session` (the guide-documented `--domain`-only form errors).
+  `interview answer --domain <d> [--from-file <path>]` answers the next
+  pending question.
+- **grill protocol** (verified 0.26.0, 2026-08-30): `intent-cli grill` is
+  persistent interview mode — the agent owns semantic questioning; one
+  focused question per turn (never batch); dependency-ordered backlog;
+  record every answer durably before proceeding; stop only at a structured
+  stop condition (backlog empty + rediscovery finds nothing →
+  `今のところ追加質問はありません`).
+
 ## Wrong-host detection (G301)
 
 `.intent-cli/host-binding.toml` records the canonical host repo for this
