@@ -58,3 +58,4 @@
 {"ts":"2026-08-30T04:45:32.4975089+00:00","execution_unit":"v01-secure-tool-composition-root","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":22}
 {"ts":"2026-08-30T04:45:32.4975089+00:00","execution_unit":"v01-secure-tool-composition-root","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":22}
 {"ts":"2026-08-30T04:51:01.1251293+00:00","execution_unit":"v01-config-secret-field-rejection","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#23","reason":"https://github.com/turtton/evorch/issues/23"}
+{"ts":"2026-08-30T05:46:14.9607204+00:00","execution_unit":"v01-config-secret-field-rejection","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":24}
