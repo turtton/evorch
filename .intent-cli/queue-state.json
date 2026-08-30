@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T03:33:08.3807042+00:00",
+  "updated_at": "2026-08-30T03:53:23.0161935+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -277,6 +277,11 @@
         "implementation": ".intent-cli/issues/v01-secure-tool-composition-root/implementation.md",
         "review_context": ".intent-cli/issues/v01-secure-tool-composition-root/review-context.md",
         "yaml": ".intent-cli/issues/v01-secure-tool-composition-root/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 21,
+        "url": "https://github.com/turtton/evorch/issues/21"
       },
       "worker_role": "implementation",
       "review_role": "review",

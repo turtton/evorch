@@ -53,3 +53,4 @@
 {"ts":"2026-08-30T02:38:17.8368746+00:00","execution_unit":"v01-role-network-enforcement","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#19","reason":"https://github.com/turtton/evorch/issues/19"}
 {"ts":"2026-08-30T03:33:08.371309+00:00","execution_unit":"v01-role-network-enforcement","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":20}
 {"ts":"2026-08-30T03:33:08.371309+00:00","execution_unit":"v01-role-network-enforcement","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":20}
+{"ts":"2026-08-30T03:53:23.0161935+00:00","execution_unit":"v01-secure-tool-composition-root","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#21","reason":"https://github.com/turtton/evorch/issues/21"}
