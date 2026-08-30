@@ -8,6 +8,13 @@ use crate::entity::{AgentRunRecord, AgentRunStatus};
 type AgentRunRow = (String, String, String, String, String, i64, Option<i64>);
 
 /// エージェント実行記録を作成します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn create(conn: &Connection, record: &AgentRunRecord) -> Result<(), StorageError> {
     let finished_at_ns = record.finished_at.map(system_time_to_ns).transpose()?;
     conn.execute(
@@ -30,6 +37,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentRunRecord>, Storag
 }
 
 /// エージェント実行記録の全フィールドを更新します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn update(conn: &Connection, record: &AgentRunRecord) -> Result<(), StorageError> {
     let finished_at_ns = record.finished_at.map(system_time_to_ns).transpose()?;
     let changed = conn.execute(
@@ -43,6 +57,13 @@ pub fn update(conn: &Connection, record: &AgentRunRecord) -> Result<(), StorageE
 }
 
 /// エージェント実行記録を削除し、削除件数が一件だったかを返します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn delete(conn: &Connection, id: &str) -> Result<bool, StorageError> {
     Ok(conn.execute("DELETE FROM agent_runs WHERE id = ?1", [id])? == 1)
 }

@@ -8,6 +8,13 @@ use crate::entity::{TaskRecord, TaskStatus};
 type TaskRow = (String, Option<String>, String, i64, i64);
 
 /// タスクを作成します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn create(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO tasks (id, session_id, status, created_at_ns, updated_at_ns) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -29,6 +36,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<TaskRecord>, StorageErr
 }
 
 /// タスクの全フィールドを更新します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn update(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError> {
     let changed = conn.execute(
         "UPDATE tasks SET session_id = ?2, status = ?3, created_at_ns = ?4, updated_at_ns = ?5 WHERE id = ?1",
@@ -41,6 +55,13 @@ pub fn update(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError
 }
 
 /// タスクを削除し、削除件数が一件だったかを返します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn delete(conn: &Connection, id: &str) -> Result<bool, StorageError> {
     Ok(conn.execute("DELETE FROM tasks WHERE id = ?1", [id])? == 1)
 }

@@ -183,7 +183,7 @@ fn fold(events: &[StoredEvent]) -> ProjectionState {
 }
 
 /// 全イベントを採番順で畳み込み、セッション ID 順の復元状態を返します。
-pub fn restore_sessions(conn: &Connection) -> Result<Vec<SessionSnapshot>, StorageError> {
+pub(crate) fn restore_sessions(conn: &Connection) -> Result<Vec<SessionSnapshot>, StorageError> {
     Ok(fold(&event::list_all_ordered(conn)?)
         .sessions
         .into_values()
@@ -192,7 +192,7 @@ pub fn restore_sessions(conn: &Connection) -> Result<Vec<SessionSnapshot>, Stora
 }
 
 /// 指定セッションのイベントを採番順で畳み込み、復元状態を返します。
-pub fn restore_session(
+pub(crate) fn restore_session(
     conn: &Connection,
     id: &str,
 ) -> Result<Option<SessionSnapshot>, StorageError> {
@@ -212,7 +212,7 @@ pub struct ReconcileSummary {
 /// イベントログを正としてセッションとタスクの行を一トランザクションで再調整します。
 ///
 /// 帰属にはライフサイクル payload 内の ID ではなく envelope の `session_id` のみを使います。
-pub fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageError> {
+pub(crate) fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageError> {
     let state = fold(&event::list_all_ordered(conn)?);
     let summary = ReconcileSummary {
         sessions_upserted: u64::try_from(state.sessions.len())

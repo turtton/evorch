@@ -122,16 +122,6 @@ pub fn append_event(
     })
 }
 
-/// セッションに属するイベント payload の累積バイト数を返します。
-pub fn session_event_bytes(conn: &Connection, session_id: &str) -> Result<u64, StorageError> {
-    accounting::session_event_bytes(conn, session_id)
-}
-
-/// 指定 UTC 日の開始以降に記録された payload の累積バイト数を返します。
-pub fn day_event_bytes(conn: &Connection, day_start_ns: i64) -> Result<u64, StorageError> {
-    accounting::day_event_bytes(conn, day_start_ns)
-}
-
 /// セッションのイベントを採番順で返します。
 pub fn list_by_session(
     conn: &Connection,

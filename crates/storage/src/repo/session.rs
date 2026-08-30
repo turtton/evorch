@@ -17,6 +17,13 @@ type SessionRow = (
 );
 
 /// セッションを作成します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn create(conn: &Connection, record: &SessionRecord) -> Result<(), StorageError> {
     let total_event_bytes = i64::try_from(record.total_event_bytes)
         .map_err(|_| StorageError::OutOfRange("total_event_bytes"))?;
@@ -40,6 +47,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<SessionRecord>, Storage
 }
 
 /// セッションの全フィールドを更新します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn update(conn: &Connection, record: &SessionRecord) -> Result<(), StorageError> {
     let total_event_bytes = i64::try_from(record.total_event_bytes)
         .map_err(|_| StorageError::OutOfRange("total_event_bytes"))?;
@@ -54,6 +68,13 @@ pub fn update(conn: &Connection, record: &SessionRecord) -> Result<(), StorageEr
 }
 
 /// セッションを削除し、削除件数が一件だったかを返します。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "exercised by in-crate contract tests; writer commands are the production path"
+    )
+)]
 pub fn delete(conn: &Connection, id: &str) -> Result<bool, StorageError> {
     Ok(conn.execute("DELETE FROM sessions WHERE id = ?1", [id])? == 1)
 }

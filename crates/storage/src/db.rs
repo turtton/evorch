@@ -48,15 +48,6 @@ impl Database {
         self.pragma_value(name)
     }
 
-    /// カタログ更新履歴を保存します。
-    ///
-    /// # Errors
-    ///
-    /// SQLite 操作に失敗した場合にエラーを返します。
-    pub fn record_catalog_update(&self, record: &CatalogUpdateRecord) -> Result<(), StorageError> {
-        catalog::record(&self.conn, record)
-    }
-
     /// カタログ更新履歴を挿入順で返します。
     ///
     /// # Errors
