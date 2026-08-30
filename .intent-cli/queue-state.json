@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T10:11:44.9293156+00:00",
+  "updated_at": "2026-08-30T11:41:03.9566488+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -394,7 +394,7 @@
     {
       "execution_unit": "v01-event-provider-observation-schema",
       "title": "v0.1.1: provider request/response \u89B3\u6E2C\u30A4\u30D9\u30F3\u30C8\u3068 TTFT \u5951\u7D04\u3092\u8FFD\u52A0\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-provider-client",
         "v01-event-stream"
@@ -411,10 +411,11 @@
         "number": 31,
         "url": "https://github.com/turtton/evorch/issues/31"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/32",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "normal",
-      "priority_revision": 1
+      "priority_revision": 0
     },
     {
       "execution_unit": "v01-config-schema-publication",
