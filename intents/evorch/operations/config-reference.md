@@ -26,7 +26,11 @@ version = 2          # スキーマバージョン（現在 2。ADR 0014。大�
 [metrics]
 ```
 
-未知キーは前方互換のため許容（エラーにならず無視）。version 管理 migration は起動時に適用（`migrate.rs`。古い version は現在値へ変換、未来の version はエラー）。
+未知キー・typo キーはロード時に拒否される。拒否は parse error になり、`diagnotics`（ルート直下の typo）、`diagnostics.log_lvl`、`providers.foo.timeout` のような dotted config path を含む。strictness は全ソース層（組み込み既定値 / ユーザ / プロジェクト / drop-in / 環境変数 / CLI 上書き）に一様に適用される。検証は deep merge と version migration の後のマージ済み値に対して走るため、どの層由来のキーでも同じエラーになる。
+
+任意キーを許容するマップは `providers` のプロファイル名、`routing.routes` の route 名、`panel.keybinds` のキーのみ。これら以外のテーブルに定義済み以外のキーを書くとエラーになる。
+
+version 管理 migration は起動時に適用（`migrate.rs`。古い version は現在値へ変換、未来の version はエラー）。
 
 ## providers（`ProviderProfileConfig`）
 
@@ -45,7 +49,23 @@ version = 2          # スキーマバージョン（現在 2。ADR 0014。大�
 # OS キーリングから取得（優先）
 credential = { type = "keyring", service = "evorch", account = "anthropic-personal" }
 # 環境変数から取得
-credential = { type = "env", name = "ANTHROPIC_API_KEY" }
+credential = { type = "env", var = "ANTHROPIC_API_KEY" }
+```
+
+### 平文 credential の明示拒否
+
+ADR 0014 どおり credential は config に書かない。`providers.<profile>` 直下、およびその `credential` テーブル内に `api_key` / `api-key` / `token` / `secret` / `password` / `credential_value` などの credential-like なキーを書くと拒否される。キー名の照合は大文字小文字を区別せず、`-` と `_` は同一視される（例: `API_Key`・`api-KEY` も一致）。
+
+```toml
+[providers.foo]
+api_key = "sk-..."   # 拒否される
+```
+
+拒否時のエラーには config path（`providers.<profile>.<field>`）と remediation 案内が含まれる。以下のいずれかの参照形式に置き換えること:
+
+```toml
+credential = { type = "keyring", service = "evorch", account = "..." }
+credential = { type = "env", var = "..." }
 ```
 
 ## routing（`RoutingConfig`）
