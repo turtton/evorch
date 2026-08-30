@@ -10,3 +10,8 @@ pub mod message;
 pub mod metrics;
 pub mod session;
 pub mod task;
+
+#[cfg(test)]
+mod credential_tests;
+#[cfg(test)]
+mod crud_tests;

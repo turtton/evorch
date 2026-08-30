@@ -1,6 +1,6 @@
 use std::time::UNIX_EPOCH;
 
-use event_bus::{EventMeta, LifecycleEvent};
+use event_bus::{EventMeta, LifecycleEvent, UsageEvent};
 
 use super::*;
 
@@ -105,4 +105,50 @@ fn day_start_floors_to_utc_midnight_and_rejects_overflow() {
     // Then: UTC 深夜へ切り捨て、範囲外は拒否する
     assert_eq!(start, NANOS_PER_DAY);
     assert_eq!(error, StorageError::OutOfRange("wall_clock nanoseconds"));
+}
+
+#[test]
+fn repo_append_event_rejects_raw_usage_without_increasing_row_count() {
+    // Given: 移行済みDBとraw usage event
+    let connection = fixture();
+    let before: i64 = connection
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("events row count must be readable");
+    let usage = Event {
+        meta: EventMeta {
+            schema_version: event_bus::SCHEMA_VERSION,
+            monotonic: Duration::from_nanos(1),
+            wall_clock: UNIX_EPOCH + Duration::from_nanos(1),
+        },
+        kind: UsageEvent::Usage {
+            provider: "provider".into(),
+            model: "model".into(),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+        }
+        .into(),
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: repo関数を直接呼び出す
+    let error = append_event(
+        &connection,
+        None,
+        &usage,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .expect_err("repo must reject raw usage event");
+
+    // Then: actionable errorを返しINSERTは一件も行われない
+    assert_eq!(error, StorageError::RawUsageEventNotPersisted);
+    let message = error.to_string();
+    assert!(message.contains("raw usage events are not persisted"));
+    assert!(message.contains("UsageSink"));
+    let after: i64 = connection
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("events row count must be readable");
+    assert_eq!(after, before);
 }

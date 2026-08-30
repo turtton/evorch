@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use event_bus::{BucketKey, Event, EventMeta, LifecycleEvent, UsageBucket, UsageEvent, UsageSink};
 use rusqlite::Connection;
 use storage::repo::{event, metrics};
-use storage::{HardLimits, Storage, StorageConfig, StorageError};
+use storage::{Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 fn config(temp_dir: &TempDir) -> StorageConfig {
@@ -38,12 +38,6 @@ fn raw_usage_event(nanos: u64) -> Event {
         },
         nanos,
     )
-}
-
-fn event_count(connection: &Connection) -> i64 {
-    connection
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .expect("events row count must be readable")
 }
 
 #[test]
@@ -81,36 +75,6 @@ fn storage_handle_rejects_raw_usage_before_insert_and_preserves_non_usage_events
     assert_eq!(stored[0].event, lifecycle);
     println!("raw_usage_error={message}");
     println!("non_usage_event_count={}", stored.len());
-}
-
-#[test]
-fn repo_append_event_rejects_raw_usage_without_increasing_row_count() {
-    // Given: Storage で初期化した DB と raw usage event
-    let temp_dir = TempDir::new().expect("temporary directory must be created");
-    let config = config(&temp_dir);
-    Storage::open(config.clone())
-        .expect("storage must open")
-        .close();
-    let connection = Connection::open(&config.db_path).expect("database must reopen");
-    let before = event_count(&connection);
-    let mut accounting = event::EventAccounting::default();
-
-    // When: repo 関数を直接呼び出す
-    let error = event::append_event(
-        &connection,
-        None,
-        &raw_usage_event(1),
-        &HardLimits::default(),
-        &mut accounting,
-    )
-    .expect_err("repo must reject raw usage event");
-
-    // Then: actionable error を返し、INSERT は一件も行われない
-    assert_eq!(error, StorageError::RawUsageEventNotPersisted);
-    let message = error.to_string();
-    assert!(message.contains("raw usage events are not persisted"));
-    assert!(message.contains("UsageSink"));
-    assert_eq!(event_count(&connection), before);
 }
 
 #[test]

@@ -206,4 +206,6 @@ const fn kind_name(kind: &EventKind) -> &'static str {
 }
 
 #[cfg(test)]
+mod limits_tests;
+#[cfg(test)]
 mod tests;
