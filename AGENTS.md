@@ -24,6 +24,22 @@ Child implementation repos do NOT own this state.
 - Do NOT call `intent-cli run` (advanced runtime) or `dotnet run` as a
   fallback. Do NOT ask `intent-cli` to launch Claude/Codex.
 
+## intent-cli knowledge recovery (post-compression)
+
+- `intent-cli` is **self-describing**: never answer intent-cli command /
+  concept questions from conversation memory alone. Resolve them from the CLI
+  itself first — `intent-cli --help`, `intent-cli guide commands list`,
+  `intent-cli <group> --help` (guide / worker / automation / packet / issue /
+  closeout / interview), and per-topic guides such as `intent-cli grill`,
+  `intent-cli inspect`, `intent-cli stack`, `intent-cli improve`,
+  `intent-cli next`.
+- Interview / guide protocols (`grill`, `inspect`, `stack`, `improve`, `next`)
+  are durable G-numbered guides owned by the CLI, not by this repo. The CLI is
+  the single source of truth; a stale recalled summary is a bug, re-fetching
+  from the CLI is the fix.
+- When compressing long sessions, keep at most this one pointer in the
+  summary; do NOT copy command catalogs into summaries (they go stale).
+
 ## Wrong-host detection (G301)
 
 `.intent-cli/host-binding.toml` records the canonical host repo for this
