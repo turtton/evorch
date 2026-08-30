@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// 診断 (ログ出力) の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiagnosticsConfig {
     /// ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。
     pub log_level: String,
@@ -25,7 +25,7 @@ impl Default for DiagnosticsConfig {
 
 /// 権限プリセットの設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PermissionConfig {
     /// 権限プリセット名。
     pub preset: String,
@@ -41,7 +41,7 @@ impl Default for PermissionConfig {
 
 /// メトリクス収集の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     /// メトリクス収集の有効フラグ。
     pub enabled: bool,

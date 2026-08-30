@@ -22,10 +22,11 @@ pub const CURRENT_VERSION: u32 = 2;
 
 /// 設定ファイルのルート構造。
 ///
-/// 各セクションは [`serde(default)`] により省略可能で、未知のキーは前方互換のため
-/// 許容します (`deny_unknown_fields` は使用しません)。
+/// 各セクションは [`serde(default)`] により省略可能ですが、未知のキーは拒否します。
+/// ロード経路では [`crate::strict`] がドット区切りの設定パスを報告し、直接の serde
+/// パースでも `deny_unknown_fields` により拒否します。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// 設定スキーマのバージョン。
     pub version: u32,
@@ -201,6 +202,20 @@ retention_days = 90
         let reparsed: Config = toml::from_str(&serialized).expect("直列化結果をパースできる");
 
         assert_eq!(reparsed, config);
+    }
+
+    // Given: ルートに不明なキーを含む設定 TOML / When: Config にパースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn unknown_root_field_rejected() {
+        let doc = "version = 2\nunknown_key = 1";
+
+        let result = toml::from_str::<Config>(doc);
+
+        assert!(
+            result.is_err(),
+            "ルートの不明なキーは拒否される: {result:?}"
+        );
     }
 
     // Given: 不明な provider_type 値を含む TOML / When: パースを試みる
