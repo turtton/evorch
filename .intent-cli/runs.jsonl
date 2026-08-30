@@ -73,3 +73,4 @@
 {"ts":"2026-08-30T10:06:01.4020296+00:00","execution_unit":"v01-gui-runtime-wiring","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":30}
 {"ts":"2026-08-30T10:07:43.7794486+00:00","execution_unit":"v01-gui-runtime-wiring","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":30}
 {"ts":"2026-08-30T10:07:43.7794486+00:00","execution_unit":"v01-gui-runtime-wiring","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":30}
+{"ts":"2026-08-30T10:11:44.9293156+00:00","execution_unit":"v01-event-provider-observation-schema","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#31","reason":"https://github.com/turtton/evorch/issues/31"}

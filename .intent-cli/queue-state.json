@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T10:07:43.7884463+00:00",
+  "updated_at": "2026-08-30T10:11:44.9293156+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -405,6 +405,11 @@
         "implementation": ".intent-cli/issues/v01-event-provider-observation-schema/implementation.md",
         "review_context": ".intent-cli/issues/v01-event-provider-observation-schema/review-context.md",
         "yaml": ".intent-cli/issues/v01-event-provider-observation-schema/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 31,
+        "url": "https://github.com/turtton/evorch/issues/31"
       },
       "worker_role": "implementation",
       "review_role": "review",
