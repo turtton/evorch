@@ -42,3 +42,7 @@ v0.1 inspect の slice #9 は pane 単体の実装ではなく roadmap の製品
 - Guide reachability (G645): route form。`guide workflow task implementation-loop` / role `implementation` から、実 runtime session と live tasks pane を持つ既存 evorch GUI app へ到達させる。GUI-adjacent ではなく operator-facing surface の実接続を完成させるため、`no_role_facing_surface: true` にはしない。
 
 `improve` (G456 / G460) は後続の安全網であり、本 packet の docs writeback と route 宣言を closeout で確認する。
+
+## Closeout learning（2026-08-30、v01-role-network-enforcement / PR #20 より）
+
+製品 GUI entrypoint から実 AgentRuntime を組む際、`crates/runtime/src/network.rs` の `build_sandbox(&ExecutionPolicy, workspace)` を経由して role の network capability が bwrap policy へ伝播することを必須要件に含めること。allow は full-open（destination filter 非対応、selective egress は v0.2）。bwrap integration test は `#[ignore]` + `cargo test -- --include-ignored` で観測する。

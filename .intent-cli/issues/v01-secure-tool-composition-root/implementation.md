@@ -47,3 +47,7 @@ Captured while the design context is fresh. Answer or explicitly decline:
 - Guide reachability (G645): 内部 crate の construction API と demo wiring の変更のみで role-facing guide surface は追加しない。`no_role_facing_surface: true`
 
 `improve` (G456 / G460) は later safety net。packet-time で writeback を宣言済み。
+
+## Closeout learning（2026-08-30、v01-role-network-enforcement / PR #20 より）
+
+`crates/runtime/src/network.rs` の `build_sandbox(&ExecutionPolicy, workspace)` が policy → `BwrapConfig.allow_network` 伝播の composition seam として存在する。本 unit では production composition root からこの関数を**必ず呼び**、role ごとの network mode（Denied = `--unshare-net`、Allowed = 親 netns 継承＝full-open）が sandboxed tool execution（shell / git_diff）へ伝播することを検証要件に含めること。allow は destination filter 非対応の full-open であり、provider client は main-process 経路のまま bwrap 外であることは変更しない。

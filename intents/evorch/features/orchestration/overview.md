@@ -19,6 +19,8 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 
 Orchestrator / Explorer / Worker / Reviewer の 4 role 実行と background agent が `crates/agents/` + `crates/runtime/` にコード確定（PR #16、issue #7）。capability boundary は ADR 0002 行列を `RoleCapabilities` で runtime レベル強制。Orchestrator の delegate / delegate_background / send_message / wait は meta 操作として ToolUse dispatch で処理され、event stream で観測可能。詳細は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) の確定節を参照。
 
+v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/runtime/src/network.rs` の写像から `BwrapConfig.allow_network` へ伝播する。`build_sandbox(&ExecutionPolicy, workspace)` が composition seam で、production composition root からの呼び出しは `v01-secure-tool-composition-root` / `v01-gui-runtime-wiring` が消費する。allow は full-open（destination filter 非対応、selective egress は v0.2）。
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること

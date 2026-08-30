@@ -19,7 +19,7 @@ Tool は統一 interface（name / schema / permissions / execute）とし、Role
 
 OpenCode / pi / senpi は prompt injection を「防げない」と公式に明記し、Codex CLI 以外は OS-level sandbox を持たない調査結果を踏まえ、以下を段階導入する。
 
-- **v0.1**: approval policy（on-request/on-failure/never）と OS enforcement（fs allowlist / network deny / workspace write scope）の二層分離（Codex 方式。承認しても sandbox 外は実行不可）／ credential を agent プロセス・子プロセス・環境変数へ渡さない（keychain 優先、0600 fallback）／ network egress 既定 deny（provider endpoint のみ allowlist）／ tool result 内の `<system-reminder>` 等の制御マーカーをエスケープ
+- **v0.1**: approval policy（on-request/on-failure/never）と OS enforcement（fs allowlist / network deny / workspace write scope）の二層分離（Codex 方式。承認しても sandbox 外は実行不可）／ credential を agent プロセス・子プロセス・環境変数へ渡さない（keychain 優先、0600 fallback）／ network egress は既定 deny で、role の network capability を bwrap network mode へ写像して強制（v0.1 は full-deny/full-open 二値: deny=`--unshare-net`、allow=親 netns 継承。per-destination allowlist は bwrap で不可、selective egress は v0.2）／ tool result 内の `<system-reminder>` 等の制御マーカーをエスケープ
 - **v0.1 設計に組み込み・v0.2 実装**: tool result の `ContentOrigin` 型付け（RepositoryUntrusted / WebUntrusted / ToolTrusted 等）／ project trust（`AGENTS.md` / skills / MCP 設定等を未承認時はロードしない。pi/senpi の「trust 解決前に context file を読む」弱点は避ける）
 - **v0.3**: untrusted mode（fs read-only / 一時コピー / network deny / credential 不可 / project 拡張無効）
 
@@ -34,11 +34,17 @@ read / edit / grep / shell / git_diff の 5 ツールが `crates/tools/` にコ�
 - **shell**: 非 interactive = `tokio::process::Command`、interactive = portable-pty（one-shot）
 - **引数検証**: 各ツールの JSON Schema で実施（新規依存 jsonschema 0.52 no-default-features）
 
+## v0.1.1 role network 強制の実装確定（2026-08-30）
+
+`NetworkAccess::{Denied, OptIn, Allowed}` → `SandboxNetworkMode::{DeniedNetwork, AllowFullNetwork}` の pure 写像（`OptIn` は明示 opt-in なしでは fail-closed で deny）を `crates/runtime/src/network.rs` に確定（PR #20、issue #19）。`build_sandbox(&ExecutionPolicy, workspace)` が policy → `BwrapConfig.allow_network` 伝播の composition seam であり、**production composition root からの呼び出しは `v01-secure-tool-composition-root` / `v01-gui-runtime-wiring` の責務**（v0.1 時点では repo 内に production composition root が存在せず、executor 構築は example のみ）。allow は destination filter を持たない full-open であり、型名・コメント・テスト名で誤魔化さない。provider client は main process 経路のまま bwrap 外。
+
+bwrap integration test（`crates/sandbox/tests/bwrap.rs`、`crates/tools/tests/two_layer.rs`）の skip 観測方法: `#[ignore = "bwrap 実行環境が必要"]` 属性付き（既定 `cargo test` では pass ではなく ignored として集計され pass と区別可能）。bwrap 利用環境では `cargo test -- --include-ignored` で実行。子プロセス re-exec 系テストは `EVORCH_BWRAP_CHILD` 環境変数で二重 re-exec を防止。**follow-up**: CI に bwrap 利用 runner での `--include-ignored` job を追加する（T5。v0.1.1 scope 外で見送り）。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること
 - exec と pty が分離され、interactive process を扱えること
-- sandbox policy が role ごとに適用されること（v0.2 で sandbox 本格導入）
+- sandbox policy が role ごとに適用されること（v0.1.1 で network が OS 強制まで接続。残る production composition root 配線は v01-secure-tool-composition-root / v01-gui-runtime-wiring）
 
 ## Related decisions
 

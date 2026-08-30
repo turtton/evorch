@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T02:38:17.8368746+00:00",
+  "updated_at": "2026-08-30T03:33:08.3807042+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -240,7 +240,7 @@
     {
       "execution_unit": "v01-role-network-enforcement",
       "title": "v0.1.1: Role \u306E network capability \u3092 sandbox policy \u5F37\u5236\u306B\u63A5\u7D9A\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-sandbox-approval",
         "v01-agent-roles"
@@ -257,6 +257,7 @@
         "number": 19,
         "url": "https://github.com/turtton/evorch/issues/19"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/20",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
