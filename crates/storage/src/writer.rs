@@ -5,13 +5,13 @@ use std::thread::JoinHandle;
 
 use event_bus::{Event, UsageBucket, UsageSink};
 
-use crate::db::file_sizes;
+use crate::db::{file_sizes, temp_files_bytes};
 use crate::entity::SecretGuard;
 use crate::{CatalogUpdateRecord, Database, ReconcileSummary, StorageConfig, StorageError};
 
 mod state;
 
-use state::{log_size_state, run_writer};
+use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
 
 type ReplyTx = mpsc::Sender<Result<(), StorageError>>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
@@ -39,6 +39,9 @@ impl Storage {
         let soft_warned = !writes_suspended
             && initial_size as f64
                 >= config.hard_limits.max_db_bytes as f64 * config.hard_limits.soft_warn_ratio;
+        let temp_bytes = temp_files_bytes(&config.db_path)?;
+        let temp_warned = temp_exceeded(temp_bytes, config.temp_warn_bytes);
+        log_temp_state(temp_bytes, config.temp_warn_bytes, temp_warned);
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
@@ -50,6 +53,7 @@ impl Storage {
                     writes_suspended,
                     soft_warned,
                     writes_suspended,
+                    temp_warned,
                 )
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
@@ -144,7 +148,8 @@ impl StorageHandle {
         self.request(Command::FlushUsage)
     }
 
-    /// PASSIVE WAL checkpoint とサイズ状態の再評価を直ちに実行します。
+    /// PASSIVE WAL checkpoint、サイズ状態の再評価、閾値条件付きの budgeted incremental
+    /// vacuum、および temp 容量検査（maintenance tick）を直ちに実行します。
     ///
     /// # Errors
     ///
