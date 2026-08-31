@@ -1,0 +1,74 @@
+implementation_issue_packet:
+  issue_title: "v0.2: web_search tool を builtin Tool 層に実装 (Exa keyless 既定 + Tavily keyless fallback)"
+  issue_kind: feature
+  source_execution_unit: v02-web-search-tool
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/tools/ crates/runtime/"
+  target_part: "builtin web_search tool。統一 Tool trait (name/schema/permissions/async execute) 準拠、内部 transport は keyless MCP endpoint JSON-RPC、SearchProvider trait 抽象化、Exa keyless 既定 + Tavily keyless 一次 fallback"
+  dependencies: [v01-tool-layer, v01-secure-tool-composition-root, v02-network-guard]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "統一 Tool trait + ToolExecutor（crates/tools。name / JSON Schema schema / permissions / async execute、jsonschema 引数検証、ToolStarted / ToolCompleted emit、結果正規化層の制御マーカーエスケープ）"
+    - "reqwest 0.12（default-features=false、json / stream / rustls-tls）— keyless MCP endpoint への JSON-RPC HTTP POST transport"
+    - "wiremock 0.6 — provider HTTP 応答の unit test 用モック（workspace dependencies 既存）"
+    - "serde / serde_json — tool 引数 schema、JSON-RPC payload、SearchResults / metadata detail の型"
+    - "async-trait — Tool trait / SearchProvider trait の async method"
+    - "NetworkAccess::{Denied, OptIn, Allowed}（crates/agents/src/capability.rs）と v0.1.1 の fail-closed network mode 写像（crates/runtime/src/network.rs）。session NetworkAccess gate は v02-network-guard が提供する NetworkGuard 経由"
+    - "production composition root（crates/sandbox/src/composition.rs、v01-secure-tool-composition-root）。web tool 実行は bwrap 外 main process のため sandbox 構築契約を変更しない"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/interviews/web-tools-v02.json
+  acceptance_criteria:
+    - "web_search tool が統一 Tool trait（name / JSON Schema schema / permissions / async execute）に準拠し、ToolExecutor が ToolStarted / ToolCompleted を emit する"
+    - "既定状態で Exa keyless により検索が動作し（API key 設定ゼロ）、fallback 発生時は Tavily keyless への一次 fallback で結果を返却する"
+    - "fallback 発生が used_fallback / fallback_attempts metadata で観測可能である"
+    - "provider API key 環境変数が main process のみで消費され、test sandbox / bwrap 内子プロセスの env に露出しないことを検証する unit test がある"
+    - "ContentOrigin::WebUntrusted が ToolExecutor の結果正規化層で capability から fail-closed 機械導出され、tool 側から上書きできないことを検証する unit test がある"
+    - "3 層 AND の各 deny 経路（role capability / per-tool permission / session NetworkAccess mode）が単独でも拒否することを検証する unit test がある"
+    - "<system-reminder> 等の制御マーカーを含む検索結果が ToolExecutor の結果正規化層でエスケープされる統合テストがある"
+    - "SearchProvider trait に Exa / Tavily 以外の provider を非 breaking に追加できることを mock provider（docs/テスト）で検証する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/interviews/web-tools-v02.json
+  new_intent_needed: false
+  placement_rationale: "grill web-tools-v02 の確定を実装に落とす slice。Q1（web_search / web_fetch の 2 本分離）、Q2（builtin + keyless MCP transport）、Q3（Exa keyless 既定 + Tavily keyless 一次 fallback のみ）、Q6（ToolExecutor での ContentOrigin 機械導出）、Q7（3 層 AND + bwrap 外 main process 実行）、Q10（既存 ToolStarted/ToolCompleted + metadata detail）を tools-sandbox overview の v0.2 確定節に接続するため、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "web_search tool の確定実装（Exa keyless 既定 + Tavily keyless 一次 fallback、SearchProvider trait の位置、3 層 AND と main process 実行、ContentOrigin 機械導出、metadata schema）を v0.2 web ツール確定節へ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "web_search tool の実装確定（Exa keyless 既定 + Tavily keyless 一次 fallback の直線構造）、SearchProvider trait の位置（crates/tools 内部抽象、key 必須 provider は trait に乗る後続 slice）、fallback 挙動（used_fallback / fallback_attempts metadata での観測）、metadata schema（provider / request_id / latency_ms / result_count / used_fallback / fallback_attempts / credential_status + usage/cost 伝播）を tools-sandbox overview に記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+# G645: Librarian（network allowed role、ADR 0002）が利用する公開 tool surface を追加するため route form。
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "tools-sandbox overview で宣言予定の tool 利用 surface（web_search）"
+      role: Librarian
+      target_surface: "workspace / session の tool 設定"

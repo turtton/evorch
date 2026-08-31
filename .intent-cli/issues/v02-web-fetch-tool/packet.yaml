@@ -1,0 +1,73 @@
+implementation_issue_packet:
+  issue_title: "v0.2: web_fetch tool を selector→readability→full document チェーン + 5MB/50KB 切詰めで実装"
+  issue_kind: feature
+  source_execution_unit: v02-web-fetch-tool
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/tools/ crates/runtime/"
+  target_part: "builtin web_fetch tool。明示 selector 優先 → Readability 系本文抽出 → full document fallback の extracter チェーン、format 分岐 (text/markdown/html)、5MB 応答上限 + 50KB model-facing byte-prefix 切詰め、NetworkGuard 連携"
+  dependencies: [v01-tool-layer, v01-secure-tool-composition-root, v02-network-guard]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml、crates/runtime/Cargo.toml）"
+    - "reqwest 0.12（workspace 依存、rustls-tls + stream feature、crates/providers で使用中）。redirect Policy カスタマイズと streaming 読み出しの基盤"
+    - "統一 Tool trait + ToolExecutor（crates/tools/src/tool.rs、crates/tools/src/executor.rs）。schema 検証 / ToolStarted・ToolCompleted emit / 制御マーカーエスケープ（crates/tools/src/sanitize.rs）の既存結果正規化経路"
+    - "serde / serde_json（引数 schema と ToolCompleted metadata detail の型・データ）"
+    - "tracing（fetch 経路の構造化ログ）"
+    - "NetworkGuard（v02-network-guard で導入。HTTPS 強制 / redirect 再検証 / DNS pinning / IP range 遮断 / size ガードを main process 層で提供）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/web-tools-v02.json
+  acceptance_criteria:
+    - "web_fetch が統一 Tool trait に準拠し、ToolExecutor 経由で ToolStarted / ToolCompleted を emit する"
+    - "明示 selector 優先 / Readability 系本文抽出 / full document fallback の 3 段 extracter チェーンが単体テストで検証される"
+    - "代表的な docs サイト（MDN / Rust docs 等）で本文抽出の E2E が通る（mode-lock 可能な fixture または deny by default の network-test として）"
+    - "format 分岐が text / markdown / html で期待どおりに動作し、html は抽出をスキップして生 HTML を返す"
+    - "5MB 超 response が Content-Length 事前 / 実読み streaming 累計 / gzip・deflate 解凍後累計の三面チェックで遮断され、metadata で可視化される"
+    - "50KB 超 model-facing 出力が UTF-8 安全な byte-prefix 切詰めで切り詰められ、truncation metadata（truncated: true, original_bytes: N と続き取得ヒント）が付く"
+    - "Content-Length 詐称 / 解凍膨張 attack が 5MB guard で防がれる"
+    - "ContentOrigin::WebUntrusted が ToolExecutor 層で fail-closed に機械導出される（tool 自己申告では変わらない）"
+    - "権限 3 層 AND（role capability / per-tool permission / session NetworkAccess mode）の各 deny 経路が単独でも拒否される"
+    - "制御マーカーを含む fetch 結果が ToolExecutor 結果正規化層の既存機構でエスケープされる"
+    - "redirect_blocked（link-local 等のガード遮断）が metadata で可視化される"
+    - "extracter チェーン先頭に site-aware extractor を後から差し込める構造であることを design review で確認する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/interviews/web-tools-v02.json
+  new_intent_needed: false
+  placement_rationale: "grill web-tools-v02 の Q1 / Q4 / Q5 / Q6 / Q10 を実装に落とす slice。Q8 の SSRF ガードは NetworkGuard（v02-network-guard）に集約するため本 packet では利用側接続のみ。既存 tools-sandbox intent と ADR 0002/0008、interview artifact で境界は確定済みのため新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "web_fetch tool の確定実装（extracter チェーン構成・採用 crate・size pipeline の結果）を v0.2 確定節へ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "web_fetch 実装確定・extracter チェーン構成・採用 crate（dom_smoothie / readability-rs 系 or scraper + htmd の検証結果）・size pipeline（5MB 三面 / 50KB 切詰め）の結果を tools-sandbox overview に記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: web_fetch tool（Librarian 等 network allowed role が調査で使う builtin tool surface）

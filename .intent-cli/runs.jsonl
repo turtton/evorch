@@ -95,3 +95,6 @@
 {"ts":"2026-08-30T18:20:20.5298372+00:00","execution_unit":"v01-provider-compatible-usage-contract","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":40}
 {"ts":"2026-08-30T18:23:13.047656+00:00","execution_unit":"v01-provider-compatible-usage-contract","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":40}
 {"ts":"2026-08-30T18:23:13.047656+00:00","execution_unit":"v01-provider-compatible-usage-contract","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":40}
+{"ts":"2026-08-31T12:45:05.2252366+00:00","execution_unit":"v02-network-guard","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-network-guard/"}
+{"ts":"2026-08-31T12:45:22.4475098+00:00","execution_unit":"v02-web-search-tool","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-web-search-tool/"}
+{"ts":"2026-08-31T12:45:42.6018185+00:00","execution_unit":"v02-web-fetch-tool","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-web-fetch-tool/"}

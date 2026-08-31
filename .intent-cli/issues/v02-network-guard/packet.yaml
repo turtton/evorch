@@ -1,0 +1,65 @@
+implementation_issue_packet:
+  issue_title: "v0.2: web ツール用 NetworkGuard（SSRF / redirect / DNS pinning）を main process 層に実装"
+  issue_kind: feature
+  source_execution_unit: v02-network-guard
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/tools/ crates/runtime/"
+  target_part: "main process 層 (bwrap 外) で web_fetch / web_search が共有する NetworkGuard — HTTPS 強制 / redirect 再検証 / DNS pinning / IP range 判定 / size 両面チェック"
+  dependencies: [v01-tool-layer, v01-secure-tool-composition-root]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "reqwest 0.12（workspace 既存、default-features = false / json / stream / rustls-tls）— redirect Policy カスタマイズと streaming 実読みの土台"
+    - "wiremock 0.6（workspace 既存テスト依存）— redirect chain / Content-Length 詐称を張る fixture サーバ"
+    - "hickory-resolver / ipnet は workspace 未導入 — DNS pinning と IP range 判定の依存クレート feasibility 確認を実装タスクに含める"
+    - "SandboxNetworkMode / build_sandbox（crates/runtime/src/network.rs、v0.1.1 確定）— bwrap の二値 network 強制は維持し、NetworkGuard は bwrap 外 main process 層に置く"
+    - "Tool trait / Permissions / ToolExecutor（crates/tools）— 3 層 AND 判定インタフェースと結果正規化の接続先"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/web-tools-v02.json
+  acceptance_criteria:
+    - "HTTPS 強制の upgrade（http URL 受領時は https へ upgrade）と https 接続失敗時の http fallback 拒否（error 返却）が unit test で検証済み"
+    - "redirect 最大 10 回と、redirect 先 URL への同一ガード再適用が integration test で検証済み（fixture サーバで redirect chain を張る）"
+    - "DNS pinning 実装が rebinding 攻撃（TTL の短い悪意ある DNS）を防ぐことを unit test で検証（解決 IP への直接接続、同一リクエスト内でアドレス一貫性を担保）"
+    - "link-local 169.254.0.0/16（AWS/GCP metadata endpoint 169.254.169.254 を含む）/ CGNAT 100.64.0.0/10 / IPv6 link-local fe80::/10 の遮断と、loopback（127.0.0.0/8, ::1, localhost）および RFC 1918 private（10/8, 172.16/12, 192.168/16）の許可が IP range 判定 unit test で検証済み"
+    - "Content-Length 詐称（大きく宣言して少なく送付 / 宣言なしで大きく送付）の両方で 5MB guard が効く統合テスト（Content-Length 事前 + 実読み streaming 累計 + gzip/deflate 解凍後累計の三面チェック）"
+    - "3 層 AND 判定（role capability ∧ per-tool permission ∧ session NetworkAccess）で各層の deny と OptIn の ask 承認が fail-closed 動作することを検証"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass"
+
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+  new_intent_needed: false
+  placement_rationale: "grill web-tools-v02 で確立済みの q07（3 層 AND + bwrap 外 main process 実行）と q08（SSRF 厳格ガード + loopback/private 許可）を実装に落とす slice。既存 tools-sandbox feature と ADR 0002/0008/0021 の境界内で完結するため新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "NetworkGuard の確定実装（HTTPS 強制 / redirect 再検証 / DNS pinning / IP range 判定 / size 三面チェック / 3 層 AND 判定インタフェース）を tools-sandbox overview へ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "NetworkGuard が main process 層（bwrap 外）で確定した事実、依存クレート選定結果（reqwest redirect Policy / hickory-resolver DNS pinning / ipnet range 判定）、feasibility 検証結果を tools-sandbox overview に記録する。facet network.browser 予約（q09）の明文化が overview 側で担保されていることも確認する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

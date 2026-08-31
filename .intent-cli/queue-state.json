@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-30T18:23:13.0571851+00:00",
+  "updated_at": "2026-08-31T12:45:42.5871326+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -547,6 +547,68 @@
         "implementation": ".intent-cli/issues/v02-otel-span-exporter/implementation.md",
         "review_context": ".intent-cli/issues/v02-otel-span-exporter/review-context.md",
         "yaml": ".intent-cli/issues/v02-otel-span-exporter/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-network-guard",
+      "title": "v0.2: web \u30C4\u30FC\u30EB\u7528 NetworkGuard\uFF08SSRF / redirect / DNS pinning\uFF09\u3092 main process \u5C64\u306B\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [
+        "v01-tool-layer",
+        "v01-secure-tool-composition-root"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-network-guard/implementation.md",
+        "review_context": ".intent-cli/issues/v02-network-guard/review-context.md",
+        "yaml": ".intent-cli/issues/v02-network-guard/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-web-search-tool",
+      "title": "v0.2: web_search tool \u3092 builtin Tool \u5C64\u306B\u5B9F\u88C5 (Exa keyless \u65E2\u5B9A \u002B Tavily keyless fallback)",
+      "state": "queued",
+      "dependencies": [
+        "v01-tool-layer",
+        "v01-secure-tool-composition-root",
+        "v02-network-guard"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-web-search-tool/implementation.md",
+        "review_context": ".intent-cli/issues/v02-web-search-tool/review-context.md",
+        "yaml": ".intent-cli/issues/v02-web-search-tool/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-web-fetch-tool",
+      "title": "v0.2: web_fetch tool \u3092 selector\u2192readability\u2192full document \u30C1\u30A7\u30FC\u30F3 \u002B 5MB/50KB \u5207\u8A70\u3081\u3067\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [
+        "v01-tool-layer",
+        "v01-secure-tool-composition-root",
+        "v02-network-guard"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-web-fetch-tool/implementation.md",
+        "review_context": ".intent-cli/issues/v02-web-fetch-tool/review-context.md",
+        "yaml": ".intent-cli/issues/v02-web-fetch-tool/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",
