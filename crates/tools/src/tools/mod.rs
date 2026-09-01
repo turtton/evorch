@@ -8,12 +8,14 @@ pub mod git_diff;
 pub mod grep;
 pub mod read;
 pub mod shell;
+pub mod web_search;
 
 pub use edit::Edit;
 pub use git_diff::GitDiff;
 pub use grep::Grep;
 pub use read::Read;
 pub use shell::Shell;
+pub use web_search::WebSearch;
 
 #[cfg(test)]
 mod tests {
