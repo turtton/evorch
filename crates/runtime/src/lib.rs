@@ -32,7 +32,10 @@ pub use event_bus::AgentRunPhase;
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
 pub use agents::Role;
 pub use model::AgentModel;
-pub use network::{SandboxNetworkMode, build_sandbox, sandbox_network_mode};
+pub use network::{
+    NetworkAccessDecision, SandboxNetworkMode, build_sandbox, judge_web_network_access,
+    sandbox_network_mode,
+};
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
 pub use runtime::AgentRuntime;
