@@ -26,6 +26,9 @@ pub use network_guard::{
 pub use origin::{ContentOrigin, derive_content_origin};
 pub use result::ToolResult;
 pub use sanitize::escape_control_markers;
-pub use search::{McpToolSuccess, McpTransport, NetworkGuardMcpTransport, SearchError};
+pub use search::{
+    ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport, SearchError,
+    SearchOptions, SearchProvider, SearchResults, TavilyKeylessProvider, count_search_results,
+};
 pub use tool::{Permissions, Tool};
 pub use tools::{Edit, GitDiff, Grep, Read, Shell};
