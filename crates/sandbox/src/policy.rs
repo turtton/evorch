@@ -8,6 +8,8 @@ pub struct Capabilities {
     pub fs_read: bool,
     pub fs_write: bool,
     pub process_spawn: bool,
+    /// ネットワークアクセス。
+    pub network: bool,
 }
 
 /// 方針による分類結果。
@@ -59,7 +61,7 @@ impl ApprovalPolicy {
             .get(tool_name)
             .or_else(|| self.overrides.get("*"))
             .copied()
-            .unwrap_or(if !caps.fs_write && !caps.process_spawn {
+            .unwrap_or(if !caps.fs_write && !caps.process_spawn && !caps.network {
                 PolicyDecision::AutoAllow
             } else {
                 PolicyDecision::Ask
@@ -101,6 +103,7 @@ mod tests {
             fs_read: true,
             fs_write,
             process_spawn,
+            network: false,
         }
     }
 
@@ -124,6 +127,34 @@ mod tests {
             policy.classify("both", &caps(true, true)),
             PolicyDecision::Ask
         );
+    }
+
+    // Given: 標準方針と network のみ true の能力 / When: 分類 / Then: 自動許可されず Ask になる (fail-closed)
+    #[test]
+    fn network_only_capability_is_not_auto_allowed() {
+        let policy = ApprovalPolicy::standard(ApprovalMode::OnRequest);
+        let caps = Capabilities {
+            fs_read: false,
+            fs_write: false,
+            process_spawn: false,
+            network: true,
+        };
+
+        assert_eq!(policy.classify("network", &caps), PolicyDecision::Ask);
+    }
+
+    // Given: 標準方針と network + fs_read の能力 / When: 分類 / Then: 自動許可されず Ask になる
+    #[test]
+    fn network_with_read_capability_is_not_auto_allowed() {
+        let policy = ApprovalPolicy::standard(ApprovalMode::OnRequest);
+        let caps = Capabilities {
+            fs_read: true,
+            fs_write: false,
+            process_spawn: false,
+            network: true,
+        };
+
+        assert_eq!(policy.classify("web", &caps), PolicyDecision::Ask);
     }
 
     // Given: 標準分類と異なる明示指定 / When: 分類 / Then: 明示指定が優先される

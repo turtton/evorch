@@ -172,6 +172,7 @@ impl ToolExecutor {
             fs_read: permissions.fs_read,
             fs_write: permissions.fs_write,
             process_spawn: permissions.process_spawn,
+            network: permissions.network,
         };
         let action = resolve(
             self.policy.classify(tool_name, &capabilities),
