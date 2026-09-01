@@ -49,6 +49,7 @@ impl Tool for GitDiff {
             fs_read: true,
             fs_write: false,
             process_spawn: true,
+            network: false,
         }
     }
 

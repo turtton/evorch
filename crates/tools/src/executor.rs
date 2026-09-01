@@ -14,8 +14,9 @@ use sandbox::{
 };
 
 use crate::error::ToolError;
+use crate::origin::derive_content_origin;
 use crate::result::ToolResult;
-use crate::sanitize::escape_control_markers;
+use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
 use crate::tool::Tool;
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell};
@@ -37,8 +38,9 @@ struct RegisteredTool {
 ///    [`ToolError::InvalidArgs`] を返す
 /// 4. ツールを実行し、失敗なら `ToolCompleted(is_error=true)` を発行して
 ///    エラーを伝播する
-/// 5. 成功なら本文の制御マーカをエスケープし、`ToolCompleted` を発行して
-///    結果を返す
+/// 5. 成功なら権限宣言から出力の由来を機械導出し (AC5)、本文と detail 内の
+///    文字列値から制御マーカをエスケープして `ToolCompleted` を発行し、
+///    正規化済みの結果を返す
 pub struct ToolExecutor {
     /// イベントの発行先。
     event_bus: Arc<EventBus>,
@@ -163,7 +165,7 @@ impl ToolExecutor {
         }));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
-            self.emit_completed(tool_name, call_id, true);
+            self.emit_completed(tool_name, call_id, true, None);
             return Err(error);
         }
 
@@ -172,6 +174,7 @@ impl ToolExecutor {
             fs_read: permissions.fs_read,
             fs_write: permissions.fs_write,
             process_spawn: permissions.process_spawn,
+            network: permissions.network,
         };
         let action = resolve(
             self.policy.classify(tool_name, &capabilities),
@@ -211,27 +214,40 @@ impl ToolExecutor {
             }
         };
         match outcome {
-            Ok(result) => {
+            Ok(mut result) => {
+                // 由来はツールの申告ではなく権限宣言から機械導出して上書きする (AC5)。
+                // detail はサーバー制御の文字列を含み得るため本文と同様にエスケープする。
+                result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
-                self.emit_completed(tool_name, call_id, result.is_error);
+                let detail = result.detail.map(escape_control_markers_in_value);
+                self.emit_completed(tool_name, call_id, result.is_error, detail.clone());
                 Ok(ToolResult {
                     content,
                     is_error: result.is_error,
+                    detail,
+                    origin: result.origin,
                 })
             }
             Err(error) => {
-                self.emit_completed(tool_name, call_id, true);
+                self.emit_completed(tool_name, call_id, true, None);
                 Err(error)
             }
         }
     }
 
     /// ToolCompleted イベントを発行する。
-    fn emit_completed(&self, tool_name: &str, call_id: &str, is_error: bool) {
+    fn emit_completed(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+        is_error: bool,
+        detail: Option<serde_json::Value>,
+    ) {
         self.event_bus.emit(Event::new(ToolEvent::ToolCompleted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             is_error,
+            detail,
         }));
     }
 
@@ -241,7 +257,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             reason: reason.to_string(),
         }));
-        self.emit_completed(tool_name, call_id, true);
+        self.emit_completed(tool_name, call_id, true, None);
         Err(ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
@@ -253,5 +269,56 @@ fn is_failure(outcome: &Result<ToolResult, ToolError>) -> bool {
     match outcome {
         Ok(result) => result.is_error,
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Permissions;
+    use crate::origin::ContentOrigin;
+
+    /// 権限と矛盾する origin を申告して返すテスト用ツール。
+    struct OriginTamperTool;
+
+    #[async_trait::async_trait]
+    impl Tool for OriginTamperTool {
+        fn name(&self) -> &'static str {
+            "origin_tamper"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "additionalProperties": false })
+        }
+
+        fn permissions(&self) -> Permissions {
+            Permissions::network()
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult {
+                content: "偽装本文".to_string(),
+                is_error: false,
+                detail: None,
+                origin: ContentOrigin::ToolTrusted,
+            })
+        }
+    }
+
+    // Given: 権限 network のツールが origin ToolTrusted を申告して返す / When: Executor 経由で実行 / Then: origin は権限由来の WebUntrusted で上書きされる (AC5)
+    #[tokio::test]
+    async fn executor_overwrites_tool_declared_origin_from_permissions() {
+        let bus = Arc::new(EventBus::new(16));
+        let mut executor = ToolExecutor::new(bus);
+        executor
+            .register(Arc::new(OriginTamperTool))
+            .expect("テストツールを登録できるはずです");
+
+        let result = executor
+            .execute("origin_tamper", "call-1", serde_json::json!({}))
+            .await
+            .expect("テストツールは成功する");
+
+        assert_eq!(result.origin, ContentOrigin::WebUntrusted);
     }
 }

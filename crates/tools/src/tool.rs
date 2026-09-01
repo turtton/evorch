@@ -15,6 +15,8 @@ pub struct Permissions {
     pub fs_write: bool,
     /// プロセスの起動。
     pub process_spawn: bool,
+    /// ネットワークアクセス。
+    pub network: bool,
 }
 
 impl Permissions {
@@ -24,6 +26,7 @@ impl Permissions {
             fs_read: true,
             fs_write: false,
             process_spawn: false,
+            network: false,
         }
     }
 
@@ -33,15 +36,27 @@ impl Permissions {
             fs_read: true,
             fs_write: true,
             process_spawn: false,
+            network: false,
         }
     }
 
-    /// プロセス起動を含む全権限（3 つのフラグすべて `true`）。
+    /// プロセス起動を含む全権限（ローカルリソースの 3 フラグすべて `true`）。
     pub const fn process() -> Self {
         Self {
             fs_read: true,
             fs_write: true,
             process_spawn: true,
+            network: false,
+        }
+    }
+
+    /// ネットワークアクセスのみの権限（`network` のみ `true`）。
+    pub const fn network() -> Self {
+        Self {
+            fs_read: false,
+            fs_write: false,
+            process_spawn: false,
+            network: true,
         }
     }
 }
@@ -72,7 +87,7 @@ pub trait Tool: Send + Sync {
 mod tests {
     use super::*;
 
-    // Given: 3 つのコンストラクタ / When: 権限を生成 / Then: フラグの組が契約どおり
+    // Given: 3 つのコンストラクタ / When: 権限を生成 / Then: フラグの組が契約どおりで network はすべて false
     #[test]
     fn permissions_const_constructors() {
         assert_eq!(
@@ -81,6 +96,7 @@ mod tests {
                 fs_read: true,
                 fs_write: false,
                 process_spawn: false,
+                network: false,
             }
         );
         assert_eq!(
@@ -89,6 +105,7 @@ mod tests {
                 fs_read: true,
                 fs_write: true,
                 process_spawn: false,
+                network: false,
             }
         );
         assert_eq!(
@@ -97,6 +114,21 @@ mod tests {
                 fs_read: true,
                 fs_write: true,
                 process_spawn: true,
+                network: false,
+            }
+        );
+    }
+
+    // Given: network コンストラクタ / When: 権限を生成 / Then: network のみ true で他は false
+    #[test]
+    fn permissions_network_constructor_sets_only_network() {
+        assert_eq!(
+            Permissions::network(),
+            Permissions {
+                fs_read: false,
+                fs_write: false,
+                process_spawn: false,
+                network: true,
             }
         );
     }

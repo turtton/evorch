@@ -52,6 +52,7 @@ fn event_kinds() -> [EventKind; 14] {
             tool_name: "read".into(),
             call_id: "c".into(),
             is_error: false,
+            detail: None,
         }
         .into(),
         UsageEvent::Usage {
@@ -112,6 +113,7 @@ fn every_event_kind_json_key_is_in_the_credential_free_allowlist() {
             "tool_name",
             "call_id",
             "is_error",
+            "detail",
             "provider",
             "model",
             "input_tokens",

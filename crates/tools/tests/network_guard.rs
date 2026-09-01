@@ -1,5 +1,10 @@
 mod common;
 
+// NetworkGuard 専用の response ヘルパー。search_mcp など他テストバイナリでは
+// 未使用のままコンパイルされないよう、このバイナリだけが取り込む。
+#[path = "common/guard_responses.rs"]
+mod guard_responses;
+
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr},
@@ -14,11 +19,11 @@ use flate2::{
     Compression,
     write::{DeflateEncoder, GzEncoder},
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use tools::{DnsResolver, MAX_RESPONSE_BYTES, NetworkGuard, NetworkGuardError};
 
-use common::{
-    FixtureServer, TestResult, chunked_response, identity_response, redirect, response_with_headers,
-};
+use common::{FixtureServer, TestResult};
+use guard_responses::{chunked_response, identity_response, redirect, response_with_headers};
 
 struct CountingResolver {
     addr: IpAddr,
@@ -285,4 +290,164 @@ fn deflate(body: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(body)?;
     encoder.finish()
+}
+
+// Given: JSON body を受信する fixture / When: post_json で送信 / Then: body・Content-Type・追加 header が届き、応答本文が GuardedResponse で返る
+#[tokio::test]
+async fn posts_json_body_and_returns_guarded_response() -> TestResult {
+    let server = FixtureServer::start(|_path| identity_response(b"posted-ok")).await?;
+    let (guard, _resolver) = guard(&server);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-test-header", HeaderValue::from_static("test-value"));
+
+    let response = guard
+        .post_json(
+            &server.url("/echo"),
+            headers,
+            &serde_json::json!({"query": "hello"}),
+        )
+        .await?;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"posted-ok");
+    let request = String::from_utf8(
+        server
+            .captured_requests()
+            .pop()
+            .expect("fixture は request を記録する"),
+    )?;
+    assert!(request.starts_with("POST /echo "));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("content-type: application/json")
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("x-test-header: test-value")
+    );
+    let body: serde_json::Value = serde_json::from_str(
+        request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request に body がある"),
+    )?;
+    assert_eq!(body, serde_json::json!({"query": "hello"}));
+    Ok(())
+}
+
+// Given: text/event-stream の POST 応答 / When: post_json で受信 / Then: SSE 形式の本文が変換なしで GuardedResponse に載って返る
+#[tokio::test]
+async fn passes_sse_like_body_through_post_guard() -> TestResult {
+    let sse_body = "event: message\ndata: {\"n\":1}\n\ndata: {\"n\":2}\n\n";
+    let server = FixtureServer::start(move |_path| {
+        response_with_headers(
+            &["Content-Type: text/event-stream".to_owned()],
+            sse_body.as_bytes(),
+        )
+    })
+    .await?;
+    let (guard, _resolver) = guard(&server);
+
+    let response = guard
+        .post_json(
+            &server.url("/sse"),
+            HeaderMap::new(),
+            &serde_json::json!({"query": "q"}),
+        )
+        .await?;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, sse_body.as_bytes());
+    Ok(())
+}
+
+// Given: POST 応答として 302 + Location を返す fixture / When: post_json / Then: RedirectOnPost で fail-closed になり追従しない
+#[tokio::test]
+async fn rejects_redirect_on_post() -> TestResult {
+    let server = FixtureServer::start(|_path| redirect("https://fixture.test/final")).await?;
+    let (guard, _resolver) = guard(&server);
+
+    let error = guard
+        .post_json(
+            &server.url("/redirect"),
+            HeaderMap::new(),
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("POST の redirect は追従しない");
+
+    assert!(matches!(
+        error,
+        NetworkGuardError::RedirectOnPost {
+            location: Some(location),
+        } if location == "https://fixture.test/final"
+    ));
+    Ok(())
+}
+
+// Given: plain HTTP fixture の port を https URL として POST / When: post_json / Then: TLS 失敗を返して plain HTTP の POST を観測しない
+#[tokio::test]
+async fn refuses_plain_http_post_after_https_upgrade() -> TestResult {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = listener.local_addr()?;
+    let served = Arc::new(AtomicUsize::new(0));
+    let observed = served.clone();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _peer)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut bytes = [0_u8; 16];
+            if let Ok(read) = stream.read(&mut bytes).await
+                && bytes[..read].starts_with(b"POST ")
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+                let _write_result = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .await;
+            }
+        }
+    });
+    let resolver = Arc::new(CountingResolver {
+        addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        calls: AtomicUsize::new(0),
+    });
+    let guard = NetworkGuard::with_resolver(resolver);
+
+    let error = guard
+        .post_json(
+            &format!("http://fixture.test:{}/", addr.port()),
+            HeaderMap::new(),
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("plain HTTP fixture への TLS 接続は失敗する");
+
+    assert!(matches!(error, NetworkGuardError::HttpsConnectFailed(_)));
+    assert_eq!(served.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+// Given: 6MB と宣言した POST 応答 / When: post_json / Then: body 読み取り前の size error を返す
+#[tokio::test]
+async fn rejects_oversized_post_response() -> TestResult {
+    let server = FixtureServer::start(|_path| {
+        response_with_headers(&[format!("Content-Length: {}", 6 * 1024 * 1024)], b"x")
+    })
+    .await?;
+    let (guard, _resolver) = guard(&server);
+
+    let error = guard
+        .post_json(&server.url("/"), HeaderMap::new(), &serde_json::json!({}))
+        .await
+        .expect_err("Content-Length 超過は拒否される");
+
+    assert!(matches!(
+        error,
+        NetworkGuardError::ResponseTooLarge {
+            check: "Content-Length",
+            ..
+        }
+    ));
+    Ok(())
 }

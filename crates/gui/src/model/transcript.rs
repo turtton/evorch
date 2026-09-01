@@ -107,6 +107,7 @@ impl TranscriptModel {
                 tool_name,
                 call_id,
                 is_error,
+                ..
             }) => self.update_tool(
                 call_id,
                 tool_name,
@@ -240,6 +241,7 @@ mod tests {
             tool_name: "read".into(),
             call_id: "c1".into(),
             is_error: false,
+            detail: None,
         }));
         assert_eq!(
             model.entries()[0],
