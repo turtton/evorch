@@ -60,6 +60,8 @@ v0.2 で Librarian の調査相棒として `web_search` / `web_fetch` を導入
 - **browser escalation（q09）**: v0.2 では実装せず、capability facet を名前空間分離（`network` vs `network.browser`）して将来拡張点として予約。「network capability 保持 ≠ browser 実行可能」を型レベルで担保。
 - **観測性（q10）**: 既存 `ToolStarted`/`ToolCompleted` を継続し、tool-specific metadata を `ToolCompleted` の detail に包含（新規イベント種別は追加しない）。web_search: provider / request_id / latency_ms / result_count / used_fallback / fallback_attempts / credential_status。web_fetch: url / final_url / status_code / content_length / decompressed_bytes / truncated / original_bytes / redirect_count / redirect_blocked / extraction_method。
 
+web_search tool の確定実装（issue #43、PR #44、2026-09-02）: `crates/tools` の `tools::web_search::WebSearch`（Exa keyless 既定 + Tavily keyless 一次 fallback、`SearchProvider` trait は `crates/tools/src/search/` 内部抽象）として上記 q01-q03・q06-q07・q10 が実装で確定。keyless MCP transport は単発 `tools/call` + SSE/JSON content-type 分岐で足り、session handshake は不要（学び）。fallback trigger は 429 / 5xx / timeout のみ（`SearchError::is_fallback_trigger`、Q3 design lock）で連鎖しない一次 fallback。学び2: NetworkGuard の send error 畳み込みは timeout trigger を誤分類するため、HTTP layer 拡張時は **send error の timeout 種別を（`NetworkGuardError::Http` 経由で）保持すること**——本 slice で timeout 注入 ctor（`with_resolver_root_certificate_and_timeouts`）と POST redirect 拒否 error を guard に追加済み。production の layer-1 gate（`ExecutionPolicy::for_role`）は現行の全 role で web_search を Deny とし、consumer/composition slice での許可配線が残る（tripwire test `crates/runtime/tests/web_search_network_gate.rs` で固定）。
+
 v0.3+ backlog: サイト専用 extractor、key 必須 provider、provider-native routing、context window 連動切詰め、credential/usage attribution 高度化。
 
 ## 受け入れ基準
