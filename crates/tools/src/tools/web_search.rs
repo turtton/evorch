@@ -107,6 +107,14 @@ impl WebSearch {
         )
     }
 
+    /// 既定配線の診断・検証用に、primary と fallback の provider 識別名を返す。
+    ///
+    /// 戻り値は metadata の `provider` field と同一の情報源であり、production
+    /// 既定構成 (`keyless_default`) では `("exa", "tavily")` となる。
+    pub fn provider_names(&self) -> (&str, &str) {
+        (self.primary.name(), self.fallback.name())
+    }
+
     /// provider と credential 判定用の環境変数 lookup をすべて注入して構築する。
     pub fn for_providers_with_env_lookup(
         primary: Arc<dyn SearchProvider>,

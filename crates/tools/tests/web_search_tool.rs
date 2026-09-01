@@ -284,12 +284,17 @@ async fn third_party_provider_composes_as_fallback_without_changes() {
     assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
 }
 
-// Given: 環境変数・config なしの状態 / When: keyless_default で構築 / Then: Ok を返し、既定 provider の endpoint は keyless endpoint である (AC2)
+// Given: 環境変数・config なしの状態 / When: keyless_default で構築 / Then: Ok を返し、provider_names が Exa primary / Tavily fallback の既定配線を報告し、既定 provider の endpoint は keyless endpoint である (AC2)
 #[test]
 fn keyless_default_builds_without_env_or_config() {
-    let _tool =
+    let tool =
         WebSearch::keyless_default().expect("keyless_default は環境なしで構築できるはずです");
 
+    assert_eq!(
+        tool.provider_names(),
+        ("exa", "tavily"),
+        "既定配線は Exa primary / Tavily fallback であるべき (AC2)"
+    );
     assert_eq!(ExaKeylessProvider::ENDPOINT, "https://mcp.exa.ai/mcp");
     assert_eq!(
         TavilyKeylessProvider::ENDPOINT,
