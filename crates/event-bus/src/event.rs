@@ -217,6 +217,12 @@ pub enum ToolEvent {
         call_id: String,
         /// ツールがエラーで終了したかどうか。
         is_error: bool,
+        /// ツールが添えたメタデータ (request_id や取得 URL 等の補助情報)。
+        ///
+        /// v0.1 で保存された旧形式ペイロードはこのフィールドを持たないため、
+        /// 欠落時は `None` として読む。
+        #[serde(default)]
+        detail: Option<serde_json::Value>,
     },
     /// ツール実行の承認が要求された。
     ApprovalRequested { tool_name: String, call_id: String },
@@ -549,6 +555,7 @@ mod tests {
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
                     is_error: true,
+                    detail: None,
                 }
                 .into(),
             ),
@@ -748,6 +755,70 @@ mod tests {
                     "call_id": "c1",
                     "reason": "policy"
                 }
+            })
+        );
+    }
+
+    // Given: detail メタデータ付きと detail なしの ToolCompleted イベント。
+    // When: Event を JSON 文字列へシリアライズして復元する。
+    // Then: いずれも往復前後で等しく、detail の有無が保存される。
+    #[test]
+    fn tool_completed_round_trips_with_and_without_detail() {
+        let cases = [
+            Event::new(ToolEvent::ToolCompleted {
+                tool_name: "read".into(),
+                call_id: "call-1".into(),
+                is_error: false,
+                detail: Some(serde_json::json!({ "request_id": "req-1" })),
+            }),
+            Event::new(ToolEvent::ToolCompleted {
+                tool_name: "read".into(),
+                call_id: "call-1".into(),
+                is_error: true,
+                detail: None,
+            }),
+        ];
+
+        for event in cases {
+            let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+            let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+            assert_eq!(event, restored, "round-trip mismatch: {json}");
+        }
+    }
+
+    // Given: detail フィールドを含まない旧形式の ToolCompleted ペイロード (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: detail が None として復元され、SCHEMA_VERSION 1 のまま読み続けられる。
+    #[test]
+    fn tool_completed_legacy_payload_without_detail_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Tool",
+                "payload": {
+                    "kind": "ToolCompleted",
+                    "payload": {
+                        "tool_name": "read",
+                        "call_id": "call-1",
+                        "is_error": false
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(
+            restored.kind,
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                tool_name: "read".into(),
+                call_id: "call-1".into(),
+                is_error: false,
+                detail: None,
             })
         );
     }

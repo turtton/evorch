@@ -163,7 +163,7 @@ impl ToolExecutor {
         }));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
-            self.emit_completed(tool_name, call_id, true);
+            self.emit_completed(tool_name, call_id, true, None);
             return Err(error);
         }
 
@@ -213,25 +213,33 @@ impl ToolExecutor {
         match outcome {
             Ok(result) => {
                 let content = escape_control_markers(&result.content);
-                self.emit_completed(tool_name, call_id, result.is_error);
+                self.emit_completed(tool_name, call_id, result.is_error, result.detail.clone());
                 Ok(ToolResult {
                     content,
                     is_error: result.is_error,
+                    detail: result.detail,
                 })
             }
             Err(error) => {
-                self.emit_completed(tool_name, call_id, true);
+                self.emit_completed(tool_name, call_id, true, None);
                 Err(error)
             }
         }
     }
 
     /// ToolCompleted イベントを発行する。
-    fn emit_completed(&self, tool_name: &str, call_id: &str, is_error: bool) {
+    fn emit_completed(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+        is_error: bool,
+        detail: Option<serde_json::Value>,
+    ) {
         self.event_bus.emit(Event::new(ToolEvent::ToolCompleted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             is_error,
+            detail,
         }));
     }
 
@@ -241,7 +249,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             reason: reason.to_string(),
         }));
-        self.emit_completed(tool_name, call_id, true);
+        self.emit_completed(tool_name, call_id, true, None);
         Err(ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),

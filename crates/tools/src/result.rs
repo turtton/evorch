@@ -12,6 +12,8 @@ pub struct ToolResult {
     pub content: String,
     /// ツール実行が異常終了した場合に `true`。
     pub is_error: bool,
+    /// ツールが添えたメタデータ。規定では `None`。
+    pub detail: Option<serde_json::Value>,
 }
 
 impl ToolResult {
@@ -20,6 +22,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: false,
+            detail: None,
         }
     }
 
@@ -28,7 +31,14 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: true,
+            detail: None,
         }
+    }
+
+    /// メタデータを添えた結果へ変換する。
+    pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
     }
 }
 
@@ -36,7 +46,7 @@ impl ToolResult {
 mod tests {
     use super::*;
 
-    // Given: 本文となる文字列と String / When: success と error で生成 / Then: content と is_error が対応する
+    // Given: 本文となる文字列と String / When: success と error で生成 / Then: content と is_error が対応し detail は None
     #[test]
     fn result_success_and_error_constructors() {
         let ok = ToolResult::success("file content");
@@ -45,6 +55,7 @@ mod tests {
             ToolResult {
                 content: "file content".to_string(),
                 is_error: false,
+                detail: None,
             }
         );
 
@@ -59,7 +70,18 @@ mod tests {
             ToolResult {
                 content: "command failed".to_string(),
                 is_error: true,
+                detail: None,
             }
         );
+    }
+
+    // Given: 正常終了の結果 / When: with_detail でメタデータを添える / Then: detail に値が入り他のフィールドは不変
+    #[test]
+    fn with_detail_attaches_metadata() {
+        let result = ToolResult::success("本文").with_detail(serde_json::json!({ "k": "v" }));
+
+        assert_eq!(result.content, "本文");
+        assert!(!result.is_error);
+        assert_eq!(result.detail, Some(serde_json::json!({ "k": "v" })));
     }
 }

@@ -94,6 +94,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             is_error: false,
+            detail: None,
         }
     );
 }
@@ -164,6 +165,7 @@ async fn executor_invalid_args_emit_completed_error() {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
             is_error: true,
+            detail: None,
         }
     );
 
@@ -196,6 +198,7 @@ async fn executor_invalid_args_emit_completed_error() {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
             is_error: true,
+            detail: None,
         }
     );
 }
@@ -238,6 +241,7 @@ async fn executor_tool_error_emits_completed_error() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             is_error: true,
+            detail: None,
         }
     );
 }
@@ -309,6 +313,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             tool_name: "shell".to_string(),
             call_id: "call-1".to_string(),
             is_error: true,
+            detail: None,
         }
     );
 }
@@ -364,6 +369,70 @@ async fn executor_with_standard_tools_registers_five() {
             result.content
         );
     }
+}
+
+/// detail メタデータを添えて正常終了するテスト用ツール。
+struct DetailTool {
+    detail: serde_json::Value,
+}
+
+#[async_trait]
+impl Tool for DetailTool {
+    fn name(&self) -> &'static str {
+        "detail_tool"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "additionalProperties": false })
+    }
+
+    fn permissions(&self) -> Permissions {
+        Permissions::read_only()
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("本文").with_detail(self.detail.clone()))
+    }
+}
+
+// Given: detail を添えるテスト用ツール / When: Executor 経由で実行 / Then: ToolCompleted イベントがツールが返した detail を運ぶ
+#[tokio::test]
+async fn executor_emits_tool_completed_with_detail() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus);
+    executor
+        .register(Arc::new(DetailTool {
+            detail: serde_json::json!({ "request_id": "req-1", "query": "evorch" }),
+        }))
+        .expect("テストツールを登録できるはずです");
+
+    executor
+        .execute("detail_tool", "call-1", serde_json::json!({}))
+        .await
+        .expect("テストツールは成功する");
+
+    let started = receiver.recv().await.expect("1 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&started),
+        &ToolEvent::ToolStarted {
+            tool_name: "detail_tool".to_string(),
+            call_id: "call-1".to_string(),
+        }
+    );
+    let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&completed),
+        &ToolEvent::ToolCompleted {
+            tool_name: "detail_tool".to_string(),
+            call_id: "call-1".to_string(),
+            is_error: false,
+            detail: Some(serde_json::json!({
+                "request_id": "req-1",
+                "query": "evorch"
+            })),
+        }
+    );
 }
 
 /// スキーマがコンパイルできないテスト用ツール。

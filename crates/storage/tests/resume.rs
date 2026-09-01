@@ -77,7 +77,7 @@ fn replay_uses_stored_id_order_instead_of_wall_clock_order() {
 
 #[test]
 fn completed_tool_call_is_removed_from_open_calls() {
-    /* Given: 開始・完了したツール呼び出し */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into() }, 2)); append(&handle, Some("s1"), &event(ToolEvent::ToolCompleted { tool_name: "tool".into(), call_id: "c1".into(), is_error: false }, 3)); storage.close(); let db = Database::open(&config).unwrap();
+    /* Given: 開始・完了したツール呼び出し */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into() }, 2)); append(&handle, Some("s1"), &event(ToolEvent::ToolCompleted { tool_name: "tool".into(), call_id: "c1".into(), is_error: false, detail: None }, 3)); storage.close(); let db = Database::open(&config).unwrap();
     /* When: 復元する */ let actual = db.restore_session("s1").unwrap();
     /* Then: 未完了一覧が空になる */ assert_eq!(actual, Some(running()));
 }
