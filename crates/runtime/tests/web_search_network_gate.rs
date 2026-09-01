@@ -4,8 +4,8 @@
 //! すべて許可している場合でも単独で web_search を拒否することを検証する
 //! ([`runtime::judge_web_network_access`])。
 
-use agents::{NetworkAccess, RoleCapabilities};
-use runtime::{NetworkAccessDecision, judge_web_network_access};
+use agents::{NetworkAccess, Role, RoleCapabilities};
+use runtime::{ExecutionPolicy, NetworkAccessDecision, RuntimeError, judge_web_network_access};
 use sandbox::PolicyDecision;
 
 // Given: web_search が role の allowed_tools に含まれない（role network Allowed・per-tool Allow・session Allowed） / When: 3層AND判定 / Then: role 層だけで Deny になる
@@ -98,4 +98,33 @@ fn all_layers_permissive_allow_web_search() {
     );
 
     assert_eq!(decision, NetworkAccessDecision::Allow);
+}
+
+// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と現在の全 role / When: web_search を authorize / Then: 全 role で CapabilityDenied になる (AC6)
+// agents::Role に全 variant の定数はないため列挙する。新 variant を enum に追加した際は
+// この列挙への追加が必要である (match と異なり追加漏れはコンパイラに検出されない)。
+// web_search は本 slice では意図的にどの role の allowed_tools にも含まれていないため、
+// このテストは production gate が現在の全 role で web_search を拒否することを固定する。
+// 将来の配線 slice で role に web_search を許可した時点で本テストが失敗し、拒否保証の
+// 更新責務をその slice へ移す tripwire として機能する。
+#[test]
+fn production_layer1_gate_denies_web_search_for_every_role() {
+    for role in [
+        Role::Orchestrator,
+        Role::Explorer,
+        Role::Worker,
+        Role::Reviewer,
+    ] {
+        let policy = ExecutionPolicy::for_role(role);
+        let role_name = role.name();
+        let Err(RuntimeError::CapabilityDenied { role, tool, reason }) =
+            policy.authorize("web_search")
+        else {
+            panic!("role {role_name} の web_search は layer-1 execute gate で拒否されるべき (AC6)");
+        };
+
+        assert_eq!(role, role_name);
+        assert_eq!(tool, "web_search");
+        assert!(!reason.is_empty(), "拒否理由が空であってはならない");
+    }
 }
