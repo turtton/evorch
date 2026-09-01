@@ -30,6 +30,12 @@ pub enum NetworkGuardError {
     /// redirect 回数が上限を超えた。
     #[error("redirect 回数が上限を超えました")]
     TooManyRedirects,
+    /// POST 応答が 3xx redirect を返した（redirect は追従しない）。
+    #[error("POST 応答の redirect は追従しません: location = {location:?}")]
+    RedirectOnPost {
+        /// 応答に含まれていた Location header（存在する場合）。
+        location: Option<String>,
+    },
     /// redirect の Location が欠落または不正。
     #[error("redirect の Location が不正です: {0}")]
     RedirectLocationInvalid(String),

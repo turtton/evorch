@@ -1,6 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -17,6 +17,7 @@ use tokio_rustls::{
 pub struct FixtureServer {
     addr: SocketAddr,
     certificate: reqwest::Certificate,
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl FixtureServer {
@@ -35,6 +36,8 @@ impl FixtureServer {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let addr = listener.local_addr()?;
         let response = Arc::new(response);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = requests.clone();
 
         tokio::spawn(async move {
             let mut connections = JoinSet::new();
@@ -44,6 +47,7 @@ impl FixtureServer {
                 };
                 let acceptor = acceptor.clone();
                 let response = response.clone();
+                let request_log = request_log.clone();
                 connections.spawn(async move {
                     let Ok(mut stream) = acceptor.accept(stream).await else {
                         return;
@@ -58,10 +62,18 @@ impl FixtureServer {
                             return;
                         }
                         request.extend_from_slice(&buffer[..read]);
-                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        if let Some(headers_end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                            && request.len()
+                                >= headers_end + 4 + request_content_length(&request[..headers_end])
+                        {
                             break;
                         }
                     }
+                    request_log
+                        .lock()
+                        .expect("request 記録用 mutex")
+                        .push(request.clone());
                     let path = request_path(&request).unwrap_or("/");
                     let bytes = response(path);
                     let _write_result = stream.write_all(&bytes).await;
@@ -69,12 +81,20 @@ impl FixtureServer {
                 });
             }
         });
-
-        Ok(Self { addr, certificate })
+        Ok(Self {
+            addr,
+            certificate,
+            requests,
+        })
     }
 
     pub fn url(&self, path: &str) -> String {
         format!("https://fixture.test:{}{path}", self.addr.port())
+    }
+
+    /// fixture が観測した生 request（header と body）を受信順で返す。
+    pub fn captured_requests(&self) -> Vec<Vec<u8>> {
+        self.requests.lock().expect("request 記録用 mutex").clone()
     }
 
     pub fn certificate(&self) -> reqwest::Certificate {
@@ -90,6 +110,22 @@ fn request_path(request: &[u8]) -> Option<&str> {
     let line_end = request.windows(2).position(|window| window == b"\r\n")?;
     let line = std::str::from_utf8(&request[..line_end]).ok()?;
     line.split_whitespace().nth(1)
+}
+
+fn request_content_length(headers: &[u8]) -> usize {
+    let Ok(text) = std::str::from_utf8(headers) else {
+        return 0;
+    };
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
 }
 
 pub fn identity_response(body: &[u8]) -> Vec<u8> {

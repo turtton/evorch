@@ -85,6 +85,35 @@ impl NetworkGuard {
     /// URL・DNS・IP・HTTPS・redirect・本文サイズのいずれかの検査または通信に失敗した場合、
     /// 対応する [`NetworkGuardError`] を返す。
     pub async fn get(&self, url: &str) -> Result<GuardedResponse, NetworkGuardError> {
+        self.guarded_request(url, OutgoingRequest::Get).await
+    }
+
+    /// URL に JSON body を POST する。
+    ///
+    /// get() と同一の guard pipeline（HTTPS upgrade・DNS pinning・IP 検査・
+    /// Content-Length / streaming / 解凍後のサイズ上限）を通過する。
+    /// `headers` は既定の `Content-Type: application/json` に追加で merge され、
+    /// POST 応答が 3xx を返した場合は Location の有無にかかわらず追従せず
+    /// [`NetworkGuardError::RedirectOnPost`] で fail-closed になる。
+    ///
+    /// # Errors
+    /// URL・DNS・IP・HTTPS・redirect・本文サイズのいずれかの検査または通信に失敗した場合、
+    /// 対応する [`NetworkGuardError`] を返す。
+    pub async fn post_json(
+        &self,
+        url: &str,
+        headers: HeaderMap,
+        body: &serde_json::Value,
+    ) -> Result<GuardedResponse, NetworkGuardError> {
+        self.guarded_request(url, OutgoingRequest::PostJson { headers, body })
+            .await
+    }
+
+    async fn guarded_request(
+        &self,
+        url: &str,
+        request: OutgoingRequest<'_>,
+    ) -> Result<GuardedResponse, NetworkGuardError> {
         let pinning = Arc::new(PinningResolver::new(self.resolver.clone()));
         let adapter = Arc::new(ReqwestPinningResolver {
             resolver: pinning.clone(),
@@ -113,18 +142,35 @@ impl NetworkGuard {
                 }
             }
 
-            let mut response = client
-                .get(current.clone())
+            let built = match request.clone() {
+                OutgoingRequest::Get => client.get(current.clone()),
+                OutgoingRequest::PostJson { headers, body } => {
+                    client.post(current.clone()).json(body).headers(headers)
+                }
+            };
+            let mut response = built
                 .send()
                 .await
                 .map_err(NetworkGuardError::HttpsConnectFailed)?;
-            if is_redirect(response.status()) {
-                if redirects == MAX_REDIRECTS {
-                    return Err(NetworkGuardError::TooManyRedirects);
+            if intercepts_redirect(&request, response.status()) {
+                match &request {
+                    OutgoingRequest::PostJson { .. } => {
+                        let location = response
+                            .headers()
+                            .get(LOCATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        return Err(NetworkGuardError::RedirectOnPost { location });
+                    }
+                    OutgoingRequest::Get => {
+                        if redirects == MAX_REDIRECTS {
+                            return Err(NetworkGuardError::TooManyRedirects);
+                        }
+                        current = redirect_target(&current, response.headers())?;
+                        redirects += 1;
+                        continue;
+                    }
                 }
-                current = redirect_target(&current, response.headers())?;
-                redirects += 1;
-                continue;
             }
 
             let status = response.status();
@@ -141,6 +187,27 @@ impl NetworkGuard {
                 body,
             });
         }
+    }
+}
+
+/// guard が送信する request の形状。
+#[derive(Clone)]
+enum OutgoingRequest<'a> {
+    Get,
+    PostJson {
+        headers: HeaderMap,
+        body: &'a serde_json::Value,
+    },
+}
+
+/// request 形状ごとに、guard が横取りする redirect status を判定する。
+///
+/// GET は従来どおり追従対象の 3xx を追従し、POST は Location の有無に
+/// かかわらずすべての 3xx を fail-closed で拒否する。
+fn intercepts_redirect(request: &OutgoingRequest<'_>, status: StatusCode) -> bool {
+    match request {
+        OutgoingRequest::Get => is_redirect(status),
+        OutgoingRequest::PostJson { .. } => status.is_redirection(),
     }
 }
 
