@@ -13,6 +13,7 @@ pub mod origin;
 pub mod result;
 pub mod sanitize;
 pub(crate) mod schema;
+pub mod search;
 pub mod tool;
 pub mod tools;
 
@@ -25,5 +26,6 @@ pub use network_guard::{
 pub use origin::{ContentOrigin, derive_content_origin};
 pub use result::ToolResult;
 pub use sanitize::escape_control_markers;
+pub use search::{McpToolSuccess, McpTransport, NetworkGuardMcpTransport, SearchError};
 pub use tool::{Permissions, Tool};
 pub use tools::{Edit, GitDiff, Grep, Read, Shell};

@@ -1,5 +1,10 @@
 mod common;
 
+// NetworkGuard 専用の response ヘルパー。search_mcp など他テストバイナリでは
+// 未使用のままコンパイルされないよう、このバイナリだけが取り込む。
+#[path = "common/guard_responses.rs"]
+mod guard_responses;
+
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr},
@@ -17,9 +22,8 @@ use flate2::{
 use reqwest::header::{HeaderMap, HeaderValue};
 use tools::{DnsResolver, MAX_RESPONSE_BYTES, NetworkGuard, NetworkGuardError};
 
-use common::{
-    FixtureServer, TestResult, chunked_response, identity_response, redirect, response_with_headers,
-};
+use common::{FixtureServer, TestResult};
+use guard_responses::{chunked_response, identity_response, redirect, response_with_headers};
 
 struct CountingResolver {
     addr: IpAddr,
