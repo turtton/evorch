@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-08-31T12:45:42.5871326+00:00",
+  "updated_at": "2026-09-01T11:25:54.0450914+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -567,6 +567,11 @@
         "implementation": ".intent-cli/issues/v02-network-guard/implementation.md",
         "review_context": ".intent-cli/issues/v02-network-guard/review-context.md",
         "yaml": ".intent-cli/issues/v02-network-guard/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 41,
+        "url": "https://github.com/turtton/evorch/issues/41"
       },
       "worker_role": "implementation",
       "review_role": "review",

@@ -98,3 +98,4 @@
 {"ts":"2026-08-31T12:45:05.2252366+00:00","execution_unit":"v02-network-guard","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-network-guard/"}
 {"ts":"2026-08-31T12:45:22.4475098+00:00","execution_unit":"v02-web-search-tool","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-web-search-tool/"}
 {"ts":"2026-08-31T12:45:42.6018185+00:00","execution_unit":"v02-web-fetch-tool","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-web-fetch-tool/"}
+{"ts":"2026-09-01T11:25:54.0450914+00:00","execution_unit":"v02-network-guard","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#41","reason":"https://github.com/turtton/evorch/issues/41"}
