@@ -8,6 +8,7 @@
 
 pub mod error;
 pub mod executor;
+pub mod network_guard;
 pub mod result;
 pub mod sanitize;
 pub(crate) mod schema;
@@ -16,6 +17,10 @@ pub mod tools;
 
 pub use error::ToolError;
 pub use executor::ToolExecutor;
+pub use network_guard::{
+    DnsResolver, GuardedResponse, MAX_REDIRECTS, MAX_RESPONSE_BYTES, NetworkGuard,
+    NetworkGuardError,
+};
 pub use result::ToolResult;
 pub use sanitize::escape_control_markers;
 pub use tool::{Permissions, Tool};

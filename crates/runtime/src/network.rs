@@ -72,3 +72,207 @@ pub fn build_sandbox(
     ));
     BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
 }
+
+/// role・tool・session の3層AND判定結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkAccessDecision {
+    /// 全層が自動許可した。
+    Allow,
+    /// deny はないが、少なくとも1層で承認が必要。
+    Ask {
+        /// 承認が必要な理由。
+        reason: String,
+    },
+    /// いずれかの層が拒否した。
+    Deny {
+        /// 最初に拒否した層の理由。
+        reason: String,
+    },
+}
+
+/// web network tool に対する role・tool・session の3層AND判定を行う。
+///
+/// deny は role → tool → session の順で最優先し、deny がなければ ask 理由を結合する。
+/// role 層で [`NetworkAccess::OptIn`] は通過扱いとし、明示的オプトインの ask 表現は
+/// session 層の [`NetworkAccess::OptIn`] が担う（契約の層割り当てに従う）。
+pub fn judge_web_network_access(
+    role: &agents::RoleCapabilities,
+    role_name: &str,
+    tool: &str,
+    per_tool: sandbox::PolicyDecision,
+    session: NetworkAccess,
+) -> NetworkAccessDecision {
+    match role.check_tool(role_name, tool) {
+        agents::CapabilityDecision::Allowed => {}
+        agents::CapabilityDecision::Denied { reason, .. } => {
+            return NetworkAccessDecision::Deny { reason };
+        }
+    }
+    match role.network {
+        NetworkAccess::Denied => {
+            return NetworkAccessDecision::Deny {
+                reason: format!(
+                    "role '{role_name}' のネットワーク利用は禁止されています (ADR 0002)"
+                ),
+            };
+        }
+        NetworkAccess::OptIn | NetworkAccess::Allowed => {}
+    }
+
+    let mut ask_reasons = Vec::new();
+    match per_tool {
+        sandbox::PolicyDecision::AutoAllow => {}
+        sandbox::PolicyDecision::Ask => {
+            ask_reasons.push(format!("ツール '{tool}' の実行には承認が必要です"));
+        }
+        sandbox::PolicyDecision::Deny => {
+            return NetworkAccessDecision::Deny {
+                reason: format!("ツール '{tool}' のネットワーク権限は拒否されています"),
+            };
+        }
+    }
+    match session {
+        NetworkAccess::Allowed => {}
+        NetworkAccess::OptIn => {
+            ask_reasons.push("session のネットワーク利用には承認が必要です".to_owned());
+        }
+        NetworkAccess::Denied => {
+            return NetworkAccessDecision::Deny {
+                reason: "session のネットワーク利用は禁止されています".to_owned(),
+            };
+        }
+    }
+
+    if ask_reasons.is_empty() {
+        NetworkAccessDecision::Allow
+    } else {
+        NetworkAccessDecision::Ask {
+            reason: ask_reasons.join(" / "),
+        }
+    }
+}
+
+#[cfg(test)]
+mod network_access_tests {
+    use super::*;
+    use agents::RoleCapabilities;
+    use sandbox::PolicyDecision;
+
+    #[derive(Clone, Copy)]
+    enum Expected {
+        Allow,
+        Ask,
+        Deny,
+    }
+
+    // Given: 各層の allow・ask・deny 組合せ / When: 3層AND判定 / Then: deny優先・ask集約・全通過allowになる
+    #[test]
+    fn judges_all_three_layers_fail_closed() {
+        let cases = [
+            (
+                "worker network deny",
+                true,
+                NetworkAccess::Denied,
+                PolicyDecision::AutoAllow,
+                NetworkAccess::Allowed,
+                Expected::Deny,
+            ),
+            (
+                "tool missing",
+                false,
+                NetworkAccess::Allowed,
+                PolicyDecision::AutoAllow,
+                NetworkAccess::Allowed,
+                Expected::Deny,
+            ),
+            (
+                "per-tool deny",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::Deny,
+                NetworkAccess::Allowed,
+                Expected::Deny,
+            ),
+            (
+                "session deny",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::AutoAllow,
+                NetworkAccess::Denied,
+                Expected::Deny,
+            ),
+            (
+                "session opt-in",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::AutoAllow,
+                NetworkAccess::OptIn,
+                Expected::Ask,
+            ),
+            (
+                "per-tool ask",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::Ask,
+                NetworkAccess::Allowed,
+                Expected::Ask,
+            ),
+            (
+                "ask plus deny",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::Ask,
+                NetworkAccess::Denied,
+                Expected::Deny,
+            ),
+            (
+                "all pass",
+                true,
+                NetworkAccess::Allowed,
+                PolicyDecision::AutoAllow,
+                NetworkAccess::Allowed,
+                Expected::Allow,
+            ),
+        ];
+
+        for (name, has_tool, role_network, per_tool, session, expected) in cases {
+            let tools = if has_tool {
+                &["web_fetch"][..]
+            } else {
+                &[][..]
+            };
+            let role = RoleCapabilities::new(tools.iter().copied(), role_network, false);
+            let decision =
+                judge_web_network_access(&role, "TestRole", "web_fetch", per_tool, session);
+            match expected {
+                Expected::Allow => assert_eq!(decision, NetworkAccessDecision::Allow, "{name}"),
+                Expected::Ask => assert!(
+                    matches!(decision, NetworkAccessDecision::Ask { .. }),
+                    "{name}"
+                ),
+                Expected::Deny => assert!(
+                    matches!(decision, NetworkAccessDecision::Deny { .. }),
+                    "{name}"
+                ),
+            }
+        }
+    }
+
+    // Given: per-tool ask と session OptIn / When: 3層AND判定 / Then: 両方の承認理由が結合される
+    #[test]
+    fn combines_ask_reasons() {
+        let role = RoleCapabilities::new(["web_fetch"], NetworkAccess::Allowed, false);
+        let decision = judge_web_network_access(
+            &role,
+            "Librarian",
+            "web_fetch",
+            PolicyDecision::Ask,
+            NetworkAccess::OptIn,
+        );
+        let NetworkAccessDecision::Ask { reason } = decision else {
+            panic!("ask 判定でなければならない");
+        };
+        assert!(reason.contains("ツール 'web_fetch'"));
+        assert!(reason.contains("session"));
+    }
+}
