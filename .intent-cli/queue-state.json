@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T18:45:22.6230753+00:00",
+  "updated_at": "2026-09-01T22:13:36.0569077+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -582,7 +582,7 @@
     {
       "execution_unit": "v02-web-search-tool",
       "title": "v0.2: web_search tool \u3092 builtin Tool \u5C64\u306B\u5B9F\u88C5 (Exa keyless \u65E2\u5B9A \u002B Tavily keyless fallback)",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-tool-layer",
         "v01-secure-tool-composition-root",
@@ -600,6 +600,7 @@
         "number": 43,
         "url": "https://github.com/turtton/evorch/issues/43"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/44",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
