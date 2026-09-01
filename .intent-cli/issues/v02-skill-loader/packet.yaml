@@ -1,0 +1,78 @@
+implementation_issue_packet:
+  issue_title: "v0.2: agentskills 仕様準拠の skill loader（2 スコープ発見 / progressive disclosure / 組み込み検証）を実装"
+  issue_kind: feature
+  source_execution_unit: v02-skill-loader
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/agents/ crates/runtime/ crates/config/"
+  target_part: "agentskills 仕様（SKILL.md frontmatter + bundled resources）準拠の skill loader。repo / user 2 スコープ発見（repo > user 優先）、起動時 metadata 露出 + 活性化時本文ロード + resources 必要時読み込みの progressive disclosure、skill-load surface（RoleCapabilities による role gate 付き）、委譲時 load_skills 相当注入、skills-ref validate 相当の組み込みバリデーション"
+  dependencies: [v02-prompt-assembly]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "v02-prompt-assembly が確立する prompt assembly 層（role / category → 論理モデル結線、preset / override 2 層）— 起動時の skills metadata 露出と活性化時本文注入の接続先。現行 runtime は system prompt 合成を持たず（crates/runtime/src/agent_loop.rs の run_agent は task prompt を user message として push するのみ）、接続点は依存 packet が新設する"
+    - "Role / RoleCapabilities / check_tool（crates/agents/src/role.rs / capability.rs）— skill-load surface の role gate。allowed_tools 更新は role.rs の v0.2 拡張レシピ（capability arm 追加）手順に従う"
+    - "Tool trait / ToolExecutor（crates/tools/src/tool.rs / executor.rs — name / JSON Schema schema / permissions / async execute、jsonschema 引数検証、ToolStarted / ToolCompleted emit、結果正規化層の制御マーカーエスケープ）と meta op dispatch（crates/runtime/src/meta.rs）— skill 本文ロード surface は ToolExecutor 登録 tool または meta op のいずれかで実装する（実装 slice で確定）"
+    - "Config 読み込み（crates/config/src/load.rs — evorch.toml / config.d/*.toml、user config dir は $XDG_CONFIG_HOME/evorch または ~/.config/evorch）— repo / user 2 スコープの発見ディレクトリ解決の土台。Config は deny_unknown_fields（crates/config/src/types/mod.rs）のため skill 設定の追加は schema 拡張として行う"
+    - "serde_yaml 等 YAML frontmatter 解析依存は workspace 未導入 — 追加 feasibility 確認を実装タスクに含める（frontmatter は SKILL.md 冒頭の YAML 区切り、本文は Markdown）"
+    - "Fault event（crates/event-bus/src/event.rs EventKind::Fault）— skill 発見 / frontmatter 検証の失敗を静かにしない（ADR 0010「失敗は静かにしない」）"
+    - "agentskills 仕様（github.com/agentskills/agentskills）が SKILL.md 形式の権威。omo（oh-my-openagent 4.19.4 調査 — buildAvailableSkills() による name+description 一覧注入、load_skills=[...] による subagent 本文注入）は発見・注入の参照実装であり形式権威ではない（grill Q4 の精密化）"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0010-extension-architecture-v2-style.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "SKILL.md frontmatter 検証が agentskills 仕様に準拠する: name 必須（1-64 文字、小文字英数 + hyphen、連続 hyphen 不可、親ディレクトリ名と一致）、description 必須（≤1024 文字）、任意 field（license / compatibility ≤500 / metadata / allowed-tools）を受け付け、違反はエラーとして観測可能であることを unit test で検証"
+    - "bundled resources（scripts/ / references/ / assets/）を含む skill ディレクトリを解決し、SKILL.md 本文からの file 参照は 1 段の相対参照に制限されることを unit test で検証"
+    - "repo / user 2 スコープ発見が動作し、同名 skill は repo スコープが user スコープに優先すること、および優先（shadowing）の発生が diagnostic / event で観測可能であることを unit test で検証"
+    - "run 開始時は name + description の metadata 一覧のみが prompt assembly に露出し、SKILL.md 本文はロードされないことを unit test で検証（progressive disclosure 第 1 段）"
+    - "agent が skill-load surface で skill 名を指定すると SKILL.md 本文が返却され、発見済みでない skill 名への呼び出しはエラーになることを unit test で検証（progressive disclosure 第 2 段。resources は参照時のみ読む第 3 段を含む）"
+    - "委譲時の load_skills 相当が動作し、指定された skill 本文が子 run の prompt assembly に注入されることを unit test で検証"
+    - "skills-ref validate 相当の組み込みバリデーションで不正な frontmatter の skill が metadata 一覧に現れない（または invalid として明示される）ことを unit test で検証"
+    - "skill-load surface の role gate が RoleCapabilities（check_tool）で機能し、未許可 role からの呼び出しが拒否されることを unit test で検証"
+    - "既存 4 role（Orchestrator / Explorer / Worker / Reviewer）の実行に回帰がないこと（metadata 露出は skill が存在する場合のみ prompt に影響する）"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0010-extension-architecture-v2-style.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "AgentRun 構造要件（id / role / category / skills / route / context / policy）の skills 軸を実装する slice であり、agent-runtime-kernel overview の v0.2 loop 基盤 packet 索引に v02-skill-loader が列挙済み。Agent の 5 軸分解（Role + Category + Skills + Execution Policy + Route Policy）の Skills 軸（orchestration overview）と ADR 0010（skill discovery は built-in と同等の typed 扱い、失敗は静かにしない）、ADR 0002（skill-load surface の role gate）を supporting とする。SKILL.md 形式の権威は agentskills 公開仕様で確定済み（grill Q4）のため新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+    summary: "skill loader の確定実装（agentskills 仕様準拠の frontmatter 検証ルール、repo / user 2 スコープ発見と優先順位、progressive disclosure 3 段の注入点、skill-load surface の形式と role gate、委譲時 load_skills 相当注入、組み込みバリデーション）を agent-runtime-kernel overview へ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "skill loader の実装確定（発見ディレクトリの既定配置、2 スコープ優先順位と shadowing の観測経路、progressive disclosure の注入点と token 目安、skill-load surface の形式（tool / meta op の最終選択）と role 付与、検証ルールとエラー観測経路、YAML 解析依存の選定結果）を agent-runtime-kernel overview に記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+# G645: skill-load surface は agent が呼び出す role-facing surface を追加するため route form。
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "agent-runtime-kernel overview で宣言される skill 利用 surface（skill-load）"
+      role: Orchestrator
+      target_surface: "run 開始時の skills metadata 露出と skill-load 呼び出し（meta op / tool 設定）"
+    - guide_surface: "agent-runtime-kernel overview で宣言される skill 利用 surface（skill-load）"
+      role: Worker
+      target_surface: "実行中 agent からの skill-load 呼び出し（RoleCapabilities 許可対象）"

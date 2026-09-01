@@ -47,6 +47,18 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 
 oh-my-pi（can1357/oh-my-pi）の設計参照は commit 51f0380 の調査に基づく（参照ファイルの一覧は [ADR 0022](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md) の References を参照）。
 
+### ループ継続保証・merge 承認の確定（grill grill-v02-loop-foundation、2026-09-02）
+
+omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲し、委譲ループの完結をシステムで保証する:
+
+- **goal 固定**: run に goal を紐付け、durable な goal state（active / paused / complete）を保持する
+- **finish gate**: orchestrator / worker の `finish`（完了宣言）は composite gate（PR 実在 + CI green + diff の成功基準照合）と Reviewer 承認を満たさなければ拒否し、run を継続させる。omo の「idle イベント駆動 continuation dispatch」（todo / goal / boulder 未完了時に continuation prompt を自動注入）に相当する機構を runtime が持つ
+- **review 往復**: Reviewer run の指摘は request-update として worker へ差し戻し、rereview まで orchestrator が回す（現行運用の lead 手作業の内製化）
+- **人間承認点は merge のみ**: 実装・PR 作成・CI 確認・review 往復・closeout 記録 (intent-cli は shell 経由) は自律。`gh pr merge` だけ GUI approval で人間に求める（現行ループと同じ安全水準）
+- **起点は GUI の goal 投入のみ**: CLI（crates/evorch main.rs）は新設しない。検証は gui crate の headless モードで行う（ADR 0005 の分離と一致）
+- **停滞検知**: worker の無応答・エラー停滞を検知して追加指示（促し）を送る。lead が直接修正しない規律（herdr-opencode-loop 運用）は維持
+- **Intent Gate との統合**: 既存構想の Intent Gate（Direct / Coordinated 分類）に、omo 式の分類表（explain / implement / look into / broken / refactor 等）と利用可能 agent / skill から動的生成される keyTriggers を実装する（詳細は v02-prompt-assembly / v02-orchestrator-loop packet）
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること

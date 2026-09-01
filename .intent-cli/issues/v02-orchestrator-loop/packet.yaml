@@ -1,0 +1,97 @@
+implementation_issue_packet:
+  issue_title: "v0.2: goalからPR・review・merge承認まで継続するorchestrator loopを内製化"
+  issue_kind: feature
+  source_execution_unit: v02-orchestrator-loop
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/gui/ crates/storage/ crates/event-bus/"
+  target_part: "GUI goal投入を起点とするdurable orchestration loop。finish composite+Reviewer gate、idle continuation、bounded review修復、stalled nudge、merge-only human approval、shell経由closeout、headless self-dogfood"
+  dependencies: [v02-agent-messaging, v02-workspace-isolation, v02-prompt-assembly, v02-skill-loader, v02-project-rules, v02-context-compaction, v02-gui-workbench-restructure]
+  technical_baseline:
+    - "AgentRuntime（crates/runtime/src/runtime.rs）はdelegate_background/send_message/wait/cancel/list_agents/inspect_agentを持ち、RunConfigは現状interactive/nameのみ。run registryはPending/Running/Waiting/Done/ErrorをEvent Busへemitする"
+    - "meta dispatch（crates/runtime/src/meta.rs）はdelegate/send/wait/cancel/list/inspect/compact/finishをmodel tool callから処理するが、finishはresultを即受理しgateを持たず、compactはstub"
+    - "v02-agent-messagingがAgentMessage send/reply/steeringをEvent Bus + transcriptへ永続化し、crash時の新規run再起動と文脈再構成を提供する（厳密reviveはv0.3）"
+    - "v02-workspace-isolationがruntime所有git worktree、writable .git、evorch/task/<run-id> branch、commit/push可能なapproved shell境界を提供する"
+    - "v02-prompt-assembly/skill-loader/project-rules/context-compactionがOrchestrator intent gate、role/category model binding、skills、AGENTS/rules注入、長時間loopのcontext管理を提供する"
+    - "Event Bus schema v1 + SQLite event/session/message persistence（ADR 0018）がdurable goal/review/gate/approval/continuation eventの追加・再構成先"
+    - "v02-gui-workbench-restructureがgoal+packet/issue+constraints submission、PR/diff/CI/reviewer表示、merge approve/reject command container、headless harnessを提供する"
+    - "omo 4.19.4 prior art: durable goal active/paused/complete、runtime idleイベント駆動continuation prompt、stop guard、completion audit。自然言語停止検出ではなくruntime state/eventを使う"
+    - "intent-cliとGitHub操作は既存shell toolから外部CLIを呼ぶ。専用bridge、新規evorch CLI、intent-cli queue polling/publishは本sliceに含めない"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "GUI goal submissionからgoal+packet/issue contract+constraintsをrunに固定でき、durable GoalState(active/paused/complete)と状態遷移eventがSQLiteへ保存され、process再起動後に同じsession/goalを再構成するintegration testがある"
+    - "pause中はcontinuation/新規delegationをdispatchせず、resumeで再開し、completeはfinish gate成功後のみ到達する。cancel/stopとpause/completeを混同しないstate machine testがある"
+    - "finishはPR実在、CI green、base mainとの差分がpacket acceptance/success criteriaに照合済み、最新Reviewer approvalのcomposite gateをすべて満たす時だけ受理し、各欠落条件では理由付き拒否+goal active維持となるtable-driven testがある"
+    - "gate未充足のrunがidleになった場合、runtime idle/completion eventを起点に未充足条件・goal・次actionを含むcontinuation promptを自動dispatchし、同一idle epochで二重dispatchせず、自然言語やtimerだけで誤発火しない"
+    - "Reviewer run→request-update→修復worker→rereviewをorchestratorが回し、review round上限をconfig/contractでboundedにする。approvalまたは上限到達で決定的に収束し、上限到達は人間merge承認へ進まずblockedとして表示する"
+    - "workerの無応答/Waiting長期化/反復errorをevent時刻とprogress signalでstalled判定し、親からsteering/nudgeを送る。bounded nudge後も進展がなければblocked化し、orchestratorがworker worktreeを直接編集して迂回しない"
+    - "実装、commit/push、PR作成、CI確認、review往復、intent-cli closeout記録はapproved shell tool経由で自律実行でき、専用GitHub/intent-cli bridgeや新規CLI binaryを追加しない"
+    - "人間approvalが必要なのはmergeのみで、GUI merge approvalがない状態ではgh pr merge相当操作を実行できない。approveは対象PR/head SHA/gate snapshotにbindされ、SHA/gate変化で失効し、rejectはgoal activeのcontinuationへ戻すtestがある"
+    - "closeoutはmerge承認後の定義済み段階でshell toolからintent-cliの適切なread/write workflowを実行し、成功/失敗とartifact参照をevent/transcriptへ記録する。queue polling/seed/publish/issue automationは呼ばない"
+    - "run crash時はv02-agent-messaging transcriptとdurable goal/gate/review stateから新規runを起動して文脈再構成し、in-flight tool snapshotの厳密reviveを実装しない"
+    - "gui crate headless fixtureでqueued packet相当の1 unitをgoal投入→worker実装fixture→PR/CI fixture→Reviewer request-update→repair→approval→merge approval→closeoutまで完走し、finish gate欠落時のcontinuationも検証する"
+    - "--demoが外部AI/GitHub/intent-cli mutationなしの決定的adapterで同loopとmerge approvalを再現し、実self-dogfood手順ではqueued v0.2 unit 1本以上をevorch loopで消費したevidenceをcloseoutへ記録する"
+    - "crates/evorch main.rs等に新規CLI entryを追加せず、intent-cli queue巡回/publishing、GitHub issue publishing、厳密parked reviveを実装しない"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check がpass"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "goal固定、finish gate、continuation、review往復、merge承認というcapstone protocolはorchestration overviewのv0.2確定節が直接所有する。GUI/runtime/storageはsupporting実装層であり、新規feature nodeは不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+      - intents/evorch/features/gui-workbench/overview.md
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+      - intents/evorch/technology/mvp-roadmap.md
+    summary: "durable goal/state machine、composite+Reviewer gate、idle continuation、bounded review/nudge、merge approval binding、shell closeout、crash再構成、headless/self-dogfood結果を各所有intentへ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+    diagram_type: state-machine
+  docs:
+    required: true
+    target_paths:
+      - crates/gui/src/bin/evorch-gui.rs
+    summary: "--help/--demoにgoal loop、finish gate拒否、review修復、merge approvalの決定的確認手順を同梱する"
+closeout_learning:
+  expected: "GoalState/event schema、idle epochとcontinuation重複防止、composite gate各evidenceの取得/鮮度、Reviewer approval binding、review/nudge上限、merge approvalのPR/SHA binding、shell経由GitHub/intent-cli command境界、closeout順序、crash再構成、headless fixtureと実queued unit self-dogfood結果をorchestration/runtime/gui/roadmapへ記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "GUI goal実装loopの開始・監視・merge判断"
+      role: operator
+      target_surface: "goal state、gate/review status、continuation、merge approval、closeout result"

@@ -1,0 +1,77 @@
+implementation_issue_packet:
+  issue_title: "v0.2: RunConfig.workspace_mode と runtime 所有 git worktree 隔離を実装"
+  issue_kind: feature
+  source_execution_unit: v02-workspace-isolation
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/sandbox/"
+  target_part: "RunConfig.workspace_mode {shared, isolated}、project 許可ディレクトリ配下の runtime 所有 git worktree、evorch/task/<run-id> branch、承認済み tool call で writable workspace / .git を持つ sandbox"
+  dependencies: []
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、workspace version 0.1.0、Tokio 1 sync runtime（workspace Cargo.toml）"
+    - "RunConfig（crates/runtime/src/run.rs）は interactive / name のみで workspace_mode・cwd・worktree identity を持たない。RunTask は run_id / role / prompt / config を保持する"
+    - "AgentRuntime::production（crates/runtime/src/runtime.rs）は ExecutionPolicy と単一 workspace_root から build_sandbox を composition-time に一度構築し、全 run で同じ ToolExecutor / Sandbox を共有する"
+    - "build_sandbox（crates/runtime/src/network.rs）は BwrapConfig::new(workspace_root) と allow_network を組み立てる。doc 上も 1 AgentRuntime = 1 policy = 1 sandbox で、run ごとの切替には executor API 再設計が必要と明記されている"
+    - "ExecutionPolicy（crates/runtime/src/policy.rs）は RoleCapabilities による tool authorization / spec filtering を担う。Worker は read / edit / grep / shell / git_diff を許可する"
+    - "sandbox ApprovalPolicy（crates/sandbox/src/policy.rs）は Capabilities {fs_read, fs_write, process_spawn} を AutoAllow / Ask / Deny に分類する。v0.2 は承認済み tool call のみ sandbox 実行する境界へ再設計する"
+    - "NetworkAccess → SandboxNetworkMode（Unshared / ParentNetns）の fail-closed 写像は crates/runtime/src/network.rs に実装済みで、workspace isolation 後も維持する"
+    - "agent-runtime-kernel / orchestration overview は shared と isolated、runtime 所有 worktree、branch 既定 evorch/task/<run-id>、worktree rw を確定済み。grill Q1 は .git writable とし、runtime 代理 git / bundle 自動化を不採用と確定"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "RunConfig.workspace_mode が shared / isolated の型付き enum として追加され、default が shared で既存呼出しの挙動を維持する unit test がある"
+    - "shared mode は親から渡された workspace / cwd を再利用し、git worktree や branch を作成しないことを integration test で検証する"
+    - "isolated mode は runtime が project の許可ディレクトリ配下に run ごとの git worktree を作成し、run cwd をその root に設定する。作成 path が許可集合外へ出る要求は fail-closed で拒否される test がある"
+    - "isolated branch mode の branch 名が厳密に evorch/task/<run-id> となり、並列 run が異なる worktree / branch / cwd を持ち、同一ファイルへの変更が相互に漏れない integration test がある"
+    - "承認済み Worker shell tool から worktree 内の git add / commit が成功し、worktree の .git gitfile と参照先 git metadata に必要な書込みが可能であることを real git integration test で検証する"
+    - "承認拒否または capability deny の tool call は git / filesystem process を起動せず、writable .git が approval / RoleCapabilities を迂回する権限昇格経路にならないことを test で検証する"
+    - "bwrap mount policy は isolated worktree と git operation に必要な .git metadata のみ rw、その他 project 許可ディレクトリは policy に従い、許可集合外への write を拒否する integration test がある"
+    - "worktree 作成途中・run 起動失敗・cancel・正常完了の各経路で runtime 所有 resource が決定的に cleanup され、既存 branch / user worktree を削除しないことを failure-injection test で検証する"
+    - "merge mode は branch を既定として branch identity / worktree path を inspection / event surface から観測可能にする。patch mode を実装する場合は .patch artifact を返すが、runtime 代理 commit/push や bundle は実装しない"
+    - "既存 NetworkAccess → SandboxNetworkMode の fail-closed matrix と standard tool execution の回帰 test が pass する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0021-bwrap-linux-sandbox.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "agent-runtime-kernel overview の RunConfig.workspace_mode と git worktree backend、orchestration overview の isolated workspace 運用を実装する slice。grill Q1 で .git writable・approval 済み tool call 境界・bundle 廃止が確定済みで、ADR 0008/0021 の project trust と bwrap 境界内で完結するため新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+      - intents/evorch/features/orchestration/overview.md
+    summary: "workspace_mode の最終型と default、worktree 配置 / cleanup ownership、branch 命名、project 許可ディレクトリ検証、writable .git と approval 境界、inspection/event surface を実装確定として反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "RunConfig.workspace_mode の最終 schema、runtime-owned worktree manager の配置、project allowed dirs 検証、evorch/task/<run-id> branch、.git rw mount の最小範囲、approval / capability deny の強制点、cleanup / failure recovery を agent-runtime-kernel overview に記録する。orchestration overview には bundle 回避策廃止と worker 直接 commit/push の成立条件を反映する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "orchestration overview の isolated workspace 運用"
+      role: Worker
+      target_surface: "RunConfig.workspace_mode=isolated と evorch/task/<run-id> worktree / branch"

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T11:25:54.0450914+00:00",
+  "updated_at": "2026-09-01T16:37:23.1626087+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -614,6 +614,176 @@
         "implementation": ".intent-cli/issues/v02-web-fetch-tool/implementation.md",
         "review_context": ".intent-cli/issues/v02-web-fetch-tool/review-context.md",
         "yaml": ".intent-cli/issues/v02-web-fetch-tool/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-agent-messaging",
+      "title": "v0.2: AgentMessage \u306E send / reply / steering \u3068 transcript \u6C38\u7D9A\u5316\u3092 runtime \u306B\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-agent-messaging/implementation.md",
+        "review_context": ".intent-cli/issues/v02-agent-messaging/review-context.md",
+        "yaml": ".intent-cli/issues/v02-agent-messaging/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-workspace-isolation",
+      "title": "v0.2: RunConfig.workspace_mode \u3068 runtime \u6240\u6709 git worktree \u9694\u96E2\u3092\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-workspace-isolation/implementation.md",
+        "review_context": ".intent-cli/issues/v02-workspace-isolation/review-context.md",
+        "yaml": ".intent-cli/issues/v02-workspace-isolation/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-prompt-assembly",
+      "title": "v0.2: role/category routing \u3068 model-family \u6700\u9069\u5316\u3092\u7D71\u5408\u3059\u308B system prompt assembly \u3092\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-prompt-assembly/implementation.md",
+        "review_context": ".intent-cli/issues/v02-prompt-assembly/review-context.md",
+        "yaml": ".intent-cli/issues/v02-prompt-assembly/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-skill-loader",
+      "title": "v0.2: agentskills \u4ED5\u69D8\u6E96\u62E0\u306E skill loader\uFF082 \u30B9\u30B3\u30FC\u30D7\u767A\u898B / progressive disclosure / \u7D44\u307F\u8FBC\u307F\u691C\u8A3C\uFF09\u3092\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [
+        "v02-prompt-assembly"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-skill-loader/implementation.md",
+        "review_context": ".intent-cli/issues/v02-skill-loader/review-context.md",
+        "yaml": ".intent-cli/issues/v02-skill-loader/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-project-rules",
+      "title": "v0.2: AGENTS.md \u30CD\u30B9\u30C8 closest-wins \u6CE8\u5165\u3068 tool \u5B9F\u884C\u5F8C synthetic message \u6CE8\u5165\uFF08scoped rules / dynamic truncation\uFF09\u3092\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [
+        "v02-prompt-assembly"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-project-rules/implementation.md",
+        "review_context": ".intent-cli/issues/v02-project-rules/review-context.md",
+        "yaml": ".intent-cli/issues/v02-project-rules/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-context-compaction",
+      "title": "v0.2: \u76E3\u67FB\u53EF\u80FD\u306A context compaction\uFF0875% \u81EA\u52D5\u30FB\u624B\u52D5\u30FBagent tool\uFF09\u3092\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [
+        "v02-agent-messaging"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-context-compaction/implementation.md",
+        "review_context": ".intent-cli/issues/v02-context-compaction/review-context.md",
+        "yaml": ".intent-cli/issues/v02-context-compaction/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-provider-codex-subscription",
+      "title": "v0.2: ChatGPT Plus/Pro \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u9023\u643A\u306E codex provider\uFF08OAuth device flow / PKCE\uFF09\u3092 providers \u5C64\u306B\u5B9F\u88C5",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-provider-codex-subscription/implementation.md",
+        "review_context": ".intent-cli/issues/v02-provider-codex-subscription/review-context.md",
+        "yaml": ".intent-cli/issues/v02-provider-codex-subscription/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-gui-workbench-restructure",
+      "title": "v0.2: GUI workbench \u3092 project/thread \u4E2D\u5FC3\u306E3\u9818\u57DF\u30EC\u30A4\u30A2\u30A6\u30C8\u3078\u518D\u69CB\u6210",
+      "state": "queued",
+      "dependencies": [
+        "v02-agent-messaging",
+        "v02-workspace-isolation"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-gui-workbench-restructure/implementation.md",
+        "review_context": ".intent-cli/issues/v02-gui-workbench-restructure/review-context.md",
+        "yaml": ".intent-cli/issues/v02-gui-workbench-restructure/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-orchestrator-loop",
+      "title": "v0.2: goal\u304B\u3089PR\u30FBreview\u30FBmerge\u627F\u8A8D\u307E\u3067\u7D99\u7D9A\u3059\u308Borchestrator loop\u3092\u5185\u88FD\u5316",
+      "state": "queued",
+      "dependencies": [
+        "v02-agent-messaging",
+        "v02-workspace-isolation",
+        "v02-prompt-assembly",
+        "v02-skill-loader",
+        "v02-project-rules",
+        "v02-context-compaction",
+        "v02-gui-workbench-restructure"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-orchestrator-loop/implementation.md",
+        "review_context": ".intent-cli/issues/v02-orchestrator-loop/review-context.md",
+        "yaml": ".intent-cli/issues/v02-orchestrator-loop/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",

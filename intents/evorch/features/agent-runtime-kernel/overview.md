@@ -74,6 +74,12 @@ ADR 0018（SQLite event sourcing）上に置くため、oh-my-pi の cap 100 非
 
 AgentRunPhase に parked 相当の状態（または Done + revive 経路）を追加し、session を解放した agent が DM で revive できるようにする。
 
+**スコープ修正（grill grill-v02-loop-foundation Q2、2026-09-02）**: 厳密な revive（会話・tool 状態のスナップショット復元を含む durable inbox）は v0.3 送りとする。v0.2 では AgentMessage（send / reply / steering）を Event Bus イベントとして transcript 永続化（message repo 既存）し、run crash 時は親が新規 run を起動して transcript から文脈を再構成する運用とする。durable 化・監査基盤（ADR 0018 event sourcing）の上に置く構造は維持。
+
+### loop 基盤の関連 packet 索引（grill grill-v02-loop-foundation、2026-09-02）
+
+本 feature（kernel）の v0.2 計画は messaging / workspace / parked が対象。loop 完結に必要な残り層は別 packet が担う（詳細は `technology/mvp-roadmap.md` v0.2 節と各 packet）: `v02-prompt-assembly`（category routing + モデル別最適化 + preset/override 2層 + intent gate）、`v02-skill-loader`（agentskills 準拠）、`v02-project-rules`（AGENTS.md ネスト + tool 後注入）、`v02-context-compaction`（75% 自動 + 手動 + DCP 型）、`v02-orchestrator-loop`（goal 固定 + finish gate + continuation）。
+
 ### 参照
 
 oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく。参照ファイル: `registry/agent-lifecycle.ts`（idle → parked → revive）、`registry/agent-tree.ts`、`irc/bus.ts`（mailbox + waiter + delivery receipt）、`session/irc-bridge.ts`（steer / aside）、`task/engine.ts`、`config/agents-config.ts`、`messaging.ts`、`projections/pipeline.ts`。

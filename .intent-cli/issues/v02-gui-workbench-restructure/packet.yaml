@@ -1,0 +1,81 @@
+implementation_issue_packet:
+  issue_title: "v0.2: GUI workbench を project/thread 中心の3領域レイアウトへ再構成"
+  issue_kind: feature
+  source_execution_unit: v02-gui-workbench-restructure
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/workspace-ui/ crates/config/"
+  target_part: "t3code 基準の既定 workbench（左 project/thread、中央 conversation、右 tabbed surfaces）と project trust、Agents live/drill-down/複数 transcript、最小 Diff、goal投入・merge承認 surface"
+  dependencies: [v02-agent-messaging, v02-workspace-isolation]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、egui + eframe + egui_dock（ADR 0007）。dock/undock/floating と layout persistence は維持する"
+    - "WorkbenchState（crates/gui/src/app.rs）は EventPump、単一 TranscriptModel、TasksModel、TerminalBuffer、DockState、Panel registry を1 frameで統合する薄いrenderer"
+    - "workspace-ui Workspace schema v1 は framework-independent LayoutNode(Split/Tabs)/Window/Panel registry を保持し、default_v01 は Tasks + Agent + Terminal の3 pane。validate/persist/dock roundtrip test が既存"
+    - "PanelKind は現状 Agent / Terminal / Tasks のみ。v0.2 surface追加では schema migrationまたは後方互換defaultが必要"
+    - "TasksModel / AgentRunSource は AgentSummaryの run_id/name/role/phase/model のみをlive表示する。provider/current tool/token usageとagent別 transcript selectorは未接続"
+    - "TranscriptModel はEvent BusのMessage/Tool eventを単一streamへ反映しcapacity/view windowを持つ。v02-agent-messagingのrun/session addressingと永続transcriptを消費して複数instance化する"
+    - "HeadlessWorkbench（crates/gui/src/headless.rs、egui_kittest）はwindow不要のframe実行・captureを提供し、runtime_wiring/workbench/dock roundtrip testが既存"
+    - "製品binary evorch-gui は実AgentRuntime/EventBus wiring済みで、--demoは外部provider不要の決定的delegate sessionを提供する"
+    - "v02-workspace-isolationがruntime所有worktreeとevorch/task/<run-id>、writable git、project allowed-directory連携の基礎を提供する"
+    - "t3code b883fc0 prior art: 左project/thread、中央conversation、右Browser/Terminal/Files/Diff/PR/Agents tabs。v0.2ではAgentsをより深く実装し、Diffはworking tree/branch unifiedのみ"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0007-gui-framework-egui-first.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "新規/初期化workspaceの既定layoutが左project+thread sidebar / 中央conversation / 右tabbed surfacesとなり、既存egui_dockの移動・resize・undock・floating・save/load roundtripを保持するheadless testがある"
+    - "projectを基準repo/path + allowed-directory setとして追加/選択/永続化でき、run cwdがproject rootと異なっても所属を解決し、runtime所有worktreeは自動許可、任意外部pathは明示trustなしに許可されないことをunit/integration testで検証する"
+    - "threadをproject配下で作成・切替・pin/unpinでき、active/paused/running/waiting/done/error等の状態とbranch/worktree indicatorをEvent Bus/永続stateから更新するheadless testがある"
+    - "Agents tabがidentity/phase/model/provider/current tool/token usageをlive更新し、agent選択で中央conversationを当該transcriptへdrill-downできる"
+    - "任意agent transcript paneを複数同時にdock表示でき、既定はorchestrator + 最新worker + reviewerの最大3 paneを利用可能なrunに応じて構成し、各runのmessage/tool eventが他paneへ混線しないheadless testがある"
+    - "右Diff tabがworking tree diffとbase branch対比のbranch unified diffを表示し、空diff・大きすぎるdiff・git errorをUIを停止させず明示状態として扱う。turn別/split/whitespace/file treeは実装しない"
+    - "goal + packet/issue参照 + 制約を送信するgoal-submission surfaceと、PR/diff/CI/reviewer状態を表示してmergeをapprove/rejectするmerge-approval surfaceが型付きcommand/event containerとして存在し、orchestrator-loop未接続時も決定的demo/headless fixtureで操作可能"
+    - "--demoが外部provider/credentialなしでproject/thread切替、agent3役live更新、複数transcript、Diff fixture、goal submission、merge approval pending/resolvedを再現でき、--helpに手動確認手順がある"
+    - "HeadlessWorkbenchでdefault layout、project/thread操作、Agents drill-down、3 transcript分離、Diff、goal/approval command発行をwindowなしに検証するintegration testがある"
+    - "workspace schema migration/backward compatibilityにより既存v0.1 layoutをloadでき、不正panel参照・duplicate・invalid trust pathはfail-closedで拒否する"
+    - "file tree、turn別diff、split diff、whitespace制御、base branch任意選択等の完全版は追加されずv0.3 scopeのまま"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check がpass"
+
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench/overview.md
+  supporting_intents:
+    - intents/evorch/technology/mvp-roadmap.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0007-gui-framework-egui-first.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "GUI layout、workspace model、project/thread、Agents、Diff、loop UI containerはgui-workbench featureのv0.2確定節が直接所有する。既存overviewへ実装結果をwritebackすれば足り、新規intent nodeは不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/gui-workbench/overview.md
+    summary: "v0.2 GUI再構成の実装確定（workspace schema/default layout、project trust/thread state、Agents live/複数transcript、最小Diff、goal/merge container、headless/demo検証）を反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - crates/gui/src/bin/evorch-gui.rs
+    summary: "--helpにv0.2 --demoのproject/thread/Agents/Diff/goal/merge approval手動確認手順を同梱する"
+closeout_learning:
+  expected: "採用したworkspace schema migration、t3code型default layout、project allowed-directoryとworktree自動許可の接続、thread状態model、agent telemetry/transcript addressing、3-pane選択規則、Diff取得上限/エラー表示、goal/merge command container、headless/--demo検証結果をgui-workbench overviewへ記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "GUI workbench のproject/thread操作と実装loop開始"
+      role: operator
+      target_surface: "左sidebar、Agents/Diff tabs、goal submission、merge approval"

@@ -1,0 +1,76 @@
+implementation_issue_packet:
+  issue_title: "v0.2: role/category routing と model-family 最適化を統合する system prompt assembly を実装"
+  issue_kind: feature
+  source_execution_unit: v02-prompt-assembly
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/routing/ crates/runtime/"
+  target_part: "config-driven role/category→logical-model binding、system preset + user override、model-family base optimization、Orchestrator 限定 Intent Gate（Direct / Coordinated + dynamic keyTriggers）の deterministic assembly"
+  dependencies: []
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、workspace version 0.1.0、serde 1 / schemars 1 / toml 1（workspace Cargo.toml）"
+    - "Config schema version 2（crates/config/src/types/mod.rs）は providers / routing / panel / diagnostics / permissions / metrics を持ち、deny_unknown_fields。role / category / prompt preset 設定は存在しない"
+    - "RoutingConfig（crates/config/src/types/routing.rs）は logical route 名 → RouteCandidateConfig の宣言順 list。candidate は profile + optional model で、同一 model の別 provider profile を別候補として表現できる"
+    - "Router（crates/routing/src/router.rs）は logical model を ResolvedRoute {profile, model_id} へ解決し、SessionAffinity で profile を pin、next_fallback で次候補へ進む。既存 (profile, model) ペア候補の identity を維持する"
+    - "AgentModel trait（crates/runtime/src/model.rs）は complete(role, messages, tools) / selected_model(role)。runtime は routing / prompt assembly を持たず、role と既存 conversation を境界実装へ渡す"
+    - "agent_loop（crates/runtime/src/agent_loop.rs）は AgentContext::new 後に initial prompt を User message として追加し、そのまま AgentModel::complete へ渡す。system preset / model-family section / category / Intent Gate の assembly は未実装"
+    - "providers::Message は Role::{System, User, Assistant} + content を持ち、assembled system prompt を provider-neutral に渡せる既存型"
+    - "Role は Orchestrator / Explorer / Worker / Reviewer（crates/agents/src/role.rs）。orchestration overview は Agent Instance = Role + Category + Skills + Execution Policy + Route Policy と Intent Gate の Direct / Coordinated を定義する"
+    - "grill Q3/Q8 と omo 4.19.4 調査は model family base optimization、category 上書き、bundled preset + user override 2層、Orchestrator のみ intent block、available agents / skills 由来 dynamic keyTriggers を確定"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+  acceptance_criteria:
+    - "config schema が role と category から logical model / preset reference / generation overrides を解決でき、prompt 本文を config に埋め込む unknown field は deny_unknown_fields で拒否する unit test がある"
+    - "system bundled preset と user override の2層 resolver が、override 有りは user、無しは bundled を選び、bundled preset 更新後も user file を変更しないことを tempfile test で検証する"
+    - "prompt assembly が deterministic な順序（role baseline → model-family optimization → category overlay → Orchestrator Intent Gate → preset/user append）で単一 System message を生成し、同一入力で byte-identical output になる golden test がある"
+    - "model id から model family（最低限 Anthropic Claude / OpenAI reasoning・GPT-5 / Gemini / Kimi / unknown）を fail-safe に分類し、family ごとの optimization section を選ぶ table-driven unit test がある。unknown は汎用 base へ fallback する"
+    - "role/category binding が logical model を返し、既存 Router が (profile, model_id) pair として解決する。同一 model_id を持つ異なる profile が別 fallback 候補として順に選ばれる regression test がある"
+    - "provider fallback と model fallback が config / diagnostics 上で区別され、fallback event / resolved route に失敗候補と選択候補の profile + model identity が保持される test がある"
+    - "Intent Gate block は Role::Orchestrator の assembled prompt にのみ含まれ、Worker / Reviewer / Explorer には含まれない role matrix test がある"
+    - "Intent Gate が current user message から task type / mutation allowed / scope / uncertainty / expected output / completion criteria / delegation need と Direct / Coordinated を分類する指示を含み、前 turn の mutation permission を持ち越さないことを golden test で検証する"
+    - "dynamic keyTriggers が assembly 時点の available agents / skills metadata から安定順序・重複排除で生成され、空集合でも有効な Intent Gate を生成する unit test がある"
+    - "preset 不在・不正参照・不正 config は provider call 前に型付き error で fail-closed となり、system prompt / credential / user override 本文を diagnostics に漏らさない test がある"
+    - "既存 Config v2 migration / serialization、Router fallback / SessionAffinity、AgentModel object-safe contract の回帰 test が pass する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "orchestration overview の Agent 5軸（Role + Category + Skills + Execution Policy + Route Policy）と Intent Gate（Direct / Coordinated）を、grill Q3/Q8 の config binding・model-family optimization・preset/override・Orchestrator 限定 dynamic keyTriggers と統合して実装する slice。既存 orchestration intent の具体化であり新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+    summary: "role/category binding schema、logical model → profile/model routing 接続、prompt assembly 順序、model-family 判定、bundled preset + user override、Orchestrator 限定 Intent Gate / dynamic keyTriggers、fallback 軸の区別を実装確定として反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "config schema の最終 field、preset discovery / precedence、assembly section 順序、model family classifier、category overlay、Intent Gate の分類契約と dynamic keyTriggers source、provider/model fallback identity の診断表現を orchestration overview に記録する。agent-runtime-kernel overview には AgentRun の role/category/route から assembled System message へ至る runtime seam を反映する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

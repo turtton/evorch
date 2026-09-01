@@ -1,0 +1,79 @@
+implementation_issue_packet:
+  issue_title: "v0.2: 監査可能な context compaction（75% 自動・手動・agent tool）を実装"
+  issue_kind: feature
+  source_execution_unit: v02-context-compaction
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/storage/ crates/event-bus/ crates/tools/ crates/config/"
+  target_part: "model-visible context window を summary checkpoint で狭める compaction engine — 75% 自動発動、手動発動、DCP 型 agent tool、cache-aware prompt policy、SQLite raw history 非破壊保持"
+  dependencies: [v02-agent-messaging]
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "crates/runtime/src/meta.rs の `compact` dispatch は現状 `COMPACT_STUB = context-engine (v0.2) で提供予定` を返すだけで、実 compaction は未実装"
+    - "LoopState（crates/runtime/src/agent_loop.rs）は run 専有の AgentContext を保持し、AgentInspection（crates/runtime/src/run.rs）は message_count を公開する。compaction はこの model-facing context view を更新し raw transcript を破壊しない"
+    - "Provider Message（crates/providers/src/message.rs）は Role::{System, User, Assistant} と ContentBlock 列。summary checkpoint は provider に渡す message window の一部として型を崩さず組み立てる"
+    - "StorageHandle::append_event（crates/storage/src/writer.rs）は Event を session_id 付きで SQLite single-writer へ追記し、Database::messages_by_session / events_by_session（crates/storage/src/read.rs）は transcript / event を順序付きで読み戻せる"
+    - "SessionSnapshot（crates/storage/src/projection.rs）は message/reasoning 差分と open_tool_calls を保持する event-sourced projection。compaction 後も raw message/event rows と session restore の監査可能性を維持する"
+    - "Event / EventKind（crates/event-bus/src/event.rs）は schema_version 付きの serde event envelope。compaction の発動理由・範囲・token before/after・summary id を観測可能にする event は後方互換に追加する"
+    - "Tool trait / ToolExecutor（crates/tools）は schema validation・ToolStarted/ToolCompleted・結果正規化を提供する。DCP 型 compact tool はこの統一 surface と runtime meta dispatch の単一 compaction engine を共有する"
+    - "grill Q5: model context window 75% を既定自動閾値、手動 + agent tool、cache hit rate 配慮を system prompt 注入で調整、圧縮は model-visible window の narrowing、raw history は storage に残す"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/technology/architecture.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "model の context limit と現在の model-visible token estimate から usage ratio を算出し、既定 75% 未満では発動せず、到達/超過時に turn boundary で一度だけ自動 compaction する boundary test がある"
+    - "手動 runtime command と agent-facing compact tool の両方が同一 compaction engine を呼び、reason（automatic/manual/agent）を event と result で区別できる"
+    - "compaction summary が goal/contract、未完了 task、重要決定、変更 file、検証結果、未解決事項、直近の関連会話、v02-agent-messaging の AgentMessage 文脈を保持し、open tool call/tool result pair を途中で切断しないことを fixture test で検証する"
+    - "compaction 後の provider request は summary checkpoint + 保持対象の recent messages だけを含み、圧縮対象 raw messages を再送しない一方、SQLite の messages/events row 数と内容は compaction 前後で不変である"
+    - "Database::messages_by_session / events_by_session と session restore から compaction 前の raw transcript を順序どおり監査でき、summary 生成失敗時は model-visible context と storage の双方が変更されない"
+    - "Compaction event が session/run、trigger reason、threshold、estimated tokens before/after、compacted range、summary/checkpoint identity を持ち、再生時に model-visible window の切替点を追跡できる"
+    - "system prompt に cache-aware compaction policy（既定 75%、stable prefix を不必要に壊さない、意味のある task boundary で agent tool を使う、連続乱用を避ける）を model/context 特性に応じて注入できる"
+    - "automatic/manual/agent の連続要求は in-flight lock + hysteresis/cooldown で重複 summary を作らず、compaction 後 token estimate が閾値を下回らない場合は明示的 diagnostics を返して無限 loop しない"
+    - "OpenAI official compaction API に依存せず provider-neutral に動作し、reference implementation（opencode / senpi / oh-my-pi / omo compress）由来の fixture で long-session continuation が成立する"
+    - "threshold / summary fidelity / audit preservation / failure atomicity / dedup のテストと cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/technology/architecture.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "compaction は storage の削除/保守ではなく AgentRun の model-visible context lifecycle を制御する kernel 機能であり、headless runtime の Context 責務に属する。SQLite event sourcing は raw history を不変に残す supporting invariant、orchestration は goal/contract/unfinished work を summary に保持する consumer である"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+      - intents/evorch/features/orchestration/overview.md
+    summary: "75% 自動・手動・agent tool の発動契約、summary fidelity、cache-aware policy、event observability、model-visible window narrowing と SQLite raw history 非破壊保持を反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "実装で確定した token estimator、75% boundary/hysteresis、summary schema、recent-tail 保持方針、tool pair/AgentMessage 保護、event schema、failure atomicity、cache-aware prompt policy、SQLite raw audit preservation の検証結果を runtime kernel と orchestration overview に記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "agent-runtime-kernel overview の context lifecycle / compaction surface"
+      role: "Orchestrator / Explorer / Worker / Reviewer"
+      target_surface: "75% automatic compaction、manual compact command、agent-facing compact tool"

@@ -37,20 +37,32 @@ Features:
 
 **v0.1.1 進捗（2026-08-30、PR #30）**: 製品 GUI（`evorch-gui`）が実 AgentRuntime へ wiring 済み。`EmptyAgentSource` は廃止され、runtime と EventPump が同一 `Arc<EventBus>` を共有する。`--demo` は外部 AI provider 不要の決定的 scripted session で、tasks pane に name/role/status/model の live 表示と Pending→Running→Done 遷移を確認できる（手順は `evorch-gui --help` に同梱）。残る v0.1 GUI 側の gap は文字内容レイアウトの automated 検証（headless screenshot 基盤が前提）と実 provider 配線時の routing 実装。
 
-## v0.2 — 役割の深化と観測
+## v0.2 — 実装ループ内製化と GUI 再構成
+
+grill `grill-v02-loop-foundation`（2026-09-02、11/11 accepted、`intents/evorch/interviews/grill-v02-loop-foundation.json`）で確定。`subagent-internalization`（2026-08-30）の messaging / workspace 計画を内包しつつ、loop 完結に必要な全層を v0.2 に確定する。
 
 ```text
-Librarian / Oracle
-Role / Category separation
-Tree-sitter / LSP
-ContentOrigin 実装（ADR 0008）
-web_search / web_fetch（tools-sandbox 側ー v0.2 web ツール確定節参照）
-project trust（ロード制御、ADR 0008）
-provider affinity
-cache metrics
+Loop 基盤（packet 9 本）:
+  v02-agent-messaging          reply / completion channel、transcript 永続、steering / wake
+  v02-workspace-isolation      runtime 所有 worktree（evorch/task/<run-id>）、sandbox 内 git writable、project 許可ディレクトリ一体化
+  v02-prompt-assembly          category→論理モデル config 結線、モデル別ベース最適化、preset / override 2層、
+                               Orchestrator intent gate、provider/model fallback 区別（omo bug 非再現）
+  v02-skill-loader             agentskills 仕様準拠（SKILL.md + bundled resources）、遅延ロード
+  v02-project-rules            AGENTS.md ネスト closest wins、scoped rules、tool 実行後 synthetic 注入
+  v02-context-compaction       75% 自動 + 手動、DCP 型 agent tool（cache 配慮の閾値調整）
+  v02-provider-codex-subscription  ChatGPT Plus/Pro 経由 codex subscription（v0.3 から前倒し）
+  v02-gui-workbench-restructure    t3code 基準レイアウト（左: project/thread、右: tabbed surfaces）、
+                               Agents 一覧+drill-down+複数 pane 同時ライブ、最小 diff tab
+  v02-orchestrator-loop        goal 固定、finish gate（composite gate + Reviewer 承認）、idle 駆動 continuation、
+                               review 往復、停滞検知、人間 merge 承認のみ
+
+既存 v0.2 seed（grill web-tools-v02 確定分）:
+  NetworkGuard / web_search / web_fetch / OTel metrics exporter / OTel span exporter
 ```
 
-**成功基準**: v0.1 の4 role（Orchestrator / Explorer / Worker / Reviewer）に Librarian / Oracle が追加され、計6 role が capability boundary として分離動作し、Librarian が web_search / web_fetch（tools-sandbox 側ー v0.2 web ツール確定）で外部調査でき、cache hit ratio が計測され、sandbox policy が role ごとに適用される。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
+**成功基準**: evorch orchestrator が goal+contract 投入から worker 起動・実装・PR 作成・review 往復を経て人間 merge 承認まで GUI 起点で完走し（OpenCode / omo / herdr 非依存。GitHub / intent-cli 連携は shell tool 経由）、queue 済み v0.2 unit の後半 1-2 本を evorch 自身のループで消費できること（headless で再現可能）。
+
+**v0.3 以降へ送り**: Librarian / Oracle role 追加、Role / Category separation の role 拡張面、Tree-sitter / LSP、ContentOrigin の web tools 外 generalization、provider affinity、cache metrics 単独項目（compaction / OTel で部分カバー）、github-copilot / anthropic-subscription provider（v0.3 計画維持）、diff / file tree 完全版。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
 
 ## v0.3 — プロバイダ拡張と cache 高度化
 

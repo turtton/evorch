@@ -29,6 +29,24 @@ Panel は left / right / bottom / tabs / floating / separate OS window に自由
 - **GUI framework 選定（ADR 0007、2026-08 再評価で確定）**: 第一候補は **egui + egui_dock**（`anhosh/egui_dock` 0.21.x。tab 移動/resize/undock/floating window、DockEvent による layout persistence を標準提供、2026 年も活発リリース）。Floem は汎用 dock API を提供せず安定版が v0.2.0（2024-11）のままであるため「docking 評価用 prototype」に限定。**GPUI + gpui-component**（Zed 実戦系、dock/nested split/floating/syntax highlighting 対応）は長期 watch
 - **大容量 transcript の扱い**: 行単位 chunking + 差分更新 + 明示的 virtualization の自前 widget とし、framework 非依存設計にする（egui immediate mode の制約。Floem/GPUI への切り替え時も流用可能に）
 
+## v0.2 GUI 再構成の確定（grill grill-v02-loop-foundation、2026-09-02）
+
+t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトとして採用する。egui_dock の自由配置機構は保持し、以下を**既定レイアウト**とする。
+
+```text
+┌──────────────┬──────────────────────────────┬────────────────────┐
+│ 左サイドバー   │ 中央: 会話 (thread)          │ 右: tabbed surfaces │
+│ project 管理  │                              │  Agents (主眼)      │
+│ thread 管理   │                              │  Diff (最小)        │
+└──────────────┴──────────────────────────────┴────────────────────┘
+```
+
+- **プロジェクト概念**: プロジェクトは「基準 repo/path + アクセス許可ディレクトリ集合」を持つ。subagent worktree の cwd はプロジェクトルートと一致しないため（cwd != プロジェクト）、プロジェクトごとにアクセス可能ディレクトリを設定し、sandbox 境界・project trust（ADR 0008 v0.2 項目）と一体化する。worktree（`evorch/task/<run-id>`）はプロジェクト許可ディレクトリ傘下として自動許可
+- **thread 管理**: 複数 session の作成/切替/pin/状態表示を左サイドバーで提供（v0.2 スコープ）
+- **Agents 可視化（主眼、t3code を超える水準）**: 右サイドバー Agents tab は一覧（identity/phase/model/provider/現在 tool/token・usage）のライブ更新 + 選択 agent の中央 pane drill-down + dock 機構による複数 agent transcript pane 同時ライブ。既定レイアウトは orchestrator + 直近 worker + reviewer の3分割程度。t3code の Agents tab は dashboard 止まりなので、ここは独自実装
+- **diff tab（最小版のみ v0.2）**: working tree / branch の unified diff 表示（人間 merge 承認の判断材料）。file tree / turn 別 diff / whitespace 制御等の完全版は v0.3 以降
+- **loop UI**: goal 投入（goal + packet/issue 参照 + 制約）と merge 承認 approval は本 feature が器を提供し、orchestrator-loop の機構が利用する
+
 ## v0.1.1 実 runtime wiring の実装確定（2026-08-30、PR #30 / issue #29）
 
 製品 GUI entrypoint（`crates/gui/src/bin/evorch-gui.rs`）が `EmptyAgentSource` を廃止し、実 `AgentRuntime` と同一 `Arc<EventBus>` を EventPump と共有する構成で landed。

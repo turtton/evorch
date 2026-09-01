@@ -1,0 +1,71 @@
+implementation_issue_packet:
+  issue_title: "v0.2: ChatGPT Plus/Pro サブスクリプション連携の codex provider（OAuth device flow / PKCE）を providers 層に実装"
+  issue_kind: feature
+  source_execution_unit: v02-provider-codex-subscription
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/providers/ crates/config/ crates/model/ crates/routing/"
+  target_part: "ChatGPT サブスクリプション（ChatGPT Plus / Pro）経由の codex subscription provider — OAuth device flow / PKCE 認証、keyring-first credential 保存（非搭載環境は 0600 fallback）、ProviderClient trait 実装（Codex responses 系 endpoint、originator / ChatGPT-Account-Id ヘッダー）"
+  dependencies: []
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
+    - "ProviderClient trait（crates/providers/src/client.rs:17-41。capabilities / send / stream、auth は ProviderAuth をリクエストごとに引数注入し client 状態として保持しない、dyn 互換のコンパイル時検証あり）— 新 client は同一契約に乗る"
+    - "既存 3 実装のパターン踏襲: OpenAiClient（crates/providers/src/provider/openai.rs:48、内部 ChatCompletionsClient :124） / AnthropicClient（crates/providers/src/provider/anthropic.rs:50、DEFAULT_BASE_URL :22 / DEFAULT_TIMEOUT 60s :23） / OpenAiCompatibleClient（crates/providers/src/provider/openai_compatible.rs:20）。client の生成経路は現状 crates/providers/tests のみで production factory wiring は不在"
+    - "ProviderTypeConfig::OpenAiCodex（crates/config/src/types/provider.rs:22-24、serde 識別子 \"openai-codex\"）と model::ProviderType::OpenAiCodex（crates/model/src/types.rs:20-22）および routing 側 mapping（crates/routing/src/profile.rs:55）は既存。設定 type は宣言済みで client 実装が不在の状態を解消する"
+    - "ApiProtocolConfig は 3 variant（anthropic-messages / openai-responses / openai-completions、crates/config/src/types/provider.rs:41）のみ。provider-routing overview の API Protocol 分離リストにある openai-codex-responses を新 variant として追加するか OpenAiResponses を流用するかは、Codex backend の実契約確認を含めて実装タスクで決定する"
+    - "CredentialRefConfig::{Keyring{service, account}, Env{var}}（crates/config/src/types/provider.rs:60、厳格ミラー Deserialize で未知フィールド拒否）+ routing::CredentialRef（crates/routing/src/credential.rs:3）。keyring 3（sync-secret-service / vendored）は workspace 依存既存、crates/sandbox/src/keychain.rs に keyring::Entry 利用の既存実装がある。storage 側 credential schema 契約は crates/storage/tests/credential_schema.rs"
+    - "reqwest 0.12（json / stream / rustls-tls）— device flow token endpoint と Codex backend への HTTPS transport。wiremock 0.6 — wire 契約テスト用モック（workspace dependencies 既存）"
+    - "OAuth device flow / PKCE 用の補助クレート（oauth2 / rand / sha2 / base64 等）は workspace 未導入 — code_verifier 生成と S256 challenge の依存選定 feasibility 確認を実装タスクに含める（device flow 自体は reqwest での HTTP POST 2 回で実装可能）"
+    - "AttemptObserver / UsageEmitter（crates/providers/src/observe.rs、v0.1.1 観測契約）— request ID 相関の attempt 観測 5 variant と usage exactly-once（成功 attempt でちょうど 1 件）は既存 3 client と同一配線を維持"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "provider_type: \"openai-codex\" の ProviderProfile から Codex subscription client が構築でき（factory seam）、ProviderClient trait（send / stream / capabilities）として既存 3 実装と同型に動作する"
+    - "OAuth device flow / PKCE（codex_cli_simplified_flow 相当）による token 取得〜 refresh が wiremock 契約テストで検証済み（device code 発行 → polling → token 取得、refresh 経路、期限切れ検知と自動 refresh、polling 中断 / timeout の扱い）"
+    - "PKCE の code_verifier 生成と S256 challenge 計算が unit test で検証済み（依存クレート選定の feasibility 結果を含む）"
+    - "access token / refresh token は config に平文で書けず（既存 strict field rejection を維持）、keyring-first で保存される（keyring 非搭載環境では 0600 permission のファイル fallback）。unit test で検証済み"
+    - "access token / refresh token / account id が worker sandbox / bwrap 内子プロセス env に露出しないことを検証する unit test がある（ADR 0008 credential 分離）"
+    - "Codex backend request に originator ヘッダー（自アプリ名を明示）と ChatGPT-Account-Id ヘッダー（JWT 由来）が付与されることを wiremock 契約テストで検証済み"
+    - "chatgpt.com/backend-api/codex/responses の body 制約（store / stream / max_output_tokens 等）への追随テストがあり、backend 応答形式の変化を検知できる"
+    - "attempt 観測（RequestStarted / FirstTokenObserved / RequestCompleted / RequestFailed）と usage exactly-once 契約（成功 attempt で 1 件、失敗 attempt で 0 件）が既存 observation / usage 契約テストと同型で pass する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass"
+
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0014-config-architecture.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "grill grill-v02-loop-foundation Q12 で openai-codex subscription provider のみ v0.2 前倒し（github-copilot / anthropic-subscription は v0.3 維持）が確定した。provider-routing overview の「サブスクリプション系 provider の実装方針（2026-08 再評価済み）」節に Codex OAuth（codex_cli_simplified_flow、originator ヘッダー、chatgpt.com/backend-api/codex/responses、ChatGPT-Account-Id 必須）の実装方式が確定済みであり、ADR 0004（Provider Type 分離）/ ADR 0008（credential 分離）/ ADR 0014（config 平文 credential 拒否）の境界内で完結するため新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/provider-routing/overview.md
+    summary: "codex subscription provider の確定実装（OAuth device flow / PKCE の採用範囲、keyring-first / 0600 fallback の credential 保存、originator / ChatGPT-Account-Id ヘッダー契約、Codex backend body 制約の追随テスト、v0.2 前倒し決定と github-copilot / anthropic-subscription の v0.3 維持）を provider-routing overview へ反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "codex subscription provider の実装確定（codex_cli_simplified_flow OAuth の採用、endpoint / ヘッダー契約と backend body 制約の追随テスト結果、credential 保存先の確定、API key 経由の openai type との分離維持）を provider-routing overview に記録する。feasibility 検証対象とした ChatGPT backend endpoint 契約（device flow token endpoint の実 URL / 応答形式）の確認結果と、未解決のまま残った項目も明示する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/provider-routing/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

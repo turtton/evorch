@@ -1,0 +1,77 @@
+implementation_issue_packet:
+  issue_title: "v0.2: AgentMessage の send / reply / steering と transcript 永続化を runtime に実装"
+  issue_kind: feature
+  source_execution_unit: v02-agent-messaging
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/event-bus/ crates/storage/"
+  target_part: "lifecycle 完了通知から独立した AgentMessage channel。send / wait_reply / inbox、親子 addressing、steering / aside / wake、Event Bus emit と transcript 永続化"
+  dependencies: []
+  technical_baseline:
+    - "Rust 1.97 / edition 2024、workspace version 0.1.0、Tokio 1 sync runtime（workspace Cargo.toml）"
+    - "AgentRuntime（crates/runtime/src/runtime.rs）は run ごとに mpsc inbox（容量 32）を持ち、send_message は text を try_send するが、送信者 identity・message identity・reply correlation・配送種別を保持しない"
+    - "meta::dispatch（crates/runtime/src/meta.rs）は delegate_background / delegate / send_message / wait / cancel / list_agents / inspect_agent / compact / finish を公開し、現行 send_message は enqueue 後に wait_for_run で宛先 run の Done/Error まで待つ"
+    - "RunConfig（crates/runtime/src/run.rs）は interactive / name のみ。AgentRunPhase（crates/event-bus/src/event.rs）は Pending / Running / Waiting / Done / Error で、parked と厳密 revive は未実装"
+    - "RoleCapabilities（crates/agents/src/capability.rs）は allowed_tools / network / can_delegate を持ち、Role::Orchestrator のみ現行 send_message を許可。親子限定 addressing と nested delegation の設計根拠は ADR 0022"
+    - "Event / EventKind / LifecycleEvent（crates/event-bus/src/event.rs）は AgentRunStateChanged、BackgroundTaskStarted / Completed / Cancelled 等を持つが、AgentMessage 専用イベントは存在しない"
+    - "storage は rusqlite 0.40.2（bundled）上の SQLite event sourcing（ADR 0018）を実装済み。MessageRecord と Database::message / messages_by_session、event append / events_by_session があり、transcript 永続化の既存接続先として利用できる"
+    - "providers::Message は role + content の会話表現であり、agent 間配送 envelope ではない。AgentMessage は provider message と分離した runtime/event-bus の型として設計する"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "AgentMessage envelope が message_id / sender_run_id / recipient_run_id / kind（send / reply / steering）/ content / reply_to（任意）を型付きで保持し、Event Bus 上で lifecycle event と別種として serialize / deserialize round-trip する unit test がある"
+    - "send は fire-and-forget で enqueue 成功後ただちに返り、宛先 run の Done/Error を待たないことを、送信先を実行中のまま保持する async test で検証する"
+    - "wait_reply は message_id に対する reply_to correlation と timeout を持ち、対応 reply のみ返す・無関係 message を消費しない・timeout を型付き error で返すことを async unit test で検証する"
+    - "inbox は未読 AgentMessage を配送順に pull でき、既読 message を再返却しないことを unit test で検証する"
+    - "ADR 0022 の親子限定 addressing が send / reply / steering の全入口で強制され、parent↔child は許可、sibling・無関係 run・自己宛は fail-closed で拒否される matrix test がある"
+    - "recipient が Running の場合は親 sender の message を steering として進行中 turn へ注入し、非親 sender は aside として step boundary まで保留する。Waiting / idle の recipient は wake して Running へ戻ることを runtime integration test で検証する"
+    - "AgentMessage の送信・返信・steering 配送が Event Bus に emit され、既存 storage ingress を通じて transcript に永続化され、Database::messages_by_session または対応する transcript read API で順序・sender / recipient / reply correlation を復元できる integration test がある"
+    - "BackgroundTaskCompleted / Cancelled と AgentMessage reply/completion payload が別 channel のままで、message 到着だけでは lifecycle 完了イベントを emit しない回帰テストがある"
+    - "run crash 後に親が新規 run を起動し、永続化済み transcript を読み出して再構成用 context を渡せる recovery test がある。会話・tool 状態の snapshot 復元や同一 run identity の revive は実装しない"
+    - "既存 delegate_background / delegate / wait / cancel / list_agents / inspect_agent と GUI event consumer の回帰テストが pass する"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  new_intent_needed: false
+  placement_rationale: "agent-runtime-kernel overview の v0.2 messaging op 再編（send / wait_reply / inbox、steering / aside / wake、完了通知との channel 分離）を実装する slice。grill Q2 で transcript 永続化と crash 時の新規 run 再起動が追加確定し、厳密 revive は v0.3 へ明示的に延期済みであるため、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+      - intents/evorch/features/orchestration/overview.md
+    summary: "AgentMessage envelope と send / wait_reply / inbox の確定 API、steering / aside / wake の実配送結果、transcript 永続化経路、crash 時の新規 run + transcript 再構成、厳密 revive の v0.3 延期を実装確定として反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "AgentMessage の最終 envelope / EventKind、reply correlation と timeout、親子 addressing の強制位置、steering / aside / wake の step 境界、storage transcript schema と recovery 手順を agent-runtime-kernel overview に記録する。orchestration overview には mid-run relay が lifecycle completion と独立した durable channel を使うことを反映し、strict revive が v0.3 のままであることを確認する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/orchestration/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "orchestration overview の委譲ループ protocol（mid-run relay）"
+      role: Orchestrator
+      target_surface: "send / wait_reply / inbox meta-op と AgentMessage transcript"
