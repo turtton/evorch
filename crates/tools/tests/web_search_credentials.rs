@@ -1,13 +1,15 @@
 //! web_search の provider API key main process 隔離テスト (AC4)。
 //!
 //! 環境変数を変更するため、テストごとに独立プロセスで走る専用 integration test
-//! binary とする。このバイナリ内のテストは 1 件のみである。
+//! binary とする。このバイナリ内のテストは 1 件のみであり、単一 test fn 内で
+//! main process 側の消費・Direct 経路・bwrap 経路の 3 点を検証する。
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use sandbox::{CommandSpec, DirectSandbox, Sandbox};
+use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, DirectSandbox, Sandbox};
 use serde_json::json;
 use tools::{SearchError, SearchOptions, SearchProvider, SearchResults, Tool, WebSearch};
 
@@ -120,4 +122,59 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
         "main process 側には key が存在する"
     );
     assert_eq!(std::env::var("TAVILY_API_KEY").as_deref(), Ok("k"));
+
+    // Assert C: bwrap 固有経路への非露出。BwrapSandbox::wrap は merge_environment の
+    // 後に HOME の retain / push という bwrap 固有の操作を行うため、Direct 経路だけ
+    // の検証では bwrap 経路への回帰を検出できない。/bin/true は環境が存在しないことが
+    // ある (NixOS) ため、PATH 解決される `true` を機能確認用 program にする。引数を
+    // 無視して成功するため、bwrap 未導入環境でも detect が通り argv/env の構築経路を
+    // 検証できる。
+    let bwrap = BwrapSandbox::detect_with_program(
+        Path::new("true"),
+        BwrapConfig::new(std::env::temp_dir()),
+    )
+    .expect("機能確認用 program で bwrap sandbox を構築できるはずです");
+    let bwrap_wrapped = bwrap
+        .wrap(CommandSpec {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), "true".to_owned()],
+            cwd: None,
+            extra_env: Vec::new(),
+        })
+        .expect("コマンドを包めるはずです");
+
+    assert!(
+        !bwrap_wrapped
+            .env
+            .iter()
+            .any(|(key, _)| key == "EXA_API_KEY" || key == "TAVILY_API_KEY"),
+        "bwrap 経路の子コマンド env に provider API key が含まれる: {:?}",
+        bwrap_wrapped.env
+    );
+    assert_eq!(
+        bwrap_wrapped
+            .env
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .map(|(_, value)| value.as_str()),
+        Some("/tmp/home"),
+        "HOME の隔離固定が観測できない = bwrap 経路を駆動できていない"
+    );
+    // 許可リスト (PATH / TERM / LANG / LC_ALL) の扱いが Direct 経路と bwrap 経路で一致する。
+    for key in ["PATH", "TERM", "LANG", "LC_ALL"] {
+        let direct = wrapped
+            .env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str());
+        let bwrap_env = bwrap_wrapped
+            .env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str());
+        assert_eq!(
+            direct, bwrap_env,
+            "許可リスト {key} の扱いが Direct と bwrap で不一致"
+        );
+    }
 }
