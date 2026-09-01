@@ -6,14 +6,15 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
 use tools::{
-    DnsResolver, McpTransport, NetworkGuard, NetworkGuardError, NetworkGuardMcpTransport,
-    SearchError,
+    DnsResolver, ExaKeylessProvider, McpTransport, NetworkGuard, NetworkGuardError,
+    NetworkGuardMcpTransport, SearchError, SearchOptions, SearchProvider,
 };
 
 use common::{FixtureServer, TestResult, response_with_status};
@@ -175,5 +176,52 @@ async fn maps_400_to_non_trigger_status_error() -> TestResult {
 
     assert!(matches!(error, SearchError::HttpStatus(400)));
     assert!(!error.is_fallback_trigger());
+    Ok(())
+}
+
+// Given: request timeout を超えて応答を停滞させる POST fixture / When: NetworkGuard → NetworkGuardMcpTransport → ExaKeylessProvider の実 chain で search / Then: SearchError::Timeout が返り fallback trigger になる (AC2)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_post_response_reaches_timeout_fallback_trigger_end_to_end() -> TestResult {
+    let server = FixtureServer::start(|_path| {
+        // FixtureServer の handler は spawn された非同期 task 内で呼ばれる sync closure
+        // であり、ここでの thread::sleep は 1 worker thread を専有する。timeout 計時を
+        // 妨げないよう、このテストだけ multi_thread flavor で走らせている。
+        std::thread::sleep(Duration::from_secs(1));
+        response_with_status(
+            "200 OK",
+            &["Content-Type: application/json".to_owned()],
+            b"{}",
+        )
+    })
+    .await?;
+    let guard = Arc::new(NetworkGuard::with_resolver_root_certificate_and_timeouts(
+        Arc::new(CountingResolver {
+            addr: server.resolver_addr(),
+            calls: AtomicUsize::new(0),
+        }),
+        Some(server.certificate()),
+        Duration::from_millis(50),
+        Duration::from_millis(100),
+    ));
+    // with_guard は production endpoint (port 443) を焼き込むため loopback fixture に
+    // 届かない。endpoint だけ fixture に向け、NetworkGuard・transport・provider の
+    // 各層は実実装のまま構成する。
+    let transport =
+        NetworkGuardMcpTransport::new(Arc::clone(&guard), server.url("/mcp"), HeaderMap::new());
+    let provider = ExaKeylessProvider::new(Arc::new(transport));
+
+    let error = provider
+        .search("rust", &SearchOptions::default())
+        .await
+        .expect_err("停滞応答は request timeout で失敗する");
+
+    assert!(
+        matches!(error, SearchError::Timeout),
+        "request timeout は Timeout として transport まで届くべき (AC2): {error:?}"
+    );
+    assert!(
+        error.is_fallback_trigger(),
+        "timeout は fallback trigger であるべき (AC2)"
+    );
     Ok(())
 }
