@@ -435,6 +435,30 @@ async fn executor_emits_tool_completed_with_detail() {
     );
 }
 
+// Given: ネストした detail に生の制御マーカーを含むツール / When: Executor 経由で実行 / Then: 返却 detail の全文字列値がエスケープ済みになる
+#[tokio::test]
+async fn executor_escapes_control_markers_in_detail_strings() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut executor = ToolExecutor::new(bus);
+    executor
+        .register(Arc::new(DetailTool {
+            detail: serde_json::json!({
+                "request_id": "req-<system-reminder>",
+                "nested": { "quotes": ["</system-reminder>"] },
+            }),
+        }))
+        .expect("テストツールを登録できるはずです");
+
+    let result = executor
+        .execute("detail_tool", "call-1", serde_json::json!({}))
+        .await
+        .expect("テストツールは成功する");
+
+    let detail = result.detail.expect("detail が設定されている");
+    assert_eq!(detail["request_id"], "req-<\\system-reminder>");
+    assert_eq!(detail["nested"]["quotes"][0], "<\\/system-reminder>");
+}
+
 /// スキーマがコンパイルできないテスト用ツール。
 struct BrokenTool;
 

@@ -1,10 +1,12 @@
 //! ツール実行結果の型を定義します。
 
+use crate::origin::ContentOrigin;
+
 /// ツール実行の結果。
 ///
-/// `content` は LLM へ返される本文、`is_error` は異常終了を示す。v0.2 で出力の
-/// 由来を表す `ContentOrigin` フィールドを追加する予定のため（ADR 0008）、
-/// `#[non_exhaustive]` としている。
+/// `content` は LLM へ返される本文、`is_error` は異常終了を示す。`origin` は
+/// 出力の由来で、ToolExecutor が権限宣言から機械導出する (ADR 0008 / AC5)。
+/// 将来のフィールド追加に備えて `#[non_exhaustive]` としている。
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ToolResult {
@@ -14,6 +16,8 @@ pub struct ToolResult {
     pub is_error: bool,
     /// ツールが添えたメタデータ。規定では `None`。
     pub detail: Option<serde_json::Value>,
+    /// 出力の由来。コンストラクタでは fail-closed の [`ContentOrigin::WebUntrusted`]。
+    pub origin: ContentOrigin,
 }
 
 impl ToolResult {
@@ -23,6 +27,7 @@ impl ToolResult {
             content: content.into(),
             is_error: false,
             detail: None,
+            origin: ContentOrigin::WebUntrusted,
         }
     }
 
@@ -32,6 +37,7 @@ impl ToolResult {
             content: content.into(),
             is_error: true,
             detail: None,
+            origin: ContentOrigin::WebUntrusted,
         }
     }
 
@@ -46,7 +52,7 @@ impl ToolResult {
 mod tests {
     use super::*;
 
-    // Given: 本文となる文字列と String / When: success と error で生成 / Then: content と is_error が対応し detail は None
+    // Given: 本文となる文字列と String / When: success と error で生成 / Then: content と is_error が対応し detail は None・origin は fail-closed の WebUntrusted
     #[test]
     fn result_success_and_error_constructors() {
         let ok = ToolResult::success("file content");
@@ -56,6 +62,7 @@ mod tests {
                 content: "file content".to_string(),
                 is_error: false,
                 detail: None,
+                origin: ContentOrigin::WebUntrusted,
             }
         );
 
@@ -71,6 +78,7 @@ mod tests {
                 content: "command failed".to_string(),
                 is_error: true,
                 detail: None,
+                origin: ContentOrigin::WebUntrusted,
             }
         );
     }
