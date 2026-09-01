@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T22:13:36.0569077+00:00",
+  "updated_at": "2026-09-01T22:19:06.1070375+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -621,6 +621,11 @@
         "implementation": ".intent-cli/issues/v02-web-fetch-tool/implementation.md",
         "review_context": ".intent-cli/issues/v02-web-fetch-tool/review-context.md",
         "yaml": ".intent-cli/issues/v02-web-fetch-tool/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 45,
+        "url": "https://github.com/turtton/evorch/issues/45"
       },
       "worker_role": "implementation",
       "review_role": "review",
