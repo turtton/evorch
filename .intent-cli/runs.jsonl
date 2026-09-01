@@ -108,3 +108,5 @@
 {"ts":"2026-09-01T16:37:21.9458078+00:00","execution_unit":"v02-provider-codex-subscription","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-provider-codex-subscription/"}
 {"ts":"2026-09-01T16:37:22.5577444+00:00","execution_unit":"v02-gui-workbench-restructure","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-gui-workbench-restructure/"}
 {"ts":"2026-09-01T16:37:23.1784684+00:00","execution_unit":"v02-orchestrator-loop","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v02-orchestrator-loop/"}
+{"ts":"2026-09-01T18:41:43.7522545+00:00","execution_unit":"v02-network-guard","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":42}
+{"ts":"2026-09-01T18:41:43.7522545+00:00","execution_unit":"v02-network-guard","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":42}

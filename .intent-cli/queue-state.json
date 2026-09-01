@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-01T16:37:23.1626087+00:00",
+  "updated_at": "2026-09-01T18:41:43.7614066+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -556,7 +556,7 @@
     {
       "execution_unit": "v02-network-guard",
       "title": "v0.2: web \u30C4\u30FC\u30EB\u7528 NetworkGuard\uFF08SSRF / redirect / DNS pinning\uFF09\u3092 main process \u5C64\u306B\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v01-tool-layer",
         "v01-secure-tool-composition-root"
@@ -573,6 +573,7 @@
         "number": 41,
         "url": "https://github.com/turtton/evorch/issues/41"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/42",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
