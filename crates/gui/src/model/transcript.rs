@@ -213,7 +213,10 @@ impl TranscriptModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::{MessageEvent, ToolEvent};
+    use event_bus::{
+        AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, EventKind,
+        MessageEvent, ToolEvent,
+    };
 
     #[test]
     fn message_deltas_coalesce_into_single_entry() {
@@ -252,6 +255,30 @@ mod tests {
                 call_id: "c1".into(),
                 status: ToolStatus::Succeeded
             }
+        );
+    }
+
+    #[test]
+    fn agent_message_event_is_no_op() {
+        let mut model = TranscriptModel::new();
+        model.push_message("before");
+        let event = Event::new(EventKind::AgentMessage(AgentMessageEvent::Delivered {
+            message: AgentMessage {
+                message_id: "msg-1".into(),
+                sender_run_id: "run-1".into(),
+                recipient_run_id: "run-2".into(),
+                kind: AgentMessageKind::Send,
+                content: "hello".into(),
+                reply_to: None,
+            },
+            disposition: DeliveryDisposition::Aside,
+        }));
+        model.apply(&event);
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Message {
+                text: "before".into()
+            }]
         );
     }
 

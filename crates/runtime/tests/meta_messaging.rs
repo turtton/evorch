@@ -627,6 +627,30 @@ async fn send_meta_op_rejects_unrelated_recipient() {
                     json!({ "run_id": "run-2", "message": "hello" }),
                 )),
                 Ok(tool_response(
+                    "deny-send-message",
+                    "send_message",
+                    json!({ "run_id": "run-2", "message": "hello" }),
+                )),
+                Ok(tool_response(
+                    "deny-reply",
+                    "send",
+                    json!({
+                        "run_id": "run-2",
+                        "message": "reply",
+                        "kind": "reply",
+                        "reply_to": "msg-none"
+                    }),
+                )),
+                Ok(tool_response(
+                    "deny-steering",
+                    "send",
+                    json!({
+                        "run_id": "run-2",
+                        "message": "steer",
+                        "kind": "steering"
+                    }),
+                )),
+                Ok(tool_response(
                     "finish",
                     "finish",
                     json!({ "result": "done" }),
@@ -653,6 +677,16 @@ async fn send_meta_op_rejects_unrelated_recipient() {
                     "wait",
                     json!({ "run_id": "run-1" }),
                 )),
+                Ok(tool_response(
+                    "noop-4",
+                    "wait",
+                    json!({ "run_id": "run-1" }),
+                )),
+                Ok(tool_response(
+                    "noop-5",
+                    "wait",
+                    json!({ "run_id": "run-1" }),
+                )),
             ],
         )
         .await;
@@ -668,23 +702,35 @@ async fn send_meta_op_rejects_unrelated_recipient() {
         RunConfig::default(),
     );
 
-    // When: gate を段階的に開いて send と finish を実行させる
+    // When: gate を段階的に開いて send 系ツールと finish を実行させる
     step(&model, &gate, 2).await;
     step(&model, &gate, 4).await;
+    step(&model, &gate, 6).await;
+    step(&model, &gate, 8).await;
+    step(&model, &gate, 10).await;
     assert_eq!(
         timeout(Duration::from_secs(2), runtime.wait(parent)).await,
         Ok(Ok(AgentRunPhase::Done))
     );
 
-    // Then: send は親子関係のない宛先として MessageDenied の error ToolResult になる
+    // Then: send / send_message / reply / steering はすべて MessageDenied/UnknownMessage の error ToolResult になる
     let observed = model.observed().await;
     let parent_turns = messages_for_marker(&observed, "PARENT");
-    let (text, is_error) = tool_result(&parent_turns[1], "deny-send").expect("send result");
-    assert!(is_error);
-    assert!(
-        text.contains("拒否されました") && text.contains("run-1") && text.contains("run-2"),
-        "MessageDenied の本文が必要: {text}"
-    );
+    let all_parent_messages: Vec<Message> = parent_turns.iter().flatten().cloned().collect();
+    for call_id in [
+        "deny-send",
+        "deny-send-message",
+        "deny-reply",
+        "deny-steering",
+    ] {
+        let (text, is_error) = tool_result(&all_parent_messages, call_id)
+            .unwrap_or_else(|| panic!("{call_id} の結果が見つかりません"));
+        assert!(is_error, "{call_id} はエラーになる");
+        assert!(
+            text.contains("run-1") && text.contains("run-2"),
+            "{call_id} は run 間の拒否を示す: {text}"
+        );
+    }
 
     // gate 待ちで残留する無関係 run をキャンセルして終端させる
     assert_eq!(runtime.cancel(unrelated), Ok(()));

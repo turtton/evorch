@@ -17,7 +17,7 @@ use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
-use crate::mailbox::{MailboxFullError, RunMailbox};
+use crate::mailbox::{PushError, RunMailbox};
 use crate::run::RunConfig;
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -356,47 +356,6 @@ impl AgentRuntime {
             });
         }
 
-        let mut sent = self
-            .shared
-            .sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let message_id = match kind {
-            AgentMessageKind::Reply => {
-                let reply_id = reply_to
-                    .as_ref()
-                    .ok_or_else(|| RuntimeError::MessageDenied {
-                        sender,
-                        recipient,
-                        detail: "Reply には reply_to が必要です".to_string(),
-                    })?;
-                let record = sent
-                    .get(reply_id)
-                    .ok_or_else(|| RuntimeError::UnknownMessage {
-                        message_id: reply_id.clone(),
-                    })?;
-                if record.recipient != sender || record.sender != recipient {
-                    return Err(RuntimeError::UnknownMessage {
-                        message_id: reply_id.clone(),
-                    });
-                }
-                let id = format!(
-                    "msg-{}",
-                    self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-                );
-                id
-            }
-            _ => {
-                let id = format!(
-                    "msg-{}",
-                    self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-                );
-                sent.insert(id.clone(), SentRecord { sender, recipient });
-                id
-            }
-        };
-
         if !is_parent_to_child && !is_child_to_parent {
             return Err(RuntimeError::MessageDenied {
                 sender,
@@ -411,6 +370,68 @@ impl AgentRuntime {
                 run_id: recipient.to_string(),
             });
         }
+
+        let mut sent = self
+            .shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let reply_correlation = if kind == AgentMessageKind::Reply {
+            let reply_id = reply_to
+                .as_ref()
+                .ok_or_else(|| RuntimeError::MessageDenied {
+                    sender,
+                    recipient,
+                    detail: "Reply には reply_to が必要です".to_string(),
+                })?;
+            let record = sent
+                .get(reply_id)
+                .ok_or_else(|| RuntimeError::UnknownMessage {
+                    message_id: reply_id.clone(),
+                })?;
+            if record.recipient != sender || record.sender != recipient {
+                return Err(RuntimeError::UnknownMessage {
+                    message_id: reply_id.clone(),
+                });
+            }
+            Some(reply_id.clone())
+        } else {
+            None
+        };
+
+        let message_id = format!(
+            "msg-{}",
+            self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
+        );
+
+        let message = AgentMessage {
+            message_id: message_id.clone(),
+            sender_run_id: sender.to_string(),
+            recipient_run_id: recipient.to_string(),
+            kind: kind.clone(),
+            content: content.clone(),
+            reply_to: reply_to.clone(),
+        };
+
+        let mailbox = Arc::clone(&recipient_entry.mailbox);
+        if let Err(push_error) = mailbox.try_push(message.clone()) {
+            return Err(match push_error {
+                PushError::Full => RuntimeError::MailboxFull {
+                    run_id: recipient.to_string(),
+                },
+                PushError::Closed => RuntimeError::RunTerminated {
+                    run_id: recipient.to_string(),
+                },
+            });
+        }
+
+        if reply_correlation.is_none() {
+            sent.insert(message_id.clone(), SentRecord { sender, recipient });
+        }
+        drop(sent);
+        drop(runs);
+
         let disposition = match phase {
             AgentRunPhase::Waiting => DeliveryDisposition::Wake,
             AgentRunPhase::Pending | AgentRunPhase::Running => {
@@ -423,22 +444,7 @@ impl AgentRuntime {
             AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
         };
 
-        let message = AgentMessage {
-            message_id: message_id.clone(),
-            sender_run_id: sender.to_string(),
-            recipient_run_id: recipient.to_string(),
-            kind: kind.clone(),
-            content: content.clone(),
-            reply_to: reply_to.clone(),
-        };
-
-        let mailbox = Arc::clone(&recipient_entry.mailbox);
-        match mailbox.try_push(message.clone()) {
-            Ok(()) => Ok((message_id, message, disposition)),
-            Err(MailboxFullError) => Err(RuntimeError::MailboxFull {
-                run_id: recipient.to_string(),
-            }),
-        }
+        Ok((message_id, message, disposition))
     }
 
     /// `run_id` の inbox に届いているすべての AgentMessage を FIFO 順で取り出す。

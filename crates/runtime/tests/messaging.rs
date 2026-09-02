@@ -29,16 +29,14 @@ async fn wait_for_phase(runtime: &AgentRuntime, run_id: RunId, target: event_bus
     }
 }
 
-fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
+fn runtime_with(model: impl Into<Arc<ScriptedModel>>) -> (AgentRuntime, Arc<EventBus>) {
+    let model = model.into();
     let bus = Arc::new(EventBus::new(256));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    (
-        AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(model)),
-        bus,
-    )
+    (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
 }
 
 #[tokio::test]
@@ -326,7 +324,8 @@ async fn addressing_matrix_rejects_non_parent_child_and_self() {
             "wrong reply",
             Some(sent_id.clone())
         ),
-        Err(RuntimeError::UnknownMessage { message_id }) if message_id == sent_id
+        Err(RuntimeError::MessageDenied { sender, recipient, .. })
+        if sender == child2 && recipient == child1
     ));
     assert!(matches!(
         runtime.send_agent_message(
@@ -349,8 +348,111 @@ async fn addressing_matrix_rejects_non_parent_child_and_self() {
         ),
         Err(RuntimeError::UnknownMessage { message_id }) if message_id == "msg-missing"
     ));
+    // Steering は P→C1 のみ許可される（C1→P は上で拒否済み）。
+    assert_eq!(
+        runtime.send_agent_message(
+            parent,
+            child1,
+            AgentMessageKind::Steering,
+            "parent steer",
+            None
+        ),
+        Ok("msg-3".to_string())
+    );
+    // Reply はもともとの送受信関係と逆方向のみ許可される。
+    let reply_id = runtime
+        .send_agent_message(
+            child1,
+            parent,
+            AgentMessageKind::Reply,
+            "ok",
+            Some(sent_id.clone()),
+        )
+        .expect("C1→P の Reply は許可");
+    assert_eq!(reply_id, "msg-4");
     let _ = runtime.wait(parent).await;
     let _ = runtime.wait(unrelated).await;
+}
+
+#[tokio::test]
+async fn failed_delivery_leaves_no_correlation_record_and_no_burned_id() {
+    // Given: 親は対話モードで入力待ち、子1 は即座に終了、子2 も対話モードで待機
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "child1",
+        FinishReason::Stop,
+    ))]));
+    model
+        .add_keyed("PARENT", [Ok(text_response("parent", FinishReason::Stop))])
+        .await;
+    model
+        .add_keyed("CHILD2", [Ok(text_response("child2", FinishReason::Stop))])
+        .await;
+    let (runtime, _bus) = runtime_with(Arc::clone(&model));
+    let parent = runtime.delegate_background(
+        Role::Orchestrator,
+        "PARENT".to_string(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, parent, event_bus::AgentRunPhase::Waiting).await;
+    let child1 = runtime
+        .delegate_background_as_child(
+            parent,
+            Role::Worker,
+            "CHILD1".to_string(),
+            RunConfig::default(),
+        )
+        .expect("子1 run を生成できる");
+    runtime.wait(child1).await.expect("子1 が終端する");
+    let child2 = runtime
+        .delegate_background_as_child(
+            parent,
+            Role::Worker,
+            "CHILD2".to_string(),
+            RunConfig {
+                interactive: true,
+                ..RunConfig::default()
+            },
+        )
+        .expect("子2 run を生成できる");
+    wait_for_phase(&runtime, child2, event_bus::AgentRunPhase::Waiting).await;
+
+    // When: 終端後の子1 へ send を試みる（失敗する）
+    let failed =
+        runtime.send_agent_message(parent, child1, AgentMessageKind::Send, "too late", None);
+    assert_eq!(
+        failed,
+        Err(RuntimeError::RunTerminated {
+            run_id: child1.to_string()
+        })
+    );
+
+    // Then: 失敗した send は sent レコードを残さず、message id も消費しない。
+    // 子1 が reply_to="msg-1" で返信を試みても UnknownMessage になる。
+    assert_eq!(
+        runtime.send_agent_message(
+            child1,
+            parent,
+            AgentMessageKind::Reply,
+            "ghost reply",
+            Some("msg-1".to_string())
+        ),
+        Err(RuntimeError::UnknownMessage {
+            message_id: "msg-1".to_string()
+        })
+    );
+    // 次に成功した send は最初の id "msg-1" を得る（id が焼失していない）。
+    assert_eq!(
+        runtime.send_agent_message(parent, child2, AgentMessageKind::Send, "ok", None),
+        Ok("msg-1".to_string())
+    );
+
+    let _ = runtime.cancel(parent);
+    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(parent)).await;
+    let _ = runtime.cancel(child2);
+    let _ = tokio::time::timeout(TokioDuration::from_secs(2), runtime.wait(child2)).await;
 }
 
 #[tokio::test]

@@ -13,10 +13,18 @@ use tokio::sync::watch;
 /// [`RunMailbox`] の最大メッセージ保持数。容量超過は [`super::RuntimeError::MailboxFull`] となる。
 pub const MAILBOX_CAPACITY: usize = 64;
 
+/// [`RunMailbox::try_push`] が受け入れを拒否した理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushError {
+    Full,
+    Closed,
+}
+
 /// 単一の AgentRun が受け取るメッセージを保持する inbox。
 #[derive(Debug)]
 pub struct RunMailbox {
     queue: Mutex<VecDeque<AgentMessage>>,
+    closed: Mutex<bool>,
     version: watch::Sender<u64>,
 }
 
@@ -26,25 +34,46 @@ impl RunMailbox {
         let (version, _) = watch::channel(0);
         Self {
             queue: Mutex::new(VecDeque::with_capacity(MAILBOX_CAPACITY)),
+            closed: Mutex::new(false),
             version,
         }
     }
 
-    /// メッセージを inbox の末尾に追加する。容量一杯の場合はエラーを返す。
-    ///
-    /// 成功時にバージョンを単調増加させる。
-    pub fn try_push(&self, message: AgentMessage) -> Result<(), MailboxFullError> {
+    pub fn try_push(&self, message: AgentMessage) -> Result<(), PushError> {
+        let closed = self
+            .closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *closed {
+            return Err(PushError::Closed);
+        }
         let mut queue = self
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if queue.len() >= MAILBOX_CAPACITY {
-            return Err(MailboxFullError);
+            return Err(PushError::Full);
         }
         queue.push_back(message);
         drop(queue);
+        drop(closed);
         self.version.send_modify(|value| *value += 1);
         Ok(())
+    }
+
+    pub fn close(&self) {
+        let mut closed = self
+            .closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *closed = true;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        *self
+            .closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// すべてのメッセージを FIFO 順で取り出す。
@@ -130,10 +159,6 @@ impl Default for RunMailbox {
     }
 }
 
-/// [`RunMailbox::try_push`] が容量制限によりメッセージを受け入れられなかったことを表す。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MailboxFullError;
-
 #[cfg(test)]
 mod tests {
     use event_bus::{AgentMessage, AgentMessageKind};
@@ -203,7 +228,7 @@ mod tests {
 
         let result = mailbox.try_push(sample("overflow"));
 
-        assert_eq!(result, Err(MailboxFullError));
+        assert_eq!(result, Err(PushError::Full));
     }
 
     // Given: 複数の購読者がいる inbox
