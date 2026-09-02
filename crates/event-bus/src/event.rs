@@ -511,6 +511,31 @@ pub enum FaultEvent {
         /// 取りこぼしたイベント数。
         skipped: u64,
     },
+    /// ADR 0010（失敗は静かにしない）に基づくスキル診断。
+    ///
+    /// `detail` には識別子と理由だけを含め、スキルプロンプト本文は含めない。
+    SkillDiagnostic {
+        /// 診断の種別。
+        kind: SkillDiagnosticKind,
+        /// 診断対象のスキル名。
+        skill: String,
+        /// スキルの適用スコープ。
+        scope: String,
+        /// 診断の詳細（識別子と理由のみ）。
+        detail: String,
+    },
+}
+
+/// スキル診断の種別。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillDiagnosticKind {
+    /// スキルの発見に失敗した。
+    DiscoveryError,
+    /// スキルの検証に失敗した。
+    ValidationError,
+    /// スキルが別スコープのスキルに隠された。
+    Shadowed,
 }
 
 /// エージェント間で配送されるメッセージ封筒です。
@@ -708,6 +733,16 @@ mod tests {
                 }
                 .into(),
             ),
+            (
+                "Fault",
+                FaultEvent::SkillDiagnostic {
+                    kind: SkillDiagnosticKind::Shadowed,
+                    skill: "demo".to_owned(),
+                    scope: "repo".to_owned(),
+                    detail: "repo overrides user".to_owned(),
+                }
+                .into(),
+            ),
         ];
 
         for (category, kind) in cases {
@@ -734,6 +769,24 @@ mod tests {
                 "inner payload missing: category={category}"
             );
         }
+    }
+
+    // Given: a skill diagnostic describing a shadowed skill.
+    // When: the event is serialized to JSON.
+    // Then: the diagnostic kind is serialized as the snake_case value "shadowed".
+    #[test]
+    fn skill_diagnostic_serializes_kind_as_snake_case() {
+        let event = Event::new(FaultEvent::SkillDiagnostic {
+            kind: SkillDiagnosticKind::Shadowed,
+            skill: "demo".to_owned(),
+            scope: "repo".to_owned(),
+            detail: "repo overrides user".to_owned(),
+        });
+
+        let json = serde_json::to_string(&event).expect("serialize Event");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(value["kind"]["payload"]["payload"]["kind"], "shadowed");
     }
 
     // Given: Running から Error へ遷移し理由を持つエージェント実行状態変化イベント。
