@@ -26,6 +26,7 @@ pub mod policy;
 pub mod prompt;
 pub mod run;
 pub mod runtime;
+pub mod skill;
 pub mod state;
 pub mod workspace;
 
