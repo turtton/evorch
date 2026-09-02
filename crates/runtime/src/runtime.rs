@@ -153,17 +153,21 @@ impl AgentRuntime {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let phase_tx_entry = phase_tx.clone();
         let mailbox = Arc::new(RunMailbox::new());
+        let mailbox_version_rx = mailbox.subscribe_version();
         let task = RunTask {
             run_id,
             role,
             prompt,
             config,
+            parent,
+            mailbox: Arc::clone(&mailbox),
         };
         let channels = LoopChannels {
             phase_tx,
             message_count_tx,
             inbox_rx,
             cancel_rx,
+            mailbox_version_rx,
         };
         lock_runs(&self.shared.runs).insert(
             run_id,
