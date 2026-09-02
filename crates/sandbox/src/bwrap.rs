@@ -89,6 +89,17 @@ impl BwrapSandbox {
 
     pub fn build_argv(&self, spec: &CommandSpec) -> Vec<String> {
         let mut args = vec!["--die-with-parent".to_owned()];
+        args.extend(["--tmpfs".to_owned(), "/tmp".to_owned()]);
+        args.extend(["--dir".to_owned(), "/tmp/home".to_owned()]);
+        for path in &self.config.ro_binds {
+            if let Some(parent) = path.parent()
+                && parent != Path::new("/")
+                && self.config.workspace_root.starts_with(parent)
+            {
+                let parent = parent.to_string_lossy().into_owned();
+                args.extend(["--ro-bind-try".to_owned(), parent.clone(), parent]);
+            }
+        }
         for path in &self.config.ro_binds {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
@@ -101,8 +112,6 @@ impl BwrapSandbox {
         args.extend(["--bind".to_owned(), workspace.clone(), workspace.clone()]);
         args.extend(["--dev".to_owned(), "/dev".to_owned()]);
         args.extend(["--proc".to_owned(), "/proc".to_owned()]);
-        args.extend(["--tmpfs".to_owned(), "/tmp".to_owned()]);
-        args.extend(["--dir".to_owned(), "/tmp/home".to_owned()]);
         if !self.config.allow_network {
             args.push("--unshare-net".to_owned());
         }
