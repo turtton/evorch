@@ -1,0 +1,22 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Provider",
+      "payload": {
+        "kind": "FallbackTriggered",
+        "payload": {
+          "from_provider": "primary",
+          "from_model": "model-a",
+          "to_provider": "secondary",
+          "to_model": "model-b",
+          "logical_model": "summary",
+          "session_id": "session-1",
+          "failure": {"kind": "Timeout"},
+          "request_id": "req-1700000000000-8"
+        }
+      }
+    }
+  },
+  "measurements": []
+}
