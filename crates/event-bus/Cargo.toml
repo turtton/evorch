@@ -12,6 +12,20 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+
+[features]
+# OTel metrics exporter。InMemoryMetricExporter は opentelemetry_sdk の
+# testing feature 配下でのみ公開されるため、otel-exporter は testing を
+# 一緒に有効化する。
+otel-exporter = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "opentelemetry_sdk?/testing",
+]
 
 [dev-dependencies]
 serde_json = { workspace = true }

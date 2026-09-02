@@ -60,6 +60,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventKind, ProviderEvent, ProviderFailureKind, UsageEvent};
 
+#[cfg(feature = "otel-exporter")]
+pub mod exporter;
+
 /// 写像先の GenAI metrics semantic conventions の pin バージョン。
 pub const SEMCONV_PIN: &str = "1.37.0";
 
