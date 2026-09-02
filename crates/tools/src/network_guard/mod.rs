@@ -38,6 +38,10 @@ pub struct GuardedResponse {
     pub headers: HeaderMap,
     /// サイズ検証と必要な解凍を終えた本文。
     pub body: Vec<u8>,
+    /// 最終応答の URL（redirect を追従した後の接続先）。
+    pub final_url: Url,
+    /// 追従した redirect の回数。
+    pub redirect_count: usize,
 }
 
 /// HTTPS・DNS pinning・IP・redirect・本文サイズを一括強制する通信境界。
@@ -170,7 +174,11 @@ impl NetworkGuard {
             let addrs = pinning.resolve(host).await?;
             for addr in addrs {
                 if self.policy.is_blocked(addr) {
-                    return Err(NetworkGuardError::BlockedIp { addr });
+                    // 初回接続 (hop 0) は BlockedIp、redirect 先 (hop 1 以降) は RedirectBlocked。
+                    if redirects == 0 {
+                        return Err(NetworkGuardError::BlockedIp { addr });
+                    }
+                    return Err(NetworkGuardError::RedirectBlocked { addr });
                 }
             }
 
@@ -214,6 +222,8 @@ impl NetworkGuard {
                 status,
                 headers,
                 body,
+                final_url: current,
+                redirect_count: redirects as usize,
             });
         }
     }

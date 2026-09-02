@@ -9,14 +9,17 @@ name = "tools"
 
 [dependencies]
 async-trait = { workspace = true }
+dom_smoothie = { workspace = true }
 event-bus = { path = "../event-bus" }
 flate2 = { workspace = true }
 hickory-resolver = { workspace = true }
+htmd = { workspace = true }
 ipnet = { workspace = true }
 jsonschema = { workspace = true }
 portable-pty = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
+scraper = { workspace = true }
 sandbox = { path = "../sandbox" }
 serde = { workspace = true }
 serde_json = { workspace = true }

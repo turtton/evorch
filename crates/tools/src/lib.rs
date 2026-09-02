@@ -31,4 +31,4 @@ pub use search::{
     SearchOptions, SearchProvider, SearchResults, TavilyKeylessProvider, count_search_results,
 };
 pub use tool::{Permissions, Tool};
-pub use tools::{Edit, GitDiff, Grep, Read, Shell, WebSearch};
+pub use tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};

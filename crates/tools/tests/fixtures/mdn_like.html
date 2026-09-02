@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Array.prototype.flatMap() - JavaScript | MDN Fixture</title>
+  <meta name="description" content="Fixture page mirroring MDN article structure for offline extraction tests.">
+</head>
+<body>
+  <header class="main-nav">
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <nav aria-label="Site" class="site-nav">
+      <ul>
+        <li><a href="/en-US/docs/Web">References</a></li>
+        <li><a href="/en-US/learn">Learn</a></li>
+        <li><a href="/en-US/plus">Plus</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <nav class="breadcrumbs" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="/en-US/docs/Web">MDN Docs Home</a></li>
+      <li><a href="/en-US/docs/Web/JavaScript">JavaScript Reference</a></li>
+      <li><a href="/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array">Array</a></li>
+      <li>Array.prototype.flatMap()</li>
+    </ol>
+  </nav>
+
+  <div class="page-layout">
+    <aside id="sidebar" class="sidebar">
+      <h2>In this article</h2>
+      <ul>
+        <li><a href="#syntax">Syntax</a></li>
+        <li><a href="#parameters">Parameters</a></li>
+        <li><a href="#examples">Examples</a></li>
+      </ul>
+      <h2>Related</h2>
+      <ul>
+        <li><a href="/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map">Array.prototype.map()</a></li>
+        <li><a href="/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/flat">Array.prototype.flat()</a></li>
+        <li><a href="/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/reduce">Array.prototype.reduce()</a></li>
+      </ul>
+    </aside>
+
+    <main>
+      <article>
+        <h1>Array.prototype.flatMap()</h1>
+        <p class="intro">The <strong>flatMap()</strong> method of <a href="/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array">Array</a> instances returns a new array formed by applying a given callback function to each element of the array, and then flattening the result by one level. It is identical to a <code>map()</code> followed by a <code>flat()</code> of depth 1, but slightly more efficient than calling those two methods separately.</p>
+
+        <h2 id="syntax">Syntax</h2>
+        <pre class="brush: js">async function loadExamples(baseUrl) {
+  const response = await fetch(`${baseUrl}/examples.json`);
+  if (!response.ok) {
+    throw new Error(`Unexpected status: ${response.status}`);
+  }
+  const payload = await response.json();
+  console.log(payload.title);
+  return payload;
+}</pre>
+
+        <h2 id="parameters">Parameters</h2>
+        <p>The method accepts the following arguments, all of which behave exactly as they do for the plain mapping step described in the array reference manual.</p>
+        <table class="standard-table">
+          <thead>
+            <tr><th>Parameter</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>offset</code></td>
+              <td>Number of bytes to skip before reading begins. Must be non-negative and smaller than the buffer length.</td>
+            </tr>
+            <tr>
+              <td><code>depth</code></td>
+              <td>Optional nesting level to flatten. Defaults to one level deep for every call of the method.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="examples">Examples</h2>
+        <p>flatMap first maps each element using a mapping function, then flattens the result into a new array one level deep. The following example splits sentences into words while keeping the original sentence count predictable for callers.</p>
+        <pre class="brush: js">const sentences = ["hello world", "fixture page"];
+const words = sentences.flatMap((sentence) =&gt; sentence.split(" "));
+console.log(words);</pre>
+        <p>Because the callback returns an array for every input element, the final output never contains nested arrays unless the mapping function intentionally returns deeper structures on purpose.</p>
+
+        <h2 id="see-also">See also</h2>
+        <ul>
+          <li>When flattening deeper structures, prefer the dedicated flattening helper documented in the array reference pages.</li>
+          <li>Readers who only need a mapping step without flattening should use the plain mapping helper instead of this one.</li>
+        </ul>
+      </article>
+    </main>
+  </div>
+
+  <footer class="page-footer">
+    <p>Report a content issue on the tracker or fork the repository and send a patch upstream.</p>
+    <ul>
+      <li><a href="/en-US/about">About MDN</a></li>
+      <li><a href="/en-US/privacy">Privacy policy</a></li>
+      <li><a href="/en-US/terms">Terms of use</a></li>
+    </ul>
+    <p><small>MDN Fixture Pages &copy; 2026 &mdash; offline test content only.</small></p>
+  </footer>
+</body>
+</html>

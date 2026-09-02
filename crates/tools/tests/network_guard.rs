@@ -19,6 +19,7 @@ use flate2::{
     Compression,
     write::{DeflateEncoder, GzEncoder},
 };
+use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderValue};
 use tools::{DnsResolver, MAX_RESPONSE_BYTES, NetworkGuard, NetworkGuardError};
 
@@ -128,7 +129,7 @@ async fn rejects_eleventh_redirect() -> TestResult {
     Ok(())
 }
 
-// Given: link-local へ飛ぶ redirect / When: guard で追従 / Then: 接続前に BlockedIp を返す
+// Given: link-local へ飛ぶ redirect / When: guard で追従 / Then: 接続前に RedirectBlocked を返す
 #[tokio::test]
 async fn reguards_redirect_target_before_connection() -> TestResult {
     let server =
@@ -141,7 +142,76 @@ async fn reguards_redirect_target_before_connection() -> TestResult {
         .expect_err("link-local は拒否される");
 
     assert!(
-        matches!(error, NetworkGuardError::BlockedIp { addr } if addr == IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
+        matches!(error, NetworkGuardError::RedirectBlocked { addr } if addr == IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
+    );
+    Ok(())
+}
+
+// Given: redirect なしの単一応答 / When: guard で取得 / Then: final_url は request URL と一致し redirect_count は 0
+#[tokio::test]
+async fn guarded_response_exposes_final_url_and_zero_redirects() -> TestResult {
+    let server = FixtureServer::start(|_path| identity_response(b"OK")).await?;
+    let (guard, _resolver) = guard(&server);
+    let request_url = Url::parse(&server.url("/identity"))?;
+
+    let response = guard.get(server.url("/identity").as_str()).await?;
+
+    assert_eq!(response.final_url, request_url);
+    assert_eq!(response.redirect_count, 0);
+    Ok(())
+}
+
+// Given: 1 hop の redirect chain / When: guard で取得 / Then: final_url は redirect 先と一致し redirect_count は 1
+#[tokio::test]
+async fn redirect_updates_final_url_and_count() -> TestResult {
+    let server = FixtureServer::start(|path| {
+        if path == "/start" {
+            redirect("/final")
+        } else {
+            identity_response(b"OK")
+        }
+    })
+    .await?;
+    let (guard, _resolver) = guard(&server);
+    let target_url = Url::parse(&server.url("/final"))?;
+
+    let response = guard.get(&server.url("/start")).await?;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.final_url, target_url);
+    assert_eq!(response.redirect_count, 1);
+    Ok(())
+}
+
+// Given: link-local へ飛ぶ redirect と、初回接続先が link-local に解決される resolver / When: guard で取得 / Then: redirect 先は RedirectBlocked、初回 hop は BlockedIp を返す
+#[tokio::test]
+async fn blocked_redirect_returns_redirect_blocked_error() -> TestResult {
+    let server =
+        FixtureServer::start(|_path| redirect("https://169.254.169.254/latest/meta-data")).await?;
+    let (guard, _resolver) = guard(&server);
+
+    let redirect_error = guard
+        .get(&server.url("/start"))
+        .await
+        .expect_err("link-local への redirect は拒否される");
+
+    assert!(
+        matches!(redirect_error, NetworkGuardError::RedirectBlocked { addr } if addr == IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
+    );
+
+    let blocked_resolver = Arc::new(CountingResolver {
+        addr: IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+        calls: AtomicUsize::new(0),
+    });
+    let initial_guard = NetworkGuard::with_resolver(blocked_resolver);
+
+    let initial_error = initial_guard
+        .get(&server.url("/start"))
+        .await
+        .expect_err("初回接続の link-local も拒否される");
+
+    assert!(
+        matches!(initial_error, NetworkGuardError::BlockedIp { addr } if addr == IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
     );
     Ok(())
 }
