@@ -24,6 +24,9 @@ pub enum NetworkGuardError {
     /// 遮断対象 IP。
     #[error("遮断対象 IP への接続を拒否しました: {addr}")]
     BlockedIp { addr: IpAddr },
+    /// redirect 先 (2 hop 以降) が遮断対象 IP。
+    #[error("redirect 先の遮断対象 IP への接続を拒否しました: {addr}")]
+    RedirectBlocked { addr: IpAddr },
     /// HTTPS 接続または TLS handshake に失敗した。
     #[error("HTTPS 接続に失敗しました: {0}")]
     HttpsConnectFailed(reqwest::Error),
