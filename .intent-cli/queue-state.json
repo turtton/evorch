@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T11:05:45.902846+00:00",
+  "updated_at": "2026-09-02T11:08:47.8845031+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -667,6 +667,11 @@
         "implementation": ".intent-cli/issues/v02-workspace-isolation/implementation.md",
         "review_context": ".intent-cli/issues/v02-workspace-isolation/review-context.md",
         "yaml": ".intent-cli/issues/v02-workspace-isolation/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 51,
+        "url": "https://github.com/turtton/evorch/issues/51"
       },
       "worker_role": "implementation",
       "review_role": "review",
