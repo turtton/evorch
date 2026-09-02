@@ -90,7 +90,7 @@ fn fallback_after_pin_resolve_roundtrip() {
             &mut affinity,
             "session-1",
             &LogicalModelId::from("summary"),
-            resolved.profile.as_str(),
+            &resolved,
             FailureKind::Server,
             None,
         )

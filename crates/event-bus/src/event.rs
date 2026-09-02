@@ -1,6 +1,7 @@
 //! イベント型と serde スキーマを定義するモジュールです。
-// allow: SIZE_OK - 本ファイルのみ編集可能というタスク制約と全バリアント網羅の
-// 表駆動テスト要件により分割不可能。生産コード単体では約156純LOC。
+// allow: SIZE_OK - ワイヤスキーマ全体 (全 EventKind バリアントとその網羅的
+// 往復テスト) を 1 つの表として保持するため分割不可能。生産コード単体では
+// 約307純LOC。
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -442,6 +443,12 @@ pub enum ProviderEvent {
     FallbackTriggered {
         /// 失敗したプロバイダプロファイル名。
         from_provider: String,
+        /// 失敗した attempt の実モデル ID。
+        ///
+        /// v0.1 で保存された旧形式ペイロードはこのフィールドを持たないため、
+        /// 欠落時は `None` として読む。
+        #[serde(default)]
+        from_model: Option<String>,
         /// 選択されたフォールバック先プロバイダプロファイル名。
         to_provider: String,
         /// フォールバック先の実モデル ID。
@@ -455,6 +462,42 @@ pub enum ProviderEvent {
         /// 失敗した元 attempt の request ID (把握している場合のみ)。
         request_id: Option<String>,
     },
+}
+
+/// フォールバック前後での変化軸の分類。
+///
+/// [`ProviderEvent::FallbackTriggered`] の診断用であり、失敗前後の
+/// (プロファイル, 実モデル) 組を比較してどの軸で切替が起きたかを表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackAxis {
+    /// プロファイルのみが変わった (同一実モデルのまま別プロファイルへ切替)。
+    Provider,
+    /// 実モデルのみが変わった (同一プロファイル内で別モデルへ切替)。
+    Model,
+    /// プロファイルと実モデルの両方が変わった。
+    Both,
+}
+
+impl FallbackAxis {
+    /// フォールバック前後の (プロファイル, 実モデル) 組から変化軸を分類する。
+    ///
+    /// プロファイルが同一ならモデル軸の変化として分類する。同一プロファイルで
+    /// 同一実モデルへの再選択はフォールバックとして発生しないため、その退化
+    /// ケースもモデル軸に含まれる。
+    pub fn classify(
+        from_profile: &str,
+        from_model: &str,
+        to_profile: &str,
+        to_model: &str,
+    ) -> Self {
+        if from_profile == to_profile {
+            Self::Model
+        } else if from_model == to_model {
+            Self::Provider
+        } else {
+            Self::Both
+        }
+    }
 }
 
 /// 障害に関するイベント。
@@ -990,6 +1033,7 @@ mod tests {
                 "FallbackTriggered",
                 ProviderEvent::FallbackTriggered {
                     from_provider: "primary".into(),
+                    from_model: Some("model-a".into()),
                     to_provider: "secondary".into(),
                     to_model: "model-b".into(),
                     logical_model: "summary".into(),
@@ -1064,6 +1108,123 @@ mod tests {
             SCHEMA_VERSION, 1,
             "schema_version は追加のみで 1 を維持する"
         );
+    }
+
+    // Given: FallbackAxis の 3 分類ケース。同一プロファイルで別モデル /
+    //        別プロファイルで同一モデル / プロファイルとモデルの両方が異なる。
+    // When: FallbackAxis::classify で変化軸を分類する。
+    // Then: それぞれ Model / Provider / Both に分類される。
+    #[test]
+    fn fallback_axis_classifies_provider_model_and_both_axes() {
+        let cases = [
+            (
+                FallbackAxis::classify("primary", "model-a", "primary", "model-b"),
+                FallbackAxis::Model,
+                "同一プロファイルで別モデル",
+            ),
+            (
+                FallbackAxis::classify("primary", "model-a", "secondary", "model-a"),
+                FallbackAxis::Provider,
+                "別プロファイルで同一モデル",
+            ),
+            (
+                FallbackAxis::classify("primary", "model-a", "secondary", "model-b"),
+                FallbackAxis::Both,
+                "プロファイルとモデルの両方が異なる",
+            ),
+        ];
+
+        for (axis, expected, label) in cases {
+            assert_eq!(axis, expected, "分類ミスマッチ: {label}");
+        }
+    }
+
+    // Given: from_model フィールドを含まない旧形式の FallbackTriggered ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: from_model が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn fallback_triggered_legacy_payload_without_from_model_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Provider",
+                "payload": {
+                    "kind": "FallbackTriggered",
+                    "payload": {
+                        "from_provider": "primary",
+                        "to_provider": "secondary",
+                        "to_model": "model-b",
+                        "logical_model": "summary",
+                        "session_id": "session-1",
+                        "failure": {"kind": "Timeout"},
+                        "request_id": "req-1700000000000-5"
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Provider(ProviderEvent::FallbackTriggered {
+                from_provider: "primary".into(),
+                from_model: None,
+                to_provider: "secondary".into(),
+                to_model: "model-b".into(),
+                logical_model: "summary".into(),
+                session_id: "session-1".into(),
+                failure: ProviderFailureKind::Timeout,
+                request_id: Some("req-1700000000000-5".into()),
+            })
+        );
+    }
+
+    // Given: from_model を持つ FallbackTriggered イベントと持たない FallbackTriggered イベント。
+    // When: それぞれ Event を JSON 文字列へシリアライズして復元する。
+    // Then: いずれも往復前後で等しく、from_model の有無が保存される。
+    #[test]
+    fn fallback_triggered_roundtrips_with_from_model() {
+        let cases = [
+            (
+                "from_model あり",
+                Event::new(ProviderEvent::FallbackTriggered {
+                    from_provider: "primary".into(),
+                    from_model: Some("model-a".into()),
+                    to_provider: "secondary".into(),
+                    to_model: "model-b".into(),
+                    logical_model: "summary".into(),
+                    session_id: "session-1".into(),
+                    failure: ProviderFailureKind::Timeout,
+                    request_id: Some("req-1700000000000-5".into()),
+                }),
+            ),
+            (
+                "from_model なし",
+                Event::new(ProviderEvent::FallbackTriggered {
+                    from_provider: "primary".into(),
+                    from_model: None,
+                    to_provider: "secondary".into(),
+                    to_model: "model-b".into(),
+                    logical_model: "summary".into(),
+                    session_id: "session-1".into(),
+                    failure: ProviderFailureKind::Timeout,
+                    request_id: None,
+                }),
+            ),
+        ];
+
+        for (label, event) in cases {
+            let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+            let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+            assert_eq!(event, restored, "round-trip mismatch: {label}");
+        }
     }
 
     // Given: reply_to と disposition を持つ完全な AgentMessage 封筒。

@@ -190,7 +190,7 @@ async fn run_send_with_fallback(
                 affinity,
                 SESSION,
                 &logical,
-                &route.profile,
+                &route,
                 FailureKind::from(&error),
                 None,
             ) {
@@ -232,7 +232,7 @@ async fn run_stream_with_fallback(
                 affinity,
                 SESSION,
                 &logical,
-                &route.profile,
+                &route,
                 FailureKind::from(&error),
                 None,
             ) {

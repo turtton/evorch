@@ -184,14 +184,18 @@ impl Router {
         })
     }
 
-    /// 障害の発生したプロファイルの次のフォールバック先を解決します。
+    /// 障害の発生したルートの次のフォールバック先を解決します。
     ///
-    /// ADR 0004 のフォールバック順 (失敗プロファイル → 同一論理モデルの別候補 →
+    /// ADR 0004 のフォールバック順 (現在のルート → 同一論理モデルの後続候補 →
     /// 別の論理モデル) に従い、次の順で候補を走査します。
     ///
-    /// 1. 同一論理モデル: 失敗プロファイルと一致する先頭候補の位置より厳密に後続する
-    ///    候補を宣言順に走査し、最初に利用可能な候補を返します。
-    ///    `failed_profile` が候補に存在しない場合は失敗位置を先頭より前とみなし、
+    /// 1. 同一論理モデル: 失敗ルート `failed` と (プロファイル, concrete model)
+    ///    の組が一致する先頭候補の位置より厳密に後続する候補を宣言順に走査し、
+    ///    最初に利用可能な候補を返します。候補の concrete model は
+    ///    `model` 上書き (指定時) またはプロファイルの `default_model` です。
+    ///    組一致のため、同一プロファイルが複数の実モデルを指す構成でも
+    ///    失敗した実モデルそのものを再選択しません。
+    ///    `failed` の組が候補に存在しない場合は失敗位置を先頭より前とみなし、
     ///    全候補を走査対象にします。
     /// 2. 別の論理モデル: (1) で候補が見つからない場合、ルートテーブル上の他の全
     ///    論理モデルを走査します。各論理モデルでは宣言順に最初の利用可能候補を
@@ -231,7 +235,7 @@ impl Router {
         affinity: &mut SessionAffinity,
         session_id: &str,
         logical: &LogicalModelId,
-        failed_profile: &str,
+        failed: &ResolvedRoute,
         failure: FailureKind,
         request_id: Option<&str>,
     ) -> Option<ResolvedRoute> {
@@ -240,20 +244,14 @@ impl Router {
         let logical_name = logical.as_str();
 
         if let Some(candidates) = self.routes.get(logical_name) {
-            let remaining_after_failed = candidates
-                .iter()
-                .position(|candidate| candidate.profile == failed_profile)
+            let remaining_after_failed = self
+                .failed_candidate_position(candidates, failed)
                 .map_or(candidates.as_slice(), |index| &candidates[index + 1..]);
             for candidate in remaining_after_failed {
                 if let Some(route) = self.available_route(candidate) {
                     affinity.pin(session_id, logical_name, &route.profile);
                     self.emit_fallback_triggered(
-                        session_id,
-                        logical,
-                        failed_profile,
-                        failure,
-                        request_id,
-                        &route,
+                        session_id, logical, failed, failure, request_id, &route,
                     );
                     return Some(route);
                 }
@@ -268,12 +266,7 @@ impl Router {
                 if let Some(route) = self.available_route(candidate) {
                     affinity.pin(session_id, logical_name, &route.profile);
                     self.emit_fallback_triggered(
-                        session_id,
-                        logical,
-                        failed_profile,
-                        failure,
-                        request_id,
-                        &route,
+                        session_id, logical, failed, failure, request_id, &route,
                     );
                     return Some(route);
                 }
@@ -283,6 +276,27 @@ impl Router {
         None
     }
 
+    /// 失敗ルートと (プロファイル, concrete model) の組が一致する候補の位置を返します。
+    ///
+    /// 候補の concrete model は `model` 上書き (指定時) またはプロファイルの
+    /// `default_model` です。一致する候補がなければ `None` を返します。
+    fn failed_candidate_position(
+        &self,
+        candidates: &[config::RouteCandidateConfig],
+        failed: &ResolvedRoute,
+    ) -> Option<usize> {
+        candidates.iter().position(|candidate| {
+            candidate.profile == failed.profile
+                && self
+                    .profiles
+                    .get(&candidate.profile)
+                    .is_some_and(|profile| {
+                        candidate.model.as_deref().unwrap_or(&profile.default_model)
+                            == failed.model_id
+                    })
+        })
+    }
+
     /// フォールバック選択を FallbackTriggered イベントとして発行する。
     ///
     /// バス未接続なら何もしない。候補の選択結果には影響しない (観測のみ)。
@@ -290,7 +304,7 @@ impl Router {
         &self,
         session_id: &str,
         logical: &LogicalModelId,
-        failed_profile: &str,
+        failed: &ResolvedRoute,
         failure: FailureKind,
         request_id: Option<&str>,
         route: &ResolvedRoute,
@@ -299,7 +313,8 @@ impl Router {
             return;
         };
         bus.emit(Event::new(ProviderEvent::FallbackTriggered {
-            from_provider: failed_profile.to_string(),
+            from_provider: failed.profile.clone(),
+            from_model: Some(failed.model_id.clone()),
             to_provider: route.profile.clone(),
             to_model: route.model_id.clone(),
             logical_model: logical.as_str().to_string(),
@@ -371,6 +386,13 @@ mod tests {
 
     fn logical(name: &str) -> LogicalModelId {
         LogicalModelId::from(name)
+    }
+
+    fn failed_route(profile: &str, model_id: &str) -> ResolvedRoute {
+        ResolvedRoute {
+            profile: profile.to_string(),
+            model_id: model_id.to_string(),
+        }
     }
 
     // merge_models_dev は属性確定フラグを強制的に true へ補正するため、
@@ -766,7 +788,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "a",
+                &failed_route("a", "model-a"),
                 FailureKind::Server,
                 None,
             )
@@ -785,7 +807,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "b",
+                &failed_route("b", "model-b"),
                 FailureKind::Server,
                 None,
             )
@@ -834,7 +856,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "a",
+                &failed_route("a", "model-a"),
                 FailureKind::Server,
                 None,
             )
@@ -883,7 +905,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "first",
+                &failed_route("first", "model-first"),
                 FailureKind::Server,
                 None,
             )
@@ -927,7 +949,7 @@ mod tests {
             &mut affinity,
             "session-1",
             &logical("summary"),
-            "only",
+            &failed_route("only", "model-only"),
             FailureKind::Server,
             None,
         );
@@ -965,7 +987,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "a",
+                &failed_route("a", "model-a"),
                 FailureKind::Server,
                 None,
             )
@@ -979,8 +1001,8 @@ mod tests {
         );
     }
 
-    // Given: 失敗プロファイル名が論理モデルの候補に存在しないルート
-    // When: その名前を失敗プロファイルとしてフォールバックする
+    // Given: 失敗ルートの (プロファイル, 実モデル) 組が論理モデルの候補に存在しないルート
+    // When: その組を失敗ルートとしてフォールバックする
     // Then: 失敗位置を先頭より前とみなし、最初の利用可能候補が選ばれる
     #[test]
     fn fallback_failed_profile_not_in_route_is_ignored() {
@@ -1003,7 +1025,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "ghost",
+                &failed_route("ghost", "model-ghost"),
                 FailureKind::Server,
                 None,
             )
@@ -1048,7 +1070,7 @@ mod tests {
                 &mut affinity,
                 "session-1",
                 &logical("summary"),
-                "a",
+                &failed_route("a", "model-a"),
                 FailureKind::Timeout,
                 Some("req-1700000000000-1"),
             )
@@ -1058,6 +1080,7 @@ mod tests {
         let event = rx.recv().await.expect("イベントを受信できる");
         let EventKind::Provider(ProviderEvent::FallbackTriggered {
             from_provider,
+            from_model,
             to_provider,
             to_model,
             logical_model,
@@ -1069,8 +1092,14 @@ mod tests {
             panic!("FallbackTriggered イベントを期待しました: {:?}", event.kind);
         };
         assert_eq!(
-            (from_provider, to_provider, to_model),
-            ("a".to_string(), "b".to_string(), "model-b".to_string())
+            (from_provider, from_model, to_provider, to_model),
+            (
+                "a".to_string(),
+                Some("model-a".to_string()),
+                "b".to_string(),
+                "model-b".to_string()
+            ),
+            "フォールバックイベントは失敗前後のプロファイルと実モデルを保持する"
         );
         assert_eq!(logical_model, "summary");
         assert_eq!(session_id, "session-1");
@@ -1081,6 +1110,112 @@ mod tests {
         assert!(
             second.is_err(),
             "フォールバックイベントは選択 1 回につき 1 件"
+        );
+    }
+
+    // Given: 同一プロファイルに別々の model 上書きを持つ 2 候補のルート。
+    // When: 片方の (プロファイル, 実モデル) 組を失敗ルートとしてフォールバックする /
+    //       もう片方の組を失敗ルートとしてフォールバックする。
+    // Then: 失敗した組の直後にある別モデル候補が選ばれる。失敗した組そのものは
+    //       再選択されず (プロファイル名だけの一致では失敗候補を特定できない)、
+    //       後続がなければ None を返す。
+    #[test]
+    fn next_fallback_matches_failed_candidate_by_profile_and_model_pair() {
+        let profiles = vec![profile("a", "model-x")];
+        let routing = routing_config(&[(
+            "summary",
+            vec![
+                candidate("a", Some("model-x")),
+                candidate("a", Some("model-y")),
+            ],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-x", Availability::Available),
+                ("model-y", Availability::Available),
+            ],
+            &[],
+        );
+        let router =
+            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
+
+        let mut affinity = SessionAffinity::default();
+        let resolved = router
+            .next_fallback(
+                &mut affinity,
+                "session-1",
+                &logical("summary"),
+                &failed_route("a", "model-x"),
+                FailureKind::Server,
+                None,
+            )
+            .expect("失敗した組の直後の候補へフォールバックできる");
+        assert_eq!(
+            resolved,
+            ResolvedRoute {
+                profile: "a".to_string(),
+                model_id: "model-y".to_string(),
+            }
+        );
+
+        let mut affinity = SessionAffinity::default();
+        let resolved = router.next_fallback(
+            &mut affinity,
+            "session-1",
+            &logical("summary"),
+            &failed_route("a", "model-y"),
+            FailureKind::Server,
+            None,
+        );
+        assert!(
+            resolved.is_none(),
+            "失敗した組 (a, model-y) 以降に候補はなく、失敗候補の再選択でも None でもない"
+        );
+    }
+
+    // Given: 同一プロファイルの model 上書き候補と既定モデル候補を宣言順に並べたルート。
+    // When: 上書きモデルの組を失敗ルートとしてフォールバックする。
+    // Then: プロファイルを変えずに既定モデル候補へフォールバックする (モデル軸のみの変化)。
+    #[test]
+    fn next_fallback_supports_model_only_fallback_within_same_profile() {
+        let profiles = vec![profile("a", "model-default")];
+        let routing = routing_config(&[(
+            "summary",
+            vec![candidate("a", Some("model-override")), candidate("a", None)],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-override", Availability::Available),
+                ("model-default", Availability::Available),
+            ],
+            &[],
+        );
+        let router =
+            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
+        let mut affinity = SessionAffinity::default();
+
+        let resolved = router
+            .next_fallback(
+                &mut affinity,
+                "session-1",
+                &logical("summary"),
+                &failed_route("a", "model-override"),
+                FailureKind::Server,
+                None,
+            )
+            .expect("同一プロファイルの既定モデル候補へフォールバックできる");
+
+        assert_eq!(
+            resolved,
+            ResolvedRoute {
+                profile: "a".to_string(),
+                model_id: "model-default".to_string(),
+            }
+        );
+        assert_eq!(
+            affinity.pinned("session-1", "summary"),
+            Some("a"),
+            "同一プロファイル内のフォールバックでも再ピンされる"
         );
     }
 
@@ -1118,7 +1253,7 @@ mod tests {
             &mut affinity,
             "session-1",
             &logical("summary"),
-            "only",
+            &failed_route("only", "model-only"),
             FailureKind::Server,
             None,
         );
