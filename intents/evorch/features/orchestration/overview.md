@@ -59,6 +59,14 @@ omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲�
 - **停滞検知**: worker の無応答・エラー停滞を検知して追加指示（促し）を送る。lead が直接修正しない規律（herdr-opencode-loop 運用）は維持
 - **Intent Gate との統合**: 既存構想の Intent Gate（Direct / Coordinated 分類）に、omo 式の分類表（explain / implement / look into / broken / refactor 等）と利用可能 agent / skill から動的生成される keyTriggers を実装する（詳細は v02-prompt-assembly / v02-orchestrator-loop packet）
 
+## v0.2 prompt assembly / routing の実装確定（issue #49、PR #50、2026-09-02）
+
+- **config schema**: `[agents]` セクション = `AgentsConfig{orchestrator,explorer,worker,reviewer: RoleBindingConfig{logical_model,preset,generation{temperature,top_p,max_tokens,reasoning_effort},categories}}`。カテゴリは固定 6 種（quick / deep / high-reasoning / visual / writing / research）で検証。`binding_for(role,category)` は per-field category-beats-role マージで `ResolvedAgentBinding` を返す。config version は 2 のまま（additive）。
+- **logical model → routing 接続**: binding の `logical_model` が `LogicalModelId` となり Router が `(profile, model_id)` へ解決。同一 model_id 異 profile は `(profile, concrete model)` pair identity により別 fallback 候補として順選択。`FallbackTriggered` に `from_model` を追加し `FallbackAxis{Provider,Model,Both}` で provider/model fallback を区別。SCHEMA_VERSION は 1 維持。
+- **prompt assembly 順序**: role baseline → model-family optimization → category overlay → Orchestrator Intent Gate → preset/user appendix の deterministic 固定順。byte-identical は golden test が固定。Intent Gate は Orchestrator のみ（8 分類項目 + Direct/Coordinated + mutation 非持越）。dynamic keyTriggers は `AvailableAgent`/`AvailableSkill` metadata → `triggers_from_availability`（昇順ソート、横断 dedup、agent 優先、空集合有効）。
+- **model-family 判定（`ModelFamily::classify`）**: claude 含有→Claude / o1,o3,o4 prefix→OpenAiReasoning / gpt-5 prefix→Gpt5 / gemini 含有→Gemini / kimi 含有→Kimi / 他 Unknown→family-generic（fail-safe）。
+- **preset**: bundled（`crates/config/assets/presets/{role,family,category}-*.md` 16 件、`include_str!`）+ user override（`<user_config_dir>/presets/`）の 2 層。resolver read-only、name=`[a-z0-9-]{1,64}`、≤64KiB、UTF-8。category スコープ appendix（`categories.<name>.preset`）はロールレベル appendix に勝つ。
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること

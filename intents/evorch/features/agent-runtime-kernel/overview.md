@@ -86,6 +86,12 @@ AgentRunPhase に parked 相当の状態（または Done + revive 経路）を�
 
 oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく。参照ファイル: `registry/agent-lifecycle.ts`（idle → parked → revive）、`registry/agent-tree.ts`、`irc/bus.ts`（mailbox + waiter + delivery receipt）、`session/irc-bridge.ts`（steer / aside）、`task/engine.ts`、`config/agents-config.ts`、`messaging.ts`、`projections/pipeline.ts`。
 
+## v0.2 prompt assembly の runtime seam 実装確定（issue #49、PR #50、2026-09-02）
+
+- `AgentRuntime::with_system_prompts(Arc<SystemPromptCatalog>)` / `with_config_prompts(&CatalogBuildInput)` で catalog を接続。`build_catalog` は `config::resolve_prompt_sources` を先行呼出し fail-closed（`PromptCompositionError{PresetResolution,Catalog}`、Display は name/path/key のみで本文・credential を含まない）とし、Ok 時のみ runtime に接続。
+- agent_loop は `AgentContext::new` 直後・push_user 前に `push_system`（Role::System 単一 Text）を run 開始時 1 回のみ挿入（Stable Prefix、全ターン byte-identical）。catalog 未接続時は v0.1 動作（User 先頭）を維持。
+- `RunConfig.category: Option<String>`、delegate/delegate_background args の category は固定 6 種で検証（`parse_category`、未知は model call 前に拒否）。
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
