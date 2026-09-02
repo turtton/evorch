@@ -4,6 +4,28 @@
   "description": "設定ファイルのルート構造。\n\n各セクションは [`serde(default)`] により省略可能ですが、未知のキーは拒否します。\nロード経路では [`crate::strict`] がドット区切りの設定パスを報告し、直接の serde\nパースでも `deny_unknown_fields` により拒否します。",
   "type": "object",
   "properties": {
+    "agents": {
+      "description": "ロール別エージェントバインディング。",
+      "$ref": "#/$defs/AgentsConfig",
+      "default": {
+        "explorer": {
+          "categories": {},
+          "generation": {}
+        },
+        "orchestrator": {
+          "categories": {},
+          "generation": {}
+        },
+        "reviewer": {
+          "categories": {},
+          "generation": {}
+        },
+        "worker": {
+          "categories": {},
+          "generation": {}
+        }
+      }
+    },
     "diagnostics": {
       "description": "診断 (ログ) 設定。",
       "$ref": "#/$defs/DiagnosticsConfig",
@@ -59,6 +81,45 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "AgentsConfig": {
+      "description": "ロール別のエージェントバインディング設定。",
+      "type": "object",
+      "properties": {
+        "explorer": {
+          "description": "explorer ロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "orchestrator": {
+          "description": "オーケストレータロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "reviewer": {
+          "description": "reviewer ロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "worker": {
+          "description": "worker ロールのバインディング。",
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ApiProtocolConfig": {
       "description": "モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-messages`) です。\n`OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子\n(`openai-responses`・`openai-completions`) として直列化します (ADR 0004)。",
       "oneOf": [
@@ -78,6 +139,32 @@
           "const": "openai-completions"
         }
       ]
+    },
+    "CategoryBindingConfig": {
+      "description": "カテゴリ 1 件分のバインディング設定。",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "logical_model": {
+          "description": "使用する論理モデル名。省略時はロール側の指定に従う。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "description": "使用するプリセット名。省略時はロール側の指定に従う。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "CredentialRefConfig": {
       "description": "認証情報の参照方法。\n\n秘密情報そのものは一切保持せず、取得先 (キーリングのサービス名・アカウント名、\nまたは環境変数名) のみを表現します。この型が秘密素材を含まないことは\nこのクレートのハードな契約です。",
@@ -140,6 +227,49 @@
           "description": "ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。",
           "type": "string",
           "default": "info"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GenerationOverridesConfig": {
+      "description": "生成パラメータの上書き指定。指定したフィールドのみ反映する。",
+      "type": "object",
+      "properties": {
+        "max_tokens": {
+          "description": "最大出力トークン数。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reasoning_effort": {
+          "description": "推論強度。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningEffortConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "temperature": {
+          "description": "サンプリング温度。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "top_p": {
+          "description": "nucleus サンプリングの確率質量。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       },
       "additionalProperties": false
@@ -279,6 +409,60 @@
           "const": "openai-compatible"
         }
       ]
+    },
+    "ReasoningEffortConfig": {
+      "description": "推論強度の指定。",
+      "oneOf": [
+        {
+          "description": "低強度。",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "中強度。",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "高強度。",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "RoleBindingConfig": {
+      "description": "ロール 1 件分のバインディング設定。",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "カテゴリ別のバインディング (キーは固定 6 カテゴリ名)。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CategoryBindingConfig"
+          },
+          "default": {}
+        },
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "logical_model": {
+          "description": "使用する論理モデル名。省略時はロール名 (小文字) を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "RouteCandidateConfig": {
       "description": "ルートの候補 1 件分の設定。",

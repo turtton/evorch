@@ -10,6 +10,7 @@ name = "runtime"
 [dependencies]
 agents = { path = "../agents" }
 async-trait = { workspace = true }
+config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 providers = { path = "../providers" }
 serde = { workspace = true }

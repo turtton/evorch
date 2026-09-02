@@ -4279,6 +4279,7 @@ version = "0.1.0"
 dependencies = [
  "agents",
  "async-trait",
+ "config",
  "event-bus",
  "providers",
  "sandbox",

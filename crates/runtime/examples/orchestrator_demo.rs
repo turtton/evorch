@@ -138,7 +138,8 @@ impl AgentModel for ScriptedModel {
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         let marker = messages
-            .first()
+            .iter()
+            .find(|message| message.role == MessageRole::User)
             .and_then(|message| {
                 message.content.iter().find_map(|block| match block {
                     ContentBlock::Text { text } => Some(text.as_str()),

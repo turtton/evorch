@@ -3,7 +3,7 @@
 use event_bus::AgentRunPhase;
 use serde::Deserialize;
 
-use super::{DispatchResult, error, parse, parse_role, success};
+use super::{DispatchResult, error, parse, parse_category, parse_role, success};
 use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, RunConfig};
 
@@ -15,6 +15,8 @@ struct DelegateBackgroundArgs {
     interactive: bool,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -23,6 +25,12 @@ struct DelegateArgs {
     prompt: String,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+}
+
+fn parse_args_category(category: Option<String>) -> Result<Option<String>, String> {
+    category.as_deref().map(parse_category).transpose()
 }
 
 pub(super) fn delegate_background(
@@ -38,6 +46,10 @@ pub(super) fn delegate_background(
         Ok(role) => role,
         Err(message) => return error(message),
     };
+    let category = match parse_args_category(args.category) {
+        Ok(category) => category,
+        Err(message) => return error(message),
+    };
     match runtime.delegate_background_as_child(
         state.caller_run_id(),
         role,
@@ -45,6 +57,7 @@ pub(super) fn delegate_background(
         RunConfig {
             interactive: args.interactive,
             name: args.name,
+            category,
         },
     ) {
         Ok(run_id) => success(run_id.to_string()),
@@ -65,12 +78,17 @@ pub(super) async fn delegate(
         Ok(role) => role,
         Err(message) => return error(message),
     };
+    let category = match parse_args_category(args.category) {
+        Ok(category) => category,
+        Err(message) => return error(message),
+    };
     let child = match runtime.delegate_background_as_child(
         state.caller_run_id(),
         role,
         args.prompt,
         RunConfig {
             name: args.name,
+            category,
             ..RunConfig::default()
         },
     ) {

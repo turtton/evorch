@@ -10,15 +10,20 @@ pub mod error;
 pub mod load;
 mod merge;
 mod migrate;
+pub mod presets;
+pub mod prompt_sources;
 mod schema;
 mod strict;
 pub mod types;
 
 pub use error::ConfigError;
 pub use load::LoadOptions;
+pub use presets::PresetStore;
+pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use schema::json_schema;
 pub use types::{
-    ApiProtocolConfig, CURRENT_VERSION, Config, CredentialRefConfig, DiagnosticsConfig,
-    MetricsConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
-    RouteCandidateConfig, RoutingConfig,
+    AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, Config,
+    CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig, PanelConfig,
+    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ReasoningEffortConfig,
+    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig,
 };

@@ -37,6 +37,9 @@ pub struct RunConfig {
     pub interactive: bool,
     /// run の表示名。`None` の場合はロール名へフォールバックする。
     pub name: Option<String>,
+    /// run のタスクカテゴリ。システムプロンプトの category overlay 選択に使う。
+    /// `None` の場合は overlay を挿入しない。
+    pub category: Option<String>,
 }
 
 /// AgentRun の要約 (一覧表示用 DTO)。
@@ -102,5 +105,11 @@ mod tests {
     #[test]
     fn run_config_default_has_no_name() {
         assert!(RunConfig::default().name.is_none());
+    }
+
+    // Given: RunConfig / When: Default / Then: category は None (overlay 選択なし)
+    #[test]
+    fn run_config_default_has_no_category() {
+        assert!(RunConfig::default().category.is_none());
     }
 }

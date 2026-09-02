@@ -1,5 +1,6 @@
 //! 設定ファイルのルート構造と各セクション型の再エクスポートを行います。
 
+pub mod agents;
 pub mod misc;
 pub mod panel;
 pub mod provider;
@@ -10,6 +11,10 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use agents::{
+    AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, ReasoningEffortConfig,
+    ResolvedAgentBinding, RoleBindingConfig,
+};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
 pub use panel::PanelConfig;
 pub use provider::{
@@ -32,6 +37,8 @@ pub struct Config {
     pub version: u32,
     /// プロバイダプロファイル (マップキーがプロファイル名)。
     pub providers: BTreeMap<String, ProviderProfileConfig>,
+    /// ロール別エージェントバインディング。
+    pub agents: AgentsConfig,
     /// ルーティング設定。
     pub routing: RoutingConfig,
     /// パネル UI 設定。
@@ -49,6 +56,7 @@ impl Default for Config {
         Self {
             version: CURRENT_VERSION,
             providers: BTreeMap::new(),
+            agents: AgentsConfig::default(),
             routing: RoutingConfig::default(),
             panel: PanelConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
