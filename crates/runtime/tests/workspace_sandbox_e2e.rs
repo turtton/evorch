@@ -98,6 +98,7 @@ async fn events_until_completed(
     .expect("background completion event arrives before timeout")
 }
 
+#[ignore = "bwrap 実行環境が必要"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_shell_can_git_add_commit_in_worktree() {
     // Given: a real repository and a Worker script that commits inside its isolated worktree.
@@ -132,6 +133,7 @@ async fn worker_shell_can_git_add_commit_in_worktree() {
     eprintln!("parent HEAD:f.txt status: {}", parent_file.status);
 }
 
+#[ignore = "bwrap 実行環境が必要"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_cwd_is_worktree_root() {
     // Given: a shell call with no explicit cwd.
@@ -157,6 +159,7 @@ async fn run_cwd_is_worktree_root() {
     );
 }
 
+#[ignore = "bwrap 実行環境が必要"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_outside_allowed_set_rejected() {
     // Given: a command that tests writes to the parent repository and /etc.
@@ -192,6 +195,7 @@ async fn write_outside_allowed_set_rejected() {
     assert!(!Path::new("/etc/evorch-x").exists());
 }
 
+#[ignore = "bwrap 実行環境が必要"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_metadata_minimality() {
     // Given: the repository config outside the writable Git metadata subset.
@@ -222,6 +226,7 @@ async fn git_metadata_minimality() {
     );
 }
 
+#[ignore = "bwrap 実行環境が必要"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denied_tool_spawns_no_process_despite_writable_git() {
     // Given: an Explorer shell call targeting the intentionally writable objects directory.
