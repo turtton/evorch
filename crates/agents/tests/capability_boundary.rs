@@ -14,6 +14,7 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
     "delegate",
     "delegate_background",
     "send_message",
+    "skill_load",
     "send",
     "wait_reply",
     "inbox",
@@ -37,6 +38,7 @@ const WORKER_TOOLS: &[&str] = &[
     "edit",
     "grep",
     "shell",
+    "skill_load",
     "git_diff",
     "send",
     "wait_reply",
@@ -142,6 +144,20 @@ fn explorer_denies_mutation_delegation_and_messaging_tools() {
 }
 
 #[test]
+fn explorer_denies_skill_load() {
+    // Given: Explorer ロール
+    // When: skill_load の使用可否を問い合わせる
+    // Then: Denied になる
+    let caps = Role::Explorer.capabilities();
+
+    assert_denied(
+        caps.check_tool("Explorer", "skill_load"),
+        "Explorer",
+        "skill_load",
+    );
+}
+
+#[test]
 fn worker_allows_exactly_adr_0002_tools() {
     // Given: Worker ロール (ワークスペース read-write の実装役)
     // When: ケイパビリティのツール集合と全ツールの判定を検査する
@@ -216,6 +232,20 @@ fn reviewer_denies_mutation_and_messaging_tools() {
     for tool in ["edit", "send", "wait_reply", "inbox"] {
         assert_denied(caps.check_tool("Reviewer", tool), "Reviewer", tool);
     }
+}
+
+#[test]
+fn reviewer_denies_skill_load() {
+    // Given: Reviewer ロール
+    // When: skill_load の使用可否を問い合わせる
+    // Then: Denied になる
+    let caps = Role::Reviewer.capabilities();
+
+    assert_denied(
+        caps.check_tool("Reviewer", "skill_load"),
+        "Reviewer",
+        "skill_load",
+    );
 }
 
 #[test]
