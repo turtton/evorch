@@ -22,7 +22,7 @@ use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
-use crate::skill::SkillRegistry;
+use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -177,6 +177,37 @@ impl AgentRuntime {
             }
         }
         self
+    }
+
+    /// config から system prompt catalog を組み立て、skill の 2 スコープ発見
+    /// 結果を metadata として組み込み、registry と catalog を同時に接続する
+    /// composition root (issue #53 / AC4)。run 開始時は name+description の
+    /// metadata のみが Orchestrator の keyTriggers へ露出し、本体は load されない。
+    ///
+    /// skill metadata は [`discover_skills`] の発見結果から構成されるため、
+    /// `input.available_skills` はこの経路では使用しない (呼び出し側の契約:
+    /// この builder に渡した availability の skill 部分は発見結果で意図的に
+    /// 置き換えられる)。診断の観測経路は [`AgentRuntime::with_skills`] の Fault
+    /// 発行に一本化され、この builder で重複発行はしない。
+    ///
+    /// # Errors
+    /// [`build_catalog`] の失敗をそのまま伝播する。
+    pub fn with_config_prompts_and_skills(
+        self,
+        input: &CatalogBuildInput<'_>,
+        skill_dirs: &[(SkillScope, PathBuf)],
+    ) -> Result<Self, PromptCompositionError> {
+        let registry = discover_skills(skill_dirs);
+        let available_skills = registry.available_skills();
+        let catalog = build_catalog(&CatalogBuildInput {
+            config: input.config,
+            user_presets_dir: input.user_presets_dir,
+            available_agents: input.available_agents,
+            available_skills: &available_skills,
+        })?;
+        Ok(self
+            .with_system_prompts(Arc::new(catalog))
+            .with_skills(Arc::new(registry)))
     }
 
     /// production 構成のランタイムを生成する。
