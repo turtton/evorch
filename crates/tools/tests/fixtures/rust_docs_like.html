@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RotationMatrix in keisan_core - Rust</title>
+  <meta name="description" content="Fixture page mirroring rustdoc structure for offline extraction tests.">
+</head>
+<body>
+  <nav class="sidebar">
+    <a class="sidebar-crate" href="../keisan_core/index.html"><code>keisan_core</code></a>
+    <h2>Crate keisan_core</h2>
+    <ul class="block mod">
+      <li><a href="../keisan_core/matrix/index.html">mod matrix</a></li>
+      <li><a href="../keisan_core/vector3/index.html">mod vector3</a></li>
+      <li><a href="../keisan_core/quaternion/index.html">mod quaternion</a></li>
+    </ul>
+    <h2>Structs</h2>
+    <ul class="block struct">
+      <li><a href="struct.Quaternion.html">Quaternion</a></li>
+      <li><a href="struct.RotationMatrix.html" class="current">RotationMatrix</a></li>
+    </ul>
+  </nav>
+
+  <main class="content">
+    <h1>Struct <code>RotationMatrix</code></h1>
+    <div class="docblock">
+      <p>A rotation matrix in three dimensions preserves handedness and has a determinant of exactly one. The matrix stores its components in row-major order so that slicing the underlying buffer yields the three basis vectors of the rotated frame in sequence.</p>
+      <p>Construct the matrix with the guaranteed-orthonormal constructor; the fallible variant rejects inputs whose columns are not unit length within the documented tolerance of the crate.</p>
+    </div>
+
+    <h2 id="signatures">Signatures</h2>
+    <pre class="rust item-decl"><code>pub struct RotationMatrix {
+    basis: [Vector3; 3],
+}</code></pre>
+
+    <h2 id="methods">Methods</h2>
+    <div class="methods">
+      <section class="method">
+        <pre class="rust"><code>pub fn from_axis_angle(axis: Vector3, radians: f64) -&gt; Self</code></pre>
+        <div class="docblock">
+          <p>Builds a rotation about <code>axis</code> by <code>radians</code>, normalizing the axis before use and panicking when the axis degenerates to zero length in the caller frame.</p>
+        </div>
+      </section>
+    </div>
+
+    <h2 id="examples">Examples</h2>
+    <div class="example-wrap">
+      <pre class="rust"><code>let frame = RotationMatrix::from_axis_angle(Vector3::UP, std::f64::consts::FRAC_PI_2);
+assert!(frame.is_orthonormal());</code></pre>
+      <div class="docblock">
+        <p>Rotating the unit up vector by a quarter turn lands on the forward axis, which the assertion checks through the orthonormal predicate of the matrix.</p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
