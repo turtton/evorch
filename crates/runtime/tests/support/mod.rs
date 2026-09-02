@@ -71,14 +71,17 @@ impl AgentModel for ScriptedModel {
             gate.notified().await;
         }
 
-        let marker = messages.first().and_then(|message| {
-            message.content.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. } => None,
-            })
-        });
+        let marker = messages
+            .iter()
+            .find(|message| message.role == MessageRole::User)
+            .and_then(|message| {
+                message.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Reasoning { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. } => None,
+                })
+            });
         if let Some(marker) = marker {
             let mut keyed = self.keyed.lock().await;
             if let Some(script) = keyed.get_mut(marker) {

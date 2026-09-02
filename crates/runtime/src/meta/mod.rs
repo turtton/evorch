@@ -79,6 +79,28 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
     }
 }
 
+/// delegate 系 op が受け付けるタスクカテゴリ (issue #49)。
+const CATEGORIES: [&str; 6] = [
+    "quick",
+    "deep",
+    "high-reasoning",
+    "visual",
+    "writing",
+    "research",
+];
+
+/// カテゴリ名を 6 種の既知名に検証する。
+///
+/// 未知の名前は子 run の生成・モデル呼び出しより前にエラーで拒否する
+/// (fail-closed)。名前の照合は既知名との完全一致で行う。
+pub(super) fn parse_category(name: &str) -> Result<String, String> {
+    if CATEGORIES.contains(&name) {
+        Ok(name.to_owned())
+    } else {
+        Err(format!("unknown category: {name}"))
+    }
+}
+
 pub(super) fn parse_run_id(value: &str) -> Result<RunId, String> {
     let Some(number) = value.strip_prefix("run-") else {
         return Err(format!("invalid run_id: {value}"));

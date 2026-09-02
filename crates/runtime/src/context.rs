@@ -20,7 +20,7 @@ pub struct AgentContext {
     pub run_id: RunId,
     /// この run を実行するロール。
     pub role: Role,
-    /// 会話履歴 (ユーザー・アシスタント・ツール結果)。
+    /// 会話履歴 (システム・ユーザー・アシスタント・ツール結果)。
     pub messages: Vec<Message>,
 }
 
@@ -32,6 +32,16 @@ impl AgentContext {
             role,
             messages: Vec::new(),
         }
+    }
+
+    /// システムプロンプトを履歴に追加する (Role::System + 単一 Text ブロック)。
+    pub fn push_system(&mut self, text: &str) {
+        self.messages.push(Message {
+            role: MessageRole::System,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        });
     }
 
     /// ユーザー発話を履歴に追加する。
@@ -103,6 +113,23 @@ mod tests {
             context.messages[0].content,
             vec![ContentBlock::Text {
                 text: "ファイルを読んで".to_string(),
+            }]
+        );
+    }
+
+    // Given: 空のコンテキスト / When: push_system / Then: System ロール + 単一 Text ブロックのメッセージが 1 件追加される
+    #[test]
+    fn push_system_appends_system_role_message() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+
+        context.push_system("あなたは Worker です");
+
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.messages[0].role, MessageRole::System);
+        assert_eq!(
+            context.messages[0].content,
+            vec![ContentBlock::Text {
+                text: "あなたは Worker です".to_string(),
             }]
         );
     }

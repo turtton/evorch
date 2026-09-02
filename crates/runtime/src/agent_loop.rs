@@ -14,6 +14,7 @@ use providers::{ContentBlock, FinishReason, ToolSpec};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
 use crate::runtime::{Shared, loop_shared};
 use crate::{AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState};
 use tool_calls::standard_tool_specs;
@@ -39,6 +40,7 @@ pub(crate) struct LoopShared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
+    pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
     pub(crate) runtime: Weak<Shared>,
 }
 
@@ -58,6 +60,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         return;
     };
     let mut context = AgentContext::new(task.run_id, task.role);
+    let system_prompt_error = push_initial_system_message(&shared, &task, &mut context);
     context.push_user(&task.prompt);
     let policy = ExecutionPolicy::for_role(task.role);
     let tool_specs = policy.filter_tool_specs(standard_tool_specs());
@@ -72,10 +75,37 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         resumed: false,
     };
     state.publish_message_count();
+    if let Some(error) = system_prompt_error {
+        // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
+        // Error へ遷移する。reason はカタログの型付きエラー Display であり、
+        // 識別子 (ロール名・キー名・カテゴリ名) のみを運ぶ。
+        state.finish_error(error.to_string());
+        return;
+    }
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return;
     }
     state.execute().await;
+}
+
+/// カタログが設定されている場合、run 開始時の System メッセージを履歴へ push する。
+///
+/// カタログなし (None) なら何もせず v0.1 の履歴構成を保つ。カタログ参照に
+/// 失敗した場合は型付きエラーを返し、履歴へは System メッセージを追加しない。
+fn push_initial_system_message(
+    shared: &LoopShared,
+    task: &RunTask,
+    context: &mut AgentContext,
+) -> Option<SystemPromptCatalogError> {
+    let catalog = shared.system_prompts.as_ref()?;
+    let model_id = shared.model.selected_model(task.role);
+    match catalog.system_prompt_for(task.role, task.config.category.as_deref(), &model_id) {
+        Ok(prompt) => {
+            context.push_system(&prompt);
+            None
+        }
+        Err(error) => Some(error),
+    }
 }
 
 impl LoopState {

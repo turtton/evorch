@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 use agents::Role;
@@ -18,6 +18,7 @@ use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
 use crate::mailbox::{PushError, RunMailbox};
+use crate::prompt::SystemPromptCatalog;
 use crate::run::RunConfig;
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -38,6 +39,7 @@ pub(crate) struct Shared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
+    pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     next_run_id: AtomicU64,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
@@ -79,12 +81,23 @@ impl AgentRuntime {
                 bus,
                 executor,
                 model,
+                system_prompts: OnceLock::new(),
                 next_run_id: AtomicU64::new(1),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// システムプロンプトカタログを設定したランタイムを返すビルダーメソッド。
+    ///
+    /// `new` / `production` に鎖でつなげて呼ぶ。設定済みの場合は 2 回目以降の
+    /// 呼び出しは無視される (先勝ち)。カタログ未設定の run は v0.1 と同じ
+    /// System メッセージなしの履歴で開始する。
+    pub fn with_system_prompts(self, system_prompts: Arc<SystemPromptCatalog>) -> Self {
+        let _ = self.shared.system_prompts.set(system_prompts);
+        self
     }
 
     /// production 構成のランタイムを生成する。
@@ -634,6 +647,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         bus: Arc::clone(&shared.bus),
         executor: Arc::clone(&shared.executor),
         model: Arc::clone(&shared.model),
+        system_prompts: shared.system_prompts.get().cloned(),
         runtime: Arc::downgrade(&shared),
     })
 }
