@@ -80,6 +80,76 @@ fn credential_like_aliases_rejected() {
     }
 }
 
+// Given: providers.foo に credential の実値を含む未知キー / When: 読み込む
+// Then: 診断にはキー名と remediation だけが含まれ、credential の実値は含まれない
+#[test]
+fn credential_error_never_contains_credential_value() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let sentinel = "SENTINEL-CRED-f31c9a2d";
+    let msg = load_project(
+        &tmp,
+        &format!("[providers.foo]\napi_key = \"{sentinel}\"\n"),
+    )
+    .expect_err("credential の実値を含む設定は拒否される")
+    .to_string();
+
+    // When/Then: トップレベル診断に path と remediation は含まれるが実値は含まれない
+    for fragment in [
+        "providers.foo.api_key",
+        "keyring",
+        "env",
+        "credential",
+        "api_key",
+    ] {
+        assert!(msg.contains(fragment));
+    }
+    assert!(!msg.contains(sentinel));
+}
+
+// Given: credential-like alias にそれぞれ異なる実値を含む設定 / When: 読み込む
+// Then: 各診断は拒否とキー名を示すが、credential の実値を含まない
+#[test]
+fn credential_rejection_diagnostics_only_carry_key_names() {
+    for (key, sentinel) in [
+        ("api-key", "SENTINEL-KEY-a1"),
+        ("token", "SENTINEL-TOKEN-b2"),
+        ("secret", "SENTINEL-SECRET-c3"),
+    ] {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+        let content = format!("[providers.foo]\n{key} = \"{sentinel}\"\n");
+
+        // When/Then: 診断にキー名と remediation は含まれるが、実値は含まれない
+        let path = format!("providers.foo.{key}");
+        let msg = load_project(&tmp, &content)
+            .expect_err("credential-like key は拒否される")
+            .to_string();
+        for fragment in [&path, "keyring", "var"] {
+            assert!(msg.contains(fragment));
+        }
+        assert!(!msg.contains(sentinel));
+    }
+}
+
+// Given: strict-walk 対象の未知キーの値に credential らしい実値を含む設定 / When: 読み込む
+// Then: strict-walk の診断は未知キーを示すが、値を含まない
+#[test]
+fn strict_walk_diagnostics_never_echo_unknown_value() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let sentinel = "SENTINEL-VALUE-d4";
+    let msg = load_project(
+        &tmp,
+        &format!("[diagnostics]\nunknown_field = \"{sentinel}\"\n"),
+    )
+    .expect_err("未知キーを含む設定は拒否される")
+    .to_string();
+
+    // When/Then: unknown field の path は含まれるが、未知キーの値は含まれない
+    for fragment in ["diagnostics.unknown_field", "unknown field"] {
+        assert!(msg.contains(fragment));
+    }
+    assert!(!msg.contains(sentinel));
+}
+
 // Given: ルートセクション名の typo / When: 読み込む
 // Then: typo のパスと unknown field を含むエラーになる
 #[test]
