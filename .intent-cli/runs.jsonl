@@ -127,3 +127,6 @@
 {"ts":"2026-09-02T11:05:45.8937278+00:00","execution_unit":"v02-prompt-assembly","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":50}
 {"ts":"2026-09-02T11:05:45.8937278+00:00","execution_unit":"v02-prompt-assembly","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":50}
 {"ts":"2026-09-02T11:08:47.8845031+00:00","execution_unit":"v02-workspace-isolation","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#51","reason":"https://github.com/turtton/evorch/issues/51"}
+{"ts":"2026-09-02T15:47:53.2021229+00:00","execution_unit":"v02-workspace-isolation","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":52}
+{"ts":"2026-09-02T15:49:56.1814206+00:00","execution_unit":"v02-workspace-isolation","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":52}
+{"ts":"2026-09-02T15:49:56.1814206+00:00","execution_unit":"v02-workspace-isolation","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":52}

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T11:08:47.8845031+00:00",
+  "updated_at": "2026-09-02T15:49:56.1908689+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -659,7 +659,7 @@
     {
       "execution_unit": "v02-workspace-isolation",
       "title": "v0.2: RunConfig.workspace_mode \u3068 runtime \u6240\u6709 git worktree \u9694\u96E2\u3092\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -673,6 +673,7 @@
         "number": 51,
         "url": "https://github.com/turtton/evorch/issues/51"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/52",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
