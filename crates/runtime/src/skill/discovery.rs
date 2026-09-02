@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use event_bus::SkillDiagnosticKind;
 
-use super::frontmatter::{parse_and_validate, split_frontmatter};
+use super::frontmatter::{parse_and_validate, read_frontmatter_prefix, split_frontmatter};
 use super::registry::{SkillDiagnostic, SkillEntry, SkillRegistry, SkillScope};
 
 /// 各スコープの skill ディレクトリを走査してレジストリを構築する。
@@ -141,7 +141,7 @@ fn scan_candidate(scope: SkillScope, dir: &Path) -> CandidateOutcome {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| dir.display().to_string());
-    let content = match std::fs::read_to_string(dir.join("SKILL.md")) {
+    let content = match read_frontmatter_prefix(&dir.join("SKILL.md")) {
         Ok(content) => content,
         Err(err) if err.kind() == ErrorKind::NotFound => return CandidateOutcome::Skip,
         Err(err) => {
@@ -356,6 +356,80 @@ mod tests {
         assert_eq!(diagnostic.kind, SkillDiagnosticKind::DiscoveryError);
         assert_eq!(diagnostic.skill, "demo-skill");
         assert_eq!(diagnostic.scope, SkillScope::Repo);
+    }
+
+    // -- discover_skills: 本文の非実体化 (AC4) ------------------------------------
+
+    /// Given: frontmatter は妥当だが本文が不正な UTF-8 バイト列である SKILL.md
+    /// When:  discover_skills を呼ぶ
+    /// Then:  本文を実体化せず frontmatter 先頭部分のみを読むため skill が
+    ///        発見され、frontmatter 由来のメタデータが登録される
+    #[test]
+    fn discovery_does_not_materialize_skill_body() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("skills");
+        let skill_dir = skills.join("demo-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let mut content = b"---\nname: demo-skill\ndescription: Demo skill\n---\n".to_vec();
+        content.extend([0xff_u8, 0xfe].repeat(4096));
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let registry = discover_skills(&[(SkillScope::Repo, skills)]);
+
+        assert_eq!(registry.len(), 1);
+        let entry = registry.get("demo-skill").unwrap();
+        assert_eq!(entry.name, "demo-skill");
+        assert_eq!(entry.description, "Demo skill");
+        let available = registry.available_skills();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].name, "demo-skill");
+        assert_eq!(available[0].description, "Demo skill");
+    }
+
+    /// Given: 本文にマルチバイト UTF-8 文字を含む SKILL.md
+    /// When:  discover_skills を呼ぶ
+    /// Then:  本文の文字種によらず frontmatter 由来のメタデータで発見される
+    #[test]
+    fn discovers_skill_with_multibyte_utf8_body() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("skills");
+        write_skill(
+            &skills,
+            "demo-skill",
+            "Demo skill",
+            "本文はロードされない。\n",
+        );
+
+        let registry = discover_skills(&[(SkillScope::Repo, skills)]);
+
+        assert_eq!(registry.len(), 1);
+        let entry = registry.get("demo-skill").unwrap();
+        assert_eq!(entry.name, "demo-skill");
+        assert_eq!(entry.description, "Demo skill");
+    }
+
+    /// Given: 閉じフェンスを欠く SKILL.md (内容は UTF-8 として有効)
+    /// When:  discover_skills を呼ぶ
+    /// Then:  ValidationError 診断が 1 件出る (frontmatter 規約は読み取り方式に依存しない)
+    #[test]
+    fn missing_closing_fence_yields_validation_diagnostic() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("skills");
+        let skill_dir = skills.join("demo-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Fenceless skill\n",
+        )
+        .unwrap();
+
+        let registry = discover_skills(&[(SkillScope::Repo, skills)]);
+
+        assert!(registry.is_empty());
+        assert_eq!(registry.diagnostics.len(), 1);
+        let diagnostic = &registry.diagnostics[0];
+        assert_eq!(diagnostic.kind, SkillDiagnosticKind::ValidationError);
+        assert_eq!(diagnostic.skill, "demo-skill");
     }
 
     // -- discover_skills: scope ディレクトリの欠損 -------------------------------

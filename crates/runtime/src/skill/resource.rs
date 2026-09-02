@@ -127,6 +127,32 @@ mod tests {
         assert_eq!(content, "root note\n");
     }
 
+    /// Given: scripts/ references/ assets/ の 3 種類のリソースを備えた skill dir
+    /// When:  各リファレンスで read_skill_resource を呼ぶ
+    /// Then:  3 種類すべてが解決され、ファイル内容そのものが返る
+    #[test]
+    fn bundled_resource_kinds_all_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill_file(dir.path(), "scripts/run.sh", b"#!/bin/sh\necho hi\n");
+        write_skill_file(dir.path(), "references/guide.md", b"# guide\n");
+        write_skill_file(dir.path(), "assets/logo.txt", b"[logo]\n");
+
+        assert_eq!(
+            read_skill_resource(dir.path(), "scripts/run.sh").unwrap(),
+            "#!/bin/sh\necho hi\n"
+        );
+        assert_eq!(
+            read_skill_resource(dir.path(), "references/guide.md").unwrap(),
+            "# guide\n"
+        );
+        assert_eq!(
+            read_skill_resource(dir.path(), "assets/logo.txt").unwrap(),
+            "[logo]\n"
+        );
+    }
+
+    // -- リファレンス形状検証 -----------------------------------------------
+
     /// Given: 空の skill ディレクトリ
     /// When:  read_skill_resource(dir, "references/a/b.md") を呼ぶ
     /// Then:  2 階層超えは InvalidReference (深度規則)

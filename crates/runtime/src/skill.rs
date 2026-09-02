@@ -12,7 +12,8 @@ mod resource;
 
 pub use discovery::{default_skill_dirs, discover_skills};
 pub use frontmatter::{
-    SkillFrontmatter, SkillValidationError, parse_and_validate, split_frontmatter,
+    SkillFrontmatter, SkillValidationError, parse_and_validate, read_frontmatter_prefix,
+    split_frontmatter,
 };
 pub use registry::{
     SkillDiagnostic, SkillEntry, SkillLoadError, SkillRegistry, SkillScope, render_skills_section,

@@ -7,6 +7,9 @@
 //!   [`split_frontmatter`] の doc を参照)。
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, BufRead};
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_yaml_ng::{Mapping, Value};
@@ -117,6 +120,69 @@ pub fn split_frontmatter(content: &str) -> Result<(&str, &str), SkillValidationE
         return Ok((yaml, ""));
     }
     Err(SkillValidationError::MissingClosingFence)
+}
+
+/// discovery が SKILL.md から読み取る frontmatter 先頭部分の上限 (バイト数)。
+/// 閉じフェンスが検出できないままこの上限を超えた SKILL.md は読み取り不可と
+/// して扱い、異常に巨大な frontmatter による過剰なメモリ使用を防ぐ。
+pub const FRONTMATTER_PREFIX_CAP: usize = 64 * 1024;
+
+/// 閉じフェンスのバイト列。行頭の `---` とその直後の改行で構成される。
+const CLOSING_FENCE: &[u8] = b"\n---\n";
+
+/// SKILL.md から frontmatter 先頭部分のみを增量読み取りする (issue #53 / AC4)。
+///
+/// ファイルを先頭からチャンク単位で読み、閉じフェンス (`\n---\n`) を検出した
+/// 時点で読み取りを打ち切り、ファイル先頭から閉じフェンスまで (含む) の部分の
+/// みを返す。本文は String として実体化されない (progressive disclosure)。
+/// 閉じフェンスが見つからず EOF に達した場合は読み取った全バイトを返す —
+/// 閉じフェンスの欠落は下流の [`parse_and_validate`] が
+/// `MissingClosingFence` として報告する。末尾が `\n---` で終わるファイルも
+/// EOF 到達時に全バイトが返るため、閉じフェンス行として下流で受理される。
+///
+/// # Errors
+/// - 閉じフェンスが検出できないまま [`FRONTMATTER_PREFIX_CAP`] バイトを超えた
+///   場合: `ErrorKind::InvalidInput` ("frontmatter too large")。discovery 層で
+///   読み取り不可として扱われる。
+/// - 取得した先頭部分が正しい UTF-8 でない場合: `ErrorKind::InvalidData`。
+///   frontmatter は UTF-8 を要求し、違反は観測可能にする (fail closed)。
+pub fn read_frontmatter_prefix(path: &Path) -> std::io::Result<String> {
+    let mut reader = io::BufReader::new(fs::File::open(path)?);
+    let mut prefix: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        prefix.extend_from_slice(available);
+        let chunk_len = available.len();
+        reader.consume(chunk_len);
+        if let Some(end) = find_closing_fence_end(&prefix) {
+            prefix.truncate(end);
+            break;
+        }
+        if prefix.len() > FRONTMATTER_PREFIX_CAP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "frontmatter too large",
+            ));
+        }
+    }
+    String::from_utf8(prefix).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SKILL.md frontmatter is not valid UTF-8",
+        )
+    })
+}
+
+/// スライス中の最初の閉じフェンス (`\n---\n`) を探し、フェンス終端 (末尾
+/// バイトの直後) のインデックスを返す。見つからなければ `None`。
+fn find_closing_fence_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(CLOSING_FENCE.len())
+        .position(|window| window == CLOSING_FENCE)
+        .map(|position| position + CLOSING_FENCE.len())
 }
 
 /// SKILL.md 内容を解析し、agentskills 仕様に基づいて検証する。
@@ -252,6 +318,10 @@ fn validate_rules(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     /// `yaml` を LF フェンスで囲み、末尾に固定本文を付した SKILL.md 内容を作る。
@@ -315,6 +385,114 @@ mod tests {
     fn split_rejects_crlf_closing_fence() {
         let err = split_frontmatter("---\nname: x\n---\r\nBody.\n").unwrap_err();
         assert!(matches!(err, SkillValidationError::MissingClosingFence));
+    }
+
+    // -- read_frontmatter_prefix -----------------------------------------------
+
+    /// Given: frontmatter 後の本文が不正な UTF-8 バイト列である SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  閉じフェンスまでの先頭部分のみが返り、本文バイトは読まれない
+    #[test]
+    fn prefix_stops_at_closing_fence_and_ignores_body() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        let mut content = b"---\nname: x\ndescription: y\n---\n".to_vec();
+        content.extend([0xff_u8, 0xfe].repeat(64));
+        fs::write(&path, content).unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).unwrap();
+
+        assert_eq!(prefix, "---\nname: x\ndescription: y\n---\n");
+    }
+
+    /// Given: 閉じフェンスがファイル末尾にあり改行を伴わない SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  末尾の `---` を含むファイル全体が返り、検証も通る
+    #[test]
+    fn prefix_includes_closing_fence_without_trailing_newline() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        fs::write(&path, "---\nname: x\ndescription: y\n---").unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).unwrap();
+
+        assert_eq!(prefix, "---\nname: x\ndescription: y\n---");
+        assert!(parse_and_validate(&prefix, "x").is_ok());
+    }
+
+    /// Given: 行中に `---` を含む行と、行頭の閉じフェンスがある SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  行頭の閉じフェンスまで読み進める (行中の `---` はフェンスとみなさない)
+    #[test]
+    fn prefix_requires_closing_fence_at_start_of_line() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        fs::write(&path, "---\nname: x\ndescription: a --- b\n---\nBody.\n").unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).unwrap();
+
+        assert_eq!(prefix, "---\nname: x\ndescription: a --- b\n---\n");
+    }
+
+    /// Given: 閉じフェンスを欠く SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  エラーにはならず読み取った全バイトが返る (欠落の報告は下流の検証)
+    #[test]
+    fn prefix_returns_all_bytes_when_closing_fence_missing() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        fs::write(&path, "---\nname: x\ndescription: y\n").unwrap();
+
+        let prefix = read_frontmatter_prefix(&path).unwrap();
+
+        assert_eq!(prefix, "---\nname: x\ndescription: y\n");
+    }
+
+    /// Given: 閉じフェンスを欠くまま FRONTMATTER_PREFIX_CAP を超える SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  InvalidInput ("frontmatter too large") で異常終了する
+    #[test]
+    fn prefix_errors_when_cap_exceeded_without_closing_fence() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        let content = format!("---\nname: x\n{}", "a".repeat(FRONTMATTER_PREFIX_CAP + 1));
+        fs::write(&path, content).unwrap();
+
+        let err = read_frontmatter_prefix(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("frontmatter too large"));
+    }
+
+    /// Given: 内容全体が不正な UTF-8 バイト列である SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  InvalidData で異常終了する (fail closed)
+    #[test]
+    fn prefix_errors_when_prefix_is_not_utf8() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        fs::write(&path, [0xff_u8, 0xfe, 0x00]).unwrap();
+
+        let err = read_frontmatter_prefix(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Given: frontmatter 区間の途中に不正な UTF-8 バイトを含む SKILL.md
+    /// When:  read_frontmatter_prefix を呼ぶ
+    /// Then:  閉じフェンスの有無によらず InvalidData で異常終了する
+    #[test]
+    fn prefix_errors_when_frontmatter_region_is_not_utf8() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        let mut content = b"---\nname: ".to_vec();
+        content.extend_from_slice(&[0xff, 0xfe]);
+        content.extend_from_slice(b"\n---\nBody.\n");
+        fs::write(&path, content).unwrap();
+
+        let err = read_frontmatter_prefix(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     // -- parse_and_validate: 正常系 --------------------------------------------
