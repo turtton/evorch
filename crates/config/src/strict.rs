@@ -4,6 +4,7 @@
 //! 混入を、型へのデシリアライズより前に完全な config path 付きで拒否します。
 
 use crate::ConfigError;
+use crate::types::agents::CATEGORY_NAMES;
 
 const ROOT_KEYS: &[&str] = &[
     "version",
@@ -13,6 +14,7 @@ const ROOT_KEYS: &[&str] = &[
     "diagnostics",
     "permissions",
     "metrics",
+    "agents",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -30,6 +32,10 @@ const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
+const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer"];
+const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
+const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
+const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens", "reasoning_effort"];
 const CREDENTIAL_LIKE_KEYS: &[&str] = &[
     "api_key",
     "apikey",
@@ -73,6 +79,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     }
 
     validate_routing(root)?;
+    validate_agents(root)?;
     validate_section(root, "panel", PANEL_KEYS)?;
     validate_section(root, "diagnostics", DIAGNOSTICS_KEYS)?;
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
@@ -117,6 +124,65 @@ fn validate_routing(root: &toml::value::Table) -> Result<(), ConfigError> {
                 candidate,
                 &format!("routing.routes.{route}[{index}]"),
                 ROUTE_CANDIDATE_KEYS,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_agents(root: &toml::value::Table) -> Result<(), ConfigError> {
+    let Some(agents) = root.get("agents").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    check_keys(agents, "agents", AGENTS_KEYS)?;
+    for (role, value) in agents {
+        let Some(binding) = value.as_table() else {
+            continue;
+        };
+        let role_path = format!("agents.{role}");
+        check_keys(binding, &role_path, ROLE_BINDING_KEYS)?;
+        if let Some(generation) = binding.get("generation").and_then(toml::Value::as_table) {
+            check_keys(
+                generation,
+                &format!("{role_path}.generation"),
+                GENERATION_KEYS,
+            )?;
+        }
+        validate_role_categories(binding, &role_path)?;
+    }
+    Ok(())
+}
+
+fn validate_role_categories(
+    binding: &toml::value::Table,
+    role_path: &str,
+) -> Result<(), ConfigError> {
+    let Some(categories) = binding.get("categories").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (category, value) in categories {
+        let category_path = format!("{role_path}.categories.{category}");
+        if !CATEGORY_NAMES.contains(&category.as_str()) {
+            return Err(ConfigError::InvalidField {
+                path: category_path,
+                message: format!(
+                    "unknown category, expected one of: {}",
+                    CATEGORY_NAMES.join(", ")
+                ),
+            });
+        }
+        let Some(category_binding) = value.as_table() else {
+            continue;
+        };
+        check_keys(category_binding, &category_path, CATEGORY_BINDING_KEYS)?;
+        if let Some(generation) = category_binding
+            .get("generation")
+            .and_then(toml::Value::as_table)
+        {
+            check_keys(
+                generation,
+                &format!("{category_path}.generation"),
+                GENERATION_KEYS,
             )?;
         }
     }

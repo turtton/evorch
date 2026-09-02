@@ -68,6 +68,7 @@ fn generated_schema_covers_all_config_sections() {
     for section in [
         "\"version\"",
         "\"providers\"",
+        "\"agents\"",
         "\"routing\"",
         "\"panel\"",
         "\"diagnostics\"",

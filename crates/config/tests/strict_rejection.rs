@@ -283,3 +283,33 @@ fn route_candidate_unknown_key_rejected() {
         &["routing.routes.fast[0].weight"],
     );
 }
+
+// Given: agents セクションに未知のキーを含む設定 / When: 読み込む
+// Then: ロールバインディングまでの完全なパスを含むエラーになる
+#[test]
+fn agents_section_unknown_key_is_rejected_with_path() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    assert_error_contains(
+        load_project(&tmp, "[agents.worker]\ntypo = \"x\"\n"),
+        &["agents.worker.typo", "unknown field"],
+    );
+}
+
+// Given: agents カテゴリに未知のカテゴリ名と未知のキーを含む設定 / When: 読み込む
+// Then: カテゴリ名とキーの完全なパスを含むエラーになる
+#[test]
+fn agents_category_unknown_name_is_rejected_with_path() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+
+    // Given/When: 固定 6 カテゴリ以外のカテゴリ名を含む設定を読み込む
+    let result = load_project(&tmp, "[agents.worker.categories.quicko]\npreset = \"p\"\n");
+
+    // Then: カテゴリ名までの完全なパスを含むエラーになる
+    assert_error_contains(result, &["agents.worker.categories.quicko"]);
+
+    // Given/When: 正しいカテゴリ名の中に未知のキーを含む設定を読み込む
+    let result = load_project(&tmp, "[agents.worker.categories.quick]\nweight = 0.5\n");
+
+    // Then: キーまでの完全なパス (agents.worker.categories.quick.weight) を含むエラーになる
+    assert_error_contains(result, &["agents.worker.categories.quick.weight"]);
+}
