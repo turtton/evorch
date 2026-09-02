@@ -5,7 +5,7 @@ use std::sync::Arc;
 use agents::Role;
 use event_bus::{AgentRunPhase, Event, EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, FinishReason};
-use runtime::{AgentRuntime, RunConfig};
+use runtime::{AgentRuntime, RunConfig, RunId};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
@@ -22,23 +22,29 @@ fn runtime_with(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
     (AgentRuntime::new(Arc::clone(&bus), executor, model), bus)
 }
 
-async fn events_until_completed(
+/// 指定 run すべての BackgroundTaskCompleted を観測するまでイベントを収集する。
+///
+/// fire-and-forget 送信により子の完了が親の完了より後になる余地があるため、
+/// ライフサイクル検証は最後に完了する run を基準に打ち切る。
+async fn events_until_all_completed(
     receiver: &mut event_bus::EventReceiver,
-    run_id: &str,
+    run_ids: &[&str],
 ) -> Vec<Event> {
+    let mut pending: std::collections::HashSet<String> =
+        run_ids.iter().map(|id| id.to_string()).collect();
     let mut events = Vec::new();
     loop {
         let event = timeout(Duration::from_secs(2), receiver.recv())
             .await
             .expect("event timeout")
             .expect("event receiver remains open");
-        let completed = matches!(
+        let all_completed = matches!(
             &event.kind,
             EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id })
-                if task_id == run_id
-        );
+                if pending.remove(task_id)
+        ) && pending.is_empty();
         events.push(event);
-        if completed {
+        if all_completed {
             return events;
         }
     }
@@ -121,15 +127,26 @@ async fn orchestrator_drives_children_entirely_through_meta_tool_uses() {
     let orchestrator =
         runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(orchestrator).await, Ok(AgentRunPhase::Done));
-    let events = events_until_completed(&mut receiver, &orchestrator.to_string()).await;
+    // send_message は fire-and-forget alias になったため、run-3 の再開・完了は
+    // 親の完了と独立に非同期へ進む。ライフサイクル検証の前に run-3 の終端を待つ。
+    let explorer = RunId::new(3);
+    assert_eq!(
+        timeout(Duration::from_secs(2), runtime.wait(explorer)).await,
+        Ok(Ok(AgentRunPhase::Done))
+    );
+    let events = events_until_all_completed(
+        &mut receiver,
+        &[&orchestrator.to_string(), "run-2", "run-3"],
+    )
+    .await;
 
-    // Then: 親子すべての位相と background lifecycle が実 API の結果として観測できる
+    // Then: 親子すべての位相と background lifecycle が実 API の結果として観測できる。
+    //       send_message は fire-and-forget alias になったため、親は Waiting せず
+    //       2 回目の Waiting→Running は wait op のみが生む
     assert_eq!(
         phases(&events, &orchestrator.to_string()),
         vec![
             AgentRunPhase::Pending,
-            AgentRunPhase::Running,
-            AgentRunPhase::Waiting,
             AgentRunPhase::Running,
             AgentRunPhase::Waiting,
             AgentRunPhase::Running,
@@ -219,7 +236,7 @@ async fn worker_cannot_spawn_child_through_meta_tool_use() {
     let worker =
         runtime.delegate_background(Role::Worker, "WORKER".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(worker).await, Ok(AgentRunPhase::Done));
-    let events = events_until_completed(&mut receiver, &worker.to_string()).await;
+    let events = events_until_all_completed(&mut receiver, &[&worker.to_string()]).await;
 
     // Then: CapabilityDenied の ToolResult が返り、子 run は登録も開始もされない
     assert_eq!(runtime.list_agents().len(), 1);

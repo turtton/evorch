@@ -18,6 +18,9 @@ pub const META_OPS: &[&str] = &[
     "inspect_agent",
     "compact",
     "finish",
+    "send",
+    "wait_reply",
+    "inbox",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -130,17 +133,20 @@ mod tests {
         assert!(!reason.is_empty());
     }
 
-    // Given: Orchestrator のポリシー (委譲系メタ操作を許可)
-    // When: delegate 系のメタ操作名を authorize する
+    // Given: Orchestrator のポリシー (委譲系・メッセージ系メタ操作を許可)
+    // When: delegate 系と send/wait_reply/inbox のメタ操作名を authorize する
     // Then: capability 集合に含まれるため許可される
     #[test]
-    fn orchestrator_authorizes_delegation_meta_ops() {
+    fn orchestrator_authorizes_delegation_and_messaging_meta_ops() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
         for op in [
             "delegate",
             "delegate_background",
             "send_message",
+            "send",
+            "wait_reply",
+            "inbox",
             "wait",
             "cancel",
         ] {
@@ -181,10 +187,10 @@ mod tests {
 
     // Given: META_OPS の正規集合
     // When: is_meta_op を全要素と境界外の名前に適用する
-    // Then: 9 操作すべて true、通常ツール・空文字は false
+    // Then: 12 操作すべて true、通常ツール・空文字は false
     #[test]
     fn meta_ops_membership_is_exhaustive() {
-        assert_eq!(META_OPS.len(), 9);
+        assert_eq!(META_OPS.len(), 12);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");
         }

@@ -1,5 +1,8 @@
 //! 単一 AgentRun のTokio実行ループ。
 
+// allow: SIZE_OK — select 駆動の単一 AgentRun 実行ループとその状態 (LoopState) が
+// 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
+
 mod messages;
 mod tool_calls;
 
@@ -78,6 +81,19 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
 impl LoopState {
     pub(crate) fn runtime(&self) -> Option<crate::AgentRuntime> {
         crate::AgentRuntime::from_weak(&self.shared.runtime)
+    }
+
+    /// メタ操作の呼び出し元 (このループの run) の RunId を返す。
+    pub(crate) fn caller_run_id(&self) -> RunId {
+        self.task.run_id
+    }
+
+    /// 委譲の記録として Delegated イベントを発行する。
+    pub(crate) fn emit_delegated(&self, session_id: &str, target: &str) {
+        self.shared.bus.emit(Event::new(LifecycleEvent::Delegated {
+            session_id: session_id.to_string(),
+            target: target.to_string(),
+        }));
     }
 
     async fn execute(&mut self) {
