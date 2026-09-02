@@ -1,4 +1,4 @@
-//! Orchestrator システムプロンプト組立の金標テスト (issue #49 / AC10)。
+//! Orchestrator システムプロンプト組立の金標テスト (issue #49 / AC3)。
 //!
 //! カタログ経由で解決した完全なプロンプトが、フィクスチャとバイト単位で
 //! 一致することを検証する。フィクスチャ (`golden/system_prompt_orchestrator.txt`)
