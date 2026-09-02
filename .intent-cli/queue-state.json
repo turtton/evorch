@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T15:49:56.1908689+00:00",
+  "updated_at": "2026-09-02T15:56:08.8651026+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -715,6 +715,11 @@
         "implementation": ".intent-cli/issues/v02-skill-loader/implementation.md",
         "review_context": ".intent-cli/issues/v02-skill-loader/review-context.md",
         "yaml": ".intent-cli/issues/v02-skill-loader/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 53,
+        "url": "https://github.com/turtton/evorch/issues/53"
       },
       "worker_role": "implementation",
       "review_role": "review",
