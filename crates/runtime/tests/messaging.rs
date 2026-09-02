@@ -312,9 +312,48 @@ async fn addressing_matrix_rejects_non_parent_child_and_self() {
         })
     );
     assert!(matches!(
-        runtime.send_agent_message(child1, parent, AgentMessageKind::Steering, "steer", None),
+        runtime.send_agent_message(child1, parent, AgentMessageKind::Steering, "steer c1->p", None),
+        Err(RuntimeError::MessageDenied { sender, recipient, detail })
+        if sender == child1 && recipient == parent && detail.contains("steering")
+    ));
+    assert!(matches!(
+        runtime.send_agent_message(child2, child1, AgentMessageKind::Steering, "steer c2->c1", None),
+        Err(RuntimeError::MessageDenied { sender, recipient, detail })
+        if sender == child2 && recipient == child1 && detail.contains("steering")
+    ));
+    assert!(matches!(
+        runtime.send_agent_message(unrelated, child1, AgentMessageKind::Steering, "steer u->c1", None),
+        Err(RuntimeError::MessageDenied { sender, recipient, detail })
+        if sender == unrelated && recipient == child1 && detail.contains("steering")
+    ));
+    assert!(matches!(
+        runtime.send_agent_message(parent, parent, AgentMessageKind::Steering, "steer self", None),
         Err(RuntimeError::MessageDenied { sender, recipient, .. })
-        if sender == child1 && recipient == parent
+        if sender == parent && recipient == parent
+    ));
+    // relation チェックが correlation 参照より先なので、無関係 run からの Reply は MessageDenied になる。
+    assert!(matches!(
+        runtime.send_agent_message(
+            unrelated,
+            parent,
+            AgentMessageKind::Reply,
+            "reply u->p",
+            Some(sent_id.clone())
+        ),
+        Err(RuntimeError::MessageDenied { sender, recipient, .. })
+        if sender == unrelated && recipient == parent
+    ));
+    // relation チェックが先に self を検出するため、同一 run への Reply も MessageDenied になる。
+    assert!(matches!(
+        runtime.send_agent_message(
+            child1,
+            child1,
+            AgentMessageKind::Reply,
+            "reply self",
+            Some(sent_id.clone())
+        ),
+        Err(RuntimeError::MessageDenied { sender, recipient, .. })
+        if sender == child1 && recipient == child1
     ));
     assert!(matches!(
         runtime.send_agent_message(
@@ -370,6 +409,22 @@ async fn addressing_matrix_rejects_non_parent_child_and_self() {
         )
         .expect("C1→P の Reply は許可");
     assert_eq!(reply_id, "msg-4");
+    // 別の有効な record (P→C2) に対して、関係は正しいが record の recipient が sender(C1) でないため UnknownMessage。
+    let sent_b = runtime
+        .send_agent_message(parent, child2, AgentMessageKind::Send, "p->c2", None)
+        .expect("P→C2 は許可");
+    assert_eq!(
+        runtime.send_agent_message(
+            child1,
+            parent,
+            AgentMessageKind::Reply,
+            "mismatched correlation",
+            Some(sent_b.clone())
+        ),
+        Err(RuntimeError::UnknownMessage {
+            message_id: sent_b.clone()
+        })
+    );
     let _ = runtime.wait(parent).await;
     let _ = runtime.wait(unrelated).await;
 }

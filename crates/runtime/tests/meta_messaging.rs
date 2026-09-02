@@ -736,3 +736,150 @@ async fn send_meta_op_rejects_unrelated_recipient() {
     assert_eq!(runtime.cancel(unrelated), Ok(()));
     let _ = timeout(Duration::from_secs(2), runtime.wait(unrelated)).await;
 }
+
+#[tokio::test]
+async fn send_meta_op_enforces_addressing_for_all_kinds() {
+    // Given: Orchestrator (run-1) が子 run を2つ生成し、さらに独立した無関係 run (run-2) が存在。
+    //        子・無関係 run は wait で生存を保ち、Orchestrator が順次 send を試行する。
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "unused",
+        FinishReason::Stop,
+    ))]));
+    model
+        .add_keyed(
+            "PARENT",
+            [
+                Ok(tool_response(
+                    "spawn-c1",
+                    "delegate_background",
+                    json!({ "role": "worker", "prompt": "CHILD1" }),
+                )),
+                Ok(tool_response(
+                    "spawn-c2",
+                    "delegate_background",
+                    json!({ "role": "worker", "prompt": "CHILD2" }),
+                )),
+                Ok(tool_response(
+                    "seed-send",
+                    "send",
+                    json!({ "run_id": "run-3", "message": "seed", "kind": "send" }),
+                )),
+                Ok(tool_response(
+                    "steer-child",
+                    "send",
+                    json!({ "run_id": "run-3", "message": "ok", "kind": "steering" }),
+                )),
+                Ok(tool_response(
+                    "steer-unrelated",
+                    "send",
+                    json!({ "run_id": "run-2", "message": "no", "kind": "steering" }),
+                )),
+                Ok(tool_response(
+                    "steer-unknown",
+                    "send",
+                    json!({ "run_id": "run-999", "message": "no", "kind": "steering" }),
+                )),
+                Ok(tool_response(
+                    "reply-missing",
+                    "send",
+                    json!({ "run_id": "run-3", "message": "no", "kind": "reply" }),
+                )),
+                Ok(tool_response(
+                    "reply-wrong",
+                    "send",
+                    json!({
+                        "run_id": "run-4",
+                        "message": "no",
+                        "kind": "reply",
+                        "reply_to": "msg-1"
+                    }),
+                )),
+                Ok(tool_response(
+                    "reply-self",
+                    "send",
+                    json!({
+                        "run_id": "run-1",
+                        "message": "no",
+                        "kind": "reply",
+                        "reply_to": "msg-1"
+                    }),
+                )),
+                Ok(tool_response(
+                    "finish",
+                    "finish",
+                    json!({ "result": "done" }),
+                )),
+            ],
+        )
+        .await;
+    let wait_script: Vec<Result<_, _>> = (0..20)
+        .map(|_| Ok(tool_response("wait", "wait", json!({ "run_id": "run-1" }))))
+        .collect();
+    model.add_keyed("CHILD1", wait_script.clone()).await;
+    model.add_keyed("CHILD2", wait_script.clone()).await;
+    model.add_keyed("UNRELATED", wait_script).await;
+
+    let (runtime, _bus) = runtime_with(Arc::clone(&model));
+    let parent = runtime.delegate_background(
+        Role::Orchestrator,
+        "PARENT".to_string(),
+        RunConfig::default(),
+    );
+    let unrelated = runtime.delegate_background(
+        Role::Explorer,
+        "UNRELATED".to_string(),
+        RunConfig::default(),
+    );
+
+    // When: Orchestrator が全 send ツールを実行し終わるまで待つ
+    assert_eq!(
+        timeout(Duration::from_secs(2), runtime.wait(parent)).await,
+        Ok(Ok(AgentRunPhase::Done))
+    );
+
+    // Then: 各 kind・宛先の成否を検証
+    let observed = model.observed().await;
+    let parent_turns = messages_for_marker(&observed, "PARENT");
+    let all_parent_messages: Vec<Message> = parent_turns.iter().flatten().cloned().collect();
+
+    fn assert_error(messages: &[Message], call_id: &str, needle: &str) {
+        let (text, is_error) = tool_result(messages, call_id)
+            .unwrap_or_else(|| panic!("{call_id} の結果が見つかりません"));
+        assert!(is_error, "{call_id} はエラーになる");
+        assert!(
+            text.contains(needle),
+            "{call_id} は {needle:?} を含むエラーを返す: {text}"
+        );
+    }
+
+    let (text, is_error) = tool_result(&all_parent_messages, "steer-child")
+        .expect("steer-child の結果が見つかりません");
+    assert!(!is_error, "steer-child は成功する: {text}");
+
+    assert_error(&all_parent_messages, "steer-unrelated", "拒否されました");
+    assert!(
+        tool_result(&all_parent_messages, "steer-unrelated")
+            .unwrap()
+            .0
+            .contains("steering"),
+        "steer-unrelated は steering 制約を示す"
+    );
+    assert_error(&all_parent_messages, "steer-unknown", "run-999");
+    assert_error(&all_parent_messages, "reply-missing", "reply_to");
+    assert_error(&all_parent_messages, "reply-wrong", "未知のメッセージ ID");
+    assert_error(&all_parent_messages, "reply-self", "自己宛て");
+
+    // meta 層では caller が Orchestrator に固定されるため sibling→sibling などの細かい行列は
+    // runtime/tests/messaging.rs の addressing_matrix_rejects_non_parent_child_and_self で網羅されている。
+    // meta-op はすべて同じ prepare_delivery を通ることがこれで担保される。
+
+    // Cleanup
+    let child1 = RunId::new(3);
+    let child2 = RunId::new(4);
+    let _ = runtime.cancel(child1);
+    let _ = runtime.cancel(child2);
+    let _ = runtime.cancel(unrelated);
+    let _ = timeout(Duration::from_secs(2), runtime.wait(child1)).await;
+    let _ = timeout(Duration::from_secs(2), runtime.wait(child2)).await;
+    let _ = timeout(Duration::from_secs(2), runtime.wait(unrelated)).await;
+}

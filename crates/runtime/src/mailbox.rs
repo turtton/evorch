@@ -39,6 +39,10 @@ impl RunMailbox {
         }
     }
 
+    /// メッセージを inbox の末尾に追加する。
+    ///
+    /// inbox が閉じている場合は [`PushError::Closed`]、容量一杯の場合は
+    /// [`PushError::Full`] を返す。成功時にバージョンを単調増加させる。
     pub fn try_push(&self, message: AgentMessage) -> Result<(), PushError> {
         let closed = self
             .closed
@@ -61,14 +65,22 @@ impl RunMailbox {
         Ok(())
     }
 
+    /// 新規メッセージの受け入れを停止する。閉じた後の `try_push` は
+    /// [`PushError::Closed`] を返す。既存メッセージは取得可能なまま残る。
+    ///
+    /// 終端待ちを version 購読者に通知するため、closed フラグ設定後にバージョンを
+    /// 単調増加させる。
     pub fn close(&self) {
         let mut closed = self
             .closed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *closed = true;
+        drop(closed);
+        self.version.send_modify(|value| *value += 1);
     }
 
+    /// inbox が新規メッセージを受け付けていないかどうかを返す。
     pub fn is_closed(&self) -> bool {
         *self
             .closed
