@@ -27,6 +27,7 @@ pub mod prompt;
 pub mod run;
 pub mod runtime;
 pub mod state;
+pub mod workspace;
 
 pub use context::AgentContext;
 pub use error::RuntimeError;
@@ -44,6 +45,6 @@ pub use prompt::{
     AvailableAgent, AvailableSkill, CatalogBuildInput, ModelFamily, PromptCompositionError,
     SystemPromptCatalog, SystemPromptCatalogError, TriggerSource, build_catalog,
 };
-pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
+pub use run::{AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceMode};
 pub use runtime::AgentRuntime;
 pub use state::{RunState, is_valid_transition};
