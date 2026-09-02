@@ -5,12 +5,15 @@
 //! 純粋な写像と、その解決結果を [`build_sandbox`] で bwrap 構成へ伝達するシームを
 //! 提供する。サンドボックス化コマンドの実行方法 (executor) は扱わない。
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agents::NetworkAccess;
 use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxError};
 
 use crate::policy::ExecutionPolicy;
+use crate::runtime::{IsolatedMounts, SandboxFactory};
+use crate::workspace::OwnedWorktree;
 
 /// サンドボックスのネットワーク実行モード (issue #19 / ADR 0021)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,49 @@ pub fn build_sandbox(
         SandboxNetworkMode::ParentNetns
     ));
     BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+}
+
+/// isolated worktree が git 操作に必要とする最小 mount set を構築する。
+///
+/// `packed-refs` の rewrite (`git pack-refs` / auto gc) は意図的に writable にしない。
+/// 通常の branch 更新に必要な個別 metadata だけを writable にする最小性との trade-off。
+pub(crate) fn isolated_mounts(worktree: &OwnedWorktree, git_common_dir: &Path) -> IsolatedMounts {
+    let worktree_name = match worktree.path.file_name() {
+        Some(name) => name,
+        None => worktree.path.as_os_str(),
+    };
+    IsolatedMounts {
+        workspace_root: worktree.path.clone(),
+        ro_binds: vec![git_common_dir.to_path_buf()],
+        rw_binds: vec![
+            git_common_dir.join("worktrees").join(worktree_name),
+            git_common_dir.join("objects"),
+            git_common_dir.join("refs/heads"),
+            git_common_dir.join("logs"),
+        ],
+    }
+}
+
+pub(crate) struct BwrapFactory;
+
+impl SandboxFactory for BwrapFactory {
+    fn build(
+        &self,
+        policy: &ExecutionPolicy,
+        mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        let mut config = BwrapConfig::new(mounts.workspace_root.clone()).allow_network(matches!(
+            policy.sandbox_network_mode(),
+            SandboxNetworkMode::ParentNetns
+        ));
+        for path in &mounts.ro_binds {
+            config = config.ro_bind(path.clone());
+        }
+        for path in &mounts.rw_binds {
+            config = config.rw_bind(path.clone());
+        }
+        BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+    }
 }
 
 /// role・tool・session の3層AND判定結果。

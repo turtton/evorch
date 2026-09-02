@@ -21,7 +21,8 @@ use crate::mailbox::{PushError, RunMailbox};
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
-use crate::run::RunConfig;
+use crate::run::{RunConfig, WorkspaceInspection};
+use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
@@ -42,10 +43,41 @@ pub(crate) struct Shared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
+    pub(crate) workspace: Option<WorkspaceContext>,
+    pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
+}
+
+/// isolated sandbox を構築するための mount policy 入力。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolatedMounts {
+    /// run 専用 worktree root。
+    pub workspace_root: PathBuf,
+    /// 読み取り専用で公開する path。
+    pub ro_binds: Vec<PathBuf>,
+    /// 読み書き可能で公開する path。
+    pub rw_binds: Vec<PathBuf>,
+}
+
+/// run ごとの sandbox 構築境界。
+pub trait SandboxFactory: Send + Sync {
+    /// policy と mount set から sandbox を構築する。
+    ///
+    /// # Errors
+    /// sandbox の検出または構成に失敗した場合に [`sandbox::SandboxError`] を返す。
+    fn build(
+        &self,
+        policy: &ExecutionPolicy,
+        mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError>;
+}
+
+pub(crate) struct WorkspaceContext {
+    pub(crate) manager: WorktreeManager,
+    pub(crate) factory: Arc<dyn SandboxFactory>,
 }
 
 struct RunEntry {
@@ -84,6 +116,8 @@ impl AgentRuntime {
                 executor,
                 model,
                 system_prompts: OnceLock::new(),
+                workspace: None,
+                workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
@@ -138,6 +172,60 @@ impl AgentRuntime {
         })?;
         let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
         Ok(Self::new(bus, executor, model))
+    }
+
+    /// production sandbox と isolated workspace context を持つランタイムを生成する。
+    ///
+    /// # Errors
+    /// project 検証または baseline sandbox 構築に失敗した場合に [`RuntimeError`] を返す。
+    pub fn production_with_project(
+        bus: Arc<EventBus>,
+        policy: &ExecutionPolicy,
+        project_root: PathBuf,
+        model: Arc<dyn AgentModel>,
+    ) -> Result<Self, RuntimeError> {
+        let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
+            detail: error.to_string(),
+        })?;
+        let sandbox = crate::network::build_sandbox(policy, project.repo_root().to_path_buf())
+            .map_err(|error| RuntimeError::Sandbox {
+                detail: error.to_string(),
+            })?;
+        let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
+        Ok(Self::with_workspace_context(
+            bus,
+            executor,
+            model,
+            WorktreeManager::new(project),
+            Arc::new(crate::network::BwrapFactory),
+        ))
+    }
+
+    /// 明示的な isolated workspace test seam を持つランタイムを生成する。
+    ///
+    /// production は [`AgentRuntime::production_with_project`] を使用する。隔離なし sandbox
+    /// は既存の [`AgentRuntime::new`] とこの明示的 seam のテスト実装でのみ許可する。
+    pub fn with_workspace_context(
+        bus: Arc<EventBus>,
+        executor: Arc<ToolExecutor>,
+        model: Arc<dyn AgentModel>,
+        manager: WorktreeManager,
+        factory: Arc<dyn SandboxFactory>,
+    ) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                bus,
+                executor,
+                model,
+                system_prompts: OnceLock::new(),
+                workspace: Some(WorkspaceContext { manager, factory }),
+                workspaces: Mutex::new(HashMap::new()),
+                next_run_id: AtomicU64::new(1),
+                next_message_id: AtomicU64::new(1),
+                runs: Mutex::new(HashMap::new()),
+                sent: Mutex::new(HashMap::new()),
+            }),
+        }
     }
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。

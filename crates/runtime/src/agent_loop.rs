@@ -14,9 +14,14 @@ use providers::{ContentBlock, FinishReason, ToolSpec};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
-use crate::runtime::{Shared, loop_shared};
-use crate::{AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState};
+use crate::runtime::{Shared, WorkspaceContext, loop_shared};
+use crate::workspace::OwnedWorktree;
+use crate::{
+    AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState,
+    WorkspaceInspection, WorkspaceMode,
+};
 use tool_calls::standard_tool_specs;
 
 pub(crate) struct RunTask {
@@ -56,17 +61,17 @@ pub(crate) struct LoopState {
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
-    let Some(shared) = loop_shared(&shared) else {
+    let Some(loop_shared) = loop_shared(&shared) else {
         return;
     };
     let mut context = AgentContext::new(task.run_id, task.role);
-    let system_prompt_error = push_initial_system_message(&shared, &task, &mut context);
+    let system_prompt_error = push_initial_system_message(&loop_shared, &task, &mut context);
     context.push_user(&task.prompt);
     let policy = ExecutionPolicy::for_role(task.role);
     let tool_specs = policy.filter_tool_specs(standard_tool_specs());
     let mut state = LoopState {
         task,
-        shared,
+        shared: loop_shared,
         channels,
         run_state: RunState::new(),
         context,
@@ -82,10 +87,108 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         state.finish_error(error.to_string());
         return;
     }
+    let mut owned_worktree = match state.task.config.workspace_mode {
+        WorkspaceMode::Shared => None,
+        WorkspaceMode::Isolated => {
+            let Some(runtime_shared) = shared.upgrade() else {
+                return;
+            };
+            let Some(workspace) = runtime_shared.workspace.as_ref() else {
+                state.finish_error("workspace isolation requires workspace context".to_string());
+                return;
+            };
+            match setup_isolated_workspace(workspace, &runtime_shared, &state).await {
+                Ok((owned, executor)) => {
+                    state.shared.executor = executor;
+                    Some(owned)
+                }
+                Err(reason) => {
+                    state.finish_error(reason);
+                    return;
+                }
+            }
+        }
+    };
     if state.transition(AgentRunPhase::Running, None).is_err() {
+        cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
         return;
     }
     state.execute().await;
+    // cancel() は cooperative で task abort しない契約への依存。JoinHandle::abort 導入は禁止。
+    cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
+}
+
+async fn setup_isolated_workspace(
+    workspace: &WorkspaceContext,
+    runtime_shared: &Arc<Shared>,
+    state: &LoopState,
+) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
+    let run_id = state.task.run_id;
+    let manager = workspace.manager.clone();
+    let owned = tokio::task::spawn_blocking(move || manager.create(run_id))
+        .await
+        .map_err(|error| format!("workspace setup failed: {error}"))?
+        .map_err(|error| format!("workspace setup failed: {error}"))?;
+    let manager = workspace.manager.clone();
+    let git_common_dir = match tokio::task::spawn_blocking(move || manager.git_common_dir()).await {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) => {
+            cleanup_failed_setup(owned).await;
+            return Err(format!("workspace setup failed: {error}"));
+        }
+        Err(error) => {
+            cleanup_failed_setup(owned).await;
+            return Err(format!("workspace setup failed: {error}"));
+        }
+    };
+    let mounts = isolated_mounts(&owned, &git_common_dir);
+    let sandbox = match workspace.factory.build(&state.policy, &mounts) {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            cleanup_failed_setup(owned).await;
+            return Err(format!("workspace sandbox setup failed: {error}"));
+        }
+    };
+    runtime_shared
+        .workspaces
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            run_id,
+            WorkspaceInspection {
+                mode: WorkspaceMode::Isolated,
+                branch: Some(owned.branch.clone()),
+                worktree_path: Some(owned.path.clone()),
+                merge_mode: state.task.config.merge_mode,
+            },
+        );
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&runtime_shared.bus),
+        sandbox,
+    ));
+    Ok((owned, executor))
+}
+
+async fn cleanup_failed_setup(owned: OwnedWorktree) {
+    let _ = tokio::task::spawn_blocking(move || owned.cleanup()).await;
+}
+
+async fn cleanup_worktree(shared: &LoopShared, run_id: RunId, owned: Option<OwnedWorktree>) {
+    let Some(owned) = owned else {
+        return;
+    };
+    let cleanup = tokio::task::spawn_blocking(move || owned.cleanup()).await;
+    // cleanup failure 用 lifecycle event は追加せず、inspection の path を残して回収対象を可視にする。
+    if matches!(cleanup, Ok(Ok(())))
+        && let Some(runtime_shared) = shared.runtime.upgrade()
+        && let Some(inspection) = runtime_shared
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&run_id)
+    {
+        inspection.worktree_path = None;
+    }
 }
 
 /// カタログが設定されている場合、run 開始時の System メッセージを履歴へ push する。

@@ -1,6 +1,7 @@
 //! AgentRun の識別子・設定、および表層用の DTO を定義します。
 
 use std::fmt;
+use std::path::PathBuf;
 
 use event_bus::AgentRunPhase;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,19 @@ pub struct RunConfig {
     pub category: Option<String>,
     /// 親 workspace を共有するか、専用 git worktree を使用するか。
     pub workspace_mode: WorkspaceMode,
+    /// isolated workspace の変更を統合する方法。
+    pub merge_mode: MergeMode,
+}
+
+/// AgentRun に割り当てられた workspace の検査用 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceInspection {
+    /// 親 workspace を共有するか、専用 worktree を使うか。
+    pub mode: WorkspaceMode,
+    /// isolated run の merge deliverable branch。cleanup 後も保持される。
+    pub branch: Option<String>,
+    /// isolated worktree の path。cleanup 成功後は `None`。
+    pub worktree_path: Option<PathBuf>,
     /// isolated workspace の変更を統合する方法。
     pub merge_mode: MergeMode,
 }

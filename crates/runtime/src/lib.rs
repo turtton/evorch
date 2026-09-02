@@ -45,6 +45,8 @@ pub use prompt::{
     AvailableAgent, AvailableSkill, CatalogBuildInput, ModelFamily, PromptCompositionError,
     SystemPromptCatalog, SystemPromptCatalogError, TriggerSource, build_catalog,
 };
-pub use run::{AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceMode};
-pub use runtime::AgentRuntime;
+pub use run::{
+    AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode,
+};
+pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory};
 pub use state::{RunState, is_valid_transition};

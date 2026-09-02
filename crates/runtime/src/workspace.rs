@@ -89,7 +89,7 @@ impl Project {
 }
 
 /// runtime 所有 worktree の作成を管理する。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WorktreeManager {
     project: Project,
 }
@@ -98,6 +98,26 @@ impl WorktreeManager {
     /// project に対する manager を作成する。
     pub const fn new(project: Project) -> Self {
         Self { project }
+    }
+
+    /// repository の git common directory を canonical path で返す。
+    ///
+    /// # Errors
+    /// `git rev-parse` または path の解決に失敗した場合に [`WorkspaceError`] を返す。
+    pub(crate) fn git_common_dir(&self) -> Result<PathBuf, WorkspaceError> {
+        let output = git_output(self.project.repo_root(), &["rev-parse", "--git-common-dir"])?;
+        if !output.status.success() {
+            return Err(WorkspaceError::Git {
+                detail: output_detail(&output),
+            });
+        }
+        let reported = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let path = if reported.is_absolute() {
+            reported
+        } else {
+            self.project.repo_root().join(reported)
+        };
+        fs::canonicalize(&path).map_err(|source| WorkspaceError::Io { path, source })
     }
 
     /// run 専用 branch と worktree を二段階で作成する。
