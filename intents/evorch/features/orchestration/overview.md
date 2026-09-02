@@ -31,7 +31,7 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 
 1. **contract**: 親 orchestrator が goal + context の契約を作る（現行運用の `.opencode/<slice>-contract.md` 相当を run の入力として正式化）
 2. **background delegation**: `delegate_background` で worker run を起動する
-3. **mid-run relay**: worker から親 orchestrator への完了前通知・質問・blocked 理由をメッセージとして中継する。現行運用の `[herdr-relay]` 相当で、配送は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) v0.2 計画の配送语义（steering / aside / wake）に従う
+3. **mid-run relay**: worker から親 orchestrator への完了前通知・質問・blocked 理由をメッセージとして中継する。現行運用の `[herdr-relay]` 相当で、配送は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) v0.2 計画の配送语义（steering / aside / wake）に従う。実装確定（PR #48）: mid-run relay は lifecycle 完了通知と独立した durable channel（`AgentMessage` event → storage transcript）を使う
 4. **review / augment / merge**: 完了結果を review し、不足があれば追加委譲（augment）で補い、worktree の merge で収束する
 
 ### 親子限定 messaging とネスト委譲
