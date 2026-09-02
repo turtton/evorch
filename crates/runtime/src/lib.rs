@@ -23,6 +23,7 @@ mod meta;
 pub mod model;
 pub mod network;
 pub mod policy;
+pub mod prompt;
 pub mod run;
 pub mod runtime;
 pub mod state;
@@ -39,6 +40,7 @@ pub use network::{
     sandbox_network_mode,
 };
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
+pub use prompt::{ModelFamily, SystemPromptCatalog, SystemPromptCatalogError, TriggerSource};
 pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
 pub use runtime::AgentRuntime;
 pub use state::{RunState, is_valid_transition};
