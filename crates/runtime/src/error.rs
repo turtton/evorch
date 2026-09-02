@@ -56,6 +56,10 @@ pub enum RuntimeError {
     #[error("サンドボックス構築に失敗しました: {detail}")]
     Sandbox { detail: String },
 
+    /// workspace project の初期化に失敗した。
+    #[error("workspace の初期化に失敗しました: {detail}")]
+    Workspace { detail: String },
+
     /// 送信者と受信者の親子関係またはメッセージ種別のルールにより配送が拒否された。
     #[error("AgentRun {sender} から {recipient} へのメッセージが拒否されました: {detail}")]
     MessageDenied {

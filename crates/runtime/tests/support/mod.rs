@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use agents::Role;
@@ -9,7 +12,9 @@ use event_bus::{Event, EventReceiver};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{AgentModel, RuntimeError};
+use runtime::{AgentModel, ExecutionPolicy, IsolatedMounts, RuntimeError, SandboxFactory};
+use sandbox::{DirectSandbox, Sandbox, SandboxError};
+use tempfile::TempDir;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{Duration, timeout};
 
@@ -18,6 +23,24 @@ pub struct ScriptedModel {
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
     observed: Mutex<Vec<Vec<Message>>>,
     gate: Option<Arc<Notify>>,
+}
+
+struct RecordingSandboxFactory {
+    mounts: Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,
+}
+
+impl SandboxFactory for RecordingSandboxFactory {
+    fn build(
+        &self,
+        _policy: &ExecutionPolicy,
+        mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        self.mounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(mounts.clone());
+        Ok(Arc::new(DirectSandbox::new_unchecked()))
+    }
 }
 
 impl ScriptedModel {
@@ -161,4 +184,47 @@ pub async fn collect_events(receiver: &mut EventReceiver, count: usize) -> Vec<E
         events.push(event);
     }
     events
+}
+
+pub fn recording_factory() -> (
+    Arc<dyn SandboxFactory>,
+    Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,
+) {
+    let mounts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    (
+        Arc::new(RecordingSandboxFactory {
+            mounts: Arc::clone(&mounts),
+        }),
+        mounts,
+    )
+}
+
+pub fn init_git_repo() -> (TempDir, PathBuf) {
+    let temp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).expect("リポジトリ用ディレクトリを作成できる");
+    assert!(git(&repo, &["init"]).status.success());
+    assert!(
+        git(&repo, &["config", "user.name", "Evorch Test"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repo, &["config", "user.email", "evorch@example.invalid"])
+            .status
+            .success()
+    );
+    fs::write(repo.join("README.md"), "# test\n").expect("初期ファイルを書き込める");
+    assert!(git(&repo, &["add", "README.md"]).status.success());
+    assert!(git(&repo, &["commit", "-m", "initial"]).status.success());
+    (temp, repo)
+}
+
+pub fn git(repo: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git を実行できる")
 }

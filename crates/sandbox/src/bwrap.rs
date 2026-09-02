@@ -18,6 +18,7 @@ pub struct BwrapConfig {
     workspace_root: PathBuf,
     allow_network: bool,
     ro_binds: Vec<PathBuf>,
+    rw_binds: Vec<PathBuf>,
 }
 
 impl BwrapConfig {
@@ -26,6 +27,7 @@ impl BwrapConfig {
             workspace_root,
             allow_network: false,
             ro_binds: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
+            rw_binds: Vec::new(),
         }
     }
 
@@ -36,6 +38,11 @@ impl BwrapConfig {
 
     pub fn ro_bind(mut self, path: impl Into<PathBuf>) -> Self {
         self.ro_binds.push(path.into());
+        self
+    }
+
+    pub fn rw_bind(mut self, path: impl Into<PathBuf>) -> Self {
+        self.rw_binds.push(path.into());
         self
     }
 }
@@ -82,16 +89,29 @@ impl BwrapSandbox {
 
     pub fn build_argv(&self, spec: &CommandSpec) -> Vec<String> {
         let mut args = vec!["--die-with-parent".to_owned()];
+        args.extend(["--tmpfs".to_owned(), "/tmp".to_owned()]);
+        args.extend(["--dir".to_owned(), "/tmp/home".to_owned()]);
+        for path in &self.config.ro_binds {
+            if let Some(parent) = path.parent()
+                && parent != Path::new("/")
+                && self.config.workspace_root.starts_with(parent)
+            {
+                let parent = parent.to_string_lossy().into_owned();
+                args.extend(["--ro-bind-try".to_owned(), parent.clone(), parent]);
+            }
+        }
         for path in &self.config.ro_binds {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
+        }
+        for path in &self.config.rw_binds {
+            let path = path.to_string_lossy().into_owned();
+            args.extend(["--bind".to_owned(), path.clone(), path]);
         }
         let workspace = self.config.workspace_root.to_string_lossy().into_owned();
         args.extend(["--bind".to_owned(), workspace.clone(), workspace.clone()]);
         args.extend(["--dev".to_owned(), "/dev".to_owned()]);
         args.extend(["--proc".to_owned(), "/proc".to_owned()]);
-        args.extend(["--tmpfs".to_owned(), "/tmp".to_owned()]);
-        args.extend(["--dir".to_owned(), "/tmp/home".to_owned()]);
         if !self.config.allow_network {
             args.push("--unshare-net".to_owned());
         }
@@ -200,6 +220,38 @@ mod tests {
             argv.windows(3)
                 .any(|args| args == ["--ro-bind-try", "/opt/data", "/opt/data"])
         );
+    }
+
+    // Given: 追加の読み書き bind / When: 引数を構築 / Then: 必須 bind として追加パスが含まれる
+    #[test]
+    fn rw_bind_appends_bind_flag() {
+        let argv =
+            sandbox(BwrapConfig::new(PathBuf::from("/workspace")).rw_bind("/repo/.git/objects"))
+                .build_argv(&spec(None));
+        assert!(
+            argv.windows(3)
+                .any(|args| args == ["--bind", "/repo/.git/objects", "/repo/.git/objects"])
+        );
+    }
+
+    // Given: 読取親 bind と読み書き子 bind / When: 引数を構築 / Then: 子 bind が親 bind を後から上書きする
+    #[test]
+    fn rw_binds_ordered_after_ro_binds() {
+        let argv = sandbox(
+            BwrapConfig::new(PathBuf::from("/workspace"))
+                .ro_bind("/repo/.git")
+                .rw_bind("/repo/.git/objects"),
+        )
+        .build_argv(&spec(None));
+        let ro_bind_index = argv
+            .windows(3)
+            .position(|args| args == ["--ro-bind-try", "/repo/.git", "/repo/.git"])
+            .expect("読み取り親 bind が含まれるはずです");
+        let rw_bind_index = argv
+            .windows(3)
+            .position(|args| args == ["--bind", "/repo/.git/objects", "/repo/.git/objects"])
+            .expect("読み書き子 bind が含まれるはずです");
+        assert!(ro_bind_index < rw_bind_index);
     }
 
     // Given: 存在しない bwrap / When: 機能確認 / Then: 利用不可として閉じる
