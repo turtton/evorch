@@ -50,4 +50,9 @@ pub use run::{
     AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode,
 };
 pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory};
+pub use skill::{
+    SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
+    SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,
+    parse_and_validate, read_skill_resource, split_frontmatter,
+};
 pub use state::{RunState, is_valid_transition};

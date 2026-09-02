@@ -9,7 +9,7 @@ use std::time::Duration;
 use agents::Role;
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
-    EventBus, EventKind, LifecycleEvent,
+    EventBus, EventKind, FaultEvent, LifecycleEvent,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -22,6 +22,7 @@ use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
+use crate::skill::SkillRegistry;
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -43,6 +44,7 @@ pub(crate) struct Shared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
+    pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -117,6 +119,7 @@ impl AgentRuntime {
                 executor,
                 model,
                 system_prompts: OnceLock::new(),
+                skills: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -151,6 +154,29 @@ impl AgentRuntime {
     ) -> Result<Self, PromptCompositionError> {
         let catalog = build_catalog(input)?;
         Ok(self.with_system_prompts(Arc::new(catalog)))
+    }
+
+    /// skill レジストリを設定したランタイムを返すビルダーメソッド。
+    ///
+    /// `new` / `production` に鎖でつなげて呼ぶ。設定済みの場合は 2 回目以降の
+    /// 呼び出しは無視される (先勝ち)。初回接続時に限り、レジストリが発見時に
+    /// 記録した診断 1 件ごとに [`FaultEvent::SkillDiagnostic`] を 1 件バスへ
+    /// 発行する (ADR 0010: 失敗は静かにしない)。レジストリ未設定の run からは
+    /// `skill_load` メタ操作はモデルに見せない (tool_specs 可視性フィルタ)。
+    pub fn with_skills(self, skills: Arc<SkillRegistry>) -> Self {
+        if self.shared.skills.set(Arc::clone(&skills)).is_ok() {
+            for diagnostic in &skills.diagnostics {
+                self.shared
+                    .bus
+                    .emit(Event::new(FaultEvent::SkillDiagnostic {
+                        kind: diagnostic.kind.clone(),
+                        skill: diagnostic.skill.clone(),
+                        scope: diagnostic.scope.as_str().to_owned(),
+                        detail: diagnostic.detail.clone(),
+                    }));
+            }
+        }
+        self
     }
 
     /// production 構成のランタイムを生成する。
@@ -219,6 +245,7 @@ impl AgentRuntime {
                 executor,
                 model,
                 system_prompts: OnceLock::new(),
+                skills: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -770,6 +797,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         executor: Arc::clone(&shared.executor),
         model: Arc::clone(&shared.model),
         system_prompts: shared.system_prompts.get().cloned(),
+        skills: shared.skills.get().cloned(),
         runtime: Arc::downgrade(&shared),
     })
 }

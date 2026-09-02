@@ -17,12 +17,13 @@ use tools::ToolExecutor;
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
+use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
     AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState,
     WorkspaceInspection, WorkspaceMode,
 };
-use tool_calls::standard_tool_specs;
+use tool_calls::{standard_tool_specs, visible_tool_specs};
 
 pub(crate) struct RunTask {
     pub(crate) run_id: RunId,
@@ -46,6 +47,7 @@ pub(crate) struct LoopShared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
+    pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) runtime: Weak<Shared>,
 }
 
@@ -68,7 +70,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
     let system_prompt_error = push_initial_system_message(&loop_shared, &task, &mut context);
     context.push_user(&task.prompt);
     let policy = ExecutionPolicy::for_role(task.role);
-    let tool_specs = policy.filter_tool_specs(standard_tool_specs());
     let mut state = LoopState {
         task,
         shared: loop_shared,
@@ -76,9 +77,16 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         run_state: RunState::new(),
         context,
         policy,
-        tool_specs,
+        tool_specs: Vec::new(),
         resumed: false,
     };
+    // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
+    // 決まるため、LoopState 構築後に確定させる。
+    state.tool_specs = visible_tool_specs(
+        standard_tool_specs(),
+        &state.policy,
+        state.skills().is_some(),
+    );
     state.publish_message_count();
     if let Some(error) = system_prompt_error {
         // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
@@ -219,6 +227,11 @@ impl LoopState {
     /// メタ操作の呼び出し元 (このループの run) の RunId を返す。
     pub(crate) fn caller_run_id(&self) -> RunId {
         self.task.run_id
+    }
+
+    /// この run から参照できる skill レジストリを返す (未設定なら None)。
+    pub(crate) fn skills(&self) -> Option<&Arc<SkillRegistry>> {
+        self.shared.skills.as_ref()
     }
 
     /// 委譲の記録として Delegated イベントを発行する。
