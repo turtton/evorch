@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
 use crate::agent_loop::LoopState;
-use crate::{AgentRuntime, RunConfig};
+use crate::{AgentRuntime, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
 struct DelegateBackgroundArgs {
@@ -17,6 +17,8 @@ struct DelegateBackgroundArgs {
     name: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    workspace_mode: Option<WorkspaceMode>,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +29,8 @@ struct DelegateArgs {
     name: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    workspace_mode: Option<WorkspaceMode>,
 }
 
 fn parse_args_category(category: Option<String>) -> Result<Option<String>, String> {
@@ -58,6 +62,7 @@ pub(super) fn delegate_background(
             interactive: args.interactive,
             name: args.name,
             category,
+            workspace_mode: args.workspace_mode.unwrap_or_default(),
             ..RunConfig::default()
         },
     ) {
@@ -90,6 +95,7 @@ pub(super) async fn delegate(
         RunConfig {
             name: args.name,
             category,
+            workspace_mode: args.workspace_mode.unwrap_or_default(),
             ..RunConfig::default()
         },
     ) {

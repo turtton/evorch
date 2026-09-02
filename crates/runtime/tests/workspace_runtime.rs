@@ -7,7 +7,9 @@ use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::FinishReason;
 use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, IsolatedMounts, RunConfig, WorkspaceMode};
+use runtime::{
+    AgentRuntime, IsolatedMounts, MergeMode, RunConfig, WorkspaceInspection, WorkspaceMode,
+};
 use sandbox::DirectSandbox;
 use tokio::sync::Notify;
 use tokio::time::{Duration, sleep, timeout};
@@ -152,6 +154,86 @@ async fn isolated_mode_creates_worktree_with_per_run_sandbox() {
     );
     gate.notify_waiters();
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inspect_agent_reports_isolated_workspace() {
+    // Given: recording factory を持つ isolated run
+    let (_temp, repo) = init_git_repo();
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(text_response("done", FinishReason::Stop))],
+        Arc::clone(&gate),
+    ));
+    let (runtime, mounts, _bus) = runtime_with_workspace(&repo, model);
+    let run_id = runtime.delegate_background(Role::Worker, "work".to_string(), isolated_config());
+    let worktree_path = repo.join(".evorch/worktrees").join(run_id.to_string());
+    let branch = format!("evorch/task/{run_id}");
+    wait_until(|| captured_mounts(&mounts).len() == 1).await;
+
+    // When: setup 完了中と cleanup 後に inspection する
+    let active = runtime
+        .inspect_agent(run_id)
+        .expect("run を inspection できる");
+
+    // Then: active 中は path を、cleanup 後は branch を保持する
+    assert_eq!(
+        active.workspace,
+        Some(WorkspaceInspection {
+            mode: WorkspaceMode::Isolated,
+            branch: Some(branch.clone()),
+            worktree_path: Some(worktree_path.clone()),
+            merge_mode: MergeMode::Branch,
+        })
+    );
+    gate.notify_waiters();
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    wait_until(|| !worktree_path.exists()).await;
+    assert_eq!(
+        runtime
+            .inspect_agent(run_id)
+            .expect("cleanup 後の run を inspection できる")
+            .workspace,
+        Some(WorkspaceInspection {
+            mode: WorkspaceMode::Isolated,
+            branch: Some(branch),
+            worktree_path: None,
+            merge_mode: MergeMode::Branch,
+        })
+    );
+}
+
+#[tokio::test]
+async fn inspect_agent_reports_shared_workspace_default() {
+    // Given: workspace context を持たない shared run
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(text_response("done", FinishReason::Stop))],
+        Arc::new(Notify::new()),
+    ));
+    let bus = Arc::new(EventBus::new(64));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(bus, executor, model);
+    let run_id =
+        runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
+
+    // When: run を inspection する
+    let inspection = runtime
+        .inspect_agent(run_id)
+        .expect("run を inspection できる");
+
+    // Then: registry 未登録でも shared workspace を合成する
+    assert_eq!(
+        inspection.workspace,
+        Some(WorkspaceInspection {
+            mode: WorkspaceMode::Shared,
+            branch: None,
+            worktree_path: None,
+            merge_mode: MergeMode::Branch,
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

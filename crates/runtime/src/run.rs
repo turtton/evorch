@@ -109,6 +109,8 @@ pub struct AgentInspection {
     pub phase: AgentRunPhase,
     /// 保持するメッセージ数。
     pub message_count: usize,
+    /// 割り当て済み workspace の検査情報。常に `Some`。
+    pub workspace: Option<WorkspaceInspection>,
 }
 
 #[cfg(test)]

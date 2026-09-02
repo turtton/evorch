@@ -21,7 +21,7 @@ use crate::mailbox::{PushError, RunMailbox};
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
-use crate::run::{RunConfig, WorkspaceInspection};
+use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -84,6 +84,7 @@ struct RunEntry {
     role: Role,
     name: String,
     model: String,
+    config: RunConfig,
     parent: Option<RunId>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
@@ -277,7 +278,7 @@ impl AgentRuntime {
             run_id,
             role,
             prompt,
-            config,
+            config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),
         };
@@ -294,6 +295,7 @@ impl AgentRuntime {
                 role,
                 name,
                 model,
+                config: config.clone(),
                 parent,
                 phase_tx: phase_tx_entry,
                 phase_rx,
@@ -392,15 +394,29 @@ impl AgentRuntime {
         summaries
     }
 
-    /// run の位相と会話履歴件数を返す。
+    /// run の位相・会話履歴件数・workspace 情報を返す。
     pub fn inspect_agent(&self, run_id: RunId) -> Result<AgentInspection, RuntimeError> {
         let runs = lock_runs(&self.shared.runs);
         let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+        let workspace = self
+            .shared
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .cloned()
+            .unwrap_or(WorkspaceInspection {
+                mode: WorkspaceMode::Shared,
+                branch: None,
+                worktree_path: None,
+                merge_mode: entry.config.merge_mode,
+            });
         Ok(AgentInspection {
             run_id,
             role_name: entry.role.name().to_string(),
             phase: *entry.phase_rx.borrow(),
             message_count: *entry.message_count_rx.borrow(),
+            workspace: Some(workspace),
         })
     }
 
