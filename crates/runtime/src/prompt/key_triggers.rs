@@ -85,6 +85,44 @@ fn capability_summary(caps: &agents::RoleCapabilities) -> String {
     format!("許可ツール: {tools} / ネットワーク: {network} / 委譲: {can_delegate}")
 }
 
+/// assembly 時点で利用可能な agent の metadata。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableAgent {
+    pub name: String,
+    pub description: String,
+}
+
+/// assembly 時点で利用可能な skill の metadata。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableSkill {
+    pub name: String,
+    pub description: String,
+}
+
+/// available agents / skills metadata から keyTriggers 用 TriggerSource を生成する。
+///
+/// 両 source を横断して name で重複排除し (同一 name が agents と skills に現れた場合は
+/// agent 側を優先)、name の昇順で安定順序化する。空集合でも有効 (空 Vec を返す)。
+pub fn triggers_from_availability(
+    agents: &[AvailableAgent],
+    skills: &[AvailableSkill],
+) -> Vec<TriggerSource> {
+    let mut sources: Vec<TriggerSource> = agents
+        .iter()
+        .map(|entry| TriggerSource {
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+        })
+        .chain(skills.iter().map(|entry| TriggerSource {
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+        }))
+        .collect();
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
+    sources.dedup_by(|a, b| a.name == b.name);
+    sources
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +219,88 @@ mod tests {
                 trigger.description
             );
         }
+    }
+
+    fn agent(name: &str, description: &str) -> AvailableAgent {
+        AvailableAgent {
+            name: name.to_owned(),
+            description: description.to_owned(),
+        }
+    }
+
+    fn skill(name: &str, description: &str) -> AvailableSkill {
+        AvailableSkill {
+            name: name.to_owned(),
+            description: description.to_owned(),
+        }
+    }
+
+    // Given: 名前順がバラバラの agents と skills
+    // When: triggers_from_availability する
+    // Then: name の昇順にマージされ、description も対応付けられる
+    #[test]
+    fn triggers_from_availability_merges_agents_and_skills_sorted() {
+        let agents = [agent("zeta", "zeta-desc"), agent("alpha", "alpha-desc")];
+        let skills = [skill("beta", "beta-desc")];
+
+        let triggers = triggers_from_availability(&agents, &skills);
+
+        let names: Vec<&str> = triggers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "zeta"]);
+        let descriptions: Vec<&str> = triggers.iter().map(|t| t.description.as_str()).collect();
+        assert_eq!(descriptions, vec!["alpha-desc", "beta-desc", "zeta-desc"]);
+    }
+
+    // Given: 同一 name が agents と skills の両方に現れる
+    // When: triggers_from_availability する
+    // Then: 1 エントリにまとめられ、description は agent 側が優先される
+    #[test]
+    fn triggers_from_availability_dedups_across_agents_and_skills() {
+        let agents = [agent("quick", "agent-desc")];
+        let skills = [skill("quick", "skill-desc"), skill("other", "other-desc")];
+
+        let triggers = triggers_from_availability(&agents, &skills);
+
+        let quick: Vec<&TriggerSource> = triggers.iter().filter(|t| t.name == "quick").collect();
+        assert_eq!(quick.len(), 1);
+        assert_eq!(quick[0].description, "agent-desc");
+        assert!(triggers.iter().any(|t| t.name == "other"));
+    }
+
+    // Given: 空の agents と skills
+    // When: triggers_from_availability して既存レンダラに渡す
+    // Then: 空 Vec が返り、レンダラは既存の (該当なし) 空状態ブロックを出す
+    #[test]
+    fn triggers_from_availability_empty_inputs_yield_empty_and_renderer_stays_valid() {
+        let triggers = triggers_from_availability(&[], &[]);
+
+        assert!(triggers.is_empty());
+
+        let rendered = render_key_triggers(&triggers);
+        assert!(rendered.starts_with("### keyTriggers"));
+        assert!(rendered.contains("(該当なし)"));
+        assert!(!rendered.lines().any(|l| l.starts_with("- ")));
+    }
+
+    // Given: 同一要素を異なる入力順で与える
+    // When: triggers_from_availability を繰り返し・順序を変えて呼ぶ
+    // Then: 呼び出しごとに同一出力で、入力順が違っても構造的に同一になる
+    #[test]
+    fn triggers_from_availability_is_deterministic() {
+        let first = triggers_from_availability(
+            &[agent("b", "b-desc"), agent("a", "a-desc")],
+            &[skill("c", "c-desc"), skill("d", "d-desc")],
+        );
+        let repeated = triggers_from_availability(
+            &[agent("b", "b-desc"), agent("a", "a-desc")],
+            &[skill("c", "c-desc"), skill("d", "d-desc")],
+        );
+        assert_eq!(first, repeated);
+
+        let scrambled = triggers_from_availability(
+            &[agent("a", "a-desc"), agent("b", "b-desc")],
+            &[skill("d", "d-desc"), skill("c", "c-desc")],
+        );
+        assert_eq!(first, scrambled);
     }
 }

@@ -6,11 +6,16 @@
 
 mod assembly;
 mod catalog;
+mod composition;
 mod family;
 mod intent_gate;
 mod key_triggers;
 
 pub use assembly::{SystemPromptInput, assemble_system_prompt};
 pub use catalog::{SystemPromptCatalog, SystemPromptCatalogBuilder, SystemPromptCatalogError};
+pub use composition::{CatalogBuildInput, PromptCompositionError, build_catalog};
 pub use family::{ModelFamily, classify};
-pub use key_triggers::{TriggerSource, default_role_triggers, render_key_triggers};
+pub use key_triggers::{
+    AvailableAgent, AvailableSkill, TriggerSource, default_role_triggers, render_key_triggers,
+    triggers_from_availability,
+};

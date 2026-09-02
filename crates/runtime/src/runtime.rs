@@ -18,7 +18,9 @@ use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
 use crate::mailbox::{PushError, RunMailbox};
-use crate::prompt::SystemPromptCatalog;
+use crate::prompt::{
+    CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
+};
 use crate::run::RunConfig;
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -98,6 +100,22 @@ impl AgentRuntime {
     pub fn with_system_prompts(self, system_prompts: Arc<SystemPromptCatalog>) -> Self {
         let _ = self.shared.system_prompts.set(system_prompts);
         self
+    }
+
+    /// config から system prompt catalog を組み立てて接続するビルダーメソッド。
+    ///
+    /// fail-closed: プリセット解決やカタログ完全性検証に失敗した場合、カタログは
+    /// ランタイムに接続されずにそのままエラーを返す。成功時は
+    /// [`AgentRuntime::with_system_prompts`] と同じ先勝ちで接続する。
+    ///
+    /// # Errors
+    /// [`build_catalog`] の失敗をそのまま伝播する。
+    pub fn with_config_prompts(
+        self,
+        input: &CatalogBuildInput<'_>,
+    ) -> Result<Self, PromptCompositionError> {
+        let catalog = build_catalog(input)?;
+        Ok(self.with_system_prompts(Arc::new(catalog)))
     }
 
     /// production 構成のランタイムを生成する。

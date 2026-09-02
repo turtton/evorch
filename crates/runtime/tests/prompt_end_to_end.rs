@@ -1,14 +1,12 @@
 //! config 駆動のプロンプトソース解決と runtime カタログの結合テスト (issue #49)。
 //!
-//! 将来の composition root が行う結合 — `resolve_prompt_sources` →
-//! [`SystemPromptCatalog`] への写像 → `system_prompt_for` — をテスト内の
-//! ヘルパーでミラーし、設定 → プロンプトの全体経路を検証する (AC3, AC2, AC10,
-//! AC4)。
+//! production composition root [`build_catalog`] が `resolve_prompt_sources` の
+//! 結果を [`SystemPromptCatalog`] へ写像する経路を通し、設定 → プロンプトの
+//! 全体経路を検証する (AC3, AC2, AC10, AC4)。
 
 use agents::Role;
-use config::{AgentPromptSources, Config, ConfigError, resolve_prompt_sources};
-use runtime::prompt::default_role_triggers;
-use runtime::{SystemPromptCatalog, SystemPromptCatalogError};
+use config::{Config, ConfigError, resolve_prompt_sources};
+use runtime::{CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog};
 use tempfile::TempDir;
 
 /// Orchestrator binding が appendix として参照する同梱プリセット名。
@@ -43,54 +41,19 @@ fn empty_user_dir() -> TempDir {
     dir
 }
 
-/// [`resolve_prompt_sources`] の結果を [`SystemPromptCatalog`] に写像する。
+/// production composition root ([`build_catalog`]) でカタログを構築する。
 ///
-/// composition root のミラー: role baseline はロール名キーのまま、family
-/// section はカタログキー (`family-` 接頭辞付き) へ、appendix は binding の
-/// プリセット名参照をロール名キーへ解決して登録する。
-fn catalog_from_sources(
+/// availability は空のリストを渡す (keyTriggers は既定の 4 ロール分のみ)。
+fn production_catalog(
     config: &Config,
-    sources: &AgentPromptSources,
-) -> Result<SystemPromptCatalog, SystemPromptCatalogError> {
-    let mut builder = SystemPromptCatalog::builder().triggers(default_role_triggers());
-    for (role_name, body) in &sources.role_baselines {
-        builder = builder.role_baseline(role_from_name(role_name), body.clone());
-    }
-    for (family_key, body) in &sources.family_sections {
-        builder = builder.family_section(format!("family-{family_key}"), body.clone());
-    }
-    for (category_name, body) in &sources.category_overlays {
-        builder = builder.category_overlay(category_name.clone(), body.clone());
-    }
-    let role_presets = [
-        (
-            Role::Orchestrator,
-            config.agents.orchestrator.preset.as_deref(),
-        ),
-        (Role::Explorer, config.agents.explorer.preset.as_deref()),
-        (Role::Worker, config.agents.worker.preset.as_deref()),
-        (Role::Reviewer, config.agents.reviewer.preset.as_deref()),
-    ];
-    for (role, preset) in role_presets {
-        let Some(preset) = preset else { continue };
-        let body = sources
-            .appendices
-            .get(preset)
-            .unwrap_or_else(|| panic!("appendix プリセット '{preset}' は解決済みのはずです"));
-        builder = builder.appendix(role, body.clone());
-    }
-    builder.build()
-}
-
-/// [`resolve_prompt_sources`] のロール名キーを [`Role`] に変換する。
-fn role_from_name(name: &str) -> Role {
-    match name {
-        "orchestrator" => Role::Orchestrator,
-        "explorer" => Role::Explorer,
-        "worker" => Role::Worker,
-        "reviewer" => Role::Reviewer,
-        other => panic!("resolve_prompt_sources は固定 4 ロール以外のキーを返さない: {other}"),
-    }
+    user_dir: &TempDir,
+) -> Result<SystemPromptCatalog, PromptCompositionError> {
+    build_catalog(&CatalogBuildInput {
+        config,
+        user_presets_dir: Some(user_dir.path()),
+        available_agents: &[],
+        available_skills: &[],
+    })
 }
 
 // Given: 同梱プリセットのみで解決したソースから構築したカタログ
@@ -103,8 +66,8 @@ fn config_driven_catalog_produces_byte_identical_system_prompt() {
     let config = bound_config();
     let sources = resolve_prompt_sources(&config, Some(user_dir.path()))
         .expect("同梱プリセットのみで解決できるはずです");
-    let catalog = catalog_from_sources(&config, &sources)
-        .expect("必須部品が揃いカタログは構築できるはずです");
+    let catalog =
+        production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
 
     let first = catalog
         .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
@@ -140,8 +103,8 @@ fn user_override_preset_changes_appendix_layer_only() {
     let config = bound_config();
     let before_sources = resolve_prompt_sources(&config, Some(user_dir.path()))
         .expect("上書き前は同梱プリセットで解決できるはずです");
-    let before_catalog = catalog_from_sources(&config, &before_sources)
-        .expect("必須部品が揃いカタログは構築できるはずです");
+    let before_catalog =
+        production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
     let before = before_catalog
         .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
@@ -153,10 +116,8 @@ fn user_override_preset_changes_appendix_layer_only() {
     std::fs::write(&override_path, format!("{OVERRIDE_SENTINEL}\n"))
         .expect("ユーザー上書きプリセットを書き込めるはずです");
 
-    let after_sources = resolve_prompt_sources(&config, Some(user_dir.path()))
-        .expect("ユーザー上書き後も解決できるはずです");
-    let after_catalog = catalog_from_sources(&config, &after_sources)
-        .expect("必須部品が揃いカタログは構築できるはずです");
+    let after_catalog =
+        production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
     let after = after_catalog
         .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
@@ -200,9 +161,11 @@ fn user_override_preset_changes_appendix_layer_only() {
 }
 
 // Given: 同梱・ユーザーのどちらにも存在しないプリセット名を参照する設定
-// When: カタログ構築より前の段階で resolve_prompt_sources する
-// Then: PresetNotFound の型付きエラーになり、Display は識別子を含むがプリセット
-//       本文は一切含まない (fail-closed でカタログは構築されない)
+// When: カタログ構築より前の段階で production composition root
+//       (build_catalog) を呼ぶ
+// Then: PresetResolution 経由の PresetNotFound の型付きエラーになり、Display は
+//       識別子を含むがプリセット本文は一切含まない (fail-closed でカタログは
+//       構築されない)
 #[test]
 fn missing_referenced_preset_fails_before_catalog_exists() {
     let user_dir = empty_user_dir();
@@ -227,12 +190,16 @@ fn missing_referenced_preset_fails_before_catalog_exists() {
 
     let mut missing_config = bound_config();
     missing_config.agents.orchestrator.preset = Some("no-such-preset-anywhere".to_owned());
-    let error = resolve_prompt_sources(&missing_config, Some(user_dir.path()))
+    let error = production_catalog(&missing_config, &user_dir)
         .expect_err("存在しないプリセット参照は解決に失敗するはずです");
 
     let display = error.to_string();
     assert!(
-        matches!(&error, ConfigError::PresetNotFound { name } if name == "no-such-preset-anywhere"),
+        matches!(
+            &error,
+            PromptCompositionError::PresetResolution(ConfigError::PresetNotFound { name })
+                if name == "no-such-preset-anywhere"
+        ),
         "PresetNotFound の型付きエラーのはずです: {error:?}"
     );
     assert!(
@@ -245,8 +212,9 @@ fn missing_referenced_preset_fails_before_catalog_exists() {
             "エラー Display にプリセット本文を含まないはずです: {display}"
         );
     }
-    // Err が先に返るため catalog_from_sources (builder) は一度も呼ばれない。
-    // このテストは resolve の呼び出しのみで、カタログ構築に到達しないこと自体が検証対象。
+    // resolve_prompt_sources の Err が先に返るため、カタログ builder
+    // (SystemPromptCatalogBuilder) は一度も呼ばれない。このテストは production
+    // 経路の呼び出しのみで、カタログ構築に到達しないこと自体が検証対象。
 }
 
 // Given: 同梱プリセットのみで構築したカタログ
@@ -258,8 +226,8 @@ fn unknown_model_id_uses_generic_family_section_end_to_end() {
     let config = bound_config();
     let sources = resolve_prompt_sources(&config, Some(user_dir.path()))
         .expect("同梱プリセットのみで解決できるはずです");
-    let catalog = catalog_from_sources(&config, &sources)
-        .expect("必須部品が揃いカタログは構築できるはずです");
+    let catalog =
+        production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
 
     let prompt = catalog
         .system_prompt_for(Role::Orchestrator, Some("quick"), "totally-unknown-model")

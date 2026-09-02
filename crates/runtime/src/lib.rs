@@ -40,7 +40,10 @@ pub use network::{
     sandbox_network_mode,
 };
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
-pub use prompt::{ModelFamily, SystemPromptCatalog, SystemPromptCatalogError, TriggerSource};
+pub use prompt::{
+    AvailableAgent, AvailableSkill, CatalogBuildInput, ModelFamily, PromptCompositionError,
+    SystemPromptCatalog, SystemPromptCatalogError, TriggerSource, build_catalog,
+};
 pub use run::{AgentInspection, AgentSummary, RunConfig, RunId};
 pub use runtime::AgentRuntime;
 pub use state::{RunState, is_valid_transition};

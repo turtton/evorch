@@ -59,12 +59,15 @@ const ALL_ROLES: [Role; 4] = [
 ];
 
 /// ロール・ファミリ・カテゴリ別のシステムプロンプト部品を保持するカタログ。
+// allow: SIZE_OK — タスク仕様により unit tests をモジュール内に維持するため
+// test コード込みで純 LOC が 250 を超える。production 本体のみなら 250 未満。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemPromptCatalog {
     role_baselines: BTreeMap<String, String>,
     family_sections: BTreeMap<String, String>,
     category_overlays: BTreeMap<String, String>,
     appendices: BTreeMap<String, String>,
+    category_appendices: BTreeMap<(String, String), String>,
     triggers: Vec<TriggerSource>,
 }
 
@@ -79,6 +82,10 @@ impl SystemPromptCatalog {
     /// - `model_id` からファミリを分類し、対応する family section を選ぶ。
     /// - `category` が指定され、未登録なら型付きエラーになる。
     /// - appendix はロール名をキーに内部 lookup し、未登録なら省略する。
+    ///   `(role, category)` でカテゴリスコープの appendix
+    ///   ([`SystemPromptCatalogBuilder::category_appendix`]) が登録されて
+    ///   いればロールレベルより優先する。これは config の per-field
+    ///   category-beats-role マージ規約と同じ優先順位である。
     ///   設計判断: appendix のキーはこのシグネチャから導出できるロール名と
     ///   する。resolver がよりリッチなキーを持つテキストを解決済みで渡す
     ///   ケースは [`assemble_system_prompt`] を直接使う。
@@ -110,7 +117,13 @@ impl SystemPromptCatalog {
                     })
             })
             .transpose()?;
-        let appendix = self.appendices.get(role.name()).map(String::as_str);
+        let scoped_appendix = category.and_then(|category| {
+            self.category_appendices
+                .get(&(role.name().to_lowercase(), category.to_owned()))
+        });
+        let appendix = scoped_appendix
+            .or_else(|| self.appendices.get(role.name()))
+            .map(String::as_str);
         Ok(assemble_system_prompt(&SystemPromptInput {
             role,
             category,
@@ -132,6 +145,7 @@ pub struct SystemPromptCatalogBuilder {
     family_sections: BTreeMap<String, String>,
     category_overlays: BTreeMap<String, String>,
     appendices: BTreeMap<String, String>,
+    category_appendices: BTreeMap<(String, String), String>,
     triggers: Vec<TriggerSource>,
 }
 
@@ -162,6 +176,21 @@ impl SystemPromptCatalogBuilder {
     /// ロールの appendix を登録する (任意)。
     pub fn appendix(mut self, role: Role, text: impl Into<String>) -> Self {
         self.appendices.insert(role.name().to_owned(), text.into());
+        self
+    }
+
+    /// カテゴリスコープの appendix を登録する (任意)。
+    ///
+    /// `(ロール名小文字, category)` をキーに保持し、`system_prompt_for` で
+    /// 同一ロールのロールレベル appendix ([`Self::appendix`]) より優先される。
+    pub fn category_appendix(
+        mut self,
+        role: Role,
+        category: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.category_appendices
+            .insert((role.name().to_lowercase(), category.into()), text.into());
         self
     }
 
@@ -196,6 +225,7 @@ impl SystemPromptCatalogBuilder {
             family_sections: self.family_sections,
             category_overlays: self.category_overlays,
             appendices: self.appendices,
+            category_appendices: self.category_appendices,
             triggers: self.triggers,
         })
     }
@@ -335,5 +365,82 @@ mod tests {
             error,
             SystemPromptCatalogError::UnknownCategory { category } if category == "no-such-category"
         ));
+    }
+
+    // Given: ロールレベル appendix と Orchestrator/bug スコープ appendix の両方を
+    //        持つカタログ
+    // When: Orchestrator / bug で system_prompt_for する
+    // Then: カテゴリスコープの本文が採用され、ロールレベルの本文は置き換わる
+    //       (config の per-field category-beats-role 規約と同じ優先順位)
+    #[test]
+    fn system_prompt_for_prefers_category_scoped_appendix_over_role_level() {
+        let catalog = complete_builder()
+            .category_appendix(
+                Role::Orchestrator,
+                "bug",
+                format!("SCOPED-APPENDIX {SENTINEL}"),
+            )
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        let prompt = catalog
+            .system_prompt_for(Role::Orchestrator, Some("bug"), "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+
+        assert!(
+            prompt.ends_with(&format!("SCOPED-APPENDIX {SENTINEL}")),
+            "appendix レイヤーはカテゴリスコープの本文のはずです"
+        );
+        assert!(
+            !prompt.contains(&format!("ORCH-APPENDIX {SENTINEL}")),
+            "ロールレベルの本文はスコープ優先で置き換わるはずです"
+        );
+    }
+
+    // Given: ロールレベル appendix のみを持ち bug スコープは未登録のカタログ
+    // When: Orchestrator / bug で system_prompt_for する
+    // Then: ロールレベルの本文にフォールバックする
+    #[test]
+    fn system_prompt_for_falls_back_to_role_level_appendix_without_scoped_one() {
+        let catalog = complete_builder()
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        let prompt = catalog
+            .system_prompt_for(Role::Orchestrator, Some("bug"), "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+
+        assert!(
+            prompt.ends_with(&format!("ORCH-APPENDIX {SENTINEL}")),
+            "スコープ未登録ならロールレベルの本文のはずです"
+        );
+    }
+
+    // Given: Orchestrator/bug スコープ appendix を追加登録したカタログ
+    // When: category None で system_prompt_for する
+    // Then: ロールレベルの本文が採用され、スコープ登録の影響を受けない
+    #[test]
+    fn system_prompt_for_ignores_category_scoped_appendix_when_category_is_none() {
+        let catalog = complete_builder()
+            .category_appendix(
+                Role::Orchestrator,
+                "bug",
+                format!("SCOPED-APPENDIX {SENTINEL}"),
+            )
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        let prompt = catalog
+            .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+
+        assert!(
+            prompt.ends_with(&format!("ORCH-APPENDIX {SENTINEL}")),
+            "category None ではロールレベルの本文のはずです"
+        );
+        assert!(
+            !prompt.contains("SCOPED-APPENDIX"),
+            "category None ではスコープの本文は現れないはずです"
+        );
     }
 }
