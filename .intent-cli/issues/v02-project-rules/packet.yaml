@@ -4,47 +4,55 @@ implementation_issue_packet:
   source_execution_unit: v02-project-rules
   domain: evorch
   target_repo: turtton/evorch
-  target_path: "crates/runtime/ crates/config/"
-  target_part: "プロジェクト rules 注入層。AGENTS.md のネスト closest-wins（ルート→深い階層順の複数注入）、起動時はルート + user スコープのみ、read / edit tool 実行後の対象ファイル最寄り rules 収集と synthetic message 注入、scoped rules dirs（.omo/rules / .claude/rules / .cursor/rules / .github/instructions）の alwaysApply / glob 解決、dynamic truncation"
+  target_path: "crates/runtime/ crates/tools/ crates/config/"
+  target_part: "プロジェクト rules 注入層。trusted project の AGENTS.md / scoped rules を path-aware に AgentRun context へ注入 — startup は root + user scope のみ、read / edit 等 tool 成功後は対象 directory から root までの nested AGENTS.md を root→deep 順で全件注入、scoped rules dirs（.omo/rules / .claude/rules / .cursor/rules / .github/instructions）の alwaysApply / glob 解決、dynamic truncation、project trust gate"
   dependencies: [v02-prompt-assembly]
   technical_baseline:
     - "Rust 1.97 / edition 2024 + Tokio async runtime（workspace Cargo.toml）"
-    - "v02-prompt-assembly が確立する prompt assembly 層 — 起動時ルート + user スコープ注入の接続先。現行 runtime は system prompt 合成を持たず（crates/runtime/src/agent_loop.rs の run_agent は task prompt を user message として push するのみ）"
+    - "v02-prompt-assembly が確立する prompt assembly 層 — startup root + user scope 注入の接続先。現行 runtime は system prompt 合成を持たず（crates/runtime/src/agent_loop.rs の run_agent は task prompt を user message として push するのみ）"
     - "AgentContext（crates/runtime/src/context.rs:18 — messages: Vec<Message>、run task が独占所有）と push_tool_result（同 file:56 — tool 結果は user role + ToolResult content block で積まれる）— synthetic 注入 part を組み込む model-visible messages の実体"
-    - "ToolExecutor 標準 5 ツール（read / edit / grep / shell / git_diff、crates/tools/src/executor.rs:92 with_standard_tools）— read / edit が対象パスを持つ trigger tool。hook は tool 実行結果の経路で行い、ToolExecutor の sandbox / 承認 / 制御マーカーエスケープ契約は変更しない"
+    - "ToolExecutor 標準 5 ツール（read / edit / grep / shell / git_diff、crates/tools/src/executor.rs:92 with_standard_tools）— read / edit が対象パスを持つ trigger tool。hook は tool 実行結果の経路で行い、ToolExecutor の sandbox / 承認 / 制御マーカーエスケープ（crates/tools/src/sanitize.rs escape_control_markers）契約は変更しない"
     - "Message / ContentBlock（crates/providers/src/message.rs、ADR 0020 canonical message normalization）— synthetic part は canonical 形式の text part として model-visible messages に組み込む"
-    - "workspace_root（crates/runtime/src/runtime.rs production() の構築引数）— AGENTS.md / rules 発見の基準点。project root の目印は evorch.toml（crates/config/src/load.rs PROJECT_MAIN_FILE）"
+    - "workspace_root（crates/runtime/src/runtime.rs production() の構築引数）— AGENTS.md / rules 発見の基準点。project root の目印は evorch.toml（crates/config/src/load.rs PROJECT_MAIN_FILE）。Config は deny_unknown_fields（crates/config/src/types/mod.rs）のため rules 設定追加は schema 拡張として行う"
+    - "ADR 0008 の project trust 判定 — trust 未承認の project からは AGENTS.md / rules directory を一切ロードしない（trust-before-load）。本 slice は trust 判定結果を消費する側で、trust UI / sandbox policy 本体は対象外"
     - "omo 参照実装（oh-my-openagent 4.19.4、dist/index.js）: findAgentsMdUp()（:91230 — 対象ファイル dir から親方向探索、found.reverse() でルート→深い階層順に複数注入）+ context injector（:135044 — 最後の user message text part の前に synthetic part 挿入）+ dynamic truncator（64KiB cache 上限）"
-    - "ADR 0003 / context-engine overview の Stable Prefix 要件（project instruction snapshot）— 起動時ルート注入を snapshot 対象と接続する（snapshot 化の本実装は v0.2 scope 外、注入内容の決定論性のみ担保）"
+    - "ADR 0003 / context-engine overview の Stable Prefix 要件（project instruction snapshot）— startup root 注入を snapshot 対象と接続する（snapshot 化の本実装は v0.2 scope 外、注入内容の決定論性のみ担保）"
   intent_references:
     - intents/evorch/features/agent-runtime-kernel/overview.md
-    - intents/evorch/features/context-engine/overview.md
-    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
     - intents/evorch/interviews/grill-v02-loop-foundation.json
   acceptance_criteria:
-    - "ネスト AGENTS.md: read / edit 実行後、対象ファイルのディレクトリから親方向へ AGENTS.md を探索し、ルート→深い階層順（closest wins、深い側が後勝ち）で全該当分が model-visible messages に synthetic 注入されることを unit test で検証（fixture repo で 2 階層以上のネスト）"
-    - "run 開始時はルート AGENTS.md + user スコープのみを注入し、深い階層の AGENTS.md を読まないことを unit test で検証"
-    - "対象ファイルに最寄り AGENTS.md / 該当 rules が存在しない場合、空の synthetic message を積まないことを unit test で検証"
-    - "scoped rules dirs（.omo/rules / .claude/rules / .cursor/rules / .github/instructions）を alwaysApply / glob メタデータ付きで解決し、alwaysApply は該当 scope で常時注入、glob 指定は対象ファイルが glob に一致した場合のみ注入されることを unit test で検証"
-    - "dynamic truncation: 注入量が上限（実装 slice で確定、既定値は unit test で固定）を超える場合、末尾 truncate して上限内に収めることを unit test で検証"
-    - "synthetic 注入は model への request 時点の messages 組み立てにのみ影響し、storage の event log / message repo に記録される transcript を改変しないことを unit test で検証"
-    - "既存 5 標準ツール・ToolExecutor 契約（jsonschema 引数検証 / 承認 / 制御マーカーエスケープ / ToolStarted / ToolCompleted）に回帰がないこと"
+    - "startup snapshot が root AGENTS.md + user scope always-apply rules のみを含み、nested / path-scoped rules を含まないことを unit test で検証"
+    - "read / edit 成功後、対象 directory から project root までの chain を root→deep 順（closest wins、deep が後）で全件 synthetic 注入し、兄弟 subtree 非混入・project root より上を探索しないことを fixture で検証（2 階層以上のネスト）"
+    - "複数 target path が stable union / dedup され、同一 source が同一 turn に二重注入されないことを unit test で検証"
+    - "scoped rules dirs（.omo/rules / .claude/rules / .cursor/rules / .github/instructions）の alwaysApply が該当 scope で常時適用され、glob は project-relative normalized path が一致した場合のみ適用され、non-match / invalid pattern は fail-closed（無効化 + diagnostics）であることを fixture test で検証"
+    - "project trust 未承認時は startup / post-tool の双方で project rules を一切ロードせず user scope のみとすることを unit test で検証（ADR 0008 trust-before-load）"
+    - "dynamic truncation が context budget（window / used tokens / response headroom）を考慮し、UTF-8 boundary を守り、root→deep ordering と closest rule を優先して保持し、省略 source を marker で観測可能にすることを unit test で検証"
+    - "rules file edit 後に cache が stale にならず更新内容を注入することを unit test で検証（cache は bounded で正しさの前提にしない）"
+    - "synthetic 注入は model-visible context の組み立てにのみ影響し、ToolResult 本文・disk bytes・ToolStarted / ToolCompleted event payload を変更しないことを unit test で検証"
+    - "既存 5 標準ツール・ToolExecutor 契約（jsonschema 引数検証 / 承認 / 制御マーカーエスケープ）に回帰がないこと"
     - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
 
 intent_placement:
   primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
   supporting_intents:
-    - intents/evorch/features/context-engine/overview.md
-    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
     - intents/evorch/interviews/grill-v02-loop-foundation.json
   new_intent_needed: false
-  placement_rationale: "AGENTS.md / rules 注入は model-visible context の組み立て（prompt 合成）責務であり、hook 点は runtime agent loop の tool 実行結果経路にある。tools-sandbox は tool 権限・sandbox 境界を担当する feature であり、本 slice は tool 実行結果を消費して注入する側で tool 契約（Tool trait / 承認 / sandbox）を変更しないため agent-runtime-kernel を primary とする。起動時ルート注入は context-engine overview の Stable Prefix 要件（project instruction snapshot）と ADR 0003 に接続するため supporting とする"
+  placement_rationale: "AGENTS.md / rules 注入は model-visible context の組み立て（runtime assembly）責務であり、kernel 機能として agent-runtime-kernel を primary とする（grill Q7 確定の v0.2 loop 基盤 packet 索引に列挙済み）。tools-sandbox overview は project trust（ADR 0008 trust-before-load）と read / edit tool seam の boundary を担うため supporting。ADR 0005（headless kernel 分離）は manual 検証面を headless に保つ契約、orchestration overview は rules を消費する role 実行の側面を接続する。skill loader / intent gate は別 packet のため新規 intent は不要"
 knowledge_updates:
   intent_tree:
     required: true
     target_paths:
       - intents/evorch/features/agent-runtime-kernel/overview.md
-    summary: "プロジェクト rules 注入の確定実装（AGENTS.md ネスト closest-wins の探索アルゴリズム、起動時ルート + user スコープのみ注入、read / edit 実行後の最寄り rules 収集と synthetic message 注入の位置、scoped rules dirs の alwaysApply / glob 解決、dynamic truncation の既定上限）を agent-runtime-kernel overview へ反映する"
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "project rules 注入の確定実装（startup root-only + user scope、nested AGENTS.md root→deep closest-wins の resolver 境界、post-tool synthetic 注入の挿入位置、scoped rules の alwaysApply / glob 语义、dynamic truncation、dedup / cache invalidation、project trust 未承認時の非ロード）を agent-runtime-kernel overview へ、tool seam で source bytes / ToolResult を変更しない境界を tools-sandbox overview へ反映する"
   adr:
     required: false
     target_paths: []
@@ -58,10 +66,14 @@ knowledge_updates:
     target_paths: []
     summary: ""
 closeout_learning:
-  expected: "rules 注入の実装確定（発見アルゴリズムと探索の打ち止め条件、注入タイミングと synthetic part の canonical 形式での位置、scoped rules の解決順とメタデータ形式、truncation の既定上限値と挙動、user スコープの配置）を agent-runtime-kernel overview に記録する"
+  expected: "rules 注入の実装確定（resolver の探索境界と打ち止め条件、synthetic part の挿入位置と canonical 形式、scoped rules の解決順とメタデータ形式、truncation の budget 計算と既定上限、dedup / cache invalidation、project trust gate の適用結果）を agent-runtime-kernel overview と tools-sandbox overview に記録する"
   write_back_required: true
   write_back_targets:
     - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/tools-sandbox/overview.md
 guide_reachability:
-  no_role_facing_surface: true
-  routes: []
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "agent-runtime-kernel overview で宣言される project rules 注入 surface"
+      role: "Orchestrator / Explorer / Worker / Reviewer"
+      target_surface: "runtime prompt assembly / AgentContext（全 runtime role の model-visible context に startup root rules と post-tool path-scoped rules が現れる）"

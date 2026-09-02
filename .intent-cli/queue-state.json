@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T22:46:48.8439873+00:00",
+  "updated_at": "2026-09-02T22:48:29.307478+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -528,6 +528,11 @@
         "implementation": ".intent-cli/issues/v02-otel-metrics-exporter/implementation.md",
         "review_context": ".intent-cli/issues/v02-otel-metrics-exporter/review-context.md",
         "yaml": ".intent-cli/issues/v02-otel-metrics-exporter/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 55,
+        "url": "https://github.com/turtton/evorch/issues/55"
       },
       "worker_role": "implementation",
       "review_role": "review",

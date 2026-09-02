@@ -91,7 +91,7 @@ Target part: 75% automatic/manual/agent-trigger compaction engine、summary chec
 - intents/evorch/features/orchestration/overview.md
 - intents/evorch/technology/architecture.md
 - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
-- intents/evorch/decisions/0018-sqlite-event-sourcing.md
+- intents/evorch/decisions/0018-sqlite-storage-schema.md
 - intents/evorch/interviews/grill-v02-loop-foundation.json（Q2 / Q5）
 - dependency: `v02-agent-messaging`
 

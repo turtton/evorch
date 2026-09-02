@@ -22,7 +22,7 @@ implementation_issue_packet:
     - intents/evorch/features/orchestration/overview.md
     - intents/evorch/technology/architecture.md
     - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
-    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0018-sqlite-storage-schema.md
     - intents/evorch/interviews/grill-v02-loop-foundation.json
   acceptance_criteria:
     - "model の context limit と現在の model-visible token estimate から usage ratio を算出し、既定 75% 未満では発動せず、到達/超過時に turn boundary で一度だけ自動 compaction する boundary test がある"
@@ -42,7 +42,7 @@ intent_placement:
     - intents/evorch/features/orchestration/overview.md
     - intents/evorch/technology/architecture.md
     - intents/evorch/decisions/0005-headless-kernel-and-gui-separation.md
-    - intents/evorch/decisions/0018-sqlite-event-sourcing.md
+    - intents/evorch/decisions/0018-sqlite-storage-schema.md
     - intents/evorch/interviews/grill-v02-loop-foundation.json
   new_intent_needed: false
   placement_rationale: "compaction は storage の削除/保守ではなく AgentRun の model-visible context lifecycle を制御する kernel 機能であり、headless runtime の Context 責務に属する。SQLite event sourcing は raw history を不変に残す supporting invariant、orchestration は goal/contract/unfinished work を summary に保持する consumer である"
