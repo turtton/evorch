@@ -92,6 +92,14 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - agent_loop は `AgentContext::new` 直後・push_user 前に `push_system`（Role::System 単一 Text）を run 開始時 1 回のみ挿入（Stable Prefix、全ターン byte-identical）。catalog 未接続時は v0.1 動作（User 先頭）を維持。
 - `RunConfig.category: Option<String>`、delegate/delegate_background args の category は固定 6 種で検証（`parse_category`、未知は model call 前に拒否）。
 
+## v0.2 workspace 隔離の実装確定（issue #51、PR #52、2026-09-02）
+
+- `RunConfig.workspace_mode` は typed enum（`Shared` 既定で既存呼出し互換 / `Isolated`）。`MergeMode::Branch` 既定（branch が deliverable）で serde 未知値は fail-closed。
+- isolated run は runtime 所有の worktree manager（`crates/runtime/src/workspace.rs`）が `<repo>/.evorch/worktrees/<run-id>` に worktree + branch `evorch/task/<run-id>` を作成。branch・worktree path の pre-existing 衝突は fail-closed で拒否、作成途中失敗は自前作成物のみ stages rollback し、user の既存 branch / worktree は決して触らない。
+- mount policy は最小権限: worktree root が新 workspace_root、git common dir は ro overlay、`worktrees/<name>` / `objects` / `refs/heads` / `logs` のみ rw。`packed-refs` は rewrite を要するため意図的に writable にしない。承認拒否 / capability deny の tool call は process を起動せず、writable `.git` が権限昇格経路にならないことを test で固定。
+- runtime wiring は fail-closed `SandboxFactory` seam + run ごとの executor 差替で実装し、`run_agent` tail で worktree を決定的に cleanup。branch は merge deliverable として cleanup 後も保持する。`AgentInspection.workspace` で branch / path を観測可能。
+- panic 時の cleanup 抜け（Drop-guard 化）と refs/heads rw 範囲の絞込みは将来検討事項。
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
