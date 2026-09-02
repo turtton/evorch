@@ -149,7 +149,9 @@ impl TranscriptModel {
             event_bus::EventKind::Lifecycle(_)
             | event_bus::EventKind::Usage(_)
             | event_bus::EventKind::Provider(_)
-            | event_bus::EventKind::Fault(_) => {}
+            | event_bus::EventKind::Fault(_)
+            // エージェント間メッセージは transcript 表示の対象外（明示 no-op）。
+            | event_bus::EventKind::AgentMessage(_) => {}
         }
     }
 

@@ -1,6 +1,9 @@
 use std::time::UNIX_EPOCH;
 
-use event_bus::{EventMeta, LifecycleEvent, UsageEvent};
+use event_bus::{
+    AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, EventMeta,
+    LifecycleEvent, UsageEvent,
+};
 
 use super::*;
 
@@ -151,4 +154,50 @@ fn repo_append_event_rejects_raw_usage_without_increasing_row_count() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("events row count must be readable");
     assert_eq!(after, before);
+}
+
+#[test]
+fn kind_name_maps_agent_message_events() {
+    // Given: 移行済み DB と AgentMessage イベント
+    let connection = fixture();
+    let delivered = Event {
+        meta: EventMeta {
+            schema_version: event_bus::SCHEMA_VERSION,
+            monotonic: Duration::from_nanos(1),
+            wall_clock: UNIX_EPOCH + Duration::from_nanos(1),
+        },
+        kind: AgentMessageEvent::Delivered {
+            message: AgentMessage {
+                message_id: "msg-1".into(),
+                sender_run_id: "run-1".into(),
+                recipient_run_id: "run-2".into(),
+                kind: AgentMessageKind::Send,
+                content: "ping".into(),
+                reply_to: None,
+            },
+            disposition: DeliveryDisposition::Wake,
+        }
+        .into(),
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: イベントを追記して kind 列と復元結果を読む
+    append_event(
+        &connection,
+        Some("s1"),
+        &delivered,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .unwrap();
+    let kind: String = connection
+        .query_row("SELECT kind FROM events ORDER BY id ASC", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: kind 列は "AgentMessage" で、復元されたイベントも同一種別である
+    assert_eq!(kind, "AgentMessage");
+    assert_eq!(stored[0].event, delivered);
 }

@@ -165,6 +165,9 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             | ToolEvent::ExecutionDenied { .. },
         ) => {}
         EventKind::Usage(_) | EventKind::Provider(_) | EventKind::Fault(_) => {}
+        // エージェント間メッセージはセッション射影の対象外（transcript は
+        // events を直接読んで復元する）。
+        EventKind::AgentMessage(_) => {}
     }
 }
 
@@ -245,7 +248,10 @@ pub(crate) fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageEr
 #[rustfmt::skip]
 mod tests {
     use super::*;
-    use event_bus::{AgentRunPhase, Event, EventMeta, FaultEvent, ProviderEvent, UsageEvent};
+    use event_bus::{
+        AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition,
+        Event, EventMeta, FaultEvent, ProviderEvent, UsageEvent,
+    };
     use std::time::{Duration, UNIX_EPOCH};
 
     fn apply(kind: impl Into<EventKind>, session: Option<&str>) -> ProjectionState {
@@ -279,4 +285,13 @@ mod tests {
     noop_test!(provider_does_not_mutate, ProviderEvent::ProviderFallback { from_provider: "a".into(), to_provider: "b".into(), reason: "r".into() });
     noop_test!(fault_does_not_mutate, FaultEvent::SubscriberLagged { subscriber_id: 1, skipped: 2 });
     noop_test!(agent_run_state_changed_does_not_mutate, LifecycleEvent::AgentRunStateChanged { run_id: "r".into(), from: AgentRunPhase::Pending, to: AgentRunPhase::Running, reason: None });
+    #[test] fn projection_ignores_agent_message_events() {
+        // Given: Message/Lifecycle イベントのみで構成したイベント列
+        let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1"))];
+        // When: 同一列の末尾へ AgentMessage イベントを追加する
+        let mut with_agent_message = base.to_vec();
+        with_agent_message.push(stored(AgentMessageEvent::Delivered { message: AgentMessage { message_id: "msg-1".into(), sender_run_id: "run-1".into(), recipient_run_id: "run-2".into(), kind: AgentMessageKind::Send, content: "ping".into(), reply_to: None }, disposition: DeliveryDisposition::Steering }, Some("s1")));
+        // Then: 射影状態は追加前後で等しい（fold は no-op）
+        assert_eq!(fold(&with_agent_message), fold(&base));
+    }
 }

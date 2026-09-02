@@ -2,7 +2,9 @@
 use std::fmt;
 use std::time::SystemTime;
 
-use event_bus::{EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent};
+use event_bus::{
+    AgentMessageEvent, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+};
 
 use crate::error::{SecretRule, StorageError};
 
@@ -307,6 +309,11 @@ impl SecretGuard {
                 // FinishReason::Other は provider 由来の任意文字列を保持し得る
                 // （providers::observe::emit_completed）。
                 self.check_text("event", "RequestCompleted.finish_reason", finish_reason)
+            }
+            // AgentMessage の本文は MessageDelta と同様の自由文字列であり、
+            // bus / storage へ流れるため fail-closed で走査する。
+            EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
+                self.check_text("event", "AgentMessage.content", &message.content)
             }
             EventKind::Lifecycle(_)
             | EventKind::Tool(_)
