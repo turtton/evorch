@@ -73,6 +73,8 @@ pub enum EventKind {
     Provider(ProviderEvent),
     /// 障害関連のイベント。
     Fault(FaultEvent),
+    /// エージェント間メッセージ関連のイベント。
+    AgentMessage(AgentMessageEvent),
 }
 
 impl From<LifecycleEvent> for EventKind {
@@ -108,6 +110,12 @@ impl From<ProviderEvent> for EventKind {
 impl From<FaultEvent> for EventKind {
     fn from(event: FaultEvent) -> Self {
         Self::Fault(event)
+    }
+}
+
+impl From<AgentMessageEvent> for EventKind {
+    fn from(event: AgentMessageEvent) -> Self {
+        Self::AgentMessage(event)
     }
 }
 
@@ -459,6 +467,65 @@ pub enum FaultEvent {
         subscriber_id: u64,
         /// 取りこぼしたイベント数。
         skipped: u64,
+    },
+}
+
+/// エージェント間で配送されるメッセージ封筒です。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentMessage {
+    /// メッセージ識別子。
+    pub message_id: String,
+    /// 送信側エージェント実行の識別子。
+    pub sender_run_id: String,
+    /// 受信側エージェント実行の識別子。
+    pub recipient_run_id: String,
+    /// メッセージ種別。`Reply` は `reply_to` による相関を意味します。
+    pub kind: AgentMessageKind,
+    /// メッセージ本文。
+    pub content: String,
+    /// `kind` が [`AgentMessageKind::Reply`] のときの相関元メッセージ識別子。
+    pub reply_to: Option<String>,
+}
+
+/// エージェント間メッセージの種別です。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageKind {
+    /// 相関しない一方向の送信です。
+    Send,
+    /// [`AgentMessage::reply_to`] で先行メッセージと相関する返信です。
+    Reply,
+    /// 実行中の受信者へ割り込む指示です。
+    Steering,
+}
+
+/// 配信時点で確定する受信側での扱いです。
+///
+/// 受信者の位相と送受信者の関係から配信時に決定されます。`Wake` は受信者が
+/// 待機中（[`AgentRunPhase::Waiting`]）のため実行を再開させる扱い、`Steering`
+/// は送信者が受信者の親であり受信者がターン中のため次回 loop-top で注入する
+/// 扱い、`Aside` は受信者のステップ境界まで保留する扱いを意味します。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryDisposition {
+    /// 受信者がターン中のため次回 loop-top で注入します。
+    Steering,
+    /// 受信者のステップ境界まで保留します。
+    Aside,
+    /// 受信者が待機中のため実行を再開させます。
+    Wake,
+}
+
+/// エージェント間メッセージの配送に関するイベントです。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum AgentMessageEvent {
+    /// メッセージが受信者へ配送された。
+    Delivered {
+        /// 配送されたメッセージ封筒。
+        message: AgentMessage,
+        /// 配信時に決定された受信側での扱い。
+        disposition: DeliveryDisposition,
     },
 }
 
@@ -996,6 +1063,75 @@ mod tests {
         assert_eq!(
             SCHEMA_VERSION, 1,
             "schema_version は追加のみで 1 を維持する"
+        );
+    }
+
+    // Given: reply_to と disposition を持つ完全な AgentMessage 封筒。
+    // When: EventKind::AgentMessage として JSON 文字列へシリアライズして復元する。
+    // Then: EventKind 全体が等しく、封筒の全フィールドと disposition が保存される。
+    #[test]
+    fn agent_message_envelope_round_trips_through_event_kind() {
+        let kind = EventKind::AgentMessage(AgentMessageEvent::Delivered {
+            message: AgentMessage {
+                message_id: "msg-2".into(),
+                sender_run_id: "run-1".into(),
+                recipient_run_id: "run-2".into(),
+                kind: AgentMessageKind::Reply,
+                content: "result".into(),
+                reply_to: Some("msg-1".into()),
+            },
+            disposition: DeliveryDisposition::Steering,
+        });
+
+        let json = serde_json::to_string(&kind).expect("serialize EventKind::AgentMessage");
+        let restored: EventKind = serde_json::from_str(&json).expect("deserialize EventKind");
+        assert_eq!(kind, restored);
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(value["kind"], "AgentMessage", "outer tag mismatch");
+        // AgentMessageKind / DeliveryDisposition は snake_case で送出される。
+        assert_eq!(
+            value["payload"]["payload"]["message"]["kind"], "reply",
+            "message kind tag mismatch"
+        );
+        assert_eq!(
+            value["payload"]["payload"]["disposition"], "steering",
+            "disposition tag mismatch"
+        );
+    }
+
+    // Given: AgentMessage イベントと Lifecycle イベント。
+    // When: それぞれ JSON 文字列へシリアライズして復元する。
+    // Then: AgentMessage の大分類タグは Lifecycle と異なり、Lifecycle 側は
+    //       従来どおり不変で往復する。
+    #[test]
+    fn agent_message_event_kind_tag_is_distinct_from_lifecycle() {
+        let agent = EventKind::AgentMessage(AgentMessageEvent::Delivered {
+            message: AgentMessage {
+                message_id: "msg-1".into(),
+                sender_run_id: "run-1".into(),
+                recipient_run_id: "run-2".into(),
+                kind: AgentMessageKind::Send,
+                content: "ping".into(),
+                reply_to: None,
+            },
+            disposition: DeliveryDisposition::Wake,
+        });
+        let lifecycle = EventKind::Lifecycle(LifecycleEvent::Started {
+            session_id: "session-1".into(),
+        });
+
+        let agent_json = serde_json::to_string(&agent).expect("serialize AgentMessage kind");
+        let agent_value: serde_json::Value = serde_json::from_str(&agent_json).expect("valid JSON");
+        assert_eq!(agent_value["kind"], "AgentMessage");
+        assert_ne!(agent_value["kind"], "Lifecycle");
+
+        let lifecycle_json = serde_json::to_string(&lifecycle).expect("serialize Lifecycle kind");
+        let restored: EventKind =
+            serde_json::from_str(&lifecycle_json).expect("deserialize Lifecycle kind");
+        assert_eq!(
+            lifecycle, restored,
+            "lifecycle round-trip must be unchanged"
         );
     }
 }

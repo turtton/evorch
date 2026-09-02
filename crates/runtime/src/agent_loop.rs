@@ -1,5 +1,9 @@
 //! 単一 AgentRun のTokio実行ループ。
 
+// allow: SIZE_OK — select 駆動の単一 AgentRun 実行ループとその状態 (LoopState) が
+// 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
+
+mod messages;
 mod tool_calls;
 
 use std::sync::{Arc, Weak};
@@ -11,7 +15,7 @@ use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
 use crate::runtime::{Shared, loop_shared};
-use crate::{AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunState};
+use crate::{AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState};
 use tool_calls::standard_tool_specs;
 
 pub(crate) struct RunTask {
@@ -19,6 +23,8 @@ pub(crate) struct RunTask {
     pub(crate) role: Role,
     pub(crate) prompt: String,
     pub(crate) config: RunConfig,
+    pub(crate) parent: Option<RunId>,
+    pub(crate) mailbox: Arc<RunMailbox>,
 }
 
 pub(crate) struct LoopChannels {
@@ -26,6 +32,7 @@ pub(crate) struct LoopChannels {
     pub(crate) message_count_tx: watch::Sender<usize>,
     pub(crate) inbox_rx: mpsc::Receiver<String>,
     pub(crate) cancel_rx: watch::Receiver<bool>,
+    pub(crate) mailbox_version_rx: watch::Receiver<u64>,
 }
 
 pub(crate) struct LoopShared {
@@ -76,12 +83,26 @@ impl LoopState {
         crate::AgentRuntime::from_weak(&self.shared.runtime)
     }
 
+    /// メタ操作の呼び出し元 (このループの run) の RunId を返す。
+    pub(crate) fn caller_run_id(&self) -> RunId {
+        self.task.run_id
+    }
+
+    /// 委譲の記録として Delegated イベントを発行する。
+    pub(crate) fn emit_delegated(&self, session_id: &str, target: &str) {
+        self.shared.bus.emit(Event::new(LifecycleEvent::Delegated {
+            session_id: session_id.to_string(),
+            target: target.to_string(),
+        }));
+    }
+
     async fn execute(&mut self) {
         loop {
             if self.cancelled() {
                 self.finish_cancelled();
                 return;
             }
+            self.inject_parent_messages();
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -131,11 +152,18 @@ impl LoopState {
 
             match finish_reason {
                 FinishReason::ToolUse => continue,
-                FinishReason::Stop if !self.task.config.interactive || self.resumed => {
-                    self.finish_success();
-                    return;
-                }
                 FinishReason::Stop => {
+                    if self.cancelled() {
+                        self.finish_cancelled();
+                        return;
+                    }
+                    if self.flush_aside() {
+                        continue;
+                    }
+                    if !self.task.config.interactive || self.resumed {
+                        self.finish_success();
+                        return;
+                    }
                     if !self.wait_for_input().await {
                         return;
                     }
@@ -160,24 +188,42 @@ impl LoopState {
         if self.transition(AgentRunPhase::Waiting, None).is_err() {
             return false;
         }
-        let message = tokio::select! {
-            biased;
-            changed = self.channels.cancel_rx.changed() => {
-                if changed.is_ok() && self.cancelled() {
-                    self.finish_cancelled();
+        loop {
+            tokio::select! {
+                biased;
+                changed = self.channels.cancel_rx.changed() => {
+                    if changed.is_ok() && self.cancelled() {
+                        self.finish_cancelled();
+                    }
+                    return false;
                 }
-                return false;
+                message = self.channels.inbox_rx.recv() => {
+                    let Some(message) = message else {
+                        self.finish_error("interactive inbox closed".to_string());
+                        return false;
+                    };
+                    self.context.push_user(&message);
+                    self.publish_message_count();
+                    self.resumed = true;
+                    return self.transition(AgentRunPhase::Running, None).is_ok();
+                }
+                changed = self.channels.mailbox_version_rx.changed() => {
+                    if changed.is_err() {
+                        continue;
+                    }
+                    if self.task.mailbox.is_empty() {
+                        continue;
+                    }
+                    let messages = self.task.mailbox.drain_where(|_| true);
+                    if messages.is_empty() {
+                        continue;
+                    }
+                    self.inject_messages(messages);
+                    self.resumed = true;
+                    return self.transition(AgentRunPhase::Running, None).is_ok();
+                }
             }
-            message = self.channels.inbox_rx.recv() => message,
-        };
-        let Some(message) = message else {
-            self.finish_error("interactive inbox closed".to_string());
-            return false;
-        };
-        self.context.push_user(&message);
-        self.publish_message_count();
-        self.resumed = true;
-        self.transition(AgentRunPhase::Running, None).is_ok()
+        }
     }
 
     pub(crate) fn transition(
@@ -185,6 +231,9 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
+        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+            self.task.mailbox.close();
+        }
         let event = self
             .run_state
             .transition(self.task.run_id, phase, reason)

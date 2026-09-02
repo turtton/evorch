@@ -197,6 +197,7 @@ const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Usage(_) => "Usage",
         EventKind::Provider(_) => "Provider",
         EventKind::Fault(_) => "Fault",
+        EventKind::AgentMessage(_) => "AgentMessage",
     }
 }
 
@@ -209,7 +210,11 @@ mod tests;
 mod secret_guard_tests {
     use std::time::UNIX_EPOCH;
 
-    use event_bus::{EventMeta, LifecycleEvent, MessageEvent};
+    use event_bus::{
+        AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, EventMeta,
+        LifecycleEvent, MessageEvent,
+    };
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -307,5 +312,46 @@ mod secret_guard_tests {
             .unwrap();
         assert_eq!(rows_after, rows_before);
         assert_eq!(bytes_after, bytes_before);
+    }
+
+    #[test]
+    fn secret_guard_rejects_agent_message_containing_secret() {
+        // Given: 公開 StorageHandle 経路と secret 形状の本文を持つ AgentMessage イベント
+        let temp_dir = TempDir::new().expect("temporary directory must be created");
+        let storage = crate::Storage::open(crate::StorageConfig {
+            db_path: temp_dir.path().join("guard.db"),
+            ..crate::StorageConfig::default()
+        })
+        .expect("storage must open");
+        let handle = storage.handle();
+        let bad = event_with(
+            AgentMessageEvent::Delivered {
+                message: AgentMessage {
+                    message_id: "msg-1".into(),
+                    sender_run_id: "run-1".into(),
+                    recipient_run_id: "run-2".into(),
+                    kind: AgentMessageKind::Send,
+                    content: "leak sk-test-evorch-9f8e7d6c5b4a3f2e1d".into(),
+                    reply_to: None,
+                },
+                disposition: DeliveryDisposition::Steering,
+            }
+            .into(),
+        );
+
+        // When: StorageHandle::append_event で追記する
+        let error = handle
+            .append_event(Some("s1"), &bad)
+            .expect_err("secret-shaped agent message must be rejected");
+
+        // Then: Message イベントと同じく field 名付きで fail-closed に拒否される
+        assert!(matches!(
+            error,
+            StorageError::SecretDetected {
+                entity: "event",
+                field: "AgentMessage.content",
+                ..
+            }
+        ));
     }
 }

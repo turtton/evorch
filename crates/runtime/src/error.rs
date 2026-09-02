@@ -2,6 +2,8 @@
 
 use event_bus::AgentRunPhase;
 
+use crate::RunId;
+
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
@@ -53,4 +55,36 @@ pub enum RuntimeError {
     /// サンドボックス構築に失敗した (fail-closed, ADR 0021)。
     #[error("サンドボックス構築に失敗しました: {detail}")]
     Sandbox { detail: String },
+
+    /// 送信者と受信者の親子関係またはメッセージ種別のルールにより配送が拒否された。
+    #[error("AgentRun {sender} から {recipient} へのメッセージが拒否されました: {detail}")]
+    MessageDenied {
+        /// 拒否されたメッセージの送信元 run ID。
+        sender: RunId,
+        /// 拒否されたメッセージの宛先 run ID。
+        recipient: RunId,
+        /// 拒否理由。
+        detail: String,
+    },
+
+    /// 指定されたメッセージ ID に対応する相関関係が存在しない。
+    #[error("未知のメッセージ ID です: {message_id}")]
+    UnknownMessage {
+        /// 存在しなかったメッセージ ID。
+        message_id: String,
+    },
+
+    /// 返信待ちがタイムアウトした。
+    #[error("返信待ちがタイムアウトしました: {message_id}")]
+    ReplyTimeout {
+        /// 待機していた元メッセージ ID。
+        message_id: String,
+    },
+
+    /// 受信者 run の mailbox が一杯である。
+    #[error("AgentRun {run_id} の mailbox が一杯です")]
+    MailboxFull {
+        /// mailbox が一杯だった run ID。
+        run_id: String,
+    },
 }

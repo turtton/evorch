@@ -4,17 +4,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
 use agents::Role;
-use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
+use event_bus::{
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
+    EventBus, EventKind, LifecycleEvent,
+};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
-use crate::{
-    AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunConfig, RunId, RuntimeError,
-};
+use crate::mailbox::{PushError, RunMailbox};
+use crate::run::RunConfig;
+use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
 
@@ -34,18 +39,28 @@ pub(crate) struct Shared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     next_run_id: AtomicU64,
+    next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
+    sent: Mutex<HashMap<String, SentRecord>>,
 }
 
 struct RunEntry {
     role: Role,
     name: String,
     model: String,
+    parent: Option<RunId>,
+    phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<String>,
     cancel_tx: watch::Sender<bool>,
+    mailbox: Arc<RunMailbox>,
     _join: Option<JoinHandle<()>>,
+}
+
+struct SentRecord {
+    sender: RunId,
+    recipient: RunId,
 }
 
 impl AgentRuntime {
@@ -65,7 +80,9 @@ impl AgentRuntime {
                 executor,
                 model,
                 next_run_id: AtomicU64::new(1),
+                next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
+                sent: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -94,6 +111,36 @@ impl AgentRuntime {
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
     pub fn delegate_background(&self, role: Role, prompt: String, config: RunConfig) -> RunId {
+        self.spawn_run(None, role, prompt, config)
+    }
+
+    /// 指定した親 run の子として run を登録してバックグラウンド実行を開始し、その ID を返す。
+    ///
+    /// # Errors
+    /// 親 run が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn delegate_background_as_child(
+        &self,
+        parent: RunId,
+        role: Role,
+        prompt: impl Into<String>,
+        config: RunConfig,
+    ) -> Result<RunId, RuntimeError> {
+        {
+            let runs = lock_runs(&self.shared.runs);
+            if !runs.contains_key(&parent) {
+                return Err(unknown_run(parent));
+            }
+        }
+        Ok(self.spawn_run(Some(parent), role, prompt.into(), config))
+    }
+
+    fn spawn_run(
+        &self,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+    ) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
         let name = config
             .name
@@ -104,17 +151,23 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let phase_tx_entry = phase_tx.clone();
+        let mailbox = Arc::new(RunMailbox::new());
+        let mailbox_version_rx = mailbox.subscribe_version();
         let task = RunTask {
             run_id,
             role,
             prompt,
             config,
+            parent,
+            mailbox: Arc::clone(&mailbox),
         };
         let channels = LoopChannels {
             phase_tx,
             message_count_tx,
             inbox_rx,
             cancel_rx,
+            mailbox_version_rx,
         };
         lock_runs(&self.shared.runs).insert(
             run_id,
@@ -122,10 +175,13 @@ impl AgentRuntime {
                 role,
                 name,
                 model,
+                parent,
+                phase_tx: phase_tx_entry,
                 phase_rx,
                 message_count_rx,
                 inbox_tx,
                 cancel_tx,
+                mailbox: Arc::clone(&mailbox),
                 _join: None,
             },
         );
@@ -235,6 +291,317 @@ impl AgentRuntime {
             return Err(unknown_run(run_id));
         }
         Ok(RunEntryView { runs, run_id })
+    }
+
+    /// AgentRun 間メッセージを配送する単一入口。
+    ///
+    /// 送信者・受信者の存否、自己宛防止、親子関係、メッセージ種別のルールを
+    /// 臨界区内で検証し、受理できれば受信者の mailbox に追加してイベントを発行する。
+    ///
+    /// # Errors
+    /// - 送信者または受信者が存在しない: [`RuntimeError::UnknownRun`]
+    /// - 自己宛・sibling・無関係: [`RuntimeError::MessageDenied`]
+    /// - Steering が親→子でない: [`RuntimeError::MessageDenied`]
+    /// - Reply に `reply_to` なし: [`RuntimeError::MessageDenied`]
+    /// - Reply の `reply_to` が相関関係と不一致: [`RuntimeError::UnknownMessage`]
+    /// - 受信者が終端位相: [`RuntimeError::RunTerminated`]
+    /// - mailbox 一杯: [`RuntimeError::MailboxFull`]
+    pub fn send_agent_message(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        kind: AgentMessageKind,
+        content: impl Into<String>,
+        reply_to: Option<String>,
+    ) -> Result<String, RuntimeError> {
+        let (message_id, message, disposition) =
+            self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?;
+        self.shared.bus.emit(Event::new(EventKind::AgentMessage(
+            AgentMessageEvent::Delivered {
+                message,
+                disposition,
+            },
+        )));
+        Ok(message_id)
+    }
+
+    fn prepare_delivery(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        kind: AgentMessageKind,
+        content: String,
+        reply_to: Option<String>,
+    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        let runs = lock_runs(&self.shared.runs);
+        let sender_entry = runs.get(&sender).ok_or_else(|| unknown_run(sender))?;
+        let recipient_entry = runs.get(&recipient).ok_or_else(|| unknown_run(recipient))?;
+
+        if sender == recipient {
+            return Err(RuntimeError::MessageDenied {
+                sender,
+                recipient,
+                detail: "自己宛てのメッセージは許可されていません".to_string(),
+            });
+        }
+
+        let is_parent_to_child = sender_entry.parent == Some(recipient);
+        let is_child_to_parent = recipient_entry.parent == Some(sender);
+
+        if kind == AgentMessageKind::Steering && !is_child_to_parent {
+            return Err(RuntimeError::MessageDenied {
+                sender,
+                recipient,
+                detail: "steering は親から子へのみ許可されています".to_string(),
+            });
+        }
+
+        if !is_parent_to_child && !is_child_to_parent {
+            return Err(RuntimeError::MessageDenied {
+                sender,
+                recipient,
+                detail: "親子関係のない run 間のメッセージは許可されていません".to_string(),
+            });
+        }
+
+        let phase = *recipient_entry.phase_rx.borrow();
+        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+            return Err(RuntimeError::RunTerminated {
+                run_id: recipient.to_string(),
+            });
+        }
+
+        let mut sent = self
+            .shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let reply_correlation = if kind == AgentMessageKind::Reply {
+            let reply_id = reply_to
+                .as_ref()
+                .ok_or_else(|| RuntimeError::MessageDenied {
+                    sender,
+                    recipient,
+                    detail: "Reply には reply_to が必要です".to_string(),
+                })?;
+            let record = sent
+                .get(reply_id)
+                .ok_or_else(|| RuntimeError::UnknownMessage {
+                    message_id: reply_id.clone(),
+                })?;
+            if record.recipient != sender || record.sender != recipient {
+                return Err(RuntimeError::UnknownMessage {
+                    message_id: reply_id.clone(),
+                });
+            }
+            Some(reply_id.clone())
+        } else {
+            None
+        };
+
+        let message_id = format!(
+            "msg-{}",
+            self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
+        );
+
+        let message = AgentMessage {
+            message_id: message_id.clone(),
+            sender_run_id: sender.to_string(),
+            recipient_run_id: recipient.to_string(),
+            kind: kind.clone(),
+            content: content.clone(),
+            reply_to: reply_to.clone(),
+        };
+
+        let mailbox = Arc::clone(&recipient_entry.mailbox);
+        if let Err(push_error) = mailbox.try_push(message.clone()) {
+            return Err(match push_error {
+                PushError::Full => RuntimeError::MailboxFull {
+                    run_id: recipient.to_string(),
+                },
+                PushError::Closed => RuntimeError::RunTerminated {
+                    run_id: recipient.to_string(),
+                },
+            });
+        }
+
+        if reply_correlation.is_none() {
+            sent.insert(message_id.clone(), SentRecord { sender, recipient });
+        }
+        drop(sent);
+        drop(runs);
+
+        let disposition = match phase {
+            AgentRunPhase::Waiting => DeliveryDisposition::Wake,
+            AgentRunPhase::Pending | AgentRunPhase::Running => {
+                if is_child_to_parent {
+                    DeliveryDisposition::Steering
+                } else {
+                    DeliveryDisposition::Aside
+                }
+            }
+            AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
+        };
+
+        Ok((message_id, message, disposition))
+    }
+
+    /// `run_id` の inbox に届いているすべての AgentMessage を FIFO 順で取り出す。
+    ///
+    /// # Errors
+    /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn take_inbox(&self, run_id: RunId) -> Result<Vec<AgentMessage>, RuntimeError> {
+        let runs = lock_runs(&self.shared.runs);
+        let run_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+        let mailbox = Arc::clone(&run_entry.mailbox);
+        Ok(mailbox.drain_all())
+    }
+
+    /// `message_id` に対応する返信を最大 `timeout` まで待つ。
+    ///
+    /// 返信が到着すると返信メッセージを返す。相手 run が返信せずに終端した場合は
+    /// [`RuntimeError::RunTerminated`]、制限時間を超えた場合は
+    /// [`RuntimeError::ReplyTimeout`] を返す。タイムアウトした場合、遅延返信は
+    /// 未読のまま inbox / 注入経路で後から観測される。
+    ///
+    /// # Errors
+    /// - `message_id` が `run_id` が送信したものでない: [`RuntimeError::UnknownMessage`]
+    /// - 返信元 run が終端: [`RuntimeError::RunTerminated`]
+    /// - 待機時間超過: [`RuntimeError::ReplyTimeout`]
+    pub async fn wait_reply(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+        timeout: Duration,
+    ) -> Result<AgentMessage, RuntimeError> {
+        let (waiter_mailbox, mut replier_phase_rx, version_rx) = {
+            let runs = lock_runs(&self.shared.runs);
+            let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+            let sent = self
+                .shared
+                .sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = sent
+                .get(message_id)
+                .ok_or_else(|| RuntimeError::UnknownMessage {
+                    message_id: message_id.to_string(),
+                })?;
+            if record.sender != run_id {
+                return Err(RuntimeError::UnknownMessage {
+                    message_id: message_id.to_string(),
+                });
+            }
+            let replier_entry =
+                runs.get(&record.recipient)
+                    .ok_or_else(|| RuntimeError::RunTerminated {
+                        run_id: record.recipient.to_string(),
+                    })?;
+            let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
+            let replier_phase_rx = replier_entry.phase_rx.clone();
+            let version_rx = waiter_entry.mailbox.subscribe_version();
+            (waiter_mailbox, replier_phase_rx, version_rx)
+        };
+
+        let mut version_rx = version_rx;
+        let deadline = Instant::now() + timeout;
+
+        let current_phase = *self.entry(run_id)?.phase_rx.borrow();
+        if current_phase == AgentRunPhase::Running {
+            let _ = self.transition_phase(run_id, AgentRunPhase::Waiting).await;
+        }
+
+        let result = loop {
+            if let Some(reply) = waiter_mailbox.remove_first_where(|message| {
+                message.kind == AgentMessageKind::Reply
+                    && message.reply_to.as_deref() == Some(message_id)
+            }) {
+                self.remove_sent_record(message_id);
+                break Ok(reply);
+            }
+
+            let current_replier_phase = *replier_phase_rx.borrow();
+            if current_replier_phase == AgentRunPhase::Done
+                || current_replier_phase == AgentRunPhase::Error
+            {
+                let replier_run_id = {
+                    let _runs = lock_runs(&self.shared.runs);
+                    self.shared
+                        .sent
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(message_id)
+                        .map(|record| record.recipient.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+                self.remove_sent_record(message_id);
+                break Err(RuntimeError::RunTerminated {
+                    run_id: replier_run_id,
+                });
+            }
+
+            tokio::select! {
+                changed = version_rx.changed() => {
+                    if changed.is_err() {
+                        break Err(RuntimeError::RunTerminated {
+                            run_id: "unknown".to_string(),
+                        });
+                    }
+                }
+                changed = replier_phase_rx.changed() => {
+                    if changed.is_err() {
+                        self.remove_sent_record(message_id);
+                        break Err(RuntimeError::RunTerminated {
+                            run_id: run_id.to_string(),
+                        });
+                    }
+                }
+                _ = sleep_until(deadline) => {
+                    self.remove_sent_record(message_id);
+                    break Err(RuntimeError::ReplyTimeout {
+                        message_id: message_id.to_string(),
+                    });
+                }
+            }
+        };
+
+        let _ = self.transition_phase(run_id, AgentRunPhase::Running).await;
+        result
+    }
+
+    async fn transition_phase(&self, run_id: RunId, to: AgentRunPhase) -> Result<(), RuntimeError> {
+        let from = *self.entry(run_id)?.phase_rx.borrow();
+        if from == to {
+            return Ok(());
+        }
+        if !crate::state::is_valid_transition(from, to) {
+            return Err(RuntimeError::InvalidTransition { from, to });
+        }
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: run_id.to_string(),
+                from,
+                to,
+                reason: None,
+            }));
+        let phase_tx = {
+            let runs = lock_runs(&self.shared.runs);
+            let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+            entry.phase_tx.clone()
+        };
+        phase_tx.send_replace(to);
+        Ok(())
+    }
+
+    fn remove_sent_record(&self, message_id: &str) {
+        let mut sent = self
+            .shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sent.remove(message_id);
     }
 }
 

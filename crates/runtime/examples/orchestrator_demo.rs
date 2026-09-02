@@ -242,6 +242,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("[event] kind=Provider payload={event:?}")
                     }
                     EventKind::Fault(event) => println!("[event] kind=Fault payload={event:?}"),
+                    EventKind::AgentMessage(event) => {
+                        println!("[event] kind=AgentMessage payload={event:?}")
+                    }
                 },
                 Err(RecvError::Lagged(skipped)) => {
                     println!("[event] kind=Lagged payload=skipped:{skipped}")

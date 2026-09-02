@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// | Role | ツール | ネットワーク | 委譲 |
 /// |---|---|---|---|
-/// | Orchestrator | 委譲・調査系のみ (mutation tool なし) | Denied | 可 |
+/// | Orchestrator | 委譲・調査・AgentRun 間メッセージ系のみ (mutation tool なし) | Denied | 可 |
 /// | Explorer | read / grep | OptIn | 不可 |
-/// | Worker | read / edit / grep / shell / git_diff | Denied | 不可 |
+/// | Worker | read / edit / grep / shell / git_diff + AgentRun 間メッセージ系 | Denied | 不可 |
 /// | Reviewer | read / grep / git_diff | Denied | 不可 |
 ///
 /// # 設計上の決定
@@ -63,6 +63,9 @@ impl Role {
                     "delegate",
                     "delegate_background",
                     "send_message",
+                    "send",
+                    "wait_reply",
+                    "inbox",
                     "wait",
                     "cancel",
                     "list_agents",
@@ -78,7 +81,16 @@ impl Role {
             ),
             Role::Explorer => RoleCapabilities::new(["read", "grep"], NetworkAccess::OptIn, false),
             Role::Worker => RoleCapabilities::new(
-                ["read", "edit", "grep", "shell", "git_diff"],
+                [
+                    "read",
+                    "edit",
+                    "grep",
+                    "shell",
+                    "git_diff",
+                    "send",
+                    "wait_reply",
+                    "inbox",
+                ],
                 NetworkAccess::Denied,
                 false,
             ),

@@ -14,6 +14,9 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
     "delegate",
     "delegate_background",
     "send_message",
+    "send",
+    "wait_reply",
+    "inbox",
     "wait",
     "cancel",
     "list_agents",
@@ -29,7 +32,16 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
 const EXPLORER_TOOLS: &[&str] = &["read", "grep"];
 
 /// ADR 0002 が定める Worker の許可ツール集合 (期待値)。
-const WORKER_TOOLS: &[&str] = &["read", "edit", "grep", "shell", "git_diff"];
+const WORKER_TOOLS: &[&str] = &[
+    "read",
+    "edit",
+    "grep",
+    "shell",
+    "git_diff",
+    "send",
+    "wait_reply",
+    "inbox",
+];
 
 /// ADR 0002 が定める Reviewer の許可ツール集合 (期待値、詳細はワークスペース決定)。
 const REVIEWER_TOOLS: &[&str] = &["read", "grep", "git_diff"];
@@ -112,12 +124,19 @@ fn explorer_allows_exactly_adr_0002_tools() {
 }
 
 #[test]
-fn explorer_denies_mutation_and_delegation_tools() {
-    // Given: Explorer ロール (read / search のみ、write / edit / delegate は拒否)
-    // When: edit / shell / delegate_background の使用可否を問い合わせる
+fn explorer_denies_mutation_delegation_and_messaging_tools() {
+    // Given: Explorer ロール (read / search のみ、write / edit / delegate / messaging は拒否)
+    // When: edit / shell / delegate_background / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Explorer.capabilities();
-    for tool in ["edit", "shell", "delegate_background"] {
+    for tool in [
+        "edit",
+        "shell",
+        "delegate_background",
+        "send",
+        "wait_reply",
+        "inbox",
+    ] {
         assert_denied(caps.check_tool("Explorer", tool), "Explorer", tool);
     }
 }
@@ -189,12 +208,14 @@ fn reviewer_allows_git_diff() {
 }
 
 #[test]
-fn reviewer_denies_mutation_tools() {
-    // Given: Reviewer ロール (レビュー対象を自分で書き換えない)
-    // When: edit の使用可否を問い合わせる
-    // Then: Denied になる
+fn reviewer_denies_mutation_and_messaging_tools() {
+    // Given: Reviewer ロール (レビュー対象を自分で書き換えず、メッセージ交換もしない)
+    // When: edit / send / wait_reply / inbox の使用可否を問い合わせる
+    // Then: すべて Denied になる
     let caps = Role::Reviewer.capabilities();
-    assert_denied(caps.check_tool("Reviewer", "edit"), "Reviewer", "edit");
+    for tool in ["edit", "send", "wait_reply", "inbox"] {
+        assert_denied(caps.check_tool("Reviewer", tool), "Reviewer", tool);
+    }
 }
 
 #[test]
