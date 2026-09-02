@@ -14,5 +14,7 @@ pub use discovery::{default_skill_dirs, discover_skills};
 pub use frontmatter::{
     SkillFrontmatter, SkillValidationError, parse_and_validate, split_frontmatter,
 };
-pub use registry::{SkillDiagnostic, SkillEntry, SkillLoadError, SkillRegistry, SkillScope};
+pub use registry::{
+    SkillDiagnostic, SkillEntry, SkillLoadError, SkillRegistry, SkillScope, render_skills_section,
+};
 pub use resource::{SkillResourceError, read_skill_resource};

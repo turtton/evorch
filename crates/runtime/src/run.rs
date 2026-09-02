@@ -64,6 +64,8 @@ pub struct RunConfig {
     /// run のタスクカテゴリ。システムプロンプトの category overlay 選択に使う。
     /// `None` の場合は overlay を挿入しない。
     pub category: Option<String>,
+    /// 委譲時に子 run の初期 System メッセージへ本文を注入する skill 名。既定は空。
+    pub load_skills: Vec<String>,
     /// 親 workspace を共有するか、専用 git worktree を使用するか。
     pub workspace_mode: WorkspaceMode,
     /// isolated workspace の変更を統合する方法。
@@ -154,6 +156,12 @@ mod tests {
     #[test]
     fn run_config_default_has_no_category() {
         assert!(RunConfig::default().category.is_none());
+    }
+
+    // Given: RunConfig / When: Default / Then: load_skills は空 (skill 注入なし)
+    #[test]
+    fn run_config_default_has_no_load_skills() {
+        assert!(RunConfig::default().load_skills.is_empty());
     }
 
     // Given: RunConfig / When: Default / Then: workspace_mode は Shared (共有 workspace が既定)

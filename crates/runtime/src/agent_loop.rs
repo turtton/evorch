@@ -17,7 +17,7 @@ use tools::ToolExecutor;
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
-use crate::skill::SkillRegistry;
+use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
 use crate::workspace::OwnedWorktree;
 use crate::{
     AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState,
@@ -88,10 +88,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         state.skills().is_some(),
     );
     state.publish_message_count();
-    if let Some(error) = system_prompt_error {
+    if let Err(error) = system_prompt_error {
         // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
-        // Error へ遷移する。reason はカタログの型付きエラー Display であり、
-        // 識別子 (ロール名・キー名・カテゴリ名) のみを運ぶ。
+        // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
+        // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
         state.finish_error(error.to_string());
         return;
     }
@@ -199,24 +199,81 @@ async fn cleanup_worktree(shared: &LoopShared, run_id: RunId, owned: Option<Owne
     }
 }
 
-/// カタログが設定されている場合、run 開始時の System メッセージを履歴へ push する。
+/// 初期 System メッセージの合成で失敗しうるエラー (issue #53 / AC6)。
 ///
-/// カタログなし (None) なら何もせず v0.1 の履歴構成を保つ。カタログ参照に
-/// 失敗した場合は型付きエラーを返し、履歴へは System メッセージを追加しない。
+/// Display は識別子のみを運び、skill 本文や frontmatter 値を漏らさない
+/// ([`SystemPromptCatalogError`] / [`SkillLoadError`] と同一規約)。
+#[derive(Debug, thiserror::Error)]
+enum InitialSystemPromptError {
+    /// カタログ参照の失敗 (既存のカタログエラーをそのまま運ぶ)。
+    #[error(transparent)]
+    Catalog(#[from] SystemPromptCatalogError),
+    /// skill 本文の読み込み失敗 ([`SkillLoadError`] は識別子のみを運ぶ)。
+    #[error(transparent)]
+    Skills(#[from] SkillLoadError),
+    /// load_skills が指定されたが skill レジストリが接続されていない。
+    #[error("skill registry is not configured")]
+    SkillsNotConfigured,
+}
+
+/// run 開始時の初期 System メッセージを履歴へ push する (単一 System 不変条件)。
+///
+/// カタログテキストと skills セクション (load_skills 指定時) を**1 件の**
+/// System メッセージへ合成する。skills セクションはカタログテキストの後ろに
+/// 空行 1 つを挟んで連結する。どちらも無指定なら何もせず v0.1 の履歴構成を
+/// 保つ。解決に失敗した場合は型付きエラーを返し、履歴へは System メッセージを
+/// 追加しない (fail-closed)。
 fn push_initial_system_message(
     shared: &LoopShared,
     task: &RunTask,
     context: &mut AgentContext,
-) -> Option<SystemPromptCatalogError> {
-    let catalog = shared.system_prompts.as_ref()?;
-    let model_id = shared.model.selected_model(task.role);
-    match catalog.system_prompt_for(task.role, task.config.category.as_deref(), &model_id) {
-        Ok(prompt) => {
-            context.push_system(&prompt);
-            None
+) -> Result<(), InitialSystemPromptError> {
+    let catalog_text = match shared.system_prompts.as_ref() {
+        Some(catalog) => {
+            let model_id = shared.model.selected_model(task.role);
+            Some(catalog.system_prompt_for(
+                task.role,
+                task.config.category.as_deref(),
+                &model_id,
+            )?)
         }
-        Err(error) => Some(error),
+        None => None,
+    };
+    let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
+    if catalog_text.is_none() && skills_text.is_none() {
+        return Ok(());
     }
+    let mut composed = String::new();
+    if let Some(catalog) = catalog_text {
+        composed.push_str(&catalog);
+    }
+    if let Some(skills) = skills_text {
+        if !composed.is_empty() {
+            composed.push_str("\n\n");
+        }
+        composed.push_str(&skills);
+    }
+    context.push_system(&composed);
+    Ok(())
+}
+
+/// load_skills 指定時、レジストリから本文を読み込み skills セクション文字列を
+/// 返す。load_skills が空なら None (セクションなし)。
+fn resolve_skills_section(
+    shared: &LoopShared,
+    load_skills: &[String],
+) -> Result<Option<String>, InitialSystemPromptError> {
+    if load_skills.is_empty() {
+        return Ok(None);
+    }
+    let Some(registry) = shared.skills.as_ref() else {
+        return Err(InitialSystemPromptError::SkillsNotConfigured);
+    };
+    let mut loaded = Vec::with_capacity(load_skills.len());
+    for name in load_skills {
+        loaded.push((name.clone(), registry.load_body(name)?));
+    }
+    Ok(Some(render_skills_section(&loaded)))
 }
 
 impl LoopState {

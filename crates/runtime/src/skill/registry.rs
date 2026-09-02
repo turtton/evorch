@@ -132,6 +132,23 @@ impl SkillRegistry {
     }
 }
 
+/// load 済み skill 本文リストを `## Skills` セクション文字列へレンダリングする
+/// (issue #53 / AC6)。
+///
+/// 各 skill はマーカー fence で括られ、要求順を保持する (name ソートは
+/// 行わない)。マーカー形式は [`crate::prompt`] の keyTriggers 埋め込みと
+/// 同規約 (`<!-- ... BEGIN/END -->`) に揃える。決定的: 同一入力からは常に
+/// バイト同一の出力を返す。
+pub fn render_skills_section(loaded: &[(String, String)]) -> String {
+    let mut section = String::from("## Skills");
+    for (name, body) in loaded {
+        section.push_str(&format!(
+            "\n\n<!-- skill:{name} BEGIN -->\n{body}\n<!-- skill:{name} END -->"
+        ));
+    }
+    section
+}
+
 /// [`SkillRegistry::load_body`] の型付きエラー。Display は識別子のみを運ぶ。
 #[derive(Debug, thiserror::Error)]
 pub enum SkillLoadError {
@@ -229,6 +246,56 @@ mod tests {
         assert_eq!(body, "Body line.\nMore.\n");
         assert!(!body.contains("name:"));
         assert!(!body.contains("---"));
+    }
+
+    // -- render_skills_section --------------------------------------------------
+
+    // Given: (name, body) 2 件
+    // When:  render_skills_section を呼ぶ
+    // Then:  ヘッダに続き、要求順どおりのマーカー fence で本文が括られる
+    #[test]
+    fn render_skills_section_renders_header_and_fences_in_request_order() {
+        let loaded = vec![
+            ("alpha".to_owned(), "Alpha body.\n".to_owned()),
+            ("beta".to_owned(), "Beta body.\n".to_owned()),
+        ];
+
+        let section = render_skills_section(&loaded);
+
+        let expected = "## Skills\n\n\
+            <!-- skill:alpha BEGIN -->\nAlpha body.\n\n<!-- skill:alpha END -->\n\n\
+            <!-- skill:beta BEGIN -->\nBeta body.\n\n<!-- skill:beta END -->";
+        assert_eq!(section, expected);
+    }
+
+    // Given: name 順と異なる要求順 (zulu → alpha)
+    // When:  render_skills_section を呼ぶ
+    // Then:  要求順を保持する (name ソートは行わない)
+    #[test]
+    fn render_skills_section_preserves_request_order_over_name_order() {
+        let loaded = vec![
+            ("zulu".to_owned(), "Z body.".to_owned()),
+            ("alpha".to_owned(), "A body.".to_owned()),
+        ];
+
+        let section = render_skills_section(&loaded);
+
+        let zulu = section.find("<!-- skill:zulu BEGIN -->").unwrap();
+        let alpha = section.find("<!-- skill:alpha BEGIN -->").unwrap();
+        assert!(zulu < alpha);
+    }
+
+    // Given: 空の load 済みリスト
+    // When:  render_skills_section を繰り返し呼ぶ
+    // Then:  ヘッダのみを返し、常にバイト一致する (決定的)
+    #[test]
+    fn render_skills_section_is_deterministic_and_header_only_for_empty_input() {
+        assert_eq!(render_skills_section(&[]), "## Skills");
+        let loaded = vec![("demo".to_owned(), "Body.".to_owned())];
+        assert_eq!(
+            render_skills_section(&loaded),
+            render_skills_section(&loaded)
+        );
     }
 
     /// Given: 未登録の skill 名
