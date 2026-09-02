@@ -17,7 +17,7 @@ mod strict;
 pub mod types;
 
 pub use error::ConfigError;
-pub use load::LoadOptions;
+pub use load::{LoadOptions, user_config_dir};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use schema::json_schema;
