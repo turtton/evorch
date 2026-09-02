@@ -3,7 +3,7 @@
 use std::fmt;
 
 use event_bus::AgentRunPhase;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// ランタイム内の AgentRun を一意に識別する newtype。
 ///
@@ -30,6 +30,29 @@ impl fmt::Display for RunId {
     }
 }
 
+/// AgentRun が親 workspace を共有するか、専用の git worktree を使うかを示す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    /// 親 run と同じ workspace を使用する。
+    #[default]
+    Shared,
+    /// run 専用の git worktree を使用する。
+    Isolated,
+}
+
+/// isolated workspace の変更を統合する方法を示す。
+///
+/// branch が既定である。patch mode は v0.2 スコープ外の型トークン
+/// (packet v02-workspace-isolation) とする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMode {
+    /// 専用 branch を統合する。
+    #[default]
+    Branch,
+}
+
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
@@ -40,6 +63,10 @@ pub struct RunConfig {
     /// run のタスクカテゴリ。システムプロンプトの category overlay 選択に使う。
     /// `None` の場合は overlay を挿入しない。
     pub category: Option<String>,
+    /// 親 workspace を共有するか、専用 git worktree を使用するか。
+    pub workspace_mode: WorkspaceMode,
+    /// isolated workspace の変更を統合する方法。
+    pub merge_mode: MergeMode,
 }
 
 /// AgentRun の要約 (一覧表示用 DTO)。
@@ -111,5 +138,54 @@ mod tests {
     #[test]
     fn run_config_default_has_no_category() {
         assert!(RunConfig::default().category.is_none());
+    }
+
+    // Given: RunConfig / When: Default / Then: workspace_mode は Shared (共有 workspace が既定)
+    #[test]
+    fn workspace_mode_on_config_defaults_to_shared() {
+        assert_eq!(RunConfig::default().workspace_mode, WorkspaceMode::Shared);
+    }
+
+    // Given: RunConfig / When: Default / Then: merge_mode は Branch (branch merge が既定)
+    #[test]
+    fn merge_mode_on_config_defaults_to_branch() {
+        assert_eq!(RunConfig::default().merge_mode, MergeMode::Branch);
+    }
+
+    // Given: Isolated workspace mode / When: JSON 化 / Then: lowercase の "isolated" となる
+    #[test]
+    fn workspace_mode_serializes_lowercase() {
+        let json = serde_json::to_value(WorkspaceMode::Isolated).expect("serialize WorkspaceMode");
+
+        assert_eq!(json, serde_json::json!("isolated"));
+    }
+
+    // Given: "shared" と "isolated" / When: WorkspaceMode として JSON 復元 / Then: 対応する既知 variant となる
+    #[test]
+    fn workspace_mode_deserializes_known_values() {
+        assert_eq!(
+            serde_json::from_value::<WorkspaceMode>(serde_json::json!("shared"))
+                .expect("deserialize shared WorkspaceMode"),
+            WorkspaceMode::Shared
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkspaceMode>(serde_json::json!("isolated"))
+                .expect("deserialize isolated WorkspaceMode"),
+            WorkspaceMode::Isolated
+        );
+    }
+
+    // Given: 未知の workspace mode / When: WorkspaceMode として JSON 復元 / Then: fail-closed でエラーとなる
+    #[test]
+    fn workspace_mode_rejects_unknown_value() {
+        assert!(serde_json::from_value::<WorkspaceMode>(serde_json::json!("hybrid")).is_err());
+    }
+
+    // Given: Branch merge mode / When: JSON 化 / Then: lowercase の "branch" となる
+    #[test]
+    fn merge_mode_branch_serializes_lowercase() {
+        let json = serde_json::to_value(MergeMode::Branch).expect("serialize MergeMode");
+
+        assert_eq!(json, serde_json::json!("branch"));
     }
 }

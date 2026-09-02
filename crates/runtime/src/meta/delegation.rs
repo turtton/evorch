@@ -58,6 +58,7 @@ pub(super) fn delegate_background(
             interactive: args.interactive,
             name: args.name,
             category,
+            ..RunConfig::default()
         },
     ) {
         Ok(run_id) => success(run_id.to_string()),
