@@ -100,6 +100,17 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - runtime wiring は fail-closed `SandboxFactory` seam + run ごとの executor 差替で実装し、`run_agent` tail で worktree を決定的に cleanup。branch は merge deliverable として cleanup 後も保持する。`AgentInspection.workspace` で branch / path を観測可能。
 - panic 時の cleanup 抜け（Drop-guard 化）と refs/heads rw 範囲の絞込みは将来検討事項。
 
+## v0.2 skill loader の実装確定（issue #53、PR #54、2026-09-02）
+
+- agentskills 仕様準拠の skill loader が `crates/runtime/src/skill/`（frontmatter.rs 16-rule 検証 / resource.rs 一段相対参照制限 / discovery.rs repo・user 2 スコープ / registry.rs progressive disclosure）と `crates/runtime/src/meta/skills.rs`（skill_load meta op）に実装済み
+- 2 スコープ発見: repo scope `<repo_root>/.evorch/skills/`、user scope `<user_config_dir>/skills/`（`crates/config/src/load.rs` の `user_config_dir` を pub 化）。同名 skill は repo が user に shadow し、shadowing は `FaultEvent::SkillDiagnostic{kind: Shadowed}` で観測可能
+- progressive disclosure: run 開始時は name+description metadata のみ prompt assembly に露出（本文非 materialize）。第 2 段は skill_load で SKILL.md 本文返却、第 3 段は resource 指定でのみ読み込み
+- skill-load surface は **meta op `skill_load`** として確定（ToolExecutor tool 案を却下: register が `&mut self` 要求 + Isolated 子 run が executor を再生成して custom tool が消失する 2 点の硬い根拠）
+- role gate は RoleCapabilities で Orchestrator / Worker のみ許可、Explorer / Reviewer は `CapabilityDenied`（authorize-before-dispatch で検証済み）
+- 委譲時 `load_skills` 相当は `crates/runtime/src/meta/delegation.rs` で子 run prompt assembly への単一 System メッセージ注入として実装（spawn 前に存在検証）
+- YAML frontmatter 解析依存は serde_yaml_ng 0.10 を採用（実ビルド確認済み。fallback 候補は serde-norway → serde_yaml）
+- Config schema 拡張は意図的に不採用（deny_unknown_fields 維持）。発見失敗 / 検証違反は `FaultEvent::SkillDiagnostic{kind, skill, scope, detail}` + SkillDiagnosticKind{DiscoveryError, ValidationError, Shadowed} で静かにしない（ADR 0010）
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
