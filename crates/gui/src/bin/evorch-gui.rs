@@ -81,14 +81,17 @@ impl AgentModel for DemoScriptModel {
         messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        let marker = messages.first().and_then(|message| {
-            message.content.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. } => None,
-            })
-        });
+        let marker = messages
+            .iter()
+            .find(|message| message.role == MessageRole::User)
+            .and_then(|message| {
+                message.content.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    ContentBlock::Reasoning { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. } => None,
+                })
+            });
         let mut scripts = self.scripts.lock().expect("script lock must not poison");
         scripts
             .get_mut(marker.as_deref().unwrap_or_default())
