@@ -12,6 +12,7 @@ pub const META_OPS: &[&str] = &[
     "delegate",
     "delegate_background",
     "send_message",
+    "skill_load",
     "wait",
     "cancel",
     "list_agents",
@@ -187,16 +188,50 @@ mod tests {
 
     // Given: META_OPS の正規集合
     // When: is_meta_op を全要素と境界外の名前に適用する
-    // Then: 12 操作すべて true、通常ツール・空文字は false
+    // Then: 13 操作すべて true、通常ツール・空文字は false
     #[test]
     fn meta_ops_membership_is_exhaustive() {
-        assert_eq!(META_OPS.len(), 12);
+        assert_eq!(META_OPS.len(), 13);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");
         }
         assert!(!is_meta_op("edit"));
         assert!(!is_meta_op("read"));
         assert!(!is_meta_op(""));
+    }
+
+    #[test]
+    fn orchestrator_authorizes_skill_load() {
+        let policy = ExecutionPolicy::for_role(Role::Orchestrator);
+
+        assert_eq!(policy.authorize("skill_load"), Ok(()));
+    }
+
+    #[test]
+    fn worker_authorizes_skill_load() {
+        let policy = ExecutionPolicy::for_role(Role::Worker);
+
+        assert_eq!(policy.authorize("skill_load"), Ok(()));
+    }
+
+    #[test]
+    fn explorer_denies_skill_load() {
+        let policy = ExecutionPolicy::for_role(Role::Explorer);
+
+        assert!(matches!(
+            policy.authorize("skill_load"),
+            Err(RuntimeError::CapabilityDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn reviewer_denies_skill_load() {
+        let policy = ExecutionPolicy::for_role(Role::Reviewer);
+
+        assert!(matches!(
+            policy.authorize("skill_load"),
+            Err(RuntimeError::CapabilityDenied { .. })
+        ));
     }
 
     // Given: Reviewer ロール

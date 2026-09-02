@@ -9,7 +9,7 @@ use std::time::Duration;
 use agents::Role;
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
-    EventBus, EventKind, LifecycleEvent,
+    EventBus, EventKind, FaultEvent, LifecycleEvent,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -22,6 +22,7 @@ use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
+use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -43,6 +44,7 @@ pub(crate) struct Shared {
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
+    pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -117,6 +119,7 @@ impl AgentRuntime {
                 executor,
                 model,
                 system_prompts: OnceLock::new(),
+                skills: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -151,6 +154,60 @@ impl AgentRuntime {
     ) -> Result<Self, PromptCompositionError> {
         let catalog = build_catalog(input)?;
         Ok(self.with_system_prompts(Arc::new(catalog)))
+    }
+
+    /// skill レジストリを設定したランタイムを返すビルダーメソッド。
+    ///
+    /// `new` / `production` に鎖でつなげて呼ぶ。設定済みの場合は 2 回目以降の
+    /// 呼び出しは無視される (先勝ち)。初回接続時に限り、レジストリが発見時に
+    /// 記録した診断 1 件ごとに [`FaultEvent::SkillDiagnostic`] を 1 件バスへ
+    /// 発行する (ADR 0010: 失敗は静かにしない)。レジストリ未設定の run からは
+    /// `skill_load` メタ操作はモデルに見せない (tool_specs 可視性フィルタ)。
+    pub fn with_skills(self, skills: Arc<SkillRegistry>) -> Self {
+        if self.shared.skills.set(Arc::clone(&skills)).is_ok() {
+            for diagnostic in &skills.diagnostics {
+                self.shared
+                    .bus
+                    .emit(Event::new(FaultEvent::SkillDiagnostic {
+                        kind: diagnostic.kind.clone(),
+                        skill: diagnostic.skill.clone(),
+                        scope: diagnostic.scope.as_str().to_owned(),
+                        detail: diagnostic.detail.clone(),
+                    }));
+            }
+        }
+        self
+    }
+
+    /// config から system prompt catalog を組み立て、skill の 2 スコープ発見
+    /// 結果を metadata として組み込み、registry と catalog を同時に接続する
+    /// composition root (issue #53 / AC4)。run 開始時は name+description の
+    /// metadata のみが Orchestrator の keyTriggers へ露出し、本体は load されない。
+    ///
+    /// skill metadata は [`discover_skills`] の発見結果から構成されるため、
+    /// `input.available_skills` はこの経路では使用しない (呼び出し側の契約:
+    /// この builder に渡した availability の skill 部分は発見結果で意図的に
+    /// 置き換えられる)。診断の観測経路は [`AgentRuntime::with_skills`] の Fault
+    /// 発行に一本化され、この builder で重複発行はしない。
+    ///
+    /// # Errors
+    /// [`build_catalog`] の失敗をそのまま伝播する。
+    pub fn with_config_prompts_and_skills(
+        self,
+        input: &CatalogBuildInput<'_>,
+        skill_dirs: &[(SkillScope, PathBuf)],
+    ) -> Result<Self, PromptCompositionError> {
+        let registry = discover_skills(skill_dirs);
+        let available_skills = registry.available_skills();
+        let catalog = build_catalog(&CatalogBuildInput {
+            config: input.config,
+            user_presets_dir: input.user_presets_dir,
+            available_agents: input.available_agents,
+            available_skills: &available_skills,
+        })?;
+        Ok(self
+            .with_system_prompts(Arc::new(catalog))
+            .with_skills(Arc::new(registry)))
     }
 
     /// production 構成のランタイムを生成する。
@@ -219,6 +276,7 @@ impl AgentRuntime {
                 executor,
                 model,
                 system_prompts: OnceLock::new(),
+                skills: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -770,6 +828,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         executor: Arc::clone(&shared.executor),
         model: Arc::clone(&shared.model),
         system_prompts: shared.system_prompts.get().cloned(),
+        skills: shared.skills.get().cloned(),
         runtime: Arc::downgrade(&shared),
     })
 }

@@ -103,10 +103,7 @@ impl Config {
     pub fn load(opts: &LoadOptions) -> Result<Config, ConfigError> {
         let mut merged = builtin_layer()?;
 
-        let user_dir = opts
-            .user_config_dir
-            .clone()
-            .or_else(default_user_config_dir);
+        let user_dir = opts.user_config_dir.clone().or_else(user_config_dir);
         if let Some(dir) = user_dir {
             merge_dir_layer(&mut merged, &dir, USER_MAIN_FILE)?;
         }
@@ -147,19 +144,24 @@ fn builtin_layer() -> Result<toml::Value, ConfigError> {
         .map_err(|err| ConfigError::Migration(format!("failed to parse builtin config: {err}")))
 }
 
-/// 既定のユーザ設定ディレクトリを解決する。
+/// 環境変数から既定のユーザ設定ディレクトリを解決する。
 ///
 /// `$XDG_CONFIG_HOME` (空でない) があれば `<それ>/evorch`、なければ
 /// `$HOME/.config/evorch`。どちらも解決できない場合は `None`。
 /// この関数はユーザ層の読み込みを試みる時点でのみ呼ばれる (遅延解決)。
-fn default_user_config_dir() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|dir| !dir.is_empty())
-    {
+pub fn user_config_dir() -> Option<PathBuf> {
+    user_config_dir_from(
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+pub(crate) fn user_config_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    let xdg = xdg.filter(|dir| !dir.is_empty());
+    if let Some(xdg) = xdg {
         return Some(PathBuf::from(xdg).join("evorch"));
     }
-    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty())?;
+    let home = home.filter(|dir| !dir.is_empty())?;
     Some(PathBuf::from(home).join(".config").join("evorch"))
 }
 
@@ -221,4 +223,49 @@ fn read_file_migrated(path: &Path) -> Result<Option<toml::Value>, ConfigError> {
             source,
         })?;
     migrate::run(toml::Value::Table(table)).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_config_dir_from;
+
+    #[test]
+    fn user_config_dir_from_prefers_non_empty_xdg_config_home() {
+        // Given: XDG_CONFIG_HOME is set to a non-empty path
+        // When: the user config directory is resolved
+        let result = user_config_dir_from(Some("/x"), Some("/h"));
+
+        // Then: the XDG path is used as the base directory
+        assert_eq!(result, Some(std::path::PathBuf::from("/x/evorch")));
+    }
+
+    #[test]
+    fn user_config_dir_from_falls_back_for_empty_xdg_config_home() {
+        // Given: XDG_CONFIG_HOME is empty and HOME is set
+        // When: the user config directory is resolved
+        let result = user_config_dir_from(Some(""), Some("/h"));
+
+        // Then: the HOME path is used as the base directory
+        assert_eq!(result, Some(std::path::PathBuf::from("/h/.config/evorch")));
+    }
+
+    #[test]
+    fn user_config_dir_from_uses_home_when_xdg_config_home_is_unset() {
+        // Given: XDG_CONFIG_HOME is unset and HOME is set
+        // When: the user config directory is resolved
+        let result = user_config_dir_from(None, Some("/h"));
+
+        // Then: the HOME path is used as the base directory
+        assert_eq!(result, Some(std::path::PathBuf::from("/h/.config/evorch")));
+    }
+
+    #[test]
+    fn user_config_dir_from_returns_none_without_config_base_directories() {
+        // Given: both XDG_CONFIG_HOME and HOME are unset or empty
+        // When: the user config directory is resolved
+        let result = user_config_dir_from(Some(""), None);
+
+        // Then: no user config directory can be resolved
+        assert_eq!(result, None);
+    }
 }

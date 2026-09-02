@@ -13,6 +13,7 @@ use agents::Role;
 use config::{CategoryBindingConfig, Config, ConfigError, resolve_prompt_sources};
 use event_bus::EventBus;
 use runtime::prompt::{AvailableAgent, AvailableSkill};
+use runtime::skill::{SkillScope, discover_skills};
 use runtime::{AgentRuntime, CatalogBuildInput, PromptCompositionError, build_catalog};
 use sandbox::DirectSandbox;
 use tempfile::TempDir;
@@ -228,4 +229,78 @@ fn key_triggers_block(prompt: &str) -> &str {
         .find(END)
         .expect("keyTriggers ブロックは閉じられているはずです");
     &prompt[start..start + stop]
+}
+
+// Given: repo scope に有効な skill metadata と、本文に公開禁止 sentinel を持つ SKILL.md
+// When: discover_skills から build_catalog を経て Orchestrator / Worker の prompt を解決する
+// Then: Orchestrator には name と description のみが現れ、本文と Worker には skill metadata が現れない
+#[test]
+fn skills_metadata_exposed_but_body_never_loaded_into_prompt() {
+    let repo_dir = TempDir::new().expect("一時リポジトリディレクトリを作成できるはずです");
+    let skill_dir = repo_dir.path().join("demo-skill");
+    std::fs::create_dir_all(&skill_dir).expect("skill ディレクトリを作成できるはずです");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: Demo skill description\n---\nBODY-SENTINEL-DO-NOT-EXPOSE",
+    )
+    .expect("SKILL.md を作成できるはずです");
+
+    let registry = discover_skills(&[(SkillScope::Repo, repo_dir.path().to_owned())]);
+    let available_skills = registry.available_skills();
+    assert_eq!(available_skills.len(), 1);
+    assert_eq!(available_skills[0].name, "demo-skill");
+    assert_eq!(available_skills[0].description, "Demo skill description");
+
+    let user_dir = empty_user_dir();
+    let config = Config::default();
+    let catalog = build_catalog(&build_input(&config, &user_dir, &[], &available_skills))
+        .expect("必須部品が揃いカタログは構築できるはずです");
+    let orchestrator_prompt = catalog
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+        .expect("登録済みの部品のみを参照するはずです");
+    let worker_prompt = catalog
+        .system_prompt_for(Role::Worker, None, "claude-opus-4-1")
+        .expect("登録済みの部品のみを参照するはずです");
+
+    assert!(orchestrator_prompt.contains("demo-skill"));
+    assert!(orchestrator_prompt.contains("Demo skill description"));
+    assert!(!orchestrator_prompt.contains("BODY-SENTINEL-DO-NOT-EXPOSE"));
+    assert!(!worker_prompt.contains("demo-skill"));
+    assert!(!worker_prompt.contains("BODY-SENTINEL-DO-NOT-EXPOSE"));
+}
+
+// Given: 同一 config から、空の skills metadata で構築した catalog と skills 入力なしの baseline
+// When: Orchestrator / Worker の system prompt をそれぞれ解決する
+// Then: 空 skills の出力は baseline とバイト単位で一致し、空入力で prompt は変化しない
+#[test]
+fn empty_skills_prompt_is_byte_identical_to_baseline() {
+    let user_dir = empty_user_dir();
+    let config = Config::default();
+    let empty_skills: [AvailableSkill; 0] = [];
+    let demo_skills = [AvailableSkill {
+        name: "demo-skill".to_owned(),
+        description: "Demo skill description".to_owned(),
+    }];
+
+    let empty_catalog = build_catalog(&build_input(&config, &user_dir, &[], &empty_skills))
+        .expect("必須部品が揃いカタログは構築できるはずです");
+    let skills_catalog = build_catalog(&build_input(&config, &user_dir, &[], &demo_skills))
+        .expect("skill metadata 付きでもカタログは構築できるはずです");
+    let baseline_catalog = build_catalog(&build_input(&config, &user_dir, &[], &[]))
+        .expect("skills なしの baseline は構築できるはずです");
+
+    for role in [Role::Orchestrator, Role::Worker] {
+        let empty_prompt = empty_catalog
+            .system_prompt_for(role, None, "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+        let baseline_prompt = baseline_catalog
+            .system_prompt_for(role, None, "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+        assert_eq!(empty_prompt, baseline_prompt, "role = {}", role.name());
+
+        let skills_prompt = skills_catalog
+            .system_prompt_for(role, None, "claude-opus-4-1")
+            .expect("登録済みの部品のみを参照するはずです");
+        assert_eq!(empty_prompt == skills_prompt, role == Role::Worker);
+    }
 }

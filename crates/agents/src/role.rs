@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// | Role | ツール | ネットワーク | 委譲 |
 /// |---|---|---|---|
-/// | Orchestrator | 委譲・調査・AgentRun 間メッセージ系のみ (mutation tool なし) | Denied | 可 |
+/// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系のみ (mutation tool なし) | Denied | 可 |
 /// | Explorer | read / grep | OptIn | 不可 |
-/// | Worker | read / edit / grep / shell / git_diff + AgentRun 間メッセージ系 | Denied | 不可 |
+/// | Worker | read / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | Denied | 不可 |
 /// | Reviewer | read / grep / git_diff | Denied | 不可 |
 ///
 /// # 設計上の決定
@@ -63,6 +63,7 @@ impl Role {
                     "delegate",
                     "delegate_background",
                     "send_message",
+                    "skill_load",
                     "send",
                     "wait_reply",
                     "inbox",
@@ -86,6 +87,7 @@ impl Role {
                     "edit",
                     "grep",
                     "shell",
+                    "skill_load",
                     "git_diff",
                     "send",
                     "wait_reply",

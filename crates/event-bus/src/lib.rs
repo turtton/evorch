@@ -9,7 +9,7 @@ pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
     EventKind, EventMeta, FallbackAxis, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent,
-    ProviderFailureKind, SCHEMA_VERSION, ToolEvent, UsageEvent,
+    ProviderFailureKind, SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
 };
 pub use ring::RingBuffer;
 pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};

@@ -6,6 +6,7 @@
 mod delegation;
 mod messaging;
 mod runs;
+mod skills;
 
 use agents::Role;
 use serde::Deserialize;
@@ -49,6 +50,7 @@ pub(crate) async fn dispatch(
         "cancel" => runs::cancel(&runtime, input),
         "list_agents" => runs::list_agents(&runtime, input),
         "inspect_agent" => runs::inspect_agent(&runtime, input),
+        "skill_load" => skills::skill_load(state, input),
         "compact" => parse::<EmptyArgs>(input).map_or_else(error, |_| error(COMPACT_STUB)),
         "finish" => finish(input),
         _ => error(format!("unknown meta-op: {name}")),

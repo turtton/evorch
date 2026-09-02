@@ -19,6 +19,8 @@ struct DelegateBackgroundArgs {
     category: Option<String>,
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
+    #[serde(default)]
+    load_skills: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -31,10 +33,39 @@ struct DelegateArgs {
     category: Option<String>,
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
+    #[serde(default)]
+    load_skills: Vec<String>,
 }
 
 fn parse_args_category(category: Option<String>) -> Result<Option<String>, String> {
     category.as_deref().map(parse_category).transpose()
+}
+
+/// load_skills を検証し、重複を除去した注入名リストを返す (issue #53 / AC6)。
+///
+/// 空ならそのまま空を返す (レジストリ参照も行わない)。空でない場合は、
+/// 子 run の生成・モデル呼び出しより前に fail-closed で検証する: レジストリ
+/// 未接続なら "not configured"、未知の名前なら "unknown skill" を運ぶエラー。
+/// 重複は最初の出現位置を保持して除去する。
+fn validate_load_skills(state: &LoopState, names: &[String]) -> Result<Vec<String>, String> {
+    let mut unique: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        if !unique.contains(name) {
+            unique.push(name.clone());
+        }
+    }
+    if unique.is_empty() {
+        return Ok(unique);
+    }
+    let Some(registry) = state.skills() else {
+        return Err("skill registry is not configured".to_string());
+    };
+    for name in &unique {
+        if registry.get(name).is_none() {
+            return Err(format!("unknown skill: {name}"));
+        }
+    }
+    Ok(unique)
 }
 
 pub(super) fn delegate_background(
@@ -54,6 +85,10 @@ pub(super) fn delegate_background(
         Ok(category) => category,
         Err(message) => return error(message),
     };
+    let load_skills = match validate_load_skills(state, &args.load_skills) {
+        Ok(load_skills) => load_skills,
+        Err(message) => return error(message),
+    };
     match runtime.delegate_background_as_child(
         state.caller_run_id(),
         role,
@@ -62,6 +97,7 @@ pub(super) fn delegate_background(
             interactive: args.interactive,
             name: args.name,
             category,
+            load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
             ..RunConfig::default()
         },
@@ -88,6 +124,10 @@ pub(super) async fn delegate(
         Ok(category) => category,
         Err(message) => return error(message),
     };
+    let load_skills = match validate_load_skills(state, &args.load_skills) {
+        Ok(load_skills) => load_skills,
+        Err(message) => return error(message),
+    };
     let child = match runtime.delegate_background_as_child(
         state.caller_run_id(),
         role,
@@ -95,6 +135,7 @@ pub(super) async fn delegate(
         RunConfig {
             name: args.name,
             category,
+            load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
             ..RunConfig::default()
         },
