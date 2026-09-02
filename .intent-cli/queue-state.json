@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T15:56:08.8651026+00:00",
+  "updated_at": "2026-09-02T22:46:48.8439873+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -705,7 +705,7 @@
     {
       "execution_unit": "v02-skill-loader",
       "title": "v0.2: agentskills \u4ED5\u69D8\u6E96\u62E0\u306E skill loader\uFF082 \u30B9\u30B3\u30FC\u30D7\u767A\u898B / progressive disclosure / \u7D44\u307F\u8FBC\u307F\u691C\u8A3C\uFF09\u3092\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v02-prompt-assembly"
       ],
@@ -721,6 +721,7 @@
         "number": 53,
         "url": "https://github.com/turtton/evorch/issues/53"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/54",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
