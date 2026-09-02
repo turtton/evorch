@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-02T00:38:49.846784+00:00",
+  "updated_at": "2026-09-02T00:42:42.2983039+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -644,6 +644,11 @@
         "implementation": ".intent-cli/issues/v02-agent-messaging/implementation.md",
         "review_context": ".intent-cli/issues/v02-agent-messaging/review-context.md",
         "yaml": ".intent-cli/issues/v02-agent-messaging/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 47,
+        "url": "https://github.com/turtton/evorch/issues/47"
       },
       "worker_role": "implementation",
       "review_role": "review",
