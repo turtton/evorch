@@ -156,3 +156,4 @@
 {"ts":"2026-09-03T16:09:05.3305845+00:00","execution_unit":"v02-project-rules","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":62}
 {"ts":"2026-09-03T16:09:22.6950117+00:00","execution_unit":"v02-project-rules","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":62}
 {"ts":"2026-09-03T16:09:22.6950117+00:00","execution_unit":"v02-project-rules","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":62}
+{"ts":"2026-09-03T16:12:21.6686876+00:00","execution_unit":"v02-context-compaction","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#63","reason":"https://github.com/turtton/evorch/issues/63"}
