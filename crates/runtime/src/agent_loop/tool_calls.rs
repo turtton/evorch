@@ -1,5 +1,5 @@
 use providers::ToolSpec;
-use tools::ToolResult;
+use tools::{ToolExecutionContext, ToolResult};
 
 use super::LoopState;
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta};
@@ -9,6 +9,9 @@ impl LoopState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
     ) -> bool {
+        let ctx = ToolExecutionContext {
+            run_id: self.task.run_id.to_string(),
+        };
         for (id, name, input) in tool_uses {
             if self.cancelled() {
                 self.finish_cancelled();
@@ -36,7 +39,7 @@ impl LoopState {
                         }
                         continue;
                     }
-                    result = self.shared.executor.execute(&name, &id, input) => result,
+                    result = self.shared.executor.execute(&ctx, &name, &id, input) => result,
                 };
                 match execution {
                     Ok(result) => result,

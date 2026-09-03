@@ -334,6 +334,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
+            run_id: None,
         })
     }
 
@@ -345,6 +346,7 @@ mod tests {
             protocol: "anthropic-messages".to_owned(),
             model: "kimi-k3".to_owned(),
             ttft_ms: 1500,
+            run_id: None,
         })
     }
 

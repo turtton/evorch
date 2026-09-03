@@ -18,7 +18,7 @@ pub mod tool;
 pub mod tools;
 
 pub use error::ToolError;
-pub use executor::ToolExecutor;
+pub use executor::{ToolExecutionContext, ToolExecutor};
 pub use network_guard::{
     DnsResolver, GuardedResponse, MAX_REDIRECTS, MAX_RESPONSE_BYTES, NetworkGuard,
     NetworkGuardError,

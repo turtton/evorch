@@ -85,6 +85,15 @@ use crate::event::{Event, EventKind, ProviderEvent, ProviderFailureKind, UsageEv
 
 #[cfg(feature = "otel-exporter")]
 pub mod exporter;
+pub mod span;
+#[cfg(feature = "otel-exporter")]
+pub mod span_exporter;
+
+pub use span::{
+    FiniteF64, SPAN_ATTRIBUTE_WHITELIST, SpanAction, SpanAttribute, SpanAttributeValue,
+    SpanAttributeViolation, SpanBudget, SpanDrop, SpanDropKind, SpanKey, SpanKind, SpanMapper,
+    SpanStatus, validate_span_attributes,
+};
 
 /// 写像先の GenAI metrics semantic conventions の pin バージョン。
 pub const SEMCONV_PIN: &str = "1.37.0";
@@ -607,6 +616,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
+            run_id: None,
         })
     }
 
@@ -625,6 +635,7 @@ mod tests {
             streaming: true,
             duration_ms,
             failure,
+            run_id: None,
         })
     }
 
@@ -636,6 +647,7 @@ mod tests {
             protocol: "openai-chat-completions".to_owned(),
             model: "kimi-k3".to_owned(),
             ttft_ms,
+            run_id: None,
         })
     }
 
@@ -880,6 +892,7 @@ mod tests {
                 protocol: "anthropic-messages".to_owned(),
                 model: "kimi-k3".to_owned(),
                 streaming: false,
+                run_id: None,
             }),
             Event::new(UsageEvent::CacheStats {
                 provider: "anthropic".to_owned(),
@@ -1163,6 +1176,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
+            run_id: None,
         })
     }
 

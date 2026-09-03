@@ -1,0 +1,214 @@
+{
+  "name": "delegated_after_parent_end",
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "Started",
+          "payload": {
+            "session_id": "session-1"
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 10,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "AgentRunStarted",
+          "payload": {
+            "run_id": "run-parent",
+            "parent_run_id": null,
+            "agent_name": "orchestrator",
+            "role": "orchestrator"
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 20,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "AgentRunStateChanged",
+          "payload": {
+            "run_id": "run-parent",
+            "from": "Running",
+            "to": "Done",
+            "reason": null
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 30,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "AgentRunStarted",
+          "payload": {
+            "run_id": "run-child",
+            "parent_run_id": "run-parent",
+            "agent_name": "worker",
+            "role": "worker"
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 40,
+      "kind": {
+        "kind": "Provider",
+        "payload": {
+          "kind": "RequestStarted",
+          "payload": {
+            "request_id": "req-1",
+            "provider": "anthropic",
+            "profile": null,
+            "protocol": "anthropic-messages",
+            "model": "kimi-k3",
+            "streaming": false,
+            "run_id": "run-child"
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 50,
+      "kind": {
+        "kind": "Tool",
+        "payload": {
+          "kind": "ToolStarted",
+          "payload": {
+            "tool_name": "read",
+            "call_id": "call-1",
+            "run_id": "run-child"
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 60,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "AgentRunStateChanged",
+          "payload": {
+            "run_id": "run-child",
+            "from": "Running",
+            "to": "Done",
+            "reason": null
+          }
+        }
+      }
+    },
+    {
+      "at_ms": 70,
+      "kind": {
+        "kind": "Lifecycle",
+        "payload": {
+          "kind": "Completed",
+          "payload": {
+            "session_id": "session-1"
+          }
+        }
+      }
+    }
+  ],
+  "expected_spans": [
+    {
+      "key": "agent:run-parent",
+      "parent": "run:run-parent",
+      "name": "invoke_agent orchestrator",
+      "kind": "client",
+      "start_ms": 10,
+      "end_ms": 20,
+      "status": "unset",
+      "attributes": [
+        [
+          "gen_ai.operation.name",
+          "invoke_agent"
+        ],
+        [
+          "gen_ai.provider.name",
+          "evorch"
+        ],
+        [
+          "gen_ai.agent.name",
+          "orchestrator"
+        ],
+        [
+          "evorch.agent_run.id",
+          "run-parent"
+        ],
+        [
+          "evorch.delegation.role",
+          "orchestrator"
+        ],
+        [
+          "evorch.delegation.depth",
+          0
+        ]
+      ]
+    },
+    {
+      "key": "run:run-parent",
+      "parent": null,
+      "name": "evorch.run orchestrator",
+      "kind": "internal",
+      "start_ms": 10,
+      "end_ms": 20,
+      "status": "unset",
+      "attributes": [
+        [
+          "evorch.agent_run.id",
+          "run-parent"
+        ],
+        [
+          "evorch.agent.name",
+          "orchestrator"
+        ],
+        [
+          "evorch.delegation.role",
+          "orchestrator"
+        ],
+        [
+          "evorch.delegation.depth",
+          0
+        ]
+      ]
+    },
+    {
+      "key": "session:session-1",
+      "parent": null,
+      "name": "evorch.session",
+      "kind": "internal",
+      "start_ms": 0,
+      "end_ms": 70,
+      "status": "unset",
+      "attributes": [
+        [
+          "evorch.session.id",
+          "session-1"
+        ]
+      ]
+    }
+  ],
+  "expected_drops": [
+    {
+      "kind": "unknown_parent",
+      "key": "request:req-1"
+    },
+    {
+      "kind": "unknown_parent",
+      "key": "run:run-child"
+    },
+    {
+      "kind": "unknown_parent",
+      "key": "tool:call-1"
+    }
+  ]
+}

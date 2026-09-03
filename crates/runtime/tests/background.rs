@@ -36,10 +36,10 @@ async fn background_start_is_observable_before_wait_and_completion_is_success_on
     // When
     let run_id =
         runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
-    let first_two = collect_events(&mut events, 2).await;
+    let first_three = collect_events(&mut events, 3).await;
 
     // Then
-    assert!(first_two.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
+    assert!(first_three.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let remaining = collect_events(&mut events, 3).await;
     assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())));
@@ -56,7 +56,7 @@ async fn cancel_mid_model_turn_emits_cancelled_and_error() {
     let mut events = bus.subscribe();
     let run_id =
         runtime.delegate_background(Role::Worker, "blocked".to_string(), RunConfig::default());
-    let _started = collect_events(&mut events, 3).await;
+    let _started = collect_events(&mut events, 4).await;
 
     // When
     assert_eq!(runtime.cancel(run_id), Ok(()));

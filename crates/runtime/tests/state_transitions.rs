@@ -36,7 +36,7 @@ async fn run_emits_pending_running_done_in_order() {
     let run_id =
         runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let events = collect_events(&mut events, 4).await;
+    let events = collect_events(&mut events, 5).await;
 
     // Then
     let lifecycle: Vec<&LifecycleEvent> = events
@@ -53,6 +53,10 @@ async fn run_emits_pending_running_done_in_order() {
         .collect();
     assert!(matches!(
         lifecycle[0],
+        LifecycleEvent::AgentRunStarted { .. }
+    ));
+    assert!(matches!(
+        lifecycle[1],
         LifecycleEvent::AgentRunStateChanged {
             from: AgentRunPhase::Pending,
             to: AgentRunPhase::Pending,
@@ -60,10 +64,10 @@ async fn run_emits_pending_running_done_in_order() {
         }
     ));
     assert!(
-        matches!(lifecycle[1], LifecycleEvent::BackgroundTaskStarted { task_id } if task_id == &run_id.to_string())
+        matches!(lifecycle[2], LifecycleEvent::BackgroundTaskStarted { task_id } if task_id == &run_id.to_string())
     );
     assert!(matches!(
-        lifecycle[2],
+        lifecycle[3],
         LifecycleEvent::AgentRunStateChanged {
             from: AgentRunPhase::Pending,
             to: AgentRunPhase::Running,
@@ -72,7 +76,7 @@ async fn run_emits_pending_running_done_in_order() {
         }
     ));
     assert!(matches!(
-        lifecycle[3],
+        lifecycle[4],
         LifecycleEvent::AgentRunStateChanged {
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
@@ -95,7 +99,7 @@ async fn model_error_transitions_run_to_error_with_reason() {
     let run_id =
         runtime.delegate_background(Role::Explorer, "inspect".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
-    let events = collect_events(&mut events, 4).await;
+    let events = collect_events(&mut events, 5).await;
 
     // Then
     assert!(events.iter().any(|event| matches!(

@@ -11,7 +11,10 @@ use portable_pty::CommandBuilder;
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{AgentModel, AgentRuntime, ExecutionPolicy, Role, RunConfig, RuntimeError};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, ExecutionPolicy, Role, RunConfig,
+    RuntimeError,
+};
 use workspace_ui::UiSettings;
 
 const EVENT_CAPACITY: usize = 256;
@@ -77,6 +80,7 @@ impl Default for DemoScriptModel {
 impl AgentModel for DemoScriptModel {
     async fn complete(
         &self,
+        _invocation: &AgentInvocationContext,
         _role: Role,
         messages: &[Message],
         _tools: &[ToolSpec],

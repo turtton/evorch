@@ -9,6 +9,19 @@ use providers::{ChatResponse, Message, ToolSpec};
 
 use crate::error::RuntimeError;
 
+/// 1 回のモデル呼び出し (agent-loop の complete) の相関文脈。
+///
+/// agent-loop は実行中 run の [`RunId`](crate::RunId) をここへ載せて
+/// [`AgentModel::complete`] へ渡す。production 実装はこれを provider request
+/// の観測相関 (`ChatRequest.observation`) へ写し、provider attempt 観測イベント
+/// へ run 相関を stamp する。テスト・demo 実装は受け取って無視してよい
+/// (`_invocation`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInvocationContext {
+    /// モデル呼び出しを行う run の ID (`run-{n}` 形式)。
+    pub run_id: String,
+}
+
 /// ロール実行のためのモデル呼び出し境界。
 ///
 /// role→model の解決・フォールバックは v01-routing-profiles がこの境界の実装として
@@ -19,10 +32,15 @@ use crate::error::RuntimeError;
 pub trait AgentModel: Send + Sync {
     /// ロールの会話履歴に対して補完を要求する。
     ///
+    /// `invocation` は呼び出し元 run の相関文脈である。実装側は観測相関
+    /// (provider attempt イベントの run_id stamp) へ写すことが期待されるが、
+    /// 相関が不要な実装は無視してよい。
+    ///
     /// # Errors
     /// 境界の実装側 (モデル呼び出し) の失敗は [`RuntimeError::Model`] に寄せられる。
     async fn complete(
         &self,
+        invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
         tools: &[ToolSpec],
@@ -48,6 +66,7 @@ mod tests {
     impl AgentModel for EchoModel {
         async fn complete(
             &self,
+            _invocation: &AgentInvocationContext,
             _role: Role,
             messages: &[Message],
             _tools: &[ToolSpec],
@@ -90,8 +109,11 @@ mod tests {
             },
         ];
 
+        let invocation = AgentInvocationContext {
+            run_id: "run-1".to_string(),
+        };
         let response = model
-            .complete(Role::Worker, &history, &[])
+            .complete(&invocation, Role::Worker, &history, &[])
             .await
             .expect("stub は常に成功する");
 

@@ -12,7 +12,7 @@ use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use serde_json::json;
 use tools::{
     ContentOrigin, ExaKeylessProvider, SearchError, SearchOptions, SearchProvider, SearchResults,
-    TavilyKeylessProvider, ToolExecutor, WebSearch,
+    TavilyKeylessProvider, ToolExecutionContext, ToolExecutor, WebSearch,
 };
 
 /// 呼び出し回数を数える stub provider。
@@ -126,7 +126,14 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
     let (executor, mut receiver) = setup_executor(tool);
 
     let result = executor
-        .execute("web_search", "call-1", json!({ "query": "evorch" }))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-21".to_string(),
+            },
+            "web_search",
+            "call-1",
+            json!({ "query": "evorch" }),
+        )
         .await
         .expect("web_search の実行に成功するはずです");
 
@@ -147,6 +154,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
         &ToolEvent::ToolStarted {
             tool_name: "web_search".to_string(),
             call_id: "call-1".to_string(),
+            run_id: Some("run-21".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -155,6 +163,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
         call_id,
         is_error,
         detail: event_detail,
+        ..
     } = tool_event(&completed)
     else {
         panic!("ToolCompleted を期待しましたが {completed:?} でした");
@@ -180,7 +189,14 @@ async fn executor_reports_fallback_in_detail() {
     let (executor, _receiver) = setup_executor(tool);
 
     let result = executor
-        .execute("web_search", "call-1", json!({ "query": "evorch" }))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "web_search",
+            "call-1",
+            json!({ "query": "evorch" }),
+        )
         .await
         .expect("web_search の実行に成功するはずです");
 
@@ -198,7 +214,14 @@ async fn executor_escapes_markers_in_content_and_detail_and_sets_web_untrusted()
     let (executor, mut receiver) = setup_executor(tool);
 
     let result = executor
-        .execute("web_search", "call-1", json!({ "query": "evorch" }))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "web_search",
+            "call-1",
+            json!({ "query": "evorch" }),
+        )
         .await
         .expect("web_search の実行に成功するはずです");
 
@@ -272,7 +295,14 @@ async fn third_party_provider_composes_as_fallback_without_changes() {
     let (executor, _receiver) = setup_executor(tool);
 
     let result = executor
-        .execute("web_search", "call-1", json!({ "query": "evorch" }))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "web_search",
+            "call-1",
+            json!({ "query": "evorch" }),
+        )
         .await
         .expect("web_search の実行に成功するはずです");
 

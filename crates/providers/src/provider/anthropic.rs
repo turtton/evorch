@@ -104,6 +104,7 @@ impl ProviderClient for AnthropicClient {
             ANTHROPIC_PROTOCOL,
             request.model.clone(),
             false,
+            request.observation.clone(),
         );
         let request_builder = self
             .http_client
@@ -157,6 +158,7 @@ impl ProviderClient for AnthropicClient {
             ANTHROPIC_PROTOCOL,
             request.model.clone(),
             true,
+            request.observation.clone(),
         );
         let http_request = self
             .http_client

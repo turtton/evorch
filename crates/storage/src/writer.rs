@@ -16,6 +16,9 @@ use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
 type ReplyTx = mpsc::Sender<Result<(), StorageError>>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
+// AgentRunStarted 追加で Event が大型化。Box 化は append hot path に alloc を
+// 増やすためサイズを許容する。
+#[allow(clippy::large_enum_variant)]
 enum Command {
     Usage(Vec<UsageBucket>),
     AppendEvent(Option<String>, Event, ReplyTx),

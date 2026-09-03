@@ -169,6 +169,7 @@ impl ChatCompletionsClient {
             OPENAI_PROTOCOL,
             model.clone(),
             false,
+            request.observation.clone(),
         );
         let request = self
             .http
@@ -241,6 +242,7 @@ impl ChatCompletionsClient {
             OPENAI_PROTOCOL,
             model.clone(),
             true,
+            request.observation.clone(),
         );
         let request = self
             .http

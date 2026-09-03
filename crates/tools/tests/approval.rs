@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use sandbox::{ApprovalGate, ApprovalMode, ApprovalPolicy};
-use tools::{Permissions, Tool, ToolError, ToolExecutor, ToolResult};
+use tools::{Permissions, Tool, ToolError, ToolExecutionContext, ToolExecutor, ToolResult};
 
 struct CountingTool {
     name: &'static str,
@@ -102,7 +102,14 @@ async fn auto_allow_executes_without_approval_events() {
     );
 
     let result = executor
-        .execute("fake", "call-1", serde_json::json!({}))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "fake",
+            "call-1",
+            serde_json::json!({}),
+        )
         .await;
 
     assert!(!result.expect("自動許可されるはずです").is_error);
@@ -139,7 +146,14 @@ async fn ask_first_denial_prevents_execution() {
     configure_gate(&mut executor, Arc::clone(&bus), ApprovalMode::OnRequest);
 
     let error = executor
-        .execute("fake", "call-2", serde_json::json!({}))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "fake",
+            "call-2",
+            serde_json::json!({}),
+        )
         .await
         .expect_err("拒否されるはずです");
     responder.await.expect("応答タスクが完了するはずです");
@@ -185,7 +199,14 @@ async fn ask_first_approval_executes_once() {
     configure_gate(&mut executor, Arc::clone(&bus), ApprovalMode::OnRequest);
 
     executor
-        .execute("fake", "call-3", serde_json::json!({}))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "fake",
+            "call-3",
+            serde_json::json!({}),
+        )
         .await
         .expect("承認後に成功するはずです");
     responder.await.expect("応答タスクが完了するはずです");
@@ -227,7 +248,14 @@ async fn ask_without_available_approval_path_fails_closed() {
         executor.set_policy(ApprovalPolicy::standard(mode));
 
         let error = executor
-            .execute("fake", call_id, serde_json::json!({}))
+            .execute(
+                &ToolExecutionContext {
+                    run_id: "run-1".to_string(),
+                },
+                "fake",
+                call_id,
+                serde_json::json!({}),
+            )
             .await
             .expect_err("閉じて拒否されるはずです");
 
@@ -271,7 +299,14 @@ async fn on_failure_retries_once_only_when_approved() {
         configure_gate(&mut executor, Arc::clone(&bus), ApprovalMode::OnFailure);
 
         let error = executor
-            .execute("fake", "call-failure", serde_json::json!({}))
+            .execute(
+                &ToolExecutionContext {
+                    run_id: "run-1".to_string(),
+                },
+                "fake",
+                "call-failure",
+                serde_json::json!({}),
+            )
             .await
             .expect_err("失敗結果が返るはずです");
         responder.await.expect("応答タスクが完了するはずです");

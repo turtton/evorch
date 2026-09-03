@@ -1,7 +1,7 @@
 //! イベント型と serde スキーマを定義するモジュールです。
 // allow: SIZE_OK - ワイヤスキーマ全体 (全 EventKind バリアントとその網羅的
 // 往復テスト) を 1 つの表として保持するため分割不可能。生産コード単体では
-// 約307純LOC。
+// 約338純LOC (+AgentRunStarted + run_id correlation fields)。
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -166,6 +166,20 @@ pub enum LifecycleEvent {
         /// キャンセルされたタスクの ID。
         task_id: String,
     },
+    /// run の登録時に発火する canonical run 開始イベント。
+    ///
+    /// run の lifetime はこの登録で開始する。`role` は委譲 role 語彙
+    /// (`orchestrator` / `explorer` / `worker` / `reviewer`) を想定する。
+    AgentRunStarted {
+        /// 登録された run の ID。
+        run_id: String,
+        /// 委譲元 run の ID。ルート run では `None`。
+        parent_run_id: Option<String>,
+        /// run を実行する agent の名前。
+        agent_name: String,
+        /// 委譲 role 語彙における実行 role。
+        role: String,
+    },
     /// エージェント実行の位相が遷移した。
     AgentRunStateChanged {
         /// 状態が変化した実行の ID。
@@ -217,6 +231,12 @@ pub enum ToolEvent {
         tool_name: String,
         /// ツール呼び出しの ID。
         call_id: String,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// ツール呼び出しが完了した。
     ToolCompleted {
@@ -232,6 +252,12 @@ pub enum ToolEvent {
         /// 欠落時は `None` として読む。
         #[serde(default)]
         detail: Option<serde_json::Value>,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// ツール実行の承認が要求された。
     ApprovalRequested { tool_name: String, call_id: String },
@@ -348,6 +374,12 @@ pub enum ProviderEvent {
         model: String,
         /// ストリーミング attempt かどうか。
         streaming: bool,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// ストリーミング attempt で最初の user-visible delta を観測した (TTFT)。
     ///
@@ -373,6 +405,12 @@ pub enum ProviderEvent {
         model: String,
         /// time-to-first-token (ミリ秒)。
         ttft_ms: u64,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// リクエスト attempt が成功して完了した。
     ///
@@ -411,6 +449,12 @@ pub enum ProviderEvent {
         /// canonical finish reason (snake_case: `stop` / `length` /
         /// `tool_use` / `content_filter`)。
         finish_reason: String,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// リクエスト attempt が失敗して終了した。
     ///
@@ -433,6 +477,12 @@ pub enum ProviderEvent {
         duration_ms: u64,
         /// 型付き失敗分類。
         failure: ProviderFailureKind,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// routing の fallback 選択境界でフォールバック先が選択された。
     ///
@@ -681,6 +731,7 @@ mod tests {
                 ToolEvent::ToolStarted {
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
+                    run_id: None,
                 }
                 .into(),
             ),
@@ -691,6 +742,7 @@ mod tests {
                     call_id: "call-1".into(),
                     is_error: true,
                     detail: None,
+                    run_id: None,
                 }
                 .into(),
             ),
@@ -933,12 +985,14 @@ mod tests {
                 call_id: "call-1".into(),
                 is_error: false,
                 detail: Some(serde_json::json!({ "request_id": "req-1" })),
+                run_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 is_error: true,
                 detail: None,
+                run_id: None,
             }),
         ];
 
@@ -982,6 +1036,7 @@ mod tests {
                 call_id: "call-1".into(),
                 is_error: false,
                 detail: None,
+                run_id: None,
             })
         );
     }
@@ -1039,6 +1094,7 @@ mod tests {
                     protocol: "openai-chat-completions".into(),
                     model: "gpt-contract".into(),
                     streaming: false,
+                    run_id: None,
                 },
             ),
             (
@@ -1050,6 +1106,7 @@ mod tests {
                     protocol: "anthropic-messages".into(),
                     model: "claude-contract".into(),
                     ttft_ms: 42,
+                    run_id: None,
                 },
             ),
             (
@@ -1067,6 +1124,7 @@ mod tests {
                     cache_read_tokens: 3,
                     cache_write_tokens: 1,
                     finish_reason: "stop".into(),
+                    run_id: None,
                 },
             ),
             (
@@ -1080,6 +1138,7 @@ mod tests {
                     streaming: true,
                     duration_ms: 120,
                     failure: ProviderFailureKind::Http { status: 500 },
+                    run_id: None,
                 },
             ),
             (
@@ -1347,5 +1406,319 @@ mod tests {
             lifecycle, restored,
             "lifecycle round-trip must be unchanged"
         );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の RequestStarted ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn request_started_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Provider",
+                "payload": {
+                    "kind": "RequestStarted",
+                    "payload": {
+                        "request_id": "req-1700000000000-1",
+                        "provider": "openai",
+                        "profile": "primary",
+                        "protocol": "openai-chat-completions",
+                        "model": "gpt-contract",
+                        "streaming": false
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Provider(ProviderEvent::RequestStarted {
+                request_id: "req-1700000000000-1".into(),
+                provider: "openai".into(),
+                profile: Some("primary".into()),
+                protocol: "openai-chat-completions".into(),
+                model: "gpt-contract".into(),
+                streaming: false,
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の FirstTokenObserved ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn first_token_observed_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Provider",
+                "payload": {
+                    "kind": "FirstTokenObserved",
+                    "payload": {
+                        "request_id": "req-1700000000000-2",
+                        "provider": "anthropic",
+                        "profile": null,
+                        "protocol": "anthropic-messages",
+                        "model": "claude-contract",
+                        "ttft_ms": 42
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Provider(ProviderEvent::FirstTokenObserved {
+                request_id: "req-1700000000000-2".into(),
+                provider: "anthropic".into(),
+                profile: None,
+                protocol: "anthropic-messages".into(),
+                model: "claude-contract".into(),
+                ttft_ms: 42,
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の RequestCompleted ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn request_completed_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Provider",
+                "payload": {
+                    "kind": "RequestCompleted",
+                    "payload": {
+                        "request_id": "req-1700000000000-3",
+                        "provider": "openai-compatible",
+                        "profile": "secondary",
+                        "protocol": "openai-chat-completions",
+                        "model": "local-model",
+                        "streaming": true,
+                        "duration_ms": 500,
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "cache_read_tokens": 3,
+                        "cache_write_tokens": 1,
+                        "finish_reason": "stop"
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                request_id: "req-1700000000000-3".into(),
+                provider: "openai-compatible".into(),
+                profile: Some("secondary".into()),
+                protocol: "openai-chat-completions".into(),
+                model: "local-model".into(),
+                streaming: true,
+                duration_ms: 500,
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: 3,
+                cache_write_tokens: 1,
+                finish_reason: "stop".into(),
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の RequestFailed ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn request_failed_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Provider",
+                "payload": {
+                    "kind": "RequestFailed",
+                    "payload": {
+                        "request_id": "req-1700000000000-4",
+                        "provider": "anthropic",
+                        "profile": null,
+                        "protocol": "anthropic-messages",
+                        "model": "claude-contract",
+                        "streaming": true,
+                        "duration_ms": 120,
+                        "failure": {"kind": "Timeout"}
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Provider(ProviderEvent::RequestFailed {
+                request_id: "req-1700000000000-4".into(),
+                provider: "anthropic".into(),
+                profile: None,
+                protocol: "anthropic-messages".into(),
+                model: "claude-contract".into(),
+                streaming: true,
+                duration_ms: 120,
+                failure: ProviderFailureKind::Timeout,
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の ToolStarted ペイロード
+    //        (v0.1 で保存された JSON)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、schema_version 1 のまま読める。
+    #[test]
+    fn tool_started_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Tool",
+                "payload": {
+                    "kind": "ToolStarted",
+                    "payload": {
+                        "tool_name": "read",
+                        "call_id": "call-1"
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Tool(ToolEvent::ToolStarted {
+                tool_name: "read".into(),
+                call_id: "call-1".into(),
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: run_id フィールドを含まない旧形式の ToolCompleted ペイロード
+    //        (v0.1 で保存された JSON、detail は保持)。
+    // When: 旧形式 JSON をデシリアライズする。
+    // Then: run_id が None として復元され、detail は保存され、
+    //       schema_version 1 のまま読める。
+    #[test]
+    fn tool_completed_legacy_payload_without_run_id_deserializes() {
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {
+                "kind": "Tool",
+                "payload": {
+                    "kind": "ToolCompleted",
+                    "payload": {
+                        "tool_name": "read",
+                        "call_id": "call-1",
+                        "is_error": false,
+                        "detail": {"request_id": "req-1"}
+                    }
+                }
+            }
+        }"#;
+
+        let restored: Event = serde_json::from_str(legacy).expect("旧形式 JSON から復元できる");
+
+        assert_eq!(restored.meta.schema_version, 1);
+        assert_eq!(
+            restored.kind,
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                tool_name: "read".into(),
+                call_id: "call-1".into(),
+                is_error: false,
+                detail: Some(serde_json::json!({ "request_id": "req-1" })),
+                run_id: None,
+            })
+        );
+    }
+
+    // Given: parent_run_id を持つ AgentRunStarted と持たない AgentRunStarted。
+    // When: それぞれ Event を JSON 文字列へシリアライズして復元する。
+    // Then: いずれも往復前後で等しく、内側タグ "AgentRunStarted" を保つ。
+    #[test]
+    fn agent_run_started_round_trips_with_parent_and_role() {
+        let cases = [
+            (
+                "parent_run_id あり",
+                Event::new(LifecycleEvent::AgentRunStarted {
+                    run_id: "run-1".into(),
+                    parent_run_id: Some("run-0".into()),
+                    agent_name: "worker-alpha".into(),
+                    role: "worker".into(),
+                }),
+            ),
+            (
+                "parent_run_id なし",
+                Event::new(LifecycleEvent::AgentRunStarted {
+                    run_id: "run-2".into(),
+                    parent_run_id: None,
+                    agent_name: "orchestrator-main".into(),
+                    role: "orchestrator".into(),
+                }),
+            ),
+        ];
+
+        for (label, event) in cases {
+            let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+            let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+            assert_eq!(event, restored, "round-trip mismatch: {label}");
+
+            let value: serde_json::Value = serde_json::from_str(&json).expect("JSONを読み取れる");
+            assert_eq!(
+                value["kind"]["payload"]["kind"], "AgentRunStarted",
+                "inner tag mismatch: {label}"
+            );
+        }
     }
 }

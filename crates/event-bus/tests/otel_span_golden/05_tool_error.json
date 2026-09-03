@@ -1,0 +1,93 @@
+{
+  "name": "tool_error",
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Started", "payload": { "session_id": "session-1" } } }
+    },
+    {
+      "at_ms": 10,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStarted", "payload": { "run_id": "run-1", "parent_run_id": null, "agent_name": "orchestrator", "role": "orchestrator" } } }
+    },
+    {
+      "at_ms": 20,
+      "kind": { "kind": "Tool", "payload": { "kind": "ToolStarted", "payload": { "tool_name": "shell", "call_id": "call-1", "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 30,
+      "kind": { "kind": "Tool", "payload": { "kind": "ToolCompleted", "payload": { "tool_name": "shell", "call_id": "call-1", "is_error": true, "detail": { "reason": "disk full" }, "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 40,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStateChanged", "payload": { "run_id": "run-1", "from": "Running", "to": "Done", "reason": null } } }
+    },
+    {
+      "at_ms": 50,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Completed", "payload": { "session_id": "session-1" } } }
+    }
+  ],
+  "expected_spans": [
+    {
+      "key": "agent:run-1",
+      "parent": "run:run-1",
+      "name": "invoke_agent orchestrator",
+      "kind": "client",
+      "start_ms": 10,
+      "end_ms": 40,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "invoke_agent"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.agent.name", "orchestrator"],
+        ["evorch.agent_run.id", "run-1"],
+        ["evorch.delegation.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "run:run-1",
+      "parent": null,
+      "name": "evorch.run orchestrator",
+      "kind": "internal",
+      "start_ms": 10,
+      "end_ms": 40,
+      "status": "unset",
+      "attributes": [
+        ["evorch.agent_run.id", "run-1"],
+        ["evorch.agent.name", "orchestrator"],
+        ["evorch.delegation.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "session:session-1",
+      "parent": null,
+      "name": "evorch.session",
+      "kind": "internal",
+      "start_ms": 0,
+      "end_ms": 50,
+      "status": "unset",
+      "attributes": [
+        ["evorch.session.id", "session-1"]
+      ]
+    },
+    {
+      "key": "tool:call-1",
+      "parent": "agent:run-1",
+      "name": "execute_tool shell",
+      "kind": "internal",
+      "start_ms": 20,
+      "end_ms": 30,
+      "status": "error",
+      "attributes": [
+        ["gen_ai.operation.name", "execute_tool"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.tool.name", "shell"],
+        ["gen_ai.tool.call.id", "call-1"],
+        ["evorch.agent_run.id", "run-1"],
+        ["error.type", "tool_error"]
+      ]
+    }
+  ],
+  "expected_drops": []
+}

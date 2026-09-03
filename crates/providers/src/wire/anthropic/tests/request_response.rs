@@ -47,6 +47,7 @@ fn canonical_request_converts_to_anthropic_wire_shape() {
         }],
         temperature: Some(0.2),
         max_tokens: None,
+        observation: None,
     };
 
     let wire = serde_json::to_value(to_wire_request(&request, true)).unwrap();
@@ -95,6 +96,7 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
         tools: vec![],
         temperature: None,
         max_tokens: Some(32),
+        observation: None,
     };
 
     let wire = serde_json::to_value(to_wire_request(&request, false)).unwrap();

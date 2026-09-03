@@ -82,7 +82,7 @@ async fn worker_edit_emits_started_and_completed() {
     let events = collect_events(&mut events, 7).await;
 
     // Then
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id }) if tool_name == "edit" && call_id == "edit-2")));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "edit" && call_id == "edit-2")));
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: false, .. }) if tool_name == "edit" && call_id == "edit-2")));
 }
 

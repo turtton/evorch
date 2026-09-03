@@ -111,6 +111,7 @@ fn representative_request() -> ChatRequest {
         tools: vec![],
         temperature: Some(0.2),
         max_tokens: Some(128),
+        observation: None,
     }
 }
 
@@ -257,6 +258,7 @@ fn openai_response_converts_to_anthropic_request_shape() {
         tools: vec![],
         temperature: None,
         max_tokens: Some(64),
+        observation: None,
     };
     let anthropic = anthropic_wire::to_wire_request(&request, false);
 

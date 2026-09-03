@@ -15,7 +15,7 @@ pub use auth::ProviderAuth;
 pub use client::ProviderClient;
 pub use error::ProviderError;
 pub use message::{
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ProviderCapabilities, Role,
-    ToolResultContent, ToolSpec, Usage,
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ObservationContext,
+    ProviderCapabilities, Role, ToolResultContent, ToolSpec, Usage,
 };
 pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};

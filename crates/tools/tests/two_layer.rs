@@ -8,7 +8,7 @@ use sandbox::{
     ApprovalGate, ApprovalMode, ApprovalPolicy, BwrapConfig, BwrapSandbox, CommandSpec,
     DirectSandbox, Sandbox, SandboxError, WrappedCommand,
 };
-use tools::ToolExecutor;
+use tools::{ToolExecutionContext, ToolExecutor};
 
 #[derive(Clone)]
 struct RecordingSandbox {
@@ -64,6 +64,9 @@ async fn approved_execution_still_routes_through_sandbox() {
 
     executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "shell",
             "call-record",
             serde_json::json!({"command": "sh", "args": ["-c", "echo ok"]}),
@@ -92,6 +95,9 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
 
     let outside_result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "shell",
             "call-outside",
             serde_json::json!({
@@ -111,6 +117,9 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
     let inside_file = workspace.path().join("allowed.txt");
     let inside_result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "shell",
             "call-inside",
             serde_json::json!({
@@ -147,6 +156,9 @@ async fn interactive_shell_runs_inside_bwrap() {
 
     let result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "shell",
             "call-pty",
             serde_json::json!({

@@ -9,7 +9,9 @@ use event_bus::AgentRunPhase;
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{AgentModel, AgentRuntime, Role, RunConfig, RunId, RuntimeError};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, Role, RunConfig, RunId, RuntimeError,
+};
 use tools::ToolExecutor;
 use workspace_ui::UiSettings;
 
@@ -68,6 +70,7 @@ impl ScriptedModel {
 impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
+        _invocation: &AgentInvocationContext,
         _role: Role,
         messages: &[Message],
         _tools: &[ToolSpec],

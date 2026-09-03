@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use sandbox::DirectSandbox;
 use tempfile::tempdir;
-use tools::{Permissions, Read, Tool, ToolError, ToolExecutor, ToolResult};
+use tools::{Permissions, Read, Tool, ToolError, ToolExecutionContext, ToolExecutor, ToolResult};
 
 /// テスト用フィクスチャ（バス・実行器・受信者）を生成する。
 ///
@@ -24,6 +24,13 @@ fn setup_executor() -> (Arc<EventBus>, ToolExecutor, EventReceiver) {
         Arc::new(DirectSandbox::new_unchecked()),
     );
     (bus, executor, receiver)
+}
+
+/// 指定 run_id のテスト用文脈を生成する。
+fn test_ctx(run_id: &str) -> ToolExecutionContext {
+    ToolExecutionContext {
+        run_id: run_id.to_string(),
+    }
 }
 
 /// イベントから [`ToolEvent`] を取り出す。
@@ -70,6 +77,7 @@ async fn executor_emits_started_then_completed_with_payload() {
 
     let result = executor
         .execute(
+            &test_ctx("run-7"),
             "read",
             "call-1",
             serde_json::json!({ "path": path.display().to_string() }),
@@ -85,6 +93,7 @@ async fn executor_emits_started_then_completed_with_payload() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
+            run_id: Some("run-7".to_string()),
         }
     );
     let second = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -95,6 +104,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             call_id: "call-1".to_string(),
             is_error: false,
             detail: None,
+            run_id: Some("run-7".to_string()),
         }
     );
 }
@@ -105,7 +115,12 @@ async fn executor_unknown_tool_is_error_without_events() {
     let (bus, executor, mut receiver) = setup_executor();
 
     let error = executor
-        .execute("nonexistent", "call-x", serde_json::json!({}))
+        .execute(
+            &test_ctx("run-1"),
+            "nonexistent",
+            "call-x",
+            serde_json::json!({}),
+        )
         .await
         .expect_err("未登録ツールはエラーになる");
 
@@ -120,6 +135,7 @@ async fn executor_unknown_tool_is_error_without_events() {
     bus.emit(Event::new(ToolEvent::ToolStarted {
         tool_name: "sentinel".to_string(),
         call_id: "sentinel".to_string(),
+        run_id: None,
     }));
 
     let first = receiver.recv().await.expect("センチネルを受信できる");
@@ -128,6 +144,7 @@ async fn executor_unknown_tool_is_error_without_events() {
         &ToolEvent::ToolStarted {
             tool_name: "sentinel".to_string(),
             call_id: "sentinel".to_string(),
+            run_id: None,
         }
     );
 }
@@ -142,7 +159,12 @@ async fn executor_invalid_args_emit_completed_error() {
 
     // 必須プロパティ path の欠落
     let error = executor
-        .execute("read", "call-missing", serde_json::json!({}))
+        .execute(
+            &test_ctx("run-9"),
+            "read",
+            "call-missing",
+            serde_json::json!({}),
+        )
         .await
         .expect_err("path 欠落は InvalidArgs になる");
     let ToolError::InvalidArgs { detail } = error else {
@@ -156,6 +178,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
+            run_id: Some("run-9".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -166,12 +189,14 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-missing".to_string(),
             is_error: true,
             detail: None,
+            run_id: Some("run-9".to_string()),
         }
     );
 
     // スキーマ未定義の未知プロパティ
     let error = executor
         .execute(
+            &test_ctx("run-9"),
             "read",
             "call-extra",
             serde_json::json!({ "path": path.display().to_string(), "extra": 1 }),
@@ -189,6 +214,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
+            run_id: Some("run-9".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("4 件目のイベントを受信できる");
@@ -199,6 +225,7 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-extra".to_string(),
             is_error: true,
             detail: None,
+            run_id: Some("run-9".to_string()),
         }
     );
 }
@@ -212,6 +239,7 @@ async fn executor_tool_error_emits_completed_error() {
 
     let error = executor
         .execute(
+            &test_ctx("run-11"),
             "read",
             "call-1",
             serde_json::json!({ "path": missing.display().to_string() }),
@@ -232,6 +260,7 @@ async fn executor_tool_error_emits_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
+            run_id: Some("run-11".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -242,6 +271,51 @@ async fn executor_tool_error_emits_completed_error() {
             call_id: "call-1".to_string(),
             is_error: true,
             detail: None,
+            run_id: Some("run-11".to_string()),
+        }
+    );
+}
+
+// Given: run_id "run-42" を載せた ToolExecutionContext / When: read を実行 / Then: ToolStarted と ToolCompleted の双方に context の run_id が Some("run-42") として stamp される
+#[tokio::test]
+async fn executor_stamps_context_run_id_on_tool_events() {
+    let (_bus, executor, mut receiver) = setup_executor();
+    let dir = tempdir().expect("一時ディレクトリの作成に失敗");
+    let path = dir.path().join("sample.txt");
+    std::fs::write(&path, "hello\n").expect("テストファイルの書き込みに失敗");
+    let ctx = ToolExecutionContext {
+        run_id: "run-42".to_string(),
+    };
+
+    let result = executor
+        .execute(
+            &ctx,
+            "read",
+            "call-1",
+            serde_json::json!({ "path": path.display().to_string() }),
+        )
+        .await
+        .expect("既存ファイルの読み取りは成功する");
+    assert!(!result.is_error);
+
+    let started = receiver.recv().await.expect("1 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&started),
+        &ToolEvent::ToolStarted {
+            tool_name: "read".to_string(),
+            call_id: "call-1".to_string(),
+            run_id: Some("run-42".to_string()),
+        }
+    );
+    let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&completed),
+        &ToolEvent::ToolCompleted {
+            tool_name: "read".to_string(),
+            call_id: "call-1".to_string(),
+            is_error: false,
+            detail: None,
+            run_id: Some("run-42".to_string()),
         }
     );
 }
@@ -257,6 +331,7 @@ async fn executor_escapes_control_markers_in_result() {
 
     let result = executor
         .execute(
+            &test_ctx("run-1"),
             "read",
             "call-1",
             serde_json::json!({ "path": path.display().to_string() }),
@@ -284,6 +359,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
 
     let result = executor
         .execute(
+            &test_ctx("run-13"),
             "shell",
             "call-1",
             serde_json::json!({ "command": "sh", "args": ["-c", "exit 3"] }),
@@ -304,6 +380,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
         &ToolEvent::ToolStarted {
             tool_name: "shell".to_string(),
             call_id: "call-1".to_string(),
+            run_id: Some("run-13".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -314,6 +391,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             call_id: "call-1".to_string(),
             is_error: true,
             detail: None,
+            run_id: Some("run-13".to_string()),
         }
     );
 }
@@ -360,7 +438,7 @@ async fn executor_with_standard_tools_registers_five() {
 
     for (name, args) in cases {
         let result = executor
-            .execute(name, "call-1", args)
+            .execute(&test_ctx("run-1"), name, "call-1", args)
             .await
             .unwrap_or_else(|error| panic!("{name} の実行に失敗しました: {error}"));
         assert!(
@@ -408,7 +486,12 @@ async fn executor_emits_tool_completed_with_detail() {
         .expect("テストツールを登録できるはずです");
 
     executor
-        .execute("detail_tool", "call-1", serde_json::json!({}))
+        .execute(
+            &test_ctx("run-15"),
+            "detail_tool",
+            "call-1",
+            serde_json::json!({}),
+        )
         .await
         .expect("テストツールは成功する");
 
@@ -418,6 +501,7 @@ async fn executor_emits_tool_completed_with_detail() {
         &ToolEvent::ToolStarted {
             tool_name: "detail_tool".to_string(),
             call_id: "call-1".to_string(),
+            run_id: Some("run-15".to_string()),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -431,6 +515,7 @@ async fn executor_emits_tool_completed_with_detail() {
                 "request_id": "req-1",
                 "query": "evorch"
             })),
+            run_id: Some("run-15".to_string()),
         }
     );
 }
@@ -450,7 +535,12 @@ async fn executor_escapes_control_markers_in_detail_strings() {
         .expect("テストツールを登録できるはずです");
 
     let result = executor
-        .execute("detail_tool", "call-1", serde_json::json!({}))
+        .execute(
+            &test_ctx("run-1"),
+            "detail_tool",
+            "call-1",
+            serde_json::json!({}),
+        )
         .await
         .expect("テストツールは成功する");
 

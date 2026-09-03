@@ -68,6 +68,7 @@ fn canonical_request_maps_to_chat_completions_json() {
         }],
         temperature: Some(0.2),
         max_tokens: Some(128),
+        observation: None,
     };
 
     let wire = to_wire_request(&request, true);

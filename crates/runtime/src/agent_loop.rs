@@ -20,8 +20,8 @@ use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
 use crate::workspace::OwnedWorktree;
 use crate::{
-    AgentContext, AgentModel, ExecutionPolicy, RunConfig, RunId, RunMailbox, RunState,
-    WorkspaceInspection, WorkspaceMode,
+    AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, RunConfig, RunId,
+    RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
 };
 use tool_calls::{standard_tool_specs, visible_tool_specs};
 
@@ -306,6 +306,9 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            let invocation = AgentInvocationContext {
+                run_id: self.task.run_id.to_string(),
+            };
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -316,6 +319,7 @@ impl LoopState {
                     continue;
                 }
                 result = self.shared.model.complete(
+                    &invocation,
                     self.task.role,
                     &self.context.messages,
                     &self.tool_specs,

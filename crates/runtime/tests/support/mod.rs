@@ -12,7 +12,10 @@ use event_bus::{Event, EventReceiver};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{AgentModel, ExecutionPolicy, IsolatedMounts, RuntimeError, SandboxFactory};
+use runtime::{
+    AgentInvocationContext, AgentModel, ExecutionPolicy, IsolatedMounts, RuntimeError,
+    SandboxFactory,
+};
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tempfile::TempDir;
 use tokio::sync::{Mutex, Notify};
@@ -85,6 +88,7 @@ impl ScriptedModel {
 impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
+        _invocation: &AgentInvocationContext,
         _role: Role,
         messages: &[Message],
         _tools: &[ToolSpec],

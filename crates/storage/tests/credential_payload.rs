@@ -46,6 +46,7 @@ fn event_kinds() -> [EventKind; 14] {
         ToolEvent::ToolStarted {
             tool_name: "read".into(),
             call_id: "c".into(),
+            run_id: None,
         }
         .into(),
         ToolEvent::ToolCompleted {
@@ -53,6 +54,7 @@ fn event_kinds() -> [EventKind; 14] {
             call_id: "c".into(),
             is_error: false,
             detail: None,
+            run_id: None,
         }
         .into(),
         UsageEvent::Usage {
@@ -114,6 +116,7 @@ fn every_event_kind_json_key_is_in_the_credential_free_allowlist() {
             "call_id",
             "is_error",
             "detail",
+            "run_id",
             "provider",
             "model",
             "input_tokens",
