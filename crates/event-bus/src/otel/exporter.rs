@@ -1,3 +1,6 @@
+// allow: SIZE_OK - in-module smoke テストの配置がタスク要件であり、emitter
+// と provider 構築は同一 feature 生命周期の 1 単位。生産コード単体では
+// 約120純LOC (event.rs の先例に準拠)。
 //! otel-exporter feature で有効化される metrics exporter 層。
 //!
 //! 写像層 ([`super::map_event`]) の出力を OTel histogram instruments へ
