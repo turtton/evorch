@@ -12,6 +12,7 @@ agents = { path = "../agents" }
 async-trait = { workspace = true }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
+globset = { workspace = true }
 providers = { path = "../providers" }
 serde = { workspace = true }
 serde_json = { workspace = true }

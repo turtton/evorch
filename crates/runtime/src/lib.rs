@@ -24,6 +24,7 @@ pub mod model;
 pub mod network;
 pub mod policy;
 pub mod prompt;
+pub mod rules;
 pub mod run;
 pub mod runtime;
 pub mod skill;
@@ -46,6 +47,7 @@ pub use prompt::{
     AvailableAgent, AvailableSkill, CatalogBuildInput, ModelFamily, PromptCompositionError,
     SystemPromptCatalog, SystemPromptCatalogError, TriggerSource, build_catalog,
 };
+pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
     AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode,
 };

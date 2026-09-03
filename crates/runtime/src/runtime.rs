@@ -21,6 +21,7 @@ use crate::mailbox::{PushError, RunMailbox};
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
+use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 use crate::workspace::{Project, WorktreeManager};
@@ -45,6 +46,7 @@ pub(crate) struct Shared {
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
+    pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -120,6 +122,7 @@ impl AgentRuntime {
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
+                rules: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -137,6 +140,15 @@ impl AgentRuntime {
     /// System メッセージなしの履歴で開始する。
     pub fn with_system_prompts(self, system_prompts: Arc<SystemPromptCatalog>) -> Self {
         let _ = self.shared.system_prompts.set(system_prompts);
+        self
+    }
+
+    /// プロジェクトルール読み込み元を設定したランタイムを返すビルダーメソッド。
+    ///
+    /// 設定済みの場合は 2 回目以降の呼び出しを無視する先勝ち契約で、実際のルール
+    /// 注入は agent loop 統合を行う後続 Wave が担う。
+    pub fn with_project_rules(self, rules: Arc<RulesSource>) -> Self {
+        let _ = self.shared.rules.set(rules);
         self
     }
 
@@ -277,6 +289,7 @@ impl AgentRuntime {
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
+                rules: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -837,6 +850,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         model: Arc::clone(&shared.model),
         system_prompts: shared.system_prompts.get().cloned(),
         skills: shared.skills.get().cloned(),
+        rules: shared.rules.get().cloned(),
         runtime: Arc::downgrade(&shared),
     })
 }

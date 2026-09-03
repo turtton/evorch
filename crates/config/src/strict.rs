@@ -15,6 +15,7 @@ const ROOT_KEYS: &[&str] = &[
     "permissions",
     "metrics",
     "agents",
+    "rules",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -33,6 +34,11 @@ const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
 const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer"];
+const RULES_KEYS: &[&str] = &[
+    "context_window_tokens",
+    "response_headroom_tokens",
+    "max_injection_bytes",
+];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens", "reasoning_effort"];
@@ -83,7 +89,8 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "panel", PANEL_KEYS)?;
     validate_section(root, "diagnostics", DIAGNOSTICS_KEYS)?;
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
-    validate_section(root, "metrics", METRICS_KEYS)
+    validate_section(root, "metrics", METRICS_KEYS)?;
+    validate_section(root, "rules", RULES_KEYS)
 }
 
 fn validate_credential(
