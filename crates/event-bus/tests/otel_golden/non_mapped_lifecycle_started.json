@@ -1,0 +1,15 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Lifecycle",
+      "payload": {
+        "kind": "Started",
+        "payload": {
+          "session_id": "session-1"
+        }
+      }
+    }
+  },
+  "measurements": []
+}

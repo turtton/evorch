@@ -1,0 +1,65 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Usage",
+      "payload": {
+        "kind": "Usage",
+        "payload": {
+          "provider": "anthropic",
+          "model": "kimi-k3",
+          "input_tokens": 10,
+          "output_tokens": 20,
+          "cache_read_tokens": 30,
+          "cache_write_tokens": 40
+        }
+      }
+    }
+  },
+  "measurements": [
+    {
+      "name": "gen_ai.client.token.usage",
+      "unit": "{token}",
+      "value": {"type": "u64", "value": 10},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
+        {"key": "gen_ai.token.type", "value": "input"}
+      ]
+    },
+    {
+      "name": "gen_ai.client.token.usage",
+      "unit": "{token}",
+      "value": {"type": "u64", "value": 20},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
+        {"key": "gen_ai.token.type", "value": "output"}
+      ]
+    },
+    {
+      "name": "gen_ai.client.token.usage",
+      "unit": "{token}",
+      "value": {"type": "u64", "value": 30},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
+        {"key": "gen_ai.token.type", "value": "cache_read"}
+      ]
+    },
+    {
+      "name": "gen_ai.client.token.usage",
+      "unit": "{token}",
+      "value": {"type": "u64", "value": 40},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
+        {"key": "gen_ai.token.type", "value": "cache_write"}
+      ]
+    }
+  ]
+}

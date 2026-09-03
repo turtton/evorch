@@ -1,0 +1,32 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Provider",
+      "payload": {
+        "kind": "FirstTokenObserved",
+        "payload": {
+          "request_id": "req-1700000000000-7",
+          "provider": "anthropic",
+          "profile": "primary",
+          "protocol": "anthropic-messages",
+          "model": "claude-contract",
+          "ttft_ms": 1500
+        }
+      }
+    }
+  },
+  "measurements": [
+    {
+      "name": "evorch.client.time_to_first_token",
+      "unit": "s",
+      "value": {"type": "f64", "value": 1.5},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "claude-contract"},
+        {"key": "evorch.profile.name", "value": "primary"}
+      ]
+    }
+  ]
+}

@@ -2,6 +2,7 @@
 
 pub mod bus;
 pub mod event;
+pub mod otel;
 pub mod ring;
 pub mod usage;
 
@@ -10,6 +11,11 @@ pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
     EventKind, EventMeta, FallbackAxis, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent,
     ProviderFailureKind, SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
+};
+pub use otel::{
+    ATTRIBUTE_WHITELIST, CardinalityViolation, MetricAttribute, MetricMeasurement, MetricValue,
+    OPERATION_DURATION_METRIC, SECONDS_UNIT, SEMCONV_PIN, TIME_TO_FIRST_TOKEN_METRIC, TOKEN_UNIT,
+    TOKEN_USAGE_METRIC, map_event, validate_metric_attributes,
 };
 pub use ring::RingBuffer;
 pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};

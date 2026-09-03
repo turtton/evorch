@@ -17,6 +17,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # event-bus の otel-exporter feature (opt-in 既定 off) は既定 job では
+      # コンパイルされないため、feature on の clippy / test を別途走らせる
+      # (issue #55 / ADR 0023 決定7: 最小 OTLP E2E は CI に 1 本入れる)。
+      - run: cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
+      - run: cargo test -p event-bus --features otel-exporter
       # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
       # 再生成結果と checked-in artifact が一致しない場合は drift として失敗する。
       - name: Check config schema artifact is up to date

@@ -1,0 +1,35 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Provider",
+      "payload": {
+        "kind": "RequestFailed",
+        "payload": {
+          "request_id": "req-1700000000000-5",
+          "provider": "openai-compatible",
+          "profile": "secondary",
+          "protocol": "openai-chat-completions",
+          "model": "local-model",
+          "streaming": true,
+          "duration_ms": 3000,
+          "failure": {"kind": "Http", "status": 503}
+        }
+      }
+    }
+  },
+  "measurements": [
+    {
+      "name": "gen_ai.client.operation.duration",
+      "unit": "s",
+      "value": {"type": "f64", "value": 3.0},
+      "attrs": [
+        {"key": "gen_ai.operation.name", "value": "chat"},
+        {"key": "gen_ai.provider.name", "value": "openai-compatible"},
+        {"key": "gen_ai.request.model", "value": "local-model"},
+        {"key": "error.type", "value": "http"},
+        {"key": "evorch.profile.name", "value": "secondary"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "event": {
+    "meta": {"schema_version": 1, "monotonic": {"secs": 0, "nanos": 0}, "wall_clock": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0}},
+    "kind": {
+      "kind": "Usage",
+      "payload": {
+        "kind": "CacheStats",
+        "payload": {
+          "provider": "anthropic",
+          "model": "kimi-k3",
+          "cache_hits": 3,
+          "cache_misses": 4
+        }
+      }
+    }
+  },
+  "measurements": []
+}
