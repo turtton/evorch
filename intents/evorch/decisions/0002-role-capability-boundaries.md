@@ -17,8 +17,9 @@ Role を personality ではなく capability boundary とする。
   - Explorer: read / search allowed、write / edit / delegate denied、network optional
   - Librarian: read / search / network allowed、write / edit / delegate denied
   - Worker: workspace read-write、network denied by default
-  - Orchestrator: delegate / read / grep / git_diff / compact / finish 等のみ、write / edit / apply_patch / arbitrary shell / git commit は持たせない
+  - Orchestrator: delegate / read / grep / git_diff / compact / finish / web_fetch(network: OptIn) のみ。write / edit / apply_patch / arbitrary shell / git commit / web_search は持たせない。単一 URL 確認用途の fetch は許可するが、open-ended な検索は Librarian 専用とする
 - 生成と独立レビューを別 context / 別 role にする（Planner → Reviewer、Worker → Reviewer）。
+- web_fetch 開放の補足（2026-09-03 確定）: Orchestrator への fetch 提供は「小さな検証コストの delegation 往復」を削るためであり、`ContentOrigin::WebUntrusted` 型付けで untrusted 扱いを維持する。web_search は open-ended 調査の起点として Librarian 専用に据え置くことで capability discipline を保持する
 
 ## Consequences
 

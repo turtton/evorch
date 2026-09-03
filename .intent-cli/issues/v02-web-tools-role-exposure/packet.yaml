@@ -1,0 +1,72 @@
+implementation_issue_packet:
+  issue_title: "v0.2: web ツールを role 別に公開する（Librarian=search+fetch / Orchestrator=fetch のみ OptIn）"
+  issue_kind: feature
+  source_execution_unit: v02-web-tools-role-exposure
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/agents/ crates/runtime/ crates/tools/"
+  target_part: "role capability と production tool registry を更新し、実装済みの web_search / web_fetch を Librarian（両方）および Orchestrator（fetch のみ OptIn）に公開する consumer 配線 slice。policy の model-visible filter と executor 登録、tripwire テストの非対称更新を含む"
+  dependencies: [v02-web-search-tool, v02-web-fetch-tool]
+  technical_baseline:
+    - "web_search / web_fetch は v0.2 で crates/tools に実装済み（issue #43 / #45、 Exa keyless 既定 + Tavily fallback、readability chain + 5MB/50KB 切詰め）"
+    - "ToolExecutor::with_standard_tools() は現状 read / edit / grep / shell / git_diff のみ登録（crates/tools/src/executor.rs）"
+    - "production agent loop の model-visible spec は crates/runtime/src/agent_loop/tool_calls.rs の standard_tool_specs() で、3 層 AND の layer-1 は crates/runtime/src/policy.rs の role filter"
+    - "role capability は crates/agents/src/role.rs（Role::capabilities() / NetworkAccess::{Denied,OptIn,Allowed}）"
+    - "runtime tripwire test: crates/runtime/tests/web_search_network_gate.rs / web_fetch_network_gate.rs、capability_enforcement.rs"
+    - "ContentOrigin 型付けは ToolExecutor の結果正規化層で fail-closed 機械導出（tool 自己申告不可）"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/interviews/web-tools-v02.json
+  acceptance_criteria:
+    - "crates/agents/src/role.rs で Librarian は web_search と web_fetch を許可、NetworkAccess=Allowed とする"
+    - "Orchestrator は web_fetch のみ許可し、NetworkAccess=OptIn（承認なしでは拒否）とする。web_search は Orchestrator からは非公開のままとする"
+    - "crates/runtime/src/agent_loop/tool_calls.rs の standard_tool_specs() に web_search / web_fetch を登録し、policy 層の role filter で上記非対称が適用される"
+    - "crates/tools/src/executor.rs の with_standard_tools()（または production composition root 側の等価経路）に web_search / web_fetch を登録し、本番 agent loop で到達可能にする"
+    - "tripwire テスト web_search_network_gate.rs / web_fetch_network_gate.rs を非対称公開へ更新（Librarian=両方許可、Orchestrator=fetch のみ OptIn、Explorer/Worker/Reviewer では拒否）"
+    - "Orchestrator の web_fetch 実行が session NetworkAccess=OptIn の approval を経由することを検証する runtime テストがある"
+    - "ContentOrigin::WebUntrusted が ToolExecutor で fail-closed に維持される回帰テストがある"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+# G461: packet-time intent-maintenance metadata
+intent_placement:
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/interviews/web-tools-v02.json
+  new_intent_needed: false
+  placement_rationale: "web tools 本体と脅威モデルは既に v0.2 確定節で確定済み（#43/#45）。本 slice は role capability と production registry の公開方針のみを確定する非対称配線であり、新規 intent を増やさず tools-sandbox overview と ADR 0002 の既有記述へ接続する"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/tools-sandbox/overview.md
+    summary: "role 公開方針（Librarian=search+fetch、Orchestrator=fetch のみ OptIn）と production wiring の更新ポイント（role.rs / tool_calls.rs / executor.rs / tripwire tests）を v0.2 確定節へ反映する"
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0002-role-capability-boundaries.md
+    decision_title: "Orchestrator capability へ web_fetch(OptIn) を追加し、web_search は Librarian 専用に据え置く"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "web ツールの role 別公開方針（Librarian=search+fetch、Orchestrator=fetch のみ OptIn）と、それに伴う capability / policy / executor / tripwire test の更新ポイントを tools-sandbox overview と ADR 0002 に記録する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+# G645: Librarian（network allowed、ADR 0002）の公開 tool surface を更新するため route form
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "tools-sandbox overview の v0.2 tool 利用 surface（web_search / web_fetch の role 公開）"
+      role: Librarian
+      target_surface: "workspace / session の tool 設定"

@@ -66,12 +66,22 @@ web_fetch tool の確定実装（issue #45、PR #46、2026-09-02）: `crates/too
 
 v0.3+ backlog: サイト専用 extractor、key 必須 provider、provider-native routing、context window 連動切詰め、credential/usage attribution 高度化。
 
+## v0.2 role 公開方針の確定（2026-09-03）
+
+web_search / web_fetch の実装（issue #43 / #45）は済んでいるが、production agent loop への role 公開配線は未着手。この slice の role 適用方針を以下に確定する。
+
+- **web_fetch**: Orchestrator にも公開する。単一既知 URL の決定的取得であり「`read` の remote 版」に近く、 Librarian の成果 URL 照合や軽量確認用途で delegation を毎回介すコストを削るため。ただし NetworkAccess は `OptIn`（承認なしでは拒否）のままとし、`Allowed` は付与しない。結果は `ContentOrigin::WebUntrusted` で fail-closed 型付けされる既存機構を維持する
+- **web_search**: Librarian 専用のまま。open-ended な調査起点であり、Orchestrator へ渡すと「探索の直接実行」が起きて ADR 0002 が防ぐ「Orchestrator が何でもやる」問題につながるため
+- **Librarian**: web_search / web_fetch の両方を第一級 tool として利用可能にする（本スライスの本来目的）
+
+production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ）と tripwire テスト（`web_search_network_gate.rs` / `web_fetch_network_gate.rs`）はこの非対称公開を反映して更新する。GUI 経由の承認ダイアログを通る OptIn 承認は、`ExecutionPolicy::for_role(Role::Orchestrator)` の network gate と per-tool permission の AND で成立させる。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること
 - exec と pty が分離され、interactive process を扱えること
 - sandbox policy が role ごとに適用されること（v0.1.1 で network が OS 強制まで接続（PR #20）、production composition root も landed（PR #22）。残る consumer 配線は v01-gui-runtime-wiring）
-- web_search / web_fetch が v0.2 で Librarian から利用可能で、tool 実行が bwrap 外 main process で行われること、`ContentOrigin::WebUntrusted` が `ToolExecutor` 層で fail-closed に型付されること、truncation / fallback / redirect_blocked 等の metadata が `ToolCompleted` event detail に観測可能な形で流れること（v0.2 確定節参照）
+- web_search / web_fetch が v0.2 で「Librarian は両方、Orchestrator は web_fetch のみ（NetworkAccess=OptIn）」から利用可能で、tool 実行が bwrap 外 main process で行われること、`ContentOrigin::WebUntrusted` が `ToolExecutor` 層で fail-closed に型付されること、truncation / fallback / redirect_blocked 等の metadata が `ToolCompleted` event detail に観測可能な形で流れること（v0.2 確定節参照）
 
 ## Related decisions
 

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-03T10:50:16.0893732+00:00",
+  "updated_at": "2026-09-03T11:44:00.9296698+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -838,6 +838,26 @@
         "implementation": ".intent-cli/issues/v02-orchestrator-loop/implementation.md",
         "review_context": ".intent-cli/issues/v02-orchestrator-loop/review-context.md",
         "yaml": ".intent-cli/issues/v02-orchestrator-loop/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-web-tools-role-exposure",
+      "title": "v0.2: web \u30C4\u30FC\u30EB\u3092 role \u5225\u306B\u516C\u958B\u3059\u308B\uFF08Librarian=search\u002Bfetch / Orchestrator=fetch \u306E\u307F OptIn\uFF09",
+      "state": "queued",
+      "dependencies": [
+        "v02-web-search-tool",
+        "v02-web-fetch-tool"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-web-tools-role-exposure/implementation.md",
+        "review_context": ".intent-cli/issues/v02-web-tools-role-exposure/review-context.md",
+        "yaml": ".intent-cli/issues/v02-web-tools-role-exposure/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",
