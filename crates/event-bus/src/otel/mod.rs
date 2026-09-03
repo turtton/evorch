@@ -25,17 +25,17 @@
 //! 括弧付き属性は条件付き: `profile` が `Some` かつ shape ポリシー
 //! ([`is_profile_name_valid`]) に適合するとき、map_event は属性を付与する
 //! (不適合値は measurement を保持したまま属性のみ省略)。`gen_ai.request.model`
-//! も同様に shape ポリシー ([`is_model_name_valid`]) が適合するときのみ
-//! 付与される。さらに exporter 層 (otel-exporter feature) は、初期化時に
-//! 渡された registry の非 member である属性のみ emit 時に除外 /
-//! 正規化する: profile は属性を除外し、model は値を `other` へ正規化
-//! する (model 次元は metrics の必須次元のため属性自体は残す)。つまり
-//! OTLP label への profile 属性の emit 条件は「map 層 shape 適合 ∧
-//! emitter registry member」、model 属性は「map 層 shape 適合」で必ず
-//! 存在し、その値は registry member 値または `other` に有界化される。
-//! attribute value は [`validate_metric_attributes`] の domain 検査
-//! (閉集合 / shape ポリシー) と exporter registry による数的有界化で
-//! 保護される。
+//! は metrics の必須次元であるため属性は**常に付与**される: shape ポリシー
+//! ([`is_model_name_valid`]) 適合時は元値、不適合時は固定値 `other` に
+//! 畳み込む ([`normalize_model_shape`])。さらに exporter 層
+//! (otel-exporter feature) は、初期化時に渡された registry の非 member で
+//! ある属性を emit 時に正規化する: profile は属性を除外し、model は値を
+//! `other` へ書き換える (属性は残す)。つまり OTLP label への profile 属性
+//! の emit 条件は「map 層 shape 適合 ∧ emitter registry member」、model
+//! 属性は無条件で存在し、その値は registry member 値または `other` に
+//! 有界化される。attribute value は [`validate_metric_attributes`] の
+//! domain 検査 (閉集合 / shape ポリシー) と exporter registry による
+//! 数的有界化で保護される。
 //!
 //! # 非写像 event と理由
 //!
@@ -71,7 +71,8 @@
 //! 固定値 `other` へ正規化する (属性自体は残す)。本層 / validator は
 //! 正規化防壁としてのみ動作する: shape ポリシー
 //! ([`is_model_name_valid`]: 非空・128 文字以下・printable ASCII) 不適合の
-//! model 文字列は map 層で属性省略、validator で拒否される。
+//! model 文字列は map 層で [`normalize_model_shape`] により `other` に
+//! 畳み込まれ、validator は DTO 直構築への防御として shape gate を行う。
 //!
 //! # 非ゴール
 //!
@@ -285,10 +286,8 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                         let mut attrs = vec![
                             MetricAttribute::new(ATTR_OPERATION_NAME, "chat"),
                             MetricAttribute::new(ATTR_PROVIDER_NAME, provider),
+                            MetricAttribute::new(ATTR_REQUEST_MODEL, normalize_model_shape(model)),
                         ];
-                        if is_model_name_valid(model) {
-                            attrs.push(MetricAttribute::new(ATTR_REQUEST_MODEL, model));
-                        }
                         attrs.push(MetricAttribute::new(ATTR_TOKEN_TYPE, token_type));
                         MetricMeasurement::new(
                             TOKEN_USAGE_METRIC,
@@ -409,10 +408,10 @@ pub fn validate_metric_attributes(
 ///
 /// 順序は semconv 定義キー (`gen_ai.operation.name`, `gen_ai.provider.name`,
 /// `gen_ai.request.model`, `error.type`) の後に evorch 拡張
-/// (`evorch.profile.name`) を置く。model は [`is_model_name_valid`] の
-/// shape ポリシーに適合するときのみ付与し、不適合値は measurement を
-/// 保持したまま属性のみ省略する。profile は [`is_profile_name_valid`] の
-/// shape ポリシーに適合するときのみ付与する。
+/// (`evorch.profile.name`) を置く。model は必須次元のため無条件で付与し、
+/// shape 不適合値は [`normalize_model_shape`] が固定値 `other` に畳み込む。
+/// profile は [`is_profile_name_valid`] の shape ポリシーに適合するときのみ
+/// 付与する。
 fn operation_attrs(
     provider: &str,
     model: &str,
@@ -422,10 +421,8 @@ fn operation_attrs(
     let mut attrs = vec![
         MetricAttribute::new(ATTR_OPERATION_NAME, "chat"),
         MetricAttribute::new(ATTR_PROVIDER_NAME, normalize_provider(provider)),
+        MetricAttribute::new(ATTR_REQUEST_MODEL, normalize_model_shape(model)),
     ];
-    if is_model_name_valid(model) {
-        attrs.push(MetricAttribute::new(ATTR_REQUEST_MODEL, model));
-    }
     if let Some(error_type) = error_type {
         attrs.push(MetricAttribute::new(ATTR_ERROR_TYPE, error_type));
     }
@@ -543,6 +540,20 @@ fn is_delegation_depth_valid(depth: &str) -> bool {
 /// registry が担う (profile と同型の責務境界)。
 fn is_model_name_valid(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// model 値を shape ポリシーで畳み込む。
+///
+/// 適合値はそのまま、不適合値は固定値 `other` へ畳み込む。`gen_ai.request.model`
+/// は metrics の必須次元であるため属性省略は許容されず、全 4 写像でこの
+/// 関数を経由して常に属性が付与される (exporter 側の membership 正規化と
+/// 合流点が `other` で統一される)。
+fn normalize_model_shape(model: &str) -> &str {
+    if is_model_name_valid(model) {
+        model
+    } else {
+        "other"
+    }
 }
 
 /// ID 形状キー (`.id` 終端・`*_id` 系) の判定。
@@ -1158,9 +1169,9 @@ mod tests {
     // Given: shape-valid な model ("kimi-k3") と shape-invalid な model
     //        ("has space") を持つ RequestCompleted。
     // When: map_event で写像する。
-    // Then: shape-valid な model は gen_ai.request.model として emit され、
-    //       shape-invalid な model は measurement を保持したまま属性のみ省略
-    //       される。
+    // Then: gen_ai.request.model は必須次元として常に付与される —
+    //       shape-valid な model は元値、shape-invalid な model は固定値
+    //       "other" に畳み込まれる (measurement 数はいずれも 1 のまま)。
     #[test]
     fn model_attribute_requirements() {
         let valid = map_event(&completed_event_with_model("kimi-k3"));
@@ -1170,17 +1181,17 @@ mod tests {
                 .attrs
                 .iter()
                 .any(|attr| attr.key == "gen_ai.request.model" && attr.value == "kimi-k3"),
-            "shape-valid model must be emitted"
+            "shape-valid model must be emitted as is"
         );
 
         let invalid = map_event(&completed_event_with_model("has space"));
         assert_eq!(invalid.len(), 1, "measurement must be kept");
         assert!(
-            !invalid[0]
+            invalid[0]
                 .attrs
                 .iter()
-                .any(|attr| attr.key == "gen_ai.request.model"),
-            "shape-invalid model attribute must be omitted"
+                .any(|attr| attr.key == "gen_ai.request.model" && attr.value == "other"),
+            "shape-invalid model must be folded to `other` (required dimension)"
         );
         assert!(
             invalid[0]
@@ -1214,7 +1225,9 @@ mod tests {
     // Given: shape ポリシー不適合の model 値 ("with space" / 129 文字 /
     //        非 ASCII / 空) を注入した measurement。
     // When: validate_metric_attributes で検査する。
-    // Then: InvalidAttributeValue で拒否される。
+    // Then: InvalidAttributeValue で拒否される。map 層出力は既に "other" へ
+    //       畳み込み済みのため通常この経路は通らないが、DTO 直構築への
+    //       防御として shape gate を維持する。
     #[test]
     fn validate_rejects_shape_invalid_models() {
         let too_long = "m".repeat(129);
