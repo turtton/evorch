@@ -85,6 +85,12 @@ use crate::event::{Event, EventKind, ProviderEvent, ProviderFailureKind, UsageEv
 
 #[cfg(feature = "otel-exporter")]
 pub mod exporter;
+pub mod span;
+
+pub use span::{
+    FiniteF64, SpanAction, SpanAttribute, SpanAttributeValue, SpanDrop, SpanDropKind, SpanKey,
+    SpanKind, SpanMapper, SpanStatus,
+};
 
 /// 写像先の GenAI metrics semantic conventions の pin バージョン。
 pub const SEMCONV_PIN: &str = "1.37.0";
