@@ -63,7 +63,8 @@ fn identifier_like_and_unknown_keys_are_rejected() {
 }
 
 // Given: 閉集合 domain 外の値 (token.type="reasoning" /
-//        operation.name="embeddings" / provider.name="custom-proxy")。
+//        operation.name="embeddings" / provider.name="custom-proxy") と
+//        shape ポリシー不適合の evorch 拡張値 (profile / depth / role)。
 // When: validate_metric_attributes で検査する。
 // Then: InvalidAttributeValue で拒否される。
 #[test]
@@ -72,6 +73,13 @@ fn out_of_domain_values_are_rejected() {
         ("gen_ai.token.type", "reasoning"),
         ("gen_ai.operation.name", "embeddings"),
         ("gen_ai.provider.name", "custom-proxy"),
+        ("error.type", "rate-limit"),
+        ("evorch.profile.name", "GPU Pool"),
+        ("evorch.profile.name", "プール"),
+        ("evorch.delegation.depth", "100"),
+        ("evorch.delegation.depth", "01"),
+        ("evorch.delegation.depth", "abc"),
+        ("evorch.delegation.role", "super-admin"),
     ];
 
     for (key, value) in cases {

@@ -22,9 +22,12 @@
 //! | `ProviderEvent::RequestFailed` | `gen_ai.client.operation.duration` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `error.type`, (`evorch.profile.name`) |
 //! | `ProviderEvent::FirstTokenObserved` | `evorch.client.time_to_first_token` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, (`evorch.profile.name`) |
 //!
-//! 括弧付き属性は条件付き (`profile` が `Some` のときのみ)。attribute
-//! value は [`validate_metric_attributes`] による閉集合 domain 検査で
-//! カーディナリティを保護する。
+//! 括弧付き属性は条件付き: `profile` が `Some` かつ shape ポリシー
+//! ([`is_profile_name_valid`]: 非空・64 文字以下・小文字 ASCII alnum と
+//! `-_.`・先頭 alnum) に適合するときのみ付与し、不適合値は measurement を
+//! 保持したまま profile 属性のみ省略する。attribute value は
+//! [`validate_metric_attributes`] による domain 検査 (閉集合 / shape
+//! ポリシー) でカーディナリティを保護する。
 //!
 //! # 非写像 event と理由
 //!
@@ -46,7 +49,10 @@
 //!   (`RequestCompleted` の `finish_reason` フィールドは写像しない)。
 //! - `evorch.delegation.depth` / `evorch.delegation.role`:
 //!   [`ATTRIBUTE_WHITELIST`] 定義のみで、供給 event 未実装のため本 slice
-//!   では emit しない。
+//!   では emit しない。値 domain は固定済み (depth: `0`..=`99` の decimal
+//!   文字列で leading zero なし / role: repo 既定の agent role 語彙
+//!   `orchestrator` / `explorer` / `worker` / `reviewer`) であり、供給
+//!   event 実装時に [`validate_metric_attributes`] が即適用する。
 //! - `evorch.client.time_to_first_token`: semconv v1.37.0 には server 側の
 //!   `gen_ai.server.time_to_first_token` しか無く、client 観測は evorch.*
 //!   拡張で表現する。
@@ -110,12 +116,16 @@ const ERROR_TYPE_DOMAIN: [&str; 9] = [
     "auth",
     "other",
 ];
+/// `evorch.delegation.role` の閉集合 domain (repo 既定の agent role 語彙)。
+const DELEGATION_ROLE_DOMAIN: [&str; 4] = ["orchestrator", "explorer", "worker", "reviewer"];
 
 const ATTR_OPERATION_NAME: &str = "gen_ai.operation.name";
 const ATTR_PROVIDER_NAME: &str = "gen_ai.provider.name";
 const ATTR_TOKEN_TYPE: &str = "gen_ai.token.type";
 const ATTR_ERROR_TYPE: &str = "error.type";
 const ATTR_PROFILE_NAME: &str = "evorch.profile.name";
+const ATTR_DELEGATION_DEPTH: &str = "evorch.delegation.depth";
+const ATTR_DELEGATION_ROLE: &str = "evorch.delegation.role";
 
 /// metric attribute の key-value 対。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,10 +319,12 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
     }
 }
 
-/// measurement の属性を whitelist と閉集合 domain で検査する。
+/// measurement の属性を whitelist と値 domain で検査する。
 ///
 /// ID 形状キーの防御深層検査を whitelist 判定より先に行い、将来
 /// [`ATTRIBUTE_WHITELIST`] に ID 形状キーが誤って混入しても常に拒否する。
+/// whitelisted キーの値は [`value_domain`] の domain (閉集合 / shape
+/// ポリシー) に適合しなければならない。
 ///
 /// # Errors
 /// whitelist 外キー・domain 外値・ID 形状キーのいずれかを検出した場合、
@@ -331,12 +343,22 @@ pub fn validate_metric_attributes(
                 key: attr.key.clone(),
             });
         }
-        if let Some(domain) = value_domain(&attr.key)
-            && !domain.contains(&attr.value.as_str())
-        {
+        let violation = match value_domain(&attr.key) {
+            Some(AttributeDomain::Closed(domain)) => {
+                (!domain.contains(&attr.value.as_str())).then(|| attr.value.clone())
+            }
+            Some(AttributeDomain::ProfileName) => {
+                (!is_profile_name_valid(&attr.value)).then(|| attr.value.clone())
+            }
+            Some(AttributeDomain::DelegationDepth) => {
+                (!is_delegation_depth_valid(&attr.value)).then(|| attr.value.clone())
+            }
+            None => None,
+        };
+        if let Some(value) = violation {
             return Err(CardinalityViolation::InvalidAttributeValue {
                 key: attr.key.clone(),
-                value: attr.value.clone(),
+                value,
             });
         }
     }
@@ -346,7 +368,10 @@ pub fn validate_metric_attributes(
 /// duration / TTFT 系 measurement 共通の属性列を作る。
 ///
 /// 順序は semconv 定義キー (`gen_ai.operation.name`, `gen_ai.provider.name`,
-/// `error.type`) の後に evorch 拡張 (`evorch.profile.name`) を置く。
+/// `error.type`) の後に evorch 拡張 (`evorch.profile.name`) を置く。profile
+/// は [`is_profile_name_valid`] の shape ポリシーに適合するときのみ付与し、
+/// 不適合値は measurement を保持したまま属性のみ省略する (二重防御の 1 層
+/// 目: validate 側でも同一ポリシーで拒否する)。
 fn operation_attrs(
     provider: &str,
     profile: Option<&str>,
@@ -359,7 +384,7 @@ fn operation_attrs(
     if let Some(error_type) = error_type {
         attrs.push(MetricAttribute::new(ATTR_ERROR_TYPE, error_type));
     }
-    if let Some(profile) = profile {
+    if let Some(profile) = profile.filter(|profile| is_profile_name_valid(profile)) {
         attrs.push(MetricAttribute::new(ATTR_PROFILE_NAME, profile.to_owned()));
     }
     attrs
@@ -394,19 +419,61 @@ fn map_failure(failure: &ProviderFailureKind) -> &'static str {
     }
 }
 
-/// 属性キーに応じた閉集合 domain を返す。
+/// attribute キーごとの値検査方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeDomain {
+    /// 閉集合 domain に含まれる値のみ許容。
+    Closed(&'static [&'static str]),
+    /// profile 名の shape ポリシー ([`is_profile_name_valid`]) 適合のみ許容。
+    ProfileName,
+    /// `0`..=`99` の decimal 文字列 (leading zero なし) のみ許容。
+    DelegationDepth,
+}
+
+/// 属性キーに応じた値 domain を返す。
 ///
-/// domain を持たない whitelisted キー (`evorch.profile.name` /
-/// `evorch.delegation.depth` / `evorch.delegation.role`) は `None` を返し、
-/// 値検査を省略する。
-fn value_domain(key: &str) -> Option<&'static [&'static str]> {
+/// whitelisted キーはすべて何らかの domain を持つ
+/// (`gen_ai.*` / `error.type` / `evorch.delegation.role` は閉集合、
+/// `evorch.profile.name` / `evorch.delegation.depth` は shape ポリシー)。
+/// whitelist 外キーは `None` (whitelist 検査が先に拒否する)。
+fn value_domain(key: &str) -> Option<AttributeDomain> {
     match key {
-        ATTR_OPERATION_NAME => Some(&OPERATION_NAME_DOMAIN),
-        ATTR_TOKEN_TYPE => Some(&TOKEN_TYPE_DOMAIN),
-        ATTR_PROVIDER_NAME => Some(&PROVIDER_NAME_DOMAIN),
-        ATTR_ERROR_TYPE => Some(&ERROR_TYPE_DOMAIN),
+        ATTR_OPERATION_NAME => Some(AttributeDomain::Closed(&OPERATION_NAME_DOMAIN)),
+        ATTR_TOKEN_TYPE => Some(AttributeDomain::Closed(&TOKEN_TYPE_DOMAIN)),
+        ATTR_PROVIDER_NAME => Some(AttributeDomain::Closed(&PROVIDER_NAME_DOMAIN)),
+        ATTR_ERROR_TYPE => Some(AttributeDomain::Closed(&ERROR_TYPE_DOMAIN)),
+        ATTR_DELEGATION_ROLE => Some(AttributeDomain::Closed(&DELEGATION_ROLE_DOMAIN)),
+        ATTR_PROFILE_NAME => Some(AttributeDomain::ProfileName),
+        ATTR_DELEGATION_DEPTH => Some(AttributeDomain::DelegationDepth),
         _ => None,
     }
+}
+
+/// `evorch.profile.name` 値の shape ポリシー。
+///
+/// 非空・長さ 64 文字以下・全文字が小文字 ASCII alnum または `-_.`・
+/// 先頭は alnum。これにより OTLP label としての低カーディナリティを
+/// 保証する (自由文字列・大文字混じり・非 ASCII・空値は拒否)。
+fn is_profile_name_valid(profile: &str) -> bool {
+    !profile.is_empty()
+        && profile.len() <= 64
+        && profile
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
+        && profile.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// `evorch.delegation.depth` 値の shape ポリシー。
+///
+/// `0`..=`99` の decimal 文字列で leading zero を禁じる (`"0"` のみ例外)。
+fn is_delegation_depth_valid(depth: &str) -> bool {
+    let bytes = depth.as_bytes();
+    depth == "0"
+        || (!bytes.is_empty()
+            && bytes.len() <= 2
+            && bytes[0].is_ascii_digit()
+            && bytes[0] != b'0'
+            && bytes.iter().all(u8::is_ascii_digit))
 }
 
 /// ID 形状キー (`.id` 終端・`*_id` 系) の判定。
@@ -838,6 +905,153 @@ mod tests {
                     Err(CardinalityViolation::InvalidAttributeValue { .. })
                 ),
                 "key={key} value={value}"
+            );
+        }
+    }
+
+    // Given: profile 値の shape ポリシーに適合する値 ("primary" / "gpu-pool.1")
+    //        と不適合な値 ("GPU Pool" / 65 文字 / "プール") を持つ
+    //        RequestCompleted。
+    // When: map_event で写像する。
+    // Then: 適合値のときのみ evorch.profile.name が付与され、不適合値では
+    //       measurement 自体は保持しつつ profile 属性のみ省略される。
+    #[test]
+    fn profile_attribute_follows_shape_policy() {
+        for valid in ["primary", "gpu-pool.1"] {
+            let measurements = map_event(&completed_event("openai", Some(valid), 500));
+            assert_eq!(measurements.len(), 1, "profile={valid:?}");
+            assert!(
+                measurements[0]
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.key == "evorch.profile.name" && attr.value == valid),
+                "valid profile={valid:?} must be kept"
+            );
+        }
+
+        let long_profile = "x".repeat(65);
+        for (label, profile) in [
+            ("大文字と空白", "GPU Pool"),
+            ("65 文字", long_profile.as_str()),
+            ("非 ASCII", "プール"),
+        ] {
+            let measurements = map_event(&completed_event("openai", Some(profile), 500));
+            assert_eq!(measurements.len(), 1, "{label}: measurement must be kept");
+            assert!(
+                !measurements[0]
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.key == "evorch.profile.name"),
+                "{label}: profile attribute must be omitted"
+            );
+            assert!(
+                measurements[0]
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.key == "gen_ai.provider.name"),
+                "{label}: other attributes must be kept"
+            );
+        }
+    }
+
+    // Given: shape ポリシー不適合の profile 値 (空 / "GPU Pool" / 65 文字 /
+    //        "プール" / 65 文字境界超過の "a" 繰り返し) と適合値 ("primary" /
+    //        "gpu-pool.1" / ちょうど 64 文字) を注入した measurement。
+    // When: validate_metric_attributes で検査する。
+    // Then: 不適合値は InvalidAttributeValue で拒否され、適合値は通過する。
+    #[test]
+    fn validate_rejects_invalid_profile_names() {
+        let long_profile = "x".repeat(65);
+        for profile in [
+            "",
+            "GPU Pool",
+            long_profile.as_str(),
+            "プール",
+            "-leading-hyphen",
+        ] {
+            let mut measurement = measurement_with_key("evorch.profile.name");
+            measurement.attrs[0].value = profile.to_owned();
+
+            assert!(
+                matches!(
+                    validate_metric_attributes(&measurement),
+                    Err(CardinalityViolation::InvalidAttributeValue { .. })
+                ),
+                "profile={profile:?}"
+            );
+        }
+
+        let exact_64 = "a".repeat(64);
+        for profile in ["primary", "gpu-pool.1", exact_64.as_str()] {
+            let mut measurement = measurement_with_key("evorch.profile.name");
+            measurement.attrs[0].value = profile.to_owned();
+
+            assert_eq!(
+                validate_metric_attributes(&measurement),
+                Ok(()),
+                "profile={profile:?}"
+            );
+        }
+    }
+
+    // Given: depth の domain 外値 ("100" / "01" / "abc" / 空) と domain 内値
+    //        ("0" / "9" / "99") を注入した measurement。
+    // When: validate_metric_attributes で検査する。
+    // Then: domain 外は InvalidAttributeValue で拒否され、domain 内は通過する。
+    #[test]
+    fn validate_rejects_invalid_delegation_depth() {
+        for depth in ["100", "01", "abc", ""] {
+            let mut measurement = measurement_with_key("evorch.delegation.depth");
+            measurement.attrs[0].value = depth.to_owned();
+
+            assert!(
+                matches!(
+                    validate_metric_attributes(&measurement),
+                    Err(CardinalityViolation::InvalidAttributeValue { .. })
+                ),
+                "depth={depth:?}"
+            );
+        }
+
+        for depth in ["0", "9", "99"] {
+            let mut measurement = measurement_with_key("evorch.delegation.depth");
+            measurement.attrs[0].value = depth.to_owned();
+
+            assert_eq!(
+                validate_metric_attributes(&measurement),
+                Ok(()),
+                "depth={depth:?}"
+            );
+        }
+    }
+
+    // Given: role の domain 外値 ("super-admin" / 空) と domain 内 4 値
+    //        (repo 既定の agent role 語彙) を注入した measurement。
+    // When: validate_metric_attributes で検査する。
+    // Then: domain 外は InvalidAttributeValue で拒否され、domain 内は通過する。
+    #[test]
+    fn validate_rejects_invalid_delegation_role() {
+        for role in ["super-admin", ""] {
+            let mut measurement = measurement_with_key("evorch.delegation.role");
+            measurement.attrs[0].value = role.to_owned();
+
+            assert!(
+                matches!(
+                    validate_metric_attributes(&measurement),
+                    Err(CardinalityViolation::InvalidAttributeValue { .. })
+                ),
+                "role={role:?}"
+            );
+        }
+
+        for role in ["orchestrator", "explorer", "worker", "reviewer"] {
+            let mut measurement = measurement_with_key("evorch.delegation.role");
+            measurement.attrs[0].value = role.to_owned();
+
+            assert_eq!(
+                validate_metric_attributes(&measurement),
+                Ok(()),
+                "role={role:?}"
             );
         }
     }
