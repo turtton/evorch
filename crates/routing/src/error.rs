@@ -16,4 +16,10 @@ pub enum RoutingError {
         /// 検証失敗の理由。
         reason: String,
     },
+    /// 指定されたプロバイダ種別の client 構築は未対応。
+    #[error("unsupported provider type: {provider_type}")]
+    UnsupportedProviderType {
+        /// 未対応のプロバイダ種別 (設定上の識別子)。
+        provider_type: String,
+    },
 }

@@ -35,7 +35,7 @@ pub enum ProviderTypeConfig {
 ///
 /// シリアライズ識別子はケバブケース (例: `anthropic-messages`) です。
 /// `OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子
-/// (`openai-responses`・`openai-completions`) として直列化します (ADR 0004)。
+/// (`openai-responses`・`openai-completions`・`openai-codex-responses`) として直列化します (ADR 0004)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApiProtocolConfig {
@@ -48,6 +48,9 @@ pub enum ApiProtocolConfig {
     /// OpenAI Chat Completions API。
     #[serde(rename = "openai-completions")]
     OpenAiCompletions,
+    /// OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。
+    #[serde(rename = "openai-codex-responses")]
+    OpenAiCodexResponses,
 }
 
 /// 認証情報の参照方法。
@@ -236,6 +239,52 @@ unknown_extra = true
         assert!(
             result.is_err(),
             "プロファイルの不明なフィールドは拒否される: {result:?}"
+        );
+    }
+
+    // Given: Codex Responses を指定するプロバイダプロファイル / When: TOML と JSON を往復する
+    // Then: api_protocol の識別子と variant が保持される
+    #[test]
+    fn provider_profile_codex_responses_protocol_roundtrip() {
+        let toml = r#"
+provider_type = "openai-codex"
+api_protocol = "openai-codex-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = { type = "env", var = "CODEX_API_KEY" }
+models = ["gpt-5.3-codex"]
+default_model = "gpt-5.3-codex"
+"#;
+
+        let toml_profile: ProviderProfileConfig =
+            toml::from_str(toml).expect("Codex Responses の TOML を解析できる");
+        assert_eq!(
+            toml_profile.api_protocol,
+            ApiProtocolConfig::OpenAiCodexResponses
+        );
+        assert!(
+            toml::to_string(&toml_profile)
+                .expect("Codex Responses の TOML を直列化できる")
+                .contains("api_protocol = \"openai-codex-responses\"")
+        );
+
+        let json = r#"{
+            "provider_type": "openai-codex",
+            "api_protocol": "openai-codex-responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "credential": { "type": "env", "var": "CODEX_API_KEY" },
+            "models": ["gpt-5.3-codex"],
+            "default_model": "gpt-5.3-codex"
+        }"#;
+
+        let json_profile: ProviderProfileConfig =
+            serde_json::from_str(json).expect("Codex Responses の JSON を解析できる");
+        assert_eq!(
+            json_profile.api_protocol,
+            ApiProtocolConfig::OpenAiCodexResponses
+        );
+        assert_eq!(
+            serde_json::to_value(&json_profile).expect("Codex Responses の JSON を直列化できる")["api_protocol"],
+            "openai-codex-responses"
         );
     }
 }

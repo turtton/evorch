@@ -3,6 +3,7 @@
 mod affinity;
 mod credential;
 mod error;
+pub mod factory;
 mod failure;
 mod profile;
 mod router;

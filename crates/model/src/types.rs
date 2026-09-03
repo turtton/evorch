@@ -33,7 +33,7 @@ pub enum ProviderType {
 ///
 /// シリアライズ識別子はケバブケース (例: `anthropic-messages`) です。
 /// `OpenAi` 系は [`ProviderType`] と同様に語を分割しない識別子
-/// (`openai-responses`・`openai-completions`) として直列化します。
+/// (`openai-responses`・`openai-completions`・`openai-codex-responses`) として直列化します。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApiProtocol {
@@ -45,6 +45,9 @@ pub enum ApiProtocol {
     /// OpenAI Chat Completions API。
     #[serde(rename = "openai-completions")]
     OpenAiCompletions,
+    /// OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。
+    #[serde(rename = "openai-codex-responses")]
+    OpenAiCodexResponses,
 }
 
 /// 論理モデル ID。
@@ -176,6 +179,7 @@ mod tests {
             (ApiProtocol::AnthropicMessages, "anthropic-messages"),
             (ApiProtocol::OpenAiResponses, "openai-responses"),
             (ApiProtocol::OpenAiCompletions, "openai-completions"),
+            (ApiProtocol::OpenAiCodexResponses, "openai-codex-responses"),
         ];
 
         for (value, expected) in cases {

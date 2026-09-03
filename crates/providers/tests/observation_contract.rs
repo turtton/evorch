@@ -7,6 +7,8 @@ use std::time::Duration;
 use event_bus::{Event, EventBus, EventKind, ProviderEvent, ProviderFailureKind, UsageEvent};
 use futures_util::StreamExt;
 use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
+use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
+use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::provider::openai::{OpenAiClient, OpenAiConfig};
 use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use providers::{
@@ -22,6 +24,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const OPENAI_MODEL: &str = "gpt-contract";
 const ANTHROPIC_MODEL: &str = "claude-test";
 const COMPATIBLE_MODEL: &str = "compatible-model";
+const CODEX_MODEL: &str = "gpt-codex-contract";
 
 fn request(model: &str) -> ChatRequest {
     ChatRequest {
@@ -146,6 +149,41 @@ fn compatible_client(server: &MockServer, bus: Arc<EventBus>) -> OpenAiCompatibl
     )
     .expect("互換 client を構築できる")
     .with_profile("compatible-profile")
+}
+
+fn codex_store() -> Arc<InMemoryTokenStore> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let store = Arc::new(InMemoryTokenStore::new());
+    let payload = serde_json::json!({
+        "exp": u64::MAX,
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acc-observe"}
+    });
+    store
+        .save(&TokenBundle {
+            access_token: "observe-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            id_token: format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(payload.to_string())),
+        })
+        .expect("token bundle を保存できる");
+    store
+}
+
+fn codex_client(
+    server: &MockServer,
+    bus: Arc<EventBus>,
+    store: Arc<dyn CodexTokenStore>,
+) -> CodexClient {
+    CodexClient::with_config(
+        CodexConfig {
+            base_url: server.uri(),
+            auth_base_url: server.uri(),
+            timeout: Duration::from_secs(1),
+            event_bus: Some(bus),
+        },
+        store,
+    )
+    .expect("Codex client を構築できる")
 }
 
 fn assert_success_sequence(
@@ -808,4 +846,137 @@ async fn openai_send_without_context_emits_none_run_id() {
     let events = collect_events(&mut rx, 3).await;
     assert_eq!(attempt_run_id(&events[0]), None);
     assert_eq!(attempt_run_id(&events[2]), None);
+}
+
+// Given: Codex 正常 SSE / When: send / Then: Codex labels で Started→Usage→Completed を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_send_success_emits_ordered_observation() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response(&fixture("codex", "responses_success.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, codex_store())
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("send は成功する");
+    let events = collect_events(&mut rx, 3).await;
+    assert_codex_success_sequence(&events, false, false);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex 正常 SSE / When: stream / Then: FirstToken は1件だけで成功列を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_stream_success_emits_first_token_once() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response(&fixture("codex", "responses_success.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let _: Vec<_> = codex_client(&server, bus, codex_store())
+        .stream(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+    let events = collect_events(&mut rx, 4).await;
+    assert_codex_success_sequence(&events, true, true);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex HTTP 500 / When: send / Then: Started→Http failure、Usage 0件を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_send_http_500_emits_http_failure() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        json_response(500, "boom"),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, codex_store())
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect_err("send は失敗する");
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&events[1]).0, started(&events[0]).0);
+    assert_eq!(
+        failed(&events[1]).1,
+        ProviderFailureKind::Http { status: 500 }
+    );
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex 不正 SSE / When: stream を読む / Then: Failed、Usage 0件を観測する
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_stream_invalid_sse_emits_failure_zero_usage() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/backend-api/codex/responses",
+        sse_response("event: response.output_text.delta\ndata: {broken\n\n"),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    let events = codex_client(&server, bus, codex_store())
+        .stream(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect("stream を開始できる")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        events.as_slice(),
+        [Err(ProviderError::InvalidJson { .. })]
+    ));
+    let observed = collect_events(&mut rx, 2).await;
+    assert_eq!(failed(&observed[1]).0, started(&observed[0]).0);
+    assert_eq!(failed(&observed[1]).1, ProviderFailureKind::InvalidResponse);
+    assert_no_more_events(&mut rx).await;
+}
+
+// Given: Codex token store が空 / When: send / Then: Started も Usage も発行しない
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_auth_failure_emits_no_usage() {
+    let server = MockServer::start().await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+    codex_client(&server, bus, Arc::new(InMemoryTokenStore::new()))
+        .send(&ProviderAuth::new(""), &request(CODEX_MODEL))
+        .await
+        .expect_err("認証は失敗する");
+    assert_no_more_events(&mut rx).await;
+}
+
+fn assert_codex_success_sequence(events: &[Event], streaming: bool, first_token: bool) {
+    let (request_id, provider, profile, protocol, model, actual_streaming) = started(&events[0]);
+    assert_eq!(provider, "openai-codex");
+    assert_eq!(profile, None);
+    assert_eq!(protocol, "openai-codex-responses");
+    assert_eq!(model, CODEX_MODEL);
+    assert_eq!(actual_streaming, streaming);
+    let usage_index = usize::from(first_token) + 1;
+    if first_token {
+        assert!(matches!(
+            events[1].kind,
+            EventKind::Provider(ProviderEvent::FirstTokenObserved { .. })
+        ));
+    }
+    assert!(matches!(
+        events[usage_index].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert!(
+        matches!(&events[usage_index + 1].kind, EventKind::Provider(ProviderEvent::RequestCompleted { request_id: id, .. }) if id == request_id)
+    );
 }

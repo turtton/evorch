@@ -121,7 +121,7 @@
       "additionalProperties": false
     },
     "ApiProtocolConfig": {
-      "description": "モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-messages`) です。\n`OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子\n(`openai-responses`・`openai-completions`) として直列化します (ADR 0004)。",
+      "description": "モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。\n\nシリアライズ識別子はケバブケース (例: `anthropic-messages`) です。\n`OpenAi` 系は [`ProviderTypeConfig`] と同様に語を分割しない識別子\n(`openai-responses`・`openai-completions`・`openai-codex-responses`) として直列化します (ADR 0004)。",
       "oneOf": [
         {
           "description": "Anthropic Messages API。",
@@ -137,6 +137,11 @@
           "description": "OpenAI Chat Completions API。",
           "type": "string",
           "const": "openai-completions"
+        },
+        {
+          "description": "OpenAI Codex Responses API。Codex subscription backend は `store=false` と `stream=true` を強制する。",
+          "type": "string",
+          "const": "openai-codex-responses"
         }
       ]
     },
