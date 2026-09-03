@@ -4,8 +4,11 @@
 //! 倣う)。`tests/otel_span_golden/*.json` を走査し、recording sink で
 //! Start/End action を完成 span 記録へ正規化した上で、span 列 (key/start_ms
 //! 順) と drop 列 (kind/key 順) を期待値と完全一致比較する。属性配列は
-//! 生成順のまま比較する。`config.budget` の `max_span_lifetime` のみ
-//! ミリ秒数で表現する (他の budget キーは回数上限)。
+//! 生成順のまま比較する。属性値の文法はスカラー (JSON 文字列 / 数値 /
+//! 真偽値) に加え、値位置に JSON 配列を許す — JSON 配列値は string 配列
+//! 属性 (例: `["gen_ai.response.finish_reasons", ["stop"]]`) として比較する。
+//! `config.budget` の `max_span_lifetime` のみミリ秒数で表現する (他の
+//! budget キーは回数上限)。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +62,7 @@ fn millis(at: SystemTime) -> u64 {
 fn attribute_json(attribute: &SpanAttribute) -> Value {
     let value = match &attribute.value {
         SpanAttributeValue::Str(value) => json!(value),
+        SpanAttributeValue::Strings(values) => json!(values),
         SpanAttributeValue::I64(value) => json!(value),
         SpanAttributeValue::F64(value) => json!(value.get()),
         SpanAttributeValue::Bool(value) => json!(value),

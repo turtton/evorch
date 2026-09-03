@@ -36,7 +36,7 @@ fn agent_run_start_emits_run_then_agent_with_stable_attributes() {
                     str_attr("evorch.agent_run.id", "child"),
                     str_attr("evorch.parent_agent_run.id", "parent"),
                     str_attr("evorch.agent.name", "researcher"),
-                    str_attr("evorch.agent.role", "explorer"),
+                    str_attr("evorch.delegation.role", "explorer"),
                     i64_attr("evorch.delegation.depth", 1)
                 ]
             },
@@ -55,7 +55,7 @@ fn agent_run_start_emits_run_then_agent_with_stable_attributes() {
                     str_attr("gen_ai.provider.name", "evorch"),
                     str_attr("gen_ai.agent.name", "researcher"),
                     str_attr("evorch.agent_run.id", "child"),
-                    str_attr("evorch.agent.role", "explorer"),
+                    str_attr("evorch.delegation.role", "explorer"),
                     i64_attr("evorch.delegation.depth", 1)
                 ]
             }

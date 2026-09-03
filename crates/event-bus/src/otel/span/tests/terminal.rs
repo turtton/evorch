@@ -1,7 +1,7 @@
 use crate::event::{LifecycleEvent, ProviderEvent, ProviderFailureKind, ToolEvent};
 
 use super::super::{SpanAction, SpanMapper, SpanStatus};
-use super::{action_attributes, event, i64_attr, start_run, str_attr};
+use super::{action_attributes, event, i64_attr, start_run, str_attr, strings_attr};
 
 #[test]
 fn request_success_ends_with_usage_and_finish_reason_attributes() {
@@ -52,7 +52,7 @@ fn request_success_ends_with_usage_and_finish_reason_attributes() {
         [
             i64_attr("gen_ai.usage.input_tokens", 11),
             i64_attr("gen_ai.usage.output_tokens", 12),
-            str_attr("gen_ai.response.finish_reasons", "tool_use")
+            strings_attr("gen_ai.response.finish_reasons", &["tool_use"])
         ]
     );
 }

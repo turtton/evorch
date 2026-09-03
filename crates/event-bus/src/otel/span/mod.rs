@@ -36,10 +36,10 @@
 //!
 //! - session: `evorch.session.id`
 //! - run: `evorch.agent_run.id`, (`evorch.parent_agent_run.id`: Some 時のみ),
-//!   `evorch.agent.name`, `evorch.agent.role`, `evorch.delegation.depth`
+//!   `evorch.agent.name`, `evorch.delegation.role`, `evorch.delegation.depth`
 //! - agent: `gen_ai.operation.name`=`invoke_agent`,
 //!   `gen_ai.provider.name`=`evorch`, `gen_ai.agent.name`,
-//!   `evorch.agent_run.id`, `evorch.agent.role`, `evorch.delegation.depth`
+//!   `evorch.agent_run.id`, `evorch.delegation.role`, `evorch.delegation.depth`
 //! - request: `gen_ai.operation.name`=`chat`, `gen_ai.provider.name`
 //!   (normalize 後), `gen_ai.request.model`, `evorch.agent_run.id`,
 //!   `evorch.request.id`
@@ -47,7 +47,8 @@
 //!   `gen_ai.provider.name`=`evorch`, `gen_ai.tool.name`,
 //!   `gen_ai.tool.call.id`, `evorch.agent_run.id`
 //! - 終端固有: `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
-//!   `gen_ai.response.finish_reasons` (request 成功終端),
+//!   `gen_ai.response.finish_reasons` (request 成功終端。semconv v1.37.0 の
+//!   string array 型に従い要素 1 値の文字列配列として記録する),
 //!   `error.type` (Error 終端), `evorch.task.id` (in-flight 記録分)
 //!
 //! `End.final_attributes` は閉鎖時点の属性**完全集合** (開始属性 +

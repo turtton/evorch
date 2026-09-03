@@ -6,9 +6,9 @@ use super::{SpanAttribute, SpanAttributeValue};
 pub const SPAN_ATTRIBUTE_WHITELIST: [&str; 18] = [
     "error.type",
     "evorch.agent.name",
-    "evorch.agent.role",
     "evorch.agent_run.id",
     "evorch.delegation.depth",
+    "evorch.delegation.role",
     "evorch.parent_agent_run.id",
     "evorch.request.id",
     "evorch.session.id",
@@ -111,7 +111,7 @@ pub(super) fn validate_attribute(attribute: &SpanAttribute) -> Result<(), SpanAt
     }
     let valid = match key {
         "gen_ai.operation.name" => string_in(&attribute.value, &OPERATION_NAMES),
-        "evorch.agent.role" => string_in(&attribute.value, &AGENT_ROLES),
+        "evorch.delegation.role" => string_in(&attribute.value, &AGENT_ROLES),
         "evorch.delegation.depth" => {
             matches!(attribute.value, SpanAttributeValue::I64(value) if (0..=99).contains(&value))
         }

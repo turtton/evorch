@@ -29,7 +29,7 @@ use opentelemetry::trace::{
     Span as _, SpanBuilder, SpanContext, SpanKind as OtelSpanKind, Status, TraceContextExt,
     Tracer as _, TracerProvider as _,
 };
-use opentelemetry::{Context, KeyValue, Value};
+use opentelemetry::{Array, Context, KeyValue, StringValue, Value};
 use opentelemetry_otlp::{ExporterBuildError, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracer, SdkTracerProvider, Span};
 
@@ -157,6 +157,9 @@ fn map_status(status: SpanStatus) -> Status {
 fn map_attribute(attribute: &SpanAttribute) -> KeyValue {
     let value = match &attribute.value {
         SpanAttributeValue::Str(value) => Value::String(value.clone().into()),
+        SpanAttributeValue::Strings(values) => Value::Array(Array::String(
+            values.iter().cloned().map(StringValue::from).collect(),
+        )),
         SpanAttributeValue::I64(value) => Value::I64(*value),
         SpanAttributeValue::F64(value) => Value::F64(value.get()),
         SpanAttributeValue::Bool(value) => Value::Bool(*value),
@@ -381,6 +384,49 @@ mod tests {
         assert_eq!(run.status, Status::Unset);
         assert_eq!(agent.status, Status::Unset);
         assert_eq!(request.status, Status::error(""));
+    }
+
+    // Given: in-memory tracer provider の emitter。
+    // When: string 配列属性 (gen_ai.response.finish_reasons) を伴う request
+    //       span を Start/End し force_flush する。
+    // Then: 属性は OTel Value::Array (Array::String) として記録され、要素列
+    //       が保持される。
+    #[test]
+    fn in_memory_smoke_maps_string_array_attribute_to_otl_value_array() {
+        let (provider, exporter) = build_in_memory_tracer_provider();
+        let mut emitter = OtelSpanEmitter::new(&provider);
+
+        emitter.apply(SpanAction::Start {
+            key: request_key(),
+            parent: None,
+            name: "chat kimi-k3".to_owned(),
+            kind: SpanKind::Client,
+            start_time: at(1),
+            attributes: vec![],
+        });
+        emitter.apply(SpanAction::End {
+            key: request_key(),
+            end_time: at(2),
+            status: SpanStatus::Unset,
+            final_attributes: vec![SpanAttribute::new(
+                "gen_ai.response.finish_reasons",
+                vec!["stop".to_owned()],
+            )],
+        });
+        provider.force_flush().expect("force_flush succeeds");
+
+        let spans = exporter.get_finished_spans().expect("finished spans");
+        let request = find_span(&spans, "chat kimi-k3");
+        match attribute_value(request, "gen_ai.response.finish_reasons") {
+            Value::Array(Array::String(values)) => {
+                assert_eq!(
+                    values,
+                    &["stop".to_owned().into()],
+                    "finish_reasons must be a 1-element string array"
+                );
+            }
+            other => panic!("string array attribute expected: {other:?}"),
+        }
     }
 
     // Given: 親 agent key が open state に存在しない Start。

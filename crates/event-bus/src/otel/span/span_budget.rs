@@ -227,6 +227,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn attribute_value_bytes(value: &SpanAttributeValue) -> usize {
     match value {
         SpanAttributeValue::Str(value) => value.len(),
+        SpanAttributeValue::Strings(values) => values.iter().map(String::len).sum(),
         SpanAttributeValue::I64(_) | SpanAttributeValue::F64(_) => 8,
         SpanAttributeValue::Bool(_) => 1,
     }

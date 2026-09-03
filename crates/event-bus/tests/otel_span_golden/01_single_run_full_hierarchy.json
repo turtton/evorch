@@ -155,7 +155,7 @@
           "run-1"
         ],
         [
-          "evorch.agent.role",
+          "evorch.delegation.role",
           "orchestrator"
         ],
         [
@@ -203,7 +203,7 @@
         ],
         [
           "gen_ai.response.finish_reasons",
-          "stop"
+          ["stop"]
         ]
       ]
     },
@@ -225,7 +225,7 @@
           "orchestrator"
         ],
         [
-          "evorch.agent.role",
+          "evorch.delegation.role",
           "orchestrator"
         ],
         [

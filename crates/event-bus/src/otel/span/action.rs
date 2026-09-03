@@ -48,6 +48,8 @@ pub enum SpanKey {
 pub enum SpanAttributeValue {
     /// 文字列値。
     Str(String),
+    /// 文字列配列値 (例: `gen_ai.response.finish_reasons` の string array)。
+    Strings(Vec<String>),
     /// 整数値。
     I64(i64),
     /// 有限浮動小数点値。
@@ -90,6 +92,12 @@ impl From<&str> for SpanAttributeValue {
 impl From<String> for SpanAttributeValue {
     fn from(value: String) -> Self {
         Self::Str(value)
+    }
+}
+
+impl From<Vec<String>> for SpanAttributeValue {
+    fn from(value: Vec<String>) -> Self {
+        Self::Strings(value)
     }
 }
 

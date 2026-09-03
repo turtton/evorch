@@ -22,6 +22,15 @@ fn i64_attribute(key: &str, value: i64) -> SpanAttribute {
     }
 }
 
+fn strings_attribute(key: &str, values: &[&str]) -> SpanAttribute {
+    SpanAttribute {
+        key: key.to_owned(),
+        value: SpanAttributeValue::Strings(
+            values.iter().map(|value| (*value).to_owned()).collect(),
+        ),
+    }
+}
+
 fn keys_of(attrs: &[SpanAttribute]) -> BTreeSet<String> {
     attrs.iter().map(|attr| attr.key.clone()).collect()
 }
@@ -32,9 +41,9 @@ fn span_whitelist_is_the_sorted_closed_key_set() {
     let expected = [
         "error.type",
         "evorch.agent.name",
-        "evorch.agent.role",
         "evorch.agent_run.id",
         "evorch.delegation.depth",
+        "evorch.delegation.role",
         "evorch.parent_agent_run.id",
         "evorch.request.id",
         "evorch.session.id",
@@ -121,7 +130,7 @@ fn validate_rejects_values_outside_closed_domains() {
     // Given: one out-of-domain value per closed attribute domain.
     let violations = [
         str_attribute("gen_ai.operation.name", "embeddings"),
-        str_attribute("evorch.agent.role", "super-admin"),
+        str_attribute("evorch.delegation.role", "super-admin"),
         i64_attribute("evorch.delegation.depth", 100),
         i64_attribute("evorch.delegation.depth", -1),
         str_attribute("evorch.delegation.depth", "0"),
@@ -147,10 +156,10 @@ fn validate_accepts_the_whitelisted_domains() {
         str_attribute("gen_ai.operation.name", "chat"),
         str_attribute("gen_ai.operation.name", "invoke_agent"),
         str_attribute("gen_ai.operation.name", "execute_tool"),
-        str_attribute("evorch.agent.role", "orchestrator"),
-        str_attribute("evorch.agent.role", "explorer"),
-        str_attribute("evorch.agent.role", "worker"),
-        str_attribute("evorch.agent.role", "reviewer"),
+        str_attribute("evorch.delegation.role", "orchestrator"),
+        str_attribute("evorch.delegation.role", "explorer"),
+        str_attribute("evorch.delegation.role", "worker"),
+        str_attribute("evorch.delegation.role", "reviewer"),
         i64_attribute("evorch.delegation.depth", 0),
         i64_attribute("evorch.delegation.depth", 99),
         str_attribute("gen_ai.provider.name", "anthropic"),
@@ -166,7 +175,7 @@ fn validate_accepts_the_whitelisted_domains() {
         str_attribute("evorch.session.id", "session-1"),
         str_attribute("evorch.task.id", "task-1"),
         str_attribute("gen_ai.request.model", "gpt-test"),
-        str_attribute("gen_ai.response.finish_reasons", "stop"),
+        strings_attribute("gen_ai.response.finish_reasons", &["stop"]),
     ];
     // When: the batch is validated.
     // Then: it passes as one closed-domain conforming attribute list.

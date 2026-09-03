@@ -133,6 +133,15 @@ fn str_attr(key: &str, value: &str) -> SpanAttribute {
     }
 }
 
+fn strings_attr(key: &str, values: &[&str]) -> SpanAttribute {
+    SpanAttribute {
+        key: key.to_owned(),
+        value: SpanAttributeValue::Strings(
+            values.iter().map(|value| (*value).to_owned()).collect(),
+        ),
+    }
+}
+
 fn i64_attr(key: &str, value: i64) -> SpanAttribute {
     SpanAttribute {
         key: key.to_owned(),

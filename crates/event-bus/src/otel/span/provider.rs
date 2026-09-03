@@ -29,7 +29,7 @@ impl SpanMapper {
                 }
                 terminal.push(SpanAttribute::new(
                     "gen_ai.response.finish_reasons",
-                    finish_reason.clone(),
+                    vec![finish_reason.clone()],
                 ));
                 self.end_span(EndSpec {
                     key: SpanKey::Request {

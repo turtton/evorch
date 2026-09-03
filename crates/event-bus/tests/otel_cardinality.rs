@@ -214,9 +214,9 @@ fn span_whitelist_contains_no_raw_content_or_credential_keys() {
 fn span_whitelist_evorch_keys_match_ac3_expected_set() {
     let expected = [
         "evorch.agent.name",
-        "evorch.agent.role",
         "evorch.agent_run.id",
         "evorch.delegation.depth",
+        "evorch.delegation.role",
         "evorch.parent_agent_run.id",
         "evorch.request.id",
         "evorch.session.id",

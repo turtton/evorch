@@ -56,7 +56,7 @@
         ["gen_ai.provider.name", "evorch"],
         ["gen_ai.agent.name", "orchestrator"],
         ["evorch.agent_run.id", "run-1"],
-        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.role", "orchestrator"],
         ["evorch.delegation.depth", 0]
       ]
     },
@@ -73,7 +73,7 @@
         ["gen_ai.provider.name", "evorch"],
         ["gen_ai.agent.name", "worker"],
         ["evorch.agent_run.id", "run-2"],
-        ["evorch.agent.role", "worker"],
+        ["evorch.delegation.role", "worker"],
         ["evorch.delegation.depth", 0]
       ]
     },
@@ -93,7 +93,7 @@
         ["evorch.request.id", "req-1"],
         ["gen_ai.usage.input_tokens", 11],
         ["gen_ai.usage.output_tokens", 22],
-        ["gen_ai.response.finish_reasons", "stop"]
+        ["gen_ai.response.finish_reasons", ["stop"]]
       ]
     },
     {
@@ -112,7 +112,7 @@
         ["evorch.request.id", "req-2"],
         ["gen_ai.usage.input_tokens", 3],
         ["gen_ai.usage.output_tokens", 9],
-        ["gen_ai.response.finish_reasons", "length"]
+        ["gen_ai.response.finish_reasons", ["length"]]
       ]
     },
     {
@@ -126,7 +126,7 @@
       "attributes": [
         ["evorch.agent_run.id", "run-1"],
         ["evorch.agent.name", "orchestrator"],
-        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.role", "orchestrator"],
         ["evorch.delegation.depth", 0]
       ]
     },
@@ -141,7 +141,7 @@
       "attributes": [
         ["evorch.agent_run.id", "run-2"],
         ["evorch.agent.name", "worker"],
-        ["evorch.agent.role", "worker"],
+        ["evorch.delegation.role", "worker"],
         ["evorch.delegation.depth", 0]
       ]
     },

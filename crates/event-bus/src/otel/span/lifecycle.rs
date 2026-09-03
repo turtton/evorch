@@ -91,7 +91,7 @@ impl SpanMapper {
         }
         run_attributes.extend([
             SpanAttribute::new("evorch.agent.name", agent_name.clone()),
-            SpanAttribute::new("evorch.agent.role", role.clone()),
+            SpanAttribute::new("evorch.delegation.role", role.clone()),
             SpanAttribute::new("evorch.delegation.depth", i64::from(depth)),
         ]);
         let run_key = SpanKey::Run {
@@ -123,7 +123,7 @@ impl SpanMapper {
                 SpanAttribute::new("gen_ai.provider.name", "evorch"),
                 SpanAttribute::new("gen_ai.agent.name", agent_name.clone()),
                 SpanAttribute::new("evorch.agent_run.id", run_id.clone()),
-                SpanAttribute::new("evorch.agent.role", role.clone()),
+                SpanAttribute::new("evorch.delegation.role", role.clone()),
                 SpanAttribute::new("evorch.delegation.depth", i64::from(depth)),
             ],
         }));
