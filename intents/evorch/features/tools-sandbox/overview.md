@@ -76,6 +76,8 @@ web_search / web_fetch の実装（issue #43 / #45）は済んでいるが、pro
 
 production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ）と tripwire テスト（`web_search_network_gate.rs` / `web_fetch_network_gate.rs`）はこの非対称公開を反映して更新する。GUI 経由の承認ダイアログを通る OptIn 承認は、`ExecutionPolicy::for_role(Role::Orchestrator)` の network gate と per-tool permission の AND で成立させる。
 
+- **v0.2 project rules 注入（PR #62）**: rules 注入は ToolResult 改変ではなく synthetic System message として prompt assembly seam 経由で出力されるため（model-visible のみ・disk/event 不変）、tools-sandbox 側の観測面契約（control marker escape / ContentOrigin 導出）への影響は構造上不変。詳細は [agent-runtime-kernel overview](../agent-runtime-kernel/overview.md) の「v0.2 project rules 注入の実装確定」
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること

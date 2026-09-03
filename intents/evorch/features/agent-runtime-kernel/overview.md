@@ -111,6 +111,16 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - YAML frontmatter 解析依存は serde_yaml_ng 0.10 を採用（実ビルド確認済み。fallback 候補は serde-norway → serde_yaml）
 - Config schema 拡張は意図的に不採用（deny_unknown_fields 維持）。発見失敗 / 検証違反は `FaultEvent::SkillDiagnostic{kind, skill, scope, detail}` + SkillDiagnosticKind{DiscoveryError, ValidationError, Shadowed} で静かにしない（ADR 0010）
 
+## v0.2 project rules 注入の実装確定（issue #61、PR #62、2026-09-04）
+
+- 実装位置: `crates/runtime/src/rules/`（session.rs / source.rs / types.rs / budget.rs / loader 系）+ runtime run bootstrap 接続
+- startup注入: root AGENTS.md + user scope always-apply rules のみを単一 synthetic System message として prompt assembly seam 経由で注入（model-visible のみ、ToolResult・disk・event payload 不変）
+- post-tool hook: 成功した read / edit / grep 実行後に対象ファイルの最寄り rules を発見（対象 dir → root の nested AGENTS.md chain を root→deep closest-wins で全件、`.omo/rules` / `.claude/rules` / `.cursor/rules` / `.github/instructions` 4 scoped rules dir の alwaysApply/glob 解決、安定 union+dedup、batch 1 件あたり1 回注入、shell/失敗/拒否は非 trigger）
+- trust gate: ADR 0008 の trust-before-load で未承認 project の AGENTS.md / scoped rules は一切 load しない
+- dynamic truncation: budget 超過時に closest 優先・UTF-8 境界安全な byte-prefix 切詰め + `truncate` marker
+- Reviewer Gate 検出済み修正: render/api の header/marker への未エスケープ rel_path 混入（`<system-reminder>` directory 経由の制御構文注入を防ぐ escape 強制、RED→GREEN 回帰 4 件）
+- 制御構文・制御マーカー類を含む rules コンテンツは既存 sanitize/escape 経路で保護（挿入は model-visible System のみ）
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
