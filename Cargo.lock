@@ -4440,12 +4440,14 @@ dependencies = [
 name = "routing"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "config",
  "event-bus",
  "futures-util",
  "model",
  "providers",
  "sandbox",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
