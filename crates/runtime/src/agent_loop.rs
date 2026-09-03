@@ -16,7 +16,7 @@ use tools::ToolExecutor;
 
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
-use crate::rules::RulesSource;
+use crate::rules::{self, RulesSession, RulesSource};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
 use crate::workspace::OwnedWorktree;
@@ -49,10 +49,6 @@ pub(crate) struct LoopShared {
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
     pub(crate) skills: Option<Arc<SkillRegistry>>,
-    #[expect(
-        dead_code,
-        reason = "project-rules loop integration is implemented in wave 2"
-    )]
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) runtime: Weak<Shared>,
 }
@@ -65,6 +61,7 @@ pub(crate) struct LoopState {
     context: AgentContext,
     policy: ExecutionPolicy,
     tool_specs: Vec<ToolSpec>,
+    pub(crate) rules_session: Option<RulesSession>,
     resumed: bool,
 }
 
@@ -72,10 +69,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
     let Some(loop_shared) = loop_shared(&shared) else {
         return;
     };
-    let mut context = AgentContext::new(task.run_id, task.role);
-    let system_prompt_error = push_initial_system_message(&loop_shared, &task, &mut context);
-    context.push_user(&task.prompt);
     let policy = ExecutionPolicy::for_role(task.role);
+    let context = AgentContext::new(task.run_id, task.role);
     let mut state = LoopState {
         task,
         shared: loop_shared,
@@ -84,6 +79,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         context,
         policy,
         tool_specs: Vec::new(),
+        rules_session: None,
         resumed: false,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
@@ -93,14 +89,6 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         &state.policy,
         state.skills().is_some(),
     );
-    state.publish_message_count();
-    if let Err(error) = system_prompt_error {
-        // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
-        // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
-        // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
-        state.finish_error(error.to_string());
-        return;
-    }
     let mut owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {
@@ -123,6 +111,32 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
             }
         }
     };
+    let active_root = match owned_worktree.as_ref() {
+        Some(owned) => Some(owned.path.clone()),
+        None => state
+            .shared
+            .rules
+            .as_ref()
+            .and_then(|source| source.project_root().map(std::path::Path::to_path_buf)),
+    };
+    if let Some(source) = state.shared.rules.as_ref() {
+        state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root));
+    }
+    if let Err(error) = push_initial_system_message(
+        &state.shared,
+        &state.task,
+        state.rules_session.as_ref(),
+        &mut state.context,
+    ) {
+        // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
+        // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
+        // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
+        state.finish_error(error.to_string());
+        cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
+        return;
+    }
+    state.context.push_user(&state.task.prompt);
+    state.publish_message_count();
     if state.transition(AgentRunPhase::Running, None).is_err() {
         cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
         return;
@@ -224,14 +238,14 @@ enum InitialSystemPromptError {
 
 /// run 開始時の初期 System メッセージを履歴へ push する (単一 System 不変条件)。
 ///
-/// カタログテキストと skills セクション (load_skills 指定時) を**1 件の**
-/// System メッセージへ合成する。skills セクションはカタログテキストの後ろに
-/// 空行 1 つを挟んで連結する。どちらも無指定なら何もせず v0.1 の履歴構成を
-/// 保つ。解決に失敗した場合は型付きエラーを返し、履歴へは System メッセージを
-/// 追加しない (fail-closed)。
+/// カタログテキスト・skills セクション・project rules を**1 件の** System
+/// メッセージへ合成する。各セクションは空行 1 つを挟んで連結する。すべて
+/// 無指定なら何もせず v0.1 の履歴構成を保つ。解決に失敗した場合は型付き
+/// エラーを返し、履歴へは System メッセージを追加しない (fail-closed)。
 fn push_initial_system_message(
     shared: &LoopShared,
     task: &RunTask,
+    rules_session: Option<&RulesSession>,
     context: &mut AgentContext,
 ) -> Result<(), InitialSystemPromptError> {
     let catalog_text = match shared.system_prompts.as_ref() {
@@ -246,18 +260,32 @@ fn push_initial_system_message(
         None => None,
     };
     let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
-    if catalog_text.is_none() && skills_text.is_none() {
-        return Ok(());
-    }
+    let estimated_history_bytes = u64::try_from(
+        catalog_text.as_ref().map_or(0, String::len)
+            + skills_text.as_ref().map_or(0, String::len)
+            + task.prompt.len(),
+    )
+    .unwrap_or(u64::MAX);
+    let rules_text = shared.rules.as_ref().and_then(|source| {
+        rules::startup_snapshot(
+            source,
+            rules_session.and_then(|session| session.active_root.as_deref()),
+            None,
+            estimated_history_bytes,
+        )
+    });
     let mut composed = String::new();
-    if let Some(catalog) = catalog_text {
-        composed.push_str(&catalog);
-    }
-    if let Some(skills) = skills_text {
+    for section in [catalog_text, skills_text, rules_text]
+        .into_iter()
+        .flatten()
+    {
         if !composed.is_empty() {
             composed.push_str("\n\n");
         }
-        composed.push_str(&skills);
+        composed.push_str(&section);
+    }
+    if composed.is_empty() {
+        return Ok(());
     }
     context.push_system(&composed);
     Ok(())
@@ -339,6 +367,9 @@ impl LoopState {
                     return;
                 }
             };
+            if let Some(session) = &mut self.rules_session {
+                session.set_last_usage(response.usage);
+            }
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message

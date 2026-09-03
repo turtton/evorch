@@ -1,8 +1,9 @@
 use providers::ToolSpec;
+use serde_json::Value;
 use tools::{ToolExecutionContext, ToolResult};
 
 use super::LoopState;
-use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta};
+use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
 impl LoopState {
     pub(super) async fn execute_tools(
@@ -12,6 +13,7 @@ impl LoopState {
         let ctx = ToolExecutionContext {
             run_id: self.task.run_id.to_string(),
         };
+        let mut rule_targets = Vec::new();
         for (id, name, input) in tool_uses {
             if self.cancelled() {
                 self.finish_cancelled();
@@ -30,6 +32,9 @@ impl LoopState {
                 }
                 continue;
             } else {
+                let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
+                    .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
+                    .flatten();
                 let execution = tokio::select! {
                     biased;
                     changed = self.channels.cancel_rx.changed() => {
@@ -41,12 +46,25 @@ impl LoopState {
                     }
                     result = self.shared.executor.execute(&ctx, &name, &id, input) => result,
                 };
-                match execution {
+                let result = match execution {
                     Ok(result) => result,
                     Err(error) => ToolResult::error(error.to_string()),
+                };
+                if !result.is_error
+                    && let Some(target) = rule_target
+                {
+                    rule_targets.push(target);
                 }
+                result
             };
             self.context.push_tool_result(id, result);
+            self.publish_message_count();
+        }
+        if !rule_targets.is_empty()
+            && let Some(session) = &mut self.rules_session
+            && let Some(text) = rules::after_successful_tools(session, &rule_targets)
+        {
+            self.context.push_user(&text);
             self.publish_message_count();
         }
         true
