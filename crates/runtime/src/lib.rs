@@ -31,7 +31,7 @@ pub mod skill;
 pub mod state;
 pub mod workspace;
 
-pub use context::AgentContext;
+pub use context::{AgentContext, CompactionCheckpoint};
 pub use error::RuntimeError;
 pub use event_bus::AgentRunPhase;
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
