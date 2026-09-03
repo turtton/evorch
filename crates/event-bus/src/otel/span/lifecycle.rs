@@ -83,23 +83,55 @@ impl SpanMapper {
         };
         // 委譲先の親 agent span が open でないなら子 subtree を開始しない
         // (未見 / 終了済み / 未 admission の親への委譲を root に降格させない)。
-        // sampling 判定より先に拒否し、子 run の帳簿挿入も起こさない。
+        // 親が tombstone 済みなら元の拒否 kind を replay する。
         if let Some(parent_run_id) = parent_run_id
             && !self.open.contains_key(&SpanKey::Agent {
                 run_id: parent_run_id.clone(),
             })
         {
-            self.add_tombstone(run_key.clone());
-            self.add_tombstone(agent_key);
-            self.record_drop(SpanDropKind::UnknownParent, run_key, at);
+            let parent_agent_key = SpanKey::Agent {
+                run_id: parent_run_id.clone(),
+            };
+            let replayed = self.tombstone_kind(&parent_agent_key);
+            let kind = replayed.unwrap_or(SpanDropKind::UnknownParent);
+            self.add_tombstone(run_key.clone(), kind);
+            self.add_tombstone(agent_key.clone(), kind);
+            match replayed {
+                Some(kind) => self.record_replayed_drop(kind, run_key),
+                None => self.record_drop(SpanDropKind::UnknownParent, run_key, at),
+            }
             return Vec::new();
         }
-        self.sampling_decision(run_id, parent_run_id.as_deref());
+        // sampling 判定は消費なしで先取りし、帳簿は admission 確定後にのみ
+        // 保持する。拒否 run は terminal 不着でも帳簿に永久残存しない。
+        let decision = self.sampling_decision_for(run_id, parent_run_id.as_deref());
+        if !decision {
+            self.add_tombstone(run_key.clone(), SpanDropKind::SampledOut);
+            self.add_tombstone(agent_key.clone(), SpanDropKind::SampledOut);
+            self.record_drop(SpanDropKind::SampledOut, run_key, at);
+            self.record_drop(SpanDropKind::SampledOut, agent_key, at);
+            return Vec::new();
+        }
         let depth = parent_run_id
             .as_deref()
             .and_then(|parent| self.agent_depth.get(parent).copied())
             .and_then(|parent_depth| parent_depth.checked_add(1))
             .map_or(0, |depth| depth.min(MAX_DEPTH));
+        // run と agent の 2 開始は 1 回の admission として扱う。片方でも
+        // 開始できないなら両方開始せず、partial tree を作らない。
+        let run_open = self.open.contains_key(&run_key);
+        if run_open || self.open.contains_key(&agent_key) {
+            let key = if run_open { run_key } else { agent_key };
+            self.record_drop(SpanDropKind::DuplicateSpan, key, at);
+            return Vec::new();
+        }
+        if let Err(kind) = self.check_admission(2, at) {
+            self.add_tombstone(run_key.clone(), kind);
+            self.add_tombstone(agent_key.clone(), kind);
+            self.record_drop(kind, run_key, at);
+            return Vec::new();
+        }
+        self.sampling_decisions.insert(run_id.clone(), decision);
         self.agent_depth.insert(run_id.clone(), depth);
         let mut run_attributes = vec![SpanAttribute::new("evorch.agent_run.id", run_id.clone())];
         if let Some(parent_run_id) = parent_run_id {
@@ -121,11 +153,9 @@ impl SpanMapper {
             self.record_drop(SpanDropKind::DuplicateSpan, key, at);
             return Vec::new();
         }
-        if self.sampling_decisions.get(run_id).copied() != Some(false)
-            && let Err(kind) = self.check_admission(2, at)
-        {
-            self.add_tombstone(run_key.clone());
-            self.add_tombstone(agent_key.clone());
+        if let Err(kind) = self.check_admission(2, at) {
+            self.add_tombstone(run_key.clone(), kind);
+            self.add_tombstone(agent_key.clone(), kind);
             self.record_drop(kind, run_key, at);
             return Vec::new();
         }

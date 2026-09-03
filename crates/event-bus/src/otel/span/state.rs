@@ -40,7 +40,7 @@ impl SpanMapper {
             SpanKey::Session { .. } => None,
         };
         if let Err(kind) = self.admit_start(&spec.key, run_id.as_deref(), spec.at) {
-            self.add_tombstone(spec.key.clone());
+            self.add_tombstone(spec.key.clone(), kind);
             self.record_drop(kind, spec.key, spec.at);
             return Vec::new();
         }

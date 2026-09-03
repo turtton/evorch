@@ -58,7 +58,7 @@ impl SpanMapper {
             span.attributes
                 .push(SpanAttribute::new("error.type", "span_budget_evicted"));
             let attributes = self.filter_attributes(&key, span.attributes, at);
-            self.add_tombstone(key.clone());
+            self.add_tombstone(key.clone(), SpanDropKind::BudgetEvicted);
             self.record_drop(SpanDropKind::BudgetEvicted, key.clone(), at);
             // evict された Run/Agent span の run_id の per-run 相関帳簿も
             // 解放する (terminal 経路の end_run と同じ掃除)。hung run が
@@ -78,15 +78,17 @@ impl SpanMapper {
         actions
     }
 
-    pub(super) fn sampling_decision(&mut self, run_id: &str, parent_run_id: Option<&str>) -> bool {
-        if let Some(decision) = self.sampling_decisions.get(run_id) {
-            return *decision;
-        }
-        let decision = parent_run_id
-            .and_then(|parent| self.sampling_decisions.get(parent).copied())
-            .unwrap_or_else(|| sampled(run_id, self.sampling_ratio));
-        self.sampling_decisions.insert(run_id.to_owned(), decision);
-        decision
+    /// run の sampling 判定を消費なしで取り出す (既存エントリ → 親判定の
+    /// 相続 → 決定的ハッシュ)。帳簿への insert は admission 確定後に
+    /// start_run 側が行う — 拒否 run は帳簿に残さない。
+    pub(super) fn sampling_decision_for(&self, run_id: &str, parent_run_id: Option<&str>) -> bool {
+        self.sampling_decisions
+            .get(run_id)
+            .copied()
+            .or_else(|| {
+                parent_run_id.and_then(|parent| self.sampling_decisions.get(parent).copied())
+            })
+            .unwrap_or_else(|| sampled(run_id, self.sampling_ratio))
     }
 
     /// `additional` 個の span 開始が現在の budget で同時に許容できるかを
@@ -220,14 +222,19 @@ impl SpanMapper {
         self.tombstones.contains_key(key)
     }
 
-    pub(super) fn add_tombstone(&mut self, key: SpanKey) {
+    /// tombstone に記録された拒否 kind を返す (後着 subtree 開始の replay 用)。
+    pub(super) fn tombstone_kind(&self, key: &SpanKey) -> Option<SpanDropKind> {
+        self.tombstones.get(key).map(|(kind, _)| *kind)
+    }
+
+    pub(super) fn add_tombstone(&mut self, key: SpanKey, kind: SpanDropKind) {
         self.tombstone_sequence = self.tombstone_sequence.wrapping_add(1);
-        self.tombstones.insert(key, self.tombstone_sequence);
+        self.tombstones.insert(key, (kind, self.tombstone_sequence));
         if self.tombstones.len() > TOMBSTONE_LIMIT
             && let Some(oldest) = self
                 .tombstones
                 .iter()
-                .min_by_key(|(_, sequence)| **sequence)
+                .min_by_key(|(_, (_, sequence))| *sequence)
                 .map(|(key, _)| key.clone())
         {
             self.tombstones.remove(&oldest);

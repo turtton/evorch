@@ -30,8 +30,15 @@
 //! duplicate) 場合は両方開始せず、typed drop 1 件だけを記録して partial
 //! tree を作らない。また委譲 run (`parent_run_id: Some`) は親
 //! `agent:{parent_run_id}` が open の場合のみ受理し、open でない親 (未見 /
-//! 終了済み / 未 admission) への委譲は子 subtree ごと `UnknownParent` として
-//! 拒否する (emitter 側の unknown-parent fallback へ到達させない)。
+//! 終了済み / 未 admission) への委譲は子 subtree ごと拒否する (emitter 側の
+//! unknown-parent fallback へ到達させない)。親が tombstone 済みなら元の拒否
+//! kind を no-warn で replay し、tombstone を持たない親 (未見 / 終了済み) へ
+//! の委譲は `UnknownParent` となる。
+//!
+//! sampling / budget に拒否された run は per-run 相関帳簿
+//! (`sampling_decisions` / `agent_depth`) に挿入されない。帳簿は admission
+//! 済み run のみが保持し、terminal / lifetime eviction で解放されるため、
+//! open span 数に bounded する。
 //!
 //! run の終端 (`AgentRunStateChanged` to=Done/Error) ではその run の
 //! per-run 相関帳簿 (`sampling_decisions` / `agent_depth`) を解放する。
@@ -169,7 +176,9 @@ pub struct SpanMapper {
     pub(super) sampling_decisions: HashMap<String, bool>,
     pub(super) window_started_at: Option<SystemTime>,
     pub(super) admitted_in_window: usize,
-    pub(super) tombstones: HashMap<SpanKey, u64>,
+    /// tombstone (key → 拒否 kind と割当順)。後着 subtree 開始が元の drop
+    /// kind を replay できるよう kind を保持する。
+    pub(super) tombstones: HashMap<SpanKey, (SpanDropKind, u64)>,
     pub(super) tombstone_sequence: u64,
     pub(super) span_sequence: u64,
 }
@@ -245,6 +254,14 @@ impl SpanMapper {
                 "span mapper dropped an event without emitting a span action"
             );
         }
+        self.drops.push(SpanDrop { kind, key });
+    }
+
+    /// tombstone replay による drop を 1 件記録する (warn なし)。
+    ///
+    /// 元の drop が既に warn 済みであり、後着のたびに同一事象を繰り返し
+    /// warn するのはノイズになるため、replay 分は記録のみ行う。
+    pub(super) fn record_replayed_drop(&mut self, kind: SpanDropKind, key: SpanKey) {
         self.drops.push(SpanDrop { kind, key });
     }
 

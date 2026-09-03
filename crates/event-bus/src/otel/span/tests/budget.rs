@@ -131,37 +131,38 @@ fn unit_ratio_admits_the_full_tree() {
 }
 
 #[test]
-fn child_of_unadmitted_parent_drops_the_subtree_as_unknown_parent() {
+fn child_of_sampled_out_parent_replays_the_sampled_out_drop() {
     // Given: a mapper sampling nothing, so the parent never opens a span.
     let mut mapper = SpanMapper::with_sampling_ratio(0.0);
     assert!(mapper.ingest(&start_run("parent", None, 1)).is_empty());
     // When: a child run is registered under the never-open parent.
     let child = mapper.ingest(&start_run("child", Some("parent"), 2));
-    // Then: the whole child subtree is refused with one UnknownParent drop —
-    //       no child span starts and no child ledger entry is recorded.
+    // Then: the parent's two SampledOut drops stand and the late delegation
+    //       replays the parent's tombstoned kind — no child span starts and
+    //       no child ledger entry is recorded.
     assert!(child.is_empty());
     let drops = mapper.drain_drops();
     assert_eq!(
         drops
             .iter()
-            .map(|drop| (drop.kind, &drop.key))
+            .map(|drop| (drop.kind, drop.key.clone()))
             .collect::<Vec<_>>(),
         vec![
             (
                 SpanDropKind::SampledOut,
-                &SpanKey::Run {
+                SpanKey::Run {
                     run_id: "parent".to_owned()
                 }
             ),
             (
                 SpanDropKind::SampledOut,
-                &SpanKey::Agent {
+                SpanKey::Agent {
                     run_id: "parent".to_owned()
                 }
             ),
             (
-                SpanDropKind::UnknownParent,
-                &SpanKey::Run {
+                SpanDropKind::SampledOut,
+                SpanKey::Run {
                     run_id: "child".to_owned()
                 }
             ),
@@ -437,7 +438,7 @@ fn active_child_survives_its_parent_eviction_and_finishes_normally() {
 }
 
 #[test]
-fn late_request_for_an_evicted_run_creates_no_new_entries() {
+fn late_request_for_an_evicted_run_replays_the_evicted_drop() {
     // Given: a run evicted by the lifetime audit.
     let mut mapper = SpanMapper::with_budget(SpanBudget {
         max_span_lifetime: Duration::from_secs(1),
@@ -453,14 +454,118 @@ fn late_request_for_an_evicted_run_creates_no_new_entries() {
     );
     // When: a late request arrives for the evicted run.
     let actions = mapper.ingest(&request_started("req-1", "run-1", 3));
-    // Then: it is an UnknownParent drop only — no span starts and the
-    //       per-run ledgers stay free of the evicted run.
+    // Then: the eviction kind is replayed for the late start — no span opens
+    //       and the per-run ledgers stay free of the evicted run.
     assert!(actions.is_empty());
     let drops = mapper.drain_drops();
     assert_eq!(
         drops.iter().map(|drop| drop.kind).collect::<Vec<_>>(),
-        vec![SpanDropKind::UnknownParent]
+        vec![SpanDropKind::BudgetEvicted]
     );
     assert!(!mapper.sampling_decisions.contains_key("run-1"));
     assert!(!mapper.agent_depth.contains_key("run-1"));
+}
+
+#[test]
+fn rejected_runs_never_enter_the_per_run_ledgers() {
+    // Given: three mappers — one sampling nothing, one with a full global
+    //        in-flight cap, and one with a full admission window.
+    let mut sampled = SpanMapper::with_sampling_ratio(0.0);
+    let mut global = SpanMapper::with_budget(SpanBudget {
+        max_in_flight_spans_global: 2,
+        ..SpanBudget::default()
+    });
+    let mut window = SpanMapper::with_budget(SpanBudget {
+        max_admitted_spans_per_window: 3,
+        ..SpanBudget::default()
+    });
+    global.ingest(&start_run("filler", None, 1));
+    window.ingest(&start_run("filler", None, 1));
+    // When: a run is rejected in each path.
+    sampled.ingest(&start_run("rejected", None, 2));
+    global.ingest(&start_run("rejected", None, 2));
+    window.ingest(&start_run("rejected", None, 2));
+    // Then: no rejected run holds a ledger entry — a hung rejected run can
+    //       never grow the maps without bound.
+    for mapper in [&sampled, &global, &window] {
+        assert!(!mapper.sampling_decisions.contains_key("rejected"));
+        assert!(!mapper.agent_depth.contains_key("rejected"));
+    }
+    // And: the admitted filler run keeps its entries; those are released by
+    //       the terminal / eviction paths instead.
+    assert!(global.sampling_decisions.contains_key("filler"));
+    assert!(window.sampling_decisions.contains_key("filler"));
+}
+
+#[test]
+fn sampled_out_run_replays_sampled_out_for_late_subtree_events() {
+    // Given: a mapper sampling nothing and its rejected run.
+    let mut mapper = SpanMapper::with_sampling_ratio(0.0);
+    assert!(mapper.ingest(&start_run("run-1", None, 1)).is_empty());
+    mapper.drain_drops();
+    // When: a request, a tool, and a child delegation arrive for the
+    //       sampled-out run.
+    let request = mapper.ingest(&request_started("req-1", "run-1", 2));
+    let tool = mapper.ingest(&tool_started("call-1", "run-1", 3));
+    let child = mapper.ingest(&start_run("child", Some("run-1"), 4));
+    // Then: each late start replays the original SampledOut drop — no span
+    //       starts and the ledgers stay empty.
+    assert!(request.is_empty());
+    assert!(tool.is_empty());
+    assert!(child.is_empty());
+    let drops = mapper.drain_drops();
+    assert_eq!(
+        drops
+            .iter()
+            .map(|drop| (drop.kind, drop.key.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                SpanDropKind::SampledOut,
+                SpanKey::Request {
+                    request_id: "req-1".to_owned()
+                }
+            ),
+            (
+                SpanDropKind::SampledOut,
+                SpanKey::Tool {
+                    call_id: "call-1".to_owned()
+                }
+            ),
+            (
+                SpanDropKind::SampledOut,
+                SpanKey::Run {
+                    run_id: "child".to_owned()
+                }
+            ),
+        ]
+    );
+    assert!(mapper.sampling_decisions.is_empty());
+    assert!(mapper.agent_depth.is_empty());
+}
+
+#[test]
+fn tombstone_cap_eviction_falls_back_to_unknown_parent() {
+    // Given: enough sampled-out runs to overflow the 4096-entry tombstone
+    //        cap — each rejected run leaves two entries.
+    let mut mapper = SpanMapper::with_sampling_ratio(0.0);
+    for index in 1..=2049_u64 {
+        let _ = mapper.ingest(&start_run(&format!("run-{index}"), None, index));
+    }
+    mapper.drain_drops();
+    // When: a late request arrives for the first run, whose tombstones were
+    //       evicted as the oldest entries.
+    let actions = mapper.ingest(&request_started("req-1", "run-1", 2050));
+    // Then: the original SampledOut kind is no longer replayable and the
+    //       request falls back to the standard UnknownParent drop.
+    assert!(actions.is_empty());
+    let kinds = mapper
+        .drain_drops()
+        .iter()
+        .map(|drop| drop.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, vec![SpanDropKind::UnknownParent]);
+    // And: the ledgers hold no sampled-out run.
+    assert!(mapper.sampling_decisions.is_empty());
+    assert!(mapper.agent_depth.is_empty());
 }

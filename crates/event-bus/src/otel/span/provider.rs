@@ -76,29 +76,24 @@ impl SpanMapper {
             self.record_drop(SpanDropKind::MissingRunId, key, at);
             return Vec::new();
         };
-        if self.sampling_decisions.get(run_id).copied() == Some(false) {
-            return self.start_span(StartSpec {
-                key,
-                parent: Some(SpanKey::Agent {
-                    run_id: run_id.clone(),
-                }),
-                name: format!("chat {model}"),
-                kind: SpanKind::Client,
-                at,
-                attributes: Vec::new(),
-            });
-        }
-        if !self.open.contains_key(&SpanKey::Agent {
+        let agent_key = SpanKey::Agent {
             run_id: run_id.clone(),
-        }) {
+        };
+        // 親 agent の tombstone があれば元の拒否 kind を replay する (帳簿は
+        // admission 済み run のみを保持するため sampled-out 判定はここでは
+        // 参照できない)。replay 分は warn しない。
+        if let Some(kind) = self.tombstone_kind(&agent_key) {
+            self.add_tombstone(key.clone(), kind);
+            self.record_replayed_drop(kind, key);
+            return Vec::new();
+        }
+        if !self.open.contains_key(&agent_key) {
             self.record_drop(SpanDropKind::UnknownParent, key, at);
             return Vec::new();
         }
         self.start_span(StartSpec {
             key,
-            parent: Some(SpanKey::Agent {
-                run_id: run_id.clone(),
-            }),
+            parent: Some(agent_key),
             name: format!("chat {model}"),
             kind: SpanKind::Client,
             at,
