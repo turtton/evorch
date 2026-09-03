@@ -12,9 +12,11 @@ config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 model = { path = "../model" }
 providers = { path = "../providers" }
+sandbox = { path = "../sandbox" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 wiremock = { workspace = true }
