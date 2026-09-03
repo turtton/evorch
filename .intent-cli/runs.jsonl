@@ -152,3 +152,4 @@
 {"ts":"2026-09-03T13:02:04.202098+00:00","execution_unit":"v02-provider-codex-subscription","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":60}
 {"ts":"2026-09-03T13:02:21.9675998+00:00","execution_unit":"v02-provider-codex-subscription","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":60}
 {"ts":"2026-09-03T13:02:21.9675998+00:00","execution_unit":"v02-provider-codex-subscription","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":60}
+{"ts":"2026-09-03T13:07:39.2226138+00:00","execution_unit":"v02-project-rules","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#61","reason":"https://github.com/turtton/evorch/issues/61"}
