@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use event_bus::{Event, EventBus, ProviderEvent, ProviderFailureKind};
 
 use crate::error::ProviderError;
-use crate::message::{FinishReason, Usage};
+use crate::message::{FinishReason, ObservationContext, Usage};
 use crate::stream::StreamEvent;
 
 /// プロセス内で一意な request ID を生成する。
@@ -34,6 +34,7 @@ pub(crate) struct AttemptObserver {
     protocol: &'static str,
     model: String,
     streaming: bool,
+    observation: Option<ObservationContext>,
     started_at: tokio::time::Instant,
     started_emitted: bool,
     first_token_emitted: bool,
@@ -49,6 +50,7 @@ impl AttemptObserver {
         protocol: &'static str,
         model: impl Into<String>,
         streaming: bool,
+        observation: Option<ObservationContext>,
     ) -> Self {
         Self {
             bus,
@@ -58,6 +60,7 @@ impl AttemptObserver {
             protocol,
             model: model.into(),
             streaming,
+            observation,
             started_at: tokio::time::Instant::now(),
             started_emitted: false,
             first_token_emitted: false,
@@ -79,7 +82,7 @@ impl AttemptObserver {
             protocol: self.protocol.to_string(),
             model: self.model.clone(),
             streaming: self.streaming,
-            run_id: None,
+            run_id: self.observation_run_id(),
         });
     }
 
@@ -104,7 +107,7 @@ impl AttemptObserver {
             protocol: self.protocol.to_string(),
             model: self.model.clone(),
             ttft_ms: self.elapsed_ms(),
-            run_id: None,
+            run_id: self.observation_run_id(),
         });
         self.first_token_emitted = true;
     }
@@ -134,7 +137,7 @@ impl AttemptObserver {
             cache_read_tokens: usage.cache_read_tokens,
             cache_write_tokens: usage.cache_write_tokens,
             finish_reason,
-            run_id: None,
+            run_id: self.observation_run_id(),
         });
         self.terminal_emitted = true;
     }
@@ -166,13 +169,29 @@ impl AttemptObserver {
             streaming: self.streaming,
             duration_ms: self.elapsed_ms(),
             failure,
-            run_id: None,
+            run_id: self.observation_run_id(),
         });
         self.terminal_emitted = true;
     }
 
     fn elapsed_ms(&self) -> u64 {
         self.started_at.elapsed().as_millis() as u64
+    }
+
+    /// 観測相関用の run ID を observation context から写す。
+    ///
+    /// context 未設定の構築経路 (routing 未接続の直接利用等) では
+    /// `None` を許容する。
+    fn observation_run_id(&self) -> Option<String> {
+        let run_id = self
+            .observation
+            .as_ref()
+            .map(|context| context.run_id.clone());
+        debug_assert!(
+            self.observation.is_none() || run_id.is_some(),
+            "observation context が設定されている場合、emit される全 attempt イベントに run_id を載せる"
+        );
+        run_id
     }
 
     fn emit(&self, event: ProviderEvent) {
@@ -206,6 +225,7 @@ mod tests {
             "protocol-a",
             "model-a",
             streaming,
+            None,
         )
     }
 

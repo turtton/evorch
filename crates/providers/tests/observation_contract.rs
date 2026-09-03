@@ -10,7 +10,8 @@ use providers::provider::anthropic::{AnthropicClient, AnthropicConfig};
 use providers::provider::openai::{OpenAiClient, OpenAiConfig};
 use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use providers::{
-    ChatRequest, ContentBlock, Message, ProviderAuth, ProviderClient, ProviderError, Role,
+    ChatRequest, ContentBlock, Message, ObservationContext, ProviderAuth, ProviderClient,
+    ProviderError, Role,
 };
 use support::{
     fixture, json_response, next_event, next_provider_event, next_usage_event, sse_response,
@@ -34,7 +35,16 @@ fn request(model: &str) -> ChatRequest {
         tools: Vec::new(),
         temperature: None,
         max_tokens: None,
+        observation: None,
     }
+}
+
+fn request_with_context(model: &str, run_id: &str) -> ChatRequest {
+    let mut request = request(model);
+    request.observation = Some(ObservationContext {
+        run_id: run_id.to_string(),
+    });
+    request
 }
 
 async fn mount(server: &MockServer, endpoint: &str, response: ResponseTemplate) {
@@ -95,6 +105,16 @@ fn failed(event: &Event) -> (&str, ProviderFailureKind, u64) {
         panic!("RequestFailed を期待しました: {:?}", event.kind)
     };
     (request_id, *failure, *duration_ms)
+}
+
+fn attempt_run_id(event: &Event) -> Option<&str> {
+    match &event.kind {
+        EventKind::Provider(ProviderEvent::RequestStarted { run_id, .. })
+        | EventKind::Provider(ProviderEvent::FirstTokenObserved { run_id, .. })
+        | EventKind::Provider(ProviderEvent::RequestCompleted { run_id, .. })
+        | EventKind::Provider(ProviderEvent::RequestFailed { run_id, .. }) => run_id.as_deref(),
+        other => panic!("attempt 観測イベントを期待しました: {other:?}"),
+    }
 }
 
 fn openai_client(server: &MockServer, bus: Arc<EventBus>, timeout: Duration) -> OpenAiClient {
@@ -632,4 +652,160 @@ async fn stream_consumer_drop_emits_other_failure() {
     ));
     assert_eq!(failed(&events[2]).0, request_id);
     assert_eq!(failed(&events[2]).1, ProviderFailureKind::Other);
+}
+
+// Given: observation context を持つ ChatRequest / When: serde_json へシリアライズ / Then: wire 非搭載のため observation キーは出現しない
+#[test]
+fn chat_request_serialization_omits_observation_context() {
+    let request = request_with_context(OPENAI_MODEL, "run-ctx-1");
+
+    let json = serde_json::to_value(&request).expect("ChatRequest を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "observation は wire 非搭載のため ChatRequest JSON に出現してはならない: {json}"
+    );
+}
+
+// Given: observation context を持つ ChatRequest / When: OpenAI wire リクエストへ変換 / Then: 変換後 JSON に observation キーは出現しない
+#[test]
+fn openai_wire_request_omits_observation_context() {
+    let request = request_with_context(OPENAI_MODEL, "run-ctx-1");
+
+    let wire = providers::wire::openai::to_wire_request(&request, false);
+    let json = serde_json::to_value(&wire).expect("OpenAI wire request を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "OpenAI wire リクエストに observation は出現してはならない: {json}"
+    );
+}
+
+// Given: observation context を持つ ChatRequest / When: Anthropic wire リクエストへ変換 / Then: 変換後 JSON に observation キーは出現しない
+#[test]
+fn anthropic_wire_request_omits_observation_context() {
+    let request = request_with_context(ANTHROPIC_MODEL, "run-ctx-1");
+
+    let wire = providers::wire::anthropic::to_wire_request(&request, false);
+    let json = serde_json::to_value(&wire).expect("Anthropic wire request を JSON 化できる");
+
+    assert!(
+        json.get("observation").is_none(),
+        "Anthropic wire リクエストに observation は出現してはならない: {json}"
+    );
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI send が成功 / Then: RequestStarted と RequestCompleted の両方に context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_stamps_context_run_id_on_observation_events() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-1"),
+        )
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 3).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-1"));
+    assert!(matches!(
+        &events[1].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[2]), Some("run-ctx-1"));
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI stream が完了まで流れる / Then: Started・FirstToken・Completed の全観測イベントに context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_stream_stamps_context_run_id_on_observation_events() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        sse_response(&fixture("openai", "stream_text.sse")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    let _: Vec<_> = openai_client(&server, bus, Duration::from_secs(1))
+        .stream(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-2"),
+        )
+        .await
+        .expect("stream を開始できる")
+        .collect()
+        .await;
+
+    let events = collect_events(&mut rx, 4).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-2"));
+    assert!(matches!(
+        &events[1].kind,
+        EventKind::Provider(ProviderEvent::FirstTokenObserved { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[1]), Some("run-ctx-2"));
+    assert!(matches!(
+        &events[2].kind,
+        EventKind::Usage(UsageEvent::Usage { .. })
+    ));
+    assert_eq!(attempt_run_id(&events[3]), Some("run-ctx-2"));
+}
+
+// Given: observation context 付きリクエスト / When: OpenAI send が HTTP 500 で失敗 / Then: RequestFailed にも context の run_id が載る
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_failure_stamps_context_run_id_on_failure_event() {
+    let server = MockServer::start().await;
+    mount(&server, "/chat/completions", json_response(500, "boom")).await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(
+            &ProviderAuth::new("sk"),
+            &request_with_context(OPENAI_MODEL, "run-ctx-3"),
+        )
+        .await
+        .expect_err("send は失敗する");
+
+    let events = collect_events(&mut rx, 2).await;
+    assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-3"));
+    assert_eq!(
+        failed(&events[1]).1,
+        ProviderFailureKind::Http { status: 500 }
+    );
+    assert_eq!(attempt_run_id(&events[1]), Some("run-ctx-3"));
+}
+
+// Given: observation context を持たないリクエスト / When: OpenAI send が成功 / Then: 観測イベントの run_id は None のまま
+#[tokio::test(flavor = "multi_thread")]
+async fn openai_send_without_context_emits_none_run_id() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/chat/completions",
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(16));
+    let mut rx = bus.subscribe();
+
+    openai_client(&server, bus, Duration::from_secs(1))
+        .send(&ProviderAuth::new("sk"), &request(OPENAI_MODEL))
+        .await
+        .expect("send は成功する");
+
+    let events = collect_events(&mut rx, 3).await;
+    assert_eq!(attempt_run_id(&events[0]), None);
+    assert_eq!(attempt_run_id(&events[2]), None);
 }

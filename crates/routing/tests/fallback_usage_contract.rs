@@ -131,6 +131,7 @@ fn chat_request(model: &str) -> ChatRequest {
         tools: Vec::new(),
         temperature: None,
         max_tokens: None,
+        observation: None,
     }
 }
 

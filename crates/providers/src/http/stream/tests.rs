@@ -127,7 +127,7 @@ fn usage_emitter_with_bus() -> (UsageEmitter, Arc<EventBus>) {
 }
 
 fn observer(bus: Option<Arc<EventBus>>) -> AttemptObserver {
-    AttemptObserver::new(bus, "test", None, "test-protocol", "model-a", true)
+    AttemptObserver::new(bus, "test", None, "test-protocol", "model-a", true, None)
 }
 
 async fn next_provider_event(rx: &mut event_bus::EventReceiver) -> ProviderEvent {
