@@ -88,8 +88,9 @@ pub mod exporter;
 pub mod span;
 
 pub use span::{
-    FiniteF64, SpanAction, SpanAttribute, SpanAttributeValue, SpanDrop, SpanDropKind, SpanKey,
-    SpanKind, SpanMapper, SpanStatus,
+    FiniteF64, SPAN_ATTRIBUTE_WHITELIST, SpanAction, SpanAttribute, SpanAttributeValue,
+    SpanAttributeViolation, SpanBudget, SpanDrop, SpanDropKind, SpanKey, SpanKind, SpanMapper,
+    SpanStatus, validate_span_attributes,
 };
 
 /// 写像先の GenAI metrics semantic conventions の pin バージョン。

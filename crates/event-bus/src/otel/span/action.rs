@@ -202,6 +202,19 @@ pub enum SpanDropKind {
     UnknownSpanEnd,
     /// 同一 key の span が既に open だった。
     DuplicateSpan,
+    /// 所属 run の sampling 判定が sampled-out だった (descendant も含む)。
+    SampledOut,
+    /// run 単位の in-flight 上限超過で Start を拒否した。
+    BudgetInFlightPerRun,
+    /// 全体の in-flight 上限超過で Start を拒否した。
+    BudgetInFlightGlobal,
+    /// 許可 window 内の admission 数上限超過で Start を拒否した。
+    BudgetWindow,
+    /// 属性上限 (数 / per-span bytes / per-value bytes / whitelist 防御) で
+    /// 属性を破棄した。
+    BudgetAttributes,
+    /// `max_span_lifetime` 超過で open span を強制閉鎖した。
+    BudgetEvicted,
 }
 
 /// mapper が破棄した事象 1 件分の typed 記録。

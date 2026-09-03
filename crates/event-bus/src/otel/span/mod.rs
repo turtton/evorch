@@ -72,6 +72,12 @@
 //! | `UnknownParent` | 親 `agent:{run_id}` が未知の request / tool 開始 |
 //! | `UnknownSpanEnd` | 開始済み span が無い End 要求 |
 //! | `DuplicateSpan` | 既に open な同一 key の再開始 |
+//! | `SampledOut` | run sampling 判定により subtree Start を拒否 |
+//! | `BudgetInFlightPerRun` | run 内 request / tool in-flight 上限超過 |
+//! | `BudgetInFlightGlobal` | mapper 全体の open span 上限超過 |
+//! | `BudgetWindow` | 60 秒 admission window の上限超過 |
+//! | `BudgetAttributes` | whitelist または属性 hard limit により属性を破棄 |
+//! | `BudgetEvicted` | lifetime 上限超過 span を Error 終了 |
 //!
 //! # エラー分類 (`error.type`)
 //!
@@ -101,6 +107,8 @@ mod action;
 mod lifecycle;
 mod mapper;
 mod provider;
+mod span_attrs;
+mod span_budget;
 mod state;
 mod tool;
 
@@ -117,6 +125,8 @@ pub use action::{
     FiniteF64, SpanAction, SpanAttribute, SpanAttributeValue, SpanDrop, SpanDropKind, SpanKey,
     SpanKind, SpanStatus,
 };
+pub use span_attrs::{SPAN_ATTRIBUTE_WHITELIST, SpanAttributeViolation, validate_span_attributes};
+pub use span_budget::SpanBudget;
 
 /// warn の rate limit 間隔 (同一 [`SpanDropKind`] につき)。
 const WARN_INTERVAL: Duration = Duration::from_secs(60);
@@ -126,15 +136,45 @@ const WARN_INTERVAL: Duration = Duration::from_secs(60);
 pub(super) struct OpenSpan {
     attributes: Vec<SpanAttribute>,
     in_flight: Vec<SpanAttribute>,
+    started_at: SystemTime,
+    sequence: u64,
+    run_id: Option<String>,
 }
 
 /// イベントを span tree 構築 action 列へ写像する stateful mapper。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SpanMapper {
     pub(super) open: HashMap<SpanKey, OpenSpan>,
     pub(super) agent_depth: HashMap<String, u32>,
     pub(super) drops: Vec<SpanDrop>,
     pub(super) last_warned: HashMap<SpanDropKind, SystemTime>,
+    pub(super) budget: SpanBudget,
+    pub(super) sampling_ratio: f64,
+    pub(super) sampling_decisions: HashMap<String, bool>,
+    pub(super) window_started_at: Option<SystemTime>,
+    pub(super) admitted_in_window: usize,
+    pub(super) tombstones: HashMap<SpanKey, u64>,
+    pub(super) tombstone_sequence: u64,
+    pub(super) span_sequence: u64,
+}
+
+impl Default for SpanMapper {
+    fn default() -> Self {
+        Self {
+            open: HashMap::new(),
+            agent_depth: HashMap::new(),
+            drops: Vec::new(),
+            last_warned: HashMap::new(),
+            budget: SpanBudget::default(),
+            sampling_ratio: 1.0,
+            sampling_decisions: HashMap::new(),
+            window_started_at: None,
+            admitted_in_window: 0,
+            tombstones: HashMap::new(),
+            tombstone_sequence: 0,
+            span_sequence: 0,
+        }
+    }
 }
 
 impl SpanMapper {
@@ -143,12 +183,35 @@ impl SpanMapper {
         Self::default()
     }
 
+    /// 指定 hard limits で mapper を生成する。
+    pub fn with_budget(budget: SpanBudget) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
+    /// run 単位の決定的 sampling ratio で mapper を生成する。
+    pub fn with_sampling_ratio(ratio: f64) -> Self {
+        let sampling_ratio = if ratio.is_nan() {
+            1.0
+        } else {
+            ratio.clamp(0.0, 1.0)
+        };
+        Self {
+            sampling_ratio,
+            ..Self::default()
+        }
+    }
+
     /// イベントを写像し、生成された span action 列を返す。
     ///
     /// 写像対象外の事象は空 [`Vec`] となり、破棄されたものは
     /// [`SpanMapper::drain_drops`] で取得できる。
     pub fn ingest(&mut self, event: &Event) -> Vec<SpanAction> {
-        self.map_event(event)
+        let mut actions = self.audit_lifetimes(event.meta.wall_clock);
+        actions.extend(self.map_event(event));
+        actions
     }
 
     /// 記録済みの typed drop を取り出す (呼び出し後は空になる)。

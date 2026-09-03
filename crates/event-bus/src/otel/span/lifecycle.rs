@@ -52,10 +52,11 @@ impl SpanMapper {
                 let key = SpanKey::Run {
                     run_id: task_id.clone(),
                 };
-                if let Some(span) = self.open.get_mut(&key) {
-                    span.in_flight
-                        .push(SpanAttribute::new("evorch.task.id", task_id.clone()));
-                }
+                self.push_in_flight_attribute(
+                    &key,
+                    SpanAttribute::new("evorch.task.id", task_id.clone()),
+                    at,
+                );
                 Vec::new()
             }
             LifecycleEvent::Delegated { .. }
@@ -74,6 +75,7 @@ impl SpanMapper {
         else {
             return Vec::new();
         };
+        self.sampling_decision(run_id, parent_run_id.as_deref());
         let depth = parent_run_id
             .as_deref()
             .and_then(|parent| self.agent_depth.get(parent).copied())
@@ -105,6 +107,9 @@ impl SpanMapper {
             at,
             attributes: run_attributes,
         });
+        if actions.is_empty() && self.sampling_decisions.get(run_id).copied().unwrap_or(true) {
+            return actions;
+        }
         actions.extend(self.start_span(StartSpec {
             key: SpanKey::Agent {
                 run_id: run_id.clone(),
@@ -126,6 +131,11 @@ impl SpanMapper {
     }
 
     fn end_run(&mut self, run_id: &str, at: SystemTime, status: SpanStatus) -> Vec<SpanAction> {
+        if self.is_tombstoned(&SpanKey::Run {
+            run_id: run_id.to_owned(),
+        }) {
+            return Vec::new();
+        }
         let error_type = (status == SpanStatus::Error).then_some("agent_run_error");
         let mut actions = self.end_span(EndSpec {
             key: SpanKey::Agent {

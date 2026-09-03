@@ -48,6 +48,18 @@ impl SpanMapper {
             self.record_drop(SpanDropKind::MissingRunId, key, at);
             return Vec::new();
         };
+        if self.sampling_decisions.get(run_id).copied() == Some(false) {
+            return self.start_span(StartSpec {
+                key,
+                parent: Some(SpanKey::Agent {
+                    run_id: run_id.clone(),
+                }),
+                name: format!("execute_tool {tool_name}"),
+                kind: SpanKind::Internal,
+                at,
+                attributes: Vec::new(),
+            });
+        }
         if !self.open.contains_key(&SpanKey::Agent {
             run_id: run_id.clone(),
         }) {
