@@ -232,3 +232,18 @@ pub fn git(repo: &Path, args: &[&str]) -> Output {
         .output()
         .expect("git を実行できる")
 }
+
+/// Loads the long coding-session fixture used by compaction fidelity (AC3)
+/// and continuation (AC9) tests of issue #63.
+///
+/// Provenance: the fixture shape is derived from opencode (sst/opencode)
+/// compaction summary+tail layout, senpi/pi-mono `CompactionEntry` +
+/// `firstKeptEntryId` cut-point rules (a tail cut must not sever an open tool
+/// pair), and the omo compress section model (Goal / Tasks / Decisions /
+/// Files / Verification / Open items) mapped onto assistant text and user
+/// tool results.
+pub fn load_compaction_fixture() -> Vec<Message> {
+    let raw = include_str!("../fixtures/compaction_long_session.json");
+    serde_json::from_str(raw)
+        .expect("compaction long-session fixture must parse as Vec<providers::Message>")
+}
