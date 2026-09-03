@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use futures_util::StreamExt;
 
+use super::oauth::DeviceAuthClient;
 use super::session::CodexSessionManager;
 use super::tokens::CodexTokenStore;
 use crate::auth::ProviderAuth;
@@ -56,7 +57,6 @@ impl Default for CodexConfig {
 pub struct CodexClient {
     http_client: reqwest::Client,
     endpoint: String,
-    _auth_base_url: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
     session: CodexSessionManager,
@@ -74,7 +74,6 @@ impl CodexClient {
                 "{}/backend-api/codex/responses",
                 config.base_url.trim_end_matches('/')
             ),
-            _auth_base_url: config.auth_base_url.trim_end_matches('/').to_string(),
             timeout: config.timeout,
             event_bus: config.event_bus,
             session,
@@ -89,7 +88,21 @@ impl CodexClient {
         config: CodexConfig,
         store: Arc<dyn CodexTokenStore>,
     ) -> Result<Self, ProviderError> {
-        Self::new(config, CodexSessionManager::new(store))
+        let http_client = build_http_client(None)?;
+        let session = CodexSessionManager::new(
+            store,
+            DeviceAuthClient::new(&config.auth_base_url, http_client.clone()),
+        );
+        Ok(Self {
+            http_client,
+            endpoint: format!(
+                "{}/backend-api/codex/responses",
+                config.base_url.trim_end_matches('/')
+            ),
+            timeout: config.timeout,
+            event_bus: config.event_bus,
+            session,
+        })
     }
 
     fn observer(&self, request: &ChatRequest, streaming: bool) -> AttemptObserver {
