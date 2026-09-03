@@ -16,6 +16,7 @@
 //!   runtime は model 名を一切持たない。
 
 mod agent_loop;
+pub(crate) mod compaction;
 pub mod context;
 pub mod error;
 pub mod mailbox;
