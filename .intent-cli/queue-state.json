@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-03T12:13:54.0975415+00:00",
+  "updated_at": "2026-09-03T13:02:21.9787138+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -780,7 +780,7 @@
     {
       "execution_unit": "v02-provider-codex-subscription",
       "title": "v0.2: ChatGPT Plus/Pro \u30B5\u30D6\u30B9\u30AF\u30EA\u30D7\u30B7\u30E7\u30F3\u9023\u643A\u306E codex provider\uFF08OAuth device flow / PKCE\uFF09\u3092 providers \u5C64\u306B\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -794,6 +794,7 @@
         "number": 59,
         "url": "https://github.com/turtton/evorch/issues/59"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/60",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
