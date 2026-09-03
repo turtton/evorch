@@ -351,7 +351,7 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 role,
-                name,
+                name: name.clone(),
                 model,
                 config: config.clone(),
                 parent,
@@ -364,6 +364,14 @@ impl AgentRuntime {
                 _join: None,
             },
         );
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: run_id.to_string(),
+                parent_run_id: parent.map(|parent| parent.to_string()),
+                agent_name: name,
+                role: role.name().to_lowercase(),
+            }));
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::AgentRunStateChanged {

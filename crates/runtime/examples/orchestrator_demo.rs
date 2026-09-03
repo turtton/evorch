@@ -8,7 +8,7 @@ use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, RecvError};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
-use runtime::{AgentModel, AgentRuntime, RunConfig, RuntimeError};
+use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, RunConfig, RuntimeError};
 use sandbox::BwrapConfig;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -133,6 +133,7 @@ impl ScriptedModel {
 impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
+        _invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
         _tools: &[ToolSpec],
