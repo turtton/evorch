@@ -16,6 +16,7 @@ use tools::ToolExecutor;
 
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
+use crate::rules::RulesSource;
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
 use crate::workspace::OwnedWorktree;
@@ -48,6 +49,11 @@ pub(crate) struct LoopShared {
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
     pub(crate) skills: Option<Arc<SkillRegistry>>,
+    #[expect(
+        dead_code,
+        reason = "project-rules loop integration is implemented in wave 2"
+    )]
+    pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) runtime: Weak<Shared>,
 }
 
