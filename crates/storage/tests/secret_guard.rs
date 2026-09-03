@@ -209,6 +209,7 @@ fn rejected_event_preserves_events_rows_and_session_bytes() {
                 cache_read_tokens: 3,
                 cache_write_tokens: 4,
                 finish_reason: format!("other {secret}"),
+                run_id: None,
             }
             .into(),
         ),

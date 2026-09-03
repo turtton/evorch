@@ -79,6 +79,7 @@ impl AttemptObserver {
             protocol: self.protocol.to_string(),
             model: self.model.clone(),
             streaming: self.streaming,
+            run_id: None,
         });
     }
 
@@ -103,6 +104,7 @@ impl AttemptObserver {
             protocol: self.protocol.to_string(),
             model: self.model.clone(),
             ttft_ms: self.elapsed_ms(),
+            run_id: None,
         });
         self.first_token_emitted = true;
     }
@@ -132,6 +134,7 @@ impl AttemptObserver {
             cache_read_tokens: usage.cache_read_tokens,
             cache_write_tokens: usage.cache_write_tokens,
             finish_reason,
+            run_id: None,
         });
         self.terminal_emitted = true;
     }
@@ -163,6 +166,7 @@ impl AttemptObserver {
             streaming: self.streaming,
             duration_ms: self.elapsed_ms(),
             failure,
+            run_id: None,
         });
         self.terminal_emitted = true;
     }

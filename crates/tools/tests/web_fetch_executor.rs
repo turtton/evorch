@@ -163,7 +163,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
 
     assert!(matches!(
         tool_event(&receiver.recv().await.expect("ToolStarted を受信できる")),
-        ToolEvent::ToolStarted { tool_name, call_id }
+        ToolEvent::ToolStarted { tool_name, call_id, .. }
             if tool_name == "web_fetch" && call_id == "call-1"
     ));
     let completed = receiver.recv().await.expect("ToolCompleted を受信できる");
@@ -172,6 +172,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
         call_id,
         is_error,
         detail,
+        ..
     } = tool_event(&completed)
     else {
         panic!("ToolCompleted を期待しましたが {completed:?} でした");

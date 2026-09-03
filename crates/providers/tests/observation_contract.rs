@@ -69,6 +69,7 @@ fn started(event: &Event) -> (&str, &str, Option<&str>, &str, &str, bool) {
         protocol,
         model,
         streaming,
+        ..
     }) = &event.kind
     else {
         panic!("RequestStarted を期待しました: {:?}", event.kind)
@@ -226,6 +227,7 @@ async fn openai_send_success_emits_ordered_observation() {
         protocol,
         model,
         streaming,
+        ..
     } = next_provider_event(&mut rx).await
     else {
         panic!("RequestStarted を期待")

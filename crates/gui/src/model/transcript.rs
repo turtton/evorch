@@ -102,6 +102,7 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
+                ..
             }) => self.push_tool(tool_name, call_id, ToolStatus::Running),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
@@ -241,12 +242,14 @@ mod tests {
         model.apply(&Event::new(ToolEvent::ToolStarted {
             tool_name: "read".into(),
             call_id: "c1".into(),
+            run_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
             tool_name: "read".into(),
             call_id: "c1".into(),
             is_error: false,
             detail: None,
+            run_id: None,
         }));
         assert_eq!(
             model.entries()[0],

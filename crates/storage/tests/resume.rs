@@ -28,7 +28,7 @@ fn total_event_bytes(conn: &Connection, session_id: &str) -> u64 {
 
 #[test]
 fn interrupted_session_restores_pending_output_and_open_tool_call() {
-    /* Given: 応答・推論・未完了ツールを持つセッション */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(MessageEvent::MessageDelta { delta: "Hello".into() }, 2)); append(&handle, Some("s1"), &event(MessageEvent::ReasoningDelta { delta: "think".into() }, 3)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into() }, 4)); storage.close(); let db = Database::open(&config).unwrap();
+    /* Given: 応答・推論・未完了ツールを持つセッション */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(MessageEvent::MessageDelta { delta: "Hello".into() }, 2)); append(&handle, Some("s1"), &event(MessageEvent::ReasoningDelta { delta: "think".into() }, 3)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into(), run_id: None }, 4)); storage.close(); let db = Database::open(&config).unwrap();
     /* When: セッションを復元する */ let actual = db.restore_session("s1").unwrap();
     /* Then: 保留状態を全て復元する */ assert_eq!(actual, Some(SessionSnapshot { pending_message: "Hello".into(), pending_reasoning: "think".into(), open_tool_calls: vec![("tool".into(), "c1".into())], ..running() }));
 }
@@ -77,7 +77,7 @@ fn replay_uses_stored_id_order_instead_of_wall_clock_order() {
 
 #[test]
 fn completed_tool_call_is_removed_from_open_calls() {
-    /* Given: 開始・完了したツール呼び出し */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into() }, 2)); append(&handle, Some("s1"), &event(ToolEvent::ToolCompleted { tool_name: "tool".into(), call_id: "c1".into(), is_error: false, detail: None }, 3)); storage.close(); let db = Database::open(&config).unwrap();
+    /* Given: 開始・完了したツール呼び出し */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into(), run_id: None }, 2)); append(&handle, Some("s1"), &event(ToolEvent::ToolCompleted { tool_name: "tool".into(), call_id: "c1".into(), is_error: false, detail: None, run_id: None }, 3)); storage.close(); let db = Database::open(&config).unwrap();
     /* When: 復元する */ let actual = db.restore_session("s1").unwrap();
     /* Then: 未完了一覧が空になる */ assert_eq!(actual, Some(running()));
 }

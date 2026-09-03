@@ -162,6 +162,7 @@ impl ToolExecutor {
         self.event_bus.emit(Event::new(ToolEvent::ToolStarted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
+            run_id: None,
         }));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
@@ -248,6 +249,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             is_error,
             detail,
+            run_id: None,
         }));
     }
 

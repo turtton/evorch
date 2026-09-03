@@ -85,6 +85,7 @@ async fn executor_emits_started_then_completed_with_payload() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
+            run_id: None,
         }
     );
     let second = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -95,6 +96,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             call_id: "call-1".to_string(),
             is_error: false,
             detail: None,
+            run_id: None,
         }
     );
 }
@@ -120,6 +122,7 @@ async fn executor_unknown_tool_is_error_without_events() {
     bus.emit(Event::new(ToolEvent::ToolStarted {
         tool_name: "sentinel".to_string(),
         call_id: "sentinel".to_string(),
+        run_id: None,
     }));
 
     let first = receiver.recv().await.expect("センチネルを受信できる");
@@ -128,6 +131,7 @@ async fn executor_unknown_tool_is_error_without_events() {
         &ToolEvent::ToolStarted {
             tool_name: "sentinel".to_string(),
             call_id: "sentinel".to_string(),
+            run_id: None,
         }
     );
 }
@@ -156,6 +160,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -166,6 +171,7 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-missing".to_string(),
             is_error: true,
             detail: None,
+            run_id: None,
         }
     );
 
@@ -189,6 +195,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("4 件目のイベントを受信できる");
@@ -199,6 +206,7 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-extra".to_string(),
             is_error: true,
             detail: None,
+            run_id: None,
         }
     );
 }
@@ -232,6 +240,7 @@ async fn executor_tool_error_emits_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -242,6 +251,7 @@ async fn executor_tool_error_emits_completed_error() {
             call_id: "call-1".to_string(),
             is_error: true,
             detail: None,
+            run_id: None,
         }
     );
 }
@@ -304,6 +314,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
         &ToolEvent::ToolStarted {
             tool_name: "shell".to_string(),
             call_id: "call-1".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -314,6 +325,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             call_id: "call-1".to_string(),
             is_error: true,
             detail: None,
+            run_id: None,
         }
     );
 }
@@ -418,6 +430,7 @@ async fn executor_emits_tool_completed_with_detail() {
         &ToolEvent::ToolStarted {
             tool_name: "detail_tool".to_string(),
             call_id: "call-1".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -431,6 +444,7 @@ async fn executor_emits_tool_completed_with_detail() {
                 "request_id": "req-1",
                 "query": "evorch"
             })),
+            run_id: None,
         }
     );
 }

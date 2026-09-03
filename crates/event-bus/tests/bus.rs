@@ -23,6 +23,7 @@ fn sample_event(index: usize) -> Event {
         _ => ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: format!("call-{index}"),
+            run_id: None,
         }
         .into(),
     };

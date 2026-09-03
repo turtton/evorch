@@ -147,6 +147,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
         &ToolEvent::ToolStarted {
             tool_name: "web_search".to_string(),
             call_id: "call-1".to_string(),
+            run_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -155,6 +156,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
         call_id,
         is_error,
         detail: event_detail,
+        ..
     } = tool_event(&completed)
     else {
         panic!("ToolCompleted を期待しましたが {completed:?} でした");

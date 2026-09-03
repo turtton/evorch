@@ -80,12 +80,14 @@ async fn main() {
     emit!(ToolEvent::ToolStarted {
         tool_name: "search_docs".into(),
         call_id: "call-42".into(),
+        run_id: None,
     });
     emit!(ToolEvent::ToolCompleted {
         tool_name: "search_docs".into(),
         call_id: "call-42".into(),
         is_error: false,
         detail: None,
+        run_id: None,
     });
     for index in 0..12 {
         bus.emit(Event::new(MessageEvent::MessageDelta {

@@ -718,6 +718,7 @@ mod tests {
                     cache_read_tokens: 3,
                     cache_write_tokens: 4,
                     finish_reason: format!("other {KNOWN_VALUE}"),
+                    run_id: None,
                 }
                 .into(),
             ),
