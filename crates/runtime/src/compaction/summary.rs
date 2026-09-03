@@ -1,0 +1,542 @@
+//! 圧縮サマリ生成（T6 で実装）。
+
+use std::{collections::HashSet, sync::Arc};
+
+use agents::Role;
+use async_trait::async_trait;
+use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent};
+use serde_json::Value;
+
+use crate::error::RuntimeError;
+use crate::model::{AgentInvocationContext, AgentModel};
+
+const AGENT_MESSAGE_PREFIX: &str = "agent-message";
+const SUMMARY_SYSTEM_PROMPT: &str = "Summarize the compacted conversation for continuation. Preserve the goal and contract, unfinished tasks, key decisions, changed files, verification results, unresolved items, recent context, and every agent message. Use terse markdown bullets and do not invoke tools.";
+const SUMMARY_USER_PROMPT: &str = "Produce the continuation summary now. Preserve exact file paths, test result lines, unresolved markers, and agent-message identifiers.";
+
+pub(crate) struct SummaryInput<'a> {
+    pub goal: Option<&'a str>,
+    pub compacted: &'a [Message],
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SummarizeError {
+    #[error("summary model failed: {0}")]
+    Model(#[from] RuntimeError),
+}
+
+#[async_trait]
+pub(crate) trait Summarizer: Send + Sync {
+    async fn summarize(&self, input: &SummaryInput<'_>) -> Result<String, SummarizeError>;
+}
+
+pub(crate) struct StructuralSummarizer;
+
+pub(crate) struct ModelSummarizer {
+    pub(crate) model: Arc<dyn AgentModel>,
+    pub(crate) role: Role,
+    pub(crate) run_id: String,
+}
+
+#[async_trait]
+impl Summarizer for StructuralSummarizer {
+    async fn summarize(&self, input: &SummaryInput<'_>) -> Result<String, SummarizeError> {
+        let goal = input.goal.or_else(|| first_user_text(input.compacted));
+        let decisions = assistant_lines(input.compacted, |line| {
+            line.contains("Decision:") || line.contains("決定:")
+        });
+        let unresolved = assistant_lines(input.compacted, |line| {
+            line.to_ascii_lowercase().contains("unresolved")
+        });
+        let files = changed_files(input.compacted);
+        let verification = verification_lines(input.compacted);
+        let recent = recent_context(input.compacted);
+        let agent_messages = agent_messages(input.compacted);
+
+        let unfinished = if unresolved.is_empty() {
+            "none detected"
+        } else {
+            "unresolved items remain"
+        };
+        let sections = [
+            ("Goal / Contract", goal.into_iter().collect()),
+            ("Unfinished Tasks", vec![unfinished]),
+            ("Key Decisions", decisions),
+            ("Changed Files", files.iter().map(String::as_str).collect()),
+            ("Verification Results", verification),
+            ("Unresolved Items", unresolved),
+            (
+                "Recent Context",
+                recent.iter().map(String::as_str).collect(),
+            ),
+            ("Agent Messages", agent_messages),
+        ];
+        let mut summary = String::new();
+        for (header, items) in sections {
+            section(&mut summary, header, items.into_iter());
+        }
+        Ok(summary)
+    }
+}
+
+#[async_trait]
+impl Summarizer for ModelSummarizer {
+    async fn summarize(&self, input: &SummaryInput<'_>) -> Result<String, SummarizeError> {
+        let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
+        messages.push(Message {
+            role: MessageRole::System,
+            content: vec![ContentBlock::Text {
+                text: SUMMARY_SYSTEM_PROMPT.to_string(),
+            }],
+        });
+        messages.extend_from_slice(input.compacted);
+        messages.push(Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: SUMMARY_USER_PROMPT.to_string(),
+            }],
+        });
+        let invocation = AgentInvocationContext {
+            run_id: self.run_id.clone(),
+        };
+        let response = self
+            .model
+            .complete(&invocation, self.role, &messages, &[])
+            .await?;
+        Ok(response
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. } => None,
+            })
+            .collect())
+    }
+}
+
+pub(crate) fn enforce_max_bytes(summary: &str, max_summary_bytes: u64) -> String {
+    let Ok(limit) = usize::try_from(max_summary_bytes) else {
+        return summary.to_string();
+    };
+    if summary.len() <= limit {
+        return summary.to_string();
+    }
+    let boundary = (0..=limit)
+        .rev()
+        .find(|index| summary.is_char_boundary(*index))
+        .unwrap_or(0);
+    format!("{}\n[truncated]", &summary[..boundary])
+}
+
+fn first_user_text(messages: &[Message]) -> Option<&str> {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+}
+
+fn assistant_lines(messages: &[Message], predicate: impl Fn(&str) -> bool) -> Vec<&str> {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .flat_map(str::lines)
+        .filter(|line| predicate(line))
+        .collect()
+}
+
+fn changed_files(messages: &[Message]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for block in messages.iter().flat_map(|message| &message.content) {
+        let ContentBlock::ToolUse { name, input, .. } = block else {
+            continue;
+        };
+        match name.as_str() {
+            "read" | "edit" | "write" => collect_path_values(input, &mut seen, &mut files),
+            "shell" => {
+                if let Some(command) = input.get("command").and_then(Value::as_str) {
+                    for token in command.split_whitespace() {
+                        let candidate = token.trim_matches(|character: char| {
+                            matches!(character, '`' | '\'' | '"' | ',' | ';')
+                        });
+                        if candidate.contains('/')
+                            && candidate.contains('.')
+                            && seen.insert(candidate.to_string())
+                        {
+                            files.push(candidate.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    files
+}
+
+fn collect_path_values(value: &Value, seen: &mut HashSet<String>, files: &mut Vec<String>) {
+    for key in ["path", "filepath", "file"] {
+        if let Some(path) = value.get(key).and_then(Value::as_str)
+            && seen.insert(path.to_string())
+        {
+            files.push(path.to_string());
+        }
+    }
+}
+
+fn verification_lines(messages: &[Message]) -> Vec<&str> {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content),
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. } => None,
+        })
+        .flatten()
+        .flat_map(|content| match content {
+            ToolResultContent::Text { text } => text.lines(),
+        })
+        .filter(|line| line.contains("test result:") || line.contains("passed;"))
+        .collect()
+}
+
+fn recent_context(messages: &[Message]) -> Vec<String> {
+    let snippets: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .collect();
+    snippets
+        .into_iter()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|text| text.chars().take(200).collect())
+        .collect()
+}
+
+fn agent_messages(messages: &[Message]) -> Vec<&str> {
+    let prefix = format!("[{AGENT_MESSAGE_PREFIX} ");
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if text.starts_with(&prefix) => Some(text.as_str()),
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .collect()
+}
+
+fn section<'a>(output: &mut String, header: &str, items: impl Iterator<Item = &'a str>) {
+    output.push_str("## ");
+    output.push_str(header);
+    output.push('\n');
+    let mut items = items.peekable();
+    if items.peek().is_none() {
+        output.push_str("- none detected\n");
+    }
+    for item in items {
+        output.push_str("- ");
+        output.push_str(item);
+        output.push('\n');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use agents::Role;
+    use async_trait::async_trait;
+    use providers::{
+        ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
+    };
+
+    use super::{
+        ModelSummarizer, StructuralSummarizer, Summarizer, SummaryInput, enforce_max_bytes,
+    };
+    use crate::compaction::cut::select_cut;
+    use crate::compaction::estimator::estimate_tokens;
+    use crate::error::RuntimeError;
+    use crate::model::{AgentInvocationContext, AgentModel};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Observation {
+        run_id: String,
+        role: Role,
+        tool_count: usize,
+    }
+
+    struct StubModel {
+        response: Result<ChatResponse, RuntimeError>,
+        observed: Mutex<Vec<Observation>>,
+    }
+
+    #[async_trait]
+    impl AgentModel for StubModel {
+        async fn complete(
+            &self,
+            invocation: &AgentInvocationContext,
+            role: Role,
+            _messages: &[Message],
+            tools: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            self.observed
+                .lock()
+                .expect("observation lock must not poison")
+                .push(Observation {
+                    run_id: invocation.run_id.clone(),
+                    role,
+                    tool_count: tools.len(),
+                });
+            self.response.clone()
+        }
+
+        fn selected_model(&self, _role: Role) -> String {
+            "stub-summary-model".to_string()
+        }
+    }
+
+    fn fixture() -> Vec<Message> {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/compaction_long_session.json"
+        ))
+        .expect("long-session fixture must parse")
+    }
+
+    fn fixture_cut(messages: &[Message]) -> crate::compaction::cut::CutPlan {
+        let keep_recent_tokens = estimate_tokens(&messages[22..]);
+        select_cut(messages, keep_recent_tokens, 1).expect("fixture has a compactable prefix")
+    }
+
+    fn initial_goal(messages: &[Message]) -> &str {
+        messages[1]
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. } => None,
+            })
+            .expect("fixture has an initial user prompt")
+    }
+
+    // Given: a safe cut through the long-session fixture
+    // When: the compacted prefix is structurally summarized
+    // Then: every AC3 fidelity class remains reachable in the summary
+    #[tokio::test]
+    async fn structural_summary_preserves_fixture_fidelity() {
+        let messages = fixture();
+        let plan = fixture_cut(&messages);
+        let compacted = &messages[plan.start..plan.end];
+
+        let summary = StructuralSummarizer
+            .summarize(&SummaryInput {
+                goal: Some(initial_goal(&messages)),
+                compacted,
+            })
+            .await
+            .expect("structural summary is infallible");
+
+        assert!(summary.contains("Fix the flaky compaction retry"));
+        for decision in compacted
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| {
+                let ContentBlock::Text { text } = block else {
+                    return None;
+                };
+                text.lines().find(|line| line.contains("Decision:"))
+            })
+        {
+            assert!(summary.contains(decision));
+        }
+        for path in ["src/scheduler.rs", "src/backoff.rs", "tests/retry.rs"] {
+            assert!(summary.contains(path), "missing changed file {path}");
+        }
+        assert!(summary.contains("test result: ok. 12 passed; 0 failed"));
+        assert!(summary.to_ascii_lowercase().contains("unresolved"));
+
+        let agent_ids: Vec<&str> = compacted
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } if text.starts_with("[agent-message ") => text
+                    .split_whitespace()
+                    .find(|token| token.starts_with("id=")),
+                ContentBlock::Text { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. } => None,
+            })
+            .collect();
+        assert!(!agent_ids.is_empty());
+        for id in agent_ids {
+            assert!(summary.contains(id));
+        }
+
+        let kept = &messages[plan.end..];
+        for tool_call_id in kept
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id),
+                ContentBlock::Text { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolUse { .. } => None,
+            })
+        {
+            assert!(
+                kept.iter()
+                    .flat_map(|message| &message.content)
+                    .any(|block| {
+                        matches!(block, ContentBlock::ToolUse { id, .. } if id == tool_call_id)
+                    })
+            );
+        }
+    }
+
+    // Given: identical fixture input
+    // When: structural summarization runs twice
+    // Then: both outputs are byte-identical
+    #[tokio::test]
+    async fn structural_summary_is_deterministic() {
+        let messages = fixture();
+        let plan = fixture_cut(&messages);
+        let input = SummaryInput {
+            goal: Some(initial_goal(&messages)),
+            compacted: &messages[plan.start..plan.end],
+        };
+
+        let first = StructuralSummarizer.summarize(&input).await.unwrap();
+        let second = StructuralSummarizer.summarize(&input).await.unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    // Given: a successful model stub and a compacted message
+    // When: model summarization runs
+    // Then: text is returned verbatim and correlation fields cross an empty-tools boundary
+    #[tokio::test]
+    async fn model_summary_forwards_context_without_tools() {
+        let model = Arc::new(StubModel {
+            response: Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "first".to_string(),
+                        },
+                        ContentBlock::Reasoning {
+                            text: "hidden".to_string(),
+                        },
+                        ContentBlock::Text {
+                            text: " second".to_string(),
+                        },
+                    ],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model: model.clone(),
+            role: Role::Worker,
+            run_id: "run-summary-7".to_string(),
+        };
+        let messages = fixture();
+
+        let summary = summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &messages[1..3],
+            })
+            .await
+            .expect("stub response succeeds");
+
+        assert_eq!(summary, "first second");
+        assert_eq!(
+            *model
+                .observed
+                .lock()
+                .expect("observation lock must not poison"),
+            vec![Observation {
+                run_id: "run-summary-7".to_string(),
+                role: Role::Worker,
+                tool_count: 0,
+            }]
+        );
+    }
+
+    // Given: a model stub returning RuntimeError
+    // When: model summarization runs
+    // Then: the failure crosses the typed summarizer boundary
+    #[tokio::test]
+    async fn model_summary_propagates_model_error() {
+        let model = Arc::new(StubModel {
+            response: Err(RuntimeError::Model {
+                reason: "summary unavailable".to_string(),
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model,
+            role: Role::Orchestrator,
+            run_id: "run-summary-8".to_string(),
+        };
+
+        let error = summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &[],
+            })
+            .await
+            .expect_err("model failure must propagate");
+
+        assert!(error.to_string().contains("summary unavailable"));
+    }
+
+    // Given: summaries around a byte boundary
+    // When: the byte limit is enforced
+    // Then: exact/under limits stay intact and over-limit UTF-8 gets a marker
+    #[test]
+    fn max_bytes_preserves_boundaries_and_marks_truncation() {
+        assert_eq!(enforce_max_bytes("abcd", 4), "abcd");
+        assert_eq!(enforce_max_bytes("abc", 4), "abc");
+        assert_eq!(enforce_max_bytes("éclair", 3), "éc\n[truncated]");
+        assert!(enforce_max_bytes("日本語", 4).is_char_boundary(0));
+        assert_eq!(enforce_max_bytes("日本語", 4), "日\n[truncated]");
+    }
+}
