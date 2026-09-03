@@ -140,3 +140,4 @@
 {"ts":"2026-09-03T02:35:26.6407128+00:00","execution_unit":"v02-otel-span-exporter","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#57","reason":"https://github.com/turtton/evorch/issues/57"}
 {"ts":"2026-09-03T10:42:48.5670265+00:00","execution_unit":"v02-otel-span-exporter","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":58}
 {"ts":"2026-09-03T10:42:48.5670265+00:00","execution_unit":"v02-otel-span-exporter","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":58}
+{"ts":"2026-09-03T10:50:16.0893732+00:00","execution_unit":"v02-provider-codex-subscription","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#59","reason":"https://github.com/turtton/evorch/issues/59"}
