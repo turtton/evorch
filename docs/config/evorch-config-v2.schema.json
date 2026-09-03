@@ -71,6 +71,15 @@
         "routes": {}
       }
     },
+    "rules": {
+      "description": "プロジェクトルール注入設定。",
+      "$ref": "#/$defs/RulesConfig",
+      "default": {
+        "context_window_tokens": 200000,
+        "max_injection_bytes": 65536,
+        "response_headroom_tokens": 16384
+      }
+    },
     "version": {
       "description": "設定スキーマのバージョン。",
       "type": "integer",
@@ -502,6 +511,34 @@
             }
           },
           "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "RulesConfig": {
+      "description": "プロジェクトルール注入の設定。",
+      "type": "object",
+      "properties": {
+        "context_window_tokens": {
+          "description": "モデルのコンテキストウィンドウ上限トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 200000,
+          "minimum": 0
+        },
+        "max_injection_bytes": {
+          "description": "1 回に注入するルール本文の最大バイト数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 65536,
+          "minimum": 0
+        },
+        "response_headroom_tokens": {
+          "description": "応答生成用に予約するトークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 16384,
+          "minimum": 0
         }
       },
       "additionalProperties": false

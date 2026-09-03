@@ -19,6 +19,7 @@ egui_dock = { version = "0.21", features = ["serde"] }
 egui_kittest = { version = "0.36", features = ["wgpu"] }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+globset = "0.4"
 flate2 = "1"
 getrandom = "0.3"
 hickory-resolver = { version = "0.25", features = ["system-config", "tokio"] }

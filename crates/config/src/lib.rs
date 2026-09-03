@@ -25,5 +25,5 @@ pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, Config,
     CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig, PanelConfig,
     PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ReasoningEffortConfig,
-    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig,
+    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
 };

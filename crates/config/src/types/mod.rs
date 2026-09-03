@@ -5,6 +5,7 @@ pub mod misc;
 pub mod panel;
 pub mod provider;
 pub mod routing;
+pub mod rules;
 
 use std::collections::BTreeMap;
 
@@ -21,6 +22,7 @@ pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
 };
 pub use routing::{RouteCandidateConfig, RoutingConfig};
+pub use rules::RulesConfig;
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
 pub const CURRENT_VERSION: u32 = 2;
@@ -49,6 +51,8 @@ pub struct Config {
     pub permissions: PermissionConfig,
     /// メトリクス設定。
     pub metrics: MetricsConfig,
+    /// プロジェクトルール注入設定。
+    pub rules: RulesConfig,
 }
 
 impl Default for Config {
@@ -62,6 +66,7 @@ impl Default for Config {
             diagnostics: DiagnosticsConfig::default(),
             permissions: PermissionConfig::default(),
             metrics: MetricsConfig::default(),
+            rules: RulesConfig::default(),
         }
     }
 }
