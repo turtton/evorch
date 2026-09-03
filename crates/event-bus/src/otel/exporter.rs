@@ -120,12 +120,29 @@ impl OtelMetricsEmitter {
     }
 }
 
+/// OTLP metrics signal path。
+///
+/// opentelemetry-otlp 0.32 の `with_endpoint` は URL を as-is で扱い
+/// signal path の自動付加は行わない (env var 経由の場合のみ付加) ため、
+/// base URL 契約を本 crate 側で正規化する。
+const METRICS_SIGNAL_PATH: &str = "/v1/metrics";
+
+/// endpoint が metrics signal path を持たない場合に付加する。
+fn with_metrics_signal_path(endpoint: &str) -> String {
+    if endpoint.ends_with(METRICS_SIGNAL_PATH) {
+        endpoint.to_owned()
+    } else {
+        // 末尾の連続 `/` を除去してから path を繋ぐ (二重スラッシュ防止)。
+        format!("{}{METRICS_SIGNAL_PATH}", endpoint.trim_end_matches('/'))
+    }
+}
+
 /// OTLP HTTP (protobuf) exporter + [`PeriodicReader`] で meter provider を
 /// 構築する。
 ///
 /// `endpoint` は OTLP HTTP の base URL (例: `http://127.0.0.1:4318`) で、
-/// exporter が signal path `/v1/metrics` を自動付加する。`interval` は
-/// PeriodicReader の収集間隔。
+/// metrics signal path `/v1/metrics` が無い場合は本関数が付加する
+/// ([`METRICS_SIGNAL_PATH`])。`interval` は PeriodicReader の収集間隔。
 ///
 /// # Errors
 /// exporter の構築に失敗した場合 [`ExporterBuildError`] を返す。0.32 では
@@ -135,15 +152,30 @@ pub fn build_otlp_meter_provider(
     endpoint: &str,
     interval: Duration,
 ) -> Result<SdkMeterProvider, ExporterBuildError> {
+    let reader = build_otlp_metric_reader(endpoint, interval)?;
+    Ok(SdkMeterProvider::builder().with_reader(reader).build())
+}
+
+/// OTLP HTTP (protobuf) exporter の [`PeriodicReader`] を構築する。
+///
+/// `endpoint` への signal path 付加は [`build_otlp_meter_provider`] と共通
+/// ([`METRICS_SIGNAL_PATH`])。複数 reader を 1 provider へ接続する構成
+/// (E2E テスト等) から再利用する。
+///
+/// # Errors
+/// exporter の構築に失敗した場合 [`ExporterBuildError`] を返す。
+pub fn build_otlp_metric_reader(
+    endpoint: &str,
+    interval: Duration,
+) -> Result<PeriodicReader<MetricExporter>, ExporterBuildError> {
     let exporter = MetricExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(endpoint)
+        .with_endpoint(with_metrics_signal_path(endpoint))
         .build()?;
-    let reader = PeriodicReader::builder(exporter)
+    Ok(PeriodicReader::builder(exporter)
         .with_interval(interval)
-        .build();
-    Ok(SdkMeterProvider::builder().with_reader(reader).build())
+        .build())
 }
 
 /// InMemory exporter 付きの meter provider を構築する。
