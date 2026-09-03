@@ -262,3 +262,16 @@ impl SpanMapper {
         due
     }
 }
+
+#[cfg(test)]
+impl SpanMapper {
+    /// テスト専用: 指定 span の開始時刻を差し替える。run span と agent span
+    /// は同一 event 時刻で開始するため通常の経路では必ず同時に evict される
+    /// が、eviction の順序依存性 (agent が先に evict されても per-run 帳簿
+    /// 解放が正しいこと) を検証するためにのみ使用する。
+    pub(super) fn set_started_at_for_test(&mut self, key: &SpanKey, at: SystemTime) {
+        if let Some(span) = self.open.get_mut(key) {
+            span.started_at = at;
+        }
+    }
+}

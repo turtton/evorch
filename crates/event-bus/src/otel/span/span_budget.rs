@@ -60,6 +60,14 @@ impl SpanMapper {
             let attributes = self.filter_attributes(&key, span.attributes, at);
             self.add_tombstone(key.clone());
             self.record_drop(SpanDropKind::BudgetEvicted, key.clone(), at);
+            // evict された Run/Agent span の run_id の per-run 相関帳簿も
+            // 解放する (terminal 経路の end_run と同じ掃除)。hung run が
+            // start→evict を繰り返しても帳簿が増え続けないようにする。
+            // request/tool span は run 自体の終端ではないため対象外。
+            if let SpanKey::Run { run_id } | SpanKey::Agent { run_id } = &key {
+                self.sampling_decisions.remove(run_id);
+                self.agent_depth.remove(run_id);
+            }
             actions.push(SpanAction::End {
                 key,
                 end_time: at,

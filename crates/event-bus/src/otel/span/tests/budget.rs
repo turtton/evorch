@@ -4,8 +4,8 @@ use crate::event::LifecycleEvent;
 
 use super::super::{SpanAction, SpanBudget, SpanDropKind, SpanKey, SpanMapper, SpanStatus};
 use super::{
-    action_attributes, event, request_completed, request_started, run_done, session_started,
-    start_run, str_attr, tool_started,
+    BASE_TIME, action_attributes, event, request_completed, request_started, run_done,
+    session_started, start_run, str_attr, tool_started,
 };
 
 #[test]
@@ -298,4 +298,169 @@ fn eviction_audit_closes_expired_spans_oldest_first() {
         })
         .collect();
     assert_eq!(keys, vec!["old", "new"]);
+}
+
+#[test]
+fn evicted_run_releases_its_per_run_entries_and_keeps_active_ones() {
+    // Given: a 1s lifetime cap and an old run opened at t=0.
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_span_lifetime: Duration::from_secs(1),
+        ..SpanBudget::default()
+    });
+    mapper.ingest(&start_run("old", None, 0));
+    assert!(mapper.sampling_decisions.contains_key("old"));
+    assert!(mapper.agent_depth.contains_key("old"));
+    // When: a fresh run opens at t=2 — the audit first evicts the old run's
+    //       spans (age 2s) before admitting the fresh one.
+    let actions = mapper.ingest(&start_run("fresh", None, 2));
+    // Then: both old spans close as BudgetEvicted errors and both fresh
+    //       spans open.
+    assert_eq!(actions.len(), 4);
+    assert!(matches!(
+        &actions[0],
+        SpanAction::End {
+            status: SpanStatus::Error,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &actions[1],
+        SpanAction::End {
+            status: SpanStatus::Error,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &actions[2],
+        SpanAction::Start { key: SpanKey::Run { run_id }, .. } if run_id == "fresh"
+    ));
+    assert!(matches!(
+        &actions[3],
+        SpanAction::Start { key: SpanKey::Agent { run_id }, .. } if run_id == "fresh"
+    ));
+    let drop_keys: Vec<SpanKey> = mapper
+        .drain_drops()
+        .iter()
+        .map(|drop| drop.key.clone())
+        .collect();
+    assert!(drop_keys.contains(&SpanKey::Run {
+        run_id: "old".to_owned()
+    }));
+    assert!(drop_keys.contains(&SpanKey::Agent {
+        run_id: "old".to_owned()
+    }));
+    // And: the evicted run's ledger entries are released while the active
+    //       fresh run keeps its own.
+    assert!(!mapper.sampling_decisions.contains_key("old"));
+    assert!(!mapper.agent_depth.contains_key("old"));
+    assert_eq!(mapper.sampling_decisions.get("fresh"), Some(&true));
+    assert_eq!(mapper.agent_depth.get("fresh"), Some(&0));
+}
+
+#[test]
+fn agent_then_run_eviction_still_releases_per_run_entries() {
+    // Given: a 1s lifetime cap and a run whose run span is aged down so the
+    //        agent span evicts first (reversed eviction order).
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_span_lifetime: Duration::from_secs(1),
+        ..SpanBudget::default()
+    });
+    mapper.ingest(&start_run("run-1", None, 0));
+    mapper.set_started_at_for_test(
+        &SpanKey::Run {
+            run_id: "run-1".to_owned(),
+        },
+        BASE_TIME + Duration::from_millis(1500),
+    );
+    // When: the audit at t=2 evicts only the agent span (age 2s; the run span
+    //       is 0.5s old).
+    let actions = mapper.ingest(&session_started("s-1", 2));
+    // Then: the agent-only eviction already releases the run's ledger
+    //       entries.
+    assert_eq!(actions.len(), 2);
+    assert!(matches!(
+        &actions[0],
+        SpanAction::End { key: SpanKey::Agent { run_id }, .. } if run_id == "run-1"
+    ));
+    assert!(!mapper.sampling_decisions.contains_key("run-1"));
+    assert!(!mapper.agent_depth.contains_key("run-1"));
+    // And: the later run span eviction re-runs the removals idempotently and
+    //       leaves the ledgers empty.
+    let actions = mapper.ingest(&session_started("s-2", 3));
+    assert_eq!(actions.len(), 2);
+    assert!(matches!(
+        &actions[0],
+        SpanAction::End { key: SpanKey::Run { run_id }, .. } if run_id == "run-1"
+    ));
+    assert!(!mapper.sampling_decisions.contains_key("run-1"));
+    assert!(!mapper.agent_depth.contains_key("run-1"));
+}
+
+#[test]
+fn active_child_survives_its_parent_eviction_and_finishes_normally() {
+    // Given: a 1s lifetime cap; the parent opens at t=0 and its child at t=1.
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_span_lifetime: Duration::from_secs(1),
+        ..SpanBudget::default()
+    });
+    mapper.ingest(&start_run("parent", None, 0));
+    mapper.ingest(&start_run("child", Some("parent"), 1));
+    assert_eq!(mapper.agent_depth.get("child"), Some(&1));
+    // When: the audit at t=2 evicts the parent (age 2s) while the child
+    //       (age 1s) is not yet over the cap — and the child's request,
+    //       mapped after the audit in the same ingest, admits normally.
+    let actions = mapper.ingest(&request_started("req-1", "child", 2));
+    // Then: only the parent's spans are evicted and only the parent's ledger
+    //       entries are released — the child keeps its own.
+    assert_eq!(actions.len(), 3);
+    assert!(matches!(
+        &actions[0],
+        SpanAction::End { key: SpanKey::Run { run_id }, .. } if run_id == "parent"
+    ));
+    assert!(matches!(
+        &actions[1],
+        SpanAction::End { key: SpanKey::Agent { run_id }, .. } if run_id == "parent"
+    ));
+    assert!(matches!(
+        &actions[2],
+        SpanAction::Start { key: SpanKey::Request { request_id }, .. } if request_id == "req-1"
+    ));
+    assert!(!mapper.sampling_decisions.contains_key("parent"));
+    assert!(!mapper.agent_depth.contains_key("parent"));
+    assert_eq!(mapper.sampling_decisions.get("child"), Some(&true));
+    assert_eq!(mapper.agent_depth.get("child"), Some(&1));
+    // And: the child finishes normally at the same audit timestamp, which
+    //       releases the remaining entries.
+    assert_eq!(mapper.ingest(&run_done("child", 2)).len(), 2);
+    assert!(mapper.sampling_decisions.is_empty());
+    assert!(mapper.agent_depth.is_empty());
+}
+
+#[test]
+fn late_request_for_an_evicted_run_creates_no_new_entries() {
+    // Given: a run evicted by the lifetime audit.
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_span_lifetime: Duration::from_secs(1),
+        ..SpanBudget::default()
+    });
+    mapper.ingest(&start_run("run-1", None, 0));
+    let _ = mapper.ingest(&session_started("s-1", 2));
+    assert!(
+        mapper
+            .drain_drops()
+            .iter()
+            .all(|drop| drop.kind == SpanDropKind::BudgetEvicted)
+    );
+    // When: a late request arrives for the evicted run.
+    let actions = mapper.ingest(&request_started("req-1", "run-1", 3));
+    // Then: it is an UnknownParent drop only — no span starts and the
+    //       per-run ledgers stay free of the evicted run.
+    assert!(actions.is_empty());
+    let drops = mapper.drain_drops();
+    assert_eq!(
+        drops.iter().map(|drop| drop.kind).collect::<Vec<_>>(),
+        vec![SpanDropKind::UnknownParent]
+    );
+    assert!(!mapper.sampling_decisions.contains_key("run-1"));
+    assert!(!mapper.agent_depth.contains_key("run-1"));
 }
