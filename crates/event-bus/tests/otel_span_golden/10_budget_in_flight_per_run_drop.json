@@ -1,0 +1,126 @@
+{
+  "name": "budget_in_flight_per_run_drop",
+  "config": { "budget": { "max_in_flight_spans_per_run": 1 } },
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Started", "payload": { "session_id": "session-1" } } }
+    },
+    {
+      "at_ms": 10,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStarted", "payload": { "run_id": "run-1", "parent_run_id": null, "agent_name": "orchestrator", "role": "orchestrator" } } }
+    },
+    {
+      "at_ms": 20,
+      "kind": { "kind": "Provider", "payload": { "kind": "RequestStarted", "payload": { "request_id": "req-1", "provider": "anthropic", "profile": null, "protocol": "anthropic-messages", "model": "kimi-k3", "streaming": true, "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 30,
+      "kind": { "kind": "Provider", "payload": { "kind": "RequestStarted", "payload": { "request_id": "req-2", "provider": "openai", "profile": null, "protocol": "openai-chat-completions", "model": "gpt-x", "streaming": false, "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 40,
+      "kind": { "kind": "Provider", "payload": { "kind": "RequestCompleted", "payload": { "request_id": "req-1", "provider": "anthropic", "profile": null, "protocol": "anthropic-messages", "model": "kimi-k3", "streaming": true, "duration_ms": 600, "input_tokens": 11, "output_tokens": 22, "cache_read_tokens": 0, "cache_write_tokens": 0, "finish_reason": "stop", "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 50,
+      "kind": { "kind": "Tool", "payload": { "kind": "ToolStarted", "payload": { "tool_name": "read", "call_id": "call-1", "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 60,
+      "kind": { "kind": "Tool", "payload": { "kind": "ToolCompleted", "payload": { "tool_name": "read", "call_id": "call-1", "is_error": false, "detail": null, "run_id": "run-1" } } }
+    },
+    {
+      "at_ms": 70,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStateChanged", "payload": { "run_id": "run-1", "from": "Running", "to": "Done", "reason": null } } }
+    },
+    {
+      "at_ms": 80,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Completed", "payload": { "session_id": "session-1" } } }
+    }
+  ],
+  "expected_spans": [
+    {
+      "key": "agent:run-1",
+      "parent": "run:run-1",
+      "name": "invoke_agent orchestrator",
+      "kind": "client",
+      "start_ms": 10,
+      "end_ms": 70,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "invoke_agent"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.agent.name", "orchestrator"],
+        ["evorch.agent_run.id", "run-1"],
+        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "request:req-1",
+      "parent": "agent:run-1",
+      "name": "chat kimi-k3",
+      "kind": "client",
+      "start_ms": 20,
+      "end_ms": 40,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "chat"],
+        ["gen_ai.provider.name", "anthropic"],
+        ["gen_ai.request.model", "kimi-k3"],
+        ["evorch.agent_run.id", "run-1"],
+        ["evorch.request.id", "req-1"],
+        ["gen_ai.usage.input_tokens", 11],
+        ["gen_ai.usage.output_tokens", 22],
+        ["gen_ai.response.finish_reasons", "stop"]
+      ]
+    },
+    {
+      "key": "run:run-1",
+      "parent": null,
+      "name": "evorch.run orchestrator",
+      "kind": "internal",
+      "start_ms": 10,
+      "end_ms": 70,
+      "status": "unset",
+      "attributes": [
+        ["evorch.agent_run.id", "run-1"],
+        ["evorch.agent.name", "orchestrator"],
+        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "session:session-1",
+      "parent": null,
+      "name": "evorch.session",
+      "kind": "internal",
+      "start_ms": 0,
+      "end_ms": 80,
+      "status": "unset",
+      "attributes": [
+        ["evorch.session.id", "session-1"]
+      ]
+    },
+    {
+      "key": "tool:call-1",
+      "parent": "agent:run-1",
+      "name": "execute_tool read",
+      "kind": "internal",
+      "start_ms": 50,
+      "end_ms": 60,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "execute_tool"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.tool.name", "read"],
+        ["gen_ai.tool.call.id", "call-1"],
+        ["evorch.agent_run.id", "run-1"]
+      ]
+    }
+  ],
+  "expected_drops": [
+    { "kind": "budget_in_flight_per_run", "key": "request:req-2" }
+  ]
+}

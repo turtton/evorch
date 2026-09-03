@@ -1,0 +1,136 @@
+{
+  "name": "delegated_two_level",
+  "events": [
+    {
+      "at_ms": 0,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Started", "payload": { "session_id": "session-1" } } }
+    },
+    {
+      "at_ms": 10,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStarted", "payload": { "run_id": "run-parent", "parent_run_id": null, "agent_name": "orchestrator", "role": "orchestrator" } } }
+    },
+    {
+      "at_ms": 20,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStarted", "payload": { "run_id": "run-child", "parent_run_id": "run-parent", "agent_name": "worker", "role": "worker" } } }
+    },
+    {
+      "at_ms": 30,
+      "kind": { "kind": "Provider", "payload": { "kind": "RequestStarted", "payload": { "request_id": "req-c1", "provider": "anthropic", "profile": null, "protocol": "anthropic-messages", "model": "kimi-k3", "streaming": false, "run_id": "run-child" } } }
+    },
+    {
+      "at_ms": 40,
+      "kind": { "kind": "Provider", "payload": { "kind": "RequestCompleted", "payload": { "request_id": "req-c1", "provider": "anthropic", "profile": null, "protocol": "anthropic-messages", "model": "kimi-k3", "streaming": false, "duration_ms": 800, "input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 0, "cache_write_tokens": 0, "finish_reason": "stop", "run_id": "run-child" } } }
+    },
+    {
+      "at_ms": 50,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStateChanged", "payload": { "run_id": "run-child", "from": "Running", "to": "Done", "reason": null } } }
+    },
+    {
+      "at_ms": 60,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "AgentRunStateChanged", "payload": { "run_id": "run-parent", "from": "Running", "to": "Done", "reason": null } } }
+    },
+    {
+      "at_ms": 70,
+      "kind": { "kind": "Lifecycle", "payload": { "kind": "Completed", "payload": { "session_id": "session-1" } } }
+    }
+  ],
+  "expected_spans": [
+    {
+      "key": "agent:run-child",
+      "parent": "run:run-child",
+      "name": "invoke_agent worker",
+      "kind": "client",
+      "start_ms": 20,
+      "end_ms": 50,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "invoke_agent"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.agent.name", "worker"],
+        ["evorch.agent_run.id", "run-child"],
+        ["evorch.agent.role", "worker"],
+        ["evorch.delegation.depth", 1]
+      ]
+    },
+    {
+      "key": "agent:run-parent",
+      "parent": "run:run-parent",
+      "name": "invoke_agent orchestrator",
+      "kind": "client",
+      "start_ms": 10,
+      "end_ms": 60,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "invoke_agent"],
+        ["gen_ai.provider.name", "evorch"],
+        ["gen_ai.agent.name", "orchestrator"],
+        ["evorch.agent_run.id", "run-parent"],
+        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "request:req-c1",
+      "parent": "agent:run-child",
+      "name": "chat kimi-k3",
+      "kind": "client",
+      "start_ms": 30,
+      "end_ms": 40,
+      "status": "unset",
+      "attributes": [
+        ["gen_ai.operation.name", "chat"],
+        ["gen_ai.provider.name", "anthropic"],
+        ["gen_ai.request.model", "kimi-k3"],
+        ["evorch.agent_run.id", "run-child"],
+        ["evorch.request.id", "req-c1"],
+        ["gen_ai.usage.input_tokens", 5],
+        ["gen_ai.usage.output_tokens", 7],
+        ["gen_ai.response.finish_reasons", "stop"]
+      ]
+    },
+    {
+      "key": "run:run-child",
+      "parent": "agent:run-parent",
+      "name": "evorch.run worker",
+      "kind": "internal",
+      "start_ms": 20,
+      "end_ms": 50,
+      "status": "unset",
+      "attributes": [
+        ["evorch.agent_run.id", "run-child"],
+        ["evorch.parent_agent_run.id", "run-parent"],
+        ["evorch.agent.name", "worker"],
+        ["evorch.agent.role", "worker"],
+        ["evorch.delegation.depth", 1]
+      ]
+    },
+    {
+      "key": "run:run-parent",
+      "parent": null,
+      "name": "evorch.run orchestrator",
+      "kind": "internal",
+      "start_ms": 10,
+      "end_ms": 60,
+      "status": "unset",
+      "attributes": [
+        ["evorch.agent_run.id", "run-parent"],
+        ["evorch.agent.name", "orchestrator"],
+        ["evorch.agent.role", "orchestrator"],
+        ["evorch.delegation.depth", 0]
+      ]
+    },
+    {
+      "key": "session:session-1",
+      "parent": null,
+      "name": "evorch.session",
+      "kind": "internal",
+      "start_ms": 0,
+      "end_ms": 70,
+      "status": "unset",
+      "attributes": [
+        ["evorch.session.id", "session-1"]
+      ]
+    }
+  ],
+  "expected_drops": []
+}
