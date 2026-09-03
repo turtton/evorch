@@ -29,14 +29,15 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
    |---|---|---|---|
    | `gen_ai.operation.name` | - | ✅ `{"chat"}`（現状の閉 domain） | ✅ |
    | `gen_ai.provider.name` | - | ✅ `{"anthropic","openai","openai-compatible"}` 既知値＋未知値は固定 `"other"` へ正規化（pass-through 禁止） | ✅ |
-   | `gen_ai.token.type` | - | ✅ `{"input","output"}` ＋固定拡張値 `{"cache_read","cache_write"}`（v1.37.0 well-known 外の evorch 拡張） | ✅ |
-   | `error.type` | - | ✅ `{rate_limited,http,timeout,invalid_response,transport,server,quota,auth,other}`（`Http{status}` は status を捨てる） | ✅ |
-   | `evorch.profile.name` | ✅ | ✅（profile = 初期化時 bounded registry メンバーのみ emit: `OtelMetricsEmitter::new(provider, known_profiles)` で registry（`MAX_PROFILE_NAMES = 64` 上限、初期化後不変）を固定し、写像層の形状ポリシー（非空・≤64 文字・小字 ASCII alnum と `-_.`・先頭 alnum）適合 ∧ registry メンバーの profile のみ属性に残す。非メンバーは同属性のみ省略（measurement 保持）。registry への注入は config profile 集合から（ADR 0014 配線 slice） | ✅ |
+    | `gen_ai.token.type` | - | ✅ `{"input","output"}` ＋固定拡張値 `{"cache_read","cache_write"}`（v1.37.0 well-known 外の evorch 拡張） | ✅ |
+    | `gen_ai.request.model` | - | ✅（model = 初期化時 bounded registry メンバーのみそのまま emit: `OtelMetricsEmitter::new(provider, known_profiles, known_models)` で registry（`MAX_MODEL_NAMES = 64` 上限、初期化後不変）を固定。写像層は形状ポリシー（非空・≤128 文字・printable ASCII・空白なし）の gate のみを担い、registry 非メンバーは exporter 層で固定値 `"other"` へ正規化する（属性自体は残し model 次元を欠落させない）。**cardinality 保証の責務者は provider profile config の宣言 model 集合**であり、registry への注入は ADR 0014 配線 slice で行う。mapping 層 / validator は正規化防壁に限定） | ✅ |
+    | `error.type` | - | ✅ `{rate_limited,http,timeout,invalid_response,transport,server,quota,auth,other}`（`Http{status}` は status を捨てる） | ✅ |
+    | `evorch.profile.name` | ✅ | ✅（profile = 初期化時 bounded registry メンバーのみ emit: `OtelMetricsEmitter::new(provider, known_profiles, known_models)` で registry（`MAX_PROFILE_NAMES = 64` 上限、初期化後不変）を固定し、写像層の形状ポリシー（非空・≤64 文字・小字 ASCII alnum と `-_.`・先頭 alnum）適合 ∧ registry メンバーの profile のみ属性に残す。非メンバーは同属性のみ省略（measurement 保持）。registry への注入は config profile 集合から（ADR 0014 配線 slice） | ✅ |
    | `evorch.delegation.depth` | ✅ | whitelist 定義のみ確定。**slice ① では供給 event 不在のため未 emit**。値 domain は `0`..=`99` の decimal 文字列（leading zero なし）に固定 | ✅ |
    | `evorch.delegation.role` | ✅ | 同上。値 domain は閉集合 `{orchestrator, explorer, worker, reviewer}` に固定 | ✅ |
    | session / task / agent_run ID | ✅ | ❌ 不許可（ID 系、高カーディナリティ） | ✅（span 相関軸） |
 
-   意図的省略（metrics label として採用しない）: `gen_ai.request.model`（OpenAI 互換 endpoint の model は任意文字列で低カーディナリティ保証不可、v1.37.0 の Conditionally Required を採らない）、`gen_ai.system`（deprecated）、`server.address` / `server.port`（provider event に非存在）、`finish_reason`（semconv metric 属性に非存在）、Usage の `model` フィールド（同理由）
+    意図的省略（metrics label として採用しない）: `gen_ai.system`（deprecated）、`server.address` / `server.port`（provider event に非存在）、`finish_reason`（semconv metric 属性に非存在）。**`gen_ai.request.model` は省略しない**: model 名はメトリクスの必須次元という lead 判断により、上表の bounded registry 方式で採用する（Usage の `model` フィールドも同一ポリシーで emit）
 5. **実装 slice 二段分割**: ① mapping 層 + OTLP metrics exporter → ② mapping 層の span 化拡張 + span exporter（② は ① に依存）
 6. **追従方針 pin + 意図的 bump**: mapping 表は対象 semconv リリースを明記（現基準 v1.37.0、2025-08）。自動追従しない。bump = release 差分精読 → mapping 表差分 → 検証。タイミングは slice ② 着手時と technology re-evaluation 連動
 7. **検証**: 二段検証。主軸 = mapping 層の golden/snapshot test（pin 固定 fixture）+ cardinality guard（CI で metrics attribute whitelist 強制、ID 混入を静的ブロック）。副軸 = 各 slice DoD に debug exporter 経由の最小 OTLP E2E 1本。**slice ① の E2E 実現形**: `opentelemetry_sdk::metrics::InMemoryMetricExporter`（debug 観察側）+ loopback OTLP HTTP receiver（wire 疎通側：POST `/v1/metrics` / protobuf content-type / 非空 body を assert）の二重 reader 構成。`opentelemetry-stdout` 0.32 は writer 注入不可・出力が人間向けテキストで assert 不能なため、この組合せを debug exporter 経路の実現形とする
@@ -47,7 +48,7 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
 - 親子関係の表現は trace に任せ、span attribute での再表現はしない。`evorch.*` の構造軸は metrics 面の集計（role 別 token 消費、depth 別 latency）専用
 - 自己改善機能（inspect_session / inspect_provider 等、diagnostics-self-improvement）のローカル downsampled 集計にも委譲軸が供給される
 - 内部 event schema（v0.1.1 landed の provider 観測含む）は OTel 名に侵食されず、標準改正の衝撃は mapping 層一箇所に閉じる
-- **slice ① landed（2026-09-03、issue #55）**: histogram bucket boundaries に v1.37.0 advisory ExplicitBucketBoundaries を採用。client 側 TTFT は v1.37.0 に無いため `evorch.client.time_to_first_token`（f64 histogram、単位 `s`）として evorch.* 拡張で表現。runtime への subscribe 配線（ADR 0014 の config 有効化経路）は slice ① の scope 外として後続に送る
+- **slice ① landed（2026-09-03、issue #55）**: histogram bucket boundaries に v1.37.0 advisory ExplicitBucketBoundaries を採用。client 側 TTFT は v1.37.0 に無いため `evorch.client.time_to_first_token`（f64 histogram、単位 `s`）として evorch.* 拡張で表現。runtime への subscribe 配線（ADR 0014 の config 有効化経路）は slice ① の scope 外として後続に送る。初版では `gen_ai.request.model` を「意図的省略」としたが、lead review で「model はメトリクスの必須次元」と覆され、emitter 初期化時 `known_models` bounded registry（上限 64、非メンバーは `"other"` 正規化）方式で whitelist 復活させた（profile.name と同型の責務境界）
 
 ## 参考
 
