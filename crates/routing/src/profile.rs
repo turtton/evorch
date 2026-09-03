@@ -61,6 +61,9 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
             config::ApiProtocolConfig::AnthropicMessages => model::ApiProtocol::AnthropicMessages,
             config::ApiProtocolConfig::OpenAiResponses => model::ApiProtocol::OpenAiResponses,
             config::ApiProtocolConfig::OpenAiCompletions => model::ApiProtocol::OpenAiCompletions,
+            config::ApiProtocolConfig::OpenAiCodexResponses => {
+                model::ApiProtocol::OpenAiCodexResponses
+            }
         };
 
         Ok(Self {
@@ -113,6 +116,26 @@ mod tests {
         );
         assert_eq!(profile.models, ["model-a", "model-b"]);
         assert_eq!(profile.default_model, "model-b");
+    }
+
+    // Given: Codex provider と Codex Responses protocol の設定 / When: ProviderProfile に変換する
+    // Then: Codex 専用の protocol variant が保持される
+    #[test]
+    fn provider_profile_maps_codex_responses_protocol() {
+        let config = config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::OpenAiCodex,
+            api_protocol: config::ApiProtocolConfig::OpenAiCodexResponses,
+            ..valid_config()
+        };
+
+        let profile =
+            ProviderProfile::try_from(("codex", &config)).expect("Codex 設定は変換できる");
+
+        assert_eq!(profile.provider_type, model::ProviderType::OpenAiCodex);
+        assert_eq!(
+            profile.api_protocol,
+            model::ApiProtocol::OpenAiCodexResponses
+        );
     }
 
     // Given: モデル一覧が空の設定 / When: ProviderProfile に変換する / Then: InvalidProfile を返す

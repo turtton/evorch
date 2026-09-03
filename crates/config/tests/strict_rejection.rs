@@ -106,6 +106,32 @@ fn credential_error_never_contains_credential_value() {
     assert!(!msg.contains(sentinel));
 }
 
+// Given: Codex provider に平文 access_token を含む設定 / When: 読み込む
+// Then: remediation を含むエラーとして拒否され、秘密値は診断に含まれない
+#[test]
+fn codex_plaintext_access_token_rejected_without_echoing_secret() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let sentinel = "SENTINEL-CODEX-ACCESS-TOKEN-e5";
+    let msg = load_project(
+        &tmp,
+        &format!(
+            "[providers.codex]\nprovider_type = \"openai-codex\"\naccess_token = \"{sentinel}\"\n"
+        ),
+    )
+    .expect_err("Codex の平文 access_token は拒否される")
+    .to_string();
+
+    for fragment in [
+        "providers.codex.access_token",
+        "keyring",
+        "env",
+        "credential",
+    ] {
+        assert!(msg.contains(fragment));
+    }
+    assert!(!msg.contains(sentinel));
+}
+
 // Given: credential-like alias にそれぞれ異なる実値を含む設定 / When: 読み込む
 // Then: 各診断は拒否とキー名を示すが、credential の実値を含まない
 #[test]
