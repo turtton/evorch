@@ -13,7 +13,7 @@ use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use serde_json::{Value, json};
 use tools::{
     ContentOrigin, DnsResolver, NetworkGuard, NetworkGuardError, Permissions, Tool, ToolError,
-    ToolExecutor, ToolResult, WebFetch,
+    ToolExecutionContext, ToolExecutor, ToolResult, WebFetch,
 };
 
 use common::{FixtureServer, TestResult};
@@ -97,7 +97,14 @@ async fn executor_overwrites_tool_declared_origin() -> TestResult {
     let (executor, mut receiver) = setup_executor(wrapper);
 
     let result = executor
-        .execute("web_fetch", "call-1", json!({"url": server.url("/origin")}))
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
+            "web_fetch",
+            "call-1",
+            json!({"url": server.url("/origin")}),
+        )
         .await?;
 
     assert_eq!(result.origin, ContentOrigin::WebUntrusted);
@@ -115,6 +122,9 @@ async fn executor_escapes_control_markers_in_fetched_content_and_detail() -> Tes
 
     let result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "web_fetch",
             "call-1",
             json!({"url": server.url("/marker"), "format": "html"}),
@@ -154,6 +164,9 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
 
     let _result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "web_fetch",
             "call-1",
             json!({"url": server.url("/metadata")}),

@@ -21,6 +21,18 @@ use crate::schema;
 use crate::tool::Tool;
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell};
 
+/// ツール実行時の文脈情報。
+///
+/// [`ToolExecutor::execute`] の必須引数であり、呼び出し元 (AgentRun) が
+/// その実行を一意に識別する `run_id` を運ぶ。Executor は `ToolStarted` /
+/// `ToolCompleted` イベントへこの値を stamp し、イベントと run の相関を
+/// 可能にする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolExecutionContext {
+    /// 実行元 AgentRun の識別子 (例: `run-7`)。
+    pub run_id: String,
+}
+
 /// ツールとコンパイル済みスキーマ検証器の登録エントリ。
 struct RegisteredTool {
     /// 登録されたツール。
@@ -142,6 +154,9 @@ impl ToolExecutor {
 
     /// ツールを実行する。
     ///
+    /// `ctx.run_id` は発行される `ToolStarted` / `ToolCompleted` イベントへ
+    /// stamp される。
+    ///
     /// # Errors
     ///
     /// 未登録のツール名なら [`ToolError::UnknownTool`]、引数がスキーマに適合
@@ -149,6 +164,7 @@ impl ToolExecutor {
     /// 場合はそのエラーをそのまま伝播する。
     pub async fn execute(
         &self,
+        ctx: &ToolExecutionContext,
         tool_name: &str,
         call_id: &str,
         args: serde_json::Value,
@@ -159,14 +175,25 @@ impl ToolExecutor {
             });
         };
 
-        self.event_bus.emit(Event::new(ToolEvent::ToolStarted {
+        let started = ToolEvent::ToolStarted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
-            run_id: None,
-        }));
+            run_id: Some(ctx.run_id.clone()),
+        };
+        debug_assert!(
+            matches!(
+                &started,
+                ToolEvent::ToolStarted {
+                    run_id: Some(_),
+                    ..
+                }
+            ),
+            "ToolStarted には ctx の run_id が stamp 済みであること"
+        );
+        self.event_bus.emit(Event::new(started));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
-            self.emit_completed(tool_name, call_id, true, None);
+            self.emit_completed(ctx, tool_name, call_id, true, None);
             return Err(error);
         }
 
@@ -184,19 +211,29 @@ impl ToolExecutor {
         let outcome = match action {
             Action::Proceed => registered.tool.execute(args).await,
             Action::Deny => {
-                return self.deny(tool_name, call_id, "policy により拒否されました");
+                return self.deny(ctx, tool_name, call_id, "policy により拒否されました");
             }
             Action::AskFirst => {
                 let Some(gate) = &self.gate else {
-                    return self.deny(tool_name, call_id, "承認ゲートが未設定のため拒否されました");
+                    return self.deny(
+                        ctx,
+                        tool_name,
+                        call_id,
+                        "承認ゲートが未設定のため拒否されました",
+                    );
                 };
                 match gate.request(tool_name, call_id).await {
                     ApprovalOutcome::Approved => registered.tool.execute(args).await,
                     ApprovalOutcome::Denied => {
-                        return self.deny(tool_name, call_id, "承認要求が拒否されました");
+                        return self.deny(ctx, tool_name, call_id, "承認要求が拒否されました");
                     }
                     ApprovalOutcome::TimedOut => {
-                        return self.deny(tool_name, call_id, "承認応答がタイムアウトしました");
+                        return self.deny(
+                            ctx,
+                            tool_name,
+                            call_id,
+                            "承認応答がタイムアウトしました",
+                        );
                     }
                 }
             }
@@ -221,7 +258,7 @@ impl ToolExecutor {
                 result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
-                self.emit_completed(tool_name, call_id, result.is_error, detail.clone());
+                self.emit_completed(ctx, tool_name, call_id, result.is_error, detail.clone());
                 Ok(ToolResult {
                     content,
                     is_error: result.is_error,
@@ -230,7 +267,7 @@ impl ToolExecutor {
                 })
             }
             Err(error) => {
-                self.emit_completed(tool_name, call_id, true, None);
+                self.emit_completed(ctx, tool_name, call_id, true, None);
                 Err(error)
             }
         }
@@ -239,27 +276,45 @@ impl ToolExecutor {
     /// ToolCompleted イベントを発行する。
     fn emit_completed(
         &self,
+        ctx: &ToolExecutionContext,
         tool_name: &str,
         call_id: &str,
         is_error: bool,
         detail: Option<serde_json::Value>,
     ) {
-        self.event_bus.emit(Event::new(ToolEvent::ToolCompleted {
+        let completed = ToolEvent::ToolCompleted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             is_error,
             detail,
-            run_id: None,
-        }));
+            run_id: Some(ctx.run_id.clone()),
+        };
+        debug_assert!(
+            matches!(
+                &completed,
+                ToolEvent::ToolCompleted {
+                    run_id: Some(_),
+                    ..
+                }
+            ),
+            "ToolCompleted には ctx の run_id が stamp 済みであること"
+        );
+        self.event_bus.emit(Event::new(completed));
     }
 
-    fn deny<T>(&self, tool_name: &str, call_id: &str, reason: &str) -> Result<T, ToolError> {
+    fn deny<T>(
+        &self,
+        ctx: &ToolExecutionContext,
+        tool_name: &str,
+        call_id: &str,
+        reason: &str,
+    ) -> Result<T, ToolError> {
         self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             reason: reason.to_string(),
         }));
-        self.emit_completed(tool_name, call_id, true, None);
+        self.emit_completed(ctx, tool_name, call_id, true, None);
         Err(ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
@@ -316,8 +371,11 @@ mod tests {
             .register(Arc::new(OriginTamperTool))
             .expect("テストツールを登録できるはずです");
 
+        let ctx = ToolExecutionContext {
+            run_id: "run-1".to_string(),
+        };
         let result = executor
-            .execute("origin_tamper", "call-1", serde_json::json!({}))
+            .execute(&ctx, "origin_tamper", "call-1", serde_json::json!({}))
             .await
             .expect("テストツールは成功する");
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use event_bus::EventBus;
 use sandbox::BwrapConfig;
-use tools::ToolExecutor;
+use tools::{ToolExecutionContext, ToolExecutor};
 
 fn workspace_dir() -> tempfile::TempDir {
     // bwrap は /tmp を tmpfs として扱うため、一時領域はサンドボックスから
@@ -33,6 +33,9 @@ async fn production_executor_runs_shell_inside_bwrap() {
 
     let result = executor
         .execute(
+            &ToolExecutionContext {
+                run_id: "run-1".to_string(),
+            },
             "shell",
             "call-production-pwd",
             serde_json::json!({ "command": "sh", "args": ["-c", "pwd"] }),
