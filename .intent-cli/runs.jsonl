@@ -134,3 +134,6 @@
 {"ts":"2026-09-02T22:46:48.8351176+00:00","execution_unit":"v02-skill-loader","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":54}
 {"ts":"2026-09-02T22:46:48.8351176+00:00","execution_unit":"v02-skill-loader","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":54}
 {"ts":"2026-09-02T22:48:29.307478+00:00","execution_unit":"v02-otel-metrics-exporter","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#55","reason":"https://github.com/turtton/evorch/issues/55"}
+{"ts":"2026-09-03T02:31:06.8329482+00:00","execution_unit":"v02-otel-metrics-exporter","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":56}
+{"ts":"2026-09-03T02:31:33.6234297+00:00","execution_unit":"v02-otel-metrics-exporter","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":56}
+{"ts":"2026-09-03T02:31:33.6234297+00:00","execution_unit":"v02-otel-metrics-exporter","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":56}
