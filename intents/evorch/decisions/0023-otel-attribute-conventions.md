@@ -42,6 +42,28 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
 6. **追従方針 pin + 意図的 bump**: mapping 表は対象 semconv リリースを明記（現基準 v1.37.0、2025-08）。自動追従しない。bump = release 差分精読 → mapping 表差分 → 検証。タイミングは slice ② 着手時と technology re-evaluation 連動
 7. **検証**: 二段検証。主軸 = mapping 層の golden/snapshot test（pin 固定 fixture）+ cardinality guard（CI で metrics attribute whitelist 強制、ID 混入を静的ブロック）。副軸 = 各 slice DoD に debug exporter 経由の最小 OTLP E2E 1本。**slice ① の E2E 実現形**: `opentelemetry_sdk::metrics::InMemoryMetricExporter`（debug 観察側）+ loopback OTLP HTTP receiver（wire 疎通側：POST `/v1/metrics` / protobuf content-type / 非空 body を assert）の二重 reader 構成。`opentelemetry-stdout` 0.32 は writer 注入不可・出力が人間向けテキストで assert 不能なため、この組合せを debug exporter 経路の実現形とする
 
+**span 実現形（slice ②、2026-09-03、issue #57）**: 写像層に stateful span mapper `event_bus::otel::span`（決定 3 の crate 不増方針に従う。feature 非依存、opentelemetry crate 非参照）を追加し、決定 2 の「委譲親子 = span 親子」を以下の閉じた tree で実現した。
+
+| key（mapper 内の論理参照） | name | kind | parent |
+|---|---|---|---|
+| `session:{id}` | `evorch.session` | Internal | root 固定（session↔run のリンクは存在しないため偽装しない） |
+| `run:{run_id}` | `evorch.run {agent_name}` | Internal | `agent:{parent_run_id}`、親なしは root |
+| `agent:{run_id}` | `invoke_agent {agent_name}` | Client | `run:{run_id}` |
+| `request:{request_id}` | `chat {model}` | Client | `agent:{run_id}` |
+| `tool:{call_id}` | `execute_tool {tool_name}` | Internal | `agent:{run_id}` |
+
+mapper API は `SpanMapper::ingest(&Event) -> Vec<SpanAction>`（`Start` / `End`、属性は生成順固定で `HashMap` 不使用、`End.final_attributes` は開始属性＋in-flight 追加＋終端固有の**完全集合**）。開始・終了時刻は元 event の `EventMeta.wall_clock` のみから取る（決定性）。開始 event 側の追加は additive に実施: `LifecycleEvent::AgentRunStarted{run_id, parent_run_id, agent_name, role}` を追加（schema_version=1 維持、run lifetime は登録時に開始）し、ProviderEvent 4 attempt variant と `ToolStarted` / `ToolCompleted` に `#[serde(default)] run_id: Option<String>` を付与した。run_id の相関 threading は boundary context 契約として実現: runtime の `AgentInvocationContext`（`AgentModel::complete` 第1引数）、providers の `ObservationContext`（`ChatRequest.observation` は `#[serde(default, skip_serializing)]` で wire 非搭載、wire 生成は `to_wire_request` 明示変換を通すダブル防御）、tools の `ToolExecutionContext`（`ToolExecutor::execute` 必須引数）。
+
+属性規律（決定 4 の span 面）は三層: `SPAN_ATTRIBUTE_WHITELIST`（ソート済み 18 key の閉集合、二分探索で検査）+ `validate_span_attributes` による key 別閉 domain 検査（`gen_ai.operation.name` 3 値 / role 4 値 / `gen_ai.provider.name` 5 値 / `error.type` 13 値 / `evorch.delegation.depth` 0..=99）+ raw-content denylist（prompt / completion / message / content / body / credential / token 等、正規例外 `gen_ai.usage.*`）。ID 系属性（session / task / agent_run / request）は span 層限定で、metrics whitelist との非交差を cardinality guard が静的に保証する。`error.type` は metrics 層と同一の `map_failure` snake_case 分類に安定 4 値（`agent_run_error` / `tool_error` / `session_failed` / `span_budget_evicted`）を加え、理由文字列等の自由文字列は属性に含めない。`evorch.delegation.depth` は mapper が parent graph から checked 算出（overflow 時 cap 99、親未知 run は depth 0）。`evorch.task.id` は `BackgroundTaskStarted` が既知 run と一致した際に run span の `final_attributes` 末尾へ追加される。
+
+sampling / hard limits（決定 2、ADR 0012）の実効経路は admission 一箇所: run sampling（決定的 FNV-1a、ratio 既定 1.0、子 run は親判定を相続）→ per-run in-flight 128（request / tool の operational span のみ計数）→ global in-flight 4096 → admission window 10_000/60s → 属性 caps（32 件 / span 合計 16KiB / 値 1KiB。超過属性は drop、String truncate はしない）→ lifetime 30min 超過は `End(Error, error.type=span_budget_evicted)` を発行して eviction → tombstone 4096（reject 済み key の後続 End を無 warn no-op）。写像不能事象は typed drop 10 種（`MissingRunId` / `UnknownParent` / `UnknownSpanEnd` / `DuplicateSpan` / `SampledOut` / `BudgetInFlightPerRun` / `BudgetInFlightGlobal` / `BudgetWindow` / `BudgetAttributes` / `BudgetEvicted`）として記録し、warn は同一 kind 60 秒に 1 回へ rate limit する。
+
+SDK 接続層（feature `otel-exporter`）: `OtelSpanEmitter`（open `HashMap<SpanKey,(Span,SpanContext)>`、親接続は `Context::with_remote_span_context` で trace_id 継承と parent_span_id 連鎖は SDK に委ねる。未知 parent は warn+root 開始、未知 End / 二重 End は no-op+warn の防御層）+ `build_otlp_tracer_provider`（OTel 0.32 の `with_endpoint` は `/v1/traces` を自動付加しないため手動 normalize、`SimpleSpanProcessor` + `Sampler::AlwaysOn` — sampling は mapper 側 admission 済みのため SDK 側は重ねない）+ `build_in_memory_tracer_provider`。依存追加なし（3 つの opentelemetry crate への `trace` feature 追加のみ）。semconv pin は GenAI spans v1.37.0（`span/mod.rs` module doc に canonical URL を記載、決定 6 の pin ポリシー）。
+
+検証（決定 7 の span 拡張）: 手書き golden fixture 10 本（`tests/otel_span_golden/`、runner `tests/otel_span_golden.rs`、循環検査なし）+ cardinality guard へ span 5 本追加（metrics whitelist との非交差 / ソート・一意 / denylist 非含有 / `evorch.*` exact 集合 / validator 直接拒否）+ span E2E（`tests/otel_span_e2e.rs`、plain `#[test]` + std `TcpListener` の loopback receiver で POST `/v1/traces`・`application/x-protobuf`・非空 body を assert、InMemory で parent 連鎖・単一 trace_id を assert）+ runtime integration（実 provider wire 経由の run_id 相関、`runtime/tests/provider_correlation.rs` / `correlation_threading.rs`）。
+
+O/R トレードオフとして残る既知注記: (a) `LifecycleEvent::Delegated` の topology mismatch 検証は現行 schema（`session_id` / `target` のみ）では実装不能のため no-op とし、逸脱候補として `span/mod.rs` doc に記録した。(b) routing crate に production `AgentModel` 実装は存在しない（依存方向 routing→runtime なし）ため、correlation は境界契約 + integration test で実証する形に留めた。(c) subscription wiring（EventBus→mapper→emitter の常駐配線）は ADR 0014 の config 有効化経路として後続 slice に deferred し、本 slice は mapper / emitter を test 駆動で提供する。(d) `storage/writer.rs` の `clippy::large_enum_variant` allow は `AgentRunStarted` による `EventKind` 大型化由来で、Box 化回避の意図的措置。
+
 ## Consequences
 
 - v0.2（観測）に execution unit 2 件（metrics exporter / span exporter、依存付き）を queue seed する（operator 承認後）
