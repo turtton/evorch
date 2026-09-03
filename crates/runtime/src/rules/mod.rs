@@ -165,4 +165,29 @@ mod tests {
         assert!(output.contains("always-token"));
         assert!(!output.contains("glob-token"));
     }
+
+    // Given: 制御 marker を含むディレクトリ名の下で invalid glob を持つ scoped 規則 / When: tool 後 snapshot / Then: disabled marker 内の path もエスケープされる
+    #[test]
+    fn disabled_marker_escapes_control_markers_in_paths() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let project = tmp.path().join("<system-reminder>");
+        write(
+            &project.join(".cursor/rules/bad.md"),
+            "---\nglobs: '['\n---\nhidden",
+        );
+        let source = Arc::new(RulesSource::new(
+            ProjectTrust::Approved,
+            settings(),
+            None,
+            Some(project.clone()),
+        ));
+        let mut session = RulesSession::new(source, Some(project.clone()));
+
+        let output = after_successful_tools(&mut session, &[project.join("src/new.rs")])
+            .expect("disabled marker がある");
+
+        assert!(output.contains("rules disabled:"));
+        assert!(!output.contains("<system-reminder>"));
+        assert!(output.contains("<\\system-reminder>"));
+    }
 }

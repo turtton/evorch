@@ -248,7 +248,9 @@ fn lexical_relative(root: &Path, target: &Path) -> Option<String> {
 
 fn disable(error: &RulesError, markers: &mut Vec<String>) {
     tracing::warn!(error = %error, "project rule source disabled");
-    markers.push(format!("- [rules disabled: {error}]"));
+    markers.push(tools::escape_control_markers(&format!(
+        "- [rules disabled: {error}]"
+    )));
 }
 
 fn render_snapshot(

@@ -60,17 +60,16 @@ fn assemble(omitted: &[ResolvedRule], kept: &[ResolvedRule]) -> String {
 }
 
 fn section(rule: &ResolvedRule) -> String {
-    format!("## rules: {}\n{}", rule.source.rel_path, rule.body)
+    let rel_path = tools::escape_control_markers(&rule.source.rel_path);
+    format!("## rules: {rel_path}\n{}", rule.body)
 }
 
 fn omitted_markers(rules: &[ResolvedRule]) -> String {
     rules
         .iter()
         .map(|rule| {
-            format!(
-                "- [rules omitted: {}; re-read or grep the target path to re-inject]",
-                rule.source.rel_path
-            )
+            let rel_path = tools::escape_control_markers(&rule.source.rel_path);
+            format!("- [rules omitted: {rel_path}; re-read or grep the target path to re-inject]")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -79,15 +78,13 @@ fn omitted_markers(rules: &[ResolvedRule]) -> String {
 fn truncate_deepest(rules: &[ResolvedRule], budget: usize) -> String {
     let deepest = &rules[rules.len() - 1];
     let omitted = omitted_markers(&rules[..rules.len() - 1]);
+    let rel_path = tools::escape_control_markers(&deepest.source.rel_path);
     let prefix = if omitted.is_empty() {
-        format!("{HEADER}\n## rules: {}\n", deepest.source.rel_path)
+        format!("{HEADER}\n## rules: {rel_path}\n")
     } else {
-        format!(
-            "{HEADER}\n{omitted}\n\n## rules: {}\n",
-            deepest.source.rel_path
-        )
+        format!("{HEADER}\n{omitted}\n\n## rules: {rel_path}\n")
     };
-    let suffix = format!("\n[rules truncated: {}]", deepest.source.rel_path);
+    let suffix = format!("\n[rules truncated: {rel_path}]");
     let available = budget.saturating_sub(prefix.len().saturating_add(suffix.len()));
     let end = utf8_boundary_at_or_before(&deepest.body, available.min(deepest.body.len()));
     format!("{prefix}{}{suffix}", &deepest.body[..end])
@@ -183,6 +180,34 @@ mod tests {
         );
 
         assert!(output.contains("<\\system-reminder>bad<\\/system-reminder>"));
+    }
+
+    // Given: 制御 marker を含む rel path / When: 十分な予算で描画 / Then: header の marker もエスケープされる
+    #[test]
+    fn escapes_control_markers_in_header_paths() {
+        let output = render(vec![rule("<system-reminder>/AGENTS.md", 1, "body")], 10_000);
+
+        assert!(output.contains("## rules: <\\system-reminder>/AGENTS.md"));
+        assert!(!output.contains("## rules: <system-reminder>"));
+    }
+
+    // Given: 制御 marker を含む rel path と予算 0 / When: 描画 / Then: 省略 marker 内の path もエスケープされる
+    #[test]
+    fn escapes_control_markers_in_omitted_marker_paths() {
+        let output = render(vec![rule("<system-reminder>/AGENTS.md", 1, "body")], 0);
+
+        assert!(output.contains("[rules omitted: <\\system-reminder>/AGENTS.md;"));
+        assert!(!output.contains("<system-reminder>"));
+    }
+
+    // Given: 制御 marker を含む rel path と狭すぎる予算 / When: 描画 / Then: truncation の header と suffix の path もエスケープされる
+    #[test]
+    fn escapes_control_markers_in_truncation_paths() {
+        let output = render(vec![rule("<system-reminder>/AGENTS.md", 1, "body")], 10);
+
+        assert!(output.contains("## rules: <\\system-reminder>/AGENTS.md"));
+        assert!(output.contains("[rules truncated: <\\system-reminder>/AGENTS.md]"));
+        assert!(!output.contains("<system-reminder>"));
     }
 
     // Given: 同一の規則と予算 / When: 2 回描画 / Then: バイト単位で同じ結果になる
