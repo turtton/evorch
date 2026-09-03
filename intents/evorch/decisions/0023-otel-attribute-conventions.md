@@ -23,7 +23,7 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
 3. **mapping 層集中**: 内部 event schema はドメイン語彙を保持し、`gen_ai.*` / `evorch.*` への変換・span 区間化・親子紐付けは専任変換層に集約。producer は opentelemetry crate を直接叩かない。**実現形（slice ①、2026-09-03）**: ADR 0016 の crate 不増方針（10+1）に従い event-bus 内 module `event_bus::otel`（写像層は常時 compile、SDK 接続層は `otel-exporter` feature gate）として実現。crate 分割は後続で再評価
 4. **`evorch.*` の骨格（metrics whitelist は slice ① で最終確定）**: 集計軸（session / task / agent_run / profile）+ 最小構造軸（低カーディナリティ列挙型の `evorch.delegation.depth` / `evorch.delegation.role` 程度。branch 等は必要時追加）。ID 系属性は span 限定、metrics には入れない（高カーディナリティ規律）
 
-   確定した OTLP metrics attribute whitelist（7 key、これが閉集合上限）:
+   確定した OTLP metrics attribute whitelist（8 key、これが閉集合上限）:
 
    | attribute | local aggregation（ring/SQLite） | OTLP metrics | span（slice ②） |
    |---|---|---|---|
