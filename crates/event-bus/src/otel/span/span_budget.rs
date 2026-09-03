@@ -81,6 +81,33 @@ impl SpanMapper {
         decision
     }
 
+    /// `additional` 個の span 開始が現在の budget で同時に許容できるかを
+    /// 消費なしで判定する (check without consume)。
+    ///
+    /// run + agent の 2 開始を 1 回の admission として扱うための事前判定で
+    /// あり、呼び出し直後に同一 `at` で `start_span` を `additional` 回だけ
+    /// 呼び出して消費することを契約とする。間に他の state 変更を挟むと
+    /// 判定が無効になる。per-run in-flight 計数 (request / tool のみ) には
+    /// 関与しない。
+    pub(super) fn check_admission(
+        &self,
+        additional: usize,
+        at: SystemTime,
+    ) -> Result<(), SpanDropKind> {
+        if self.open.len().saturating_add(additional) > self.budget.max_in_flight_spans_global {
+            return Err(SpanDropKind::BudgetInFlightGlobal);
+        }
+        let admitted = if self.window_is_expired(at) {
+            0
+        } else {
+            self.admitted_in_window
+        };
+        if admitted.saturating_add(additional) > self.budget.max_admitted_spans_per_window {
+            return Err(SpanDropKind::BudgetWindow);
+        }
+        Ok(())
+    }
+
     pub(super) fn admit_start(
         &mut self,
         key: &SpanKey,

@@ -131,30 +131,44 @@ fn unit_ratio_admits_the_full_tree() {
 }
 
 #[test]
-fn child_run_inherits_the_parent_sampling_decision() {
-    // Given: a sampled-out root run.
+fn child_of_unadmitted_parent_drops_the_subtree_as_unknown_parent() {
+    // Given: a mapper sampling nothing, so the parent never opens a span.
     let mut mapper = SpanMapper::with_sampling_ratio(0.0);
     assert!(mapper.ingest(&start_run("parent", None, 1)).is_empty());
-    // When: a child run is registered under the sampled-out parent.
+    // When: a child run is registered under the never-open parent.
     let child = mapper.ingest(&start_run("child", Some("parent"), 2));
-    // Then: the child is dropped as SampledOut too (inherited, not re-decided).
+    // Then: the whole child subtree is refused with one UnknownParent drop —
+    //       no child span starts and no child ledger entry is recorded.
     assert!(child.is_empty());
     let drops = mapper.drain_drops();
-    assert_eq!(drops.len(), 4);
-    assert_eq!(drops[2].kind, SpanDropKind::SampledOut);
     assert_eq!(
-        drops[2].key,
-        SpanKey::Run {
-            run_id: "child".to_owned()
-        }
+        drops
+            .iter()
+            .map(|drop| (drop.kind, &drop.key))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                SpanDropKind::SampledOut,
+                &SpanKey::Run {
+                    run_id: "parent".to_owned()
+                }
+            ),
+            (
+                SpanDropKind::SampledOut,
+                &SpanKey::Agent {
+                    run_id: "parent".to_owned()
+                }
+            ),
+            (
+                SpanDropKind::UnknownParent,
+                &SpanKey::Run {
+                    run_id: "child".to_owned()
+                }
+            ),
+        ]
     );
-    assert_eq!(drops[3].kind, SpanDropKind::SampledOut);
-    assert_eq!(
-        drops[3].key,
-        SpanKey::Agent {
-            run_id: "child".to_owned()
-        }
-    );
+    assert!(!mapper.sampling_decisions.contains_key("child"));
+    assert!(!mapper.agent_depth.contains_key("child"));
 }
 
 #[test]

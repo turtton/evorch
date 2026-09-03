@@ -1,7 +1,7 @@
 use super::super::{SpanBudget, SpanDrop, SpanDropKind, SpanKey, SpanMapper};
 use super::{
     action_attributes, i64_attr, request_completed, request_started, request_started_custom,
-    session_started, start_run, str_attr,
+    run_done, session_started, start_run, str_attr,
 };
 
 #[test]
@@ -203,4 +203,54 @@ fn oversized_attribute_values_are_dropped_without_truncation() {
     assert_eq!(final_attrs.len(), 7);
     assert!(final_attrs.contains(&i64_attr("gen_ai.usage.input_tokens", 1)));
     assert!(final_attrs.contains(&str_attr("evorch.request.id", "req-1")));
+}
+
+#[test]
+fn run_start_with_one_global_slot_remaining_admits_nothing() {
+    // Given: a global in-flight cap that leaves exactly one slot after run-1.
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_in_flight_spans_global: 3,
+        ..SpanBudget::default()
+    });
+    assert_eq!(mapper.ingest(&start_run("run-1", None, 1)).len(), 2);
+    // When: another run starts while only one slot remains.
+    let actions = mapper.ingest(&start_run("run-2", None, 2));
+    // Then: neither the run nor the agent span opens — one atomic
+    //       BudgetInFlightGlobal drop keyed by the run span, no partial tree.
+    assert!(actions.is_empty());
+    assert_eq!(
+        mapper.drain_drops(),
+        vec![SpanDrop {
+            kind: SpanDropKind::BudgetInFlightGlobal,
+            key: SpanKey::Run {
+                run_id: "run-2".to_owned()
+            },
+        }]
+    );
+    // And: once run-1 closes, a fresh run admits both spans again.
+    assert_eq!(mapper.ingest(&run_done("run-1", 3)).len(), 2);
+    assert_eq!(mapper.ingest(&start_run("run-3", None, 4)).len(), 2);
+}
+
+#[test]
+fn run_start_with_one_window_slot_remaining_admits_nothing() {
+    // Given: a window admission cap that leaves exactly one slot after run-1.
+    let mut mapper = SpanMapper::with_budget(SpanBudget {
+        max_admitted_spans_per_window: 3,
+        ..SpanBudget::default()
+    });
+    assert_eq!(mapper.ingest(&start_run("run-1", None, 1)).len(), 2);
+    // When: another run starts while only one window slot remains.
+    let actions = mapper.ingest(&start_run("run-2", None, 2));
+    // Then: both spans are refused with one atomic BudgetWindow drop.
+    assert!(actions.is_empty());
+    assert_eq!(
+        mapper.drain_drops(),
+        vec![SpanDrop {
+            kind: SpanDropKind::BudgetWindow,
+            key: SpanKey::Run {
+                run_id: "run-2".to_owned()
+            },
+        }]
+    );
 }

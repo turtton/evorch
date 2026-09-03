@@ -1,7 +1,7 @@
 use crate::event::{LifecycleEvent, ProviderEvent, ProviderFailureKind, ToolEvent};
 
 use super::super::{SpanAction, SpanMapper, SpanStatus};
-use super::{action_attributes, event, i64_attr, start_run, str_attr, strings_attr};
+use super::{action_attributes, event, i64_attr, run_done, start_run, str_attr, strings_attr};
 
 #[test]
 fn request_success_ends_with_usage_and_finish_reason_attributes() {
@@ -163,5 +163,29 @@ fn unrelated_background_task_is_ignored() {
     ));
     // Then: no action or drop is recorded.
     assert!(actions.is_empty());
+    assert!(mapper.drain_drops().is_empty());
+}
+
+#[test]
+fn terminal_runs_release_their_per_run_correlation_entries() {
+    // Given: a two-level tree plus two sibling runs, all open, each holding
+    //        its own sampling decision and delegation depth.
+    let mut mapper = SpanMapper::new();
+    mapper.ingest(&start_run("root", None, 1));
+    mapper.ingest(&start_run("child", Some("root"), 2));
+    mapper.ingest(&start_run("sibling-1", None, 3));
+    mapper.ingest(&start_run("sibling-2", None, 4));
+    assert_eq!(mapper.sampling_decisions.len(), 4);
+    assert_eq!(mapper.agent_depth.len(), 4);
+    // When: every run reaches its terminal state.
+    assert_eq!(mapper.ingest(&run_done("child", 5)).len(), 2);
+    assert_eq!(mapper.ingest(&run_done("root", 6)).len(), 2);
+    assert_eq!(mapper.ingest(&run_done("sibling-1", 7)).len(), 2);
+    assert_eq!(mapper.ingest(&run_done("sibling-2", 8)).len(), 2);
+    // Then: no per-run ledger entry survives its run — memory stays bounded
+    //       regardless of how many runs completed.
+    assert!(mapper.sampling_decisions.is_empty());
+    assert!(mapper.agent_depth.is_empty());
+    assert!(mapper.open.is_empty());
     assert!(mapper.drain_drops().is_empty());
 }

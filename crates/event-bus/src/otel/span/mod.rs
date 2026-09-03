@@ -23,6 +23,21 @@
 //! session↔run のリンクは存在しないため、session span の parent を run に
 //! 偽装しない (独立 root)。
 //!
+//! # 委譲 run の admission
+//!
+//! `AgentRunStarted` に由来する run + agent の 2 span 開始は 1 回の
+//! admission として扱う。どちらか一方でも開始できない (budget 上限 /
+//! duplicate) 場合は両方開始せず、typed drop 1 件だけを記録して partial
+//! tree を作らない。また委譲 run (`parent_run_id: Some`) は親
+//! `agent:{parent_run_id}` が open の場合のみ受理し、open でない親 (未見 /
+//! 終了済み / 未 admission) への委譲は子 subtree ごと `UnknownParent` として
+//! 拒否する (emitter 側の unknown-parent fallback へ到達させない)。
+//!
+//! run の終端 (`AgentRunStateChanged` to=Done/Error) ではその run の
+//! per-run 相関帳簿 (`sampling_decisions` / `agent_depth`) を解放する。
+//! 子 run は開始時点で自 depth / decision を保持しているため、親の解放で
+//! active な子 subtree は壊れない。
+//!
 //! # 決定性
 //!
 //! 開始 / 終了時刻はすべて元イベントの `EventMeta.wall_clock` から取り、
@@ -58,8 +73,8 @@
 //!
 //! mapper が parent graph (`agent:{parent_run_id}` の depth + 1) から
 //! checked 算出し、cap 99 (checked 加算が overflow したら 99 固定)。
-//! parent が未知の run は depth 0 として開始する (parent link 自体は
-//! 設計どおり付与する)。
+//! 委譲 run は親 `agent:{parent_run_id}` が open の場合のみ開始するため、
+//! depth は常に open な親から連鎖算出される。
 //!
 //! # typed drop
 //!
@@ -70,7 +85,7 @@
 //! | 種別 | 事象 |
 //! |---|---|
 //! | `MissingRunId` | `run_id: None` の `RequestStarted` / `ToolStarted` |
-//! | `UnknownParent` | 親 `agent:{run_id}` が未知の request / tool 開始 |
+//! | `UnknownParent` | 親 `agent:{run_id}` が open でない request / tool / 委譲 run の開始 |
 //! | `UnknownSpanEnd` | 開始済み span が無い End 要求 |
 //! | `DuplicateSpan` | 既に open な同一 key の再開始 |
 //! | `SampledOut` | run sampling 判定により subtree Start を拒否 |

@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use crate::event::{AgentRunPhase, LifecycleEvent};
 
 use super::state::{EndSpec, StartSpec, terminal_error};
-use super::{SpanAction, SpanAttribute, SpanKey, SpanKind, SpanMapper, SpanStatus};
+use super::{SpanAction, SpanAttribute, SpanDropKind, SpanKey, SpanKind, SpanMapper, SpanStatus};
 
 const MAX_DEPTH: u32 = 99;
 
@@ -75,6 +75,25 @@ impl SpanMapper {
         else {
             return Vec::new();
         };
+        let run_key = SpanKey::Run {
+            run_id: run_id.clone(),
+        };
+        let agent_key = SpanKey::Agent {
+            run_id: run_id.clone(),
+        };
+        // 委譲先の親 agent span が open でないなら子 subtree を開始しない
+        // (未見 / 終了済み / 未 admission の親への委譲を root に降格させない)。
+        // sampling 判定より先に拒否し、子 run の帳簿挿入も起こさない。
+        if let Some(parent_run_id) = parent_run_id
+            && !self.open.contains_key(&SpanKey::Agent {
+                run_id: parent_run_id.clone(),
+            })
+        {
+            self.add_tombstone(run_key.clone());
+            self.add_tombstone(agent_key);
+            self.record_drop(SpanDropKind::UnknownParent, run_key, at);
+            return Vec::new();
+        }
         self.sampling_decision(run_id, parent_run_id.as_deref());
         let depth = parent_run_id
             .as_deref()
@@ -94,9 +113,22 @@ impl SpanMapper {
             SpanAttribute::new("evorch.delegation.role", role.clone()),
             SpanAttribute::new("evorch.delegation.depth", i64::from(depth)),
         ]);
-        let run_key = SpanKey::Run {
-            run_id: run_id.clone(),
-        };
+        // run と agent の 2 開始は 1 回の admission として扱う。片方でも
+        // 開始できないなら両方開始せず、partial tree を作らない。
+        let run_open = self.open.contains_key(&run_key);
+        if run_open || self.open.contains_key(&agent_key) {
+            let key = if run_open { run_key } else { agent_key };
+            self.record_drop(SpanDropKind::DuplicateSpan, key, at);
+            return Vec::new();
+        }
+        if self.sampling_decisions.get(run_id).copied() != Some(false)
+            && let Err(kind) = self.check_admission(2, at)
+        {
+            self.add_tombstone(run_key.clone());
+            self.add_tombstone(agent_key.clone());
+            self.record_drop(kind, run_key, at);
+            return Vec::new();
+        }
         let mut actions = self.start_span(StartSpec {
             key: run_key.clone(),
             parent: parent_run_id.as_ref().map(|parent| SpanKey::Agent {
@@ -107,13 +139,8 @@ impl SpanMapper {
             at,
             attributes: run_attributes,
         });
-        if actions.is_empty() && self.sampling_decisions.get(run_id).copied().unwrap_or(true) {
-            return actions;
-        }
         actions.extend(self.start_span(StartSpec {
-            key: SpanKey::Agent {
-                run_id: run_id.clone(),
-            },
+            key: agent_key,
             parent: Some(run_key),
             name: format!("invoke_agent {agent_name}"),
             kind: SpanKind::Client,
@@ -131,28 +158,35 @@ impl SpanMapper {
     }
 
     fn end_run(&mut self, run_id: &str, at: SystemTime, status: SpanStatus) -> Vec<SpanAction> {
-        if self.is_tombstoned(&SpanKey::Run {
+        let actions = if self.is_tombstoned(&SpanKey::Run {
             run_id: run_id.to_owned(),
         }) {
-            return Vec::new();
-        }
-        let error_type = (status == SpanStatus::Error).then_some("agent_run_error");
-        let mut actions = self.end_span(EndSpec {
-            key: SpanKey::Agent {
-                run_id: run_id.to_owned(),
-            },
-            at,
-            status,
-            terminal: terminal_error(error_type),
-        });
-        actions.extend(self.end_span(EndSpec {
-            key: SpanKey::Run {
-                run_id: run_id.to_owned(),
-            },
-            at,
-            status,
-            terminal: terminal_error(error_type),
-        }));
+            Vec::new()
+        } else {
+            let error_type = (status == SpanStatus::Error).then_some("agent_run_error");
+            let mut actions = self.end_span(EndSpec {
+                key: SpanKey::Agent {
+                    run_id: run_id.to_owned(),
+                },
+                at,
+                status,
+                terminal: terminal_error(error_type),
+            });
+            actions.extend(self.end_span(EndSpec {
+                key: SpanKey::Run {
+                    run_id: run_id.to_owned(),
+                },
+                at,
+                status,
+                terminal: terminal_error(error_type),
+            }));
+            actions
+        };
+        // run 終端で per-run 相関帳簿を解放する。子 run は開始時点で自
+        // depth / decision を保持しているため、親の解放で active な子 subtree
+        // は壊れない。
+        self.sampling_decisions.remove(run_id);
+        self.agent_depth.remove(run_id);
         actions
     }
 }

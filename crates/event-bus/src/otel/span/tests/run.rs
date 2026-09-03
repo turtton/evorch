@@ -1,7 +1,10 @@
 use crate::event::{AgentRunPhase, LifecycleEvent};
 
-use super::super::{SpanAction, SpanKey, SpanKind, SpanMapper, SpanStatus};
-use super::{BASE_TIME, action_attributes, event, i64_attr, start_run, str_attr};
+use super::super::{SpanAction, SpanDrop, SpanDropKind, SpanKey, SpanKind, SpanMapper, SpanStatus};
+use super::{
+    BASE_TIME, action_attributes, event, i64_attr, request_started, run_done, start_run, str_attr,
+    tool_started,
+};
 
 #[test]
 fn agent_run_start_emits_run_then_agent_with_stable_attributes() {
@@ -91,6 +94,93 @@ fn delegation_depth_is_checked_and_capped_at_99() {
         action_attributes(&capped[0]).last(),
         Some(&i64_attr("evorch.delegation.depth", 99))
     );
+}
+
+#[test]
+fn delegated_run_under_a_non_open_parent_is_dropped_as_a_subtree() {
+    // Given: a parent run that has already reached its terminal state.
+    let mut mapper = SpanMapper::new();
+    mapper.ingest(&start_run("parent", None, 1));
+    assert_eq!(mapper.ingest(&run_done("parent", 2)).len(), 2);
+    // When: a child run is delegated to the closed parent.
+    let child = mapper.ingest(&start_run("child", Some("parent"), 3));
+    // Then: the child subtree is refused with one UnknownParent drop — no run
+    //       or agent span starts and no child ledger entry is recorded.
+    assert!(child.is_empty());
+    assert_eq!(
+        mapper.drain_drops(),
+        vec![SpanDrop {
+            kind: SpanDropKind::UnknownParent,
+            key: SpanKey::Run {
+                run_id: "child".to_owned()
+            },
+        }]
+    );
+    assert!(!mapper.sampling_decisions.contains_key("child"));
+    assert!(!mapper.agent_depth.contains_key("child"));
+    // And: later child-scoped events drop too, and the child terminal is silent.
+    assert!(
+        mapper
+            .ingest(&request_started("req-1", "child", 4))
+            .is_empty()
+    );
+    assert!(
+        mapper
+            .ingest(&tool_started("call-1", "child", 5))
+            .is_empty()
+    );
+    assert!(mapper.ingest(&run_done("child", 6)).is_empty());
+    let kinds = mapper
+        .drain_drops()
+        .iter()
+        .map(|drop| drop.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![SpanDropKind::UnknownParent, SpanDropKind::UnknownParent]
+    );
+}
+
+#[test]
+fn active_child_keeps_mapping_after_its_parent_completes() {
+    // Given: a parent with an open child; the parent completes first.
+    let mut mapper = SpanMapper::new();
+    mapper.ingest(&start_run("parent", None, 1));
+    mapper.ingest(&start_run("child", Some("parent"), 2));
+    assert_eq!(mapper.ingest(&run_done("parent", 3)).len(), 2);
+    // When: the active child keeps working — chat, tool, and a delegation.
+    let chat = mapper.ingest(&request_started("req-1", "child", 4));
+    let tool = mapper.ingest(&tool_started("call-1", "child", 5));
+    let grandchild = mapper.ingest(&start_run("grandchild", Some("child"), 6));
+    // Then: every child-scoped span still maps under the child's agent span
+    //       and the grandchild derives its depth from the child, not the
+    //       cleaned-up parent.
+    assert!(matches!(
+        &chat[0],
+        SpanAction::Start {
+            key: SpanKey::Request { .. },
+            parent: Some(SpanKey::Agent { run_id }),
+            ..
+        } if run_id == "child"
+    ));
+    assert!(matches!(
+        &tool[0],
+        SpanAction::Start {
+            key: SpanKey::Tool { .. },
+            parent: Some(SpanKey::Agent { run_id }),
+            ..
+        } if run_id == "child"
+    ));
+    assert_eq!(
+        action_attributes(&grandchild[0]).last(),
+        Some(&i64_attr("evorch.delegation.depth", 2))
+    );
+    // And: the remaining terminals close normally and empty the per-run
+    //       ledgers.
+    assert_eq!(mapper.ingest(&run_done("grandchild", 7)).len(), 2);
+    assert_eq!(mapper.ingest(&run_done("child", 8)).len(), 2);
+    assert!(mapper.sampling_decisions.is_empty());
+    assert!(mapper.agent_depth.is_empty());
 }
 
 #[test]

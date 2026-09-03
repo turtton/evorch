@@ -204,7 +204,8 @@ pub enum SpanAction {
 pub enum SpanDropKind {
     /// 相関先 run ID が欠落していた (`run_id: None` の request / tool 開始)。
     MissingRunId,
-    /// 親 `agent:{run_id}` が mapper 状態に存在しなかった。
+    /// 親 `agent:{run_id}` が open 状態でなかった (未見 / 終了済み /
+    /// 未 admission)。request / tool 開始に加え、委譲 run の開始も含む。
     UnknownParent,
     /// 開始済み span が存在しない End 要求だった。
     UnknownSpanEnd,
