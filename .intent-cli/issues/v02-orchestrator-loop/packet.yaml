@@ -6,7 +6,7 @@ implementation_issue_packet:
   target_repo: turtton/evorch
   target_path: "crates/runtime/ crates/gui/ crates/storage/ crates/event-bus/"
   target_part: "GUI goal投入を起点とするdurable orchestration loop。finish composite+Reviewer gate、idle continuation、bounded review修復、stalled nudge、merge-only human approval、shell経由closeout、headless self-dogfood"
-  dependencies: [v02-agent-messaging, v02-workspace-isolation, v02-prompt-assembly, v02-skill-loader, v02-project-rules, v02-context-compaction, v02-gui-workbench-restructure]
+  dependencies: [v02-agent-messaging, v02-workspace-isolation, v02-prompt-assembly, v02-skill-loader, v02-project-rules, v02-context-compaction, v02-gui-workbench-restructure, v02-entry-pre-routing]
   technical_baseline:
     - "AgentRuntime（crates/runtime/src/runtime.rs）はdelegate_background/send_message/wait/cancel/list_agents/inspect_agentを持ち、RunConfigは現状interactive/nameのみ。run registryはPending/Running/Waiting/Done/ErrorをEvent Busへemitする"
     - "meta dispatch（crates/runtime/src/meta.rs）はdelegate/send/wait/cancel/list/inspect/compact/finishをmodel tool callから処理するが、finishはresultを即受理しgateを持たず、compactはstub"

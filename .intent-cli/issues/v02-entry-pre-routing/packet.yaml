@@ -1,0 +1,69 @@
+implementation_issue_packet:
+  issue_title: "v0.2: entry で Intent Gate 事前判定し Direct 時は Worker 直接起動する"
+  issue_kind: feature
+  source_execution_unit: v02-entry-pre-routing
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/gui/"
+  target_part: "ユーザーメッセージ entry でローカルキーワードルール（explicit direct キーワード検出）+ 必要時の同モデル再分類により ExecutionShape を判定し、Coordinated のみ Orchestrator を起動し Direct は Worker を直接起動する pre-routing slice"
+  dependencies: [v02-intent-gate-rules, v02-workspace-isolation, v02-skill-loader, v02-project-rules]
+  technical_baseline:
+    - "GUI entry は crates/gui/src/bin/evorch-gui.rs:246-255 で Role::Orchestrator を固定指定して AgentRuntime::production を生成する"
+    - "crates/evorch/src/main.rs は空の fn main() {} で CLI entry は存在しない"
+    - "run 開始 API は crates/runtime/src/runtime.rs:290-313 の delegate_background / delegate_background_as_child で、RunId を返す"
+    - "Intent Gate の分類ルールは v02-intent-gate-rules で型付きポリシーモジュールとして抽出される前提"
+    - "interview new-session.json で確定: デフォルト Orchestrator 起動、明示 direct キーワード時のみ Worker 起動、fail-safe は Orchestrator 側、分類モデルは Orchestrator と同じ、ローカルルールで高確度なら直接 Worker 起動する 2 段階方式"
+    - "omo (oh-my-openagent) の ulw キーワード実装: 正規表現 /\\b(ultrawork|ulw)\\b/i、コードブロック・内部メッセージ・既注入 directive を除外、キーワード検出時のみ policy 注入、モデル・権限変更は別設定層"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/new-session.json
+  acceptance_criteria:
+    - "GUI entry でユーザーメッセージ到着時に pre-routing を実行し、Coordinated の場合のみ Orchestrator run を起動し、Direct の場合は Worker run を直接起動する"
+    - "ローカルキーワードルールで explicit direct キーワード（例: direct / just）を検出した場合のみ Worker 直接起動とし、それ以外は Orchestrator を起動する"
+    - "ローカルルールで判定不能・低確度・矛盾した場合は Orchestrator モデルによる再分類にフォールバックし、さらに不確かな場合は Coordinated に倒す"
+    - "分類は型付きポリシーモジュール（v02-intent-gate-rules）を参照し、prompt-only の分岐を残さない"
+    - "RoutingDecision event（shape、判定理由、使用ルール or モデル）を event bus に発行する"
+    - "GUI の headless モードで Direct キーワード有り/無しの両ケースを検証するテストがある"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+# G461: packet-time intent-maintenance metadata
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/interviews/new-session.json
+  new_intent_needed: false
+  placement_rationale: "pre-routing は ADR 0001 由来の既存 acceptance『Coordinated の場合のみ Orchestrator が起動する』を初めて実装する slice であり、orchestration overview の v0.2 確定節に既に記載済み。新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+    summary: "entry pre-routing の実装完了（ローカルキーワード + 同モデル再分類の 2 段階）を v0.2 確定節に反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "entry での routing 判定が型付きポリシー + ローカルキーワード + 同モデル再分類で実装され、GUI から Coordinated のみ Orchestrator が起動することが検証されたこと"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+# G645: GUI entry（goal 投入）と runtime routing API の role-facing surface
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "GUI workbench の goal 投入 surface（pre-routing 判定で Worker / Orchestrator を選択）"
+      role: Orchestrator
+      target_surface: "goal submission UI / run startup"

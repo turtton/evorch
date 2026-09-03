@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-03T11:44:00.9296698+00:00",
+  "updated_at": "2026-09-03T12:13:54.0975415+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -830,7 +830,8 @@
         "v02-skill-loader",
         "v02-project-rules",
         "v02-context-compaction",
-        "v02-gui-workbench-restructure"
+        "v02-gui-workbench-restructure",
+        "v02-entry-pre-routing"
       ],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -858,6 +859,65 @@
         "implementation": ".intent-cli/issues/v02-web-tools-role-exposure/implementation.md",
         "review_context": ".intent-cli/issues/v02-web-tools-role-exposure/review-context.md",
         "yaml": ".intent-cli/issues/v02-web-tools-role-exposure/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-intent-gate-rules",
+      "title": "v02-intent-gate-rules TODO short title",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-intent-gate-rules/implementation.md",
+        "review_context": ".intent-cli/issues/v02-intent-gate-rules/review-context.md",
+        "yaml": ".intent-cli/issues/v02-intent-gate-rules/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-direct-escalation-handoff",
+      "title": "v02-direct-escalation-handoff TODO short title",
+      "state": "queued",
+      "dependencies": [
+        "v02-entry-pre-routing",
+        "v02-orchestrator-loop"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-direct-escalation-handoff/implementation.md",
+        "review_context": ".intent-cli/issues/v02-direct-escalation-handoff/review-context.md",
+        "yaml": ".intent-cli/issues/v02-direct-escalation-handoff/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v02-entry-pre-routing",
+      "title": "v0.2: entry \u3067 Intent Gate \u4E8B\u524D\u5224\u5B9A\u3057 Direct \u6642\u306F Worker \u76F4\u63A5\u8D77\u52D5\u3059\u308B",
+      "state": "queued",
+      "dependencies": [
+        "v02-intent-gate-rules",
+        "v02-workspace-isolation",
+        "v02-skill-loader",
+        "v02-project-rules"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v02-entry-pre-routing/implementation.md",
+        "review_context": ".intent-cli/issues/v02-entry-pre-routing/review-context.md",
+        "yaml": ".intent-cli/issues/v02-entry-pre-routing/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",

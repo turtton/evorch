@@ -69,6 +69,17 @@ omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲�
 
 workspace 隔離が実装確定（PR #52）: isolated mode は runtime 所有 worktree（`<repo>/.evorch/worktrees/<run-id>`、branch `evorch/task/<run-id>`）で、worktree rw は runtime 確保、worker は承認済み tool call 内で直接 git add / commit できる（bundle / runtime 代理 commit push は不採用）。cleanup は runtime が worktree のみ決定的に削除し、branch は merge deliverable として保持する。
 
+## v0.2 pre-routing / escalation の確定（2026-09-03）
+
+Intent Gate の判定ロジックを prompt 内固定文字列から型付きポリシーモジュールへ抽出し、entry での pre-routing（Direct / Coordinated 判定）と Direct→Orchestrator escalation を正式化する。
+
+- **Intent Gate のコード化**: `ExecutionShape`、8 分類軸、Direct/Coordinated 判定結果、mutation 非持越ルールを `crates/runtime/src/prompt/intent_gate.rs` の固定プロンプト文字列から、独立した型付きポリシーモジュールへ移行する。既存 prompt はそのモジュールから生成し、出力を変えない golden test を持たせる。
+- **pre-routing (Layer A)**: entry でユーザーメッセージを受け取った際、ローカルキーワードルール（omo `ulw` 型の regex injector）で「明らかに単一作業」を判定し、該当すれば Worker 直接起動、該当しなければ Orchestrator 起動へ分岐する。デフォルトは Orchestrator 起動、明示 direct キーワード（例: `direct` / `just`）時のみ Worker 直接起動。fail-safe は Orchestrator 側。
+- **escalation (Layer B)**: Worker 直接起動中に「これは複数モジュールまたぐ / 依存調査が必要 / 並列化したい」と気づいた場合、専用 meta op で `EscalationMemo`（構造化スキーマ: `source_run_id`, `original_request`, `findings`, `files_touched: Vec<PathBuf>`, `blockers`, `workspace_state(dirty files/summary)`, `escalation_reason`, `suggested_next`）を記録して旧 run を terminal にし、新しい Orchestrator root run を起動する。workspace は引き継ぐ（旧 run terminal 保証後に排他的に譲渡）。
+- **モデル**: pre-routing で分類に使うモデルは、起動予定の Orchestrator と同じモデルを使用する。ローカルルールで高確度な場合は直接 Worker 起動、低確度・矛盾時のみ Orchestrator モデルで再分類する 2 段階方式。
+- **観測**: pre-routing 判定結果と escalation イベントは runtime event で記録し、`v02-orchestrator-loop` の observability（ToolStarted/Completed 同様の event bus）に乗せる。具体的には RoutingDecision event（Direct/Coordinated, 判定理由, 使用ルール or モデル）と EscalationRequested event（source_run_id, memo 概要, 新 run_id）を発行。
+- **Intent Gate との関係**: 再分類の指示は Orchestrator prompt から削除し、選択結果を検証する説明に留める。ルールは単一ソース化し、routing prompt と Orchestrator prompt の両方をレンダリングする形にする。
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること

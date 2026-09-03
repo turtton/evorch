@@ -26,6 +26,8 @@ Dynamic Agent Topology
 
 - Intent Gate は粗い `ExecutionShape`（Direct / Coordinated）だけを決める。
 - Coordinated の場合、Orchestrator が required capabilities から動的に topology を構築する。
+- entry ではローカルキーワードルール（omo `ulw` 型）で「明らかに単一作業」を判定し、該当すれば Worker 直接起動、該当しなければ Orchestrator 起動へ分岐する。デフォルトは Orchestrator 起動、明示 direct キーワード時のみ Worker 直接起動。fail-safe は Orchestrator 側。
+- Direct として起動した run が「これは複数モジュールまたぐ / 依存調査が必要 / 並列化したい」と気づいた場合、専用 meta op で `EscalationMemo`（構造化スキーマ: `source_run_id`, `original_request`, `findings`, `files_touched: Vec<PathBuf>`, `blockers`, `workspace_state(dirty files/summary)`, `escalation_reason`, `suggested_next`）を記録して旧 run を terminal にし、新しい Orchestrator root run を起動する。workspace は引き継ぐ（旧 run terminal 保証後に排他的に譲渡）。
 
 ## Consequences
 

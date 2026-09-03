@@ -33,3 +33,9 @@ Role を personality ではなく capability boundary とする。
 - [features/tools-sandbox](../features/tools-sandbox/overview.md)
 - [identity/mission](../identity/mission.md)
 - [ADR 0022: 親子限定ツリー addressing と can_delegate の Role capability 開放](0022-parent-child-tree-addressing-and-nested-delegation.md) — `can_delegate` の適用範囲拡大（boundary 設計自体は不変）
+
+## 2026-09-03 確定: Direct→Orchestrator escalation の capability 影響
+
+- escalation は capability boundary を変更するものではなく、run の lifecycle 遷移。
+- escalation 時に workspace を引き継ぐ場合、排他的制御で二重変更リスクを防ぐ。
+- memo スキーマ（`EscalationMemo`）は ADR 0001 に記載の通り、構造化された handoff 情報を保持する。

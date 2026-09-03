@@ -1,0 +1,65 @@
+implementation_issue_packet:
+  issue_title: "v0.2: Intent Gate の分類ルールを型付きポリシーモジュールへ抽出する"
+  issue_kind: feature
+  source_execution_unit: v02-intent-gate-rules
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/"
+  target_part: "Intent Gate の 8 分類軸・Direct/Coordinated 判定・mutation 非持越ルールを prompt 内固定文字列から型付きポリシーモジュールへ抽出し、prompt 生成をそのモジュールからレンダリングする基盤 slice。出力を変えない golden test で振る舞いを固定する"
+  dependencies: [v02-prompt-assembly]
+  technical_baseline:
+    - "Intent Gate は crates/runtime/src/prompt/intent_gate.rs:15-48 の固定プロンプト文字列としてのみ存在し、ExecutionShape や分類軸を表すコード型はない"
+    - "render_intent_gate(triggers: &[TriggerSource]) -> String が唯一の public API で、Role::Orchestrator の場合のみ assembly に追加される（crates/runtime/src/prompt/assembly.rs:34-55）"
+    - "prompt assembly 順序は role baseline → family → category overlay → Intent Gate → appendix で deterministic に固定（v02-prompt-assembly 完了済み、PR #50）"
+    - "routing crate (crates/routing) に ExecutionShape 型は存在しない"
+    - "GUI entry は crates/gui/src/bin/evorch-gui.rs:246-255 で Role::Orchestrator を固定指定して起動し、CLI は crates/evorch/src/main.rs が空実装"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/interviews/new-session.json
+  acceptance_criteria:
+    - "ExecutionShape（Direct / Coordinated）、8 分類軸、mutation 非持越ルールを表す型付きポリシーモジュールが crates/runtime に存在し、単一の正本としてコードと prompt の両方から参照される"
+    - "render_intent_gate() がポリシーモジュールから prompt 文字列をレンダリングする形に変更され、既存の byte-identical golden test（v02-prompt-assembly 由来）が pass する"
+    - "ポリシーモジュールは routing prompt（Layer A 用）と Orchestrator prompt（既存用途）の両方を生成できる API を公開する"
+    - "Orchestrator prompt 内の再分類指示が削除され、選択結果を検証する説明に置き換わる（entry pre-routing との役割分担のため）"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+# G461: packet-time intent-maintenance metadata
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/interviews/new-session.json
+  new_intent_needed: false
+  placement_rationale: "Intent Gate のコード化は orchestration feature の v0.2 確定節（pre-routing / escalation）の一部として既に記載済み。本 slice はその基盤となる型抽出であり、新規 intent を増やさず orchestration overview へ接続する"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+    summary: "v0.2 pre-routing / escalation の確定節に、Intent Gate コード化の実装根拠（型付きポリシーモジュール、golden test、単一ソース化）が実装完了として反映されていること"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "Intent Gate のコード化（型付きポリシーモジュール抽出、単一ソース化、Orchestrator prompt からの再分類指示削除）が orchestration overview の v0.2 確定節に反映されること"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+# G645: Orchestrator（Intent Gate prompt の consumer）が role-facing surface を持つため route form
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "orchestration overview の v0.2 Intent Gate / pre-routing surface"
+      role: Orchestrator
+      target_surface: "system prompt assembly"

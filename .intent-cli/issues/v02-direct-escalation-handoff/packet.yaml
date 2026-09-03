@@ -1,0 +1,72 @@
+implementation_issue_packet:
+  issue_title: "v0.2: Direct run を構造化 memo で Orchestrator root run へ昇格する"
+  issue_kind: feature
+  source_execution_unit: v02-direct-escalation-handoff
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/agents/"
+  target_part: "Worker 直接起動 run が手に負えないと判断した際、構造化 EscalationMemo を記録して旧 run を terminal にし workspace を排他的に譲渡したうえで新規 Orchestrator root run を起動する escalation meta-op slice"
+  dependencies: [v02-entry-pre-routing, v02-orchestrator-loop]
+  technical_baseline:
+    - "meta-op は crates/runtime/src/meta/mod.rs:34-58 の文字列 match で dispatch され、新規 meta-op はハンドラ module 追加 + match arm 登録で実装する"
+    - "既存に構造化 handoff/memo 型は存在せず、delegate は {role, prompt, interactive, name, category, workspace_mode, load_skills}（meta/delegation.rs:10-38）、finish は FinishArgs { result: String } のみ"
+    - "RunConfig (crates/runtime/src/run.rs:57-73) に handoff/memo フィールドはない"
+    - "ADR 0022: 親子限定ツリー addressing で、sibling 間通信は orchestrator が中継。escalation は逆向き delegation を避けるため旧 run を terminal にして新規 root run を起動する必要がある"
+    - "interview new-session.json で確定: workspace は排他譲渡で引き継ぐ、memo に files_touched: Vec<PathBuf> を含める、EscalationMemo { source_run_id, original_request, findings, files_touched, blockers, workspace_state, escalation_reason, suggested_next }"
+    - "LLM エージェントには構造的な継続バイアスがあり escalation の自己申告は滅多に発火しないため、runtime 停滞検知（連続 edit 失敗/反復書き換え/tool call 閾値）による push 型の昇格提案 event を補助として持つ"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/new-session.json
+  acceptance_criteria:
+    - "EscalationMemo 型（source_run_id, original_request, findings, files_touched: Vec<PathBuf>, blockers, workspace_state, escalation_reason, suggested_next）が runtime に定義される"
+    - "Worker run から呼べる専用 meta-op が meta dispatch に登録され、呼出時に memo を記録し旧 run を terminal 状態（新規 tool call 停止・実行中 tool 完了/abort・phase を Done/Error 遷移）にする"
+    - "旧 run terminal 保証後に workspace が排他的に新 Orchestrator root run へ譲渡される（二重変更不可）"
+    - "新 Orchestrator root run が memo を初期 context として起動し、source_run_id を保持する"
+    - "EscalationRequested event（source_run_id、memo 概要、新 run_id）を event bus に発行する"
+    - "runtime 停滞検知による昇格提案 event が発行され、agent 自己申告への依存でない安全網となる"
+    - "cargo test / cargo clippy -- -D warnings / cargo fmt --check / git diff --check が pass する"
+
+# G461: packet-time intent-maintenance metadata
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0001-no-fixed-workflow.md
+    - intents/evorch/decisions/0022-parent-child-tree-addressing-and-nested-delegation.md
+    - intents/evorch/interviews/new-session.json
+  new_intent_needed: false
+  placement_rationale: "Direct→Orchestrator escalation は orchestration overview の v0.2 確定節に 2026-09-03 付で既に記載済み。本 slice はその実装であり、新規 intent は不要"
+knowledge_updates:
+  intent_tree:
+    required: true
+    target_paths:
+      - intents/evorch/features/orchestration/overview.md
+    summary: "escalation meta-op・EscalationMemo スキーマ・workspace 排他譲渡の実装完了を v0.2 確定節に反映する"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "Worker-direct run から Orchestrator root run への昇格が、構造化 memo と排他的 workspace 譲渡を伴う専用 meta-op として実装され、event bus で観測可能であること"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+# G645: Orchestrator 起動経路（escalation 先）が role-facing surface
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "orchestration overview の v0.2 escalation surface（Direct→Orchestrator 昇格）"
+      role: Orchestrator
+      target_surface: "run lifecycle / workspace handoff"
