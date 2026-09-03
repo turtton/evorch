@@ -60,9 +60,11 @@ Loop 基盤（packet 9 本）:
   NetworkGuard / web_search / web_fetch / OTel metrics exporter / OTel span exporter
 ```
 
+**v0.2 進捗（2026-09-03、issue #55）**: OTel metrics exporter の slice ①（写像層＋OTLP metrics exporter）が landed。`crates/event-bus` に `event_bus::otel` module（写像層は常時 compile、SDK 接続は opt-in feature `otel-exporter`、既定 off）を追加し、`gen_ai.*` 標準属性＋`evorch.*` 拡張への写像・属性 whitelist 7 key の cardinality guard・golden fixture 検証・InMemory＋実 OTLP HTTP の二重 reader による最小 E2E を実装（詳細は ADR 0023 最終版）。`CacheStats`（hit/miss 系）は v0.3 以降送りを維持。残る v0.2 gap は slice ②（span exporter）のみとなった。
+
 **成功基準**: evorch orchestrator が goal+contract 投入から worker 起動・実装・PR 作成・review 往復を経て人間 merge 承認まで GUI 起点で完走し（OpenCode / omo / herdr 非依存。GitHub / intent-cli 連携は shell tool 経由）、queue 済み v0.2 unit の後半 1-2 本を evorch 自身のループで消費できること（headless で再現可能）。
 
-**v0.3 以降へ送り**: Librarian / Oracle role 追加、Role / Category separation の role 拡張面、Tree-sitter / LSP、ContentOrigin の web tools 外 generalization、provider affinity、cache metrics 単独項目（compaction / OTel で部分カバー）、github-copilot / anthropic-subscription provider（v0.3 計画維持）、diff / file tree 完全版。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
+**v0.3 以降へ送り**: Librarian / Oracle role 追加、Role / Category separation の role 拡張面、Tree-sitter / LSP、ContentOrigin の web tools 外 generalization、provider affinity、cache metrics 単独項目（compaction / OTel で部分カバー。v0.2 slice ① で cache_read/cache_write の `gen_ai.token.type` 拡張値は出力済み、`CacheStats` の hit/miss 集計はこちらに残す）、github-copilot / anthropic-subscription provider（v0.3 計画維持）、diff / file tree 完全版。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
 
 ## v0.3 — プロバイダ拡張と cache 高度化
 

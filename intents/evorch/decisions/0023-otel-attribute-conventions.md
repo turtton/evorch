@@ -14,16 +14,32 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
 - 標準の思想: 階層は trace 親子（top-level `invoke_agent` → child `chat` → `execute_tool`）、集計は attribute
 - 標準に存在しない: task、安定 run ID、agent role、delegation depth、branch 構造、明示的 delegation 関係属性
 - 全 gen_ai 領域は Development stability
+- **訂正（2026-09-03、slice ① 実装時の pin 精査）**: 上記の `gen_ai.agent.version` および agent invocation 系 metrics（`gen_ai.invoke_agent.duration` / `inference_calls` / `tool_calls`）は genai 拡張リポジトリ main の内容で、本設計の pin 先 semconv **v1.37.0**（`open-telemetry/semantic-conventions` v1.37.0 tag）には存在しない。v1.37.0 の gen_ai metrics は 5 種（`gen_ai.client.token.usage` / `gen_ai.client.operation.duration` / `gen_ai.server.request.duration` / `gen_ai.server.time_per_output_token` / `gen_ai.server.time_to_first_token`）に限定される。また `gen_ai.system` は v1.37.0 で deprecated（後継 `gen_ai.provider.name`）
 
 ## Decision
 
 1. **部分採用**: 標準 attribute（`gen_ai.*`）は registry 準拠。registry に無い観測は `evorch.*` namespace で拡張
 2. **信号範囲**: metrics + span。委譲親子 = span 親子。log 相当（SSE raw / message 本文）は対象外（ADR 0012 の raw 非永続化ポリシーと整合）。span 高頻度 export はサンプリング + ハード上限ポリシーで制御
-3. **mapping 層集中**: 内部 event schema はドメイン語彙を保持し、`gen_ai.*` / `evorch.*` への変換・span 区間化・親子紐付けは専任変換層（crate）に集約。producer は opentelemetry crate を直接叩かない
-4. **`evorch.*` の骨格**: 集計軸（session / task / agent_run / profile）+ 最小構造軸（低カーディナリティ列挙型の `evorch.delegation.depth` / `evorch.delegation.role` 程度。branch 等は必要時追加）。ID 系属性は span 限定、metrics には入れない（高カーディナリティ規律）
+3. **mapping 層集中**: 内部 event schema はドメイン語彙を保持し、`gen_ai.*` / `evorch.*` への変換・span 区間化・親子紐付けは専任変換層に集約。producer は opentelemetry crate を直接叩かない。**実現形（slice ①、2026-09-03）**: ADR 0016 の crate 不増方針（10+1）に従い event-bus 内 module `event_bus::otel`（写像層は常時 compile、SDK 接続層は `otel-exporter` feature gate）として実現。crate 分割は後続で再評価
+4. **`evorch.*` の骨格（metrics whitelist は slice ① で最終確定）**: 集計軸（session / task / agent_run / profile）+ 最小構造軸（低カーディナリティ列挙型の `evorch.delegation.depth` / `evorch.delegation.role` 程度。branch 等は必要時追加）。ID 系属性は span 限定、metrics には入れない（高カーディナリティ規律）
+
+   確定した OTLP metrics attribute whitelist（7 key、これが閉集合上限）:
+
+   | attribute | local aggregation（ring/SQLite） | OTLP metrics | span（slice ②） |
+   |---|---|---|---|
+   | `gen_ai.operation.name` | - | ✅ `{"chat"}`（現状の閉 domain） | ✅ |
+   | `gen_ai.provider.name` | - | ✅ `{"anthropic","openai","openai-compatible"}` 既知値＋未知値は固定 `"other"` へ正規化（pass-through 禁止） | ✅ |
+   | `gen_ai.token.type` | - | ✅ `{"input","output"}` ＋固定拡張値 `{"cache_read","cache_write"}`（v1.37.0 well-known 外の evorch 拡張） | ✅ |
+   | `error.type` | - | ✅ `{rate_limited,http,timeout,invalid_response,transport,server,quota,auth,other}`（`Http{status}` は status を捨てる） | ✅ |
+   | `evorch.profile.name` | ✅ | ✅（profile = config 由来の有界値のみ） | ✅ |
+   | `evorch.delegation.depth` | ✅ | whitelist 定義のみ確定。**slice ① では供給 event 不在のため未 emit**（値型: 低カーディナリティ depth） | ✅ |
+   | `evorch.delegation.role` | ✅ | 同上（値型: 固定列挙 role） | ✅ |
+   | session / task / agent_run ID | ✅ | ❌ 不許可（ID 系、高カーディナリティ） | ✅（span 相関軸） |
+
+   意図的省略（metrics label として採用しない）: `gen_ai.request.model`（OpenAI 互換 endpoint の model は任意文字列で低カーディナリティ保証不可、v1.37.0 の Conditionally Required を採らない）、`gen_ai.system`（deprecated）、`server.address` / `server.port`（provider event に非存在）、`finish_reason`（semconv metric 属性に非存在）、Usage の `model` フィールド（同理由）
 5. **実装 slice 二段分割**: ① mapping 層 + OTLP metrics exporter → ② mapping 層の span 化拡張 + span exporter（② は ① に依存）
 6. **追従方針 pin + 意図的 bump**: mapping 表は対象 semconv リリースを明記（現基準 v1.37.0、2025-08）。自動追従しない。bump = release 差分精読 → mapping 表差分 → 検証。タイミングは slice ② 着手時と technology re-evaluation 連動
-7. **検証**: 二段検証。主軸 = mapping 層の golden/snapshot test（pin 固定 fixture）+ cardinality guard（CI で metrics attribute whitelist 強制、ID 混入を静的ブロック）。副軸 = 各 slice DoD に debug exporter 経由の最小 OTLP E2E 1本
+7. **検証**: 二段検証。主軸 = mapping 層の golden/snapshot test（pin 固定 fixture）+ cardinality guard（CI で metrics attribute whitelist 強制、ID 混入を静的ブロック）。副軸 = 各 slice DoD に debug exporter 経由の最小 OTLP E2E 1本。**slice ① の E2E 実現形**: `opentelemetry_sdk::metrics::InMemoryMetricExporter`（debug 観察側）+ loopback OTLP HTTP receiver（wire 疎通側：POST `/v1/metrics` / protobuf content-type / 非空 body を assert）の二重 reader 構成。`opentelemetry-stdout` 0.32 は writer 注入不可・出力が人間向けテキストで assert 不能なため、この組合せを debug exporter 経路の実現形とする
 
 ## Consequences
 
@@ -31,6 +47,7 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
 - 親子関係の表現は trace に任せ、span attribute での再表現はしない。`evorch.*` の構造軸は metrics 面の集計（role 別 token 消費、depth 別 latency）専用
 - 自己改善機能（inspect_session / inspect_provider 等、diagnostics-self-improvement）のローカル downsampled 集計にも委譲軸が供給される
 - 内部 event schema（v0.1.1 landed の provider 観測含む）は OTel 名に侵食されず、標準改正の衝撃は mapping 層一箇所に閉じる
+- **slice ① landed（2026-09-03、issue #55）**: histogram bucket boundaries に v1.37.0 advisory ExplicitBucketBoundaries を採用。client 側 TTFT は v1.37.0 に無いため `evorch.client.time_to_first_token`（f64 histogram、単位 `s`）として evorch.* 拡張で表現。runtime への subscribe 配線（ADR 0014 の config 有効化経路）は slice ① の scope 外として後続に送る
 
 ## 参考
 
