@@ -86,6 +86,8 @@ use crate::event::{Event, EventKind, ProviderEvent, ProviderFailureKind, UsageEv
 #[cfg(feature = "otel-exporter")]
 pub mod exporter;
 pub mod span;
+#[cfg(feature = "otel-exporter")]
+pub mod span_exporter;
 
 pub use span::{
     FiniteF64, SPAN_ATTRIBUTE_WHITELIST, SpanAction, SpanAttribute, SpanAttributeValue,
