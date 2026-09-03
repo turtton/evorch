@@ -31,9 +31,9 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
    | `gen_ai.provider.name` | - | ✅ `{"anthropic","openai","openai-compatible"}` 既知値＋未知値は固定 `"other"` へ正規化（pass-through 禁止） | ✅ |
    | `gen_ai.token.type` | - | ✅ `{"input","output"}` ＋固定拡張値 `{"cache_read","cache_write"}`（v1.37.0 well-known 外の evorch 拡張） | ✅ |
    | `error.type` | - | ✅ `{rate_limited,http,timeout,invalid_response,transport,server,quota,auth,other}`（`Http{status}` は status を捨てる） | ✅ |
-   | `evorch.profile.name` | ✅ | ✅（profile = config 由来の有界値のみ） | ✅ |
-   | `evorch.delegation.depth` | ✅ | whitelist 定義のみ確定。**slice ① では供給 event 不在のため未 emit**（値型: 低カーディナリティ depth） | ✅ |
-   | `evorch.delegation.role` | ✅ | 同上（値型: 固定列挙 role） | ✅ |
+   | `evorch.profile.name` | ✅ | ✅（profile = config 由来の有界値。guard が形状ポリシー（非空・≤64 文字・小字 ASCII alnum と `-_.`・先頭 alnum）を強制し、map 層では形状不適合の profile は同属性のみ省略（measurement 自体は保持）。数的有界性は per-installation の config profile 集合に依存） | ✅ |
+   | `evorch.delegation.depth` | ✅ | whitelist 定義のみ確定。**slice ① では供給 event 不在のため未 emit**。値 domain は `0`..=`99` の decimal 文字列（leading zero なし）に固定 | ✅ |
+   | `evorch.delegation.role` | ✅ | 同上。値 domain は閉集合 `{orchestrator, explorer, worker, reviewer}` に固定 | ✅ |
    | session / task / agent_run ID | ✅ | ❌ 不許可（ID 系、高カーディナリティ） | ✅（span 相関軸） |
 
    意図的省略（metrics label として採用しない）: `gen_ai.request.model`（OpenAI 互換 endpoint の model は任意文字列で低カーディナリティ保証不可、v1.37.0 の Conditionally Required を採らない）、`gen_ai.system`（deprecated）、`server.address` / `server.port`（provider event に非存在）、`finish_reason`（semconv metric 属性に非存在）、Usage の `model` フィールド（同理由）
