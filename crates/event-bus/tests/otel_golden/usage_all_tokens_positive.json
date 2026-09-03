@@ -24,6 +24,7 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
         {"key": "gen_ai.token.type", "value": "input"}
       ]
     },
@@ -34,6 +35,7 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
         {"key": "gen_ai.token.type", "value": "output"}
       ]
     },
@@ -44,6 +46,7 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
         {"key": "gen_ai.token.type", "value": "cache_read"}
       ]
     },
@@ -54,6 +57,7 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "kimi-k3"},
         {"key": "gen_ai.token.type", "value": "cache_write"}
       ]
     }

@@ -9,17 +9,20 @@
 //! v1.37.0 (`super::SEMCONV_PIN`) の advisory ExplicitBucketBoundaries に
 //! 従う。
 //!
-//! # profile cardinality 責任分界
+//! # label cardinality 責任分界
 //!
-//! `evorch.profile.name` の値は次の 2 層で有界化される:
-//! - 写像層 / validator: shape ポリシー (小文字 ASCII alnum と `-_.`、
-//!   最大長 64) を強制し、任意文字列性を排除する。ただし shape 制約だけでは
-//!   値の種類数は有界化できない。
-//! - emitter 初期化時の profile registry: `config` 由来の profile 集合を
-//!   [`MAX_PROFILE_NAMES`] (64) 件まで受け取り、emit 時に registry 非
-//!   member の `evorch.profile.name` 属性のみ除外する (measurement 自体は
-//!   保持)。数的有界性はこの registry が単独で担う。ADR 0014 配線時に
-//!   runtime から config profile 集合が注入される想定。
+//! `evorch.profile.name` と `gen_ai.request.model` の値は次の 2 層で
+//! 有界化される:
+//! - 写像層 / validator: shape ポリシーを強制し、任意文字列性を排除する。
+//!   ただし shape 制約だけでは値の種類数は有界化できない。
+//! - emitter 初期化時の registry: `config` 由来の宣言集合を
+//!   [`MAX_PROFILE_NAMES`] / [`MAX_MODEL_NAMES`] (各 64) 件まで受け取り、
+//!   emit 時に正規化する。profile は registry 非 member の属性のみ除外し
+//!   (measurement 自体は保持)、model は registry 非 member の値を固定値
+//!   `other` へ書き換える (model 次元は必須のため属性は残す)。数的有界性は
+//!   この registry が単独で担う。ADR 0014 配線時に runtime から config の
+//!   provider profile 集合 (profiles) と provider profile config の論理
+//!   model 集合 (models) が注入される想定。
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -32,10 +35,13 @@ use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMete
 use crate::event::Event;
 
 use super::{
-    ATTR_PROFILE_NAME, MetricMeasurement, MetricValue, OPERATION_DURATION_METRIC, SECONDS_UNIT,
-    TIME_TO_FIRST_TOKEN_METRIC, TOKEN_UNIT, TOKEN_USAGE_METRIC, map_event,
-    validate_metric_attributes,
+    ATTR_PROFILE_NAME, ATTR_REQUEST_MODEL, MetricMeasurement, MetricValue,
+    OPERATION_DURATION_METRIC, SECONDS_UNIT, TIME_TO_FIRST_TOKEN_METRIC, TOKEN_UNIT,
+    TOKEN_USAGE_METRIC, map_event, validate_metric_attributes,
 };
+
+/// registry 非 member の model を正規化する固定値。
+const NORMALIZED_MODEL: &str = "other";
 
 /// `gen_ai.client.token.usage` の advisory bucket boundaries。
 ///
@@ -60,62 +66,82 @@ const DURATION_BOUNDARIES: [f64; 14] = [
 /// emitter 初期化時のみ消費され、実行中に変化しない (初期化後不変)。
 pub const MAX_PROFILE_NAMES: usize = 64;
 
-/// emitter 初期化時の profile registry 構築エラー。
+/// model registry に許容される最大個数。
 ///
-/// [`OtelMetricsEmitter::new`] に [`MAX_PROFILE_NAMES`] を超える数の
-/// profile が渡された場合に返る。
+/// emitter 初期化時のみ消費され、実行中に変化しない (初期化後不変)。
+pub const MAX_MODEL_NAMES: usize = 64;
+
+/// emitter 初期化時の registry 構築エラー。
+///
+/// [`OtelMetricsEmitter::new`] に [`MAX_PROFILE_NAMES`] /
+/// [`MAX_MODEL_NAMES`] を超える数の値が渡された場合に返る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProfileRegistryError {
-    /// registry に要求された profile の個数 (重複除去後)。
+pub struct RegistryError {
+    /// 超過した registry の種別 (`"profiles"` または `"models"`)。
+    pub registry: &'static str,
+    /// registry に要求された値の個数 (重複除去後)。
     pub requested: usize,
-    /// 許容される最大個数 ([`MAX_PROFILE_NAMES`])。
+    /// 許容される最大個数。
     pub max: usize,
 }
 
-impl std::fmt::Display for ProfileRegistryError {
+impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "profile registry limit exceeded: {} profiles requested (max {})",
-            self.requested, self.max
+            "{} registry limit exceeded: {} entries requested (max {})",
+            self.registry, self.requested, self.max
         )
     }
 }
 
-impl std::error::Error for ProfileRegistryError {}
+impl std::error::Error for RegistryError {}
 
 /// イベントを OTel histogram へ記録する emitter。
 ///
 /// [`OtelMetricsEmitter::emit`] は panic しない。cardinality guard 違反や
 /// instrument と値型の不一致は `tracing::warn!` で記録し、該当 measurement
-/// のみ skip する。`known_profiles` (profile registry) は初期化時にのみ
-/// 構築され、以後不変である。
+/// のみ skip する。`known_profiles` / `known_models` (registry) は初期化時
+/// にのみ構築され、以後不変である。
 pub struct OtelMetricsEmitter {
     token_usage: Histogram<u64>,
     operation_duration: Histogram<f64>,
     time_to_first_token: Histogram<f64>,
     known_profiles: HashSet<String>,
+    known_models: HashSet<String>,
 }
 
 impl OtelMetricsEmitter {
-    /// [`SdkMeterProvider`] から meter を取得し、3 histogram と profile
-    /// registry を構築する。
+    /// [`SdkMeterProvider`] から meter を取得し、3 histogram と 2 registry
+    /// を構築する。
     ///
     /// `known_profiles` は emit 時に `evorch.profile.name` 属性を維持してよい
-    /// profile の集合 (ADR 0014 配線時は config の profile 集合を注入する想定)。
+    /// profile の集合、`known_models` は `gen_ai.request.model` 値として
+    /// 記録してよい model の集合 (非 member の model は `other` へ正規化)。
+    /// ADR 0014 配線時は runtime から config 由来の集合を注入する想定。
     ///
     /// # Errors
-    /// 重複除去後の `known_profiles` が [`MAX_PROFILE_NAMES`] を超える場合、
-    /// [`ProfileRegistryError`] を返す。
+    /// 重複除去後のいずれかの集合が [`MAX_PROFILE_NAMES`] /
+    /// [`MAX_MODEL_NAMES`] を超える場合、[`RegistryError`] を返す。
     pub fn new(
         provider: &SdkMeterProvider,
         known_profiles: impl IntoIterator<Item = String>,
-    ) -> Result<Self, ProfileRegistryError> {
+        known_models: impl IntoIterator<Item = String>,
+    ) -> Result<Self, RegistryError> {
         let known_profiles: HashSet<String> = known_profiles.into_iter().collect();
         if known_profiles.len() > MAX_PROFILE_NAMES {
-            return Err(ProfileRegistryError {
+            return Err(RegistryError {
+                registry: "profiles",
                 requested: known_profiles.len(),
                 max: MAX_PROFILE_NAMES,
+            });
+        }
+        let known_models: HashSet<String> = known_models.into_iter().collect();
+        if known_models.len() > MAX_MODEL_NAMES {
+            return Err(RegistryError {
+                registry: "models",
+                requested: known_models.len(),
+                max: MAX_MODEL_NAMES,
             });
         }
         let meter = provider.meter("evorch.event-bus");
@@ -136,14 +162,17 @@ impl OtelMetricsEmitter {
                 .with_boundaries(DURATION_BOUNDARIES.to_vec())
                 .build(),
             known_profiles,
+            known_models,
         })
     }
 
     /// イベントを写像し、有効な measurement を histogram へ記録する。
     ///
     /// `evorch.profile.name` 属性は map 層の shape ポリシー適合に加え、
-    /// registry member であるときのみ維持される。非 member は profile 属性
-    /// のみ除外して measurement を記録する (metric 全欠落を避ける)。
+    /// registry member であるときのみ維持される。`gen_ai.request.model`
+    /// 属性は map 層の shape ポリシー適合時に存在し、registry 非 member の
+    /// 値は `other` へ正規化される (属性自体は残す)。いずれも measurement
+    /// の個数は変わらない (metric 全欠落を避ける)。
     pub fn emit(&self, event: &Event) {
         for measurement in map_event(event) {
             self.record(measurement);
@@ -155,6 +184,14 @@ impl OtelMetricsEmitter {
             attr.key == ATTR_PROFILE_NAME && !self.known_profiles.contains(&attr.value)
         }) {
             measurement.attrs.remove(position);
+        }
+        if let Some(model) = measurement
+            .attrs
+            .iter_mut()
+            .find(|attr| attr.key == ATTR_REQUEST_MODEL)
+            && !self.known_models.contains(&model.value)
+        {
+            model.value = NORMALIZED_MODEL.to_owned();
         }
         if let Err(violation) = validate_metric_attributes(&measurement) {
             tracing::warn!(
@@ -283,13 +320,13 @@ mod tests {
         })
     }
 
-    fn completed_event(profile: &str) -> Event {
+    fn completed_event(model: &str, profile: &str) -> Event {
         Event::new(ProviderEvent::RequestCompleted {
             request_id: "req-1".to_owned(),
             provider: "openai".to_owned(),
             profile: Some(profile.to_owned()),
             protocol: "openai-chat-completions".to_owned(),
-            model: "kimi-k3".to_owned(),
+            model: model.to_owned(),
             streaming: false,
             duration_ms: 500,
             input_tokens: 1,
@@ -321,18 +358,25 @@ mod tests {
             .collect()
     }
 
-    // Given: in-memory provider と registry={"primary"} の emitter。
-    // When: 3 種のイベント (profile="primary" を含む) を emit し force_flush する。
+    // Given: in-memory provider と registry={"primary"} / models={"kimi-k3"}
+    //        の emitter。
+    // When: 3 種のイベント (profile="primary"、model="kimi-k3" を含む) を
+    //       emit し force_flush する。
     // Then: 3 instrument が正しい unit・合計値・属性で記録され、registry
-    //       member の profile 属性は duration / TTFT の両方に記録される。
+    //       member の profile / model 属性は duration / TTFT の両方に
+    //       記録される。
     #[test]
     fn in_memory_smoke_records_three_instruments() {
         let (provider, exporter) = build_in_memory_meter_provider();
-        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
-            .expect("registry within limit");
+        let emitter = OtelMetricsEmitter::new(
+            &provider,
+            vec!["primary".to_owned()],
+            vec!["kimi-k3".to_owned()],
+        )
+        .expect("registries within limit");
 
         emitter.emit(&usage_event());
-        emitter.emit(&completed_event("primary"));
+        emitter.emit(&completed_event("kimi-k3", "primary"));
         emitter.emit(&ttft_event());
         provider.force_flush().expect("force_flush succeeds");
 
@@ -394,6 +438,9 @@ mod tests {
         assert!(points[0].attributes().any(|kv| {
             kv.key.as_str() == "evorch.profile.name" && kv.value.to_string() == "primary"
         }));
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "kimi-k3"
+        }));
 
         let ttft = metrics
             .iter()
@@ -409,6 +456,9 @@ mod tests {
         assert!(points[0].attributes().any(|kv| {
             kv.key.as_str() == "evorch.profile.name" && kv.value.to_string() == "primary"
         }));
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "kimi-k3"
+        }));
     }
 
     // Given: advisory boundaries を設定した 3 instrument。
@@ -417,11 +467,15 @@ mod tests {
     #[test]
     fn histograms_use_semconv_advisory_boundaries() {
         let (provider, exporter) = build_in_memory_meter_provider();
-        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
-            .expect("registry within limit");
+        let emitter = OtelMetricsEmitter::new(
+            &provider,
+            vec!["primary".to_owned()],
+            vec!["kimi-k3".to_owned()],
+        )
+        .expect("registries within limit");
 
         emitter.emit(&usage_event());
-        emitter.emit(&completed_event("primary"));
+        emitter.emit(&completed_event("kimi-k3", "primary"));
         emitter.emit(&ttft_event());
         provider.force_flush().expect("force_flush succeeds");
 
@@ -455,18 +509,23 @@ mod tests {
         }
     }
 
-    // Given: registry={"primary"} の emitter と、shape-valid だが registry 外
-    //        の profile ("tenant-000001") を持つ RequestCompleted。
+    // Given: registry profiles={"primary"} / models={"kimi-k3"} の emitter と、
+    //        profile が registry 外 ("tenant-000001") かつ model が member
+    //        ("kimi-k3") の RequestCompleted。
     // When: emit し force_flush する。
-    // Then: measurement は 1 件記録され、evorch.profile.name 属性のみ除外され、
-    //       他の属性 (operation / provider) は維持される。
+    // Then: measurement は 1 件記録され、evorch.profile.name 属性のみ除外
+    //       され、gen_ai.request.model は member 値のまま保持される。
     #[test]
     fn strips_profile_attribute_when_not_in_registry() {
         let (provider, exporter) = build_in_memory_meter_provider();
-        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
-            .expect("registry within limit");
+        let emitter = OtelMetricsEmitter::new(
+            &provider,
+            vec!["primary".to_owned()],
+            vec!["kimi-k3".to_owned()],
+        )
+        .expect("registries within limit");
 
-        emitter.emit(&completed_event("tenant-000001"));
+        emitter.emit(&completed_event("kimi-k3", "tenant-000001"));
         provider.force_flush().expect("force_flush succeeds");
 
         let finished = exporter.get_finished_metrics().expect("finished metrics");
@@ -489,25 +548,114 @@ mod tests {
                 .attributes()
                 .any(|kv| kv.key.as_str() == "gen_ai.provider.name")
         );
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "kimi-k3"
+        }));
+    }
+
+    // Given: registry member の model ("kimi-k3") を持つ RequestCompleted。
+    // When: emit し force_flush する。
+    // Then: model 値はそのまま記録される。
+    #[test]
+    fn records_known_model_as_is() {
+        let (provider, exporter) = build_in_memory_meter_provider();
+        let emitter = OtelMetricsEmitter::new(
+            &provider,
+            vec!["primary".to_owned()],
+            vec!["kimi-k3".to_owned()],
+        )
+        .expect("registries within limit");
+
+        emitter.emit(&completed_event("kimi-k3", "primary"));
+        provider.force_flush().expect("force_flush succeeds");
+
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics = flattened_metrics(&finished);
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metrics[0].data() else {
+            panic!("f64 histogram expected: {:?}", metrics[0].data());
+        };
+        let point = histogram.data_points().next().expect("data point");
+        assert!(point.attributes().any(|kv| {
+            kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "kimi-k3"
+        }));
+    }
+
+    // Given: registry models={"kimi-k3"} の emitter と、shape-valid だが
+    //        registry 外の model ("tenant-model-001") を持つ RequestCompleted。
+    // When: emit し force_flush する。
+    // Then: model 値は "other" へ正規化され (属性は残る)、measurement と
+    //       他の属性は保持される。
+    #[test]
+    fn normalizes_unknown_model_to_other() {
+        let (provider, exporter) = build_in_memory_meter_provider();
+        let emitter = OtelMetricsEmitter::new(
+            &provider,
+            vec!["primary".to_owned()],
+            vec!["kimi-k3".to_owned()],
+        )
+        .expect("registries within limit");
+
+        emitter.emit(&completed_event("tenant-model-001", "primary"));
+        provider.force_flush().expect("force_flush succeeds");
+
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics = flattened_metrics(&finished);
+        assert_eq!(metrics.len(), 1, "measurement must still be recorded");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metrics[0].data() else {
+            panic!("f64 histogram expected: {:?}", metrics[0].data());
+        };
+        let points: Vec<_> = histogram.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].sum(), 0.5);
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "other"
+        }));
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "evorch.profile.name" && kv.value.to_string() == "primary"
+        }));
     }
 
     // Given: 上限 ([`MAX_PROFILE_NAMES`] = 64) を超える 65 個の profile 名。
     // When: OtelMetricsEmitter::new で初期化する。
-    // Then: ProfileRegistryError を返す。
+    // Then: RegistryError { registry: "profiles" } を返す。
     #[test]
     fn rejects_registry_larger_than_max_profile_names() {
         let (provider, _exporter) = build_in_memory_meter_provider();
         let profiles: Vec<String> = (0..65).map(|index| format!("profile-{index}")).collect();
 
-        let result = OtelMetricsEmitter::new(&provider, profiles);
+        let result = OtelMetricsEmitter::new(&provider, profiles, vec!["kimi-k3".to_owned()]);
 
         match result {
             Ok(_) => panic!("registry larger than {MAX_PROFILE_NAMES} must be rejected"),
             Err(error) => assert_eq!(
                 error,
-                ProfileRegistryError {
+                RegistryError {
+                    registry: "profiles",
                     requested: 65,
                     max: MAX_PROFILE_NAMES
+                }
+            ),
+        }
+    }
+
+    // Given: 上限 ([`MAX_MODEL_NAMES`] = 64) を超える 65 個の model 名。
+    // When: OtelMetricsEmitter::new で初期化する。
+    // Then: RegistryError { registry: "models" } を返す。
+    #[test]
+    fn rejects_registry_larger_than_max_model_names() {
+        let (provider, _exporter) = build_in_memory_meter_provider();
+        let models: Vec<String> = (0..65).map(|index| format!("model-{index}")).collect();
+
+        let result = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()], models);
+
+        match result {
+            Ok(_) => panic!("registry larger than {MAX_MODEL_NAMES} must be rejected"),
+            Err(error) => assert_eq!(
+                error,
+                RegistryError {
+                    registry: "models",
+                    requested: 65,
+                    max: MAX_MODEL_NAMES
                 }
             ),
         }

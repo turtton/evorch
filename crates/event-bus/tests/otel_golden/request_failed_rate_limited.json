@@ -26,6 +26,7 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "anthropic"},
+        {"key": "gen_ai.request.model", "value": "claude-contract"},
         {"key": "error.type", "value": "rate_limited"}
       ]
     }

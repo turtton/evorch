@@ -7,8 +7,8 @@
         "kind": "Usage",
         "payload": {
           "provider": "openai",
-          "model": "gpt-contract",
-          "input_tokens": 7,
+          "model": "has space",
+          "input_tokens": 5,
           "output_tokens": 3,
           "cache_read_tokens": 0,
           "cache_write_tokens": 0
@@ -20,11 +20,10 @@
     {
       "name": "gen_ai.client.token.usage",
       "unit": "{token}",
-      "value": {"type": "u64", "value": 7},
+      "value": {"type": "u64", "value": 5},
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "openai"},
-        {"key": "gen_ai.request.model", "value": "gpt-contract"},
         {"key": "gen_ai.token.type", "value": "input"}
       ]
     },
@@ -35,7 +34,6 @@
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
         {"key": "gen_ai.provider.name", "value": "openai"},
-        {"key": "gen_ai.request.model", "value": "gpt-contract"},
         {"key": "gen_ai.token.type", "value": "output"}
       ]
     }

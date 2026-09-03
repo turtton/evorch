@@ -182,8 +182,12 @@ fn otel_exporter_flushes_to_in_memory_and_otlp_http_receiver() {
         .with_reader(PeriodicReader::builder(in_memory.clone()).build())
         .with_reader(otlp_reader)
         .build();
-    let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
-        .expect("build emitter with bounded profile registry");
+    let emitter = OtelMetricsEmitter::new(
+        &provider,
+        vec!["primary".to_owned()],
+        vec!["kimi-k3".to_owned()],
+    )
+    .expect("build emitter with bounded registries");
 
     emitter.emit(&usage_event());
     emitter.emit(&completed_event());
@@ -234,6 +238,9 @@ fn otel_exporter_flushes_to_in_memory_and_otlp_http_receiver() {
     assert_eq!(duration_points[0].sum(), 0.5);
     assert!(duration_points[0].attributes().any(|kv| {
         kv.key.as_str() == "evorch.profile.name" && kv.value.to_string() == "primary"
+    }));
+    assert!(duration_points[0].attributes().any(|kv| {
+        kv.key.as_str() == "gen_ai.request.model" && kv.value.to_string() == "kimi-k3"
     }));
 
     let ttft = metrics

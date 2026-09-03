@@ -29,7 +29,8 @@
       "value": {"type": "f64", "value": 0.7},
       "attrs": [
         {"key": "gen_ai.operation.name", "value": "chat"},
-        {"key": "gen_ai.provider.name", "value": "openai"}
+        {"key": "gen_ai.provider.name", "value": "openai"},
+        {"key": "gen_ai.request.model", "value": "gpt-contract"}
       ]
     }
   ]

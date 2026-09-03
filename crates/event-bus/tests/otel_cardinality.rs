@@ -22,11 +22,12 @@ fn measurement_with(key: &str, value: &str) -> MetricMeasurement {
     }
 }
 
-// Given: ID 形状キー 7 種と whitelist 外キー (gen_ai.request.model) を注入した
-//        measurement。
+// Given: ID 形状キー 7 種と whitelist 外キー (gen_ai.response.model) を注入
+//        した measurement。
 // When: validate_metric_attributes で検査する。
 // Then: ID 形状キーは IdentifierLikeAttribute、whitelist 外キーは
-//       UnknownAttributeKey で拒否される。
+//       UnknownAttributeKey で拒否される。gen_ai.request.model は
+//       whitelist 8 キー目として許可されているため拒否リストに含めない。
 #[test]
 fn identifier_like_and_unknown_keys_are_rejected() {
     let cases = [
@@ -37,7 +38,7 @@ fn identifier_like_and_unknown_keys_are_rejected() {
         ("call_id", "IdentifierLike"),
         ("message_id", "IdentifierLike"),
         ("foo.id", "IdentifierLike"),
-        ("gen_ai.request.model", "Unknown"),
+        ("gen_ai.response.model", "Unknown"),
     ];
 
     for (key, expected) in cases {
@@ -62,13 +63,44 @@ fn identifier_like_and_unknown_keys_are_rejected() {
     }
 }
 
+// Given: whitelist 8 キーとそれぞれの domain 内値 (model の "other" は
+//        正規化済み値として常に許可される)。
+// When: validate_metric_attributes で検査する。
+// Then: いずれも通過する。
+#[test]
+fn allowed_whitelist_keys_are_accepted() {
+    let cases = [
+        ("gen_ai.operation.name", "chat"),
+        ("gen_ai.provider.name", "anthropic"),
+        // "other" は emitter が非 member model を正規化した結果の値であり、
+        // shape ポリシーで常に許可される。
+        ("gen_ai.request.model", "other"),
+        ("gen_ai.token.type", "input"),
+        ("error.type", "http"),
+        ("evorch.profile.name", "primary"),
+        ("evorch.delegation.depth", "1"),
+        ("evorch.delegation.role", "worker"),
+    ];
+
+    for (key, value) in cases {
+        let measurement = measurement_with(key, value);
+        assert_eq!(
+            validate_metric_attributes(&measurement),
+            Ok(()),
+            "key={key} value={value}"
+        );
+    }
+}
+
 // Given: 閉集合 domain 外の値 (token.type="reasoning" /
-//        operation.name="embeddings" / provider.name="custom-proxy") と
-//        shape ポリシー不適合の evorch 拡張値 (profile / depth / role)。
+//        operation.name="embeddings" / provider.name="custom-proxy")、
+//        shape ポリシー不適合の evorch 拡張値 (profile / depth / role)、
+//        および shape ポリシー不適合の model 値。
 // When: validate_metric_attributes で検査する。
 // Then: InvalidAttributeValue で拒否される。
 #[test]
 fn out_of_domain_values_are_rejected() {
+    let too_long_model = "m".repeat(129);
     let cases = [
         ("gen_ai.token.type", "reasoning"),
         ("gen_ai.operation.name", "embeddings"),
@@ -80,6 +112,9 @@ fn out_of_domain_values_are_rejected() {
         ("evorch.delegation.depth", "01"),
         ("evorch.delegation.depth", "abc"),
         ("evorch.delegation.role", "super-admin"),
+        ("gen_ai.request.model", "has space"),
+        ("gen_ai.request.model", too_long_model.as_str()),
+        ("gen_ai.request.model", "モデル"),
     ];
 
     for (key, value) in cases {

@@ -17,21 +17,25 @@
 //!
 //! | source event | metric name | instrument / unit | attributes (順序固定) |
 //! |---|---|---|---|
-//! | `UsageEvent::Usage` | `gen_ai.client.token.usage` | u64 histogram / `{token}` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.token.type` |
-//! | `ProviderEvent::RequestCompleted` | `gen_ai.client.operation.duration` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, (`evorch.profile.name`) |
-//! | `ProviderEvent::RequestFailed` | `gen_ai.client.operation.duration` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `error.type`, (`evorch.profile.name`) |
-//! | `ProviderEvent::FirstTokenObserved` | `evorch.client.time_to_first_token` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, (`evorch.profile.name`) |
+//! | `UsageEvent::Usage` | `gen_ai.client.token.usage` | u64 histogram / `{token}` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` |
+//! | `ProviderEvent::RequestCompleted` | `gen_ai.client.operation.duration` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, (`evorch.profile.name`) |
+//! | `ProviderEvent::RequestFailed` | `gen_ai.client.operation.duration` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `error.type`, (`evorch.profile.name`) |
+//! | `ProviderEvent::FirstTokenObserved` | `evorch.client.time_to_first_token` | f64 histogram / `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, (`evorch.profile.name`) |
 //!
 //! 括弧付き属性は条件付き: `profile` が `Some` かつ shape ポリシー
-//! ([`is_profile_name_valid`]: 非空・64 文字以下・小文字 ASCII alnum と
-//! `-_.`・先頭 alnum) に適合するとき、map_event は属性を付与する (不適合値
-//! は measurement を保持したまま属性のみ省略)。さらに exporter 層
-//! (otel-exporter feature) は、初期化時に渡された profile registry の非
-//! member である属性のみ emit 時に除外する。つまり OTLP label への profile
-//! 属性の emit 条件は「map 層 shape 適合 ∧ emitter registry member」で
-//! ある。attribute value は [`validate_metric_attributes`] の domain 検査
-//! (閉集合 / shape ポリシー) と exporter registry による数的有界化で保護
-//! される。
+//! ([`is_profile_name_valid`]) に適合するとき、map_event は属性を付与する
+//! (不適合値は measurement を保持したまま属性のみ省略)。`gen_ai.request.model`
+//! も同様に shape ポリシー ([`is_model_name_valid`]) が適合するときのみ
+//! 付与される。さらに exporter 層 (otel-exporter feature) は、初期化時に
+//! 渡された registry の非 member である属性のみ emit 時に除外 /
+//! 正規化する: profile は属性を除外し、model は値を `other` へ正規化
+//! する (model 次元は metrics の必須次元のため属性自体は残す)。つまり
+//! OTLP label への profile 属性の emit 条件は「map 層 shape 適合 ∧
+//! emitter registry member」、model 属性は「map 層 shape 適合」で必ず
+//! 存在し、その値は registry member 値または `other` に有界化される。
+//! attribute value は [`validate_metric_attributes`] の domain 検査
+//! (閉集合 / shape ポリシー) と exporter registry による数的有界化で
+//! 保護される。
 //!
 //! # 非写像 event と理由
 //!
@@ -44,9 +48,6 @@
 //!
 //! # 意図的省略
 //!
-//! - `gen_ai.request.model`: OpenAI 互換 endpoint の model は任意文字列で
-//!   低カーディナリティ保証不可のため、v1.37.0 の Conditionally Required
-//!   を省略する。
 //! - `gen_ai.system`: v1.37.0 で deprecated のため `gen_ai.provider.name` を採用する。
 //! - `server.address` / `server.port`: provider event に存在しないため。
 //! - `finish_reason`: semconv metric 属性に存在しないため
@@ -60,6 +61,17 @@
 //! - `evorch.client.time_to_first_token`: semconv v1.37.0 には server 側の
 //!   `gen_ai.server.time_to_first_token` しか無く、client 観測は evorch.*
 //!   拡張で表現する。
+//!
+//! # `gen_ai.request.model` の管理方針
+//!
+//! model 名は metrics の必須次元であり観測から落とせないため、whitelist に
+//! 含める。カーディナリティの責務者は provider profile config 宣言集合
+//! (emitter 初期化時の `known_models` registry、上限
+//! [`super::MAX_MODEL_NAMES`]) であり、非 member の model は exporter が
+//! 固定値 `other` へ正規化する (属性自体は残す)。本層 / validator は
+//! 正規化防壁としてのみ動作する: shape ポリシー
+//! ([`is_model_name_valid`]: 非空・128 文字以下・printable ASCII) 不適合の
+//! model 文字列は map 層で属性省略、validator で拒否される。
 //!
 //! # 非ゴール
 //!
@@ -92,9 +104,10 @@ pub const SECONDS_UNIT: &str = "s";
 /// このリスト外のキーは [`validate_metric_attributes`] が拒否する。ID 形状
 /// キー (`.id` 終端・`*_id` 系) は whitelist に含めない方針であり、その
 /// 不変条件は統合テスト (tests/otel_cardinality.rs) で検査する。
-pub const ATTRIBUTE_WHITELIST: [&str; 7] = [
+pub const ATTRIBUTE_WHITELIST: [&str; 8] = [
     "gen_ai.operation.name",
     "gen_ai.provider.name",
+    "gen_ai.request.model",
     "gen_ai.token.type",
     "error.type",
     "evorch.profile.name",
@@ -130,6 +143,13 @@ const ATTR_ERROR_TYPE: &str = "error.type";
 const ATTR_PROFILE_NAME: &str = "evorch.profile.name";
 const ATTR_DELEGATION_DEPTH: &str = "evorch.delegation.depth";
 const ATTR_DELEGATION_ROLE: &str = "evorch.delegation.role";
+
+/// `gen_ai.request.model` 属性キー (whitelist 8 キー目)。
+///
+/// 値の数的有界性は otel-exporter feature の emitter 初期化時
+/// `known_models` registry (上限 [`super::MAX_MODEL_NAMES`]) が担い、非
+/// member は `other` へ正規化される。本層 / validator は shape 防壁のみ。
+pub const ATTR_REQUEST_MODEL: &str = "gen_ai.request.model";
 
 /// metric attribute の key-value 対。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +263,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         EventKind::Usage(usage) => match usage {
             UsageEvent::Usage {
                 provider,
+                model,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
@@ -261,15 +282,19 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 token_kinds
                     .into_iter()
                     .map(|(token_type, value)| {
+                        let mut attrs = vec![
+                            MetricAttribute::new(ATTR_OPERATION_NAME, "chat"),
+                            MetricAttribute::new(ATTR_PROVIDER_NAME, provider),
+                        ];
+                        if is_model_name_valid(model) {
+                            attrs.push(MetricAttribute::new(ATTR_REQUEST_MODEL, model));
+                        }
+                        attrs.push(MetricAttribute::new(ATTR_TOKEN_TYPE, token_type));
                         MetricMeasurement::new(
                             TOKEN_USAGE_METRIC,
                             TOKEN_UNIT,
                             MetricValue::U64(value),
-                            vec![
-                                MetricAttribute::new(ATTR_OPERATION_NAME, "chat"),
-                                MetricAttribute::new(ATTR_PROVIDER_NAME, provider),
-                                MetricAttribute::new(ATTR_TOKEN_TYPE, token_type),
-                            ],
+                            attrs,
                         )
                     })
                     .collect()
@@ -279,6 +304,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         EventKind::Provider(provider) => match provider {
             ProviderEvent::RequestCompleted {
                 provider,
+                model,
                 profile,
                 duration_ms,
                 ..
@@ -286,10 +312,11 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 OPERATION_DURATION_METRIC,
                 SECONDS_UNIT,
                 MetricValue::F64(*duration_ms as f64 / 1000.0),
-                operation_attrs(provider, profile.as_deref(), None),
+                operation_attrs(provider, model, profile.as_deref(), None),
             )],
             ProviderEvent::RequestFailed {
                 provider,
+                model,
                 profile,
                 duration_ms,
                 failure,
@@ -298,10 +325,16 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 OPERATION_DURATION_METRIC,
                 SECONDS_UNIT,
                 MetricValue::F64(*duration_ms as f64 / 1000.0),
-                operation_attrs(provider, profile.as_deref(), Some(map_failure(failure))),
+                operation_attrs(
+                    provider,
+                    model,
+                    profile.as_deref(),
+                    Some(map_failure(failure)),
+                ),
             )],
             ProviderEvent::FirstTokenObserved {
                 provider,
+                model,
                 profile,
                 ttft_ms,
                 ..
@@ -309,7 +342,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 TIME_TO_FIRST_TOKEN_METRIC,
                 SECONDS_UNIT,
                 MetricValue::F64(*ttft_ms as f64 / 1000.0),
-                operation_attrs(provider, profile.as_deref(), None),
+                operation_attrs(provider, model, profile.as_deref(), None),
             )],
             ProviderEvent::RequestStarted { .. }
             | ProviderEvent::ProviderFallback { .. }
@@ -357,6 +390,9 @@ pub fn validate_metric_attributes(
             Some(AttributeDomain::DelegationDepth) => {
                 (!is_delegation_depth_valid(&attr.value)).then(|| attr.value.clone())
             }
+            Some(AttributeDomain::RequestModel) => {
+                (!is_model_name_valid(&attr.value)).then(|| attr.value.clone())
+            }
             None => None,
         };
         if let Some(value) = violation {
@@ -372,12 +408,14 @@ pub fn validate_metric_attributes(
 /// duration / TTFT 系 measurement 共通の属性列を作る。
 ///
 /// 順序は semconv 定義キー (`gen_ai.operation.name`, `gen_ai.provider.name`,
-/// `error.type`) の後に evorch 拡張 (`evorch.profile.name`) を置く。profile
-/// は [`is_profile_name_valid`] の shape ポリシーに適合するときのみ付与し、
-/// 不適合値は measurement を保持したまま属性のみ省略する (二重防御の 1 層
-/// 目: validate 側でも同一ポリシーで拒否する)。
+/// `gen_ai.request.model`, `error.type`) の後に evorch 拡張
+/// (`evorch.profile.name`) を置く。model は [`is_model_name_valid`] の
+/// shape ポリシーに適合するときのみ付与し、不適合値は measurement を
+/// 保持したまま属性のみ省略する。profile は [`is_profile_name_valid`] の
+/// shape ポリシーに適合するときのみ付与する。
 fn operation_attrs(
     provider: &str,
+    model: &str,
     profile: Option<&str>,
     error_type: Option<&'static str>,
 ) -> Vec<MetricAttribute> {
@@ -385,6 +423,9 @@ fn operation_attrs(
         MetricAttribute::new(ATTR_OPERATION_NAME, "chat"),
         MetricAttribute::new(ATTR_PROVIDER_NAME, normalize_provider(provider)),
     ];
+    if is_model_name_valid(model) {
+        attrs.push(MetricAttribute::new(ATTR_REQUEST_MODEL, model));
+    }
     if let Some(error_type) = error_type {
         attrs.push(MetricAttribute::new(ATTR_ERROR_TYPE, error_type));
     }
@@ -432,14 +473,21 @@ enum AttributeDomain {
     ProfileName,
     /// `0`..=`99` の decimal 文字列 (leading zero なし) のみ許容。
     DelegationDepth,
+    /// model 名の shape ポリシー ([`is_model_name_valid`]) 適合のみ許容。
+    ///
+    /// `"other"` (emitter が非 member model を正規化した結果の値) も shape
+    /// 上常に通過する。membership は emitter 側責務 (profile と同型)。
+    RequestModel,
 }
 
 /// 属性キーに応じた値 domain を返す。
 ///
 /// whitelisted キーはすべて何らかの domain を持つ
-/// (`gen_ai.*` / `error.type` / `evorch.delegation.role` は閉集合、
-/// `evorch.profile.name` / `evorch.delegation.depth` は shape ポリシー)。
-/// whitelist 外キーは `None` (whitelist 検査が先に拒否する)。
+/// (`gen_ai.operation.name` / `gen_ai.token.type` / `gen_ai.provider.name` /
+/// `error.type` / `evorch.delegation.role` は閉集合、
+/// `evorch.profile.name` / `evorch.delegation.depth` /
+/// `gen_ai.request.model` は shape ポリシー)。whitelist 外キーは `None`
+/// (whitelist 検査が先に拒否する)。
 fn value_domain(key: &str) -> Option<AttributeDomain> {
     match key {
         ATTR_OPERATION_NAME => Some(AttributeDomain::Closed(&OPERATION_NAME_DOMAIN)),
@@ -449,6 +497,7 @@ fn value_domain(key: &str) -> Option<AttributeDomain> {
         ATTR_DELEGATION_ROLE => Some(AttributeDomain::Closed(&DELEGATION_ROLE_DOMAIN)),
         ATTR_PROFILE_NAME => Some(AttributeDomain::ProfileName),
         ATTR_DELEGATION_DEPTH => Some(AttributeDomain::DelegationDepth),
+        ATTR_REQUEST_MODEL => Some(AttributeDomain::RequestModel),
         _ => None,
     }
 }
@@ -481,6 +530,19 @@ fn is_delegation_depth_valid(depth: &str) -> bool {
             && bytes[0].is_ascii_digit()
             && bytes[0] != b'0'
             && bytes.iter().all(u8::is_ascii_digit))
+}
+
+/// `gen_ai.request.model` 値の shape ポリシー。
+///
+/// 非空・128 文字以下・全文字が printable ASCII (`0x21..=0x7E`、空白なし)。
+/// profile より意図的に緩い: model id は digest や区切り文字 (`/`、`:` など)
+/// を含み得るため。予約値 `"other"` もこの shape で常に通過する (emitter が
+/// 非 member model を正規化した結果の値として、domain 上明示的に許可)。
+/// このポリシーで保証できるのは任意文字列性の排除と 1 値あたりの最大長
+/// であり、値の種類数の有界性は emitter 初期化時の `known_models`
+/// registry が担う (profile と同型の責務境界)。
+fn is_model_name_valid(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.chars().all(|c| c.is_ascii_graphic())
 }
 
 /// ID 形状キー (`.id` 終端・`*_id` 系) の判定。
@@ -581,11 +643,13 @@ mod tests {
     fn token_summary(m: &MetricMeasurement) -> (&str, u64) {
         assert_eq!(m.name, TOKEN_USAGE_METRIC);
         assert_eq!(m.unit, TOKEN_UNIT);
-        assert_eq!(m.attrs.len(), 3);
+        assert_eq!(m.attrs.len(), 4);
         assert_eq!(m.attrs[0].key, "gen_ai.operation.name");
         assert_eq!(m.attrs[0].value, "chat");
+        assert_eq!(m.attrs[2].key, "gen_ai.request.model");
+        assert_eq!(m.attrs[2].value, "kimi-k3");
         match m.value {
-            MetricValue::U64(value) => (m.attrs[2].value.as_str(), value),
+            MetricValue::U64(value) => (m.attrs[3].value.as_str(), value),
             MetricValue::F64(_) => panic!("u64 histogram expected"),
         }
     }
@@ -626,7 +690,7 @@ mod tests {
     // Given: 全 token 数が正の Usage イベント。
     // When: map_event で写像する。
     // Then: input/output/cache_read/cache_write の 4 measurement がこの順で得られ、
-    //       各 measurement は u64 値と 3 属性 (operation/provider/token.type) を持つ。
+    //       各 measurement は u64 値と 4 属性 (operation/provider/request.model/token.type) を持つ。
     #[test]
     fn usage_maps_four_token_types_when_all_counts_are_positive() {
         let measurements = map_event(&usage_event("anthropic", 10, 20, 30, 40));
@@ -694,6 +758,10 @@ mod tests {
                     value: "openai".to_owned()
                 },
                 MetricAttribute {
+                    key: "gen_ai.request.model".to_owned(),
+                    value: "kimi-k3".to_owned()
+                },
+                MetricAttribute {
                     key: "evorch.profile.name".to_owned(),
                     value: "primary".to_owned()
                 },
@@ -705,7 +773,7 @@ mod tests {
         assert_eq!(without_profile.len(), 1);
         let measurement = &without_profile[0];
         assert_eq!(measurement.value, MetricValue::F64(1.25));
-        assert_eq!(measurement.attrs.len(), 2);
+        assert_eq!(measurement.attrs.len(), 3);
     }
 
     // Given: Http{503} 失敗 (profile Some) と RateLimited 失敗 (profile None)。
@@ -738,6 +806,10 @@ mod tests {
                     value: "openai-compatible".to_owned()
                 },
                 MetricAttribute {
+                    key: "gen_ai.request.model".to_owned(),
+                    value: "kimi-k3".to_owned()
+                },
+                MetricAttribute {
                     key: "error.type".to_owned(),
                     value: "http".to_owned()
                 },
@@ -757,14 +829,15 @@ mod tests {
 
         assert_eq!(rate_limited.len(), 1);
         let measurement = &rate_limited[0];
-        assert_eq!(measurement.attrs.len(), 3);
-        assert_eq!(measurement.attrs[2].key, "error.type");
-        assert_eq!(measurement.attrs[2].value, "rate_limited");
+        assert_eq!(measurement.attrs.len(), 4);
+        assert_eq!(measurement.attrs[3].key, "error.type");
+        assert_eq!(measurement.attrs[3].value, "rate_limited");
     }
 
     // Given: TTFT 1500ms の FirstTokenObserved。
     // When: map_event で写像する。
-    // Then: evorch.client.time_to_first_token に 1.5 秒が f64 で記録される。
+    // Then: evorch.client.time_to_first_token に 1.5 秒が f64 で記録され、
+    //       request.model は provider の直後に配置される。
     #[test]
     fn first_token_observed_maps_ttft_seconds() {
         let measurements = map_event(&ttft_event("anthropic", Some("primary"), 1500));
@@ -774,9 +847,11 @@ mod tests {
         assert_eq!(measurement.name, TIME_TO_FIRST_TOKEN_METRIC);
         assert_eq!(measurement.unit, SECONDS_UNIT);
         assert_eq!(measurement.value, MetricValue::F64(1.5));
-        assert_eq!(measurement.attrs.len(), 3);
-        assert_eq!(measurement.attrs[2].key, "evorch.profile.name");
-        assert_eq!(measurement.attrs[2].value, "primary");
+        assert_eq!(measurement.attrs.len(), 4);
+        assert_eq!(measurement.attrs[2].key, "gen_ai.request.model");
+        assert_eq!(measurement.attrs[2].value, "kimi-k3");
+        assert_eq!(measurement.attrs[3].key, "evorch.profile.name");
+        assert_eq!(measurement.attrs[3].value, "primary");
     }
 
     // Given: 写像対象外の代表 variant (RequestStarted / CacheStats /
@@ -848,17 +923,17 @@ mod tests {
         }
     }
 
-    // Given: whitelist 外の属性キー (gen_ai.request.model) を含む measurement。
+    // Given: whitelist 外の属性キー (gen_ai.response.model) を含む measurement。
     // When: validate_metric_attributes で検査する。
     // Then: UnknownAttributeKey で拒否される。
     #[test]
     fn validate_rejects_keys_outside_the_whitelist() {
-        let measurement = measurement_with_key("gen_ai.request.model");
+        let measurement = measurement_with_key("gen_ai.response.model");
 
         assert_eq!(
             validate_metric_attributes(&measurement),
             Err(CardinalityViolation::UnknownAttributeKey {
-                key: "gen_ai.request.model".to_owned()
+                key: "gen_ai.response.model".to_owned()
             })
         );
     }
@@ -1059,6 +1134,100 @@ mod tests {
                 validate_metric_attributes(&measurement),
                 Ok(()),
                 "role={role:?}"
+            );
+        }
+    }
+
+    fn completed_event_with_model(model: &str) -> Event {
+        Event::new(ProviderEvent::RequestCompleted {
+            request_id: "req-1".to_owned(),
+            provider: "openai".to_owned(),
+            profile: Some("primary".to_owned()),
+            protocol: "openai-chat-completions".to_owned(),
+            model: model.to_owned(),
+            streaming: false,
+            duration_ms: 500,
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".to_owned(),
+        })
+    }
+
+    // Given: shape-valid な model ("kimi-k3") と shape-invalid な model
+    //        ("has space") を持つ RequestCompleted。
+    // When: map_event で写像する。
+    // Then: shape-valid な model は gen_ai.request.model として emit され、
+    //       shape-invalid な model は measurement を保持したまま属性のみ省略
+    //       される。
+    #[test]
+    fn model_attribute_requirements() {
+        let valid = map_event(&completed_event_with_model("kimi-k3"));
+        assert_eq!(valid.len(), 1);
+        assert!(
+            valid[0]
+                .attrs
+                .iter()
+                .any(|attr| attr.key == "gen_ai.request.model" && attr.value == "kimi-k3"),
+            "shape-valid model must be emitted"
+        );
+
+        let invalid = map_event(&completed_event_with_model("has space"));
+        assert_eq!(invalid.len(), 1, "measurement must be kept");
+        assert!(
+            !invalid[0]
+                .attrs
+                .iter()
+                .any(|attr| attr.key == "gen_ai.request.model"),
+            "shape-invalid model attribute must be omitted"
+        );
+        assert!(
+            invalid[0]
+                .attrs
+                .iter()
+                .any(|attr| attr.key == "gen_ai.provider.name"),
+            "other attributes must be kept"
+        );
+    }
+
+    // Given: domain 内の model 値 ("other" / digest と区切り文字を含む値 /
+    //        ちょうど 128 文字) を注入した measurement。
+    // When: validate_metric_attributes で検査する。
+    // Then: いずれも通過する (validator は shape gate のみで membership は
+    //       emitter 側責務)。
+    #[test]
+    fn validate_accepts_other_and_valid_models() {
+        let exact_128 = "m".repeat(128);
+        for model in ["other", "gpt-4o:2024-08-06", exact_128.as_str()] {
+            let mut measurement = measurement_with_key("gen_ai.request.model");
+            measurement.attrs[0].value = model.to_owned();
+
+            assert_eq!(
+                validate_metric_attributes(&measurement),
+                Ok(()),
+                "model={model:?}"
+            );
+        }
+    }
+
+    // Given: shape ポリシー不適合の model 値 ("with space" / 129 文字 /
+    //        非 ASCII / 空) を注入した measurement。
+    // When: validate_metric_attributes で検査する。
+    // Then: InvalidAttributeValue で拒否される。
+    #[test]
+    fn validate_rejects_shape_invalid_models() {
+        let too_long = "m".repeat(129);
+        for model in ["with space", too_long.as_str(), "モデル", ""] {
+            let mut measurement = measurement_with_key("gen_ai.request.model");
+            measurement.attrs[0].value = model.to_owned();
+
+            assert!(
+                matches!(
+                    validate_metric_attributes(&measurement),
+                    Err(CardinalityViolation::InvalidAttributeValue { .. })
+                ),
+                "model={model:?}"
             );
         }
     }
