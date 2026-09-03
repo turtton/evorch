@@ -152,7 +152,9 @@ impl TranscriptModel {
             | event_bus::EventKind::Provider(_)
             | event_bus::EventKind::Fault(_)
             // エージェント間メッセージは transcript 表示の対象外（明示 no-op）。
-            | event_bus::EventKind::AgentMessage(_) => {}
+            | event_bus::EventKind::AgentMessage(_)
+            // コンテキスト圧縮は transcript 表示の対象外（明示 no-op）。
+            | event_bus::EventKind::Compaction(_) => {}
         }
     }
 
@@ -215,8 +217,8 @@ impl TranscriptModel {
 mod tests {
     use super::*;
     use event_bus::{
-        AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, EventKind,
-        MessageEvent, ToolEvent,
+        AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
+        DeliveryDisposition, EventKind, MessageEvent, ToolEvent,
     };
 
     #[test]
@@ -276,6 +278,31 @@ mod tests {
             },
             disposition: DeliveryDisposition::Aside,
         }));
+        model.apply(&event);
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Message {
+                text: "before".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn compaction_event_is_no_op() {
+        let mut model = TranscriptModel::new();
+        model.push_message("before");
+        let event = Event::new(CompactionEvent::Compacted {
+            run_id: "run-1".into(),
+            reason: CompactionReason::Automatic,
+            threshold: 0.8,
+            context_window_tokens: 200_000,
+            estimated_tokens_before: 180_000,
+            estimated_tokens_after: 60_000,
+            compacted_range_start: 0,
+            compacted_range_end: 42,
+            checkpoint_id: "checkpoint-1".into(),
+            summary: "圧縮要約".into(),
+        });
         model.apply(&event);
         assert_eq!(
             model.entries(),

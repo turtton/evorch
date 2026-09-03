@@ -171,6 +171,9 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         // エージェント間メッセージはセッション射影の対象外（transcript は
         // events を直接読んで復元する）。
         EventKind::AgentMessage(_) => {}
+        // コンテキスト圧縮はトランスクリプト語彙の差し替えを伴うが、
+        // セッション射影 (SessionSnapshot / open_tool_calls) は変更しない。
+        EventKind::Compaction(_) => {}
     }
 }
 
@@ -252,8 +255,9 @@ pub(crate) fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageEr
 mod tests {
     use super::*;
     use event_bus::{
-        AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition,
-        Event, EventMeta, FaultEvent, ProviderEvent, UsageEvent,
+        AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
+        CompactionReason, DeliveryDisposition, Event, EventMeta, FaultEvent, ProviderEvent,
+        UsageEvent,
     };
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -296,5 +300,14 @@ mod tests {
         with_agent_message.push(stored(AgentMessageEvent::Delivered { message: AgentMessage { message_id: "msg-1".into(), sender_run_id: "run-1".into(), recipient_run_id: "run-2".into(), kind: AgentMessageKind::Send, content: "ping".into(), reply_to: None }, disposition: DeliveryDisposition::Steering }, Some("s1")));
         // Then: 射影状態は追加前後で等しい（fold は no-op）
         assert_eq!(fold(&with_agent_message), fold(&base));
+    }
+    #[test] fn projection_ignores_compaction_events() {
+        // Given: Message/Lifecycle/Tool イベントのみで構成したイベント列
+        let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1")), stored(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1"))];
+        // When: 同一列の末尾へ Compaction イベントを追加する
+        let mut with_compaction = base.to_vec();
+        with_compaction.push(stored(CompactionEvent::Compacted { run_id: "run-1".into(), reason: CompactionReason::Automatic, threshold: 0.8, context_window_tokens: 200_000, estimated_tokens_before: 180_000, estimated_tokens_after: 60_000, compacted_range_start: 0, compacted_range_end: 42, checkpoint_id: "checkpoint-1".into(), summary: "s".into() }, Some("s1")));
+        // Then: 射影状態は追加前後で等しい（fold は no-op）
+        assert_eq!(fold(&with_compaction), fold(&base));
     }
 }

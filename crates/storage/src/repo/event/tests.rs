@@ -1,8 +1,8 @@
 use std::time::UNIX_EPOCH;
 
 use event_bus::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, EventMeta,
-    LifecycleEvent, UsageEvent,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
+    DeliveryDisposition, EventMeta, LifecycleEvent, UsageEvent,
 };
 
 use super::*;
@@ -200,4 +200,51 @@ fn kind_name_maps_agent_message_events() {
     // Then: kind 列は "AgentMessage" で、復元されたイベントも同一種別である
     assert_eq!(kind, "AgentMessage");
     assert_eq!(stored[0].event, delivered);
+}
+
+#[test]
+fn kind_name_maps_compaction_events() {
+    // Given: 移行済み DB と Compaction イベント
+    let connection = fixture();
+    let compacted = Event {
+        meta: EventMeta {
+            schema_version: event_bus::SCHEMA_VERSION,
+            monotonic: Duration::from_nanos(1),
+            wall_clock: UNIX_EPOCH + Duration::from_nanos(1),
+        },
+        kind: CompactionEvent::Compacted {
+            run_id: "run-1".into(),
+            reason: CompactionReason::Manual,
+            threshold: 0.8,
+            context_window_tokens: 200_000,
+            estimated_tokens_before: 180_000,
+            estimated_tokens_after: 60_000,
+            compacted_range_start: 0,
+            compacted_range_end: 42,
+            checkpoint_id: "checkpoint-1".into(),
+            summary: "summary".into(),
+        }
+        .into(),
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: イベントを追記して kind 列と復元結果を読む
+    append_event(
+        &connection,
+        Some("s1"),
+        &compacted,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .unwrap();
+    let kind: String = connection
+        .query_row("SELECT kind FROM events ORDER BY id ASC", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: kind 列は "compaction" で、復元されたイベントも同一種別である
+    assert_eq!(kind, "compaction");
+    assert_eq!(stored[0].event, compacted);
 }

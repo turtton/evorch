@@ -79,7 +79,8 @@ fn usage_events(events: &[Event]) -> Vec<&UsageEvent> {
             | EventKind::Tool(_)
             | EventKind::Provider(_)
             | EventKind::Fault(_)
-            | EventKind::AgentMessage(_) => None,
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_) => None,
         })
         .collect()
 }

@@ -1,7 +1,7 @@
 //! イベント型と serde スキーマを定義するモジュールです。
 // allow: SIZE_OK - ワイヤスキーマ全体 (全 EventKind バリアントとその網羅的
 // 往復テスト) を 1 つの表として保持するため分割不可能。生産コード単体では
-// 約338純LOC (+AgentRunStarted + run_id correlation fields)。
+// 約367純LOC (+AgentRunStarted + run_id correlation fields + Compaction)。
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -76,6 +76,8 @@ pub enum EventKind {
     Fault(FaultEvent),
     /// エージェント間メッセージ関連のイベント。
     AgentMessage(AgentMessageEvent),
+    /// コンテキスト圧縮関連のイベント。
+    Compaction(CompactionEvent),
 }
 
 impl From<LifecycleEvent> for EventKind {
@@ -117,6 +119,12 @@ impl From<FaultEvent> for EventKind {
 impl From<AgentMessageEvent> for EventKind {
     fn from(event: AgentMessageEvent) -> Self {
         Self::AgentMessage(event)
+    }
+}
+
+impl From<CompactionEvent> for EventKind {
+    fn from(event: CompactionEvent) -> Self {
+        Self::Compaction(event)
     }
 }
 
@@ -644,6 +652,50 @@ pub enum AgentMessageEvent {
         message: AgentMessage,
         /// 配信時に決定された受信側での扱い。
         disposition: DeliveryDisposition,
+    },
+}
+
+/// コンテキスト圧縮の発火理由です。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReason {
+    /// しきい値超過による自動発火です。
+    Automatic,
+    /// 利用者による明示発火です。
+    Manual,
+    /// エージェント判断による発火です。
+    Agent,
+}
+
+/// コンテキスト圧縮に関するイベントです。
+///
+/// 圧縮はトランスクリプトの語彙を差し替えるため、リプレイ時には
+/// `compacted_range` で示した範囲を `summary` で置き換えて読む。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum CompactionEvent {
+    /// コンテキスト圧縮が完了した。
+    Compacted {
+        /// 圧縮を実行した agent run の ID。
+        run_id: String,
+        /// 圧縮の発火理由。
+        reason: CompactionReason,
+        /// 発火しきい値 (0.0..=1.0 のトークン使用率)。
+        threshold: f64,
+        /// コンテキストウィンドウのトークン数。
+        context_window_tokens: u64,
+        /// 圧縮前の推定トークン数。
+        estimated_tokens_before: u64,
+        /// 圧縮後の推定トークン数。
+        estimated_tokens_after: u64,
+        /// 圧縮対象範囲の開始位置 (包含)。
+        compacted_range_start: usize,
+        /// 圧縮対象範囲の終了位置 (排他)。
+        compacted_range_end: usize,
+        /// 圧縮前状態を復元できる checkpoint の ID。
+        checkpoint_id: String,
+        /// 圧縮で生成された要約。
+        summary: String,
     },
 }
 
@@ -1719,6 +1771,76 @@ mod tests {
                 value["kind"]["payload"]["kind"], "AgentRunStarted",
                 "inner tag mismatch: {label}"
             );
+        }
+    }
+
+    // Given: trigger 理由・しきい値・トークン推計・圧縮範囲・checkpoint を
+    //        持つ Compaction イベント。
+    // When: Event を JSON 文字列へシリアライズして復元する。
+    // Then: 元のイベントと等しく、外側タグ "Compaction" と内側タグ
+    //       "Compacted" が保たれ、schema_version は 1 のままである。
+    #[test]
+    fn compaction_round_trips_with_nested_adjacent_tags() {
+        let event = Event::new(CompactionEvent::Compacted {
+            run_id: "run-1".into(),
+            reason: CompactionReason::Automatic,
+            threshold: 0.8,
+            context_window_tokens: 200_000,
+            estimated_tokens_before: 180_000,
+            estimated_tokens_after: 60_000,
+            compacted_range_start: 0,
+            compacted_range_end: 42,
+            checkpoint_id: "checkpoint-1".into(),
+            summary: "要約済み".into(),
+        });
+
+        assert_eq!(event.meta.schema_version, SCHEMA_VERSION);
+
+        let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+        let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+        assert_eq!(event, restored);
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("JSONを読み取れる");
+        assert_eq!(value["kind"]["kind"], "Compaction", "outer tag mismatch");
+        assert_eq!(
+            value["kind"]["payload"]["kind"], "Compacted",
+            "inner tag mismatch"
+        );
+        assert_eq!(
+            value["kind"]["payload"]["payload"],
+            serde_json::json!({
+                "run_id": "run-1",
+                "reason": "automatic",
+                "threshold": 0.8,
+                "context_window_tokens": 200_000,
+                "estimated_tokens_before": 180_000,
+                "estimated_tokens_after": 60_000,
+                "compacted_range_start": 0,
+                "compacted_range_end": 42,
+                "checkpoint_id": "checkpoint-1",
+                "summary": "要約済み"
+            })
+        );
+    }
+
+    // Given: CompactionReason の全 3 バリアント。
+    // When: それぞれ JSON 文字列へシリアライズして復元する。
+    // Then: いずれも snake_case タグで往復前後で等しい。
+    #[test]
+    fn compaction_reason_round_trips_every_variant_as_snake_case() {
+        let cases = [
+            (CompactionReason::Automatic, "automatic"),
+            (CompactionReason::Manual, "manual"),
+            (CompactionReason::Agent, "agent"),
+        ];
+
+        for (reason, tag) in cases {
+            let json = serde_json::to_string(&reason).expect("serialize CompactionReason");
+            assert_eq!(json, format!("\"{tag}\""), "tag mismatch: {tag}");
+
+            let restored: CompactionReason =
+                serde_json::from_str(&json).expect("deserialize CompactionReason");
+            assert_eq!(reason, restored, "round-trip mismatch: {tag}");
         }
     }
 }

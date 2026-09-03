@@ -3,7 +3,8 @@ use std::fmt;
 use std::time::SystemTime;
 
 use event_bus::{
-    AgentMessageEvent, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+    AgentMessageEvent, CompactionEvent, EventKind, LifecycleEvent, MessageEvent, ProviderEvent,
+    ToolEvent,
 };
 
 use crate::error::{SecretRule, StorageError};
@@ -315,6 +316,18 @@ impl SecretGuard {
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
                 self.check_text("event", "AgentMessage.content", &message.content)
             }
+            // Compaction の summary は会話由来の自由文字列であり、
+            // checkpoint / run の識別子も同様に fail-closed で走査する。
+            EventKind::Compaction(CompactionEvent::Compacted {
+                run_id,
+                checkpoint_id,
+                summary,
+                ..
+            }) => {
+                self.check_text("event", "Compacted.summary", summary)?;
+                self.check_text("event", "Compacted.checkpoint_id", checkpoint_id)?;
+                self.check_text("event", "Compacted.run_id", run_id)
+            }
             EventKind::Lifecycle(_)
             | EventKind::Tool(_)
             | EventKind::Provider(_)
@@ -534,7 +547,7 @@ fn detect_jwt(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::FaultEvent;
+    use event_bus::{CompactionReason, FaultEvent};
 
     const JWT_SHAPED: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
     const KNOWN_VALUE: &str = "evorch-known-credential-fixture-value-0123456789";
@@ -757,6 +770,76 @@ mod tests {
             guard
                 .check_event_kind(&kind)
                 .expect("typed-only variant must pass");
+        }
+    }
+
+    #[test]
+    fn event_check_rejects_secret_in_compaction_fields() {
+        // Given: 既知値を注入した guard と Compaction イベント
+        let guard = SecretGuard::with_known_values([KNOWN_VALUE.to_owned()]);
+        let cases: [(&str, EventKind); 3] = [
+            (
+                "Compacted.summary",
+                CompactionEvent::Compacted {
+                    run_id: "r".into(),
+                    reason: CompactionReason::Automatic,
+                    threshold: 0.8,
+                    context_window_tokens: 100,
+                    estimated_tokens_before: 90,
+                    estimated_tokens_after: 30,
+                    compacted_range_start: 0,
+                    compacted_range_end: 3,
+                    checkpoint_id: "cp".into(),
+                    summary: format!("chat {KNOWN_VALUE}"),
+                }
+                .into(),
+            ),
+            (
+                "Compacted.checkpoint_id",
+                CompactionEvent::Compacted {
+                    run_id: "r".into(),
+                    reason: CompactionReason::Automatic,
+                    threshold: 0.8,
+                    context_window_tokens: 100,
+                    estimated_tokens_before: 90,
+                    estimated_tokens_after: 30,
+                    compacted_range_start: 0,
+                    compacted_range_end: 3,
+                    checkpoint_id: format!("cp {KNOWN_VALUE}"),
+                    summary: "safe".into(),
+                }
+                .into(),
+            ),
+            (
+                "Compacted.run_id",
+                CompactionEvent::Compacted {
+                    run_id: format!("run {KNOWN_VALUE}"),
+                    reason: CompactionReason::Automatic,
+                    threshold: 0.8,
+                    context_window_tokens: 100,
+                    estimated_tokens_before: 90,
+                    estimated_tokens_after: 30,
+                    compacted_range_start: 0,
+                    compacted_range_end: 3,
+                    checkpoint_id: "cp".into(),
+                    summary: "safe".into(),
+                }
+                .into(),
+            ),
+        ];
+
+        // When / Then: 各 field 名付きで拒否される
+        for (field, kind) in cases {
+            let Err(StorageError::SecretDetected {
+                entity,
+                field: actual,
+                ..
+            }) = guard.check_event_kind(&kind)
+            else {
+                panic!("field {field} must be rejected");
+            };
+            assert_eq!(entity, "event");
+            assert_eq!(actual, field);
         }
     }
 
