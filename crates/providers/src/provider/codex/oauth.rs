@@ -1,4 +1,4 @@
-//! codex プロバイダの PKCE (RFC 7636) プリミティブを提供します。
+//! codex プロバイダの OAuth device flow と PKCE プリミティブを提供します。
 
 use std::fmt;
 
@@ -7,6 +7,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 
 use crate::error::ProviderError;
+
+mod device;
+
+pub use device::{
+    AgentCodeBundle, CODEX_CLIENT_ID, CODEX_SCOPE, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL,
+    DeviceAuthClient, PollOptions, UserCodeResponse,
+};
 
 /// PKCE の challenge メソッド。
 pub const PKCE_CHALLENGE_METHOD: &str = "S256";
