@@ -63,6 +63,16 @@ config ロード経路が fail-closed 化され、未知キーと平文 credenti
 - **fallback harness**（crates/routing/tests/fallback_usage_contract.rs）: 敗者 attempt 0 件・勝者 1 件・論理リクエストで exactly-once。.expect(1) で HTTP attempt 数も固定。勝者の profile label/model が usage に乗る（居住再 pin は同一 protocol 前提のアドレス切替）
 - src 差分は doc のみ（挙動変更なし）。routing dev-deps に wiremock/futures-util/tokio rt-multi-thread を追加（すべて workspace 既存管理）
 
+## v0.2 codex subscription provider の実装確定（2026-09-02、PR #60 / issue #59）
+
+codex サブスクリプション provider（provider_type `openai-codex` / api_protocol `openai-codex-responses`）を実装済み。
+
+- **認証**: RFC8628 非互換の codex 固有 3 段階 device flow（usercode 発行 → polling（403 `authorization_pending` のみ retry・interval 文字列秒）→ authorization_code 交換）+ `id_token` JWT exp の 5 分前 window で provider 単位 lock 下の自動 refresh。code_verifier/S256 PKCE は unit test + feasibility 明記済み
+- **credential**: sandbox の keyring-first / 0600 fallback store へ adapter 経由で単一 JSON bundle 永続化。`chatgpt_account_id` は id_token から都度導出。config 平文 token 拒否を維持し、sandbox 子 env 非露出はテストで固定
+- **wire 契約**: originator ヘッダー（`ChatGPT-Account-Id` 併記必須）、body は `store:false` / `stream:true` 強制・`max_output_tokens` 非送出。追随テストで固定
+- **protocol 分離一覧の `openai-codex-responses` は実装済み**。`openai`（API key 経由）とは別 type のまま
+- **未確認事項**（実 API 未接続のため実接続時要検証）: audience 値 / instructions 必須性 / max_output_tokens backend 受理可否 / third-party originator 受理可否 / `response.completed` 内 usage shape（fixture pin）
+
 ## 受け入れ基準
 
 - provider type と profile を TOML で複数定義でき、logical model から解決できること
