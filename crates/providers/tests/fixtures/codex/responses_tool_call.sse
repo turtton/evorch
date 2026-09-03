@@ -1,0 +1,22 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp-2","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call-1","type":"function_call","call_id":"call-1","name":"read_file","arguments":"","status":"in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"call-1","output_index":0,"delta":"{\"path\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"call-1","output_index":0,"delta":"\"Cargo.toml\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"call-1","output_index":0,"arguments":"{\"path\":\"Cargo.toml\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"call-1","type":"function_call","call_id":"call-1","name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-2","status":"completed","usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{}}}}
+
+data: [DONE]
