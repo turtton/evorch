@@ -31,7 +31,7 @@ ADR 0012 で計測の収集・保存方針（OTel Metrics API 語彙、ring buff
    | `gen_ai.provider.name` | - | ✅ `{"anthropic","openai","openai-compatible"}` 既知値＋未知値は固定 `"other"` へ正規化（pass-through 禁止） | ✅ |
    | `gen_ai.token.type` | - | ✅ `{"input","output"}` ＋固定拡張値 `{"cache_read","cache_write"}`（v1.37.0 well-known 外の evorch 拡張） | ✅ |
    | `error.type` | - | ✅ `{rate_limited,http,timeout,invalid_response,transport,server,quota,auth,other}`（`Http{status}` は status を捨てる） | ✅ |
-   | `evorch.profile.name` | ✅ | ✅（profile = config 由来の有界値。guard が形状ポリシー（非空・≤64 文字・小字 ASCII alnum と `-_.`・先頭 alnum）を強制し、map 層では形状不適合の profile は同属性のみ省略（measurement 自体は保持）。数的有界性は per-installation の config profile 集合に依存） | ✅ |
+   | `evorch.profile.name` | ✅ | ✅（profile = 初期化時 bounded registry メンバーのみ emit: `OtelMetricsEmitter::new(provider, known_profiles)` で registry（`MAX_PROFILE_NAMES = 64` 上限、初期化後不変）を固定し、写像層の形状ポリシー（非空・≤64 文字・小字 ASCII alnum と `-_.`・先頭 alnum）適合 ∧ registry メンバーの profile のみ属性に残す。非メンバーは同属性のみ省略（measurement 保持）。registry への注入は config profile 集合から（ADR 0014 配線 slice） | ✅ |
    | `evorch.delegation.depth` | ✅ | whitelist 定義のみ確定。**slice ① では供給 event 不在のため未 emit**。値 domain は `0`..=`99` の decimal 文字列（leading zero なし）に固定 | ✅ |
    | `evorch.delegation.role` | ✅ | 同上。値 domain は閉集合 `{orchestrator, explorer, worker, reviewer}` に固定 | ✅ |
    | session / task / agent_run ID | ✅ | ❌ 不許可（ID 系、高カーディナリティ） | ✅（span 相関軸） |
