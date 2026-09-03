@@ -182,7 +182,8 @@ fn otel_exporter_flushes_to_in_memory_and_otlp_http_receiver() {
         .with_reader(PeriodicReader::builder(in_memory.clone()).build())
         .with_reader(otlp_reader)
         .build();
-    let emitter = OtelMetricsEmitter::new(&provider);
+    let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
+        .expect("build emitter with bounded profile registry");
 
     emitter.emit(&usage_event());
     emitter.emit(&completed_event());

@@ -1,6 +1,6 @@
 // allow: SIZE_OK - in-module smoke テストの配置がタスク要件であり、emitter
 // と provider 構築は同一 feature 生命周期の 1 単位。生産コード単体では
-// 約120純LOC (event.rs の先例に準拠)。
+// 約150純LOC (event.rs の先例に準拠)。
 //! otel-exporter feature で有効化される metrics exporter 層。
 //!
 //! 写像層 ([`super::map_event`]) の出力を OTel histogram instruments へ
@@ -8,7 +8,20 @@
 //! provider 構築関数を提供する。histogram の bucket boundaries は semconv
 //! v1.37.0 (`super::SEMCONV_PIN`) の advisory ExplicitBucketBoundaries に
 //! 従う。
+//!
+//! # profile cardinality 責任分界
+//!
+//! `evorch.profile.name` の値は次の 2 層で有界化される:
+//! - 写像層 / validator: shape ポリシー (小文字 ASCII alnum と `-_.`、
+//!   最大長 64) を強制し、任意文字列性を排除する。ただし shape 制約だけでは
+//!   値の種類数は有界化できない。
+//! - emitter 初期化時の profile registry: `config` 由来の profile 集合を
+//!   [`MAX_PROFILE_NAMES`] (64) 件まで受け取り、emit 時に registry 非
+//!   member の `evorch.profile.name` 属性のみ除外する (measurement 自体は
+//!   保持)。数的有界性はこの registry が単独で担う。ADR 0014 配線時に
+//!   runtime から config profile 集合が注入される想定。
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -19,7 +32,7 @@ use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMete
 use crate::event::Event;
 
 use super::{
-    MetricMeasurement, MetricValue, OPERATION_DURATION_METRIC, SECONDS_UNIT,
+    ATTR_PROFILE_NAME, MetricMeasurement, MetricValue, OPERATION_DURATION_METRIC, SECONDS_UNIT,
     TIME_TO_FIRST_TOKEN_METRIC, TOKEN_UNIT, TOKEN_USAGE_METRIC, map_event,
     validate_metric_attributes,
 };
@@ -42,22 +55,71 @@ const DURATION_BOUNDARIES: [f64; 14] = [
     0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
 ];
 
+/// profile registry に許容される最大個数。
+///
+/// emitter 初期化時のみ消費され、実行中に変化しない (初期化後不変)。
+pub const MAX_PROFILE_NAMES: usize = 64;
+
+/// emitter 初期化時の profile registry 構築エラー。
+///
+/// [`OtelMetricsEmitter::new`] に [`MAX_PROFILE_NAMES`] を超える数の
+/// profile が渡された場合に返る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileRegistryError {
+    /// registry に要求された profile の個数 (重複除去後)。
+    pub requested: usize,
+    /// 許容される最大個数 ([`MAX_PROFILE_NAMES`])。
+    pub max: usize,
+}
+
+impl std::fmt::Display for ProfileRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "profile registry limit exceeded: {} profiles requested (max {})",
+            self.requested, self.max
+        )
+    }
+}
+
+impl std::error::Error for ProfileRegistryError {}
+
 /// イベントを OTel histogram へ記録する emitter。
 ///
 /// [`OtelMetricsEmitter::emit`] は panic しない。cardinality guard 違反や
 /// instrument と値型の不一致は `tracing::warn!` で記録し、該当 measurement
-/// のみ skip する。
+/// のみ skip する。`known_profiles` (profile registry) は初期化時にのみ
+/// 構築され、以後不変である。
 pub struct OtelMetricsEmitter {
     token_usage: Histogram<u64>,
     operation_duration: Histogram<f64>,
     time_to_first_token: Histogram<f64>,
+    known_profiles: HashSet<String>,
 }
 
 impl OtelMetricsEmitter {
-    /// [`SdkMeterProvider`] から meter を取得し、3 histogram を構築する。
-    pub fn new(provider: &SdkMeterProvider) -> Self {
+    /// [`SdkMeterProvider`] から meter を取得し、3 histogram と profile
+    /// registry を構築する。
+    ///
+    /// `known_profiles` は emit 時に `evorch.profile.name` 属性を維持してよい
+    /// profile の集合 (ADR 0014 配線時は config の profile 集合を注入する想定)。
+    ///
+    /// # Errors
+    /// 重複除去後の `known_profiles` が [`MAX_PROFILE_NAMES`] を超える場合、
+    /// [`ProfileRegistryError`] を返す。
+    pub fn new(
+        provider: &SdkMeterProvider,
+        known_profiles: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ProfileRegistryError> {
+        let known_profiles: HashSet<String> = known_profiles.into_iter().collect();
+        if known_profiles.len() > MAX_PROFILE_NAMES {
+            return Err(ProfileRegistryError {
+                requested: known_profiles.len(),
+                max: MAX_PROFILE_NAMES,
+            });
+        }
         let meter = provider.meter("evorch.event-bus");
-        Self {
+        Ok(Self {
             token_usage: meter
                 .u64_histogram(TOKEN_USAGE_METRIC)
                 .with_unit(TOKEN_UNIT)
@@ -73,17 +135,27 @@ impl OtelMetricsEmitter {
                 .with_unit(SECONDS_UNIT)
                 .with_boundaries(DURATION_BOUNDARIES.to_vec())
                 .build(),
-        }
+            known_profiles,
+        })
     }
 
     /// イベントを写像し、有効な measurement を histogram へ記録する。
+    ///
+    /// `evorch.profile.name` 属性は map 層の shape ポリシー適合に加え、
+    /// registry member であるときのみ維持される。非 member は profile 属性
+    /// のみ除外して measurement を記録する (metric 全欠落を避ける)。
     pub fn emit(&self, event: &Event) {
         for measurement in map_event(event) {
             self.record(measurement);
         }
     }
 
-    fn record(&self, measurement: MetricMeasurement) {
+    fn record(&self, mut measurement: MetricMeasurement) {
+        if let Some(position) = measurement.attrs.iter().position(|attr| {
+            attr.key == ATTR_PROFILE_NAME && !self.known_profiles.contains(&attr.value)
+        }) {
+            measurement.attrs.remove(position);
+        }
         if let Err(violation) = validate_metric_attributes(&measurement) {
             tracing::warn!(
                 metric = %measurement.name,
@@ -211,11 +283,11 @@ mod tests {
         })
     }
 
-    fn completed_event() -> Event {
+    fn completed_event(profile: &str) -> Event {
         Event::new(ProviderEvent::RequestCompleted {
             request_id: "req-1".to_owned(),
             provider: "openai".to_owned(),
-            profile: Some("primary".to_owned()),
+            profile: Some(profile.to_owned()),
             protocol: "openai-chat-completions".to_owned(),
             model: "kimi-k3".to_owned(),
             streaming: false,
@@ -232,7 +304,7 @@ mod tests {
         Event::new(ProviderEvent::FirstTokenObserved {
             request_id: "req-1".to_owned(),
             provider: "anthropic".to_owned(),
-            profile: None,
+            profile: Some("primary".to_owned()),
             protocol: "anthropic-messages".to_owned(),
             model: "kimi-k3".to_owned(),
             ttft_ms: 1500,
@@ -249,16 +321,18 @@ mod tests {
             .collect()
     }
 
-    // Given: in-memory provider と emitter。
-    // When: 3 種のイベントを emit し force_flush する。
-    // Then: 3 instrument が正しい unit・合計値・属性で記録される。
+    // Given: in-memory provider と registry={"primary"} の emitter。
+    // When: 3 種のイベント (profile="primary" を含む) を emit し force_flush する。
+    // Then: 3 instrument が正しい unit・合計値・属性で記録され、registry
+    //       member の profile 属性は duration / TTFT の両方に記録される。
     #[test]
     fn in_memory_smoke_records_three_instruments() {
         let (provider, exporter) = build_in_memory_meter_provider();
-        let emitter = OtelMetricsEmitter::new(&provider);
+        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
+            .expect("registry within limit");
 
         emitter.emit(&usage_event());
-        emitter.emit(&completed_event());
+        emitter.emit(&completed_event("primary"));
         emitter.emit(&ttft_event());
         provider.force_flush().expect("force_flush succeeds");
 
@@ -332,6 +406,9 @@ mod tests {
         let points: Vec<_> = histogram.data_points().collect();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].sum(), 1.5);
+        assert!(points[0].attributes().any(|kv| {
+            kv.key.as_str() == "evorch.profile.name" && kv.value.to_string() == "primary"
+        }));
     }
 
     // Given: advisory boundaries を設定した 3 instrument。
@@ -340,10 +417,11 @@ mod tests {
     #[test]
     fn histograms_use_semconv_advisory_boundaries() {
         let (provider, exporter) = build_in_memory_meter_provider();
-        let emitter = OtelMetricsEmitter::new(&provider);
+        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
+            .expect("registry within limit");
 
         emitter.emit(&usage_event());
-        emitter.emit(&completed_event());
+        emitter.emit(&completed_event("primary"));
         emitter.emit(&ttft_event());
         provider.force_flush().expect("force_flush succeeds");
 
@@ -374,6 +452,64 @@ mod tests {
                 other => panic!("histogram expected: {other:?}"),
             };
             assert_eq!(bounds, expected, "bounds of {name}");
+        }
+    }
+
+    // Given: registry={"primary"} の emitter と、shape-valid だが registry 外
+    //        の profile ("tenant-000001") を持つ RequestCompleted。
+    // When: emit し force_flush する。
+    // Then: measurement は 1 件記録され、evorch.profile.name 属性のみ除外され、
+    //       他の属性 (operation / provider) は維持される。
+    #[test]
+    fn strips_profile_attribute_when_not_in_registry() {
+        let (provider, exporter) = build_in_memory_meter_provider();
+        let emitter = OtelMetricsEmitter::new(&provider, vec!["primary".to_owned()])
+            .expect("registry within limit");
+
+        emitter.emit(&completed_event("tenant-000001"));
+        provider.force_flush().expect("force_flush succeeds");
+
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        let metrics = flattened_metrics(&finished);
+        assert_eq!(metrics.len(), 1, "measurement must still be recorded");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metrics[0].data() else {
+            panic!("f64 histogram expected: {:?}", metrics[0].data());
+        };
+        let points: Vec<_> = histogram.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].sum(), 0.5);
+        assert!(
+            points[0]
+                .attributes()
+                .all(|kv| kv.key.as_str() != "evorch.profile.name"),
+            "non-member profile attribute must be stripped"
+        );
+        assert!(
+            points[0]
+                .attributes()
+                .any(|kv| kv.key.as_str() == "gen_ai.provider.name")
+        );
+    }
+
+    // Given: 上限 ([`MAX_PROFILE_NAMES`] = 64) を超える 65 個の profile 名。
+    // When: OtelMetricsEmitter::new で初期化する。
+    // Then: ProfileRegistryError を返す。
+    #[test]
+    fn rejects_registry_larger_than_max_profile_names() {
+        let (provider, _exporter) = build_in_memory_meter_provider();
+        let profiles: Vec<String> = (0..65).map(|index| format!("profile-{index}")).collect();
+
+        let result = OtelMetricsEmitter::new(&provider, profiles);
+
+        match result {
+            Ok(_) => panic!("registry larger than {MAX_PROFILE_NAMES} must be rejected"),
+            Err(error) => assert_eq!(
+                error,
+                ProfileRegistryError {
+                    requested: 65,
+                    max: MAX_PROFILE_NAMES
+                }
+            ),
         }
     }
 }

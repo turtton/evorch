@@ -24,10 +24,14 @@
 //!
 //! 括弧付き属性は条件付き: `profile` が `Some` かつ shape ポリシー
 //! ([`is_profile_name_valid`]: 非空・64 文字以下・小文字 ASCII alnum と
-//! `-_.`・先頭 alnum) に適合するときのみ付与し、不適合値は measurement を
-//! 保持したまま profile 属性のみ省略する。attribute value は
-//! [`validate_metric_attributes`] による domain 検査 (閉集合 / shape
-//! ポリシー) でカーディナリティを保護する。
+//! `-_.`・先頭 alnum) に適合するとき、map_event は属性を付与する (不適合値
+//! は measurement を保持したまま属性のみ省略)。さらに exporter 層
+//! (otel-exporter feature) は、初期化時に渡された profile registry の非
+//! member である属性のみ emit 時に除外する。つまり OTLP label への profile
+//! 属性の emit 条件は「map 層 shape 適合 ∧ emitter registry member」で
+//! ある。attribute value は [`validate_metric_attributes`] の domain 検査
+//! (閉集合 / shape ポリシー) と exporter registry による数的有界化で保護
+//! される。
 //!
 //! # 非写像 event と理由
 //!
@@ -452,8 +456,11 @@ fn value_domain(key: &str) -> Option<AttributeDomain> {
 /// `evorch.profile.name` 値の shape ポリシー。
 ///
 /// 非空・長さ 64 文字以下・全文字が小文字 ASCII alnum または `-_.`・
-/// 先頭は alnum。これにより OTLP label としての低カーディナリティを
-/// 保証する (自由文字列・大文字混じり・非 ASCII・空値は拒否)。
+/// 先頭は alnum。このポリシーで保証できるのは「任意文字列性の排除
+/// (自由文字列・大文字混じり・非 ASCII・空値の拒否) と 1 値あたりの
+/// 最大長」であり、値の種類数の有界性は含まない。数的有界性は
+/// otel-exporter feature の emitter 初期化時 profile registry
+/// (上限 [`super::MAX_PROFILE_NAMES`]) が担う (責任分界)。
 fn is_profile_name_valid(profile: &str) -> bool {
     !profile.is_empty()
         && profile.len() <= 64
