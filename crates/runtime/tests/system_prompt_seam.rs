@@ -9,6 +9,7 @@ mod support;
 use std::sync::Arc;
 
 use agents::Role;
+use config::CompactionConfig;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
 use runtime::prompt::SystemPromptCatalogBuilder;
@@ -130,6 +131,82 @@ async fn run_starts_with_single_assembled_system_message() {
         .filter(|m| m.role == MessageRole::System)
         .count();
     assert_eq!(system_count, 1);
+}
+
+// Given: compaction 設定を明示したランタイム
+// When: Worker run の初回モデル呼び出しを観測する
+// Then: compaction 方針が閾値・compact tool・cache prefix・cooldown を含む
+#[tokio::test]
+async fn configured_compaction_policy_is_added_to_initial_system_message() {
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let (runtime, _bus) = runtime_with(model.clone(), Some(complete_catalog()));
+    let runtime = runtime.with_compaction(CompactionConfig::default());
+
+    let run_id = runtime.delegate_background(Role::Worker, "W".to_string(), RunConfig::default());
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    let observed = model.observed().await;
+    let system = text_of_role(&observed[0], MessageRole::System).expect("System がある");
+    assert!(system.contains("75"));
+    assert!(system.contains("call the `compact` tool"));
+    assert!(system.contains("stable prompt prefix"));
+    assert!(system.contains("cooldown 1 turn(s)"));
+}
+
+// Given: compaction 設定を接続していないゼロ設定ランタイム
+// When: Worker run の初回モデル呼び出しを観測する
+// Then: compaction 方針セクションは追加されない
+#[tokio::test]
+async fn zero_config_runtime_omits_compaction_policy() {
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let (runtime, _bus) = runtime_with(model.clone(), Some(complete_catalog()));
+
+    let run_id = runtime.delegate_background(Role::Worker, "W".to_string(), RunConfig::default());
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    let observed = model.observed().await;
+    let system = text_of_role(&observed[0], MessageRole::System).expect("System がある");
+    assert!(!system.contains("call the `compact` tool"));
+}
+
+// Given: Claude と GPT-5 のモデルを選択した compaction 設定ランタイム
+// When: それぞれの初回モデル呼び出しを観測する
+// Then: cache 方針の family 条件分岐が保持される
+#[tokio::test]
+async fn compaction_policy_uses_selected_model_family() {
+    for (model_id, expected, unexpected) in [
+        (
+            "claude-sonnet-4-5",
+            "Preserve Claude prompt-cache prefix stability",
+            "Preserve provider cache reuse",
+        ),
+        (
+            "gpt-5.2",
+            "Preserve provider cache reuse",
+            "Preserve Claude prompt-cache prefix stability",
+        ),
+    ] {
+        let model = Arc::new(
+            ScriptedModel::new([Ok(text_response("done", FinishReason::Stop))])
+                .with_selected_model(model_id),
+        );
+        let (runtime, _bus) = runtime_with(model.clone(), Some(complete_catalog()));
+        let runtime = runtime.with_compaction(CompactionConfig::default());
+        let run_id =
+            runtime.delegate_background(Role::Worker, "W".to_string(), RunConfig::default());
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+        let observed = model.observed().await;
+        let system = text_of_role(&observed[0], MessageRole::System).expect("System がある");
+        assert!(system.contains(expected));
+        assert!(!system.contains(unexpected));
+    }
 }
 
 // Given: 対話モード run と 2 応答のスクリプト

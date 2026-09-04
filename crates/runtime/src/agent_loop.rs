@@ -15,9 +15,11 @@ use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
 use crate::compaction;
-use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
+use crate::compaction::policy::{
+    CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
+};
 use crate::network::isolated_mounts;
-use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
+use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
 use crate::rules::{self, RulesSession, RulesSource};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
@@ -54,6 +56,7 @@ pub(crate) struct LoopShared {
     pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
+    pub(crate) compaction_configured: bool,
     pub(crate) runtime: Weak<Shared>,
 }
 
@@ -268,9 +271,14 @@ fn push_initial_system_message(
         None => None,
     };
     let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
+    let compaction_text = shared.compaction_configured.then(|| {
+        let model_id = shared.model.selected_model(task.role);
+        compaction_policy_text(&shared.compaction, classify(&model_id))
+    });
     let estimated_history_bytes = u64::try_from(
         catalog_text.as_ref().map_or(0, String::len)
             + skills_text.as_ref().map_or(0, String::len)
+            + compaction_text.as_ref().map_or(0, String::len)
             + task.prompt.len(),
     )
     .unwrap_or(u64::MAX);
@@ -283,7 +291,7 @@ fn push_initial_system_message(
         )
     });
     let mut composed = String::new();
-    for section in [catalog_text, skills_text, rules_text]
+    for section in [catalog_text, skills_text, rules_text, compaction_text]
         .into_iter()
         .flatten()
     {

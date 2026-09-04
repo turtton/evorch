@@ -26,6 +26,7 @@ pub struct ScriptedModel {
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
     observed: Mutex<Vec<Vec<Message>>>,
     gate: Option<Arc<Notify>>,
+    selected_model: Option<String>,
 }
 
 struct RecordingSandboxFactory {
@@ -53,6 +54,7 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
             gate: None,
+            selected_model: None,
         }
     }
 
@@ -65,7 +67,13 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
             gate: Some(gate),
+            selected_model: None,
         }
+    }
+
+    pub fn with_selected_model(mut self, model: &str) -> Self {
+        self.selected_model = Some(model.to_owned());
+        self
     }
 
     pub async fn add_keyed(
@@ -128,7 +136,9 @@ impl AgentModel for ScriptedModel {
     }
 
     fn selected_model(&self, role: Role) -> String {
-        format!("scripted-{}", role.name().to_lowercase())
+        self.selected_model
+            .clone()
+            .unwrap_or_else(|| format!("scripted-{}", role.name().to_lowercase()))
     }
 }
 

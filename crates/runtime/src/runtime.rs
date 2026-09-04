@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
@@ -49,6 +49,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
+    pub(crate) compaction_configured: AtomicBool,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -127,6 +128,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                compaction_configured: AtomicBool::new(false),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -143,6 +145,9 @@ impl AgentRuntime {
             .shared
             .compaction
             .set(CompactionSettings::from(&settings));
+        self.shared
+            .compaction_configured
+            .store(true, Ordering::Release);
         self
     }
 
@@ -304,6 +309,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                compaction_configured: AtomicBool::new(false),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -876,6 +882,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         skills: shared.skills.get().cloned(),
         rules: shared.rules.get().cloned(),
         compaction: shared.compaction.get().cloned().unwrap_or_default(),
+        compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
         runtime: Arc::downgrade(&shared),
     })
 }
