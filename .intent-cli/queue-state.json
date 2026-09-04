@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T10:32:21.1725948+00:00",
+  "updated_at": "2026-09-04T10:47:47.6533173+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -826,6 +826,11 @@
         "implementation": ".intent-cli/issues/v02-gui-workbench-restructure/implementation.md",
         "review_context": ".intent-cli/issues/v02-gui-workbench-restructure/review-context.md",
         "yaml": ".intent-cli/issues/v02-gui-workbench-restructure/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 65,
+        "url": "https://github.com/turtton/evorch/issues/65"
       },
       "worker_role": "implementation",
       "review_role": "review",
