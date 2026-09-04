@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T18:49:01.6259406+00:00",
+  "updated_at": "2026-09-04T18:52:22.0151864+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -901,6 +901,11 @@
         "implementation": ".intent-cli/issues/v02-intent-gate-rules/implementation.md",
         "review_context": ".intent-cli/issues/v02-intent-gate-rules/review-context.md",
         "yaml": ".intent-cli/issues/v02-intent-gate-rules/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 69,
+        "url": "https://github.com/turtton/evorch/issues/69"
       },
       "worker_role": "implementation",
       "review_role": "review",

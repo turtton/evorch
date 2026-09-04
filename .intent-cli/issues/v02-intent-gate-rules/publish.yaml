@@ -1,0 +1,7 @@
+execution_unit: v02-intent-gate-rules
+publish_status: issue-created
+packet_path: "/home/turtton/.ghr/github.com/turtton/evorch/.intent-cli/issues/v02-intent-gate-rules"
+issue_body_path: "/home/turtton/.ghr/github.com/turtton/evorch/.intent-cli/issues/v02-intent-gate-rules/github-body.md"
+created_issue_number: 69
+created_issue_url: "https://github.com/turtton/evorch/issues/69"
+published_label_name: null

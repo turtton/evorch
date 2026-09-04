@@ -168,3 +168,4 @@
 {"ts":"2026-09-04T18:47:55.928941+00:00","execution_unit":"v02-web-tools-role-exposure","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":68}
 {"ts":"2026-09-04T18:49:01.6168592+00:00","execution_unit":"v02-web-tools-role-exposure","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":68}
 {"ts":"2026-09-04T18:49:01.6168592+00:00","execution_unit":"v02-web-tools-role-exposure","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":68}
+{"ts":"2026-09-04T18:52:22.0151864+00:00","execution_unit":"v02-intent-gate-rules","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#69","reason":"https://github.com/turtton/evorch/issues/69"}
