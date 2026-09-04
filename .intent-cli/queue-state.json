@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T19:31:30.8663823+00:00",
+  "updated_at": "2026-09-04T22:41:25.2696855+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -936,7 +936,7 @@
     {
       "execution_unit": "v02-entry-pre-routing",
       "title": "v0.2: entry \u3067 Intent Gate \u4E8B\u524D\u5224\u5B9A\u3057 Direct \u6642\u306F Worker \u76F4\u63A5\u8D77\u52D5\u3059\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v02-intent-gate-rules",
         "v02-workspace-isolation",
@@ -955,6 +955,7 @@
         "number": 71,
         "url": "https://github.com/turtton/evorch/issues/71"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/72",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
