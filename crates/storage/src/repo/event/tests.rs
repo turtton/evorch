@@ -2,7 +2,7 @@ use std::time::UNIX_EPOCH;
 
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
-    DeliveryDisposition, EventMeta, LifecycleEvent, UsageEvent,
+    DeliveryDisposition, EventMeta, LifecycleEvent, OrchestratorEvent, UsageEvent,
 };
 
 use super::*;
@@ -200,6 +200,35 @@ fn kind_name_maps_agent_message_events() {
     // Then: kind 列は "AgentMessage" で、復元されたイベントも同一種別である
     assert_eq!(kind, "AgentMessage");
     assert_eq!(stored[0].event, delivered);
+}
+
+#[test]
+fn kind_name_for_orchestrator_is_pascal_case() {
+    // Given: a migrated database and an orchestrator event
+    let connection = fixture();
+    let event = Event::new(OrchestratorEvent::GoalStateChanged {
+        goal_id: "goal-1".into(),
+        from: event_bus::GoalState::Active,
+        to: event_bus::GoalState::Paused,
+        reason: "test".into(),
+    });
+    let mut accounting = EventAccounting::default();
+
+    // When: the event is appended through the repository
+    append_event(
+        &connection,
+        Some("session-1"),
+        &event,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .expect("orchestrator event must append");
+
+    // Then: the persisted kind uses the public PascalCase category name
+    let kind: String = connection
+        .query_row("SELECT kind FROM events", [], |row| row.get(0))
+        .expect("event kind must be readable");
+    assert_eq!(kind, "Orchestrator");
 }
 
 #[test]

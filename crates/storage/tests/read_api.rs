@@ -1,7 +1,7 @@
 //! Database の公開 read-only facade を検証します。
 
 use rusqlite::{Connection, params};
-use storage::{Database, StorageConfig};
+use storage::{Database, Storage, StorageConfig};
 use tempfile::TempDir;
 
 #[test]
@@ -58,4 +58,57 @@ fn database_read_facade_roundtrips_all_entity_queries() {
     assert_eq!(metrics.len(), 1);
     assert_eq!(restored.unwrap().session_id, "s1");
     assert_eq!(restored_all.len(), 1);
+}
+
+#[test]
+fn orchestrator_events_round_trip_through_sqlite() {
+    // Given: a file-backed storage writer and two orchestrator events
+    let temp_dir = TempDir::new().expect("temporary directory must be created");
+    let config = StorageConfig {
+        db_path: temp_dir.path().join("orchestrator-events.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    let handle = storage.handle();
+    let created = event_bus::Event::new(event_bus::OrchestratorEvent::GoalCreated {
+        goal_id: "goal-1".into(),
+        session_id: "session-1".into(),
+        project_id: "project-1".into(),
+        thread_id: "thread-1".into(),
+        goal: "implement storage durability".into(),
+        references: vec![event_bus::GoalReference {
+            kind: "issue".into(),
+            value: "73".into(),
+        }],
+        constraints: vec!["storage-only".into()],
+        repo: "turtton/evorch".into(),
+        base_ref: "main".into(),
+        root_run_id: "run-1".into(),
+    });
+    let changed = event_bus::Event::new(event_bus::OrchestratorEvent::GoalStateChanged {
+        goal_id: "goal-1".into(),
+        from: event_bus::GoalState::Active,
+        to: event_bus::GoalState::Paused,
+        reason: "test".into(),
+    });
+
+    // When: append through the public writer handle and reopen the database
+    handle
+        .append_event(Some("session-1"), &created)
+        .expect("created event must append");
+    handle
+        .append_event(Some("session-1"), &changed)
+        .expect("state change event must append");
+    drop(storage);
+    let database = Database::open(&config).expect("database must reopen");
+
+    // Then: the ordered read API restores both events exactly
+    let events: Vec<_> = database
+        .events_all_ordered()
+        .expect("events must read")
+        .into_iter()
+        .filter(|stored| matches!(stored.event.kind, event_bus::EventKind::Orchestrator(_)))
+        .map(|stored| stored.event)
+        .collect();
+    assert_eq!(events, vec![created, changed]);
 }
