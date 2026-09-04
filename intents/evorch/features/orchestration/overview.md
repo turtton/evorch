@@ -82,6 +82,8 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 
 - **v0.2 context compaction（PR #64）**: model-visible context の切替は provider request 層で checkpoint+recent のみに制限され、AgentMessage 配送（durable channel、PR #48）・project rules（synthetic System、PR #62）と独立に重ねられる。orchestration 面で意識するのは compaction 後も goal / 委譲結果の参照可能性が transcript（storage）側で保たれること。詳細は [agent-runtime-kernel overview](../agent-runtime-kernel/overview.md) の「v0.2 context compaction の実装確定」
 
+**実装確定（issue #69、PR #70、2026-09-03）**: Intent Gate 分類ルール（8 分類軸・タスク種別判定表・ExecutionShape 判定・mutation 非持越ルール）は `crates/runtime/src/prompt/intent_gate_policy.rs` の型付きポリシーモジュールへコード化済み。prompt 生成は同モジュールからのレンダリングに統一（単一ソース化）し、Orchestrator 向け本文は entry pre-routing の選択結果を検証する枠組みに更新済み。routing prompt（Layer A）と Orchestrator prompt の両方を同一型定義から生成する API が公開され、出力は byte-identical golden test で決定論性を固定。
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること
