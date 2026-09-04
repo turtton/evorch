@@ -190,7 +190,9 @@ async fn inspect_agent_reports_isolated_workspace() {
             merge_mode: MergeMode::Branch,
         })
     );
-    gate.notify_waiters();
+    // ここでの同期点は mounts 記録 (= model 呼出し前) なので、待機者不在のまま通知すると
+    // 失われる。permit を保持する notify_one で model の notified() 到着を保証する。
+    gate.notify_one();
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     wait_until(|| !worktree_path.exists()).await;
     assert_eq!(
@@ -240,6 +242,9 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
     let active = runtime
         .inspect_agent(run_id)
         .expect("run を inspection できる");
+    // inspection (snapshot) 取得直後に gate を解放する。assert 失敗時に build が
+    // 滞留して runtime drop が応答不能になる経路を残さないため。
+    let _ = proceed_tx.send(());
 
     // Then: build 完了前でも Isolated の branch / worktree path が観測できる
     assert_eq!(
@@ -251,7 +256,6 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
             merge_mode: MergeMode::Branch,
         })
     );
-    let _ = proceed_tx.send(());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
 }
 
