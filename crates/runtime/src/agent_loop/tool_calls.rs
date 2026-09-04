@@ -100,6 +100,8 @@ impl LoopState {
     /// network 権限を持つツールに 3 層 AND 判定 (role / per-tool / session) を適用する。
     /// 非 network ツール・未登録ツールはそのまま通す (UnknownTool は executor 側で処理)。
     /// Ask は ApprovalGate (EventBus ApprovalRequested/ApprovalResolved) で 1 回だけ承認を求める。
+    /// 承認相関キーは `{run_id}:{call_id}` に run スコープ化する (call_id は
+    /// model 由来で run-local のため、同一 EventBus 上の並列 run と衝突しうる)。
     async fn gate_network_tool(&mut self, name: &str, call_id: &str) -> NetworkGate {
         let Some(permissions) = self.shared.executor.tool_permissions(name) else {
             return NetworkGate::Proceed;
@@ -125,6 +127,10 @@ impl LoopState {
             }
             NetworkAccessDecision::Ask { reason } => {
                 let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
+                // 承認相関キーは run スコープ化する: 同一 EventBus 上の並列 run が
+                // 同一 call_id (model 由来で run-local) を使いうるため、run_id を
+                // 前置して他 run 宛ての ApprovalResolved を受け付けない。
+                let correlation_id = format!("{}:{}", self.task.run_id, call_id);
                 let outcome = tokio::select! {
                     biased;
                     changed = self.channels.cancel_rx.changed() => {
@@ -138,7 +144,7 @@ impl LoopState {
                             "cancel 監視が変化したため承認待ちを中止しました",
                         ));
                     }
-                    outcome = gate.request(name, call_id) => outcome,
+                    outcome = gate.request(name, &correlation_id) => outcome,
                 };
                 match outcome {
                     ApprovalOutcome::Approved => NetworkGate::Proceed,

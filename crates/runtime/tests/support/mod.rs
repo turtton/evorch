@@ -237,6 +237,44 @@ pub fn spawn_approval_responder(
     })
 }
 
+/// run スコープ相関キー (`{run_id}:{call_id}`) を待って 1 件だけ承認する応答者。
+///
+/// `prefix` (例: `format!("{run_id}:")`) に一致する要求だけを承認し、他 run の
+/// 要求には応答しない。相関キーが run スコープ化される前の実装では 2 run の要求が
+/// 同一生 call_id になり接頭辞一致しないため、prefix 不一致の要求を 2 件観測した
+/// 時点で先頭の要求を 1 回だけ resolve する。このとき単一の ApprovalResolved が
+/// 両 gate に受理されてしまい、横取り回帰がタイムアウトなしで失敗として顕在化する
+/// (run スコープ化後は 2 run の要求が必ず異なる key のため、この分岐に到達しない)。
+pub fn spawn_run_scoped_approval_responder(
+    bus: Arc<EventBus>,
+    mut receiver: EventReceiver,
+    prefix: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut unmatched: Option<String> = None;
+        loop {
+            let event = receiver.recv().await.expect("承認要求を受信できるはずです");
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                if call_id.starts_with(&prefix) {
+                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved: true,
+                    }));
+                    return;
+                }
+                if let Some(stored) = unmatched {
+                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                        call_id: stored,
+                        approved: true,
+                    }));
+                    return;
+                }
+                unmatched = Some(call_id);
+            }
+        }
+    })
+}
+
 pub fn recording_factory() -> (
     Arc<dyn SandboxFactory>,
     Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,
