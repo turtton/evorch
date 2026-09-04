@@ -71,16 +71,26 @@ impl LoopState {
     }
 }
 
+/// 標準ツール定義を返す。
+/// Web ツールの露出ゲートは [`ExecutionPolicy::filter_tool_specs`] が担う。
 pub(super) fn standard_tool_specs() -> Vec<ToolSpec> {
-    ["read", "edit", "grep", "shell", "git_diff"]
-        .into_iter()
-        .chain(META_OPS.iter().copied())
-        .map(|name| ToolSpec {
-            name: name.to_string(),
-            description: format!("{name} tool"),
-            input_schema: serde_json::json!({ "type": "object" }),
-        })
-        .collect()
+    [
+        "read",
+        "edit",
+        "grep",
+        "shell",
+        "git_diff",
+        "web_search",
+        "web_fetch",
+    ]
+    .into_iter()
+    .chain(META_OPS.iter().copied())
+    .map(|name| ToolSpec {
+        name: name.to_string(),
+        description: format!("{name} tool"),
+        input_schema: serde_json::json!({ "type": "object" }),
+    })
+    .collect()
 }
 
 /// モデルに見せるツール定義を決定する。
@@ -111,6 +121,62 @@ mod tests {
 
     fn names(specs: &[ToolSpec]) -> Vec<&str> {
         specs.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    // Given: 標準ツール定義
+    // When: standard_tool_specs を呼ぶ
+    // Then: web_search と web_fetch の定義が含まれる
+    #[test]
+    fn standard_tool_specs_include_web_search_and_web_fetch() {
+        let specs = standard_tool_specs();
+        let tool_names = names(&specs);
+
+        assert!(tool_names.contains(&"web_search"));
+        assert!(tool_names.contains(&"web_fetch"));
+    }
+
+    // Given: Librarian のポリシーと skills 未設定
+    // When: visible_tool_specs を呼ぶ
+    // Then: web_search と web_fetch がモデルに見える
+    #[test]
+    fn visible_tool_specs_exposes_both_web_tools_for_librarian() {
+        let policy = ExecutionPolicy::for_role(Role::Librarian);
+
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let tool_names = names(&specs);
+
+        assert!(tool_names.contains(&"web_search"));
+        assert!(tool_names.contains(&"web_fetch"));
+    }
+
+    // Given: Orchestrator のポリシーと skills 未設定
+    // When: visible_tool_specs を呼ぶ
+    // Then: web_fetch のみがモデルに見える
+    #[test]
+    fn visible_tool_specs_exposes_only_web_fetch_for_orchestrator() {
+        let policy = ExecutionPolicy::for_role(Role::Orchestrator);
+
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let tool_names = names(&specs);
+
+        assert!(tool_names.contains(&"web_fetch"));
+        assert!(!tool_names.contains(&"web_search"));
+    }
+
+    // Given: Explorer、Worker、Reviewer のポリシーと skills 未設定
+    // When: 各ロールで visible_tool_specs を呼ぶ
+    // Then: web_search と web_fetch はモデルに見えない
+    #[test]
+    fn visible_tool_specs_hides_web_tools_for_explorer_worker_reviewer() {
+        for role in [Role::Explorer, Role::Worker, Role::Reviewer] {
+            let policy = ExecutionPolicy::for_role(role);
+
+            let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+            let tool_names = names(&specs);
+
+            assert!(!tool_names.contains(&"web_search"));
+            assert!(!tool_names.contains(&"web_fetch"));
+        }
     }
 
     // Given: Worker のポリシー (skill_load は capability 内) と skills 設定あり
