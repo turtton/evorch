@@ -52,7 +52,8 @@ impl ApprovalGate {
                         | EventKind::Provider(_)
                         | EventKind::Fault(_)
                         | EventKind::AgentMessage(_)
-                        | EventKind::Compaction(_) => {}
+                        | EventKind::Compaction(_)
+                        | EventKind::Orchestrator(_) => {}
                     },
                     Err(RecvError::Lagged(_)) => {}
                     Err(RecvError::Closed) => return ApprovalOutcome::TimedOut,

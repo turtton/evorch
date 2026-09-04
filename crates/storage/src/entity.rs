@@ -336,6 +336,14 @@ impl SecretGuard {
             | EventKind::Provider(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_) => Ok(()),
+            // Orchestrator は goal 本文・findings・detail 等の自由文字列を
+            // payload 全体で保持するため、serialize 結果ごと fail-closed で
+            // 走査する。
+            EventKind::Orchestrator(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "Orchestrator.payload", &payload)
+            }
         }
     }
 

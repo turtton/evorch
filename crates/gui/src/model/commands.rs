@@ -1,3 +1,4 @@
+use event_bus::{CloseoutStep, GoalStage, GoalState, MergeBinding};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,7 @@ pub struct PrRef {
 pub struct MergeCommand {
     pub thread_id: String,
     pub pr: Option<PrRef>,
+    pub token_id: Option<String>,
     pub decision: MergeDecision,
 }
 
@@ -45,6 +47,9 @@ pub struct MergeCommand {
 pub enum WorkbenchCommand {
     SubmitGoal(GoalSubmission),
     DecideMerge(MergeCommand),
+    PauseGoal { goal_id: String },
+    ResumeGoal { goal_id: String },
+    CancelGoal { goal_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +75,33 @@ pub struct MergeApprovalView {
     pub reviewer: ReviewerStatus,
     pub diff_summary: Option<String>,
     pub resolution: Option<MergeDecision>,
+    /// 承認トークン束縛 (`MergeApprovalRequested` で確定し、Approve の必須条件)。
+    pub binding: Option<MergeBinding>,
+    /// gate チェックリストの表示行。
+    pub gate: Vec<GateItemView>,
+    /// goal が Blocked になるなど Approve を不能にする事由。
+    pub blocked: Option<String>,
+}
+
+/// gate チェックリスト 1 行の表示モデル。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateItemView {
+    pub label: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// goal ループ状態の表示モデル (既定は空)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopStatusView {
+    pub goal_id: Option<String>,
+    pub state: Option<GoalState>,
+    pub stage: Option<GoalStage>,
+    pub review_round: u32,
+    pub nudges: u32,
+    pub epoch: u64,
+    pub last_rejections: Vec<String>,
+    pub closeout: Vec<(CloseoutStep, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +114,10 @@ pub enum LoopEvent {
     MergeResolved {
         thread_id: String,
         decision: MergeDecision,
+    },
+    LoopStatusUpdated(LoopStatusView),
+    CommandRejected {
+        reason: String,
     },
 }
 
@@ -118,6 +154,9 @@ impl FixtureLoopAdapter {
             reviewer: ReviewerStatus::Pending,
             diff_summary: Some("model-only change".into()),
             resolution,
+            binding: None,
+            gate: Vec::new(),
+            blocked: None,
         }
     }
 }
@@ -146,6 +185,10 @@ impl CommandSink for FixtureLoopAdapter {
                     ..Self::fixture_view(None)
                 }),
             ],
+            // 一時停止/再開/取消は T1.5 の reducer 接続まで no-op。
+            WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => Vec::new(),
         }
     }
 }
@@ -186,6 +229,7 @@ impl MergeApprovalModel {
         Some(WorkbenchCommand::DecideMerge(MergeCommand {
             thread_id: String::new(),
             pr: self.view.pr.clone(),
+            token_id: self.view.binding.as_ref().map(|b| b.token_id.clone()),
             decision,
         }))
     }
@@ -206,6 +250,9 @@ mod tests {
             reviewer: ReviewerStatus::Pending,
             diff_summary: Some("model-only change".into()),
             resolution: None,
+            binding: None,
+            gate: Vec::new(),
+            blocked: None,
         }
     }
 
@@ -293,6 +340,7 @@ mod tests {
         let merge = WorkbenchCommand::DecideMerge(MergeCommand {
             thread_id: "thread-1".into(),
             pr: None,
+            token_id: None,
             decision: MergeDecision::Approve,
         });
 

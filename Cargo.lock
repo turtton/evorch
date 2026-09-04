@@ -4496,6 +4496,7 @@ dependencies = [
  "async-trait",
  "config",
  "event-bus",
+ "getrandom 0.3.4",
  "globset",
  "providers",
  "regex",

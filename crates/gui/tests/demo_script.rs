@@ -60,7 +60,8 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
             | EventKind::Usage(_)
             | EventKind::Provider(_)
             | EventKind::Fault(_)
-            | EventKind::Compaction(_) => None,
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => None,
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
@@ -86,7 +87,8 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
             | EventKind::Provider(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_) => None,
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => None,
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(completed_runs, BTreeSet::from(["run-1", "run-2", "run-3"]));

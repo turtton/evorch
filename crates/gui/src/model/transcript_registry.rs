@@ -68,7 +68,8 @@ impl TranscriptRegistry {
             | EventKind::Usage(_)
             | EventKind::Provider(_)
             | EventKind::Fault(_)
-            | EventKind::Compaction(_) => Vec::new(),
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => Vec::new(),
         }
     }
 
@@ -127,7 +128,8 @@ impl TranscriptRegistry {
             | EventKind::Provider(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_) => {}
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => {}
         }
     }
 

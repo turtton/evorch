@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::orchestrator::OrchestratorEvent;
+
 /// イベントスキーマのバージョン。
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -78,6 +80,8 @@ pub enum EventKind {
     AgentMessage(AgentMessageEvent),
     /// コンテキスト圧縮関連のイベント。
     Compaction(CompactionEvent),
+    /// オーケストレーションループ関連のイベント。
+    Orchestrator(OrchestratorEvent),
 }
 
 impl From<LifecycleEvent> for EventKind {
@@ -125,6 +129,12 @@ impl From<AgentMessageEvent> for EventKind {
 impl From<CompactionEvent> for EventKind {
     fn from(event: CompactionEvent) -> Self {
         Self::Compaction(event)
+    }
+}
+
+impl From<OrchestratorEvent> for EventKind {
+    fn from(event: OrchestratorEvent) -> Self {
+        Self::Orchestrator(event)
     }
 }
 

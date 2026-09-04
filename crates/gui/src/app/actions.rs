@@ -221,6 +221,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             LoopEvent::MergeResolved { decision, .. } => {
                 self.merge.view.resolution = Some(decision)
             }
+            // loop_status 状態フィールドと表示は T1.5 で接続する。
+            LoopEvent::LoopStatusUpdated(_) => {}
+            LoopEvent::CommandRejected { .. } => {}
         }
     }
 

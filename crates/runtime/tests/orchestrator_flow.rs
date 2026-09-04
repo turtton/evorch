@@ -66,7 +66,8 @@ fn phases(events: &[Event], run_id: &str) -> Vec<AgentRunPhase> {
             | EventKind::Provider(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_) => None,
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => None,
         })
         .collect()
 }

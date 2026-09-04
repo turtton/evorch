@@ -193,6 +193,9 @@ fn pending_merge_view() -> MergeApprovalView {
         reviewer: ReviewerStatus::Pending,
         diff_summary: Some("model-only change".into()),
         resolution: None,
+        binding: None,
+        gate: Vec::new(),
+        blocked: None,
     }
 }
 
@@ -513,7 +516,10 @@ fn v02_end_to_end_chained_scenario() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
-            WorkbenchCommand::DecideMerge(_) => None,
+            WorkbenchCommand::DecideMerge(_)
+            | WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");
@@ -549,7 +555,10 @@ fn v02_end_to_end_chained_scenario() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
-            WorkbenchCommand::SubmitGoal(_) => None,
+            WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");

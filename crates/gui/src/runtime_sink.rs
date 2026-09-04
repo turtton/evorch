@@ -59,6 +59,10 @@ impl CommandSink for RuntimeCommandSink {
                 tracing::warn!("merge decision has no production loop yet");
                 Vec::new()
             }
+            // goal 一時停止/再開/取消の supervisor 接続は T3.1 で行う。
+            WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => Vec::new(),
         }
     }
 }
@@ -316,6 +320,7 @@ mod tests {
         let events = sink.submit(WorkbenchCommand::DecideMerge(MergeCommand {
             thread_id: "thread-1".into(),
             pr: None,
+            token_id: None,
             decision: MergeDecision::Approve,
         }));
 

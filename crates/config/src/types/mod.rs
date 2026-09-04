@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod compaction;
 pub mod misc;
+pub mod orchestration;
 pub mod panel;
 pub mod provider;
 pub mod routing;
@@ -19,6 +20,7 @@ pub use agents::{
 };
 pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
+pub use orchestration::OrchestrationConfig;
 pub use panel::PanelConfig;
 pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
@@ -57,6 +59,8 @@ pub struct Config {
     pub rules: RulesConfig,
     /// コンテキスト圧縮設定。
     pub compaction: CompactionConfig,
+    /// オーケストレーションループ設定。
+    pub orchestration: OrchestrationConfig,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             rules: RulesConfig::default(),
             compaction: CompactionConfig::default(),
+            orchestration: OrchestrationConfig::default(),
         }
     }
 }

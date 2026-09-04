@@ -176,6 +176,9 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         // コンテキスト圧縮はトランスクリプト語彙の差し替えを伴うが、
         // セッション射影 (SessionSnapshot / open_tool_calls) は変更しない。
         EventKind::Compaction(_) => {}
+        // goal ループの状態は runtime 側の GoalLedger で畳み込むため、
+        // セッション射影は変更しない。
+        EventKind::Orchestrator(_) => {}
     }
 }
 

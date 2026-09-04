@@ -70,6 +70,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_) => {}
+            // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
+            EventKind::Orchestrator(_) => {}
         }
     }
 
