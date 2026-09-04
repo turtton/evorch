@@ -244,6 +244,15 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
     assert_eq!(summary, "model generated checkpoint");
     let observed = model.observed().await;
     assert_eq!(observed.len(), 3);
+    let summarizer_request = &observed[1];
+    assert!(
+        summarizer_request.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("MODEL-SUMMARY"))
+            })
+        }),
+        "B4a cut floor keeps the goal out of the compacted slice, so the summarizer request must carry it"
+    );
     assert!(has_checkpoint(observed.last().expect("resumed request")));
 }
 

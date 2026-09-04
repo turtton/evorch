@@ -93,11 +93,17 @@ impl Summarizer for ModelSummarizer {
             }],
         });
         messages.extend_from_slice(input.compacted);
+        // cut の protected floor が先頭 User を compacted slice から外すため、
+        // goal は最終 User プロンプトへ明示同梱しないと summary モデルに届かない。
+        let user_prompt = match input.goal {
+            Some(goal) => format!(
+                "{SUMMARY_USER_PROMPT}\n\nOriginal session goal (preserve verbatim in the summary):\n{goal}"
+            ),
+            None => SUMMARY_USER_PROMPT.to_string(),
+        };
         messages.push(Message {
             role: MessageRole::User,
-            content: vec![ContentBlock::Text {
-                text: SUMMARY_USER_PROMPT.to_string(),
-            }],
+            content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
             run_id: self.run_id.clone(),
@@ -326,6 +332,7 @@ mod tests {
         run_id: String,
         role: Role,
         tool_count: usize,
+        last_user_text: String,
     }
 
     struct StubModel {
@@ -339,9 +346,24 @@ mod tests {
             &self,
             invocation: &AgentInvocationContext,
             role: Role,
-            _messages: &[Message],
+            messages: &[Message],
             tools: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
+            let last_user_text = messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+                .map(|message| {
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
             self.observed
                 .lock()
                 .expect("observation lock must not poison")
@@ -349,6 +371,7 @@ mod tests {
                     run_id: invocation.run_id.clone(),
                     role,
                     tool_count: tools.len(),
+                    last_user_text,
                 });
             self.response.clone()
         }
@@ -564,7 +587,55 @@ mod tests {
                 run_id: "run-summary-7".to_string(),
                 role: Role::Worker,
                 tool_count: 0,
+                last_user_text: "Produce the continuation summary now. Preserve exact file paths, test result lines, unresolved markers, and agent-message identifiers.".to_string(),
             }]
+        );
+    }
+
+    // Given: a goal that B4a cut-floor protection removed from the compacted slice
+    // When: the model summarizer builds its request
+    // Then: the final user prompt carries the goal verbatim so the model can preserve it
+    #[tokio::test]
+    async fn model_summary_request_contains_goal() {
+        let model = Arc::new(StubModel {
+            response: Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "summary".to_string(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model: model.clone(),
+            role: Role::Worker,
+            run_id: "run-summary-goal".to_string(),
+        };
+        let messages = fixture();
+
+        summarizer
+            .summarize(&SummaryInput {
+                goal: Some("Fix the flaky compaction retry"),
+                compacted: &messages[2..4],
+            })
+            .await
+            .expect("stub response succeeds");
+
+        let observed = model.observed.lock().expect("observation lock");
+        let request = observed.last().expect("one summarizer call");
+        assert!(
+            request.last_user_text.contains("Produce the continuation summary now."),
+            "instruction prompt must remain"
+        );
+        assert!(
+            request
+                .last_user_text
+                .contains("Fix the flaky compaction retry"),
+            "goal must reach the summary model"
         );
     }
 
