@@ -1,9 +1,27 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use providers::ToolSpec;
+use sandbox::{ApprovalGate, ApprovalOutcome, PolicyDecision};
 use serde_json::Value;
 use tools::{ToolExecutionContext, ToolResult};
 
 use super::LoopState;
+use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
+
+/// 承認待ちの上限。TimedOut は error result として run を継続する。
+const WEB_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// [`LoopState::gate_network_tool`] の判定結果。
+enum NetworkGate {
+    /// ツール実行へ進む。
+    Proceed,
+    /// 実行せず、エラー結果をツール結果として履歴に積む。
+    Reject(ToolResult),
+    /// run がキャンセル済み (`finish_cancelled` 呼び出し済み)。
+    Cancelled,
+}
 
 impl LoopState {
     pub(super) async fn execute_tools(
@@ -32,6 +50,15 @@ impl LoopState {
                 }
                 continue;
             } else {
+                match self.gate_network_tool(&name, &id).await {
+                    NetworkGate::Proceed => {}
+                    NetworkGate::Reject(result) => {
+                        self.context.push_tool_result(id, result);
+                        self.publish_message_count();
+                        continue;
+                    }
+                    NetworkGate::Cancelled => return false,
+                }
                 let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
                     .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                     .flatten();
@@ -69,10 +96,68 @@ impl LoopState {
         }
         true
     }
+
+    /// network 権限を持つツールに 3 層 AND 判定 (role / per-tool / session) を適用する。
+    /// 非 network ツール・未登録ツールはそのまま通す (UnknownTool は executor 側で処理)。
+    /// Ask は ApprovalGate (EventBus ApprovalRequested/ApprovalResolved) で 1 回だけ承認を求める。
+    async fn gate_network_tool(&mut self, name: &str, call_id: &str) -> NetworkGate {
+        let Some(permissions) = self.shared.executor.tool_permissions(name) else {
+            return NetworkGate::Proceed;
+        };
+        if !permissions.network {
+            return NetworkGate::Proceed;
+        }
+        let per_tool = self
+            .shared
+            .executor
+            .classify_tool(name)
+            .unwrap_or(PolicyDecision::Deny);
+        match judge_web_network_access(
+            &self.policy.capabilities,
+            &self.policy.role_name,
+            name,
+            per_tool,
+            self.task.config.network_access,
+        ) {
+            NetworkAccessDecision::Allow => NetworkGate::Proceed,
+            NetworkAccessDecision::Deny { reason } => {
+                NetworkGate::Reject(ToolResult::error(reason))
+            }
+            NetworkAccessDecision::Ask { reason } => {
+                let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
+                let outcome = tokio::select! {
+                    biased;
+                    changed = self.channels.cancel_rx.changed() => {
+                        if changed.is_ok() && self.cancelled() {
+                            self.finish_cancelled();
+                            return NetworkGate::Cancelled;
+                        }
+                        // executor 実行の select と同じガードだが、承認待ちを破棄した
+                        // 後に無承認で実行されないよう fail-closed で拒否する。
+                        return NetworkGate::Reject(ToolResult::error(
+                            "cancel 監視が変化したため承認待ちを中止しました",
+                        ));
+                    }
+                    outcome = gate.request(name, call_id) => outcome,
+                };
+                match outcome {
+                    ApprovalOutcome::Approved => NetworkGate::Proceed,
+                    ApprovalOutcome::Denied => NetworkGate::Reject(ToolResult::error(format!(
+                        "承認要求が拒否されました: {reason}"
+                    ))),
+                    ApprovalOutcome::TimedOut => NetworkGate::Reject(ToolResult::error(format!(
+                        "承認応答がタイムアウトしました: {reason}"
+                    ))),
+                }
+            }
+        }
+    }
 }
 
 /// 標準ツール定義を返す。
-/// Web ツールの露出ゲートは [`ExecutionPolicy::filter_tool_specs`] が担う。
+/// Web ツールの露出ゲートは [`ExecutionPolicy::filter_tool_specs`] が担い、
+/// 実行時には network 権限ツールへの 3 層 AND 判定 (role / per-tool / session、
+/// session OptIn は承認プロンプト) が execute_tools の network gate で行われる。
 pub(super) fn standard_tool_specs() -> Vec<ToolSpec> {
     [
         "read",

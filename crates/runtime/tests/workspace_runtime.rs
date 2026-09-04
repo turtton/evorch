@@ -3,7 +3,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agents::Role;
+use agents::{NetworkAccess, Role};
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::FinishReason;
 use runtime::workspace::{Project, WorktreeManager};
@@ -220,8 +220,15 @@ async fn isolated_run_executor_registers_web_tools() {
     let mut events = bus.subscribe();
 
     // When
-    let run_id =
-        runtime.delegate_background(Role::Librarian, "fetch".to_string(), isolated_config());
+    let run_id = runtime.delegate_background(
+        Role::Librarian,
+        "fetch".to_string(),
+        RunConfig {
+            workspace_mode: WorkspaceMode::Isolated,
+            network_access: NetworkAccess::Allowed,
+            ..RunConfig::default()
+        },
+    );
 
     // Then: 再構築された executor が web_fetch を登録済みなら ToolStarted が
     // 観測され、引数スキーマ検証 (url 必須) で is_error 完了する

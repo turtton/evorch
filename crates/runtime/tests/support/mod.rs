@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use agents::Role;
 use async_trait::async_trait;
-use event_bus::{Event, EventReceiver};
+use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
@@ -211,6 +211,30 @@ pub async fn drain_events(receiver: &mut EventReceiver) -> Vec<Event> {
         events.push(event);
     }
     events
+}
+
+/// ApprovalRequested を待って ApprovalResolved で応答するタスクを起動する。
+///
+/// `receiver` は呼び出し側が `delegate_background` の前に subscribe したものを
+/// 受け取る (承認要求の取りこぼしを防ぐため)。最初の 1 件の承認要求に応答すると
+/// 終了する。
+pub fn spawn_approval_responder(
+    bus: Arc<EventBus>,
+    mut receiver: EventReceiver,
+    approved: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let event = receiver.recv().await.expect("承認要求を受信できるはずです");
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                    call_id,
+                    approved,
+                }));
+                return;
+            }
+        }
+    })
 }
 
 pub fn recording_factory() -> (
