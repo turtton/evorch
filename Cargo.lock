@@ -2044,6 +2044,7 @@ name = "gui"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "config",
  "eframe",
  "egui",
  "egui_dock",
