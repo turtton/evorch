@@ -9,12 +9,18 @@ mod catalog;
 mod composition;
 mod family;
 mod intent_gate;
+mod intent_gate_policy;
 mod key_triggers;
 
 pub use assembly::{SystemPromptInput, assemble_system_prompt};
 pub use catalog::{SystemPromptCatalog, SystemPromptCatalogBuilder, SystemPromptCatalogError};
 pub use composition::{CatalogBuildInput, PromptCompositionError, build_catalog};
 pub use family::{ModelFamily, classify};
+pub use intent_gate_policy::{
+    CLASSIFICATION_AXES, ClassificationAxis, EXECUTION_SHAPES, ExecutionShape,
+    MUTATION_NO_CARRYOVER_RULE, TASK_KINDS, TaskKind, render_orchestrator_gate_body,
+    render_routing_gate_body,
+};
 pub use key_triggers::{
     AvailableAgent, AvailableSkill, TriggerSource, default_role_triggers, render_key_triggers,
     triggers_from_availability,
