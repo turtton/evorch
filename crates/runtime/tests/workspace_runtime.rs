@@ -17,8 +17,8 @@ use tokio::time::{Duration, sleep, timeout};
 use tools::ToolExecutor;
 
 use support::{
-    ScriptedModel, collect_events, git, init_git_repo, recording_factory, text_response,
-    tool_response,
+    ScriptedModel, collect_events, gated_factory, git, init_git_repo, recording_factory,
+    text_response, tool_response,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -205,6 +205,54 @@ async fn inspect_agent_reports_isolated_workspace() {
             merge_mode: MergeMode::Branch,
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
+    // Given: sandbox build が proceed まで停止する factory を持つ isolated run
+    let (_temp, repo) = init_git_repo();
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let bus = Arc::new(EventBus::new(64));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let manager =
+        WorktreeManager::new(Project::new(repo.clone()).expect("git リポジトリを検証できる"));
+    let (factory, entered_rx, proceed_tx) = gated_factory();
+    let runtime =
+        AgentRuntime::with_workspace_context(Arc::clone(&bus), executor, model, manager, factory);
+    let run_id = runtime.delegate_background(Role::Worker, "work".to_string(), isolated_config());
+    let worktree_path = repo.join(".evorch/worktrees").join(run_id.to_string());
+    let branch = format!("evorch/task/{run_id}");
+    timeout(SETUP_TIMEOUT, async {
+        while entered_rx.try_recv().is_err() {
+            sleep(POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .expect("sandbox build が期限内に開始される");
+
+    // When: sandbox build の完了前に inspection する
+    let active = runtime
+        .inspect_agent(run_id)
+        .expect("run を inspection できる");
+
+    // Then: build 完了前でも Isolated の branch / worktree path が観測できる
+    assert_eq!(
+        active.workspace,
+        Some(WorkspaceInspection {
+            mode: WorkspaceMode::Isolated,
+            branch: Some(branch),
+            worktree_path: Some(worktree_path),
+            merge_mode: MergeMode::Branch,
+        })
+    );
+    let _ = proceed_tx.send(());
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

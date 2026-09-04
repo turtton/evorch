@@ -288,6 +288,45 @@ pub fn recording_factory() -> (
     )
 }
 
+struct GatedSandboxFactory {
+    entered: std::sync::mpsc::Sender<()>,
+    proceed: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl SandboxFactory for GatedSandboxFactory {
+    fn build(
+        &self,
+        _policy: &ExecutionPolicy,
+        _mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        let _ = self.entered.send(());
+        let _ = self
+            .proceed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+        Ok(Arc::new(DirectSandbox::new_unchecked()))
+    }
+}
+
+/// build 開始を通知し、proceed 送信まで build を停止する factory を返す。
+pub fn gated_factory() -> (
+    Arc<dyn SandboxFactory>,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    (
+        Arc::new(GatedSandboxFactory {
+            entered: entered_tx,
+            proceed: std::sync::Mutex::new(proceed_rx),
+        }),
+        entered_rx,
+        proceed_tx,
+    )
+}
+
 pub fn init_git_repo() -> (TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let repo = temp.path().join("repo");

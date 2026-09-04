@@ -166,40 +166,10 @@ async fn setup_isolated_workspace(
     state: &LoopState,
 ) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
     let run_id = state.task.run_id;
-    let manager = workspace.manager.clone();
-    let owned = tokio::task::spawn_blocking(move || manager.create(run_id))
-        .await
-        .map_err(|error| format!("workspace setup failed: {error}"))?
-        .map_err(|error| format!("workspace setup failed: {error}"))?;
-    let manager = workspace.manager.clone();
-    let git_common_dir = match tokio::task::spawn_blocking(move || manager.git_common_dir()).await {
-        Ok(Ok(path)) => path,
-        Ok(Err(error)) => {
-            cleanup_failed_setup(owned).await;
-            return Err(format!("workspace setup failed: {error}"));
-        }
-        Err(error) => {
-            cleanup_failed_setup(owned).await;
-            return Err(format!("workspace setup failed: {error}"));
-        }
-    };
-    let mounts = isolated_mounts(&owned, &git_common_dir);
-    let sandbox = match workspace.factory.build(&state.policy, &mounts) {
-        Ok(sandbox) => sandbox,
-        Err(error) => {
-            cleanup_failed_setup(owned).await;
-            return Err(format!("workspace sandbox setup failed: {error}"));
-        }
-    };
-    let executor = match ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
-        .with_web_tools()
-    {
-        Ok(executor) => Arc::new(executor),
-        Err(error) => {
-            cleanup_failed_setup(owned).await;
-            return Err(format!("workspace web tool setup failed: {error}"));
-        }
-    };
+    // inspection は sandbox build より先に登録する。factory.build の完了を観測してから
+    // inspect する利用者が Shared fallback を読まないようにするため (issue #71 CI 失敗の
+    // root cause: 旧実装は build 完了後に登録しており、その間の inspect が Shared を返した)。
+    let (planned_branch, planned_path) = workspace.manager.planned(run_id);
     runtime_shared
         .workspaces
         .lock()
@@ -208,15 +178,65 @@ async fn setup_isolated_workspace(
             run_id,
             WorkspaceInspection {
                 mode: WorkspaceMode::Isolated,
-                branch: Some(owned.branch.clone()),
-                worktree_path: Some(owned.path.clone()),
+                branch: Some(planned_branch),
+                worktree_path: Some(planned_path),
                 merge_mode: state.task.config.merge_mode,
             },
         );
+    let manager = workspace.manager.clone();
+    let owned = match tokio::task::spawn_blocking(move || manager.create(run_id)).await {
+        Ok(Ok(owned)) => owned,
+        Ok(Err(error)) => {
+            remove_workspace_inspection(runtime_shared, run_id);
+            return Err(format!("workspace setup failed: {error}"));
+        }
+        Err(error) => {
+            remove_workspace_inspection(runtime_shared, run_id);
+            return Err(format!("workspace setup failed: {error}"));
+        }
+    };
+    let manager = workspace.manager.clone();
+    let git_common_dir = match tokio::task::spawn_blocking(move || manager.git_common_dir()).await {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) => {
+            cleanup_failed_setup(runtime_shared, run_id, owned).await;
+            return Err(format!("workspace setup failed: {error}"));
+        }
+        Err(error) => {
+            cleanup_failed_setup(runtime_shared, run_id, owned).await;
+            return Err(format!("workspace setup failed: {error}"));
+        }
+    };
+    let mounts = isolated_mounts(&owned, &git_common_dir);
+    let sandbox = match workspace.factory.build(&state.policy, &mounts) {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            cleanup_failed_setup(runtime_shared, run_id, owned).await;
+            return Err(format!("workspace sandbox setup failed: {error}"));
+        }
+    };
+    let executor = match ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
+        .with_web_tools()
+    {
+        Ok(executor) => Arc::new(executor),
+        Err(error) => {
+            cleanup_failed_setup(runtime_shared, run_id, owned).await;
+            return Err(format!("workspace web tool setup failed: {error}"));
+        }
+    };
     Ok((owned, executor))
 }
 
-async fn cleanup_failed_setup(owned: OwnedWorktree) {
+fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {
+    runtime_shared
+        .workspaces
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&run_id);
+}
+
+async fn cleanup_failed_setup(runtime_shared: &Arc<Shared>, run_id: RunId, owned: OwnedWorktree) {
+    remove_workspace_inspection(runtime_shared, run_id);
     let _ = tokio::task::spawn_blocking(move || owned.cleanup()).await;
 }
 
