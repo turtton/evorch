@@ -80,6 +80,8 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 - **観測**: pre-routing 判定結果と escalation イベントは runtime event で記録し、`v02-orchestrator-loop` の observability（ToolStarted/Completed 同様の event bus）に乗せる。具体的には RoutingDecision event（Direct/Coordinated, 判定理由, 使用ルール or モデル）と EscalationRequested event（source_run_id, memo 概要, 新 run_id）を発行。
 - **Intent Gate との関係**: 再分類の指示は Orchestrator prompt から削除し、選択結果を検証する説明に留める。ルールは単一ソース化し、routing prompt と Orchestrator prompt の両方をレンダリングする形にする。
 
+- **v0.2 context compaction（PR #64）**: model-visible context の切替は provider request 層で checkpoint+recent のみに制限され、AgentMessage 配送（durable channel、PR #48）・project rules（synthetic System、PR #62）と独立に重ねられる。orchestration 面で意識するのは compaction 後も goal / 委譲結果の参照可能性が transcript（storage）側で保たれること。詳細は [agent-runtime-kernel overview](../agent-runtime-kernel/overview.md) の「v0.2 context compaction の実装確定」
+
 ## 受け入れ基準
 
 - Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること

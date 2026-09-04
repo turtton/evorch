@@ -121,6 +121,15 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - Reviewer Gate 検出済み修正: render/api の header/marker への未エスケープ rel_path 混入（`<system-reminder>` directory 経由の制御構文注入を防ぐ escape 強制、RED→GREEN 回帰 4 件）
 - 制御構文・制御マーカー類を含む rules コンテンツは既存 sanitize/escape 経路で保護（挿入は model-visible System のみ）
 
+## v0.2 context compaction の実装確定（issue #63、PR #64、2026-09-04）
+
+- 実装位置: `crates/runtime/src/compaction/`（mod / policy / estimator / cut / summary）。発火は usage ratio ≥ 75%（既定、config `[compaction] threshold`）で turn boundary に一度だけ。手動 compact と agent compact tool は同一 engine・`CompactionReason` 分離
+- 構成: checkpoint + visible_messages 射影で provider request は checkpoint+recent のみ（raw rows 前後不変・監査可能）。summary 失敗は atomicity（部分置換なし）。estimator は model-visible token 推定で cut-point は open tool pair を切断しない（tool pair 不変条件）
+- 永続化・監査: `CompactionEvent`（event-bus variant、storage / otel / gui / sandbox へ no-op mapping、後方互換）で replay で切替追跡可能。storage `repo/event` へイベント append
+- prompt seam 経由で cache-aware policy（`[compaction]` 設定・summarizer 種別）を system prompt に注入
+- 実行ガード: 試行予算・自動トリガの ratchet・手動 compact の in-flight 拒否・cooldown/hysteresis・diagnostics（security 審査 4 findings 修正済み）
+- 検証: 長期 session fixture（replay→自動 compaction→Done 継続、summary/tail/AGENT_MESSAGE 含有）・audit byte-proof・失敗原子性・新境界意味論
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
