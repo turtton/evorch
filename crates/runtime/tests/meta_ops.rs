@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use agents::Role;
 use config::{CompactionConfig, SummarizerKind};
-use event_bus::{
-    AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind,
-};
+use event_bus::{AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
 use runtime::workspace::{Project, WorktreeManager};
 use runtime::{AgentRuntime, IsolatedMounts, RunConfig, WorkspaceMode};
@@ -216,16 +214,15 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
-    let runtime =
-        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_compaction(
-            CompactionConfig {
-                context_window_tokens: 1_000_000,
-                keep_recent_tokens: 1,
-                max_summary_bytes: 1_024,
-                summarizer: SummarizerKind::Structural,
-                ..CompactionConfig::default()
-            },
-        );
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_compaction(
+        CompactionConfig {
+            context_window_tokens: 1_000_000,
+            keep_recent_tokens: 1,
+            max_summary_bytes: 1_024,
+            summarizer: SummarizerKind::Structural,
+            ..CompactionConfig::default()
+        },
+    );
     let mut receiver = bus.subscribe();
 
     // When: Orchestrator を finish まで実行する
@@ -244,9 +241,11 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     let (content, is_error) = tool_result(final_turn, "compact-1").expect("compact result");
     assert!(!is_error);
     let payload: serde_json::Value = serde_json::from_str(&content).expect("compact JSON");
-    assert!(payload["checkpoint_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("ckpt-")));
+    assert!(
+        payload["checkpoint_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("ckpt-"))
+    );
     assert!(payload["estimated_tokens_before"].is_u64());
     assert!(payload["estimated_tokens_after"].is_u64());
     assert_eq!(payload["still_above_threshold"], json!(false));

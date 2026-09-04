@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use config::{CompactionConfig, SummarizerKind};
 use event_bus::{
-    AgentMessageKind, AgentRunPhase, CompactionEvent, CompactionReason, EventReceiver, EventBus,
-    EventKind, LifecycleEvent,
+    AgentMessageKind, AgentRunPhase, CompactionEvent, CompactionReason, EventBus, EventKind,
+    EventReceiver, LifecycleEvent,
 };
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent,
@@ -339,7 +339,10 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     };
 
     let tool_turn = |index: usize| {
-        Ok(scripted_response(fixture[index].clone(), FinishReason::ToolUse))
+        Ok(scripted_response(
+            fixture[index].clone(),
+            FinishReason::ToolUse,
+        ))
     };
     let script: Vec<Result<ChatResponse, RuntimeError>> = vec![
         tool_turn(2),
@@ -413,13 +416,19 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
             }
             1 => {
                 assert_eq!(request.len(), 2);
-                assert!(request_texts(request)
-                    .iter()
-                    .any(|text| text.contains("Fix the flaky compaction retry in scheduler")));
+                assert!(
+                    request_texts(request)
+                        .iter()
+                        .any(|text| text.contains("Fix the flaky compaction retry in scheduler"))
+                );
             }
             3 => {
                 // fixture[8] 相当の agent-message はまだ履歴に無い
-                assert!(!request_texts(request).iter().any(|text| text.contains(&body_send)));
+                assert!(
+                    !request_texts(request)
+                        .iter()
+                        .any(|text| text.contains(&body_send))
+                );
                 runtime
                     .send_agent_message(
                         parent,
@@ -432,12 +441,12 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
             }
             4 => {
                 // fixture[8] と同一位置 (T3 の結果の直後) に生の User text として入る
-                assert!(request
-                    .iter()
-                    .any(|message| message.content.iter().any(|block| matches!(
+                assert!(request.iter().any(|message| message.content.iter().any(
+                    |block| matches!(
                         block,
                         ContentBlock::Text { text } if *text == agent1
-                    ))));
+                    )
+                )));
             }
             9 => {
                 assert!(
@@ -457,12 +466,12 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
             }
             10 => {
                 // fixture[21] と同一位置 (T9 の結果の直後) に生の User text として入る
-                assert!(request
-                    .iter()
-                    .any(|message| message.content.iter().any(|block| matches!(
+                assert!(request.iter().any(|message| message.content.iter().any(
+                    |block| matches!(
                         block,
                         ContentBlock::Text { text } if *text == agent2
-                    ))));
+                    )
+                )));
             }
             _ => {}
         }
@@ -507,8 +516,14 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
 
     // 要約入力への fixture AGENT_MESSAGE 取り込みは Structural 要約の出力で検証する
     assert!(summary.contains("Fix the flaky compaction retry in scheduler"));
-    assert!(summary.contains(&agent1), "summary must carry the relayed send body");
-    assert!(summary.contains(&agent2), "summary must carry the relayed reply body");
+    assert!(
+        summary.contains(&agent1),
+        "summary must carry the relayed send body"
+    );
+    assert!(
+        summary.contains(&agent2),
+        "summary must carry the relayed reply body"
+    );
     assert!(summary.contains("Decision: use exponential backoff with jitter"));
     assert!(summary.to_ascii_lowercase().contains("unresolved"));
     println!(
@@ -541,11 +556,17 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         assert!(!request_texts(request).iter().any(|text| {
             text.contains("reproduce the flake with a stress run before touching anything")
         }));
-        assert!(!request_texts(request).iter().any(|text| text.contains("The scheduler rearms")));
+        assert!(
+            !request_texts(request)
+                .iter()
+                .any(|text| text.contains("The scheduler rearms"))
+        );
         // goal は checkpoint の 1 メッセージ内にだけ残る
         let goal_bearers = request
             .iter()
-            .filter(|message| text_of(message).contains("Fix the flaky compaction retry in scheduler"))
+            .filter(|message| {
+                text_of(message).contains("Fix the flaky compaction retry in scheduler")
+            })
             .count();
         assert_eq!(goal_bearers, 1);
     }
@@ -586,13 +607,13 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     }
     let checkpoint_message = last
         .iter()
-        .find(|message| {
-            text_of(message)
-                .starts_with(CHECKPOINT_PREFIX)
-        })
+        .find(|message| text_of(message).starts_with(CHECKPOINT_PREFIX))
         .expect("final request carries the checkpoint");
     assert!(matches!(checkpoint_message.role, MessageRole::User));
-    assert!(matches!(checkpoint_message.content.as_slice(), [ContentBlock::Text { .. }]));
+    assert!(matches!(
+        checkpoint_message.content.as_slice(),
+        [ContentBlock::Text { .. }]
+    ));
     assert_eq!(
         runtime
             .inspect_agent(child)
