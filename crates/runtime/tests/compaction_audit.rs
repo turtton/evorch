@@ -1,8 +1,10 @@
 mod support;
 
-// allow: SIZE_OK — three AC4/AC5 end-to-end scenarios share one real storage bridge and model.
+// allow: SIZE_OK — three AC4/AC5 end-to-end scenarios share one real storage
+// bridge and model, plus the byte-level audit helpers (payload capture,
+// post-close DB-file scans) that keep the storage-invariance proof non-vacuous.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::sync::Arc;
 
@@ -189,6 +191,72 @@ async fn wait_for_event_count(config: &StorageConfig, count: usize) -> Vec<Store
     .expect("storage bridge drain timeout")
 }
 
+async fn wait_for_compaction_row(config: &StorageConfig) -> Vec<StoredEvent> {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let events = Database::open(config)
+                .expect("reader opens")
+                .events_by_session(TEST_SESSION)
+                .expect("events read");
+            if events
+                .iter()
+                .any(|stored| matches!(stored.event.kind, EventKind::Compaction(_)))
+            {
+                return events;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compaction row persistence timeout")
+}
+
+/// `repo::event::append_event` が `events.payload` 列へ書き込むバイト列
+/// （`serde_json::to_string(&event.kind)`、crates/storage/src/repo/event.rs）を
+/// 復元済みイベントから再構築します。
+///
+/// runtime 統合テストは rusqlite 依存を持たず（crates/runtime/Cargo.toml）、
+/// `Database.conn` も非公開のため生 SQL を発行できない。最強の公開アクセサは
+/// `events_by_session`（ORDER BY id ASC）なので、行バイトの証明は「再直列化
+/// バイトと close 後 DB ファイル内バイトの突き合わせ」で近似する。再直列化が
+/// 保存形式と一致するか自体が本走査の検証対象であり、循環ではない。
+fn payload_bytes(stored: &StoredEvent) -> Vec<u8> {
+    serde_json::to_vec(&stored.event.kind).expect("event kind serializes")
+}
+
+fn count_bytes(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+fn payload_row_multiplicity(events: &[StoredEvent]) -> BTreeMap<Vec<u8>, usize> {
+    let mut rows = BTreeMap::new();
+    for stored in events {
+        *rows.entry(payload_bytes(stored)).or_insert(0) += 1;
+    }
+    rows
+}
+
+/// close 済み DB ファイル内で、既存行の payload バイトが重複度以上残ることを検証します。
+///
+/// `==` でなく `>=` なのは、後続ランの新規行が同一 payload を持つ追記や、
+/// compaction 要約が同一バイト列を部分文字列として含む場合は行不変性の違反では
+/// ないため。既存行が別バイトへ書き換えられると元バイトの出現数が重複度を下回り
+/// この検証が赤になる（行削除・入替は events_by_session の prefix 一致が先に赤）。
+fn assert_payload_rows_survive(db_bytes: &[u8], rows: &BTreeMap<Vec<u8>, usize>) {
+    for (payload, multiplicity) in rows {
+        let found = count_bytes(db_bytes, payload);
+        assert!(
+            found >= *multiplicity,
+            "expected >= {multiplicity} occurrences of a {len}-byte event payload, \
+             found {found}: pre-existing event row bytes were rewritten or lost",
+            len = payload.len(),
+        );
+    }
+}
+
 fn has_checkpoint(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
         message.content.iter().any(|block| {
@@ -230,10 +298,30 @@ async fn compaction_is_auditable_in_storage() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
     let observed_before = model.observed().await;
     let events_before = wait_for_event_count(&config, 9).await;
+    // compaction 前スナップショット（行順 + payload 列バイト）。この時点で compaction 行は存在しない。
+    let pre_compaction_rows = payload_row_multiplicity(&events_before);
     let reader = Database::open(&config).expect("reader opens");
+    // ------------------------------------------------------------------
+    // 境界ドキュメント (issue #63 AC4): compaction は messages テーブルへの
+    // runtime 書き経路を持たない。grep 証拠:
+    //   - crates/runtime/Cargo.toml は SQL 能力を持つ依存（rusqlite 等）を持たない
+    //   - 公開書き込み面 storage::StorageHandle（crates/storage/src/writer.rs）は
+    //     append_event / record_catalog_update / reconcile / flush_usage_now /
+    //     checkpoint_now のみで、メッセージ書きコマンドを持たない
+    //   - INSERT INTO messages は crate 非公開の storage::repo::message のみ
+    //     （`use storage::repo;` は lib.rs doctest で E0603 compile_fail 保証）
+    // storage 自身の統合テスト（crates/storage/tests/read_api.rs）は生 rusqlite で
+    // messages を seed できるが、runtime テストへの依存追加は本タスクで禁止されて
+    // いるため不可。よって以下の is_empty() は境界の負荷テスト: 将来 runtime に
+    // メッセージ書き経路が生えた場合ここが赤になり、この監査面の意図的な更新を強制する。
     let messages_before = reader
         .messages_by_session(TEST_SESSION)
         .expect("messages read");
+    assert!(
+        messages_before.is_empty(),
+        "runtime gained a messages-table write path; update this boundary documentation \
+         and the compaction audit surface deliberately"
+    );
     let snapshot_before = reader
         .restore_session(TEST_SESSION)
         .expect("snapshot restores")
@@ -255,17 +343,21 @@ async fn compaction_is_auditable_in_storage() {
     })
     .await
     .expect("resumed provider request timeout");
-    let events_after = wait_for_event_count(&config, events_before.len() + 1).await;
+    let events_after = wait_for_compaction_row(&config).await;
     let reader = Database::open(&config).expect("reader reopens");
 
     // Then: prior bytes/order and projections remain exact; one complete compaction row is appended
+    //
+    // StoredEvent の PartialEq は採番 id を含むため、prefix 一致は「同一行が同一順で
+    // 残っていること」を意味する。全行に対する Compaction 種別の数検査（prefix 部には
+    // 定義上 compaction 行がないため実質 tail 部）で、compaction 行がちょうど 1 行
+    // であることを保証する。
     assert_eq!(
         &events_after[..events_before.len()],
         events_before.as_slice()
     );
     let compacted = events_after
         .iter()
-        .skip(events_before.len())
         .filter(|stored| matches!(stored.event.kind, EventKind::Compaction(_)))
         .collect::<Vec<_>>();
     assert_eq!(compacted.len(), 1);
@@ -319,15 +411,17 @@ async fn compaction_is_auditable_in_storage() {
     drop(reader);
     storage.close();
     let db_bytes = fs::read(&config.db_path).expect("database bytes read");
-    let stored_kind_and_payload =
-        b"compaction{\"kind\":\"Compaction\",\"payload\":{\"kind\":\"Compacted\"";
-    assert_eq!(
-        db_bytes
-            .windows(stored_kind_and_payload.len())
-            .filter(|bytes| *bytes == stored_kind_and_payload)
-            .count(),
-        1
-    );
+
+    // compaction 前に存在した全行の payload 列バイトが、書き換え・欠落なしで
+    // そのまま DB ファイル上に残っていること（assert_payload_rows_survive 参照）。
+    assert_payload_rows_survive(&db_bytes, &pre_compaction_rows);
+
+    // compaction 行の kind 列バイト（issue #63 指定の小文字 "compaction"）と
+    // payload 列バイト全体が、DB ファイル上にちょうど 1 回出現すること。
+    // デシリアライズ経由の AC6 フィールド検査とファイルバイトの両面で裏取りする。
+    let mut compaction_row_bytes = b"compaction".to_vec();
+    compaction_row_bytes.extend_from_slice(&payload_bytes(compacted[0]));
+    assert_eq!(count_bytes(&db_bytes, &compaction_row_bytes), 1);
 }
 
 #[tokio::test]
@@ -368,9 +462,15 @@ async fn summarizer_failure_is_atomic_end_to_end() {
     wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
     let events_before = wait_for_event_count(&config, 9).await;
     let reader = Database::open(&config).expect("reader opens");
+    // 境界ドキュメントは compaction_is_auditable_in_storage の同ブロックを参照。
     let messages_before = reader
         .messages_by_session(TEST_SESSION)
         .expect("messages read");
+    assert!(
+        messages_before.is_empty(),
+        "runtime gained a messages-table write path; update this boundary documentation \
+         and the compaction audit surface deliberately"
+    );
     let snapshot_before = reader
         .restore_session(TEST_SESSION)
         .expect("snapshot restores");
@@ -397,12 +497,14 @@ async fn summarizer_failure_is_atomic_end_to_end() {
         &events_after[..events_before.len()],
         events_before.as_slice()
     );
+    // 全行（prefix 込み）に compaction 行が 1 行も無いこと。要約失敗時は
+    // CompactionEvent が一切永続化されていなければならない。
     assert!(
         events_after
             .iter()
-            .skip(events_before.len())
             .all(|stored| !matches!(stored.event.kind, EventKind::Compaction(_)))
     );
+    let checkpoint_rows = payload_row_multiplicity(&events_after);
     let reader = Database::open(&config).expect("reader reopens");
     assert_eq!(
         reader
@@ -439,6 +541,16 @@ async fn summarizer_failure_is_atomic_end_to_end() {
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     bridge.abort();
     storage.close();
+    let db_bytes = fs::read(&config.db_path).expect("database bytes read");
+
+    // 要約失敗時点で存在した全行の payload 列バイトが、close 後も書き換え・
+    // 欠落なしで残っていること（原子性のファイルレベル裏取り）。
+    assert_payload_rows_survive(&db_bytes, &checkpoint_rows);
+
+    // compaction 行の kind 列 + payload 列の接合バイトがファイル上に皆無である
+    // こと（デシリアライズ経由の「compaction 行ゼロ」検査のバイトレベル裏取り）。
+    let compaction_row_needle = b"compaction{\"kind\":\"Compaction\"".as_slice();
+    assert_eq!(count_bytes(&db_bytes, compaction_row_needle), 0);
 }
 
 #[tokio::test]

@@ -520,16 +520,6 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         summary.contains(&agent1),
         "summary must carry the relayed send body"
     );
-    assert!(
-        summary.contains(&agent2),
-        "summary must carry the relayed reply body"
-    );
-    assert!(summary.contains("Decision: use exponential backoff with jitter"));
-    assert!(summary.to_ascii_lowercase().contains("unresolved"));
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&events[0]).expect("compaction event serializes")
-    );
 
     // (c) 圧縮後の provider 要求 = checkpoint + kept tail のみ
     let observed = model.observed().await;
@@ -540,6 +530,24 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         .position(|request| !checkpoint_ids(request).is_empty())
         .expect("a compacted provider request exists")
         + 1;
+
+    // B4a の完全ターン境界ルールでは relayed reply が compacted 域外(tail)に verbatim で残りうる。
+    // tail 生存は要約内保持より強い保存形態なので「summary 内 or 圧縮後全要求の tail 内」の OR を検証する。
+    let agent2_in_summary = summary.contains(&agent2);
+    let agent2_in_tail = child_requests[first_compacted - 1..]
+        .iter()
+        .all(|request| request.iter().any(|message| text_of(message).contains(&agent2)));
+    assert!(
+        agent2_in_summary || agent2_in_tail,
+        "relayed reply body must survive compaction (summary or kept tail)"
+    );
+    assert!(summary.contains("Decision: use exponential backoff with jitter"));
+    assert!(summary.to_ascii_lowercase().contains("unresolved"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&events[0]).expect("compaction event serializes")
+    );
+
     assert!(
         (11..=13).contains(&first_compacted),
         "compaction must fire mid-session, after both relayed agent messages sank into history (got {first_compacted})"
@@ -561,14 +569,17 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
                 .iter()
                 .any(|text| text.contains("The scheduler rearms"))
         );
-        // goal は checkpoint の 1 メッセージ内にだけ残る
+        // B4a: goal は保護済み raw User(verbatim) + checkpoint 要約の 2 メッセージで保持される
         let goal_bearers = request
             .iter()
-            .filter(|message| {
-                text_of(message).contains("Fix the flaky compaction retry in scheduler")
-            })
+            .filter(|message| text_of(message).contains(goal.as_str()))
             .count();
-        assert_eq!(goal_bearers, 1);
+        assert_eq!(goal_bearers, 2);
+        assert!(
+            request
+                .iter()
+                .any(|message| text_of(message) == goal.as_str())
+        );
     }
     // kept tail を含む全要求で ToolUse / ToolResult が対で閉じる (尻切れなし)
     for request in child_requests {

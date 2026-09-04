@@ -206,6 +206,7 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     // window を十分大きくして自動圧縮を発火させず、keep_recent_tokens を 1 にして
     // Agent 起因の cut が成立するようにする
     let model = Arc::new(ScriptedModel::new([
+        Ok(text_response(&"old answer ".repeat(40), FinishReason::Stop)),
         Ok(tool_response("compact-1", "compact", json!({}))),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
@@ -229,8 +230,29 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     let orchestrator = runtime.delegate_background(
         Role::Orchestrator,
         "large prompt ".repeat(40),
-        RunConfig::default(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
     );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .inspect_agent(orchestrator)
+                .expect("run remains inspectable")
+                .phase
+                == AgentRunPhase::Waiting
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiting phase timeout");
+    runtime
+        .send_message(orchestrator, "resume".to_string())
+        .expect("waiting run resumes");
     assert_eq!(runtime.wait(orchestrator).await, Ok(AgentRunPhase::Done));
     let events = compaction_events_until_done(&mut receiver, &orchestrator.to_string()).await;
 
@@ -239,7 +261,7 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     let observed = model.observed().await;
     let final_turn = observed.last().expect("orchestrator final model turn");
     let (content, is_error) = tool_result(final_turn, "compact-1").expect("compact result");
-    assert!(!is_error);
+    assert!(!is_error, "compact failed: {content}");
     let payload: serde_json::Value = serde_json::from_str(&content).expect("compact JSON");
     assert!(
         payload["checkpoint_id"]
@@ -249,6 +271,7 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
     assert!(payload["estimated_tokens_before"].is_u64());
     assert!(payload["estimated_tokens_after"].is_u64());
     assert_eq!(payload["still_above_threshold"], json!(false));
+    assert_eq!(payload["reason"], json!("agent"));
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].kind,

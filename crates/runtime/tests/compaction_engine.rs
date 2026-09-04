@@ -194,9 +194,10 @@ async fn manual_requests_coalesce_and_run_before_resumed_provider_call() {
 
 #[tokio::test]
 async fn model_summarizer_reply_becomes_checkpoint_summary() {
-    // Given: a keyed model script with a distinct summary reply
+    // Given: provider replies keyed by the original goal and a summary reply keyed by the
+    // summarizer's own first User message, matching ScriptedModel's routing contract
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
-        "done",
+        "model generated checkpoint",
         FinishReason::Stop,
     ))]));
     model
@@ -204,10 +205,7 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
             "MODEL-SUMMARY",
             [
                 Ok(text_response(&"old answer ".repeat(20), FinishReason::Stop)),
-                Ok(text_response(
-                    "model generated checkpoint",
-                    FinishReason::Stop,
-                )),
+                Ok(text_response("done", FinishReason::Stop)),
             ],
         )
         .await;
@@ -251,16 +249,16 @@ async fn model_summarizer_reply_becomes_checkpoint_summary() {
 
 #[tokio::test]
 async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event() {
-    // Given: model summarization fails between a successful waiting turn and its resume
-    let model = Arc::new(ScriptedModel::new([]));
+    // Given: provider replies remain keyed by the original goal while the summarizer's own
+    // first User message selects a failing summary script
+    let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
+        reason: "summary unavailable".to_string(),
+    })]));
     model
         .add_keyed(
             "ATOMIC-HISTORY",
             [
                 Ok(text_response(&"old answer ".repeat(20), FinishReason::Stop)),
-                Err(RuntimeError::Model {
-                    reason: "summary unavailable".to_string(),
-                }),
                 Ok(text_response("done", FinishReason::Stop)),
             ],
         )
@@ -364,11 +362,12 @@ async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
 
 #[tokio::test]
 async fn still_above_threshold_compacts_once_without_reentry() {
-    // Given: three provider boundaries whose structural checkpoint remains over a tiny window
+    // Given: an interactive mid-session User boundary makes the old assistant turn legally
+    // compactable while the resulting structural checkpoint remains over a tiny window
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(
             &"first response ".repeat(20),
-            FinishReason::ToolUse,
+            FinishReason::Stop,
         )),
         Ok(text_response(
             &"second response ".repeat(20),
@@ -387,12 +386,20 @@ async fn still_above_threshold_compacts_once_without_reentry() {
     let (runtime, bus) = runtime_with(model, settings);
     let mut receiver = bus.subscribe();
 
-    // When: the run crosses all three boundaries under a timeout
+    // When: the waiting run receives the required mid-session User message and then crosses
+    // the remaining provider boundaries under a timeout
     let run_id = runtime.delegate_background(
         Role::Worker,
         "large prompt ".repeat(20),
-        RunConfig::default(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
     );
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    runtime
+        .send_message(run_id, "continue through large context".to_string())
+        .expect("waiting run resumes at a legal User boundary");
     assert_eq!(
         timeout(Duration::from_secs(2), runtime.wait(run_id)).await,
         Ok(Ok(AgentRunPhase::Done))

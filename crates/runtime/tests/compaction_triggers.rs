@@ -1,6 +1,6 @@
 mod support;
 
-// allow: SIZE_OK — issue #63 requires five independent end-to-end trigger scenarios in this
+// allow: SIZE_OK — issue #63 requires independent end-to-end trigger scenarios in this
 // single integration-test target; splitting would violate the requested auditable test surface.
 
 use std::collections::BTreeSet;
@@ -9,13 +9,14 @@ use std::sync::Arc;
 use agents::Role;
 use config::{CompactionConfig, SummarizerKind};
 use event_bus::{AgentRunPhase, CompactionEvent, CompactionReason, EventBus, EventKind};
-use providers::{ContentBlock, FinishReason, Message, Role as MessageRole};
+use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError, SystemPromptCatalog};
 use sandbox::DirectSandbox;
+use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, text_response};
+use support::{ScriptedModel, text_response, tool_responses};
 
 const CHECKPOINT_PREFIX: &str = "[COMPACTION CHECKPOINT ";
 const SYSTEM_TEXT: &str = "stable-system-prefix";
@@ -104,6 +105,37 @@ fn checkpoint_ids(messages: &[Message]) -> Vec<&str> {
                 .map(|(id, _)| id)
         })
         .collect()
+}
+
+fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {
+    messages.iter().find_map(|message| {
+        message.content.iter().find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } if tool_call_id == call_id => content.first().map(|item| match item {
+                ToolResultContent::Text { text } => (text.clone(), *is_error),
+            }),
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+    })
+}
+
+async fn wait_for_observed_calls(model: &ScriptedModel, expected: usize) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if model.observed().await.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("model call timeout");
 }
 
 async fn wait_for_phase(runtime: &AgentRuntime, run_id: RunId, phase: AgentRunPhase) {
@@ -236,7 +268,7 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
     assert!(request_texts(&observed[0]).contains(&old_request.as_str()));
     assert!(checkpoint_ids(&observed[0]).is_empty());
     assert_eq!(checkpoint_ids(&observed[1]), vec![checkpoint_id.as_str()]);
-    assert!(!request_texts(&observed[1]).contains(&old_request.as_str()));
+    assert!(request_texts(&observed[1]).contains(&old_request.as_str()));
     assert!(!request_texts(&observed[1]).contains(&old_reply.as_str()));
     assert!(request_texts(&observed[1]).contains(&resume));
     for request in &observed {
@@ -335,7 +367,8 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
         .expect("waiting run resumes");
     let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
 
-    // Then: the first post-resume completion sees the manual checkpoint, not the raw old turn.
+    // Then: the first post-resume completion sees the manual checkpoint and protected goal,
+    // while the compacted assistant reply is absent.
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0],
@@ -347,27 +380,40 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
     let observed = model.observed().await;
     assert_eq!(observed.len(), 2);
     assert_eq!(checkpoint_ids(&observed[1]).len(), 1);
-    assert!(!request_texts(&observed[1]).contains(&old_request.as_str()));
+    assert!(request_texts(&observed[1]).contains(&old_request.as_str()));
     assert!(!request_texts(&observed[1]).contains(&old_reply.as_str()));
 }
 
 #[tokio::test]
 async fn still_above_threshold_reports_once_and_never_loops() {
-    // Given: a tiny window whose first checkpoint and retained tail remain above 75%.
+    // Given: a tiny window and an interactive mid-session User boundary whose first
+    // checkpoint and retained tail remain above 75%.
     let huge_prompt = "huge-prompt-".repeat(40);
     let huge_turn = "huge-turn-".repeat(40);
     let model = Arc::new(ScriptedModel::new([
-        Ok(text_response(&huge_turn, FinishReason::ToolUse)),
+        Ok(text_response(&huge_turn, FinishReason::Stop)),
         Ok(text_response("turn-two", FinishReason::ToolUse)),
         Ok(text_response("turn-three", FinishReason::ToolUse)),
         Ok(text_response("turn-four", FinishReason::ToolUse)),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(80, 100, 10));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(80, 1, 10));
     let mut receiver = bus.subscribe();
 
-    // When: the run crosses the compacting boundary and three later boundaries.
-    let run_id = runtime.delegate_background(Role::Worker, huge_prompt, RunConfig::default());
+    // When: the waiting run resumes at that legal User boundary and crosses three later
+    // provider boundaries.
+    let run_id = runtime.delegate_background(
+        Role::Worker,
+        huge_prompt,
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    runtime
+        .send_message(run_id, "continue-large-session".to_string())
+        .expect("waiting run resumes at a legal User boundary");
     let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
 
     // Then: the still-above diagnostic is emitted once and one checkpoint persists without stacking.
@@ -441,4 +487,173 @@ async fn duplicate_manual_requests_within_cooldown_boundary_coalesce() {
     ));
     let observed = model.observed().await;
     assert_eq!(checkpoint_ids(&observed[1]).len(), 1);
+}
+
+#[tokio::test]
+async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
+    // Given: one assistant response containing two compact calls and compactable history.
+    let model = Arc::new(ScriptedModel::new([
+        Ok(text_response(
+            &"agent-old-answer ".repeat(40),
+            FinishReason::Stop,
+        )),
+        Ok(tool_responses([
+            ("compact-1", "compact", serde_json::json!({})),
+            ("compact-2", "compact", serde_json::json!({})),
+        ])),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(1_000_000, 1, 100));
+    let mut receiver = bus.subscribe();
+
+    // When: both meta operations are dispatched sequentially in the same turn boundary.
+    let run_id = runtime.delegate_background(
+        Role::Orchestrator,
+        "agent-double-compact ".repeat(40),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    runtime
+        .send_message(run_id, "agent-resume".to_string())
+        .expect("waiting run resumes");
+    let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
+
+    // Then: only the first call compacts and the second receives an explicit boundary error.
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        CompactionEvent::Compacted {
+            reason: CompactionReason::Agent,
+            ..
+        }
+    ));
+    let observed = model.observed().await;
+    let final_turn = observed.last().expect("final provider request");
+    let (_, first_is_error) = tool_result(final_turn, "compact-1").expect("first compact result");
+    assert!(!first_is_error);
+    assert_eq!(
+        tool_result(final_turn, "compact-2"),
+        Some((
+            "compaction already completed at the current turn boundary".to_string(),
+            true,
+        ))
+    );
+}
+
+#[tokio::test]
+async fn manual_compact_at_next_boundary_is_rejected_during_cooldown() {
+    // Given: a run whose provider calls are held so manual generations can target boundaries.
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            Ok(text_response("old-answer", FinishReason::Stop)),
+            Ok(text_response("turn-two", FinishReason::ToolUse)),
+            Ok(text_response("done", FinishReason::Stop)),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(1_000_000, 1, 5));
+    let mut receiver = bus.subscribe();
+    let run_id = runtime.delegate_background(
+        Role::Worker,
+        "manual-cooldown ".repeat(40),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_observed_calls(&model, 1).await;
+    gate.notify_one();
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    runtime
+        .compact(run_id)
+        .expect("first manual request accepted");
+    runtime
+        .send_message(run_id, "first-resume".to_string())
+        .expect("waiting run resumes");
+    wait_for_observed_calls(&model, 2).await;
+
+    // When: another manual generation is requested for the immediately following boundary.
+    runtime
+        .compact(run_id)
+        .expect("second manual request accepted");
+    gate.notify_one();
+    wait_for_observed_calls(&model, 3).await;
+    gate.notify_one();
+    let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
+
+    // Then: the generation is consumed without creating a second checkpoint event.
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        CompactionEvent::Compacted {
+            reason: CompactionReason::Manual,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn manual_compact_succeeds_after_cooldown_expires() {
+    // Given: a first manual compaction at turn 2 and enough held turns to reach turn 8.
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            Ok(text_response("old-answer", FinishReason::Stop)),
+            Ok(text_response("turn-two", FinishReason::ToolUse)),
+            Ok(text_response("turn-three", FinishReason::ToolUse)),
+            Ok(text_response("turn-four", FinishReason::ToolUse)),
+            Ok(text_response("turn-five", FinishReason::ToolUse)),
+            Ok(text_response("turn-six", FinishReason::ToolUse)),
+            Ok(text_response("turn-seven", FinishReason::ToolUse)),
+            Ok(text_response("done", FinishReason::Stop)),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(1_000_000, 1, 5));
+    let mut receiver = bus.subscribe();
+    let run_id = runtime.delegate_background(
+        Role::Worker,
+        "manual-expiry ".repeat(40),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_observed_calls(&model, 1).await;
+    gate.notify_one();
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+    runtime
+        .compact(run_id)
+        .expect("first manual request accepted");
+    runtime
+        .send_message(run_id, "first-resume".to_string())
+        .expect("waiting run resumes");
+    for expected in 2..=6 {
+        wait_for_observed_calls(&model, expected).await;
+        gate.notify_one();
+    }
+    wait_for_observed_calls(&model, 7).await;
+
+    // When: a new manual generation is requested six turns after the first compaction.
+    runtime
+        .compact(run_id)
+        .expect("later manual request accepted");
+    gate.notify_one();
+    wait_for_observed_calls(&model, 8).await;
+    gate.notify_one();
+    let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
+
+    // Then: cooldown expiry permits a second manual checkpoint.
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| matches!(
+        event,
+        CompactionEvent::Compacted {
+            reason: CompactionReason::Manual,
+            ..
+        }
+    )));
 }
