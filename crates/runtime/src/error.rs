@@ -91,4 +91,11 @@ pub enum RuntimeError {
         /// mailbox が一杯だった run ID。
         run_id: String,
     },
+
+    /// 対象 run でコンテキスト圧縮が実行中である。
+    #[error("AgentRun {run_id} で compaction が実行中です")]
+    CompactionInFlight {
+        /// compaction 実行中の run ID。
+        run_id: String,
+    },
 }

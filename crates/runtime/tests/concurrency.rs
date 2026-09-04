@@ -77,7 +77,8 @@ async fn concurrent_runs_keep_independent_histories_and_run_ids() {
             | EventKind::Usage(_)
             | EventKind::Provider(_)
             | EventKind::Fault(_)
-            | EventKind::AgentMessage(_) => None,
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_) => None,
         })
         .collect();
     let short_text = short_id.to_string();

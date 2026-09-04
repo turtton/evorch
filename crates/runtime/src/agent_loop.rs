@@ -6,16 +6,21 @@
 mod messages;
 mod tool_calls;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
-use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
-use providers::{ContentBlock, FinishReason, ToolSpec};
+use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent};
+use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::compaction;
+use crate::compaction::policy::{
+    CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
+};
 use crate::network::isolated_mounts;
-use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
+use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
 use crate::rules::{self, RulesSession, RulesSource};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
@@ -41,6 +46,9 @@ pub(crate) struct LoopChannels {
     pub(crate) inbox_rx: mpsc::Receiver<String>,
     pub(crate) cancel_rx: watch::Receiver<bool>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
+    pub(crate) compact_rx: watch::Receiver<u64>,
+    /// 実行中の圧縮を runtime 側 (AgentRuntime::compact) と共有するフラグ。
+    pub(crate) compaction_busy: Arc<AtomicBool>,
 }
 
 pub(crate) struct LoopShared {
@@ -50,18 +58,22 @@ pub(crate) struct LoopShared {
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
     pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) rules: Option<Arc<RulesSource>>,
+    pub(crate) compaction: CompactionSettings,
+    pub(crate) compaction_configured: bool,
     pub(crate) runtime: Weak<Shared>,
 }
 
 pub(crate) struct LoopState {
     task: RunTask,
-    shared: LoopShared,
-    channels: LoopChannels,
+    pub(crate) shared: LoopShared,
+    pub(crate) channels: LoopChannels,
     run_state: RunState,
-    context: AgentContext,
+    pub(crate) context: AgentContext,
     policy: ExecutionPolicy,
     tool_specs: Vec<ToolSpec>,
     pub(crate) rules_session: Option<RulesSession>,
+    pub(crate) compaction: CompactionLoopState,
+    pub(crate) last_usage: Option<Usage>,
     resumed: bool,
 }
 
@@ -80,6 +92,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         policy,
         tool_specs: Vec::new(),
         rules_session: None,
+        compaction: CompactionLoopState::default(),
+        last_usage: None,
         resumed: false,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
@@ -260,9 +274,14 @@ fn push_initial_system_message(
         None => None,
     };
     let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
+    let compaction_text = shared.compaction_configured.then(|| {
+        let model_id = shared.model.selected_model(task.role);
+        compaction_policy_text(&shared.compaction, classify(&model_id))
+    });
     let estimated_history_bytes = u64::try_from(
         catalog_text.as_ref().map_or(0, String::len)
             + skills_text.as_ref().map_or(0, String::len)
+            + compaction_text.as_ref().map_or(0, String::len)
             + task.prompt.len(),
     )
     .unwrap_or(u64::MAX);
@@ -275,7 +294,7 @@ fn push_initial_system_message(
         )
     });
     let mut composed = String::new();
-    for section in [catalog_text, skills_text, rules_text]
+    for section in [catalog_text, skills_text, rules_text, compaction_text]
         .into_iter()
         .flatten()
     {
@@ -320,6 +339,10 @@ impl LoopState {
         self.task.run_id
     }
 
+    pub(crate) fn run_role(&self) -> Role {
+        self.task.role
+    }
+
     /// この run から参照できる skill レジストリを返す (未設定なら None)。
     pub(crate) fn skills(&self) -> Option<&Arc<SkillRegistry>> {
         self.shared.skills.as_ref()
@@ -340,9 +363,51 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
+            self.compaction.compacted_this_boundary = false;
+            let requested_gen = *self.channels.compact_rx.borrow();
+            if requested_gen > self.compaction.last_handled_gen {
+                self.compaction.last_handled_gen = requested_gen;
+                if let Err(error) = compaction::compact_now(self, CompactionReason::Manual).await {
+                    tracing::warn!(%error, "manual compaction failed");
+                }
+            } else {
+                let visible = self.context.visible_messages();
+                let estimated =
+                    compaction::estimator::estimate_visible(&visible, self.last_usage.as_ref());
+                let window = compaction::policy::resolve_window(
+                    &self.shared.compaction,
+                    &self.shared.model.selected_model(self.task.role),
+                );
+                // 閾値未満の境界を観測したら自動トリガを再武装する (ラチェット解除)。
+                if (estimated as f64) < window as f64 * self.shared.compaction.threshold {
+                    self.compaction.auto_suspended = false;
+                }
+                if compaction::policy::should_trigger(
+                    &self.compaction,
+                    &self.shared.compaction,
+                    estimated,
+                    window,
+                ) == TriggerDecision::Trigger
+                {
+                    match compaction::compact_now(self, CompactionReason::Automatic).await {
+                        Ok(outcome) if outcome.still_above_threshold => tracing::warn!(
+                            estimated_tokens_before = outcome.estimated_tokens_before,
+                            estimated_tokens_after = outcome.estimated_tokens_after,
+                            context_window_tokens = window,
+                            "automatic compaction remains above threshold"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "automatic compaction skipped or failed");
+                        }
+                    }
+                }
+            }
             let invocation = AgentInvocationContext {
                 run_id: self.task.run_id.to_string(),
             };
+            let visible_messages = self.context.visible_messages();
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -355,7 +420,7 @@ impl LoopState {
                 result = self.shared.model.complete(
                     &invocation,
                     self.task.role,
-                    &self.context.messages,
+                    &visible_messages,
                     &self.tool_specs,
                 ) => result,
             };
@@ -370,6 +435,7 @@ impl LoopState {
             if let Some(session) = &mut self.rules_session {
                 session.set_last_usage(response.usage);
             }
+            self.last_usage = Some(response.usage);
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message

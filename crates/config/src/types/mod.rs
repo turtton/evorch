@@ -1,6 +1,7 @@
 //! 設定ファイルのルート構造と各セクション型の再エクスポートを行います。
 
 pub mod agents;
+pub mod compaction;
 pub mod misc;
 pub mod panel;
 pub mod provider;
@@ -16,6 +17,7 @@ pub use agents::{
     AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, ReasoningEffortConfig,
     ResolvedAgentBinding, RoleBindingConfig,
 };
+pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
 pub use panel::PanelConfig;
 pub use provider::{
@@ -53,6 +55,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// プロジェクトルール注入設定。
     pub rules: RulesConfig,
+    /// コンテキスト圧縮設定。
+    pub compaction: CompactionConfig,
 }
 
 impl Default for Config {
@@ -67,6 +71,7 @@ impl Default for Config {
             permissions: PermissionConfig::default(),
             metrics: MetricsConfig::default(),
             rules: RulesConfig::default(),
+            compaction: CompactionConfig::default(),
         }
     }
 }

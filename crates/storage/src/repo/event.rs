@@ -198,6 +198,8 @@ const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Provider(_) => "Provider",
         EventKind::Fault(_) => "Fault",
         EventKind::AgentMessage(_) => "AgentMessage",
+        // issue #63 で指定された小文字の kind。
+        EventKind::Compaction(_) => "compaction",
     }
 }
 

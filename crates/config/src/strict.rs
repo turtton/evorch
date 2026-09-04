@@ -16,6 +16,7 @@ const ROOT_KEYS: &[&str] = &[
     "metrics",
     "agents",
     "rules",
+    "compaction",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -38,6 +39,17 @@ const RULES_KEYS: &[&str] = &[
     "context_window_tokens",
     "response_headroom_tokens",
     "max_injection_bytes",
+];
+const COMPACTION_KEYS: &[&str] = &[
+    "enabled",
+    "threshold",
+    "context_window_tokens",
+    "model_overrides",
+    "keep_recent_tokens",
+    "cooldown_turns",
+    "max_compactions_per_run",
+    "max_summary_bytes",
+    "summarizer",
 ];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
@@ -90,7 +102,8 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "diagnostics", DIAGNOSTICS_KEYS)?;
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
     validate_section(root, "metrics", METRICS_KEYS)?;
-    validate_section(root, "rules", RULES_KEYS)
+    validate_section(root, "rules", RULES_KEYS)?;
+    validate_section(root, "compaction", COMPACTION_KEYS)
 }
 
 fn validate_credential(

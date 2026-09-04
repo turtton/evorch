@@ -22,8 +22,9 @@ pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use schema::json_schema;
 pub use types::{
-    AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, Config,
-    CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig, PanelConfig,
-    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ReasoningEffortConfig,
-    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
+    AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
+    Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig,
+    PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
+    ReasoningEffortConfig, ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig,
+    RoutingConfig, RulesConfig, SummarizerKind,
 };

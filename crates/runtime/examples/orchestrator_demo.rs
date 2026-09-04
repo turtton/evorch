@@ -247,6 +247,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     EventKind::AgentMessage(event) => {
                         println!("[event] kind=AgentMessage payload={event:?}")
                     }
+                    EventKind::Compaction(event) => {
+                        println!("[event] kind=Compaction payload={event:?}")
+                    }
                 },
                 Err(RecvError::Lagged(skipped)) => {
                     println!("[event] kind=Lagged payload=skipped:{skipped}")

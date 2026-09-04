@@ -26,6 +26,21 @@
         }
       }
     },
+    "compaction": {
+      "description": "コンテキスト圧縮設定。",
+      "$ref": "#/$defs/CompactionConfig",
+      "default": {
+        "context_window_tokens": 200000,
+        "cooldown_turns": 1,
+        "enabled": true,
+        "keep_recent_tokens": 20000,
+        "max_compactions_per_run": 32,
+        "max_summary_bytes": 16384,
+        "model_overrides": {},
+        "summarizer": "model",
+        "threshold": 0.75
+      }
+    },
     "diagnostics": {
       "description": "診断 (ログ) 設定。",
       "$ref": "#/$defs/DiagnosticsConfig",
@@ -176,6 +191,74 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CompactionConfig": {
+      "description": "コンテキスト圧縮の設定。",
+      "type": "object",
+      "properties": {
+        "context_window_tokens": {
+          "description": "既定のコンテキストウィンドウ上限トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 200000,
+          "minimum": 0
+        },
+        "cooldown_turns": {
+          "description": "圧縮後に再圧縮を抑制するターン数。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "コンテキスト圧縮の有効フラグ。",
+          "type": "boolean",
+          "default": true
+        },
+        "keep_recent_tokens": {
+          "description": "圧縮せずに保持する直近トークン数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20000,
+          "minimum": 0
+        },
+        "max_compactions_per_run": {
+          "description": "1 run あたりの圧縮回数の上限 (DoS/暴走防止)。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 32,
+          "minimum": 0
+        },
+        "max_summary_bytes": {
+          "description": "要約本文の最大バイト数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 16384,
+          "minimum": 0
+        },
+        "model_overrides": {
+          "description": "モデル ID ごとのコンテキストウィンドウ上限トークン数。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "default": {}
+        },
+        "summarizer": {
+          "description": "要約に使用する方式。",
+          "$ref": "#/$defs/SummarizerKind",
+          "default": "model"
+        },
+        "threshold": {
+          "description": "圧縮を開始するコンテキスト使用率の閾値。",
+          "type": "number",
+          "format": "double",
+          "default": 0.75
         }
       },
       "additionalProperties": false
@@ -542,6 +625,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "SummarizerKind": {
+      "description": "コンテキスト要約の方式。",
+      "oneOf": [
+        {
+          "description": "モデルで要約する。",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "構造情報から要約する。",
+          "type": "string",
+          "const": "structural"
+        }
+      ]
     }
   }
 }

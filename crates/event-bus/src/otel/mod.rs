@@ -45,6 +45,7 @@
 //! | `UsageEvent::CacheStats` | cache metrics 単独項目は roadmap v0.3 以降 |
 //! | `ProviderEvent::FallbackTriggered` / `ProviderEvent::ProviderFallback` | whitelist 最終決定後、slice ②以降 |
 //! | `Lifecycle` / `Message` / `Tool` / `Fault` / `AgentMessage` | 本 slice 対象外 |
+//! | `Compaction` (issue #63) | semconv metrics の対応語彙が未定義 |
 //!
 //! # 意図的省略
 //!
@@ -360,7 +361,9 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         | EventKind::Message(_)
         | EventKind::Tool(_)
         | EventKind::Fault(_)
-        | EventKind::AgentMessage(_) => Vec::new(),
+        | EventKind::AgentMessage(_)
+        // 圧縮イベントは semconv metrics の写像対象外 (issue #63)。
+        | EventKind::Compaction(_) => Vec::new(),
     }
 }
 
