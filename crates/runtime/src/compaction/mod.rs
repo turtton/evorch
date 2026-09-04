@@ -108,6 +108,12 @@ pub(crate) async fn compact_now(
         &summary_result.map_err(|error| CompactionError::SummarizeFailed(error.to_string()))?,
         settings.max_summary_bytes,
     );
+    // max_summary_bytes=0 などで要約本文が空になる設定を黙って成功扱いしない。
+    if summary.is_empty() {
+        return Err(CompactionError::SummarizeFailed(
+            "summary became empty after max_summary_bytes enforcement".to_string(),
+        ));
+    }
 
     let checkpoint_id = format!(
         "ckpt-{}-{}",

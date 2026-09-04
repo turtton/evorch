@@ -58,11 +58,24 @@ impl From<&CompactionConfig> for CompactionSettings {
             SummarizerKind::Structural => SummarizerKindSel::Structural,
         };
 
+        let model_overrides = config
+            .model_overrides
+            .iter()
+            // 0 の override は比率計算の 0 除算を招くため、baseline へ正規化する。
+            .map(|(model, window)| {
+                let window = match window {
+                    0 => context_window_tokens,
+                    window => *window,
+                };
+                (model.clone(), window)
+            })
+            .collect();
+
         Self {
             enabled: config.enabled,
             threshold,
             context_window_tokens,
-            model_overrides: config.model_overrides.clone(),
+            model_overrides,
             keep_recent_tokens: config.keep_recent_tokens,
             cooldown_turns: config.cooldown_turns,
             max_summary_bytes: config.max_summary_bytes,
@@ -336,6 +349,24 @@ mod tests {
         };
         assert_eq!(resolve_window(&settings, "claude-sonnet-4-5"), 180_000);
         assert_eq!(resolve_window(&settings, "unknown-model"), 128_000);
+    }
+
+    // Given: window=0 の override を含む config
+    // When: runtime settings へ変換する
+    // Then: 0 の override は baseline window へ正規化され、非 0 は保持される
+    #[test]
+    fn settings_from_config_normalizes_zero_model_overrides_to_baseline() {
+        let config = CompactionConfig {
+            context_window_tokens: 128_000,
+            model_overrides: BTreeMap::from([
+                (String::from("model-zero"), 0),
+                (String::from("model-kept"), 99_000),
+            ]),
+            ..CompactionConfig::default()
+        };
+        let settings = CompactionSettings::from(&config);
+        assert_eq!(resolve_window(&settings, "model-zero"), 128_000);
+        assert_eq!(resolve_window(&settings, "model-kept"), 99_000);
     }
 
     // Given: 全項目を既定値と異なる値にした config

@@ -310,6 +310,63 @@ async fn summary_failure_preserves_visible_history_and_emits_no_compaction_event
 }
 
 #[tokio::test]
+async fn zero_max_summary_bytes_fails_closed_without_checkpoint_or_event() {
+    // Given: a structural summarizer whose body is truncated to nothing by max_summary_bytes=0
+    //        (provider replies stay keyed by the goal; the structural path never calls the model)
+    let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
+        reason: "unused root script".to_string(),
+    })]));
+    model
+        .add_keyed(
+            "EMPTY-SUMMARY",
+            [
+                Ok(text_response(&"old answer ".repeat(20), FinishReason::Stop)),
+                Ok(text_response("done", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    let settings = CompactionConfig {
+        context_window_tokens: 1_000_000,
+        keep_recent_tokens: 1,
+        max_summary_bytes: 0,
+        summarizer: SummarizerKind::Structural,
+        ..CompactionConfig::default()
+    };
+    let (runtime, bus) = runtime_with(Arc::clone(&model), settings);
+    let mut receiver = bus.subscribe();
+    let run_id = runtime.delegate_background(
+        Role::Worker,
+        "EMPTY-SUMMARY".to_string(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+
+    // When: the degenerate manual compaction runs and the run then resumes normally
+    runtime.compact(run_id).expect("manual request accepted");
+    runtime
+        .send_message(run_id, "resume".to_string())
+        .expect("waiting run resumes");
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    let events = compaction_events_until_done(&mut receiver, &run_id.to_string()).await;
+
+    // Then: the empty summary is rejected — no event, no checkpoint, raw history intact
+    assert!(events.is_empty());
+    let observed = model.observed().await;
+    let resumed = observed
+        .last()
+        .expect("provider continues after empty summary rejection");
+    assert!(!has_checkpoint(resumed));
+    assert!(resumed.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text.contains("old answer")),
+        )
+    }));
+}
+
+#[tokio::test]
 async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
     // Given: a tiny waiting context whose keep budget covers every message
     let model = Arc::new(ScriptedModel::new([
