@@ -47,7 +47,8 @@ impl ExecutionPolicy {
     ///
     /// v0.1 のポリシーにはオプトイン経路が存在しないため `explicit_opt_in` は
     /// 常に `false` で委譲する。したがって [`NetworkAccess::OptIn`] のロール
-    /// (Explorer) は [`SandboxNetworkMode::Unshared`] に解決される (fail-closed)。
+    /// (Explorer / Orchestrator) は [`SandboxNetworkMode::Unshared`] に解決される
+    /// (fail-closed)。
     pub fn sandbox_network_mode(&self) -> SandboxNetworkMode {
         sandbox_network_mode(self.capabilities.network, false)
     }

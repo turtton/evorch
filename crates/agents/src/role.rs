@@ -1,30 +1,33 @@
-//! v0.1 エージェントロールの定義 (ADR 0002)。
+//! v0.2 エージェントロールの定義 (ADR 0002)。
 //!
 //! 各ロールは personality ではなく capability boundary として定義される。
 
 use crate::capability::{NetworkAccess, RoleCapabilities};
 use serde::{Deserialize, Serialize};
 
-/// v0.1 のエージェントロール (ADR 0002 の capability boundary)。
+/// v0.2 のエージェントロール (ADR 0002 の capability boundary)。
 ///
 /// # 境界の一覧
 ///
 /// | Role | ツール | ネットワーク | 委譲 |
 /// |---|---|---|---|
-/// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系のみ (mutation tool なし) | Denied | 可 |
+/// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系 + web_fetch (mutation tool なし) | OptIn | 可 |
 /// | Explorer | read / grep | OptIn | 不可 |
 /// | Worker | read / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | Denied | 不可 |
 /// | Reviewer | read / grep / git_diff | Denied | 不可 |
+/// | Librarian | read / grep / web_search / web_fetch | Allowed | 不可 |
 ///
 /// # 設計上の決定
 ///
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
-/// - Orchestrator のネットワークが [`NetworkAccess::Denied`] なのは
-///   ADR 0008 の default-deny に基づく。
+/// - Orchestrator のネットワークは web_fetch のみを対象とする
+///   [`NetworkAccess::OptIn`] (ADR 0002 2026-09-03 補足)。
+///   web_search は Librarian 専用であり、Orchestrator は持たない。
 ///
 /// # v0.2 拡張レシピ
 ///
-/// 新ロール (Librarian / Oracle) の追加はロール定義の追加のみで完結する:
+/// Librarian はこのレシピに従い追加済み。将来の新ロール (Oracle など) の追加も
+/// ロール定義の追加のみで完結する:
 ///
 /// 1. この enum に variant を追加する。
 /// 2. [`Role::capabilities`] に対応する arm を 1 つ追加する
@@ -42,6 +45,8 @@ pub enum Role {
     Worker,
     /// レビュー役。生成と独立したレビューを行う。
     Reviewer,
+    /// 調査役 (v0.2)。read / grep と web_search / web_fetch を持ち、ネットワークは常時許可。
+    Librarian,
 }
 
 impl Role {
@@ -52,6 +57,7 @@ impl Role {
             Role::Explorer => "Explorer",
             Role::Worker => "Worker",
             Role::Reviewer => "Reviewer",
+            Role::Librarian => "Librarian",
         }
     }
 
@@ -76,8 +82,9 @@ impl Role {
                     "git_diff",
                     "compact",
                     "finish",
+                    "web_fetch",
                 ],
-                NetworkAccess::Denied,
+                NetworkAccess::OptIn,
                 true,
             ),
             Role::Explorer => RoleCapabilities::new(["read", "grep"], NetworkAccess::OptIn, false),
@@ -99,6 +106,11 @@ impl Role {
             Role::Reviewer => {
                 RoleCapabilities::new(["read", "grep", "git_diff"], NetworkAccess::Denied, false)
             }
+            Role::Librarian => RoleCapabilities::new(
+                ["read", "grep", "web_search", "web_fetch"],
+                NetworkAccess::Allowed,
+                false,
+            ),
         }
     }
 }
