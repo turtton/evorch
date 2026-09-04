@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T18:52:22.0151864+00:00",
+  "updated_at": "2026-09-04T19:29:54.7667745+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -893,7 +893,7 @@
     {
       "execution_unit": "v02-intent-gate-rules",
       "title": "v02-intent-gate-rules TODO short title",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -907,6 +907,7 @@
         "number": 69,
         "url": "https://github.com/turtton/evorch/issues/69"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/70",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
