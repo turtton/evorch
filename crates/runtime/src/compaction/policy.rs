@@ -89,6 +89,20 @@ pub(crate) enum TriggerDecision {
     InFlight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardDecision {
+    Disabled,
+    InFlight,
+    AlreadyThisBoundary,
+    Cooldown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThresholdDecision {
+    Trigger,
+    BelowThreshold,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct CompactionLoopState {
     pub last_handled_gen: u64,
@@ -100,33 +114,60 @@ pub(crate) struct CompactionLoopState {
     pub last_estimated_tokens: u64,
 }
 
-/// Disabled、InFlight、AlreadyThisBoundary、Cooldown、使用率の順に判定する。
+/// 全理由共通の抑制条件を Disabled、InFlight、境界、Cooldown の順に判定する。
+pub(crate) fn guard_decision(
+    state: &CompactionLoopState,
+    settings: &CompactionSettings,
+) -> Option<GuardDecision> {
+    if !settings.enabled {
+        return Some(GuardDecision::Disabled);
+    }
+    if state.in_flight {
+        return Some(GuardDecision::InFlight);
+    }
+    if state.compacted_this_boundary {
+        return Some(GuardDecision::AlreadyThisBoundary);
+    }
+    if state.last_compaction_turn.is_some_and(|last_turn| {
+        state.turn_counter.saturating_sub(last_turn) < u64::from(settings.cooldown_turns)
+    }) {
+        return Some(GuardDecision::Cooldown);
+    }
+    None
+}
+
+/// 共通抑制条件の後に自動発火の使用率を判定する。
 pub(crate) fn should_trigger(
     state: &CompactionLoopState,
     settings: &CompactionSettings,
     estimated_tokens: u64,
     window_tokens: u64,
 ) -> TriggerDecision {
-    if !settings.enabled {
-        return TriggerDecision::Disabled;
-    }
-    if state.in_flight {
-        return TriggerDecision::InFlight;
-    }
-    if state.compacted_this_boundary {
-        return TriggerDecision::AlreadyThisBoundary;
-    }
-    if state.last_compaction_turn.is_some_and(|last_turn| {
-        state.turn_counter.saturating_sub(last_turn) < u64::from(settings.cooldown_turns)
-    }) {
-        return TriggerDecision::Cooldown;
+    if let Some(decision) = guard_decision(state, settings) {
+        return match decision {
+            GuardDecision::Disabled => TriggerDecision::Disabled,
+            GuardDecision::InFlight => TriggerDecision::InFlight,
+            GuardDecision::AlreadyThisBoundary => TriggerDecision::AlreadyThisBoundary,
+            GuardDecision::Cooldown => TriggerDecision::Cooldown,
+        };
     }
 
+    match threshold_decision(settings, estimated_tokens, window_tokens) {
+        ThresholdDecision::Trigger => TriggerDecision::Trigger,
+        ThresholdDecision::BelowThreshold => TriggerDecision::BelowThreshold,
+    }
+}
+
+pub(crate) fn threshold_decision(
+    settings: &CompactionSettings,
+    estimated_tokens: u64,
+    window_tokens: u64,
+) -> ThresholdDecision {
     let ratio = estimated_tokens as f64 / window_tokens as f64;
     if ratio >= settings.threshold {
-        TriggerDecision::Trigger
+        ThresholdDecision::Trigger
     } else {
-        TriggerDecision::BelowThreshold
+        ThresholdDecision::BelowThreshold
     }
 }
 

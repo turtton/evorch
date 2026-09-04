@@ -13,7 +13,7 @@ pub(crate) fn select_cut(
     keep_recent_tokens: u64,
     protected_prefix: usize,
 ) -> Option<CutPlan> {
-    let prefix = protected_prefix.min(messages.len());
+    let prefix = protected_floor(messages, protected_prefix);
     let mut cut = messages.len();
     let mut kept_tokens = 0_u64;
     while cut > prefix && kept_tokens < keep_recent_tokens {
@@ -29,21 +29,13 @@ pub(crate) fn select_cut(
         let previous = cut;
         cut = preserve_tool_groups(messages, cut, prefix);
         cut = preserve_open_tail(messages, cut, prefix);
+        if cut == messages.len() || !is_kept_boundary(&messages[cut]) {
+            cut = (prefix..cut)
+                .rev()
+                .find(|index| is_kept_boundary(&messages[*index]))?;
+        }
         if cut == previous {
             break;
-        }
-    }
-
-    if cut == messages.len() || !is_kept_boundary(&messages[cut]) {
-        cut = (prefix..cut)
-            .rev()
-            .find(|index| is_kept_boundary(&messages[*index]))?;
-        loop {
-            let adjusted = preserve_tool_groups(messages, cut, prefix);
-            if adjusted == cut {
-                break;
-            }
-            cut = adjusted;
         }
     }
 
@@ -51,6 +43,16 @@ pub(crate) fn select_cut(
         start: prefix,
         end: cut,
     })
+}
+
+fn protected_floor(messages: &[Message], protected_prefix: usize) -> usize {
+    let configured = protected_prefix.min(messages.len());
+    // AC1 の完全ターン境界と監査可能なゴールを両立するため、最初の User は切らない。
+    let goal_floor = messages
+        .iter()
+        .position(is_kept_boundary)
+        .map_or(0, |index| index.saturating_add(1));
+    configured.max(goal_floor).min(messages.len())
 }
 
 fn preserve_tool_groups(messages: &[Message], cut: usize, prefix: usize) -> usize {
@@ -108,21 +110,7 @@ fn preserve_open_tail(messages: &[Message], cut: usize, prefix: usize) -> usize 
 }
 
 fn is_kept_boundary(message: &Message) -> bool {
-    match message.role {
-        Role::System => false,
-        Role::Assistant => true,
-        Role::User => {
-            let has_text = message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::Text { .. }));
-            let has_tool_result = message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
-            has_text && !has_tool_result
-        }
-    }
+    message.role == Role::User && matches!(message.content.first(), Some(ContentBlock::Text { .. }))
 }
 
 #[cfg(test)]
@@ -186,7 +174,7 @@ mod tests {
 
         let plan = select_cut(&messages, keep, 1).expect("old conversation is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 3));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: 予算境界が ToolResult 直前に来る履歴 / When: cut point を選択 / Then: matching ToolUse まで kept region を広げる
@@ -194,16 +182,18 @@ mod tests {
     fn kept_tool_result_keeps_matching_tool_use() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-1"),
             tool_results(&["call-1"]),
             text(Role::Assistant, "done"),
         ];
-        let keep = message_tokens(&messages[3]).saturating_add(message_tokens(&messages[4]));
+        let keep = message_tokens(&messages[5]).saturating_add(message_tokens(&messages[6]));
 
         let plan = select_cut(&messages, keep, 1).expect("old user message is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: 予算境界が ToolUse 後かつ結果前に来る履歴 / When: cut point を選択 / Then: ToolUse と全 ToolResult を kept region に置く
@@ -211,18 +201,20 @@ mod tests {
     fn kept_tool_use_keeps_all_tool_results() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-1"),
             tool_results(&["call-1"]),
             text(Role::Assistant, "done"),
         ];
-        let keep = message_tokens(&messages[3])
-            .saturating_add(message_tokens(&messages[4]))
+        let keep = message_tokens(&messages[5])
+            .saturating_add(message_tokens(&messages[6]))
             .saturating_sub(1);
 
         let plan = select_cut(&messages, keep, 1).expect("old user message is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: ToolResult が予算境界の次メッセージ / When: cut point を選択 / Then: ToolResult 直前を避けて ToolUse の Assistant 境界を使う
@@ -230,16 +222,18 @@ mod tests {
     fn never_cuts_directly_before_tool_result_message() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-1"),
             tool_results(&["call-1"]),
             text(Role::Assistant, "done"),
         ];
-        let keep = message_tokens(&messages[3]).saturating_add(message_tokens(&messages[4]));
+        let keep = message_tokens(&messages[5]).saturating_add(message_tokens(&messages[6]));
 
         let plan = select_cut(&messages, keep, 1).expect("a safe boundary exists");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: tail の ToolUse に結果がまだない履歴 / When: keep budget 0 で cut point を選択 / Then: open ToolUse は kept region に残す
@@ -247,13 +241,15 @@ mod tests {
     fn open_tool_use_at_tail_always_stays_kept() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-open"),
         ];
 
         let plan = select_cut(&messages, 0, 1).expect("old user message is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: tail の ToolUse と final ToolResult / When: keep budget 0 で cut point を選択 / Then: open turn 全体を kept region に残す
@@ -261,14 +257,16 @@ mod tests {
     fn final_tool_result_pair_always_stays_kept() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-final"),
             tool_results(&["call-final"]),
         ];
 
         let plan = select_cut(&messages, 0, 1).expect("old user message is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 
     // Given: prefix 後の全メッセージを覆う keep budget / When: cut point を選択 / Then: compactable range はない
@@ -284,21 +282,59 @@ mod tests {
         assert_eq!(select_cut(&messages, keep, 1), None);
     }
 
+    // Given: a single complete user-assistant turn after the system prompt
+    // When: no recent-token tail is requested
+    // Then: compaction does not leave the assistant answer orphaned
+    #[test]
+    fn keep_region_never_starts_with_orphaned_assistant() {
+        let messages = [
+            text(Role::System, "system"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "answer"),
+        ];
+
+        assert_eq!(select_cut(&messages, 0, 1), None);
+    }
+
+    // Given: a goal turn followed by an older and a recent complete turn
+    // When: the recent turn is retained
+    // Then: the initial user goal remains outside the compacted range
+    #[test]
+    fn first_user_goal_is_protected_from_compaction() {
+        let messages = [
+            text(Role::System, "system"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledgement"),
+            text(Role::User, "old question"),
+            text(Role::Assistant, "old answer"),
+            text(Role::User, "recent question"),
+            text(Role::Assistant, "recent answer"),
+        ];
+        let keep = message_tokens(&messages[5]).saturating_add(message_tokens(&messages[6]));
+
+        let plan = select_cut(&messages, keep, 1).expect("old turn is compactable");
+
+        assert!(plan.start > 1, "the first user goal must be protected");
+        assert_eq!(messages[plan.end].role, Role::User);
+    }
+
     // Given: 1 ToolUse に複数 ToolResult message / When: 境界が結果群に入る / Then: tool group 全体を kept region に置く
     #[test]
     fn multi_result_tool_call_stays_whole() {
         let messages = [
             text(Role::System, "system"),
-            text(Role::User, "old"),
+            text(Role::User, "goal"),
+            text(Role::Assistant, "goal acknowledged"),
+            text(Role::User, "tool request"),
             tool_use("call-many"),
             tool_results(&["call-many"]),
             tool_results(&["call-many"]),
             text(Role::Assistant, "done"),
         ];
-        let keep = message_tokens(&messages[4]).saturating_add(message_tokens(&messages[5]));
+        let keep = message_tokens(&messages[6]).saturating_add(message_tokens(&messages[7]));
 
         let plan = select_cut(&messages, keep, 1).expect("old user message is compactable");
 
-        assert_eq!((plan.start, plan.end), (1, 2));
+        assert_eq!((plan.start, plan.end), (2, 3));
     }
 }

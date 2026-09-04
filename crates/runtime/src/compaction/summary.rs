@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use agents::Role;
 use async_trait::async_trait;
-use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent};
+use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
 use serde_json::Value;
 
 use crate::error::RuntimeError;
@@ -23,6 +23,10 @@ pub(crate) struct SummaryInput<'a> {
 pub(crate) enum SummarizeError {
     #[error("summary model failed: {0}")]
     Model(#[from] RuntimeError),
+    #[error("summary model returned abnormal finish reason: {reason}")]
+    AbnormalFinish { reason: String },
+    #[error("summary model returned empty summary")]
+    EmptySummary,
 }
 
 #[async_trait]
@@ -48,19 +52,18 @@ impl Summarizer for StructuralSummarizer {
         let unresolved = assistant_lines(input.compacted, |line| {
             line.to_ascii_lowercase().contains("unresolved")
         });
+        let unfinished = assistant_lines(input.compacted, is_unfinished_task_line)
+            .into_iter()
+            .take(8)
+            .collect();
         let files = changed_files(input.compacted);
         let verification = verification_lines(input.compacted);
         let recent = recent_context(input.compacted);
         let agent_messages = agent_messages(input.compacted);
 
-        let unfinished = if unresolved.is_empty() {
-            "none detected"
-        } else {
-            "unresolved items remain"
-        };
         let sections = [
             ("Goal / Contract", goal.into_iter().collect()),
-            ("Unfinished Tasks", vec![unfinished]),
+            ("Unfinished Tasks", unfinished),
             ("Key Decisions", decisions),
             ("Changed Files", files.iter().map(String::as_str).collect()),
             ("Verification Results", verification),
@@ -103,7 +106,17 @@ impl Summarizer for ModelSummarizer {
             .model
             .complete(&invocation, self.role, &messages, &[])
             .await?;
-        Ok(response
+        let finish_reason = match response.finish_reason {
+            FinishReason::Stop => None,
+            FinishReason::Length => Some("length".to_string()),
+            FinishReason::ToolUse => Some("tool_use".to_string()),
+            FinishReason::ContentFilter => Some("content_filter".to_string()),
+            FinishReason::Other(reason) => Some(format!("other: {reason}")),
+        };
+        if let Some(reason) = finish_reason {
+            return Err(SummarizeError::AbnormalFinish { reason });
+        }
+        let summary: String = response
             .message
             .content
             .iter()
@@ -113,22 +126,32 @@ impl Summarizer for ModelSummarizer {
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
-            .collect())
+            .collect();
+        if summary.trim().is_empty() {
+            return Err(SummarizeError::EmptySummary);
+        }
+        Ok(summary)
     }
 }
 
 pub(crate) fn enforce_max_bytes(summary: &str, max_summary_bytes: u64) -> String {
+    const MARKER: &str = "\n[truncated]";
+
     let Ok(limit) = usize::try_from(max_summary_bytes) else {
         return summary.to_string();
     };
     if summary.len() <= limit {
         return summary.to_string();
     }
-    let boundary = (0..=limit)
+    if limit < MARKER.len() {
+        return MARKER[..limit].to_string();
+    }
+    let content_limit = limit - MARKER.len();
+    let boundary = (0..=content_limit)
         .rev()
         .find(|index| summary.is_char_boundary(*index))
         .unwrap_or(0);
-    format!("{}\n[truncated]", &summary[..boundary])
+    format!("{}{MARKER}", &summary[..boundary])
 }
 
 fn first_user_text(messages: &[Message]) -> Option<&str> {
@@ -158,6 +181,15 @@ fn assistant_lines(messages: &[Message], predicate: impl Fn(&str) -> bool) -> Ve
         .flat_map(str::lines)
         .filter(|line| predicate(line))
         .collect()
+}
+
+fn is_unfinished_task_line(line: &str) -> bool {
+    let normalized = line.to_ascii_lowercase();
+    normalized.contains("unresolved")
+        || normalized.contains("todo")
+        || line.contains("次:")
+        || line.contains("次は")
+        || line.contains("残課題")
 }
 
 fn changed_files(messages: &[Message]) -> Vec<String> {
@@ -385,7 +417,9 @@ mod tests {
             assert!(summary.contains(path), "missing changed file {path}");
         }
         assert!(summary.contains("test result: ok. 12 passed; 0 failed"));
-        assert!(summary.to_ascii_lowercase().contains("unresolved"));
+        assert!(summary.contains(
+            "Still unresolved: why the second retry occasionally skips the backoff under concurrent polls."
+        ));
 
         let agent_ids: Vec<&str> = compacted
             .iter()
@@ -443,6 +477,40 @@ mod tests {
         let second = StructuralSummarizer.summarize(&input).await.unwrap();
 
         assert_eq!(first, second);
+    }
+
+    // Given: more than eight assistant lines carrying explicit pending markers
+    // When: structural summarization renders unfinished tasks
+    // Then: the oldest eight concrete items are listed and later items are omitted
+    #[tokio::test]
+    async fn structural_summary_lists_at_most_eight_unfinished_tasks_oldest_first() {
+        let messages = (0..10)
+            .map(|index| Message {
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: format!("TODO task-{index}"),
+                }],
+            })
+            .collect::<Vec<_>>();
+
+        let summary = StructuralSummarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &messages,
+            })
+            .await
+            .expect("structural summary is infallible");
+
+        let unfinished = summary
+            .split_once("## Unfinished Tasks\n")
+            .and_then(|(_, rest)| rest.split_once("## Key Decisions\n"))
+            .map(|(section, _)| section)
+            .expect("summary contains the unfinished-task section");
+        for index in 0..8 {
+            assert!(unfinished.contains(&format!("- TODO task-{index}")));
+        }
+        assert!(!unfinished.contains("- TODO task-8"));
+        assert!(!unfinished.contains("- TODO task-9"));
     }
 
     // Given: a successful model stub and a compacted message
@@ -528,6 +596,175 @@ mod tests {
         assert!(error.to_string().contains("summary unavailable"));
     }
 
+    // Given: a model response stopped by the token limit
+    // When: model summarization validates the completion
+    // Then: the partial response is rejected with a deterministic reason
+    #[tokio::test]
+    async fn model_summary_rejects_length_finish() {
+        let model = Arc::new(StubModel {
+            response: Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "partial summary".to_string(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Length,
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model,
+            role: Role::Worker,
+            run_id: "run-summary-length".to_string(),
+        };
+
+        let error = summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &[],
+            })
+            .await
+            .expect_err("length-limited summary must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "summary model returned abnormal finish reason: length"
+        );
+    }
+
+    // Given: a model response stopped by content filtering
+    // When: model summarization validates the completion
+    // Then: the blocked response is rejected with a deterministic reason
+    #[tokio::test]
+    async fn model_summary_rejects_content_filter_finish() {
+        let model = Arc::new(StubModel {
+            response: Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "blocked summary".to_string(),
+                    }],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::ContentFilter,
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model,
+            role: Role::Worker,
+            run_id: "run-summary-filter".to_string(),
+        };
+
+        let error = summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &[],
+            })
+            .await
+            .expect_err("content-filtered summary must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "summary model returned abnormal finish reason: content_filter"
+        );
+    }
+
+    // Given: a stop response containing reasoning and tool use but no text
+    // When: model summarization concatenates visible text
+    // Then: the empty summary is rejected
+    #[tokio::test]
+    async fn model_summary_rejects_empty_text_output() {
+        let model = Arc::new(StubModel {
+            response: Ok(ChatResponse {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: " \n\t".to_string(),
+                        },
+                        ContentBlock::Reasoning {
+                            text: "hidden".to_string(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "unexpected-tool".to_string(),
+                            name: "read".to_string(),
+                            input: serde_json::json!({ "path": "src/lib.rs" }),
+                        },
+                    ],
+                },
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+            }),
+            observed: Mutex::new(Vec::new()),
+        });
+        let summarizer = ModelSummarizer {
+            model,
+            role: Role::Worker,
+            run_id: "run-summary-empty".to_string(),
+        };
+
+        let error = summarizer
+            .summarize(&SummaryInput {
+                goal: None,
+                compacted: &[],
+            })
+            .await
+            .expect_err("text-free summary must fail");
+
+        assert_eq!(error.to_string(), "summary model returned empty summary");
+    }
+
+    // Given: non-terminal finish reasons not accepted by the summary boundary
+    // When: model summarization validates each response
+    // Then: tool-use and provider-specific stops fail closed with named reasons
+    #[tokio::test]
+    async fn model_summary_rejects_tool_use_and_other_finishes() {
+        let cases = [
+            (FinishReason::ToolUse, "tool_use"),
+            (
+                FinishReason::Other("provider_pause".to_string()),
+                "other: provider_pause",
+            ),
+        ];
+
+        for (finish_reason, expected_reason) in cases {
+            let model = Arc::new(StubModel {
+                response: Ok(ChatResponse {
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: "not terminal".to_string(),
+                        }],
+                    },
+                    usage: Usage::default(),
+                    finish_reason,
+                }),
+                observed: Mutex::new(Vec::new()),
+            });
+            let summarizer = ModelSummarizer {
+                model,
+                role: Role::Worker,
+                run_id: "run-summary-abnormal".to_string(),
+            };
+
+            let error = summarizer
+                .summarize(&SummaryInput {
+                    goal: None,
+                    compacted: &[],
+                })
+                .await
+                .expect_err("non-stop summary must fail");
+
+            assert_eq!(
+                error.to_string(),
+                format!("summary model returned abnormal finish reason: {expected_reason}")
+            );
+        }
+    }
+
     // Given: summaries around a byte boundary
     // When: the byte limit is enforced
     // Then: exact/under limits stay intact and over-limit UTF-8 gets a marker
@@ -535,8 +772,9 @@ mod tests {
     fn max_bytes_preserves_boundaries_and_marks_truncation() {
         assert_eq!(enforce_max_bytes("abcd", 4), "abcd");
         assert_eq!(enforce_max_bytes("abc", 4), "abc");
-        assert_eq!(enforce_max_bytes("éclair", 3), "éc\n[truncated]");
-        assert!(enforce_max_bytes("日本語", 4).is_char_boundary(0));
-        assert_eq!(enforce_max_bytes("日本語", 4), "日\n[truncated]");
+        let truncated = enforce_max_bytes("éclair日本語", 15);
+        assert!(truncated.ends_with("\n[truncated]"));
+        assert!(truncated.len() <= 15);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }

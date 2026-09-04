@@ -18,6 +18,7 @@ pub(super) async fn compact(state: &mut LoopState, input: serde_json::Value) -> 
                 "estimated_tokens_before": outcome.estimated_tokens_before,
                 "estimated_tokens_after": outcome.estimated_tokens_after,
                 "still_above_threshold": outcome.still_above_threshold,
+                "reason": CompactionReason::Agent,
             })
             .to_string(),
         ),

@@ -11,7 +11,10 @@ use crate::context::CompactionCheckpoint;
 
 use self::cut::select_cut;
 use self::estimator::{estimate_tokens, estimate_visible};
-use self::policy::{SummarizerKindSel, TriggerDecision, resolve_window, should_trigger};
+use self::policy::{
+    GuardDecision, SummarizerKindSel, ThresholdDecision, guard_decision, resolve_window,
+    threshold_decision,
+};
 use self::summary::{
     ModelSummarizer, StructuralSummarizer, Summarizer, SummaryInput, enforce_max_bytes,
 };
@@ -30,11 +33,13 @@ pub(crate) struct CompactionOutcome {
 pub(crate) enum CompactionError {
     #[error("compaction has no safe message range to replace")]
     NothingToCompact,
-    #[error("compaction is blocked by the cooldown or current turn boundary")]
+    #[error("compaction cooldown is active")]
     Cooldown,
+    #[error("compaction already completed at the current turn boundary")]
+    AlreadyThisBoundary,
     #[error("compaction is already in flight")]
     InFlight,
-    #[error("automatic compaction is disabled")]
+    #[error("compaction is disabled")]
     Disabled,
     #[error("context usage is below the automatic compaction threshold")]
     TooSmall,
@@ -46,26 +51,21 @@ pub(crate) async fn compact_now(
     state: &mut LoopState,
     reason: CompactionReason,
 ) -> Result<CompactionOutcome, CompactionError> {
-    if state.compaction.in_flight {
-        return Err(CompactionError::InFlight);
+    let settings = state.shared.compaction.clone();
+    if let Some(decision) = guard_decision(&state.compaction, &settings) {
+        return Err(error_from_guard(decision));
     }
 
     let visible = state.context.visible_messages();
     let estimated_before = estimate_visible(&visible, state.last_usage.as_ref());
-    let settings = state.shared.compaction.clone();
     let window = resolve_window(
         &settings,
         &state.shared.model.selected_model(state.run_role()),
     );
     if reason == CompactionReason::Automatic {
-        match should_trigger(&state.compaction, &settings, estimated_before, window) {
-            TriggerDecision::Trigger => {}
-            TriggerDecision::BelowThreshold => return Err(CompactionError::TooSmall),
-            TriggerDecision::Disabled => return Err(CompactionError::Disabled),
-            TriggerDecision::InFlight => return Err(CompactionError::InFlight),
-            TriggerDecision::Cooldown | TriggerDecision::AlreadyThisBoundary => {
-                return Err(CompactionError::Cooldown);
-            }
+        match threshold_decision(&settings, estimated_before, window) {
+            ThresholdDecision::Trigger => {}
+            ThresholdDecision::BelowThreshold => return Err(CompactionError::TooSmall),
         }
     }
 
@@ -83,7 +83,8 @@ pub(crate) async fn compact_now(
     )
     .ok_or(CompactionError::NothingToCompact)?;
     let compacted = &state.context.messages[plan.start..plan.end];
-    let goal = first_user_text(compacted);
+    // cut の protected floor が先頭 User(goal) を保護するため、goal は raw 履歴全体から取得する。
+    let goal = first_user_text(&state.context.messages);
 
     state.compaction.in_flight = true;
     let summary_result = match settings.summarizer {
@@ -161,6 +162,15 @@ pub(crate) async fn compact_now(
         }));
 
     Ok(outcome)
+}
+
+const fn error_from_guard(decision: GuardDecision) -> CompactionError {
+    match decision {
+        GuardDecision::Disabled => CompactionError::Disabled,
+        GuardDecision::InFlight => CompactionError::InFlight,
+        GuardDecision::AlreadyThisBoundary => CompactionError::AlreadyThisBoundary,
+        GuardDecision::Cooldown => CompactionError::Cooldown,
+    }
 }
 
 fn first_user_text(messages: &[Message]) -> Option<&str> {
