@@ -18,6 +18,7 @@ use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
 use crate::compaction::policy::CompactionSettings;
+use crate::entry_routing::EntryRouter;
 use crate::mailbox::{PushError, RunMailbox};
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
@@ -338,6 +339,14 @@ impl AgentRuntime {
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// entry pre-routing 判定器を返す。
+    ///
+    /// 再分類にはこの runtime のモデル (= 起動予定の Orchestrator と同じモデル) が
+    /// 構造的に使われる (issue #71 / AC3)。
+    pub fn entry_router(&self) -> EntryRouter {
+        EntryRouter::new(Arc::clone(&self.shared.model), Arc::clone(&self.shared.bus))
     }
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
