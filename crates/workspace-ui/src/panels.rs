@@ -26,11 +26,17 @@ impl fmt::Display for PanelId {
     }
 }
 
-/// v0.1 で提供するパネル種別。
+/// Workspace が提供するパネル種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelKind {
     Agent,
+    Sidebar,
+    Agents,
+    AgentTranscript,
+    Diff,
+    Goal,
+    MergeApproval,
     Terminal,
     Tasks,
 }
@@ -40,6 +46,12 @@ impl PanelKind {
     pub const fn default_title(self) -> &'static str {
         match self {
             Self::Agent => "Agent",
+            Self::Sidebar => "Projects",
+            Self::Agents => "Agents",
+            Self::AgentTranscript => "Transcript",
+            Self::Diff => "Diff",
+            Self::Goal => "Goal",
+            Self::MergeApproval => "Merge",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
         }
@@ -52,6 +64,8 @@ pub struct Panel {
     pub id: PanelId,
     pub kind: PanelKind,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// v0.1 の Agent・Terminal・Tasks パネルレジストリを返します。
@@ -70,6 +84,34 @@ pub fn default_panels() -> BTreeMap<PanelId, Panel> {
                 id: panel_id,
                 kind,
                 title: kind.default_title().to_owned(),
+                target: None,
+            },
+        )
+    })
+    .collect()
+}
+
+/// v0.2 の三領域レイアウト用パネルレジストリを返します。
+pub fn default_panels_v02() -> BTreeMap<PanelId, Panel> {
+    [
+        ("sidebar-main", PanelKind::Sidebar, "Projects"),
+        ("agent-main", PanelKind::Agent, "Conversation"),
+        ("agents-main", PanelKind::Agents, "Agents"),
+        ("diff-main", PanelKind::Diff, "Diff"),
+        ("terminal-main", PanelKind::Terminal, "Terminal"),
+        ("goal-main", PanelKind::Goal, "Goal"),
+        ("merge-main", PanelKind::MergeApproval, "Merge"),
+    ]
+    .into_iter()
+    .map(|(id, kind, title)| {
+        let panel_id = PanelId::new(id);
+        (
+            panel_id.clone(),
+            Panel {
+                id: panel_id,
+                kind,
+                title: title.to_owned(),
+                target: None,
             },
         )
     })

@@ -8,9 +8,9 @@ use workspace_ui::{
 
 #[test]
 fn public_settings_toml_contains_layout_panel_kinds_and_keybinds() {
-    // Given: settings embedding the default agent/terminal/tasks workspace.
+    // Given: settings embedding the current three-region workspace.
     let mut settings = UiSettings::default();
-    settings.layout.workspace = Some(workspace_ui::Workspace::default_v01());
+    settings.layout.workspace = Some(workspace_ui::Workspace::default());
     let directory = tempdir().expect("temporary directory must be created");
     let path = directory.path().join("ui.toml");
 
@@ -24,7 +24,11 @@ fn public_settings_toml_contains_layout_panel_kinds_and_keybinds() {
     let serialized = parsed.to_string();
     assert!(serialized.contains("agent"));
     assert!(serialized.contains("terminal"));
-    assert!(serialized.contains("tasks"));
+    assert!(serialized.contains("sidebar"));
+    assert!(serialized.contains("agents"));
+    assert!(serialized.contains("diff"));
+    assert!(serialized.contains("goal"));
+    assert!(serialized.contains("merge_approval"));
     assert!(parsed.get("keybinds").is_some());
     assert_eq!(restored, settings);
     assert_eq!(
@@ -42,6 +46,33 @@ fn public_settings_toml_contains_layout_panel_kinds_and_keybinds() {
                 .map(|panel| panel.kind)
                 .collect::<Vec<PanelKind>>()
         })
+    );
+}
+
+#[test]
+fn settings_with_embedded_v1_workspace_migrates() {
+    // Given: settings TOML embedding the frozen v1 workspace fixture.
+    let directory = tempdir().expect("temporary directory must be created");
+    let path = directory.path().join("ui.toml");
+    let workspace: workspace_ui::Workspace =
+        serde_json::from_str(include_str!("fixtures/workspace_v1.json"))
+            .expect("v1 fixture must be valid JSON");
+    let mut settings = UiSettings::default();
+    settings.layout.workspace = Some(workspace);
+    std::fs::write(
+        &path,
+        toml::to_string_pretty(&settings).expect("fixture must serialize"),
+    )
+    .expect("fixture must be writable");
+
+    // When: settings cross the public load boundary.
+    let restored = load_settings(&path).expect("v1 workspace must migrate");
+
+    // Then: only the embedded workspace schema advances to v2.
+    assert_eq!(restored.version, 1);
+    assert_eq!(
+        restored.layout.workspace.expect("workspace exists").version,
+        2
     );
 }
 

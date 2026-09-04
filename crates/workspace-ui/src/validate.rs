@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::{LayoutError, LayoutNode, WORKSPACE_SCHEMA_VERSION, Window, WindowRect, Workspace};
+use crate::{
+    LayoutError, LayoutNode, PanelKind, WORKSPACE_SCHEMA_VERSION, Window, WindowRect, Workspace,
+};
 
 /// Workspace の全 window と floating pane を横断して検証します。
 ///
@@ -12,6 +14,43 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             found: workspace.version,
             supported: WORKSPACE_SCHEMA_VERSION,
         });
+    }
+
+    for (key, panel) in &workspace.panels {
+        if key != &panel.id {
+            return Err(LayoutError::PanelIdMismatch {
+                key: key.to_string(),
+                panel_id: panel.id.to_string(),
+            });
+        }
+        match (&panel.kind, &panel.target) {
+            (PanelKind::AgentTranscript, None) => {
+                return Err(LayoutError::MissingTarget {
+                    panel_id: panel.id.to_string(),
+                });
+            }
+            (PanelKind::AgentTranscript, Some(_))
+            | (PanelKind::Agent, None)
+            | (PanelKind::Sidebar, None)
+            | (PanelKind::Agents, None)
+            | (PanelKind::Diff, None)
+            | (PanelKind::Goal, None)
+            | (PanelKind::MergeApproval, None)
+            | (PanelKind::Terminal, None)
+            | (PanelKind::Tasks, None) => {}
+            (PanelKind::Agent, Some(_))
+            | (PanelKind::Sidebar, Some(_))
+            | (PanelKind::Agents, Some(_))
+            | (PanelKind::Diff, Some(_))
+            | (PanelKind::Goal, Some(_))
+            | (PanelKind::MergeApproval, Some(_))
+            | (PanelKind::Terminal, Some(_))
+            | (PanelKind::Tasks, Some(_)) => {
+                return Err(LayoutError::UnexpectedTarget {
+                    panel_id: panel.id.to_string(),
+                });
+            }
+        }
     }
 
     let mut placed = BTreeSet::new();

@@ -11,6 +11,7 @@ fn panel(id: &str, kind: PanelKind) -> Panel {
         id: PanelId::new(id),
         kind,
         title: kind.default_title().to_owned(),
+        target: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn default_v01_places_three_panels_in_nested_binary_splits() {
 
     // Then: all three pane kinds exist and the nested layout is valid.
     assert_eq!(workspace.panels.len(), 3);
+    assert_eq!(workspace.version, 1);
     assert_eq!(
         workspace.panels[&PanelId::new("agent-main")].kind,
         PanelKind::Agent
@@ -47,7 +49,9 @@ fn default_v01_places_three_panels_in_nested_binary_splits() {
         workspace.panels[&PanelId::new("tasks-main")].kind,
         PanelKind::Tasks
     );
-    assert_eq!(validate(&workspace), Ok(()));
+    let json = serde_json::to_string(&workspace).expect("v1 fixture serialization must succeed");
+    let migrated = workspace_ui::from_json(&json).expect("v1 fixture must migrate");
+    assert_eq!(validate(&migrated), Ok(()));
 
     let LayoutNode::Split(horizontal) = &workspace.main.root else {
         panic!("default root must be a horizontal split");
@@ -165,11 +169,12 @@ fn recursive_layout_serialization_roundtrip_remains_a_tree() {
 
     // When: serde JSON serializes and deserializes the complete workspace.
     let json = serde_json::to_string(&workspace).expect("workspace serialization must succeed");
-    let restored: Workspace =
-        serde_json::from_str(&json).expect("workspace deserialization must succeed");
+    let restored = workspace_ui::from_json(&json).expect("workspace migration must succeed");
 
-    // Then: ownership recursion remains an equal tree and validates without loops.
-    assert_eq!(restored, workspace);
+    // Then: ownership recursion remains an equal tree after the schema version advances.
+    assert_eq!(restored.main, workspace.main);
+    assert_eq!(restored.panels, workspace.panels);
+    assert_eq!(restored.version, WORKSPACE_SCHEMA_VERSION);
     assert_eq!(validate(&restored), Ok(()));
 }
 
@@ -201,7 +206,7 @@ fn public_event_and_insert_position_types_roundtrip_through_serde() {
 #[test]
 fn duplicate_panel_across_main_floating_and_extra_windows_is_invalid() {
     // Given: one panel placed in main, floating, and an extra window.
-    let mut workspace = Workspace::default_v01();
+    let mut workspace = Workspace::default();
     workspace.main.floating.push(FloatingPane {
         node: LayoutNode::Tabs(Tabs {
             panels: vec![PanelId::new("agent-main")],

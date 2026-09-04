@@ -8,7 +8,7 @@ use workspace_ui::{
 #[test]
 fn workspace_json_and_file_roundtrips_preserve_layout() {
     // Given: the valid default workspace and an isolated path.
-    let workspace = Workspace::default_v01();
+    let workspace = Workspace::default();
     let directory = tempdir().expect("temporary directory must be created");
     let path = directory.path().join("workspace.json");
 
@@ -47,7 +47,7 @@ fn load_rejects_unsupported_and_invalid_layouts() {
         unsupported_result,
         Err(PersistError::Layout(LayoutError::UnsupportedVersion {
             found: 99,
-            supported: 1,
+            supported: 2,
         }))
     );
     assert!(matches!(
