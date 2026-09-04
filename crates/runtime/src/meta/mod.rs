@@ -1,8 +1,10 @@
 //! モデルが要求したメタ操作を AgentRuntime API へ接続する。
 //!
 //! dispatch と共通ヘルパーをここに置き、ハンドラは責務ごとに
-//! [`delegation`] / [`messaging`] / [`runs`] へ分離する。
+//! [`compaction`] / [`delegation`] / [`messaging`] / [`runs`] / [`skills`]
+//! へ分離する。
 
+mod compaction;
 mod delegation;
 mod messaging;
 mod runs;
@@ -14,8 +16,6 @@ use tools::ToolResult;
 
 use crate::RunId;
 use crate::agent_loop::LoopState;
-
-const COMPACT_STUB: &str = "context-engine (v0.2) で提供予定";
 
 pub(crate) struct DispatchResult {
     pub(crate) result: ToolResult,
@@ -51,7 +51,7 @@ pub(crate) async fn dispatch(
         "list_agents" => runs::list_agents(&runtime, input),
         "inspect_agent" => runs::inspect_agent(&runtime, input),
         "skill_load" => skills::skill_load(state, input),
-        "compact" => parse::<EmptyArgs>(input).map_or_else(error, |_| error(COMPACT_STUB)),
+        "compact" => compaction::compact(state, input).await,
         "finish" => finish(input),
         _ => error(format!("unknown meta-op: {name}")),
     }

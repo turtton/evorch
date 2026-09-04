@@ -4,7 +4,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use agents::Role;
-use event_bus::{AgentRunPhase, EventBus};
+use config::{CompactionConfig, SummarizerKind};
+use event_bus::{
+    AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind,
+};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
 use runtime::workspace::{Project, WorktreeManager};
 use runtime::{AgentRuntime, IsolatedMounts, RunConfig, WorkspaceMode};
@@ -120,7 +123,8 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
         Ok(AgentRunPhase::Error)
     );
 
-    // Then: 各 ToolResult が実 API の成功値または契約どおりの stub error を返す
+    // Then: 各 ToolResult が実 API の成功値、または圧縮不可能 context を示す
+    // CompactionError::NothingToCompact の診断を返す
     let observed = model.observed().await;
     let final_turn = observed
         .iter()
@@ -166,8 +170,94 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
     );
     assert_eq!(
         tool_result(final_turn, "compact"),
-        Some(("context-engine (v0.2) で提供予定".to_string(), true))
+        Some((
+            "compaction has no safe message range to replace".to_string(),
+            true
+        ))
     );
+}
+
+async fn compaction_events_until_done(
+    receiver: &mut event_bus::EventReceiver,
+    run_id: &str,
+) -> Vec<Event> {
+    let mut compacted = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = receiver.recv().await.expect("event receiver remains open");
+            if matches!(&event.kind, EventKind::Compaction(_)) {
+                compacted.push(event.clone());
+            }
+            if matches!(
+                &event.kind,
+                EventKind::Lifecycle(event_bus::LifecycleEvent::BackgroundTaskCompleted { task_id })
+                    if task_id == run_id
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("run completion event timeout");
+    compacted
+}
+
+#[tokio::test]
+async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
+    // Given: 大きな prompt で始まり compact → finish を要求する Orchestrator。
+    // window を十分大きくして自動圧縮を発火させず、keep_recent_tokens を 1 にして
+    // Agent 起因の cut が成立するようにする
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response("compact-1", "compact", json!({}))),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let bus = Arc::new(EventBus::new(128));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime =
+        AgentRuntime::new(Arc::clone(&bus), executor, model.clone()).with_compaction(
+            CompactionConfig {
+                context_window_tokens: 1_000_000,
+                keep_recent_tokens: 1,
+                max_summary_bytes: 1_024,
+                summarizer: SummarizerKind::Structural,
+                ..CompactionConfig::default()
+            },
+        );
+    let mut receiver = bus.subscribe();
+
+    // When: Orchestrator を finish まで実行する
+    let orchestrator = runtime.delegate_background(
+        Role::Orchestrator,
+        "large prompt ".repeat(40),
+        RunConfig::default(),
+    );
+    assert_eq!(runtime.wait(orchestrator).await, Ok(AgentRunPhase::Done));
+    let events = compaction_events_until_done(&mut receiver, &orchestrator.to_string()).await;
+
+    // Then: compact は checkpoint ID を含む JSON の成功結果を返し、bus には
+    // Agent reason の CompactionEvent が 1 件だけ流れる
+    let observed = model.observed().await;
+    let final_turn = observed.last().expect("orchestrator final model turn");
+    let (content, is_error) = tool_result(final_turn, "compact-1").expect("compact result");
+    assert!(!is_error);
+    let payload: serde_json::Value = serde_json::from_str(&content).expect("compact JSON");
+    assert!(payload["checkpoint_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("ckpt-")));
+    assert!(payload["estimated_tokens_before"].is_u64());
+    assert!(payload["estimated_tokens_after"].is_u64());
+    assert_eq!(payload["still_above_threshold"], json!(false));
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].kind,
+        EventKind::Compaction(CompactionEvent::Compacted {
+            reason: CompactionReason::Agent,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
