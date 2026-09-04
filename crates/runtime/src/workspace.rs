@@ -120,13 +120,10 @@ impl WorktreeManager {
         fs::canonicalize(&path).map_err(|source| WorkspaceError::Io { path, source })
     }
 
-    /// run 専用 branch と worktree を二段階で作成する。
+    /// run 専用 branch 名と worktree path を作成前に導出する。
     ///
-    /// # Errors
-    /// branch/path の衝突、git command、または filesystem 操作の失敗時に
-    /// [`WorkspaceError`] を返す。worktree add の失敗時だけ、この呼出しで作成した
-    /// branch と部分ディレクトリを rollback する。
-    pub fn create(&self, run_id: RunId) -> Result<OwnedWorktree, WorkspaceError> {
+    /// 実作成を行わずに inspection へ先行登録するために使う (issue #71 CI 対応)。
+    pub(crate) fn planned(&self, run_id: RunId) -> (String, PathBuf) {
         let run_name = run_id.to_string();
         let branch = format!("{BRANCH_PREFIX}{run_name}");
         let path = self
@@ -135,6 +132,17 @@ impl WorktreeManager {
             .join(".evorch")
             .join("worktrees")
             .join(&run_name);
+        (branch, path)
+    }
+
+    /// run 専用 branch と worktree を二段階で作成する。
+    ///
+    /// # Errors
+    /// branch/path の衝突、git command、または filesystem 操作の失敗時に
+    /// [`WorkspaceError`] を返す。worktree add の失敗時だけ、この呼出しで作成した
+    /// branch と部分ディレクトリを rollback する。
+    pub fn create(&self, run_id: RunId) -> Result<OwnedWorktree, WorkspaceError> {
+        let (branch, path) = self.planned(run_id);
 
         if branch_exists(&self.project.repo_root, &branch)? {
             return Err(WorkspaceError::BranchExists { branch });

@@ -10,8 +10,8 @@ pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
     CompactionReason, DeliveryDisposition, Event, EventKind, EventMeta, FallbackAxis, FaultEvent,
-    LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, SCHEMA_VERSION,
-    SkillDiagnosticKind, ToolEvent, UsageEvent,
+    LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, RoutingSource,
+    SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
 };
 pub use otel::{
     ATTRIBUTE_WHITELIST, CardinalityViolation, MetricAttribute, MetricMeasurement, MetricValue,

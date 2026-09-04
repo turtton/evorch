@@ -143,6 +143,22 @@ pub enum AgentRunPhase {
     Error,
 }
 
+/// entry pre-routing 判定の出所 (使用ルール or 再分類モデル)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum RoutingSource {
+    /// ローカルキーワードルールで判定した。
+    LocalRule {
+        /// 適用したルールの識別子 (例: "direct-keyword:direct", "no-direct-keyword")。
+        rule: String,
+    },
+    /// Orchestrator と同じモデルによる再分類で判定した。
+    Model {
+        /// 再分類に使用したモデル識別子。
+        model: String,
+    },
+}
+
 /// セッションおよびタスクのライフサイクルに関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
@@ -210,6 +226,19 @@ pub enum LifecycleEvent {
         session_id: String,
         /// 失敗理由。
         reason: String,
+    },
+    /// entry pre-routing が ExecutionShape を判定した (issue #71)。
+    ///
+    /// `shape` は typed policy モジュールの ExecutionShape 名 ("Direct" / "Coordinated")、
+    /// `reason` は判定理由 (ユーザーメッセージ本文は含めない)、`source` は使用した
+    /// ルールまたは再分類モデルの識別子。
+    RoutingDecision {
+        /// 判定された ExecutionShape 名。
+        shape: String,
+        /// 判定理由。
+        reason: String,
+        /// 判定の出所。
+        source: RoutingSource,
     },
 }
 
@@ -768,6 +797,28 @@ mod tests {
                 .into(),
             ),
             (
+                "Lifecycle",
+                LifecycleEvent::RoutingDecision {
+                    shape: "Direct".into(),
+                    reason: "direct-keyword".into(),
+                    source: RoutingSource::LocalRule {
+                        rule: "direct-keyword:direct".into(),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::RoutingDecision {
+                    shape: "Coordinated".into(),
+                    reason: "model reclassified".into(),
+                    source: RoutingSource::Model {
+                        model: "kimi-k3".into(),
+                    },
+                }
+                .into(),
+            ),
+            (
                 "Message",
                 MessageEvent::MessageDelta { delta: "he".into() }.into(),
             ),
@@ -934,6 +985,43 @@ mod tests {
             value["kind"]["payload"]["kind"], "BackgroundTaskCancelled",
             "inner tag mismatch"
         );
+    }
+
+    // Given: LocalRule を source に持つ RoutingDecision ライフサイクルイベント。
+    // When: EventKind として JSON 値へシリアライズして復元する。
+    // Then: Lifecycle / RoutingDecision / RoutingSource の隣接タグが二重に
+    //       ネストした wire 形状を保ち、往復前後で等しい。
+    #[test]
+    fn routing_decision_round_trips_with_nested_adjacent_tags() {
+        let kind = EventKind::Lifecycle(LifecycleEvent::RoutingDecision {
+            shape: "Direct".into(),
+            reason: "direct-keyword".into(),
+            source: RoutingSource::LocalRule {
+                rule: "direct-keyword:direct".into(),
+            },
+        });
+
+        let value = serde_json::to_value(&kind).expect("serialize EventKind");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "Lifecycle",
+                "payload": {
+                    "kind": "RoutingDecision",
+                    "payload": {
+                        "shape": "Direct",
+                        "reason": "direct-keyword",
+                        "source": {
+                            "kind": "LocalRule",
+                            "payload": {"rule": "direct-keyword:direct"}
+                        }
+                    }
+                }
+            })
+        );
+
+        let restored: EventKind = serde_json::from_value(value).expect("deserialize EventKind");
+        assert_eq!(kind, restored);
     }
 
     // Given: AgentRunPhase の全 5 位相。

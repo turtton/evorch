@@ -4498,6 +4498,7 @@ dependencies = [
  "event-bus",
  "globset",
  "providers",
+ "regex",
  "sandbox",
  "serde",
  "serde_json",

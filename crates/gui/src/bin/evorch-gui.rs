@@ -8,6 +8,7 @@ use gui::events::EventPump;
 use gui::model::commands::FixtureLoopAdapter;
 use gui::model::demo::DemoScriptModel;
 use gui::pty::PtySession;
+use gui::runtime_sink::RuntimeCommandSink;
 use portable_pty::CommandBuilder;
 use runtime::{AgentRuntime, ExecutionPolicy, Role, RunConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
@@ -79,6 +80,12 @@ fn print_help() {
 
 Demo mode (--demo) runs a deterministic scripted session; no external AI
 provider is used or required.
+
+Non-demo mode starts a real AgentRuntime. Goal submission goes through the
+entry router and launches a pre-routed background run: an explicit "direct"
+keyword starts a Worker run directly; otherwise an Orchestrator run is
+started.
+既知の制限: エージェント応答の描画は demo スクリプトモデルのままであり、provider composition root 導入まで実 provider の応答は表示されない。
 
 Sidebar state is loaded from and saved to --state PATH. Without --state, the
 default is <user-config-dir>/sidebar.json; if no user config dir is derivable,
@@ -224,9 +231,15 @@ fn run() -> Result<(), GuiError> {
     };
     let (pump, handle) = spawn_event_bridge(Arc::clone(&bus), Some(repaint_hook))?;
     let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
+    // goal 投入を runtime の entry pre-routing 起動へ接続する production CommandSink。
+    // demo モードでは下段で FixtureLoopAdapter へ差し替えられる。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_pump(pump)
-        .with_pty(pty);
+        .with_pty(pty)
+        .with_command_sink(Box::new(RuntimeCommandSink::new(
+            runtime.clone(),
+            handle.clone(),
+        )));
     let sidebar = match demo_directory.as_ref() {
         Some(directory) => demo_sidebar(&repo_root, directory.path())?,
         None => load_sidebar(state_path.as_ref())?,
@@ -246,10 +259,14 @@ fn run() -> Result<(), GuiError> {
         bus.emit(Event::new(LifecycleEvent::Started {
             session_id: String::from("gui-demo"),
         }));
+        // demo 起動 run も entry pre-routing 経由で role を決定する。
+        // "DEMO-ORCH" に direct キーワードは無いため Coordinated → Orchestrator となり、
+        // 従来の固定 Orchestrator 起動と同一の挙動。
         let demo_runtime = runtime.clone();
         handle.spawn(async move {
+            let decision = demo_runtime.entry_router().classify("DEMO-ORCH").await;
             demo_runtime.delegate_background(
-                Role::Orchestrator,
+                decision.role(),
                 String::from("DEMO-ORCH"),
                 RunConfig::default(),
             );

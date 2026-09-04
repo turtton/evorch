@@ -294,6 +294,9 @@ impl SecretGuard {
                 reason: Some(reason),
                 ..
             }) => self.check_text("event", "AgentRunStateChanged.reason", reason),
+            EventKind::Lifecycle(LifecycleEvent::RoutingDecision { reason, .. }) => {
+                self.check_text("event", "RoutingDecision.reason", reason)
+            }
             EventKind::Message(MessageEvent::MessageDelta { delta }) => {
                 self.check_text("event", "MessageDelta.delta", delta)
             }
@@ -841,6 +844,32 @@ mod tests {
             assert_eq!(entity, "event");
             assert_eq!(actual, field);
         }
+    }
+
+    #[test]
+    fn routing_decision_reason_is_secret_guarded() {
+        // Given: 既知値を注入した guard と reason へ既知 credential 値を含む
+        //        RoutingDecision イベント
+        let guard = SecretGuard::with_known_values([KNOWN_VALUE.to_owned()]);
+        let kind = EventKind::Lifecycle(LifecycleEvent::RoutingDecision {
+            shape: "Direct".into(),
+            reason: format!("matched {KNOWN_VALUE}"),
+            source: event_bus::RoutingSource::LocalRule {
+                rule: "direct-keyword:direct".into(),
+            },
+        });
+
+        // When / Then: "RoutingDecision.reason" の field 名付きで拒否される
+        let Err(StorageError::SecretDetected {
+            entity,
+            field: actual,
+            ..
+        }) = guard.check_event_kind(&kind)
+        else {
+            panic!("RoutingDecision.reason must be rejected");
+        };
+        assert_eq!(entity, "event");
+        assert_eq!(actual, "RoutingDecision.reason");
     }
 
     #[test]

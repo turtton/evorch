@@ -124,6 +124,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             // エージェント実行はセッションではないため、セッション射影を変更しません。
             LifecycleEvent::AgentRunStateChanged { .. } => {}
             LifecycleEvent::AgentRunStarted { .. } => {}
+            // entry 判定は session/task を更新しない。
+            LifecycleEvent::RoutingDecision { .. } => {}
             LifecycleEvent::Completed { .. } => {
                 set_status(state, stored, SessionStatus::Completed);
             }
@@ -257,7 +259,7 @@ mod tests {
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
         CompactionReason, DeliveryDisposition, Event, EventMeta, FaultEvent, ProviderEvent,
-        UsageEvent,
+        RoutingSource, UsageEvent,
     };
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -292,6 +294,7 @@ mod tests {
     noop_test!(provider_does_not_mutate, ProviderEvent::ProviderFallback { from_provider: "a".into(), to_provider: "b".into(), reason: "r".into() });
     noop_test!(fault_does_not_mutate, FaultEvent::SubscriberLagged { subscriber_id: 1, skipped: 2 });
     noop_test!(agent_run_state_changed_does_not_mutate, LifecycleEvent::AgentRunStateChanged { run_id: "r".into(), from: AgentRunPhase::Pending, to: AgentRunPhase::Running, reason: None });
+    noop_test!(routing_decision_does_not_touch_sessions_or_tasks, LifecycleEvent::RoutingDecision { shape: "Direct".into(), reason: "direct-keyword".into(), source: RoutingSource::LocalRule { rule: "direct-keyword:direct".into() } });
     #[test] fn projection_ignores_agent_message_events() {
         // Given: Message/Lifecycle イベントのみで構成したイベント列
         let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1"))];
