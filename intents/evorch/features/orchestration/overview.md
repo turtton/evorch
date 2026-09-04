@@ -100,3 +100,16 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 
 - Explorer / Librarian / Reviewer の runtime レベル capability 制限の具体設定（network の role-dependent 扱いの細部）
 - Category（quick / deep / high-reasoning / visual / writing / research）のモデル routing との対応表
+
+
+## v0.2 確定（PR #72、issue #71）: entry pre-routing
+
+GUI の goal 投入時に Orchestrator 起動へ進む前に Execution Shape を事前判定する（entry pre-routing）。`crates/runtime/src/entry_routing/` の `EntryRouter` が 2 段階で分類する:
+
+1. **ローカルキーワードルール**: fenced/inline code・slash command 行を除外した goal 本文を word boundary・case-insensitive で走査。direct 系キーワード（`direct`/`just`）のみ検出→Direct（Worker run を直接起動）、未検出→Coordinated（Orchestrator 起動）、direct 系と coordination 系の混在または分類対象テキスト無し→不確実。
+2. **同一モデル再分類**: 不確実時のみ、起動予定の Orchestrator と同一モデルへ Intent Gate 本文と `ExecutionShape:` マーカー報告指示を送って再分類する（`AgentRuntime::entry_router()` が runtime 内部のモデルを構造的に再利用するため同一性が保証される）。マーカーが一意に parse できない場合・モデルエラー時は Coordinated に fail-safe。
+
+全判定経路で `LifecycleEvent::RoutingDecision { shape, reason, source: LocalRule{rule} | Model{model} }` event を発行し、entry 判断を event stream で観測可能にする。GUI 側は `RuntimeCommandSink`（`crates/gui/src/runtime_sink.rs`）が `SubmitGoal` を pre-routing 経由の background run 起動（`goal-N` 採番、Direct→Worker / Coordinated→Orchestrator の role 選択）へ接続する。shape 毎に runtime を再構築するのではなく共有 runtime 上で run の role を選択する方式。
+
+## 検証・ゲート実績
+6 commits 17 files +1802/-7 / CI 系全 PASS（146 suites 0 failed、otel-exporter feature 両面）/ Reviewer Gate APPROVED_WITH_NOTES（blocker 0、note 2）。canonical: claim/result-summary/complete 全 applied、issue #71 intent-pr-created。**queue-state linked_pr 同期は sandbox RO で失敗 → lead 側で closeout-plan --write-recovered-linkage が必要**。
