@@ -64,6 +64,14 @@ impl ExecutionShape {
             }
         }
     }
+
+    /// 名前 ("Direct" / "Coordinated") から復元する。ASCII 大文字小文字を区別しない。
+    pub fn from_name(name: &str) -> Option<Self> {
+        EXECUTION_SHAPES
+            .iter()
+            .copied()
+            .find(|shape| shape.name().eq_ignore_ascii_case(name))
+    }
 }
 
 /// 全実行形態。プロンプトの列挙順。
@@ -356,5 +364,34 @@ mod tests {
             render_orchestrator_gate_body()
         );
         assert_eq!(render_routing_gate_body(), render_routing_gate_body());
+    }
+
+    // Given: ExecutionShape の表示名とその大小文字混在表記
+    // When: from_name で復元する
+    // Then: ASCII 大文字小文字の違いを無視して対応する形態に復元される
+    #[test]
+    fn execution_shape_parses_its_own_names_case_insensitively() {
+        assert_eq!(
+            ExecutionShape::from_name("Direct"),
+            Some(ExecutionShape::Direct)
+        );
+        assert_eq!(
+            ExecutionShape::from_name("Coordinated"),
+            Some(ExecutionShape::Coordinated)
+        );
+        assert_eq!(
+            ExecutionShape::from_name("dIrEcT"),
+            Some(ExecutionShape::Direct)
+        );
+    }
+
+    // Given: 実行形態の名称ではない文字列
+    // When: from_name で復元する
+    // Then: 常に None を返す
+    #[test]
+    fn execution_shape_rejects_unknown_name() {
+        assert_eq!(ExecutionShape::from_name("Worker"), None);
+        assert_eq!(ExecutionShape::from_name(""), None);
+        assert_eq!(ExecutionShape::from_name("directive"), None);
     }
 }

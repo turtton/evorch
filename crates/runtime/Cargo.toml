@@ -14,6 +14,7 @@ config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 globset = { workspace = true }
 providers = { path = "../providers" }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
