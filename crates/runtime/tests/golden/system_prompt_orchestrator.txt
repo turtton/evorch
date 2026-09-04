@@ -40,7 +40,7 @@ Claude ファミリ向け規約: 応答は簡潔にし、ツール呼び出し�
 ### keyTriggers
 
 - Explorer: 許可ツール: grep, read / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 不可
-- Orchestrator: 許可ツール: cancel, compact, delegate, delegate_background, finish, git_diff, grep, inbox, inspect_agent, list_agents, read, send, send_message, skill_load, wait, wait_reply / ネットワーク: 拒否 / 委譲: 可
+- Orchestrator: 許可ツール: cancel, compact, delegate, delegate_background, finish, git_diff, grep, inbox, inspect_agent, list_agents, read, send, send_message, skill_load, wait, wait_reply, web_fetch / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 可
 - Reviewer: 許可ツール: git_diff, grep, read / ネットワーク: 拒否 / 委譲: 不可
 - Worker: 許可ツール: edit, git_diff, grep, inbox, read, send, shell, skill_load, wait_reply / ネットワーク: 拒否 / 委譲: 不可
 

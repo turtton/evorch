@@ -100,21 +100,28 @@ fn all_layers_permissive_allow_web_fetch() {
     assert_eq!(decision, NetworkAccessDecision::Allow);
 }
 
-// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と現在の全 role / When: web_fetch を authorize / Then: 全 role で CapabilityDenied になる (AC6)
-// agents::Role に全 variant の定数はないため列挙する。新 variant を enum に追加した際は
-// この列挙への追加が必要である (match と異なり追加漏れはコンパイラに検出されない)。
-// web_fetch は本 slice では意図的にどの role の allowed_tools にも含まれていないため、
-// このテストは production gate が現在の全 role で web_fetch を拒否することを固定する。
-// 将来の配線 slice で role に web_fetch を許可した時点で本テストが失敗し、拒否保証の
-// 更新責務をその slice へ移す tripwire として機能する。
+// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_fetch を authorize / Then: Librarian と Orchestrator は許可され、他の 3 role は CapabilityDenied になる (AC6)
+// agents::Role に全 variant の定数はないため列挙する。現行の全 variant は
+// Orchestrator / Explorer / Worker / Reviewer / Librarian の 5 つであり、
+// 新 variant を enum に追加した際はこの列挙への追加が必要である
+// (match と異なり追加漏れはコンパイラに検出されない)。
+// web_fetch は ADR 0002 (2026-09-03 補足) により Librarian (network Allowed) と
+// Orchestrator (network OptIn) に公開され、このテストは production gate の
+// 公開範囲を固定する。
+// role の公開範囲を変更する slice は必ず本テストを更新すること (tripwire)。
 #[test]
-fn production_layer1_gate_denies_web_fetch_for_every_role() {
-    for role in [
-        Role::Orchestrator,
-        Role::Explorer,
-        Role::Worker,
-        Role::Reviewer,
-    ] {
+fn production_layer1_gate_exposes_web_fetch_to_librarian_and_orchestrator() {
+    for role in [Role::Librarian, Role::Orchestrator] {
+        let policy = ExecutionPolicy::for_role(role);
+        assert_eq!(
+            policy.authorize("web_fetch"),
+            Ok(()),
+            "role {} の web_fetch は layer-1 execute gate で許可されるべき (AC6)",
+            role.name()
+        );
+    }
+
+    for role in [Role::Explorer, Role::Worker, Role::Reviewer] {
         let policy = ExecutionPolicy::for_role(role);
         let role_name = role.name();
         let Err(RuntimeError::CapabilityDenied { role, tool, reason }) =
@@ -127,4 +134,67 @@ fn production_layer1_gate_denies_web_fetch_for_every_role() {
         assert_eq!(tool, "web_fetch");
         assert!(!reason.is_empty(), "拒否理由が空であってはならない");
     }
+}
+
+// Given: Librarian と Orchestrator の production ポリシー / When: ケイパビリティの network を参照する / Then: Librarian は Allowed、Orchestrator は OptIn になる (ADR 0002 2026-09-03 補足)
+#[test]
+fn librarian_network_is_allowed_and_orchestrator_is_opt_in() {
+    assert_eq!(
+        ExecutionPolicy::for_role(Role::Librarian)
+            .capabilities
+            .network,
+        NetworkAccess::Allowed
+    );
+    assert_eq!(
+        ExecutionPolicy::for_role(Role::Orchestrator)
+            .capabilities
+            .network,
+        NetworkAccess::OptIn
+    );
+}
+
+// Given: Orchestrator の production ポリシー (role network OptIn) / When: session の NetworkAccess を変えて web_fetch を 3層AND判定 / Then: session OptIn では承認理由に session を含む Ask、Denied では Deny、Allowed かつ per-tool AutoAllow では Allow になる (AC6)
+#[test]
+fn orchestrator_web_fetch_requires_session_opt_in_approval() {
+    let policy = ExecutionPolicy::for_role(Role::Orchestrator);
+
+    let decision = judge_web_network_access(
+        &policy.capabilities,
+        &policy.role_name,
+        "web_fetch",
+        PolicyDecision::Ask,
+        NetworkAccess::OptIn,
+    );
+    let NetworkAccessDecision::Ask { reason } = decision else {
+        panic!("session OptIn では Ask になるべき。実際の判定: {decision:?}");
+    };
+    assert!(
+        reason.contains("session"),
+        "Ask 理由は session を含むべき: {reason}"
+    );
+
+    let decision = judge_web_network_access(
+        &policy.capabilities,
+        &policy.role_name,
+        "web_fetch",
+        PolicyDecision::Ask,
+        NetworkAccess::Denied,
+    );
+    assert!(
+        matches!(decision, NetworkAccessDecision::Deny { .. }),
+        "session Denied では Deny になるべき。実際の判定: {decision:?}"
+    );
+
+    let decision = judge_web_network_access(
+        &policy.capabilities,
+        &policy.role_name,
+        "web_fetch",
+        PolicyDecision::AutoAllow,
+        NetworkAccess::Allowed,
+    );
+    assert_eq!(
+        decision,
+        NetworkAccessDecision::Allow,
+        "role の OptIn は通過扱いのため session Allowed では Allow になるべき"
+    );
 }

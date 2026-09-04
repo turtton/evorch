@@ -247,6 +247,8 @@ impl AgentRuntime {
     /// `build_sandbox(&ExecutionPolicy, workspace)` 経由で role の network
     /// capability を bwrap policy へ伝播し、標準ツールを持つ ToolExecutor に注入する
     /// composition root (PR #22 の fail-closed 経路 / implementation.md:48)。
+    /// 標準ツールに加えて web_search / web_fetch を [`ToolExecutor::with_web_tools`]
+    /// で登録し、NetworkGuard 初期化の失敗はフォールバックせずエラーを返す。
     /// bwrap の検出・検証に失敗した場合はエラーをそのまま伝播する。
     /// DirectSandbox へのフォールバック経路は存在しない (ADR 0021)。
     pub fn production(
@@ -260,14 +262,24 @@ impl AgentRuntime {
                 detail: error.to_string(),
             }
         })?;
-        let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
+        let executor = Arc::new(
+            ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox)
+                .with_web_tools()
+                .map_err(|error| RuntimeError::NetworkGuard {
+                    detail: error.to_string(),
+                })?,
+        );
         Ok(Self::new(bus, executor, model))
     }
 
     /// production sandbox と isolated workspace context を持つランタイムを生成する。
     ///
+    /// baseline executor は [`AgentRuntime::production`] と同様に web_search /
+    /// web_fetch を [`ToolExecutor::with_web_tools`] で登録する。
+    ///
     /// # Errors
-    /// project 検証または baseline sandbox 構築に失敗した場合に [`RuntimeError`] を返す。
+    /// project 検証、baseline sandbox 構築、または NetworkGuard 初期化に失敗した
+    /// 場合に [`RuntimeError`] を返す。
     pub fn production_with_project(
         bus: Arc<EventBus>,
         policy: &ExecutionPolicy,
@@ -281,7 +293,13 @@ impl AgentRuntime {
             .map_err(|error| RuntimeError::Sandbox {
                 detail: error.to_string(),
             })?;
-        let executor = Arc::new(ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox));
+        let executor = Arc::new(
+            ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox)
+                .with_web_tools()
+                .map_err(|error| RuntimeError::NetworkGuard {
+                    detail: error.to_string(),
+                })?,
+        );
         Ok(Self::with_workspace_context(
             bus,
             executor,

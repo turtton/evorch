@@ -60,6 +60,10 @@ pub enum RuntimeError {
     #[error("workspace の初期化に失敗しました: {detail}")]
     Workspace { detail: String },
 
+    /// web ツールのネットワークガード初期化に失敗した (fail-closed)。
+    #[error("web ツールのネットワークガード初期化に失敗しました: {detail}")]
+    NetworkGuard { detail: String },
+
     /// 送信者と受信者の親子関係またはメッセージ種別のルールにより配送が拒否された。
     #[error("AgentRun {sender} から {recipient} へのメッセージが拒否されました: {detail}")]
     MessageDenied {

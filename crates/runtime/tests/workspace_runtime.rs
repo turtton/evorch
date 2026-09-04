@@ -3,19 +3,23 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agents::Role;
-use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
+use agents::{NetworkAccess, Role};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::FinishReason;
 use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
     AgentRuntime, IsolatedMounts, MergeMode, RunConfig, WorkspaceInspection, WorkspaceMode,
 };
 use sandbox::DirectSandbox;
+use serde_json::json;
 use tokio::sync::Notify;
 use tokio::time::{Duration, sleep, timeout};
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, git, init_git_repo, recording_factory, text_response};
+use support::{
+    ScriptedModel, collect_events, git, init_git_repo, recording_factory, text_response,
+    tool_response,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -201,6 +205,38 @@ async fn inspect_agent_reports_isolated_workspace() {
             merge_mode: MergeMode::Branch,
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_run_executor_registers_web_tools() {
+    // Given: isolated run では setup_isolated_workspace が executor を再構築する。
+    // Librarian は web_fetch を capability に持つ
+    let (_temp, repo) = init_git_repo();
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response("fetch-1", "web_fetch", json!({}))),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let (runtime, _mounts, bus) = runtime_with_workspace(&repo, model);
+    let mut events = bus.subscribe();
+
+    // When
+    let run_id = runtime.delegate_background(
+        Role::Librarian,
+        "fetch".to_string(),
+        RunConfig {
+            workspace_mode: WorkspaceMode::Isolated,
+            network_access: NetworkAccess::Allowed,
+            ..RunConfig::default()
+        },
+    );
+
+    // Then: 再構築された executor が web_fetch を登録済みなら ToolStarted が
+    // 観測され、引数スキーマ検証 (url 必須) で is_error 完了する
+    // (検証は実行前のためネットワーク I/O は発生しない)
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    let events = collect_events(&mut events, 6).await;
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "web_fetch" && call_id == "fetch-1")));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: true, .. }) if tool_name == "web_fetch" && call_id == "fetch-1")));
 }
 
 #[tokio::test]

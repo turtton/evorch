@@ -100,15 +100,24 @@ fn all_layers_permissive_allow_web_search() {
     assert_eq!(decision, NetworkAccessDecision::Allow);
 }
 
-// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と現在の全 role / When: web_search を authorize / Then: 全 role で CapabilityDenied になる (AC6)
-// agents::Role に全 variant の定数はないため列挙する。新 variant を enum に追加した際は
-// この列挙への追加が必要である (match と異なり追加漏れはコンパイラに検出されない)。
-// web_search は本 slice では意図的にどの role の allowed_tools にも含まれていないため、
-// このテストは production gate が現在の全 role で web_search を拒否することを固定する。
-// 将来の配線 slice で role に web_search を許可した時点で本テストが失敗し、拒否保証の
-// 更新責務をその slice へ移す tripwire として機能する。
+// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_search を authorize / Then: Librarian のみ許可され、他の 4 role は CapabilityDenied になる (AC6)
+// agents::Role に全 variant の定数はないため列挙する。現行の全 variant は
+// Orchestrator / Explorer / Worker / Reviewer / Librarian の 5 つであり、
+// 新 variant を enum に追加した際はこの列挙への追加が必要である
+// (match と異なり追加漏れはコンパイラに検出されない)。
+// web_search は ADR 0002 (2026-09-03 補足) により Librarian 専用であり、
+// このテストは production gate が Librarian にのみ web_search を公開し、
+// 他の全 role で拒否することを固定する。
+// role の公開範囲を変更する slice は必ず本テストを更新すること (tripwire)。
 #[test]
-fn production_layer1_gate_denies_web_search_for_every_role() {
+fn production_layer1_gate_exposes_web_search_only_to_librarian() {
+    let policy = ExecutionPolicy::for_role(Role::Librarian);
+    assert_eq!(
+        policy.authorize("web_search"),
+        Ok(()),
+        "Librarian の web_search は layer-1 execute gate で許可されるべき (AC6)"
+    );
+
     for role in [
         Role::Orchestrator,
         Role::Explorer,
@@ -126,5 +135,30 @@ fn production_layer1_gate_denies_web_search_for_every_role() {
         assert_eq!(role, role_name);
         assert_eq!(tool, "web_search");
         assert!(!reason.is_empty(), "拒否理由が空であってはならない");
+    }
+}
+
+// Given: Orchestrator の production ポリシー (web_search は allowed_tools 外) / When: session NetworkAccess が Allowed / OptIn / Denied のいずれでも 3層AND判定 / Then: すべて Deny になる
+#[test]
+fn orchestrator_web_search_denied_regardless_of_session() {
+    let policy = ExecutionPolicy::for_role(Role::Orchestrator);
+
+    for session in [
+        NetworkAccess::Allowed,
+        NetworkAccess::OptIn,
+        NetworkAccess::Denied,
+    ] {
+        let decision = judge_web_network_access(
+            &policy.capabilities,
+            &policy.role_name,
+            "web_search",
+            PolicyDecision::AutoAllow,
+            session,
+        );
+
+        assert!(
+            matches!(decision, NetworkAccessDecision::Deny { .. }),
+            "session {session:?} でも Deny になるべき。実際の判定: {decision:?}"
+        );
     }
 }

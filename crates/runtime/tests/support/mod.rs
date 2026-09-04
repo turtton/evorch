@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use agents::Role;
 use async_trait::async_trait;
-use event_bus::{Event, EventReceiver};
+use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
@@ -198,6 +198,81 @@ pub async fn collect_events(receiver: &mut EventReceiver, count: usize) -> Vec<E
         events.push(event);
     }
     events
+}
+
+/// run 完了後にバス上に残ったイベントをすべて回収する。
+///
+/// `wait` 完了後は Tool / Lifecycle イベントがすべて発行済みなので、
+/// 短いタイムアウトで `recv` を枯渇させて presence/absence アサーションに使う。
+/// イベント総数は実装詳細に依存するため固定カウントで回収しない。
+pub async fn drain_events(receiver: &mut EventReceiver) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Ok(Ok(event)) = timeout(Duration::from_millis(100), receiver.recv()).await {
+        events.push(event);
+    }
+    events
+}
+
+/// ApprovalRequested を待って ApprovalResolved で応答するタスクを起動する。
+///
+/// `receiver` は呼び出し側が `delegate_background` の前に subscribe したものを
+/// 受け取る (承認要求の取りこぼしを防ぐため)。最初の 1 件の承認要求に応答すると
+/// 終了する。
+pub fn spawn_approval_responder(
+    bus: Arc<EventBus>,
+    mut receiver: EventReceiver,
+    approved: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let event = receiver.recv().await.expect("承認要求を受信できるはずです");
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                    call_id,
+                    approved,
+                }));
+                return;
+            }
+        }
+    })
+}
+
+/// run スコープ相関キー (`{run_id}:{call_id}`) を待って 1 件だけ承認する応答者。
+///
+/// `prefix` (例: `format!("{run_id}:")`) に一致する要求だけを承認し、他 run の
+/// 要求には応答しない。相関キーが run スコープ化される前の実装では 2 run の要求が
+/// 同一生 call_id になり接頭辞一致しないため、prefix 不一致の要求を 2 件観測した
+/// 時点で先頭の要求を 1 回だけ resolve する。このとき単一の ApprovalResolved が
+/// 両 gate に受理されてしまい、横取り回帰がタイムアウトなしで失敗として顕在化する
+/// (run スコープ化後は 2 run の要求が必ず異なる key のため、この分岐に到達しない)。
+pub fn spawn_run_scoped_approval_responder(
+    bus: Arc<EventBus>,
+    mut receiver: EventReceiver,
+    prefix: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut unmatched: Option<String> = None;
+        loop {
+            let event = receiver.recv().await.expect("承認要求を受信できるはずです");
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
+                if call_id.starts_with(&prefix) {
+                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved: true,
+                    }));
+                    return;
+                }
+                if let Some(stored) = unmatched {
+                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                        call_id: stored,
+                        approved: true,
+                    }));
+                    return;
+                }
+                unmatched = Some(call_id);
+            }
+        }
+    })
 }
 
 pub fn recording_factory() -> (

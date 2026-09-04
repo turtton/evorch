@@ -84,12 +84,12 @@ fn denied_with_explicit_opt_in_maps_to_unshared() {
     assert_eq!(mode, SandboxNetworkMode::Unshared);
 }
 
-// Given: ネットワーク要件が Denied の 3 ロール (Worker / Orchestrator / Reviewer) のポリシー
+// Given: ネットワーク要件が Denied の 2 ロール (Worker / Reviewer) のポリシー
 // When: sandbox_network_mode を呼ぶ
 // Then: すべて Unshared に解決される
 #[test]
 fn for_role_denied_roles_map_to_unshared() {
-    for role in [Role::Worker, Role::Orchestrator, Role::Reviewer] {
+    for role in [Role::Worker, Role::Reviewer] {
         let policy = ExecutionPolicy::for_role(role);
 
         assert_eq!(
@@ -101,14 +101,21 @@ fn for_role_denied_roles_map_to_unshared() {
     }
 }
 
-// Given: Explorer のポリシー (NetworkAccess::OptIn)
+// Given: ネットワーク要件が OptIn の 2 ロール (Explorer / Orchestrator) のポリシー
 // When: sandbox_network_mode を呼ぶ (v0.1 にはオプトイン経路がない)
-// Then: fail-closed により Unshared に解決される
+// Then: fail-closed によりすべて Unshared に解決される
 #[test]
-fn for_role_explorer_maps_to_unshared_fail_closed() {
-    let policy = ExecutionPolicy::for_role(Role::Explorer);
+fn for_role_opt_in_roles_map_to_unshared_fail_closed() {
+    for role in [Role::Explorer, Role::Orchestrator] {
+        let policy = ExecutionPolicy::for_role(role);
 
-    assert_eq!(policy.sandbox_network_mode(), SandboxNetworkMode::Unshared);
+        assert_eq!(
+            policy.sandbox_network_mode(),
+            SandboxNetworkMode::Unshared,
+            "{} は fail-closed で Unshared に解決されるべき",
+            role.name()
+        );
+    }
 }
 
 // Given: role_name は Worker だがケイパビリティの network が Allowed の手組みポリシー

@@ -14,12 +14,13 @@ use sandbox::{
 };
 
 use crate::error::ToolError;
+use crate::network_guard::NetworkGuardError;
 use crate::origin::derive_content_origin;
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::Tool;
-use crate::tools::{Edit, GitDiff, Grep, Read, Shell};
+use crate::tool::{Permissions, Tool};
+use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
 
 /// ツール実行時の文脈情報。
 ///
@@ -97,6 +98,8 @@ impl ToolExecutor {
     /// 検証・変換されずそのまま使われるため、隔離なしの `DirectSandbox` も
     /// 注入できる。テスト・記録用サンドボックス・独自統合向けであり、
     /// production の呼び出し元は必ず `with_production_sandbox` を使うこと。
+    /// web_search / web_fetch が必要な呼び出し元は返り値に
+    /// [`ToolExecutor::with_web_tools`] を連鎖させること。
     ///
     /// # Panics
     ///
@@ -121,11 +124,37 @@ impl ToolExecutor {
         executor
     }
 
+    /// 標準ツールに web_search / web_fetch（production 既定構成）を追加登録する。
+    ///
+    /// # Errors
+    ///
+    /// [`NetworkGuard`] の DNS resolver 初期化に失敗した場合は
+    /// [`NetworkGuardError`] を返す（fail-closed。フォールバック登録はしない）。
+    ///
+    /// # Panics
+    ///
+    /// web ツールのスキーマがコンパイルできない場合のみ panic する。スキーマは
+    /// `tools::tools::tests::web_tool_schemas_compile` でコンパイル可能を
+    /// 検証済みのため、到達しない経路である。
+    ///
+    /// [`NetworkGuard`]: crate::network_guard::NetworkGuard
+    pub fn with_web_tools(mut self) -> Result<Self, NetworkGuardError> {
+        self.register(Arc::new(WebSearch::keyless_default()?))
+            // SAFE-EXPECT: web スキーマは web_tool_schemas_compile でコンパイル検証済み。
+            .expect("web_search のスキーマは web_tool_schemas_compile でコンパイル可能を検証済み");
+        self.register(Arc::new(WebFetch::new()?))
+            // SAFE-EXPECT: web スキーマは web_tool_schemas_compile でコンパイル検証済み。
+            .expect("web_fetch のスキーマは web_tool_schemas_compile でコンパイル可能を検証済み");
+        Ok(self)
+    }
+
     /// read / edit / grep / shell / git_diff の 5 標準ツールを登録し、production 用の
     /// fail-closed なサンドボックスを注入した実行器を生成する。
     ///
     /// `sandbox::production_sandbox`（composition root）経由で `BwrapSandbox` を
     /// 構築する。bwrap の検出に失敗した場合はフォールバックせずエラーを返す。
+    /// web_search / web_fetch が必要な呼び出し元は返り値に
+    /// [`ToolExecutor::with_web_tools`] を連鎖させること。
     ///
     /// # Errors
     ///
@@ -144,6 +173,24 @@ impl ToolExecutor {
     pub fn set_policy(&mut self, policy: ApprovalPolicy) -> &mut Self {
         self.policy = policy;
         self
+    }
+
+    /// 登録済みツールの権限宣言を返す。未登録なら None。
+    pub fn tool_permissions(&self, tool_name: &str) -> Option<Permissions> {
+        self.tools
+            .get(tool_name)
+            .map(|registered| registered.tool.permissions())
+    }
+
+    /// loop 側 3 層 AND 判定の per-tool 層入力として、登録済みツールの実行分類を返す。
+    /// 未登録なら None。executor 自身も同じ policy で判定するため、allow_all 以外の
+    /// policy を設定した構成では loop 側と executor 側の二重 ask になりうる点に注意。
+    pub fn classify_tool(&self, tool_name: &str) -> Option<sandbox::PolicyDecision> {
+        let permissions = self.tool_permissions(tool_name)?;
+        Some(
+            self.policy
+                .classify(tool_name, &capabilities_of(&permissions)),
+        )
     }
 
     /// 利用者承認を待つゲートを設定する。
@@ -198,12 +245,7 @@ impl ToolExecutor {
         }
 
         let permissions = registered.tool.permissions();
-        let capabilities = Capabilities {
-            fs_read: permissions.fs_read,
-            fs_write: permissions.fs_write,
-            process_spawn: permissions.process_spawn,
-            network: permissions.network,
-        };
+        let capabilities = capabilities_of(&permissions);
         let action = resolve(
             self.policy.classify(tool_name, &capabilities),
             self.policy.mode(),
@@ -319,6 +361,15 @@ impl ToolExecutor {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
         })
+    }
+}
+
+fn capabilities_of(permissions: &Permissions) -> Capabilities {
+    Capabilities {
+        fs_read: permissions.fs_read,
+        fs_write: permissions.fs_write,
+        process_spawn: permissions.process_spawn,
+        network: permissions.network,
     }
 }
 
