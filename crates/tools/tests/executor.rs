@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use sandbox::DirectSandbox;
 use tempfile::tempdir;
-use tools::{Permissions, Read, Tool, ToolError, ToolExecutionContext, ToolExecutor, ToolResult};
+use tools::{
+    ContentOrigin, Permissions, Read, Tool, ToolError, ToolExecutionContext, ToolExecutor,
+    ToolResult, WebFetch, WebSearch, derive_content_origin,
+};
 
 /// テスト用フィクスチャ（バス・実行器・受信者）を生成する。
 ///
@@ -447,6 +450,148 @@ async fn executor_with_standard_tools_registers_five() {
             result.content
         );
     }
+}
+
+// Given: with_standard_tools に with_web_tools を連鎖させた実行器 / When: web_search と web_fetch を空引数でそれぞれ実行 / Then: いずれも InvalidArgs（登録済みで実スキーマが検証される証明）となり、ToolStarted + ToolCompleted(is_error=true) が受信できる。さらに read が引き続き成功する（標準ツールが保持される証明）
+#[tokio::test]
+async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    )
+    .with_web_tools()
+    .expect("NetworkGuard 初期化");
+
+    for name in ["web_search", "web_fetch"] {
+        let error = executor
+            .execute(&test_ctx("run-20"), name, "call-web", serde_json::json!({}))
+            .await
+            .expect_err("空引数はスキーマ違反になる");
+        let ToolError::InvalidArgs { detail } = error else {
+            panic!("InvalidArgs を期待しましたが {error:?} でした");
+        };
+        assert!(!detail.is_empty(), "{name} の違反の詳細が空: {detail}");
+
+        let started = receiver.recv().await.expect("1 件目のイベントを受信できる");
+        assert_eq!(
+            tool_event(&started),
+            &ToolEvent::ToolStarted {
+                tool_name: name.to_string(),
+                call_id: "call-web".to_string(),
+                run_id: Some("run-20".to_string()),
+            }
+        );
+        let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
+        assert_eq!(
+            tool_event(&completed),
+            &ToolEvent::ToolCompleted {
+                tool_name: name.to_string(),
+                call_id: "call-web".to_string(),
+                is_error: true,
+                detail: None,
+                run_id: Some("run-20".to_string()),
+            }
+        );
+    }
+
+    // 標準ツールが保持されることの確認。
+    let dir = tempdir().expect("一時ディレクトリの作成に失敗");
+    let path = dir.path().join("sample.txt");
+    std::fs::write(&path, "hello\n").expect("テストファイルの書き込みに失敗");
+    let result = executor
+        .execute(
+            &test_ctx("run-20"),
+            "read",
+            "call-read",
+            serde_json::json!({ "path": path.display().to_string() }),
+        )
+        .await
+        .expect("read は引き続き実行できる");
+    assert!(!result.is_error);
+    let started = receiver.recv().await.expect("3 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&started),
+        &ToolEvent::ToolStarted {
+            tool_name: "read".to_string(),
+            call_id: "call-read".to_string(),
+            run_id: Some("run-20".to_string()),
+        }
+    );
+    let completed = receiver.recv().await.expect("4 件目のイベントを受信できる");
+    assert_eq!(
+        tool_event(&completed),
+        &ToolEvent::ToolCompleted {
+            tool_name: "read".to_string(),
+            call_id: "call-read".to_string(),
+            is_error: false,
+            detail: None,
+            run_id: Some("run-20".to_string()),
+        }
+    );
+}
+
+/// 由来 (origin) を申告しない network 権限のテスト用ツール。
+struct NetworkStubTool;
+
+#[async_trait]
+impl Tool for NetworkStubTool {
+    fn name(&self) -> &'static str {
+        "network_stub"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "additionalProperties": false })
+    }
+
+    fn permissions(&self) -> Permissions {
+        Permissions::network()
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("本文"))
+    }
+}
+
+// Given: with_web_tools 済みの実行器と network 権限のスタブツール / When: permissions からの機械導出と Executor 経由の実行 / Then: いずれの経路でも origin は WebUntrusted（fail-closed: 由来は権限宣言から機械導出され、ツールの申告では決まらない）(AC7)
+#[tokio::test]
+async fn web_tools_result_origin_is_web_untrusted_fail_closed() {
+    // (1) permissions からの機械導出（WebSearch / WebFetch の両方）。
+    let web_fetch = WebFetch::new().expect("WebFetch の生成に失敗");
+    let web_search = WebSearch::keyless_default().expect("WebSearch の生成に失敗");
+    assert_eq!(
+        derive_content_origin(&web_fetch.permissions()),
+        ContentOrigin::WebUntrusted
+    );
+    assert_eq!(
+        derive_content_origin(&web_search.permissions()),
+        ContentOrigin::WebUntrusted
+    );
+
+    // (2) Executor 経由の正規化結果（スタブは由来を申告しない）。
+    let bus = Arc::new(EventBus::new(16));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    )
+    .with_web_tools()
+    .expect("NetworkGuard 初期化");
+    executor
+        .register(Arc::new(NetworkStubTool))
+        .expect("テストツールを登録できるはずです");
+
+    let result = executor
+        .execute(
+            &test_ctx("run-21"),
+            "network_stub",
+            "call-1",
+            serde_json::json!({}),
+        )
+        .await
+        .expect("テストツールは成功する");
+
+    assert_eq!(result.origin, ContentOrigin::WebUntrusted);
 }
 
 /// detail メタデータを添えて正常終了するテスト用ツール。
