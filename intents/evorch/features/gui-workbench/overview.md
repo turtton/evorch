@@ -56,6 +56,17 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - **自動 / 手動検証の分担**: headless wiring test（`gui/tests/runtime_wiring.rs`: 実 runtime + EventPump + WorkbenchState で 2 rows 収束）は CI で常時実行。文字内容レイアウト（name/role/model の実表示）は headless screenshot 基盤が必要で別 unit。`--demo` の手順による目視は手動
 - **network capability 伝播**: production runtime は `runtime::network::build_sandbox(policy)` 経由で role の network mode を bwrap へ伝播する（PR #20 seam。`AgentRuntime::production` 内では `ToolExecutor::with_standard_tools` に構築済み sandbox を注入。`with_production_sandbox` は BwrapConfig 直接受取りの sibling entry として残存）
 
+
+## v0.2 GUI workbench 3領域再構成の実装確定（issue #65、PR #66、2026-09-05）
+
+- workspace schema v2 + `migrate.rs` による v1 自動移行。PanelKind に Sidebar / Agents / AgentTranscript（target=run_id 必須）/ Diff / Goal / Merge を追加し、load は fail-closed（不正 panel 参照・duplicate・invalid trust path を拒否）
+- project/thread/trust モデルは workspace-ui 所有（config 不変）。allowed-directory は mutation/load で同一 validator を通し、runtime 所有 worktree（`<root>/.evorch/worktrees/`）は membership 自動許可、任意外部 path は明示 trust なしに許可しない
+- TranscriptRegistry が run-addressed event（tool は run_id、approval は call_id index、AgentMessage は sender/recipient）を決定配送。MessageDelta は run_id を持たないため thread + 単一 Running run のみ mirror（follow-up 候補: event-bus の MessageDelta/ReasoningDelta へ run_id 付与）
+- Telemetry は ProviderEvent の run_id Some のみ集約、UsageEvent は推測せず無視
+- Diff は working tree / main 固定 branch のみ（turn 別・split・whitespace・file tree・base 任意選択は v0.3 scope 据置）、256KiB cap、空/Error は明示状態
+- goal-submission / merge-approval は WorkbenchCommand + FixtureLoopAdapter で型付き・決定的（orchestrator-loop 未接続でも fixture で操作可能）
+- `--demo` は 3 役 delegate + AgentMessage + telemetry + diff/goal/merge を外部 provider なしで再現、`--state` で sidebar 永続化、手動確認手順は `--help` に同梱（NixOS は LD_LIBRARY_PATH+WGPU_BACKEND=gl+llvmpipe が必要）
+- HeadlessWorkbench 統合テスト（chained scenario + v1 migration + error paths）を含む。GUI 95 / workspace-ui 38 test green、Reviewer Gate 3 round で APPROVED（AC5 非混線・AC10 migration・AC11 scope 外項を最終修正）
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
