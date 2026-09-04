@@ -34,6 +34,8 @@ pub enum ProjectError {
     NotAbsolute,
     #[error("path is not a directory")]
     NotADirectory,
+    #[error("path must be canonical")]
+    NotCanonical,
     #[error("failed to canonicalize path '{0}'")]
     Canonicalize(String),
     #[error("project already exists")]
@@ -46,6 +48,8 @@ pub enum ProjectError {
     NestedInExistingAllowed,
     #[error("unknown project")]
     UnknownProject,
+    #[error("unknown allowed directory")]
+    UnknownAllowedDirectory,
 }
 
 /// Thread mutation errors.

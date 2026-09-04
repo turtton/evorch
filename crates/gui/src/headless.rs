@@ -144,7 +144,6 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
 struct PanicHookGuard {
     previous: Option<PanicHook>,
 }
-
 impl PanicHookGuard {
     fn suppress() -> Self {
         let previous = std::panic::take_hook();

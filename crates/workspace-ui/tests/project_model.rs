@@ -122,3 +122,75 @@ fn default_trust_is_unapproved() {
     // Then: access fails closed until explicitly approved.
     assert_eq!(trust, TrustState::Unapproved);
 }
+
+#[test]
+fn set_allowed_trust_updates_existing_canonical_directory() {
+    // Given: an unapproved canonical allowed directory on a known project.
+    let directory = tempdir().expect("temporary directory must be created");
+    let root = directory.path().join("project");
+    let allowed = directory.path().join("allowed");
+    std::fs::create_dir(&root).expect("project directory must be created");
+    std::fs::create_dir(&allowed).expect("allowed directory must be created");
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("p1");
+    sidebar
+        .add_project(project_id.clone(), "One", &root)
+        .expect("project must be added");
+    sidebar
+        .add_allowed_directory(&project_id, &allowed, TrustState::Unapproved)
+        .expect("allowed directory must be added");
+    let canonical = allowed.canonicalize().expect("allowed path canonicalizes");
+
+    // When: trust is approved through the public sidebar mutation API.
+    sidebar
+        .set_allowed_trust(&project_id, &canonical, TrustState::Approved)
+        .expect("allowed directory trust must update");
+
+    // Then: membership reports the updated trust state.
+    assert_eq!(
+        sidebar.projects[0].resolve_membership(&canonical),
+        Membership::AllowedDirectory {
+            trust: TrustState::Approved
+        }
+    );
+}
+
+#[test]
+fn set_allowed_trust_rejects_unknown_and_noncanonical_paths() {
+    // Given: one known project and allowed directory plus unrelated existing paths.
+    let directory = tempdir().expect("temporary directory must be created");
+    let root = directory.path().join("project");
+    let allowed = directory.path().join("allowed");
+    let unknown = directory.path().join("unknown");
+    std::fs::create_dir(&root).expect("project directory must be created");
+    std::fs::create_dir(&allowed).expect("allowed directory must be created");
+    std::fs::create_dir(&unknown).expect("unknown directory must be created");
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("p1");
+    sidebar
+        .add_project(project_id.clone(), "One", &root)
+        .expect("project must be added");
+    sidebar
+        .add_allowed_directory(&project_id, &allowed, TrustState::Unapproved)
+        .expect("allowed directory must be added");
+    let canonical = allowed.canonicalize().expect("allowed path canonicalizes");
+    let noncanonical = canonical.join("..").join("allowed");
+
+    // When: invalid project and path identities are submitted.
+    let unknown_project =
+        sidebar.set_allowed_trust(&ProjectId::new("missing"), &canonical, TrustState::Approved);
+    let unknown_path = sidebar.set_allowed_trust(&project_id, &unknown, TrustState::Approved);
+    let relative = sidebar.set_allowed_trust(
+        &project_id,
+        PathBuf::from("relative").as_path(),
+        TrustState::Approved,
+    );
+    let noncanonical_result =
+        sidebar.set_allowed_trust(&project_id, &noncanonical, TrustState::Approved);
+
+    // Then: each boundary failure remains a distinct typed project error.
+    assert_eq!(unknown_project, Err(ProjectError::UnknownProject));
+    assert_eq!(unknown_path, Err(ProjectError::UnknownAllowedDirectory));
+    assert_eq!(relative, Err(ProjectError::NotAbsolute));
+    assert_eq!(noncanonical_result, Err(ProjectError::NotCanonical));
+}

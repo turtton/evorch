@@ -42,6 +42,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
+    pub fn set_allowed_trust(
+        &mut self,
+        path: impl AsRef<Path>,
+        trust: TrustState,
+    ) -> Result<(), WorkbenchError> {
+        let project_id = self
+            .sidebar
+            .selected_project
+            .clone()
+            .ok_or(ProjectError::UnknownProject)?;
+        self.sidebar
+            .set_allowed_trust(&project_id, path.as_ref(), trust)?;
+        Ok(())
+    }
+
     pub fn create_thread(&mut self, title: impl Into<String>) -> Result<ThreadId, WorkbenchError> {
         let project_id = self
             .sidebar

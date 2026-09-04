@@ -77,6 +77,19 @@ impl SidebarState {
             .add_allowed_directory(path, trust)
     }
 
+    pub fn set_allowed_trust(
+        &mut self,
+        project_id: &ProjectId,
+        path: &Path,
+        trust: TrustState,
+    ) -> Result<(), ProjectError> {
+        self.projects
+            .iter_mut()
+            .find(|project| &project.id == project_id)
+            .ok_or(ProjectError::UnknownProject)?
+            .set_allowed_trust(path, trust)
+    }
+
     pub fn create_thread(
         &mut self,
         id: ThreadId,

@@ -104,6 +104,24 @@ impl ProjectRecord {
         });
         Ok(())
     }
+
+    pub(crate) fn set_allowed_trust(
+        &mut self,
+        path: &Path,
+        trust: TrustState,
+    ) -> Result<(), ProjectError> {
+        let canonical = canonical_directory(path)?;
+        if canonical != path {
+            return Err(ProjectError::NotCanonical);
+        }
+        let directory = self
+            .allowed_directories
+            .iter_mut()
+            .find(|directory| directory.path == canonical)
+            .ok_or(ProjectError::UnknownAllowedDirectory)?;
+        directory.trust = trust;
+        Ok(())
+    }
 }
 
 pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf, ProjectError> {
