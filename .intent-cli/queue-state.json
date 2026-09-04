@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T16:35:18.105999+00:00",
+  "updated_at": "2026-09-04T18:49:01.6259406+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -867,7 +867,7 @@
     {
       "execution_unit": "v02-web-tools-role-exposure",
       "title": "v0.2: web \u30C4\u30FC\u30EB\u3092 role \u5225\u306B\u516C\u958B\u3059\u308B\uFF08Librarian=search\u002Bfetch / Orchestrator=fetch \u306E\u307F OptIn\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v02-web-search-tool",
         "v02-web-fetch-tool"
@@ -884,6 +884,7 @@
         "number": 67,
         "url": "https://github.com/turtton/evorch/issues/67"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/68",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",

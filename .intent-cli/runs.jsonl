@@ -165,3 +165,6 @@
 {"ts":"2026-09-04T16:26:11.4764919+00:00","execution_unit":"v02-gui-workbench-restructure","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":66}
 {"ts":"2026-09-04T16:26:11.4764919+00:00","execution_unit":"v02-gui-workbench-restructure","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":66}
 {"ts":"2026-09-04T16:35:18.105999+00:00","execution_unit":"v02-web-tools-role-exposure","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#67","reason":"https://github.com/turtton/evorch/issues/67"}
+{"ts":"2026-09-04T18:47:55.928941+00:00","execution_unit":"v02-web-tools-role-exposure","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":68}
+{"ts":"2026-09-04T18:49:01.6168592+00:00","execution_unit":"v02-web-tools-role-exposure","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":68}
+{"ts":"2026-09-04T18:49:01.6168592+00:00","execution_unit":"v02-web-tools-role-exposure","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":68}
