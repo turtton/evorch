@@ -29,7 +29,7 @@ fn run_executes_workbench_logic_and_exposes_state() {
     workbench.run();
 
     // Then: the rendered workbench state remains available for assertions
-    assert_eq!(workbench.state().dock().iter_all_tabs().count(), 3);
+    assert_eq!(workbench.state().dock().iter_all_tabs().count(), 7);
 }
 
 #[test]

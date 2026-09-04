@@ -76,10 +76,10 @@ fn three_panes_render_with_titles() {
     // When: the UI is rendered
     harness.run();
 
-    // Then: all three pane titles are present
-    harness.get_by_label("Agent");
-    harness.get_by_label("Run ID");
-    harness.get_by_role(egui_dock::egui::accesskit::Role::TextInput);
+    // Then: the v0.2 region titles are present
+    harness.get_by_label("Projects");
+    harness.get_by_label("Conversation");
+    harness.get_by_label("Agents");
 }
 
 #[test]
@@ -127,39 +127,39 @@ fn dock_undock_and_tab_move_operations_update_state() {
     let mut harness = build_harness(state);
     harness.run();
 
-    // When: the terminal tab is moved into the tasks tab group
+    // When: the terminal tab is moved into the agents tab group
     let terminal_id = PanelId::new("terminal-main");
-    let tasks_id = PanelId::new("tasks-main");
+    let agents_id = PanelId::new("agents-main");
     let terminal_path = harness
         .state()
         .dock()
         .find_tab(&terminal_id)
         .expect("terminal tab exists");
-    let tasks_node = harness
+    let agents_node = harness
         .state()
         .dock()
-        .find_tab(&tasks_id)
-        .expect("tasks tab exists")
+        .find_tab(&agents_id)
+        .expect("agents tab exists")
         .node;
     harness.state_mut().dock_mut().move_tab(
         terminal_path,
         (
-            NodePath::new(SurfaceIndex::main(), tasks_node),
+            NodePath::new(SurfaceIndex::main(), agents_node),
             TabInsert::Append,
         ),
     );
     harness.run();
 
-    // Then: terminal now shares a tab group with tasks
-    let tasks_path = harness
+    // Then: terminal now shares a tab group with agents
+    let agents_path = harness
         .state()
         .dock()
-        .find_tab(&tasks_id)
-        .expect("tasks tab exists");
+        .find_tab(&agents_id)
+        .expect("agents tab exists");
     let leaf = harness
         .state()
         .dock()
-        .leaf(tasks_path.node_path())
+        .leaf(agents_path.node_path())
         .expect("leaf exists");
     assert!(leaf.tabs.contains(&terminal_id));
 
@@ -281,5 +281,6 @@ fn save_layout_keybind_persists_workspace_json() {
     collect_panel_ids(&loaded.main.root, &mut panels);
     assert!(panels.contains(&PanelId::new("agent-main")));
     assert!(panels.contains(&PanelId::new("terminal-main")));
-    assert!(panels.contains(&PanelId::new("tasks-main")));
+    assert!(panels.contains(&PanelId::new("sidebar-main")));
+    assert!(panels.contains(&PanelId::new("agents-main")));
 }

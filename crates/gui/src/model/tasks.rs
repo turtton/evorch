@@ -64,15 +64,23 @@ mod tests {
     }
 }
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
-use runtime::{AgentRuntime, AgentSummary, RunId};
+use runtime::{AgentInspection, AgentRuntime, AgentSummary, RunId};
 
 pub trait AgentRunSource: Send {
     fn list(&self) -> Vec<AgentSummary>;
+
+    fn inspect(&self, _run_id: RunId) -> Option<AgentInspection> {
+        None
+    }
 }
 
 impl AgentRunSource for AgentRuntime {
     fn list(&self) -> Vec<AgentSummary> {
         self.list_agents()
+    }
+
+    fn inspect(&self, run_id: RunId) -> Option<AgentInspection> {
+        self.inspect_agent(run_id).ok()
     }
 }
 
@@ -100,6 +108,10 @@ impl<S: AgentRunSource> TasksModel<S> {
 
     pub fn rows(&self) -> &[TaskRow] {
         &self.rows
+    }
+
+    pub fn inspect(&self, run_id: RunId) -> Option<AgentInspection> {
+        self.source.inspect(run_id)
     }
 
     pub fn refresh(&mut self) {

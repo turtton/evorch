@@ -6,7 +6,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use egui::vec2;
-use egui_kittest::Harness;
+use egui::{Key, Modifiers};
+use egui_kittest::{Harness, kittest::Queryable};
 
 use crate::app::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
@@ -92,6 +93,26 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
     /// 現在の Workbench 状態を返します。
     pub fn state(&self) -> &WorkbenchState<S> {
         self.harness.state()
+    }
+
+    /// 現在の Workbench 状態を可変で返します。
+    pub fn state_mut(&mut self) -> &mut WorkbenchState<S> {
+        self.harness.state_mut()
+    }
+
+    /// 指定ラベルの UI node をクリックします。
+    pub fn click_label(&self, label: &str) {
+        self.harness.get_by_label(label).click();
+    }
+
+    /// 指定ラベルの UI node が存在するか返します。
+    pub fn has_label(&self, label: &str) -> bool {
+        self.harness.query_by_label(label).is_some()
+    }
+
+    /// modifier 付きキー入力を次フレームへ送ります。
+    pub fn key_press(&self, modifiers: Modifiers, key: Key) {
+        self.harness.key_press_modifiers(modifiers, key);
     }
 
     /// 現在の UI を RGBA8 フレームとして取得します。
