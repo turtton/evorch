@@ -1,4 +1,4 @@
-use event_bus::Event;
+use event_bus::{AgentMessageKind, Event};
 
 const DEFAULT_CAPACITY: usize = 10_000;
 
@@ -12,7 +12,13 @@ pub enum ToolStatus {
     Denied { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDirection {
+    Incoming,
+    Outgoing,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
     Message {
         text: String,
@@ -24,6 +30,12 @@ pub enum TranscriptEntry {
         tool_name: String,
         call_id: String,
         status: ToolStatus,
+    },
+    AgentMessage {
+        direction: MessageDirection,
+        peer_run_id: String,
+        kind: AgentMessageKind,
+        content: String,
     },
 }
 
@@ -172,7 +184,7 @@ impl TranscriptModel {
                     TranscriptEntry::Message { text } | TranscriptEntry::Reasoning { text } => {
                         text.push_str(delta)
                     }
-                    TranscriptEntry::Tool { .. } => {}
+                    TranscriptEntry::Tool { .. } | TranscriptEntry::AgentMessage { .. } => {}
                 }
             }
         } else if reasoning {
@@ -201,7 +213,7 @@ impl TranscriptModel {
         )
     }
 
-    fn push(&mut self, entry: TranscriptEntry) {
+    pub(crate) fn push(&mut self, entry: TranscriptEntry) {
         if self.capacity == 0 {
             return;
         }

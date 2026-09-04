@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{PersistError, SettingsError, UI_SETTINGS_VERSION, UiSettings, Workspace, validate};
+use crate::{
+    PersistError, SettingsError, SidebarError, SidebarState, UI_SETTINGS_VERSION, UiSettings,
+    Workspace, migrate, validate,
+};
 
 /// Workspace を検証して pretty JSON に直列化します。
 ///
@@ -18,7 +21,10 @@ pub fn to_json(workspace: &Workspace) -> Result<String, PersistError> {
 /// # Errors
 /// JSON の解析またはレイアウト検証に失敗した場合に返します。
 pub fn from_json(json: &str) -> Result<Workspace, PersistError> {
-    let workspace = serde_json::from_str(json)
+    let value = serde_json::from_str(json)
+        .map_err(|error| PersistError::Serialization(error.to_string()))?;
+    let migrated = migrate::run(value)?;
+    let workspace = serde_json::from_value(migrated)
         .map_err(|error| PersistError::Serialization(error.to_string()))?;
     validate(&workspace)?;
     Ok(workspace)
@@ -63,10 +69,43 @@ pub fn save_settings(settings: &UiSettings, path: &Path) -> Result<(), SettingsE
 pub fn load_settings(path: &Path) -> Result<UiSettings, SettingsError> {
     let document =
         fs::read_to_string(path).map_err(|error| SettingsError::Io(error.to_string()))?;
-    let settings = toml::from_str(&document)
+    let toml_value: toml::Value = toml::from_str(&document)
+        .map_err(|error| SettingsError::Serialization(error.to_string()))?;
+    let mut value = serde_json::to_value(toml_value)
+        .map_err(|error| SettingsError::Serialization(error.to_string()))?;
+    if let Some(workspace) = value
+        .get_mut("layout")
+        .and_then(|layout| layout.get_mut("workspace"))
+    {
+        *workspace = migrate::run(workspace.take())?;
+    }
+    let settings = serde_json::from_value(value)
         .map_err(|error| SettingsError::Serialization(error.to_string()))?;
     validate_settings(&settings)?;
     Ok(settings)
+}
+
+pub fn sidebar_to_json(sidebar: &SidebarState) -> Result<String, SidebarError> {
+    sidebar.validate()?;
+    serde_json::to_string_pretty(sidebar)
+        .map_err(|error| SidebarError::Serialization(error.to_string()))
+}
+
+pub fn sidebar_from_json(json: &str) -> Result<SidebarState, SidebarError> {
+    let sidebar: SidebarState = serde_json::from_str(json)
+        .map_err(|error| SidebarError::Serialization(error.to_string()))?;
+    sidebar.validate()?;
+    Ok(sidebar)
+}
+
+pub fn save_sidebar(sidebar: &SidebarState, path: &Path) -> Result<(), SidebarError> {
+    let json = sidebar_to_json(sidebar)?;
+    fs::write(path, json).map_err(|error| SidebarError::Io(error.to_string()))
+}
+
+pub fn load_sidebar(path: &Path) -> Result<SidebarState, SidebarError> {
+    let json = fs::read_to_string(path).map_err(|error| SidebarError::Io(error.to_string()))?;
+    sidebar_from_json(&json)
 }
 
 fn validate_settings(settings: &UiSettings) -> Result<(), SettingsError> {

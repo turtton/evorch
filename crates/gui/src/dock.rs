@@ -63,6 +63,8 @@ pub fn from_dock_state(
         .map(|(surface_index, state)| {
             let node = extract_node(dock, NodePath::new(surface_index, NodeIndex::root()))?;
             let rect = state.rect();
+            // Workspace load remains fail-closed through `validate_rect`; only an unrendered
+            // floating window can expose `Rect::NOTHING` while DockState is being extracted.
             let rect = if rect.min.x.is_finite()
                 && rect.min.y.is_finite()
                 && rect.width().is_finite()

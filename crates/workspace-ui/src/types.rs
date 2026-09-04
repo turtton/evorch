@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::LayoutError;
-use crate::panels::{Panel, PanelId, default_panels};
+use crate::panels::{Panel, PanelId, default_panels, default_panels_v02};
 
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 1;
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 2;
 
 /// 二分割の方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,7 @@ impl Workspace {
         };
 
         Self {
-            version: WORKSPACE_SCHEMA_VERSION,
+            version: 1,
             panels: default_panels(),
             main: Window {
                 root: LayoutNode::Split(Split {
@@ -120,6 +120,46 @@ impl Workspace {
         }
     }
 
+    /// Sidebar・Conversation・Workbench tabs の三領域既定レイアウトを構築します。
+    pub fn default_v02() -> Self {
+        let tabs = |panels: &[&str]| {
+            LayoutNode::Tabs(Tabs {
+                panels: panels.iter().map(|id| PanelId::new(*id)).collect(),
+                active: 0,
+            })
+        };
+        let sidebar_panels: &[&str] = &["sidebar-main"];
+        let conversation_panels: &[&str] = &["agent-main"];
+        let workbench_panels: &[&str] = &[
+            "agents-main",
+            "diff-main",
+            "terminal-main",
+            "goal-main",
+            "merge-main",
+        ];
+
+        Self {
+            version: WORKSPACE_SCHEMA_VERSION,
+            panels: default_panels_v02(),
+            main: Window {
+                root: LayoutNode::Split(Split {
+                    direction: SplitDirection::Horizontal,
+                    fraction: 0.2,
+                    first: Box::new(tabs(sidebar_panels)),
+                    second: Box::new(LayoutNode::Split(Split {
+                        direction: SplitDirection::Horizontal,
+                        fraction: 0.625,
+                        first: Box::new(tabs(conversation_panels)),
+                        second: Box::new(tabs(workbench_panels)),
+                    })),
+                }),
+                floating: Vec::new(),
+                rect: None,
+            },
+            extra_windows: Vec::new(),
+        }
+    }
+
     /// Workspace の全レイアウト不変条件を検証します。
     ///
     /// # Errors
@@ -131,6 +171,6 @@ impl Workspace {
 
 impl Default for Workspace {
     fn default() -> Self {
-        Self::default_v01()
+        Self::default_v02()
     }
 }

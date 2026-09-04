@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "panels": {
+    "agent-main": {
+      "id": "agent-main",
+      "kind": "agent",
+      "title": "Agent"
+    },
+    "tasks-main": {
+      "id": "tasks-main",
+      "kind": "tasks",
+      "title": "Tasks"
+    },
+    "terminal-main": {
+      "id": "terminal-main",
+      "kind": "terminal",
+      "title": "Terminal"
+    }
+  },
+  "main": {
+    "root": {
+      "type": "split",
+      "direction": "horizontal",
+      "fraction": 0.2,
+      "first": {
+        "type": "tabs",
+        "panels": [
+          "tasks-main"
+        ],
+        "active": 0
+      },
+      "second": {
+        "type": "split",
+        "direction": "vertical",
+        "fraction": 0.7,
+        "first": {
+          "type": "tabs",
+          "panels": [
+            "agent-main"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "tabs",
+          "panels": [
+            "terminal-main"
+          ],
+          "active": 0
+        }
+      }
+    },
+    "floating": [],
+    "rect": null
+  },
+  "extra_windows": []
+}

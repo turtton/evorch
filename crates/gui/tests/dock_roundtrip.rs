@@ -8,7 +8,7 @@ use workspace_ui::{
 #[test]
 fn workspace_dock_workspace_round_trip_preserves_nested_structure() {
     // Given: the two-level nested default workspace layout
-    let workspace = Workspace::default_v01();
+    let workspace = Workspace::default();
 
     // When: converting to DockState and extracting it again
     let dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
@@ -21,7 +21,7 @@ fn workspace_dock_workspace_round_trip_preserves_nested_structure() {
 #[test]
 fn extraction_does_not_depend_on_unrendered_rects() {
     // Given: a newly-created DockState whose egui rectangles are Rect::NOTHING
-    let workspace = Workspace::default_v01();
+    let workspace = Workspace::default();
     let dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
 
     // When: extracting without rendering the DockArea
@@ -43,6 +43,7 @@ fn complex_nested_split_round_trip_preserves_tree_and_active_tabs() {
                 id: panel_id.clone(),
                 kind: PanelKind::Agent,
                 title: id.to_owned(),
+                target: None,
             };
             (panel_id, panel)
         })

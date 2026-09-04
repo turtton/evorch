@@ -1,21 +1,16 @@
-use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
-use async_trait::async_trait;
 use event_bus::{Event, EventBus, LifecycleEvent};
 use gui::app::{WorkbenchApp, WorkbenchState};
+use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
+use gui::model::commands::FixtureLoopAdapter;
+use gui::model::demo::DemoScriptModel;
 use gui::pty::PtySession;
 use portable_pty::CommandBuilder;
-use providers::{
-    ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
-};
-use runtime::{
-    AgentInvocationContext, AgentModel, AgentRuntime, ExecutionPolicy, Role, RunConfig,
-    RuntimeError,
-};
-use workspace_ui::UiSettings;
+use runtime::{AgentRuntime, ExecutionPolicy, Role, RunConfig};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -37,108 +32,14 @@ enum GuiError {
     Runtime(#[from] runtime::RuntimeError),
     #[error("current directory lookup failed: {0}")]
     CurrentDir(#[from] std::io::Error),
-}
-
-/// 決定的な scripted model。
-///
-/// 外部 AI プロバイダなしで demo session を駆動する。会話履歴の先頭ユーザー
-/// メッセージ本文を marker として script を選択する
-/// (tests/runtime_wiring.rs の ScriptedModel と同じ dispatch 方式)。
-struct DemoScriptModel {
-    scripts: Mutex<HashMap<String, VecDeque<ChatResponse>>>,
-}
-
-impl Default for DemoScriptModel {
-    fn default() -> Self {
-        Self {
-            scripts: Mutex::new(HashMap::from([
-                (
-                    "DEMO-ORCH".to_string(),
-                    VecDeque::from([
-                        tool_response(
-                            "demo-delegate-w1",
-                            "delegate_background",
-                            serde_json::json!({
-                                "role": "worker",
-                                "prompt": "DEMO-W1",
-                                "name": "worker-w1"
-                            }),
-                        ),
-                        text_response("demo complete", FinishReason::Stop),
-                    ]),
-                ),
-                (
-                    "DEMO-W1".to_string(),
-                    VecDeque::from([text_response("worker done", FinishReason::Stop)]),
-                ),
-            ])),
-        }
-    }
-}
-
-#[async_trait]
-impl AgentModel for DemoScriptModel {
-    async fn complete(
-        &self,
-        _invocation: &AgentInvocationContext,
-        _role: Role,
-        messages: &[Message],
-        _tools: &[ToolSpec],
-    ) -> Result<ChatResponse, RuntimeError> {
-        let marker = messages
-            .iter()
-            .find(|message| message.role == MessageRole::User)
-            .and_then(|message| {
-                message.content.iter().find_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
-                })
-            });
-        let mut scripts = self.scripts.lock().expect("script lock must not poison");
-        scripts
-            .get_mut(marker.as_deref().unwrap_or_default())
-            .and_then(VecDeque::pop_front)
-            .ok_or_else(|| RuntimeError::Model {
-                reason: format!("script exhausted for {marker:?}"),
-            })
-    }
-
-    fn selected_model(&self, role: Role) -> String {
-        format!("demo-{}", role.name().to_lowercase())
-    }
-}
-
-fn text_response(text: &str, finish_reason: FinishReason) -> ChatResponse {
-    response(
-        vec![ContentBlock::Text {
-            text: text.to_string(),
-        }],
-        finish_reason,
-    )
-}
-
-fn tool_response(id: &str, name: &str, input: serde_json::Value) -> ChatResponse {
-    response(
-        vec![ContentBlock::ToolUse {
-            id: id.to_string(),
-            name: name.to_string(),
-            input,
-        }],
-        FinishReason::ToolUse,
-    )
-}
-
-fn response(content: Vec<ContentBlock>, finish_reason: FinishReason) -> ChatResponse {
-    ChatResponse {
-        message: Message {
-            role: MessageRole::Assistant,
-            content,
-        },
-        usage: Usage::default(),
-        finish_reason,
-    }
+    #[error("sidebar state failed: {0}")]
+    Sidebar(#[from] workspace_ui::SidebarError),
+    #[error("demo project state failed: {0}")]
+    Project(#[from] workspace_ui::ProjectError),
+    #[error("demo thread state failed: {0}")]
+    Thread(#[from] workspace_ui::ThreadError),
+    #[error("sidebar state directory initialization failed: {0}")]
+    StateDirectory(std::io::Error),
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +48,7 @@ struct Arguments {
     settings: Option<PathBuf>,
     layout: Option<PathBuf>,
     save_layout: Option<PathBuf>,
+    state: Option<PathBuf>,
 }
 
 fn parse_arguments() -> Result<Arguments, GuiError> {
@@ -160,6 +62,7 @@ fn parse_arguments() -> Result<Arguments, GuiError> {
             "--save-layout" => {
                 arguments.save_layout = Some(next_path(&mut values, "--save-layout")?);
             }
+            "--state" => arguments.state = Some(next_path(&mut values, "--state")?),
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -172,27 +75,37 @@ fn parse_arguments() -> Result<Arguments, GuiError> {
 
 fn print_help() {
     println!(
-        "Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH]
+        r#"Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH]
 
 Demo mode (--demo) runs a deterministic scripted session; no external AI
 provider is used or required.
+
+Sidebar state is loaded from and saved to --state PATH. Without --state, the
+default is <user-config-dir>/sidebar.json; if no user config dir is derivable,
+sidebar persistence is skipped.
 
 Start:
 
     cargo run -p gui --bin evorch-gui -- --demo
 
-Expected task rows (name / role / status / model):
+Demo mode manual verification:
 
-    run-1: Orchestrator / Orchestrator / Done / demo-orchestrator
-    run-2: worker-w1 / Worker / Done / demo-worker
-
-Each row transitions Pending -> Running -> Done.
+1. Sidebar: evorch-demo, trusted temp dir, demo-thread-1 (pinned, active), demo-thread-2.
+2. Agents: run-1 Orchestrator, run-2 worker-w1, run-3 reviewer-r1 reach Done;
+   provider is demo and tokens increase.
+3. Click a row to drill down; use ← Thread to return.
+4. Open default panes: 3 transcripts; run-2 contains incoming "implement the goal"
+   and outgoing "worker done" only.
+5. Diff: Working tree shows 2 fixture files; Branch vs main shows 1.
+6. Goal: submit and confirm "accepted: goal-1".
+7. Merge: PR #65 is pending; Approve resolves it and disables the buttons.
+8. Ctrl+S saves layout; Ctrl+Shift+R resets it. `bwrap` must be on PATH.
 
 Requirements:
 
 - `bwrap` must be on PATH. Without it the app prints
   `evorch-gui: runtime initialization failed: サンドボックス構築に失敗しました: ...`
-  and exits with code 1."
+   and exits with code 1."#
     );
 }
 
@@ -214,6 +127,47 @@ fn load_settings(arguments: &Arguments) -> Result<UiSettings, GuiError> {
         settings.layout.workspace = Some(workspace_ui::load_workspace(layout)?);
     }
     Ok(settings)
+}
+
+fn sidebar_path(arguments: &Arguments) -> Option<PathBuf> {
+    arguments
+        .state
+        .clone()
+        .or_else(|| config::user_config_dir().map(|directory| directory.join("sidebar.json")))
+}
+
+fn load_sidebar(path: Option<&PathBuf>) -> Result<SidebarState, GuiError> {
+    let Some(path) = path else {
+        return Ok(SidebarState::default());
+    };
+    if path.exists() {
+        return Ok(workspace_ui::load_sidebar(path)?);
+    }
+    Ok(SidebarState::default())
+}
+
+fn demo_sidebar(
+    repo_root: &std::path::Path,
+    allowed_directory: &std::path::Path,
+) -> Result<SidebarState, GuiError> {
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("evorch-demo");
+    sidebar.add_project(project_id.clone(), "evorch-demo", repo_root)?;
+    sidebar.select_project(&project_id)?;
+    sidebar.add_allowed_directory(&project_id, allowed_directory, TrustState::Approved)?;
+    let active_thread = ThreadId::new("demo-thread-1");
+    sidebar.create_thread(active_thread.clone(), project_id.clone(), "demo-thread-1")?;
+    sidebar.set_pinned(&active_thread, true)?;
+    sidebar.create_thread(ThreadId::new("demo-thread-2"), project_id, "demo-thread-2")?;
+    sidebar.switch_thread(&active_thread)?;
+    Ok(sidebar)
+}
+
+fn demo_diff_source() -> FixtureDiffSource {
+    FixtureDiffSource::new(
+        Ok("diff --git a/src/demo.rs b/src/demo.rs\n--- a/src/demo.rs\n+++ b/src/demo.rs\n@@ -1 +1 @@\n-old\n+demo\ndiff --git a/tests/demo.rs b/tests/demo.rs\n--- /dev/null\n+++ b/tests/demo.rs\n@@ -0,0 +1 @@\n+demo test\n".to_string()),
+        Ok("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+demo branch\n".to_string()),
+    )
 }
 
 fn spawn_event_bridge(
@@ -246,12 +200,18 @@ fn spawn_event_bridge(
 fn run() -> Result<(), GuiError> {
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
+    let repo_root = std::fs::canonicalize(std::env::current_dir()?)?;
+    let state_path = sidebar_path(&arguments);
+    if let Some(parent) = state_path.as_deref().and_then(std::path::Path::parent) {
+        std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
+    }
+    let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
     let runtime = AgentRuntime::production(
         Arc::clone(&bus),
         &ExecutionPolicy::for_role(Role::Orchestrator),
-        std::env::current_dir()?,
-        Arc::new(DemoScriptModel::default()),
+        repo_root.clone(),
+        Arc::new(DemoScriptModel::new(Arc::clone(&bus))),
     )?;
     let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
     let repaint_hook = {
@@ -267,11 +227,22 @@ fn run() -> Result<(), GuiError> {
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_pump(pump)
         .with_pty(pty);
+    let sidebar = match demo_directory.as_ref() {
+        Some(directory) => demo_sidebar(&repo_root, directory.path())?,
+        None => load_sidebar(state_path.as_ref())?,
+    };
+    state = state.with_sidebar(sidebar);
+    if let Some(path) = state_path {
+        state = state.with_sidebar_path(path);
+    }
     if let Some(path) = arguments.save_layout {
         state = state.with_save_path(path);
     }
 
     if arguments.demo {
+        state = state
+            .with_diff_source(Arc::new(demo_diff_source()))
+            .with_command_sink(Box::new(FixtureLoopAdapter::default()));
         bus.emit(Event::new(LifecycleEvent::Started {
             session_id: String::from("gui-demo"),
         }));
@@ -291,10 +262,30 @@ fn run() -> Result<(), GuiError> {
         options,
         Box::new(move |creation_context| {
             let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
-            Ok(Box::new(WorkbenchApp(state)))
+            Ok(Box::new(GuiApp {
+                workbench: WorkbenchApp(state),
+                _demo_directory: demo_directory,
+            }))
         }),
     )
     .map_err(|error| GuiError::Eframe(error.to_string()))
+}
+
+struct GuiApp {
+    workbench: WorkbenchApp<AgentRuntime>,
+    _demo_directory: Option<tempfile::TempDir>,
+}
+
+impl eframe::App for GuiApp {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.workbench.0.ui(ui, frame);
+    }
+}
+
+impl Drop for GuiApp {
+    fn drop(&mut self) {
+        self.workbench.0.save_sidebar();
+    }
 }
 
 fn main() {
