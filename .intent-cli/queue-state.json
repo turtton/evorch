@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-03T16:12:21.6686876+00:00",
+  "updated_at": "2026-09-04T10:32:21.1725948+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -767,7 +767,7 @@
     {
       "execution_unit": "v02-context-compaction",
       "title": "v0.2: \u76E3\u67FB\u53EF\u80FD\u306A context compaction\uFF0875% \u81EA\u52D5\u30FB\u624B\u52D5\u30FBagent tool\uFF09\u3092\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v02-agent-messaging"
       ],
@@ -783,6 +783,7 @@
         "number": 63,
         "url": "https://github.com/turtton/evorch/issues/63"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/64",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
