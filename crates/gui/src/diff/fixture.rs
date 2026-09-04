@@ -42,7 +42,7 @@ impl DiffSource for FixtureDiffSource {
     fn fetch(&self, req: &DiffRequest) -> Result<String, DiffError> {
         match &req.mode {
             DiffMode::WorkingTree => self.working_tree.clone(),
-            DiffMode::Branch { base: _ } => self.branch.clone(),
+            DiffMode::Branch => self.branch.clone(),
         }
     }
 }

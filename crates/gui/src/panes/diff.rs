@@ -11,9 +11,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             requested = Some(DiffMode::WorkingTree);
         }
         if ui.button("Branch vs main").clicked() {
-            requested = Some(DiffMode::Branch {
-                base: "main".to_owned(),
-            });
+            requested = Some(DiffMode::Branch);
         }
     });
     if let Some(mode) = &requested {

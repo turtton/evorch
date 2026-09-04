@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::canonical_directory;
+use crate::project::{canonical_directory, validate_allowed_directory};
 use crate::{
     ProjectError, ProjectId, ProjectRecord, SidebarError, ThreadError, ThreadId, ThreadRecord,
     TrustState,
@@ -145,13 +145,20 @@ impl SidebarState {
                     project.repo_root.display()
                 )));
             }
-            for directory in &project.allowed_directories {
-                if !directory.path.is_absolute() || !directory.path.is_dir() {
-                    return Err(SidebarError::Validation(format!(
-                        "invalid allowed directory '{}'",
-                        directory.path.display()
-                    )));
+            let mut validated_project = project.clone();
+            validated_project.allowed_directories.clear();
+            let mut allowed_directories = project.allowed_directories.iter().collect::<Vec<_>>();
+            allowed_directories.sort_by_key(|directory| directory.path.components().count());
+            for directory in allowed_directories {
+                let validated = validate_allowed_directory(
+                    &validated_project,
+                    &directory.path,
+                    directory.trust,
+                )?;
+                if validated.path != directory.path {
+                    return Err(ProjectError::NotCanonical.into());
                 }
+                validated_project.allowed_directories.push(validated);
             }
         }
         if self

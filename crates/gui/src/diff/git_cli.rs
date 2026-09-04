@@ -2,6 +2,9 @@ use std::process::{Command, Stdio};
 
 use super::{DiffError, DiffMode, DiffRequest, DiffSource};
 
+/// branch diff の固定 base branch。base 選択は API に公開しない (issue #65 AC11)。
+const DIFF_BASE_BRANCH: &str = "main";
+
 /// ローカル Git リポジトリから unified diff を取得する読み取り専用 source。
 ///
 /// GUI と同じ trust domain で動作し、資格情報を扱わず、network access を行わない。
@@ -22,8 +25,8 @@ impl DiffSource for GitCliDiffSource {
 
         match &req.mode {
             DiffMode::WorkingTree => {}
-            DiffMode::Branch { base } => {
-                command.arg(format!("{base}...HEAD"));
+            DiffMode::Branch => {
+                command.arg(format!("{DIFF_BASE_BRANCH}...HEAD"));
             }
         }
 

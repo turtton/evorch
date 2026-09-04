@@ -99,6 +99,9 @@ fn working_tree_diff_shows_modified_file() {
 // Given: main と分岐後に双方へ独立した commit があるリポジトリ
 // When: task branch から main...HEAD の diff を取得する
 // Then: merge base 以降の branch 側変更だけが返る
+//
+// 任意 base は DiffMode::Branch が unit variant となった時点で型レベルで
+// 表現不可能であり、それを試す runtime test は存在し得ない (issue #65 AC11)。
 #[test]
 fn branch_diff_against_main_uses_merge_base() {
     let repo = initialized_repo();
@@ -112,12 +115,7 @@ fn branch_diff_against_main_uses_merge_base() {
     let source = GitCliDiffSource;
 
     let text = source
-        .fetch(&request(
-            repo.path(),
-            DiffMode::Branch {
-                base: "main".to_string(),
-            },
-        ))
+        .fetch(&request(repo.path(), DiffMode::Branch))
         .expect("branch diff を取得できる");
 
     assert!(text.contains("branch.txt"));
@@ -188,12 +186,7 @@ fn fixture_source_returns_canned_states() {
     );
 
     let working = source.fetch(&request(Path::new("."), DiffMode::WorkingTree));
-    let branch = source.fetch(&request(
-        Path::new("."),
-        DiffMode::Branch {
-            base: "main".to_string(),
-        },
-    ));
+    let branch = source.fetch(&request(Path::new("."), DiffMode::Branch));
 
     assert_eq!(working.expect("working fixture が成功する"), "working");
     assert!(matches!(branch, Err(DiffError::Io(message)) if message == "branch unavailable"));

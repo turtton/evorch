@@ -80,28 +80,8 @@ impl ProjectRecord {
         path: &Path,
         trust: TrustState,
     ) -> Result<(), ProjectError> {
-        let canonical = canonical_directory(path)?;
-        if canonical.starts_with(&self.repo_root) {
-            return Err(ProjectError::NestedInProjectRoot);
-        }
-        if self
-            .allowed_directories
-            .iter()
-            .any(|directory| canonical == directory.path)
-        {
-            return Err(ProjectError::DuplicateAllowedDirectory);
-        }
-        if self
-            .allowed_directories
-            .iter()
-            .any(|directory| canonical.starts_with(&directory.path))
-        {
-            return Err(ProjectError::NestedInExistingAllowed);
-        }
-        self.allowed_directories.push(AllowedDirectory {
-            path: canonical,
-            trust,
-        });
+        let directory = validate_allowed_directory(self, path, trust)?;
+        self.allowed_directories.push(directory);
         Ok(())
     }
 
@@ -122,6 +102,35 @@ impl ProjectRecord {
         directory.trust = trust;
         Ok(())
     }
+}
+
+pub(crate) fn validate_allowed_directory(
+    project: &ProjectRecord,
+    path: &Path,
+    trust: TrustState,
+) -> Result<AllowedDirectory, ProjectError> {
+    let canonical = canonical_directory(path)?;
+    if canonical.starts_with(&project.repo_root) {
+        return Err(ProjectError::NestedInProjectRoot);
+    }
+    if project
+        .allowed_directories
+        .iter()
+        .any(|directory| canonical == directory.path)
+    {
+        return Err(ProjectError::DuplicateAllowedDirectory);
+    }
+    if project
+        .allowed_directories
+        .iter()
+        .any(|directory| canonical.starts_with(&directory.path))
+    {
+        return Err(ProjectError::NestedInExistingAllowed);
+    }
+    Ok(AllowedDirectory {
+        path: canonical,
+        trust,
+    })
 }
 
 pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf, ProjectError> {

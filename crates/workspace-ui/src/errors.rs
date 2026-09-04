@@ -72,6 +72,8 @@ pub enum SidebarError {
     Io(String),
     #[error("sidebar validation failed: {0}")]
     Validation(String),
+    #[error(transparent)]
+    Project(#[from] ProjectError),
 }
 
 /// Workspace JSON の永続化エラー。

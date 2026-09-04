@@ -6,7 +6,7 @@ use egui::{Key, Modifiers};
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
-    EventBus, MessageEvent, ProviderEvent, ToolEvent,
+    EventBus, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
 };
 use gui::app::{ConversationFocus, WorkbenchState};
 use gui::events::EventPump;
@@ -256,6 +256,100 @@ fn three_transcript_panes_do_not_mix_run_events() {
 }
 
 #[test]
+fn stream_delta_mirrors_to_sole_running_run_pane() {
+    // Given: exactly one run has entered Running phase.
+    let mut fixture = Fixture::new(vec![summary(1, "worker-one", "worker")]);
+    fixture.bus.emit(run_state_changed(
+        "run-1",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+
+    // When: the phase event and following run-less delta are drained in event order.
+    fixture.bus.emit(Event::new(MessageEvent::MessageDelta {
+        delta: "sole run response".into(),
+    }));
+    for _ in 0..2 {
+        fixture
+            .repaint_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("event repaint");
+    }
+    fixture.workbench.run();
+    let transcript = fixture
+        .workbench
+        .state()
+        .transcripts()
+        .run("run-1")
+        .expect("run transcript")
+        .clone();
+    let mut pane = Harness::new_ui(move |ui| {
+        gui::panes::agent_transcript::agent_transcript_pane(ui, "run-1", Some(&transcript));
+    });
+    pane.run();
+
+    // Then: the run pane renders the response and the thread retains it too.
+    assert!(pane.query_by_label("Message: sole run response").is_some());
+    assert_eq!(
+        fixture
+            .workbench
+            .state()
+            .transcripts()
+            .run("run-1")
+            .expect("run transcript")
+            .entries(),
+        &[TranscriptEntry::Message {
+            text: "sole run response".into(),
+        }]
+    );
+    assert_eq!(
+        fixture.workbench.state().transcripts().thread().entries(),
+        &[TranscriptEntry::Message {
+            text: "sole run response".into(),
+        }]
+    );
+}
+
+#[test]
+fn stream_delta_stays_thread_only_when_two_runs_running() {
+    // Given: two runs have both entered Running phase.
+    let mut fixture = Fixture::new(vec![
+        summary(1, "worker-one", "worker"),
+        summary(2, "reviewer-two", "reviewer"),
+    ]);
+    for run_id in ["run-1", "run-2"] {
+        fixture.emit(run_state_changed(
+            run_id,
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+        ));
+    }
+
+    // When: an uncorrelated model stream delta arrives.
+    fixture.emit(Event::new(MessageEvent::ReasoningDelta {
+        delta: "shared ambiguity".into(),
+    }));
+
+    // Then: neither run is guessed, while the thread transcript receives the delta.
+    for run_id in ["run-1", "run-2"] {
+        assert!(
+            fixture
+                .workbench
+                .state()
+                .transcripts()
+                .run(run_id)
+                .is_none()
+        );
+    }
+    assert_eq!(
+        fixture.workbench.state().transcripts().thread().entries(),
+        &[TranscriptEntry::Reasoning {
+            text: "shared ambiguity".into(),
+        }]
+    );
+}
+
+#[test]
 fn close_and_reopen_pane_does_not_duplicate_entries() {
     // Given: one run pane with two routed transcript entries.
     let mut fixture = Fixture::new(vec![summary(1, "worker-one", "worker")]);
@@ -371,6 +465,15 @@ fn tool_started(run_id: &str, tool_name: &str, call_id: &str) -> Event {
         tool_name: tool_name.into(),
         call_id: call_id.into(),
         run_id: Some(run_id.into()),
+    })
+}
+
+fn run_state_changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run_id.into(),
+        from,
+        to,
+        reason: None,
     })
 }
 

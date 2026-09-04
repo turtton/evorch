@@ -1,8 +1,9 @@
 //! run ID ごとに transcript を分離し、相関可能なイベントだけを決定的に配送する。
 //!
-//! `MessageDelta` / `ReasoningDelta` は event-bus 上に `run_id` を持たないため、
-//! thread transcript のみに残る。run transcript は tool とエージェント間メッセージを
-//! 保持する。この制約を解消する event-bus 変更は本モデルの責務外である。
+//! `MessageDelta` / `ReasoningDelta` は event-bus 上に `run_id` を持たないため、通常の
+//! route では thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件
+//! の場合だけ、明示的に run transcript へ同じ delta を適用できる。Running が 0 件または
+//! 複数なら thread のみに留め、推測による run 間の混線を防ぐ。
 
 use std::collections::BTreeMap;
 
@@ -113,6 +114,23 @@ impl TranscriptRegistry {
         }
     }
 
+    /// `run_id` を持たない stream delta を、既知の対象 run に明示的に適用する。
+    pub fn apply_stream_delta(&mut self, run_id: &str, event: &Event) {
+        match &event.kind {
+            EventKind::Message(MessageEvent::MessageDelta { .. })
+            | EventKind::Message(MessageEvent::ReasoningDelta { .. }) => {
+                self.runs.entry(run_id.to_owned()).or_default().apply(event);
+            }
+            EventKind::Lifecycle(_)
+            | EventKind::Tool(_)
+            | EventKind::Usage(_)
+            | EventKind::Provider(_)
+            | EventKind::Fault(_)
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_) => {}
+        }
+    }
+
     pub fn get(&self, key: &TranscriptKey) -> Option<&TranscriptModel> {
         match key {
             TranscriptKey::Thread => Some(&self.thread),
@@ -164,6 +182,27 @@ mod tests {
         });
 
         assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
+    }
+
+    #[test]
+    fn apply_stream_delta_creates_and_updates_target_run() {
+        // Given: no transcript model exists for the target run.
+        let mut registry = TranscriptRegistry::new();
+        let event = Event::new(MessageEvent::ReasoningDelta {
+            delta: "considering".into(),
+        });
+
+        // When: the stream delta is explicitly applied to that run.
+        registry.apply_stream_delta("run-1", &event);
+
+        // Then: the target model is created with the reasoning entry only.
+        assert_eq!(
+            registry.run("run-1").expect("run transcript").entries(),
+            &[TranscriptEntry::Reasoning {
+                text: "considering".into(),
+            }]
+        );
+        assert!(registry.thread().entries().is_empty());
     }
 
     #[test]

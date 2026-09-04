@@ -197,8 +197,6 @@ fn branch_mode_requests_main_merge_base() {
     step_until(&mut harness, "branch body");
     assert_eq!(
         source.modes.lock().expect("modes lock").as_slice(),
-        &[DiffMode::Branch {
-            base: "main".to_owned()
-        }]
+        &[DiffMode::Branch]
     );
 }

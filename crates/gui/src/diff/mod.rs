@@ -19,8 +19,11 @@ pub const DIFF_BYTE_CAP: usize = 256 * 1024;
 pub enum DiffMode {
     /// index と working tree の差分。
     WorkingTree,
-    /// merge base から現在の HEAD までの差分。
-    Branch { base: String },
+    /// 固定 base branch (`main`) の merge base から現在の HEAD までの差分。
+    ///
+    /// base branch 選択は API に公開せず、unit variant で任意 base を
+    /// 型レベルで表現不可能にする (issue #65 AC11)。
+    Branch,
 }
 
 /// 差分取得要求。
@@ -103,7 +106,7 @@ impl DiffModel {
     pub const fn state(&self, mode: &DiffMode) -> &DiffState {
         match mode {
             DiffMode::WorkingTree => &self.working_tree,
-            DiffMode::Branch { base: _ } => &self.branch,
+            DiffMode::Branch => &self.branch,
         }
     }
 
@@ -134,7 +137,7 @@ impl DiffModel {
     const fn state_mut(&mut self, mode: &DiffMode) -> &mut DiffState {
         match mode {
             DiffMode::WorkingTree => &mut self.working_tree,
-            DiffMode::Branch { base: _ } => &mut self.branch,
+            DiffMode::Branch => &mut self.branch,
         }
     }
 }
