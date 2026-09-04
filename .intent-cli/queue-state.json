@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-04T10:47:47.6533173+00:00",
+  "updated_at": "2026-09-04T16:26:11.485683+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -815,7 +815,7 @@
     {
       "execution_unit": "v02-gui-workbench-restructure",
       "title": "v0.2: GUI workbench \u3092 project/thread \u4E2D\u5FC3\u306E3\u9818\u57DF\u30EC\u30A4\u30A2\u30A6\u30C8\u3078\u518D\u69CB\u6210",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v02-agent-messaging",
         "v02-workspace-isolation"
@@ -832,6 +832,7 @@
         "number": 65,
         "url": "https://github.com/turtton/evorch/issues/65"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/66",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",

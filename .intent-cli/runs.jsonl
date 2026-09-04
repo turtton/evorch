@@ -161,3 +161,6 @@
 {"ts":"2026-09-04T10:32:21.1634904+00:00","execution_unit":"v02-context-compaction","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":64}
 {"ts":"2026-09-04T10:32:21.1634904+00:00","execution_unit":"v02-context-compaction","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":64}
 {"ts":"2026-09-04T10:47:47.6533173+00:00","execution_unit":"v02-gui-workbench-restructure","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#65","reason":"https://github.com/turtton/evorch/issues/65"}
+{"ts":"2026-09-04T16:25:49.5382166+00:00","execution_unit":"v02-gui-workbench-restructure","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":66}
+{"ts":"2026-09-04T16:26:11.4764919+00:00","execution_unit":"v02-gui-workbench-restructure","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":66}
+{"ts":"2026-09-04T16:26:11.4764919+00:00","execution_unit":"v02-gui-workbench-restructure","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":66}
