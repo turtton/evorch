@@ -17,6 +17,7 @@ use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
+use crate::compaction::policy::CompactionSettings;
 use crate::mailbox::{PushError, RunMailbox};
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
@@ -47,6 +48,7 @@ pub(crate) struct Shared {
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
+    pub(crate) compaction: OnceLock<CompactionSettings>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -95,6 +97,7 @@ struct RunEntry {
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<String>,
     cancel_tx: watch::Sender<bool>,
+    compact_tx: watch::Sender<u64>,
     mailbox: Arc<RunMailbox>,
     _join: Option<JoinHandle<()>>,
 }
@@ -123,6 +126,7 @@ impl AgentRuntime {
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
+                compaction: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -131,6 +135,15 @@ impl AgentRuntime {
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// コンテキスト圧縮設定を接続したランタイムを返す。
+    pub fn with_compaction(self, settings: config::CompactionConfig) -> Self {
+        let _ = self
+            .shared
+            .compaction
+            .set(CompactionSettings::from(&settings));
+        self
     }
 
     /// システムプロンプトカタログを設定したランタイムを返すビルダーメソッド。
@@ -290,6 +303,7 @@ impl AgentRuntime {
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
+                compaction: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -342,6 +356,7 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (compact_tx, compact_rx) = watch::channel(0_u64);
         let phase_tx_entry = phase_tx.clone();
         let mailbox = Arc::new(RunMailbox::new());
         let mailbox_version_rx = mailbox.subscribe_version();
@@ -359,6 +374,7 @@ impl AgentRuntime {
             inbox_rx,
             cancel_rx,
             mailbox_version_rx,
+            compact_rx,
         };
         lock_runs(&self.shared.runs).insert(
             run_id,
@@ -373,6 +389,7 @@ impl AgentRuntime {
                 message_count_rx,
                 inbox_tx,
                 cancel_tx,
+                compact_tx,
                 mailbox: Arc::clone(&mailbox),
                 _join: None,
             },
@@ -435,6 +452,13 @@ impl AgentRuntime {
     pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
         let sender = self.entry(run_id)?.cancel_tx.clone();
         sender.send_replace(true);
+        Ok(())
+    }
+
+    /// run の次のターン境界で手動コンテキスト圧縮を要求する。
+    pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let sender = self.entry(run_id)?.compact_tx.clone();
+        sender.send_modify(|generation| *generation = generation.saturating_add(1));
         Ok(())
     }
 
@@ -851,6 +875,7 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         system_prompts: shared.system_prompts.get().cloned(),
         skills: shared.skills.get().cloned(),
         rules: shared.rules.get().cloned(),
+        compaction: shared.compaction.get().cloned().unwrap_or_default(),
         runtime: Arc::downgrade(&shared),
     })
 }

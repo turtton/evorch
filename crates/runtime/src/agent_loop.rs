@@ -9,11 +9,13 @@ mod tool_calls;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
-use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
-use providers::{ContentBlock, FinishReason, ToolSpec};
+use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent};
+use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::compaction;
+use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError};
 use crate::rules::{self, RulesSession, RulesSource};
@@ -41,6 +43,7 @@ pub(crate) struct LoopChannels {
     pub(crate) inbox_rx: mpsc::Receiver<String>,
     pub(crate) cancel_rx: watch::Receiver<bool>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
+    pub(crate) compact_rx: watch::Receiver<u64>,
 }
 
 pub(crate) struct LoopShared {
@@ -50,18 +53,21 @@ pub(crate) struct LoopShared {
     pub(crate) system_prompts: Option<Arc<SystemPromptCatalog>>,
     pub(crate) skills: Option<Arc<SkillRegistry>>,
     pub(crate) rules: Option<Arc<RulesSource>>,
+    pub(crate) compaction: CompactionSettings,
     pub(crate) runtime: Weak<Shared>,
 }
 
 pub(crate) struct LoopState {
     task: RunTask,
-    shared: LoopShared,
+    pub(crate) shared: LoopShared,
     channels: LoopChannels,
     run_state: RunState,
-    context: AgentContext,
+    pub(crate) context: AgentContext,
     policy: ExecutionPolicy,
     tool_specs: Vec<ToolSpec>,
     pub(crate) rules_session: Option<RulesSession>,
+    pub(crate) compaction: CompactionLoopState,
+    pub(crate) last_usage: Option<Usage>,
     resumed: bool,
 }
 
@@ -80,6 +86,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         policy,
         tool_specs: Vec::new(),
         rules_session: None,
+        compaction: CompactionLoopState::default(),
+        last_usage: None,
         resumed: false,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
@@ -320,6 +328,10 @@ impl LoopState {
         self.task.run_id
     }
 
+    pub(crate) fn run_role(&self) -> Role {
+        self.task.role
+    }
+
     /// この run から参照できる skill レジストリを返す (未設定なら None)。
     pub(crate) fn skills(&self) -> Option<&Arc<SkillRegistry>> {
         self.shared.skills.as_ref()
@@ -340,9 +352,47 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
+            self.compaction.compacted_this_boundary = false;
+            let requested_gen = *self.channels.compact_rx.borrow();
+            if requested_gen > self.compaction.last_handled_gen {
+                self.compaction.last_handled_gen = requested_gen;
+                if let Err(error) = compaction::compact_now(self, CompactionReason::Manual).await {
+                    tracing::warn!(%error, "manual compaction failed");
+                }
+            } else {
+                let visible = self.context.visible_messages();
+                let estimated =
+                    compaction::estimator::estimate_visible(&visible, self.last_usage.as_ref());
+                let window = compaction::policy::resolve_window(
+                    &self.shared.compaction,
+                    &self.shared.model.selected_model(self.task.role),
+                );
+                if compaction::policy::should_trigger(
+                    &self.compaction,
+                    &self.shared.compaction,
+                    estimated,
+                    window,
+                ) == TriggerDecision::Trigger
+                {
+                    match compaction::compact_now(self, CompactionReason::Automatic).await {
+                        Ok(outcome) if outcome.still_above_threshold => tracing::warn!(
+                            estimated_tokens_before = outcome.estimated_tokens_before,
+                            estimated_tokens_after = outcome.estimated_tokens_after,
+                            context_window_tokens = window,
+                            "automatic compaction remains above threshold"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "automatic compaction skipped or failed");
+                        }
+                    }
+                }
+            }
             let invocation = AgentInvocationContext {
                 run_id: self.task.run_id.to_string(),
             };
+            let visible_messages = self.context.visible_messages();
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -355,7 +405,7 @@ impl LoopState {
                 result = self.shared.model.complete(
                     &invocation,
                     self.task.role,
-                    &self.context.messages,
+                    &visible_messages,
                     &self.tool_specs,
                 ) => result,
             };
@@ -370,6 +420,7 @@ impl LoopState {
             if let Some(session) = &mut self.rules_session {
                 session.set_last_usage(response.usage);
             }
+            self.last_usage = Some(response.usage);
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message

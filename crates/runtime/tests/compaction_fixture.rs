@@ -53,8 +53,8 @@ fn tool_result_text(message: &Message) -> String {
             ContentBlock::ToolResult { content, .. } => Some(
                 content
                     .iter()
-                    .filter_map(|item| match item {
-                        ToolResultContent::Text { text } => Some(text.as_str()),
+                    .map(|item| match item {
+                        ToolResultContent::Text { text } => text.as_str(),
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

@@ -89,7 +89,7 @@ pub(crate) enum TriggerDecision {
     InFlight,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct CompactionLoopState {
     pub last_handled_gen: u64,
     pub turn_counter: u64,
@@ -239,8 +239,10 @@ mod tests {
             should_trigger(&in_flight_state, &settings, 750, 1_000),
             TriggerDecision::InFlight
         );
-        let mut disabled_settings = CompactionSettings::default();
-        disabled_settings.enabled = false;
+        let disabled_settings = CompactionSettings {
+            enabled: false,
+            ..CompactionSettings::default()
+        };
         assert_eq!(
             should_trigger(&state(), &disabled_settings, 750, 1_000),
             TriggerDecision::Disabled
@@ -252,8 +254,10 @@ mod tests {
     // Then: Disabled, InFlight, AlreadyThisBoundary, Cooldown の順で先の条件が勝つ
     #[test]
     fn check_order_prefers_disabled_then_in_flight_then_boundary_then_cooldown() {
-        let mut settings = CompactionSettings::default();
-        settings.enabled = false;
+        let mut settings = CompactionSettings {
+            enabled: false,
+            ..CompactionSettings::default()
+        };
         let mut state = state();
         state.in_flight = true;
         state.compacted_this_boundary = true;
