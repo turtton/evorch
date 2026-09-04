@@ -6,6 +6,7 @@
 mod messages;
 mod tool_calls;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
@@ -46,6 +47,8 @@ pub(crate) struct LoopChannels {
     pub(crate) cancel_rx: watch::Receiver<bool>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
     pub(crate) compact_rx: watch::Receiver<u64>,
+    /// 実行中の圧縮を runtime 側 (AgentRuntime::compact) と共有するフラグ。
+    pub(crate) compaction_busy: Arc<AtomicBool>,
 }
 
 pub(crate) struct LoopShared {
@@ -63,7 +66,7 @@ pub(crate) struct LoopShared {
 pub(crate) struct LoopState {
     task: RunTask,
     pub(crate) shared: LoopShared,
-    channels: LoopChannels,
+    pub(crate) channels: LoopChannels,
     run_state: RunState,
     pub(crate) context: AgentContext,
     policy: ExecutionPolicy,
@@ -376,6 +379,10 @@ impl LoopState {
                     &self.shared.compaction,
                     &self.shared.model.selected_model(self.task.role),
                 );
+                // 閾値未満の境界を観測したら自動トリガを再武装する (ラチェット解除)。
+                if (estimated as f64) < window as f64 * self.shared.compaction.threshold {
+                    self.compaction.auto_suspended = false;
+                }
                 if compaction::policy::should_trigger(
                     &self.compaction,
                     &self.shared.compaction,

@@ -23,6 +23,7 @@ pub(crate) struct CompactionSettings {
     pub model_overrides: BTreeMap<String, u64>,
     pub keep_recent_tokens: u64,
     pub cooldown_turns: u32,
+    pub max_compactions_per_run: u64,
     pub max_summary_bytes: u64,
     pub summarizer: SummarizerKindSel,
 }
@@ -36,6 +37,7 @@ impl Default for CompactionSettings {
             model_overrides: BTreeMap::new(),
             keep_recent_tokens: 20_000,
             cooldown_turns: 1,
+            max_compactions_per_run: 32,
             max_summary_bytes: 16_384,
             summarizer: SummarizerKindSel::Model,
         }
@@ -78,6 +80,13 @@ impl From<&CompactionConfig> for CompactionSettings {
             model_overrides,
             keep_recent_tokens: config.keep_recent_tokens,
             cooldown_turns: config.cooldown_turns,
+            // 0 は設定ミスとして既定値へ正規化する (上限 0 は圧縮の事実上の無効化を
+            // 黙って意味してしまうため)。
+            max_compactions_per_run: if config.max_compactions_per_run == 0 {
+                32
+            } else {
+                config.max_compactions_per_run
+            },
             max_summary_bytes: config.max_summary_bytes,
             summarizer,
         }
@@ -100,6 +109,10 @@ pub(crate) enum TriggerDecision {
     Cooldown,
     AlreadyThisBoundary,
     InFlight,
+    /// 直前の圧縮成功後にまだ閾値未満の境界を観測していない (自動のみ)。
+    Suspended,
+    /// run あたりの圧縮回数上限に達した。
+    BudgetExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +121,8 @@ pub(crate) enum GuardDecision {
     InFlight,
     AlreadyThisBoundary,
     Cooldown,
+    /// run あたりの圧縮回数上限に達した。
+    BudgetExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +137,11 @@ pub(crate) struct CompactionLoopState {
     pub turn_counter: u64,
     pub last_compaction_turn: Option<u64>,
     pub compacted_this_boundary: bool,
+    /// 成功した圧縮の累計回数 (run 予算の消費量)。
+    pub compaction_count: u64,
+    /// 自動トリガの一時停止。圧縮成功時に立ち、閾値未満の境界観測で解除される
+    /// (圧縮後も閾値超過が続く場合の自動連鎖を止めるラチェット)。
+    pub auto_suspended: bool,
     pub checkpoint_seq: u32,
     pub in_flight: bool,
     pub last_estimated_tokens: u64,
@@ -146,6 +166,9 @@ pub(crate) fn guard_decision(
     }) {
         return Some(GuardDecision::Cooldown);
     }
+    if state.compaction_count >= settings.max_compactions_per_run {
+        return Some(GuardDecision::BudgetExhausted);
+    }
     None
 }
 
@@ -162,9 +185,13 @@ pub(crate) fn should_trigger(
             GuardDecision::InFlight => TriggerDecision::InFlight,
             GuardDecision::AlreadyThisBoundary => TriggerDecision::AlreadyThisBoundary,
             GuardDecision::Cooldown => TriggerDecision::Cooldown,
+            GuardDecision::BudgetExhausted => TriggerDecision::BudgetExhausted,
         };
     }
 
+    if state.auto_suspended {
+        return TriggerDecision::Suspended;
+    }
     match threshold_decision(settings, estimated_tokens, window_tokens) {
         ThresholdDecision::Trigger => TriggerDecision::Trigger,
         ThresholdDecision::BelowThreshold => TriggerDecision::BelowThreshold,
@@ -221,6 +248,8 @@ mod tests {
             turn_counter: 0,
             last_compaction_turn: None,
             compacted_this_boundary: false,
+            compaction_count: 0,
+            auto_suspended: false,
             checkpoint_seq: 0,
             in_flight: false,
             last_estimated_tokens: 0,
@@ -381,6 +410,7 @@ mod tests {
             model_overrides: BTreeMap::from([(String::from("model-a"), 99_000)]),
             keep_recent_tokens: 12_000,
             cooldown_turns: 3,
+            max_compactions_per_run: 7,
             max_summary_bytes: 8_192,
             summarizer: SummarizerKind::Structural,
         };
@@ -394,6 +424,7 @@ mod tests {
                 model_overrides: BTreeMap::from([(String::from("model-a"), 99_000)]),
                 keep_recent_tokens: 12_000,
                 cooldown_turns: 3,
+                max_compactions_per_run: 7,
                 max_summary_bytes: 8_192,
                 summarizer: SummarizerKindSel::Structural,
             }
@@ -452,5 +483,46 @@ mod tests {
         assert!(claude.contains("Claude prompt-cache prefix stability"));
         assert!(generic.contains("provider cache reuse"));
         assert_ne!(claude, generic);
+    }
+
+    // Given: 圧縮試行回数が予算上限に達した state
+    // When: 自動トリガを判定する
+    // Then: 閾値超過でも BudgetExhausted で抑止される
+    #[test]
+    fn exhausted_budget_blocks_trigger_above_threshold() {
+        let settings = CompactionSettings {
+            max_compactions_per_run: 2,
+            ..CompactionSettings::default()
+        };
+        let state = CompactionLoopState {
+            compaction_count: 2,
+            ..CompactionLoopState::default()
+        };
+
+        assert_eq!(
+            should_trigger(&state, &settings, 900, 1_000),
+            TriggerDecision::BudgetExhausted
+        );
+    }
+
+    // Given: 圧縮成功直後 (auto_suspended=true) の state
+    // When: 閾値超過のまま自動トリガを判定する
+    // Then: Suspended で抑止され、解除後は再発火する
+    #[test]
+    fn suspended_state_blocks_automatic_trigger_until_rearmed() {
+        let settings = CompactionSettings::default();
+        let suspended = CompactionLoopState {
+            auto_suspended: true,
+            ..CompactionLoopState::default()
+        };
+
+        assert_eq!(
+            should_trigger(&suspended, &settings, 900, 1_000),
+            TriggerDecision::Suspended
+        );
+        assert_eq!(
+            should_trigger(&CompactionLoopState::default(), &settings, 900, 1_000),
+            TriggerDecision::Trigger
+        );
     }
 }

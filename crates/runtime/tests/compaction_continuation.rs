@@ -534,9 +534,11 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     // B4a の完全ターン境界ルールでは relayed reply が compacted 域外(tail)に verbatim で残りうる。
     // tail 生存は要約内保持より強い保存形態なので「summary 内 or 圧縮後全要求の tail 内」の OR を検証する。
     let agent2_in_summary = summary.contains(&agent2);
-    let agent2_in_tail = child_requests[first_compacted - 1..]
-        .iter()
-        .all(|request| request.iter().any(|message| text_of(message).contains(&agent2)));
+    let agent2_in_tail = child_requests[first_compacted - 1..].iter().all(|request| {
+        request
+            .iter()
+            .any(|message| text_of(message).contains(&agent2))
+    });
     assert!(
         agent2_in_summary || agent2_in_tail,
         "relayed reply body must survive compaction (summary or kept tail)"

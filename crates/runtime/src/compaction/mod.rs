@@ -3,6 +3,8 @@ pub(crate) mod estimator;
 pub(crate) mod policy;
 pub(crate) mod summary;
 
+use std::sync::atomic::Ordering;
+
 use event_bus::{CompactionEvent, CompactionReason, Event};
 use providers::{ContentBlock, Message, Role};
 
@@ -35,6 +37,8 @@ pub(crate) enum CompactionError {
     NothingToCompact,
     #[error("compaction cooldown is active")]
     Cooldown,
+    #[error("compaction budget for this run is exhausted")]
+    BudgetExhausted,
     #[error("compaction already completed at the current turn boundary")]
     AlreadyThisBoundary,
     #[error("compaction is already in flight")]
@@ -63,6 +67,10 @@ pub(crate) async fn compact_now(
         &state.shared.model.selected_model(state.run_role()),
     );
     if reason == CompactionReason::Automatic {
+        // 圧縮成功直後は閾値未満の境界を一度観測するまで自動発火しない (ラチェット)。
+        if state.compaction.auto_suspended {
+            return Err(CompactionError::TooSmall);
+        }
         match threshold_decision(&settings, estimated_before, window) {
             ThresholdDecision::Trigger => {}
             ThresholdDecision::BelowThreshold => return Err(CompactionError::TooSmall),
@@ -86,7 +94,11 @@ pub(crate) async fn compact_now(
     // cut の protected floor が先頭 User(goal) を保護するため、goal は raw 履歴全体から取得する。
     let goal = first_user_text(&state.context.messages);
 
+    // 予算は要約「試行」で消費する (要約失敗のまま同一応答内で compact を
+    // 連呼される増幅を stop するため、成功時のみの counting では不十分)。
+    state.compaction.compaction_count = state.compaction.compaction_count.saturating_add(1);
     state.compaction.in_flight = true;
+    state.channels.compaction_busy.store(true, Ordering::SeqCst);
     let summary_result = match settings.summarizer {
         SummarizerKindSel::Model => {
             ModelSummarizer {
@@ -104,6 +116,10 @@ pub(crate) async fn compact_now(
         }
     };
     state.compaction.in_flight = false;
+    state
+        .channels
+        .compaction_busy
+        .store(false, Ordering::SeqCst);
     let summary = enforce_max_bytes(
         &summary_result.map_err(|error| CompactionError::SummarizeFailed(error.to_string()))?,
         settings.max_summary_bytes,
@@ -150,6 +166,8 @@ pub(crate) async fn compact_now(
     state.compaction.checkpoint_seq = state.compaction.checkpoint_seq.saturating_add(1);
     state.compaction.last_compaction_turn = Some(state.compaction.turn_counter);
     state.compaction.compacted_this_boundary = true;
+    // 圧縮成功後は自動トリガを一時停止する。閾値未満の境界観測で再武装される。
+    state.compaction.auto_suspended = true;
     state.compaction.last_estimated_tokens = estimated_after;
     state
         .shared
@@ -176,6 +194,7 @@ const fn error_from_guard(decision: GuardDecision) -> CompactionError {
         GuardDecision::InFlight => CompactionError::InFlight,
         GuardDecision::AlreadyThisBoundary => CompactionError::AlreadyThisBoundary,
         GuardDecision::Cooldown => CompactionError::Cooldown,
+        GuardDecision::BudgetExhausted => CompactionError::BudgetExhausted,
     }
 }
 

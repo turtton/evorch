@@ -544,6 +544,70 @@ async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
 }
 
 #[tokio::test]
+async fn failed_agent_compaction_consumes_budget_without_consuming_boundary_marker() {
+    // Given: two compact calls share one response, and the first summary attempt fails.
+    let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
+        reason: "summary unavailable".to_string(),
+    })]));
+    model
+        .add_keyed(
+            "agent-failed-double",
+            [
+                Ok(text_response(
+                    &"agent-old-answer ".repeat(40),
+                    FinishReason::Stop,
+                )),
+                Ok(tool_responses([
+                    ("failed-compact-1", "compact", serde_json::json!({})),
+                    ("failed-compact-2", "compact", serde_json::json!({})),
+                ])),
+                Ok(text_response("done", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    let mut compaction_settings = settings(1_000_000, 1, 100);
+    compaction_settings.summarizer = SummarizerKind::Model;
+    compaction_settings.max_compactions_per_run = 1;
+    let (runtime, bus) = runtime_with(Arc::clone(&model), compaction_settings);
+    let mut receiver = bus.subscribe();
+    let run_id = runtime.delegate_background(
+        Role::Orchestrator,
+        "agent-failed-double".to_string(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, run_id, AgentRunPhase::Waiting).await;
+
+    // When: both agent compact operations execute sequentially at the same boundary.
+    runtime
+        .send_message(run_id, "agent-resume".to_string())
+        .expect("waiting run resumes");
+    let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
+
+    // Then: no successful event escapes, and the second call observes exhausted attempt budget.
+    assert!(events.is_empty());
+    let observed = model.observed().await;
+    let final_turn = observed.last().expect("final provider request");
+    assert_eq!(
+        tool_result(final_turn, "failed-compact-1"),
+        Some((
+            "compaction summary failed: summary model failed: モデル呼び出しに失敗しました: summary unavailable"
+                .to_string(),
+            true,
+        ))
+    );
+    assert_eq!(
+        tool_result(final_turn, "failed-compact-2"),
+        Some((
+            "compaction budget for this run is exhausted".to_string(),
+            true,
+        ))
+    );
+}
+
+#[tokio::test]
 async fn manual_compact_at_next_boundary_is_rejected_during_cooldown() {
     // Given: a run whose provider calls are held so manual generations can target boundaries.
     let gate = Arc::new(Notify::new());

@@ -99,6 +99,8 @@ struct RunEntry {
     inbox_tx: mpsc::Sender<String>,
     cancel_tx: watch::Sender<bool>,
     compact_tx: watch::Sender<u64>,
+    /// 実行中の圧縮を loop 側と共有するフラグ (compact() の in-flight 拒否判定用)。
+    compaction_busy: Arc<AtomicBool>,
     mailbox: Arc<RunMailbox>,
     _join: Option<JoinHandle<()>>,
 }
@@ -363,6 +365,7 @@ impl AgentRuntime {
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
+        let compaction_busy = Arc::new(AtomicBool::new(false));
         let phase_tx_entry = phase_tx.clone();
         let mailbox = Arc::new(RunMailbox::new());
         let mailbox_version_rx = mailbox.subscribe_version();
@@ -381,6 +384,7 @@ impl AgentRuntime {
             cancel_rx,
             mailbox_version_rx,
             compact_rx,
+            compaction_busy: compaction_busy.clone(),
         };
         lock_runs(&self.shared.runs).insert(
             run_id,
@@ -396,6 +400,7 @@ impl AgentRuntime {
                 inbox_tx,
                 cancel_tx,
                 compact_tx,
+                compaction_busy: Arc::clone(&compaction_busy),
                 mailbox: Arc::clone(&mailbox),
                 _join: None,
             },
@@ -463,8 +468,15 @@ impl AgentRuntime {
 
     /// run の次のターン境界で手動コンテキスト圧縮を要求する。
     pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let sender = self.entry(run_id)?.compact_tx.clone();
-        sender.send_modify(|generation| *generation = generation.saturating_add(1));
+        let entry = self.entry(run_id)?;
+        if entry.compaction_busy.load(Ordering::Acquire) {
+            return Err(RuntimeError::CompactionInFlight {
+                run_id: run_id.to_string(),
+            });
+        }
+        entry
+            .compact_tx
+            .send_modify(|generation| *generation = generation.saturating_add(1));
         Ok(())
     }
 

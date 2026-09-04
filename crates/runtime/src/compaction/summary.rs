@@ -628,7 +628,9 @@ mod tests {
         let observed = model.observed.lock().expect("observation lock");
         let request = observed.last().expect("one summarizer call");
         assert!(
-            request.last_user_text.contains("Produce the continuation summary now."),
+            request
+                .last_user_text
+                .contains("Produce the continuation summary now."),
             "instruction prompt must remain"
         );
         assert!(

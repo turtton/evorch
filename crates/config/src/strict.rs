@@ -47,6 +47,7 @@ const COMPACTION_KEYS: &[&str] = &[
     "model_overrides",
     "keep_recent_tokens",
     "cooldown_turns",
+    "max_compactions_per_run",
     "max_summary_bytes",
     "summarizer",
 ];
