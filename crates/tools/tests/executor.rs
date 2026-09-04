@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
-use sandbox::DirectSandbox;
+use sandbox::{ApprovalMode, ApprovalPolicy, DirectSandbox, PolicyDecision};
 use tempfile::tempdir;
 use tools::{
     ContentOrigin, Permissions, Read, Tool, ToolError, ToolExecutionContext, ToolExecutor,
@@ -530,6 +530,39 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
             run_id: Some("run-20".to_string()),
         }
     );
+}
+
+// Given: with_web_tools 済みの実行器 / When: 登録ツールの権限と分類を参照 / Then: web_fetch は network として分類され、未登録ツールは None になる
+#[test]
+fn tool_permissions_and_classify_report_registered_network_tools() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    )
+    .with_web_tools()
+    .expect("NetworkGuard 初期化");
+
+    assert_eq!(
+        executor.tool_permissions("web_fetch"),
+        Some(Permissions::network())
+    );
+    assert_eq!(
+        executor.tool_permissions("read").map(|p| p.network),
+        Some(false)
+    );
+    assert_eq!(executor.tool_permissions("nope"), None);
+    assert_eq!(
+        executor.classify_tool("web_fetch"),
+        Some(PolicyDecision::AutoAllow)
+    );
+
+    executor.set_policy(ApprovalPolicy::standard(ApprovalMode::OnRequest));
+    assert_eq!(
+        executor.classify_tool("web_fetch"),
+        Some(PolicyDecision::Ask)
+    );
+    assert_eq!(executor.classify_tool("nope"), None);
 }
 
 /// 由来 (origin) を申告しない network 権限のテスト用ツール。

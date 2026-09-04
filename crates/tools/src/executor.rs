@@ -19,7 +19,7 @@ use crate::origin::derive_content_origin;
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::Tool;
+use crate::tool::{Permissions, Tool};
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
 
 /// ツール実行時の文脈情報。
@@ -175,6 +175,24 @@ impl ToolExecutor {
         self
     }
 
+    /// 登録済みツールの権限宣言を返す。未登録なら None。
+    pub fn tool_permissions(&self, tool_name: &str) -> Option<Permissions> {
+        self.tools
+            .get(tool_name)
+            .map(|registered| registered.tool.permissions())
+    }
+
+    /// loop 側 3 層 AND 判定の per-tool 層入力として、登録済みツールの実行分類を返す。
+    /// 未登録なら None。executor 自身も同じ policy で判定するため、allow_all 以外の
+    /// policy を設定した構成では loop 側と executor 側の二重 ask になりうる点に注意。
+    pub fn classify_tool(&self, tool_name: &str) -> Option<sandbox::PolicyDecision> {
+        let permissions = self.tool_permissions(tool_name)?;
+        Some(
+            self.policy
+                .classify(tool_name, &capabilities_of(&permissions)),
+        )
+    }
+
     /// 利用者承認を待つゲートを設定する。
     pub fn set_approval_gate(&mut self, gate: ApprovalGate) -> &mut Self {
         self.gate = Some(gate);
@@ -227,12 +245,7 @@ impl ToolExecutor {
         }
 
         let permissions = registered.tool.permissions();
-        let capabilities = Capabilities {
-            fs_read: permissions.fs_read,
-            fs_write: permissions.fs_write,
-            process_spawn: permissions.process_spawn,
-            network: permissions.network,
-        };
+        let capabilities = capabilities_of(&permissions);
         let action = resolve(
             self.policy.classify(tool_name, &capabilities),
             self.policy.mode(),
@@ -348,6 +361,15 @@ impl ToolExecutor {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
         })
+    }
+}
+
+fn capabilities_of(permissions: &Permissions) -> Capabilities {
+    Capabilities {
+        fs_read: permissions.fs_read,
+        fs_write: permissions.fs_write,
+        process_spawn: permissions.process_spawn,
+        network: permissions.network,
     }
 }
 
