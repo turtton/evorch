@@ -79,6 +79,14 @@ fn tool_set(tools: &[&str]) -> BTreeSet<String> {
 }
 
 #[test]
+fn network_access_default_is_denied_fail_closed() {
+    // Given: NetworkAccess の既定値
+    // When: Default を構築する
+    // Then: Denied (fail-closed) になる
+    assert_eq!(NetworkAccess::default(), NetworkAccess::Denied);
+}
+
+#[test]
 fn role_names_are_stable_identifiers() {
     // Given: v0.2 の 5 ロール
     // When: name() を呼び出す

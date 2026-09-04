@@ -8,9 +8,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 /// ロールのネットワークアクセス要件 (ADR 0002)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NetworkAccess {
-    /// ネットワークアクセスを禁止する (ADR 0008 default-deny)。
+    /// ネットワークアクセスを禁止する (ADR 0008 default-deny)。既定値 (ADR 0008 default-deny)。
+    #[default]
     Denied,
     /// 明示的なオプトイン時のみ許可する。
     OptIn,
