@@ -200,6 +200,19 @@ pub async fn collect_events(receiver: &mut EventReceiver, count: usize) -> Vec<E
     events
 }
 
+/// run 完了後にバス上に残ったイベントをすべて回収する。
+///
+/// `wait` 完了後は Tool / Lifecycle イベントがすべて発行済みなので、
+/// 短いタイムアウトで `recv` を枯渇させて presence/absence アサーションに使う。
+/// イベント総数は実装詳細に依存するため固定カウントで回収しない。
+pub async fn drain_events(receiver: &mut EventReceiver) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Ok(Ok(event)) = timeout(Duration::from_millis(100), receiver.recv()).await {
+        events.push(event);
+    }
+    events
+}
+
 pub fn recording_factory() -> (
     Arc<dyn SandboxFactory>,
     Arc<std::sync::Mutex<Vec<IsolatedMounts>>>,

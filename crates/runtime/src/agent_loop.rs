@@ -191,6 +191,15 @@ async fn setup_isolated_workspace(
             return Err(format!("workspace sandbox setup failed: {error}"));
         }
     };
+    let executor = match ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
+        .with_web_tools()
+    {
+        Ok(executor) => Arc::new(executor),
+        Err(error) => {
+            cleanup_failed_setup(owned).await;
+            return Err(format!("workspace web tool setup failed: {error}"));
+        }
+    };
     runtime_shared
         .workspaces
         .lock()
@@ -204,10 +213,6 @@ async fn setup_isolated_workspace(
                 merge_mode: state.task.config.merge_mode,
             },
         );
-    let executor = Arc::new(ToolExecutor::with_standard_tools(
-        Arc::clone(&runtime_shared.bus),
-        sandbox,
-    ));
     Ok((owned, executor))
 }
 
