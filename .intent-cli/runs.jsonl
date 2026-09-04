@@ -172,3 +172,4 @@
 {"ts":"2026-09-04T19:29:04.1525508+00:00","execution_unit":"v02-intent-gate-rules","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":70}
 {"ts":"2026-09-04T19:29:54.7570203+00:00","execution_unit":"v02-intent-gate-rules","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":70}
 {"ts":"2026-09-04T19:29:54.7570203+00:00","execution_unit":"v02-intent-gate-rules","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":70}
+{"ts":"2026-09-04T19:31:30.8663823+00:00","execution_unit":"v02-entry-pre-routing","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#71","reason":"https://github.com/turtton/evorch/issues/71"}
