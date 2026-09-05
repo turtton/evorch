@@ -4,6 +4,25 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[lib]
+name = "evorch"
+
 [[bin]]
 name = "evorch"
 path = "src/main.rs"
+
+[dependencies]
+config = { path = "../config" }
+event-bus = { path = "../event-bus" }
+routing = { path = "../routing" }
+runtime = { path = "../runtime" }
+sandbox = { path = "../sandbox" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tools = { path = "../tools" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+# E2E テストで run の hang 検出 (timeout) に使う。
+tokio = { workspace = true, features = ["time"] }
