@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod mock_openai;
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};

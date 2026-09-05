@@ -6,10 +6,7 @@
 
 mod support;
 
-use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agents::Role;
@@ -23,6 +20,8 @@ use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, RunConfig, Runti
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tools::ToolExecutor;
+
+use support::mock_openai::RecordingMockOpenAi;
 
 fn runtime_with(bus: &Arc<EventBus>, model: Arc<dyn AgentModel>) -> AgentRuntime {
     let executor = Arc::new(ToolExecutor::with_standard_tools(
@@ -41,63 +40,6 @@ async fn drain_events(receiver: &mut event_bus::EventReceiver) -> Vec<Event> {
         }
     }
     events
-}
-
-/// OpenAI 互換の 1 リクエスト 1 応答モックサーバを起動し、base URL を返す。
-fn spawn_mock_openai(responses: Vec<String>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("モックサーバを bind できる");
-    let addr = listener.local_addr().expect("モックアドレスを取得できる");
-    let script = Mutex::new(VecDeque::from(responses));
-    std::thread::spawn(move || {
-        while let Ok((mut stream, _)) = listener.accept() {
-            let Some(response) = script
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front()
-            else {
-                continue;
-            };
-            read_request(&mut stream);
-            let http = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            );
-            stream
-                .write_all(http.as_bytes())
-                .expect("モック応答を書き込める");
-        }
-    });
-    format!("http://{addr}")
-}
-
-/// リクエストヘッダと Content-Length 分の body を読み切る。
-///
-/// body を読み切らずに close すると RST によりクライアントが応答を
-/// 読めなくなるため、応答前に送信内容を読み捨てる。
-fn read_request(stream: &mut TcpStream) {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        if let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("content-length:")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            if buf.len() >= header_end + 4 + content_length {
-                return;
-            }
-        }
-        let read = stream.read(&mut chunk).expect("モックリクエストを読める");
-        if read == 0 {
-            return;
-        }
-        buf.extend_from_slice(&chunk[..read]);
-    }
 }
 
 /// production 実装と同じ「invocation → ChatRequest.observation」変換を行い、
@@ -191,7 +133,8 @@ async fn agent_loop_stamps_run_id_on_provider_attempts_and_tool_events() {
     .to_string();
 
     let bus = Arc::new(EventBus::new(64));
-    let base_url = spawn_mock_openai(vec![tool_response, stop_response]);
+    let mock_openai = RecordingMockOpenAi::spawn(vec![tool_response, stop_response]);
+    let base_url = mock_openai.base_url();
     let runtime = runtime_with(
         &bus,
         Arc::new(ProviderCorrelatedModel::new(base_url, Arc::clone(&bus))),
