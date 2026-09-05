@@ -118,10 +118,12 @@ async fn goal_runs_to_awaiting_merge_then_complete_with_one_request_update_round
     let (_temp, runtime, bus) = runtime_with_workspace(Arc::clone(&model));
     let mut events = bus.subscribe();
     let delivery = Arc::new(FixtureDeliveryAdapter::scripted_happy_path());
-    let mut settings = OrchestrationSettings::default();
-    settings.ci_poll_secs = 1;
-    settings.ci_timeout_secs = 5;
-    settings.stall_after_secs = 60;
+    let settings = OrchestrationSettings {
+        ci_poll_secs: 1,
+        ci_timeout_secs: 5,
+        stall_after_secs: 60,
+        ..OrchestrationSettings::default()
+    };
     let handle = GoalSupervisor::spawn(runtime.clone(), Arc::clone(&bus), delivery, settings);
     model
         .add_keyed(

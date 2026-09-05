@@ -518,8 +518,10 @@ fn gate_missing_continuation_is_visible_in_gui() {
 #[test]
 fn review_rounds_exhausted_shows_blocked_and_disables_approve() {
     // Given: the first scripted review always requests an update and one round is the maximum.
-    let mut settings = OrchestrationSettings::default();
-    settings.max_review_rounds = 1;
+    let settings = OrchestrationSettings {
+        max_review_rounds: 1,
+        ..OrchestrationSettings::default()
+    };
     let mut fixture = Fixture::new(FixtureDeliveryAdapter::scripted_happy_path(), settings);
 
     // When: the only allowed review round requests an update.

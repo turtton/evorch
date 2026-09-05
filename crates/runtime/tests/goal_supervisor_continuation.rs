@@ -37,9 +37,11 @@ impl Fixture {
             executor,
             Arc::new(ScriptedModel::gated([], Arc::new(Notify::new()))),
         );
-        let mut settings = OrchestrationSettings::default();
-        settings.max_continuations = max_continuations;
-        settings.stall_after_secs = 86_400;
+        let settings = OrchestrationSettings {
+            max_continuations,
+            stall_after_secs: 86_400,
+            ..OrchestrationSettings::default()
+        };
         let handle = GoalSupervisor::spawn(
             runtime.clone(),
             Arc::clone(&bus),

@@ -113,7 +113,7 @@ pub enum LoopEvent {
         thread_id: String,
         goal_id: String,
     },
-    MergeStateUpdated(MergeApprovalView),
+    MergeStateUpdated(Box<MergeApprovalView>),
     MergeResolved {
         thread_id: String,
         decision: MergeDecision,
@@ -174,7 +174,7 @@ impl CommandSink for FixtureLoopAdapter {
                         thread_id: submission.thread_id,
                         goal_id: format!("goal-{}", self.accepted_goals),
                     },
-                    LoopEvent::MergeStateUpdated(Self::fixture_view(None)),
+                    LoopEvent::MergeStateUpdated(Box::new(Self::fixture_view(None))),
                 ]
             }
             WorkbenchCommand::DecideMerge(command) => vec![LoopEvent::MergeResolved {
@@ -461,7 +461,7 @@ mod tests {
                     thread_id: "thread-1".into(),
                     goal_id: "goal-1".into(),
                 },
-                LoopEvent::MergeStateUpdated(pending_view()),
+                LoopEvent::MergeStateUpdated(Box::new(pending_view())),
             ]
         );
     }

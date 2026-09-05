@@ -32,7 +32,6 @@ const LABEL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// isolated workspace 用に mounts を記録しつつ DirectSandbox を返す factory。
 struct RecordingSandboxFactory {
-    #[expect(dead_code)]
     mounts: Arc<Mutex<Vec<IsolatedMounts>>>,
 }
 
@@ -139,7 +138,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// --demo と同じ構成 (DemoScriptModel + FixtureDeliveryAdapter::scripted_happy_path)
 /// の headless workbench fixture。
 struct DemoFixture {
-    runtime: tokio::runtime::Runtime,
+    _runtime: tokio::runtime::Runtime,
     _temp: tempfile::TempDir,
     repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
@@ -197,7 +196,7 @@ impl DemoFixture {
         activate_panel(&mut harness, "goal-main");
         harness.run();
         Self {
-            runtime: rt,
+            _runtime: rt,
             _temp: temp,
             repaint_rx,
             harness,

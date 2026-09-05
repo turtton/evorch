@@ -210,7 +210,7 @@ fn merge_view_updates_from_loop_event() {
     // When: the loop publishes a merge view for PR #65 with pending CI
     harness
         .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     harness.run();
 
     // Then: the PR info, badges, diff summary, binding head/token, and gate
@@ -235,7 +235,7 @@ fn approve_click_issues_exactly_one_command_even_if_clicked_twice() {
     activate_panel(&mut harness, "merge-main");
     harness
         .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     harness.run();
 
     // When: Approve is clicked twice across two separate frames
@@ -261,7 +261,7 @@ fn reject_without_reason_is_blocked() {
     activate_panel(&mut harness, "merge-main");
     harness
         .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     harness.run();
 
     // When: the disabled Reject button is clicked anyway

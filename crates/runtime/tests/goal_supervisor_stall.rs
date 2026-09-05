@@ -39,12 +39,14 @@ impl Fixture {
             executor,
             Arc::new(ScriptedModel::gated([], Arc::new(Notify::new()))),
         );
-        let mut settings = OrchestrationSettings::default();
-        settings.stall_after_secs = 0;
-        settings.stall_check_secs = 1;
-        settings.in_flight_tool_multiplier = 3;
-        settings.repeated_error_threshold = 3;
-        settings.max_nudges = max_nudges;
+        let settings = OrchestrationSettings {
+            stall_after_secs: 0,
+            stall_check_secs: 1,
+            in_flight_tool_multiplier: 3,
+            repeated_error_threshold: 3,
+            max_nudges,
+            ..OrchestrationSettings::default()
+        };
         let handle = GoalSupervisor::spawn(
             runtime.clone(),
             Arc::clone(&bus),
@@ -149,9 +151,11 @@ fn in_flight_tool_gets_multiplied_window() {
     let mut track = ProgressTrack::new(AgentRunPhase::Running);
     track.last_progress = now;
     track.tool_in_flight = Some(now);
-    let mut settings = OrchestrationSettings::default();
-    settings.stall_after_secs = 10;
-    settings.in_flight_tool_multiplier = 3;
+    let settings = OrchestrationSettings {
+        stall_after_secs: 10,
+        in_flight_tool_multiplier: 3,
+        ..OrchestrationSettings::default()
+    };
     assert_eq!(
         judge(&track, now + std::time::Duration::from_secs(20), &settings),
         None

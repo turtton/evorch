@@ -236,7 +236,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
             LoopEvent::GoalAccepted { goal_id, .. } => self.goal_form.last_accepted = Some(goal_id),
-            LoopEvent::MergeStateUpdated(view) => self.merge.view = view,
+            LoopEvent::MergeStateUpdated(view) => self.merge.view = *view,
             LoopEvent::MergeResolved { decision, .. } => {
                 self.merge.view.resolution = Some(decision)
             }

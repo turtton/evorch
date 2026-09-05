@@ -163,7 +163,7 @@ fn complete_requires_closeout_stage_and_success() {
 
 #[test]
 fn replay_rebuilds_identical_snapshot() {
-    let events = vec![
+    let events = [
         created(),
         OrchestratorEvent::RunAttached {
             goal_id: "goal-1".into(),

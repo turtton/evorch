@@ -568,7 +568,7 @@ fn v02_end_to_end_chained_scenario() {
     fixture
         .workbench
         .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     fixture
         .workbench
         .state_mut()
@@ -787,7 +787,7 @@ fn operator_error_paths_stay_explicit() {
         state
             .create_thread("error path thread")
             .expect("thread created");
-        state.apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        state.apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     }
     workbench.state_mut().decide_merge(MergeDecision::Reject {
         reason: String::new(),

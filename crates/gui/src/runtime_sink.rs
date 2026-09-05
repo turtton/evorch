@@ -443,10 +443,10 @@ mod tests {
                 Instant::now() < deadline,
                 "goal {goal_id} did not reach {expected:?} within 5s"
             );
-            if let Some(snapshot) = supervisor.snapshot(goal_id) {
-                if snapshot.state == expected {
-                    return;
-                }
+            if let Some(snapshot) = supervisor.snapshot(goal_id)
+                && snapshot.state == expected
+            {
+                return;
             }
             std::thread::sleep(Duration::from_millis(50));
         }

@@ -86,7 +86,7 @@ impl SupervisorHandle {
         let goal_id = format!("goal-{wall_ms}-{sequence}");
         let _ = self.tx.send(SupervisorCommand::Create {
             goal_id: goal_id.clone(),
-            spec,
+            spec: Box::new(spec),
             root_run,
         });
         goal_id
@@ -162,7 +162,10 @@ impl SupervisorHandle {
             },
         );
         self.tx
-            .send(SupervisorCommand::Recover { snapshot, run })
+            .send(SupervisorCommand::Recover {
+                snapshot: Box::new(snapshot),
+                run,
+            })
             .map_err(|_| SupervisorError::Closed)?;
         Ok(run)
     }
@@ -255,7 +258,7 @@ enum GoalCommand {
 enum SupervisorCommand {
     Create {
         goal_id: String,
-        spec: GoalSpec,
+        spec: Box<GoalSpec>,
         root_run: RunId,
     },
     Goal {
@@ -268,7 +271,7 @@ enum SupervisorCommand {
     },
     Adopt(Vec<(GoalSnapshot, Vec<AgentMessage>)>),
     Recover {
-        snapshot: GoalSnapshot,
+        snapshot: Box<GoalSnapshot>,
         run: RunId,
     },
     RetryDispatch {
@@ -324,12 +327,12 @@ impl SupervisorActor {
                 goal_id,
                 spec,
                 root_run,
-            } => self.create(goal_id, spec, root_run).await,
+            } => self.create(goal_id, *spec, root_run).await,
             SupervisorCommand::Goal { goal_id, command } => {
                 self.change_goal(&goal_id, command).await
             }
             SupervisorCommand::Adopt(goals) => self.adopt(goals),
-            SupervisorCommand::Recover { snapshot, run } => self.attach_recovery(snapshot, run),
+            SupervisorCommand::Recover { snapshot, run } => self.attach_recovery(*snapshot, run),
             SupervisorCommand::DecideMerge { token_id, decision } => {
                 self.decide_merge(token_id, decision).await;
             }
@@ -767,15 +770,14 @@ impl SupervisorActor {
         let Some(goal_id) = orchestrator_goal_id(&event).map(str::to_string) else {
             return;
         };
-        if !self.event_is_applied(&goal_id, &event) {
-            if let Some(ledger) = self
+        if !self.event_is_applied(&goal_id, &event)
+            && let Some(ledger) = self
                 .ledgers
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get_mut(&goal_id)
-            {
-                let _ = ledger.apply(&event);
-            }
+        {
+            let _ = ledger.apply(&event);
         }
         if let OrchestratorEvent::RunAttached { run_id, .. } = &event {
             self.progress
@@ -1452,14 +1454,14 @@ impl SupervisorActor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter_map(|(goal_id, ledger)| {
+            .filter(|(_, ledger)| {
                 ledger
                     .snapshot()
                     .attached_runs
                     .iter()
                     .any(|attached| attached.run_id == run_id)
-                    .then(|| goal_id.clone())
             })
+            .map(|(goal_id, _)| goal_id.clone())
             .collect()
     }
 
