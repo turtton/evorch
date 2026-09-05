@@ -1466,11 +1466,12 @@ impl SupervisorActor {
     }
 
     fn pipeline_busy(&self, goal_id: &str) -> bool {
+        // Implement/Review/Repair の非終端 run を配信 pipeline 稼働中とみなす不変条件。
         self.snapshot(goal_id).is_some_and(|snapshot| {
             snapshot.attached_runs.iter().any(|attached| {
                 matches!(
                     attached.purpose,
-                    RunPurpose::Review { .. } | RunPurpose::Repair { .. }
+                    RunPurpose::Implement | RunPurpose::Review { .. } | RunPurpose::Repair { .. }
                 ) && !self.terminal_runs.contains(&attached.run_id)
             })
         })

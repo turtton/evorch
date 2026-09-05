@@ -306,3 +306,62 @@ async fn dispatch_deferred_while_pipeline_busy_then_fires_once() {
         1
     );
 }
+
+#[tokio::test]
+async fn dispatch_stays_deferred_while_implement_worker_is_alive() {
+    let fixture = Fixture::new(8).await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(fixture.root, Role::Worker, "IMPL", RunConfig::default())
+        .expect("implement child");
+    fixture.bus.emit(Event::new(OrchestratorEvent::RunAttached {
+        goal_id: fixture.goal_id.clone(),
+        run_id: child.to_string(),
+        parent_run_id: Some(fixture.root.to_string()),
+        role: "worker".into(),
+        purpose: RunPurpose::Implement,
+    }));
+    fixture.settle().await;
+
+    fixture.terminal(fixture.root);
+    fixture.settle().await;
+    assert!(fixture.orchestrator_events().iter().any(|event| matches!(
+        event,
+        OrchestratorEvent::ContinuationSuppressed {
+            reason: SuppressReason::PipelineBusy,
+            ..
+        }
+    )));
+
+    // 別の run 状態変化で再チェックが走っても、Implement worker 稼働中は
+    // dispatch されない (実バイナリで観測された cascade 回帰)。
+    fixture.bus.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: child.to_string(),
+        from: AgentRunPhase::Pending,
+        to: AgentRunPhase::Running,
+        reason: None,
+    }));
+    fixture.settle().await;
+    assert_eq!(
+        fixture
+            .orchestrator_events()
+            .iter()
+            .filter(|event| matches!(event, OrchestratorEvent::ContinuationDispatched { .. }))
+            .count(),
+        0
+    );
+
+    fixture.terminal(child);
+    fixture.settle().await;
+    assert_eq!(
+        fixture
+            .orchestrator_events()
+            .iter()
+            .filter(|event| matches!(
+                event,
+                OrchestratorEvent::ContinuationDispatched { epoch: 1, .. }
+            ))
+            .count(),
+        1
+    );
+}
