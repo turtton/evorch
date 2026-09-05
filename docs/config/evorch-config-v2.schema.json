@@ -511,6 +511,11 @@
       "description": "プロバイダプロファイル 1 件分の設定。\n\n[`super::Config`] の `providers` マップのキーがプロファイル名になります。",
       "type": "object",
       "properties": {
+        "api_key_env": {
+          "description": "`credential = { type = \"env\", var = \"...\" }` の糖衣構文。`credential` とは併用できない。",
+          "type": "string",
+          "minLength": 1
+        },
         "api_protocol": {
           "description": "通信に用いる API プロトコル。",
           "$ref": "#/$defs/ApiProtocolConfig",
@@ -548,6 +553,10 @@
           "description": "プロバイダの種別。",
           "$ref": "#/$defs/ProviderTypeConfig",
           "default": "anthropic"
+        },
+        "type": {
+          "description": "`provider_type` のエイリアス。",
+          "$ref": "#/$defs/ProviderTypeConfig"
         }
       },
       "additionalProperties": false
