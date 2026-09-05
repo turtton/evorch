@@ -49,6 +49,70 @@ fn demo_sidebar_rejects_missing_root() {
     assert!(matches!(error, gui::fixture::FixtureError::MissingRoot(_)));
 }
 
+#[test]
+fn demo_state_has_no_duplicate_interactive_labels() {
+    // Given: labels whose duplication would panic kittest single-node queries.
+    const LABELS: &[&str] = &[
+        "Add project",
+        "New thread",
+        "Go to Projects",
+        "Start a thread",
+        "Go to Goal",
+        "Approve",
+        "Reject",
+        "Submit",
+        "Open default panes",
+        "Working tree",
+        "Branch vs main",
+        "← Thread",
+        "Projects",
+        "Conversation",
+        "Agents",
+        "Goal",
+        "Merge",
+        "no pull request",
+    ];
+    const RIGHT_TABS: &[&str] = &[
+        "agents-main",
+        "goal-main",
+        "merge-main",
+        "diff-main",
+        "terminal-main",
+    ];
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let demo = populate(
+        WorkbenchState::new(DemoSource(demo_runs()), &UiSettings::default())
+            .expect("default state builds"),
+        demo_sidebar(dir.path()).expect("demo sidebar"),
+    );
+    let empty = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds");
+
+    // When: each state renders with every right-area tab active in turn.
+    for state in [empty, demo] {
+        let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
+        workbench.run();
+        assert_unique_labels(&workbench, LABELS);
+        for tab in RIGHT_TABS {
+            activate_tab(&mut workbench, tab);
+            workbench.run();
+            // Then: no label binds to two or more nodes in any frame.
+            assert_unique_labels(&workbench, LABELS);
+        }
+    }
+}
+
+fn assert_unique_labels(workbench: &HeadlessWorkbench<DemoSource>, labels: &[&str]) {
+    for label in labels {
+        let count = workbench.count_labels(label);
+        assert!(
+            count <= 1,
+            "label {label:?} matched {count} nodes in one frame"
+        );
+    }
+}
+
 fn activate_tab(workbench: &mut HeadlessWorkbench<DemoSource>, panel_id: &str) {
     let path = workbench
         .state()
