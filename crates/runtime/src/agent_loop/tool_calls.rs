@@ -1,12 +1,18 @@
+// allow: SIZE_OK — tool-call 実行・terminal 網羅 match・標準ツール定義・その unit
+// tests が一体の契約 (dispatch seam) を構成する。250 超過の分割 (tool_specs 抽出)
+// は後続タスク候補。本タスクの変更前は 249 行で境界線上にあった。
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use event_bus::{Event, LifecycleEvent};
 use providers::ToolSpec;
 use sandbox::{ApprovalGate, ApprovalOutcome, PolicyDecision};
 use serde_json::Value;
 use tools::{ToolExecutionContext, ToolResult};
 
 use super::LoopState;
+use crate::escalation::detector::ToolObservation;
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
@@ -43,12 +49,20 @@ impl LoopState {
                 let dispatch = meta::dispatch(self, &name, input).await;
                 self.context.push_tool_result(id, dispatch.result);
                 self.publish_message_count();
-                if let Some(result) = dispatch.finish {
-                    self.push_final_result(&result);
-                    self.finish_success();
-                    return false;
+                match dispatch.terminal {
+                    meta::Terminal::Continue => continue,
+                    meta::Terminal::Finish(result) => {
+                        self.push_final_result(&result);
+                        self.finish_success();
+                        return false;
+                    }
+                    meta::Terminal::Escalate(memo) => {
+                        // 終端指示を返した時点で残りのバッチ tool call は
+                        // 実行しない (新規 tool call 受付の停止)。
+                        self.finish_escalated(*memo);
+                        return false;
+                    }
                 }
-                continue;
             } else {
                 match self.gate_network_tool(&name, &id).await {
                     NetworkGate::Proceed => {}
@@ -77,6 +91,28 @@ impl LoopState {
                     Ok(result) => result,
                     Err(error) => ToolResult::error(error.to_string()),
                 };
+                // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
+                // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
+                let observation_path = if name == "edit" {
+                    rule_target.as_deref().map(PathBuf::from)
+                } else {
+                    None
+                };
+                if let Some(trigger) = self.escalation_detector.observe(
+                    &ToolObservation {
+                        tool: name.as_str(),
+                        path: observation_path,
+                        is_error: result.is_error,
+                    },
+                    &self.shared.escalation,
+                ) {
+                    self.shared
+                        .bus
+                        .emit(Event::new(LifecycleEvent::EscalationProposed {
+                            run_id: self.caller_run_id().to_string(),
+                            trigger,
+                        }));
+                }
                 if !result.is_error
                     && let Some(target) = rule_target
                 {
@@ -280,6 +316,18 @@ mod tests {
         let specs = visible_tool_specs(standard_tool_specs(), &policy, true);
 
         assert!(names(&specs).contains(&"skill_load"));
+    }
+
+    // Given: Worker のポリシー
+    // When: visible_tool_specs を呼ぶ
+    // Then: escalate がモデルに見える
+    #[test]
+    fn visible_tool_specs_exposes_escalate_for_worker() {
+        let policy = ExecutionPolicy::for_role(Role::Worker);
+
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+
+        assert!(names(&specs).contains(&"escalate"));
     }
 
     // Given: Worker のポリシーと skills 未設定

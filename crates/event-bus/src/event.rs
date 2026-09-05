@@ -169,6 +169,44 @@ pub enum RoutingSource {
     },
 }
 
+/// Direct run から Orchestrator へ引き継ぐメモの要約。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscalationMemoSummary {
+    /// 元の依頼内容。
+    pub original_request: String,
+    /// 昇格が必要になった理由。
+    pub escalation_reason: String,
+    /// Direct run が変更したファイル。
+    pub files_touched: Vec<String>,
+    /// Direct run を妨げた阻害要因。
+    pub blockers: Vec<String>,
+    /// 次に推奨する対応。
+    pub suggested_next: String,
+}
+
+/// runtime の停滞検知が観測した昇格提案のトリガー。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationTrigger {
+    /// 編集失敗が連続してしきい値を超えた。
+    ConsecutiveEditFailures {
+        /// 連続した編集失敗の回数。
+        count: u32,
+    },
+    /// 同じファイルの書き換えが繰り返された。
+    RepeatedFileRewrite {
+        /// 繰り返し書き換えられたファイルのパス。
+        path: String,
+        /// 書き換え回数。
+        count: u32,
+    },
+    /// ツール呼び出し回数がしきい値を超えた。
+    ToolCallThreshold {
+        /// ツール呼び出し回数。
+        count: u32,
+    },
+}
+
 /// セッションおよびタスクのライフサイクルに関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
@@ -249,6 +287,22 @@ pub enum LifecycleEvent {
         reason: String,
         /// 判定の出所。
         source: RoutingSource,
+    },
+    /// Direct run 昇格時に source run、memo 概要、新 run を通知する。
+    EscalationRequested {
+        /// 昇格元の Direct run ID。
+        source_run_id: String,
+        /// 昇格先として作成された run ID。
+        new_run_id: String,
+        /// 昇格時に引き継ぐメモの要約。
+        summary: EscalationMemoSummary,
+    },
+    /// runtime 停滞検知による観測専用の昇格提案。自動昇格は行わない。
+    EscalationProposed {
+        /// 昇格を提案された run ID。
+        run_id: String,
+        /// 昇格提案を発火した観測トリガー。
+        trigger: EscalationTrigger,
     },
 }
 
@@ -825,6 +879,48 @@ mod tests {
                     source: RoutingSource::Model {
                         model: "kimi-k3".into(),
                     },
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::EscalationRequested {
+                    source_run_id: "direct-run-1".into(),
+                    new_run_id: "orchestrator-run-1".into(),
+                    summary: EscalationMemoSummary {
+                        original_request: "Implement feature".into(),
+                        escalation_reason: "Direct run needs orchestration".into(),
+                        files_touched: vec!["src/main.rs".into()],
+                        blockers: vec!["Repeated edit failure".into()],
+                        suggested_next: "Review the implementation plan".into(),
+                    },
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::EscalationProposed {
+                    run_id: "direct-run-1".into(),
+                    trigger: EscalationTrigger::ConsecutiveEditFailures { count: 3 },
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::EscalationProposed {
+                    run_id: "direct-run-1".into(),
+                    trigger: EscalationTrigger::RepeatedFileRewrite {
+                        path: "src/main.rs".into(),
+                        count: 4,
+                    },
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::EscalationProposed {
+                    run_id: "direct-run-1".into(),
+                    trigger: EscalationTrigger::ToolCallThreshold { count: 20 },
                 }
                 .into(),
             ),

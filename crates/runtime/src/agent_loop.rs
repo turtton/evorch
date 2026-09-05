@@ -19,6 +19,8 @@ use crate::compaction;
 use crate::compaction::policy::{
     CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
 };
+use crate::escalation::detector::EscalationDetector;
+use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
 use crate::rules::{self, RulesSession, RulesSource};
@@ -38,6 +40,16 @@ pub(crate) struct RunTask {
     pub(crate) config: RunConfig,
     pub(crate) parent: Option<RunId>,
     pub(crate) mailbox: Arc<RunMailbox>,
+    pub(crate) handoff: Option<RunHandoff>,
+}
+
+/// 終端済み run から新規 root run へ排他的に移す workspace 所有権。
+///
+/// `OwnedWorktree` は clone せず値で移動するため、移譲元と移譲先が同時に cleanup
+/// できない。Shared mode では移す worktree がないため `worktree` は `None` となる。
+pub(crate) struct RunHandoff {
+    pub(crate) source_run_id: RunId,
+    pub(crate) worktree: Option<OwnedWorktree>,
 }
 
 pub(crate) struct LoopChannels {
@@ -63,6 +75,7 @@ pub(crate) struct LoopShared {
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
     pub(crate) compaction_configured: bool,
+    pub(crate) escalation: EscalationSettings,
     pub(crate) runtime: Weak<Shared>,
 }
 
@@ -78,6 +91,8 @@ pub(crate) struct LoopState {
     pub(crate) compaction: CompactionLoopState,
     pub(crate) last_usage: Option<Usage>,
     resumed: bool,
+    pending_escalation: Option<EscalationMemo>,
+    escalation_detector: EscalationDetector,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
@@ -98,6 +113,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         compaction: CompactionLoopState::default(),
         last_usage: None,
         resumed: false,
+        pending_escalation: None,
+        escalation_detector: EscalationDetector::default(),
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
@@ -116,7 +133,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
                 state.finish_error("workspace isolation requires workspace context".to_string());
                 return;
             };
-            match setup_isolated_workspace(workspace, &runtime_shared, &state).await {
+            let adopted = state
+                .task
+                .handoff
+                .as_mut()
+                .and_then(|handoff| handoff.worktree.take());
+            let setup = match adopted {
+                Some(owned) => {
+                    attach_adopted_workspace(workspace, &runtime_shared, &state, owned).await
+                }
+                None => setup_isolated_workspace(workspace, &runtime_shared, &state).await,
+            };
+            match setup {
                 Ok((owned, executor)) => {
                     state.shared.executor = executor;
                     Some(owned)
@@ -160,7 +188,13 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
     }
     state.execute().await;
     // cancel() は cooperative で task abort しない契約への依存。JoinHandle::abort 導入は禁止。
-    cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
+    match state.take_pending_escalation() {
+        Some(memo) => {
+            crate::escalation::handoff::complete(&shared, &state, memo, owned_worktree.take())
+                .await;
+        }
+        None => cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await,
+    }
 }
 
 async fn setup_isolated_workspace(
@@ -168,6 +202,21 @@ async fn setup_isolated_workspace(
     runtime_shared: &Arc<Shared>,
     state: &LoopState,
 ) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
+    let owned = create_worktree(workspace, runtime_shared, state).await?;
+    match attach_worktree_executor(workspace, runtime_shared, state, &owned).await {
+        Ok(executor) => Ok((owned, executor)),
+        Err(reason) => {
+            cleanup_failed_setup(runtime_shared, state.task.run_id, owned).await;
+            Err(reason)
+        }
+    }
+}
+
+async fn create_worktree(
+    workspace: &WorkspaceContext,
+    runtime_shared: &Arc<Shared>,
+    state: &LoopState,
+) -> Result<OwnedWorktree, String> {
     let run_id = state.task.run_id;
     // inspection は sandbox build より先に登録する。factory.build の完了を観測してから
     // inspect する利用者が Shared fallback を読まないようにするため (issue #71 CI 失敗の
@@ -193,52 +242,85 @@ async fn setup_isolated_workspace(
         );
     let branch_override = state.task.config.workspace_branch.clone();
     let manager = workspace.manager.clone();
-    let owned = match tokio::task::spawn_blocking(move || match branch_override {
+    match tokio::task::spawn_blocking(move || match branch_override {
         Some(branch) => manager.create_on_branch(run_id, &branch),
         None => manager.create(run_id),
     })
     .await
     {
-        Ok(Ok(owned)) => owned,
+        Ok(Ok(owned)) => Ok(owned),
         Ok(Err(error)) => {
             remove_workspace_inspection(runtime_shared, run_id);
-            return Err(format!("workspace setup failed: {error}"));
+            Err(format!("workspace setup failed: {error}"))
         }
         Err(error) => {
             remove_workspace_inspection(runtime_shared, run_id);
-            return Err(format!("workspace setup failed: {error}"));
+            Err(format!("workspace setup failed: {error}"))
         }
-    };
-    let manager = workspace.manager.clone();
-    let git_common_dir = match tokio::task::spawn_blocking(move || manager.git_common_dir()).await {
-        Ok(Ok(path)) => path,
-        Ok(Err(error)) => {
-            cleanup_failed_setup(runtime_shared, run_id, owned).await;
-            return Err(format!("workspace setup failed: {error}"));
-        }
-        Err(error) => {
-            cleanup_failed_setup(runtime_shared, run_id, owned).await;
-            return Err(format!("workspace setup failed: {error}"));
-        }
-    };
-    let mounts = isolated_mounts(&owned, &git_common_dir);
-    let sandbox = match workspace.factory.build(&state.policy, &mounts) {
-        Ok(sandbox) => sandbox,
-        Err(error) => {
-            cleanup_failed_setup(runtime_shared, run_id, owned).await;
-            return Err(format!("workspace sandbox setup failed: {error}"));
-        }
-    };
-    let executor = match ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
-        .with_web_tools()
+    }
+}
+
+async fn attach_adopted_workspace(
+    workspace: &WorkspaceContext,
+    runtime_shared: &Arc<Shared>,
+    state: &LoopState,
+    owned: OwnedWorktree,
+) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
+    let run_id = state.task.run_id;
+    let source_run_id = state
+        .task
+        .handoff
+        .as_ref()
+        .map(|handoff| handoff.source_run_id)
+        .ok_or_else(|| "adopted workspace requires handoff context".to_string())?;
     {
-        Ok(executor) => Arc::new(executor),
-        Err(error) => {
-            cleanup_failed_setup(runtime_shared, run_id, owned).await;
-            return Err(format!("workspace web tool setup failed: {error}"));
+        let mut workspaces = runtime_shared
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        workspaces.insert(
+            run_id,
+            WorkspaceInspection {
+                mode: WorkspaceMode::Isolated,
+                branch: Some(owned.branch.clone()),
+                worktree_path: Some(owned.path.clone()),
+                merge_mode: state.task.config.merge_mode,
+            },
+        );
+        if let Some(source) = workspaces.get_mut(&source_run_id) {
+            source.worktree_path = None;
         }
-    };
-    Ok((owned, executor))
+    }
+
+    match attach_worktree_executor(workspace, runtime_shared, state, &owned).await {
+        Ok(executor) => Ok((owned, executor)),
+        Err(reason) => {
+            cleanup_failed_setup(runtime_shared, run_id, owned).await;
+            Err(reason)
+        }
+    }
+}
+
+async fn attach_worktree_executor(
+    workspace: &WorkspaceContext,
+    runtime_shared: &Arc<Shared>,
+    state: &LoopState,
+    owned: &OwnedWorktree,
+) -> Result<Arc<ToolExecutor>, String> {
+    let manager = workspace.manager.clone();
+    let git_common_dir = tokio::task::spawn_blocking(move || manager.git_common_dir())
+        .await
+        .map_err(|error| format!("workspace setup failed: {error}"))?
+        .map_err(|error| format!("workspace setup failed: {error}"))?;
+    let mounts = isolated_mounts(owned, &git_common_dir);
+    let sandbox = workspace
+        .factory
+        .build(&state.policy, &mounts)
+        .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
+    ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
+        .with_web_tools()
+        .map(Arc::new)
+        .map_err(|error| format!("workspace web tool setup failed: {error}"))
 }
 
 fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {
@@ -254,7 +336,11 @@ async fn cleanup_failed_setup(runtime_shared: &Arc<Shared>, run_id: RunId, owned
     let _ = tokio::task::spawn_blocking(move || owned.cleanup()).await;
 }
 
-async fn cleanup_worktree(shared: &LoopShared, run_id: RunId, owned: Option<OwnedWorktree>) {
+pub(crate) async fn cleanup_worktree(
+    shared: &LoopShared,
+    run_id: RunId,
+    owned: Option<OwnedWorktree>,
+) {
     let Some(owned) = owned else {
         return;
     };
@@ -376,6 +462,14 @@ impl LoopState {
     /// メタ操作の呼び出し元 (このループの run) の RunId を返す。
     pub(crate) fn caller_run_id(&self) -> RunId {
         self.task.run_id
+    }
+
+    pub(crate) fn run_config(&self) -> &RunConfig {
+        &self.task.config
+    }
+
+    pub(crate) fn phase(&self) -> AgentRunPhase {
+        *self.channels.phase_tx.borrow()
     }
 
     pub(crate) fn run_role(&self) -> Role {
@@ -626,6 +720,32 @@ impl LoopState {
                     task_id: self.task.run_id.to_string(),
                 }));
         }
+    }
+
+    /// エスカレーションで run を終端させる。
+    ///
+    /// [`LoopState::finish_success`] と異なり最終テキストを `result_tx` へ公開しない。
+    /// 昇格 run の成果物は自然文の final result ではなく [`EscalationMemo`] であり、
+    /// 公開すべき final text を持たないためである。メモは `pending_escalation` に
+    /// 退避され、引き継ぎ側 (handoff タスク) が [`LoopState::take_pending_escalation`]
+    /// で回収する。
+    pub(crate) fn finish_escalated(&mut self, memo: EscalationMemo) {
+        self.pending_escalation = Some(memo);
+        if self
+            .transition(AgentRunPhase::Done, Some("escalated".to_string()))
+            .is_ok()
+        {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::BackgroundTaskCompleted {
+                    task_id: self.task.run_id.to_string(),
+                }));
+        }
+    }
+
+    /// 記録済みのエスカレーションメモを取り出す (取り出し後は `None`)。
+    pub(crate) fn take_pending_escalation(&mut self) -> Option<EscalationMemo> {
+        self.pending_escalation.take()
     }
 
     /// 最終 assistant メッセージの Text ブロックを連結して返す。

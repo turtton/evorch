@@ -16,9 +16,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
-use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
+use crate::agent_loop::{LoopChannels, LoopShared, RunHandoff, RunTask, run_agent};
 use crate::compaction::policy::CompactionSettings;
 use crate::entry_routing::EntryRouter;
+use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::mailbox::{PushError, RunMailbox};
 use crate::orchestration::GoalGate;
 use crate::prompt::{
@@ -27,7 +28,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
-use crate::workspace::{Project, WorktreeManager};
+use crate::workspace::{OwnedWorktree, Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
@@ -52,6 +53,8 @@ pub(crate) struct Shared {
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
     pub(crate) compaction_configured: AtomicBool,
+    pub(crate) escalation_settings: OnceLock<EscalationSettings>,
+    pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
     /// goal gate (finish 判定 seam、issue #73 T1.3)。未設定なら finish は
     /// legacy の即時受理のまま残る (T3.1 が `meta::finish` から参照する)。
     pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
@@ -98,6 +101,7 @@ struct RunEntry {
     model: String,
     config: RunConfig,
     parent: Option<RunId>,
+    escalated_from: Option<RunId>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -138,6 +142,8 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                escalation_settings: OnceLock::new(),
+                escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
@@ -158,6 +164,14 @@ impl AgentRuntime {
         self.shared
             .compaction_configured
             .store(true, Ordering::Release);
+        self
+    }
+
+    /// エスカレーション検出設定を接続したランタイムを返す。
+    ///
+    /// 設定済みの場合は 2 回目以降の呼び出しを無視する先勝ち契約である。
+    pub fn with_escalation_settings(self, settings: EscalationSettings) -> Self {
+        let _ = self.shared.escalation_settings.set(settings);
         self
     }
 
@@ -338,6 +352,8 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                escalation_settings: OnceLock::new(),
+                escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
@@ -368,6 +384,24 @@ impl AgentRuntime {
         if let Some(gate) = self.goal_gate() {
             gate.attach_child(parent, child, role);
         }
+    }
+
+    pub(crate) fn record_escalation_memo(&self, run_id: RunId, memo: EscalationMemo) {
+        self.shared
+            .escalations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id, memo);
+    }
+
+    /// 指定 run に記録されたエスカレーションメモを返す。
+    pub fn escalation_memo(&self, run_id: RunId) -> Option<EscalationMemo> {
+        self.shared
+            .escalations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .cloned()
     }
 
     /// entry pre-routing 判定器を返す。
@@ -410,7 +444,19 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> RunId {
+        self.spawn_run_with_handoff(parent, role, prompt, config, None)
+    }
+
+    fn spawn_run_with_handoff(
+        &self,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+        handoff: Option<RunHandoff>,
+    ) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         let name = config
             .name
             .clone()
@@ -433,6 +479,7 @@ impl AgentRuntime {
             config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),
+            handoff,
         };
         let channels = LoopChannels {
             phase_tx,
@@ -452,6 +499,7 @@ impl AgentRuntime {
                 model,
                 config: config.clone(),
                 parent,
+                escalated_from,
                 phase_tx: phase_tx_entry,
                 phase_rx,
                 message_count_rx,
@@ -491,6 +539,43 @@ impl AgentRuntime {
             entry._join = Some(join);
         }
         run_id
+    }
+
+    pub(crate) fn spawn_escalated_root(
+        &self,
+        memo: EscalationMemo,
+        source_config: &RunConfig,
+        worktree: Option<OwnedWorktree>,
+    ) -> RunId {
+        let config = RunConfig {
+            interactive: false,
+            name: Some("escalation-orchestrator".to_string()),
+            category: None,
+            load_skills: Vec::new(),
+            workspace_mode: source_config.workspace_mode,
+            merge_mode: source_config.merge_mode,
+            network_access: Default::default(),
+            workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
+        };
+        let source_run_id = memo.source_run_id;
+        self.spawn_run_with_handoff(
+            None,
+            Role::Orchestrator,
+            crate::escalation::prompt::render_escalation_prompt(&memo),
+            config,
+            Some(RunHandoff {
+                source_run_id,
+                worktree,
+            }),
+        )
+    }
+
+    /// エスカレーションで生成された run の移譲元を返す。
+    ///
+    /// # Errors
+    /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn escalation_source(&self, run_id: RunId) -> Result<Option<RunId>, RuntimeError> {
+        Ok(self.entry(run_id)?.escalated_from)
     }
 
     /// 対話待機中の run へユーザーメッセージを送る。
@@ -967,6 +1052,11 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         rules: shared.rules.get().cloned(),
         compaction: shared.compaction.get().cloned().unwrap_or_default(),
         compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
+        escalation: shared
+            .escalation_settings
+            .get()
+            .copied()
+            .unwrap_or_default(),
         runtime: Arc::downgrade(&shared),
     })
 }

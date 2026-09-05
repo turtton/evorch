@@ -22,6 +22,7 @@ pub const META_OPS: &[&str] = &[
     "send",
     "wait_reply",
     "inbox",
+    "escalate",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -172,6 +173,29 @@ mod tests {
         ));
     }
 
+    // Given: Worker と各非 Worker ロールのポリシー
+    // When: escalate を authorize する
+    // Then: Worker のみ許可され、他ロールは CapabilityDenied になる
+    #[test]
+    fn worker_authorizes_escalate_and_other_roles_deny_it() {
+        assert_eq!(
+            ExecutionPolicy::for_role(Role::Worker).authorize("escalate"),
+            Ok(())
+        );
+
+        for role in [
+            Role::Orchestrator,
+            Role::Explorer,
+            Role::Reviewer,
+            Role::Librarian,
+        ] {
+            assert!(matches!(
+                ExecutionPolicy::for_role(role).authorize("escalate"),
+                Err(RuntimeError::CapabilityDenied { .. })
+            ));
+        }
+    }
+
     // Given: Worker のポリシーと read/edit/shell/delegate のツール定義
     // When: filter_tool_specs に渡す
     // Then: 境界内 3 つ (read/edit/shell) が残り、境界外の delegate は除去される
@@ -188,10 +212,28 @@ mod tests {
 
     // Given: META_OPS の正規集合
     // When: is_meta_op を全要素と境界外の名前に適用する
-    // Then: 13 操作すべて true、通常ツール・空文字は false
+    // Then: 14 操作すべて true、通常ツール・空文字は false
     #[test]
     fn meta_ops_membership_is_exhaustive() {
-        assert_eq!(META_OPS.len(), 13);
+        let expected = [
+            "delegate",
+            "delegate_background",
+            "send_message",
+            "skill_load",
+            "wait",
+            "cancel",
+            "list_agents",
+            "inspect_agent",
+            "compact",
+            "finish",
+            "send",
+            "wait_reply",
+            "inbox",
+            "escalate",
+        ];
+
+        assert_eq!(META_OPS.len(), 14);
+        assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");
         }

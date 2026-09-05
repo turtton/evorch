@@ -20,6 +20,7 @@ pub(crate) mod compaction;
 pub mod context;
 pub mod entry_routing;
 pub mod error;
+pub mod escalation;
 pub mod mailbox;
 mod meta;
 pub mod model;
@@ -40,6 +41,7 @@ pub use entry_routing::{
     UncertainReason, classify_local,
 };
 pub use error::RuntimeError;
+pub use escalation::{EscalationMemo, EscalationSettings};
 pub use event_bus::{AgentRunPhase, RoutingSource};
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
 pub use agents::Role;

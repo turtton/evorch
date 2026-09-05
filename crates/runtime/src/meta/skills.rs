@@ -58,6 +58,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::skill_load_with_registry;
+    use crate::meta::Terminal;
     use crate::skill::{SkillRegistry, SkillScope, discover_skills};
 
     /// 本文と references/note.md を持つ `demo` skill 1 件のレジストリを組み立てる。
@@ -82,7 +83,7 @@ mod tests {
 
     // Given: demo skill を持つレジストリ
     // When:  {"name":"demo"} で skill_load を呼ぶ (stage 2)
-    // Then:  frontmatter を含まない本文が success で返り finish は立たない
+    // Then:  frontmatter を含まない本文が success で返り run は継続指示になる
     #[test]
     fn skill_load_returns_body_without_frontmatter() {
         let (registry, _root) = demo_registry();
@@ -91,7 +92,7 @@ mod tests {
 
         assert!(!dispatch.result.is_error);
         assert_eq!(dispatch.result.content, "DEMO BODY SENTINEL\n");
-        assert!(dispatch.finish.is_none());
+        assert!(matches!(dispatch.terminal, Terminal::Continue));
     }
 
     // Given: references/note.md を持つ demo skill
