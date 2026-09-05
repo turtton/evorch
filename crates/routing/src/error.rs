@@ -22,4 +22,23 @@ pub enum RoutingError {
         /// 未対応のプロバイダ種別 (設定上の識別子)。
         provider_type: String,
     },
+    /// プロバイダの認証環境変数が設定されていない。
+    #[error("environment variable `{var}` for provider `{profile}` is unset")]
+    MissingCredential {
+        /// 対象プロファイル名。
+        profile: String,
+        /// 未設定の環境変数名。
+        var: String,
+    },
+    /// プロバイダの認証環境変数が空である。
+    #[error("environment variable `{var}` for provider `{profile}` is empty")]
+    EmptyCredential {
+        /// 対象プロファイル名。
+        profile: String,
+        /// 空の環境変数名。
+        var: String,
+    },
+    /// 構成対象のプロバイダが一件もない。
+    #[error("no providers configured")]
+    NoProviders,
 }
