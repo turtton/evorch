@@ -17,15 +17,32 @@
         intent-system = intent-system-flake.packages."${system}".intent-cli;
       in
       {
-        devShells.default = pkgs.mkShell { packages = [
-          pkgs.bashInteractive
-          pkgs.rustc
-          pkgs.cargo
-          pkgs.rustfmt
-          pkgs.clippy
-          pkgs.rust-analyzer
-          intent-system
-        ]; };
+        devShells.default = pkgs.mkShell {
+          packages = [
+            pkgs.bashInteractive
+            pkgs.rustc
+            pkgs.cargo
+            pkgs.rustfmt
+            pkgs.clippy
+            pkgs.rust-analyzer
+            intent-system
+            # GUI (evorch-gui / winit+wgpu) が dev shell から起動できるようにする動的ライブラリ群
+            pkgs.pkg-config
+            pkgs.wayland
+            pkgs.wayland-protocols
+            pkgs.libxkbcommon
+            pkgs.vulkan-loader
+            pkgs.mesa # lavapipe (ソフトウェアレンダリング fallback 用)
+          ];
+          shellHook = ''
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.vulkan-loader
+              pkgs.mesa
+            ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          '';
+        };
       }
     );
 }
