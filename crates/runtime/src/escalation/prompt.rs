@@ -3,13 +3,6 @@ use super::EscalationMemo;
 use std::fmt::Write;
 
 /// 新規 Orchestrator root run 用の日本語引継ぎプロンプトを描画する。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "エスカレーション handoff は後続タスクでこの描画器を呼び出す"
-    )
-)]
 pub(crate) fn render_escalation_prompt(memo: &EscalationMemo) -> String {
     let mut prompt = format!(
         "[evorch escalation source_run_id={}]\n\n## 引継ぎ\nあなたは旧 Direct run からの昇格を受けた新規 Orchestrator root run です。以下のメモを引き継ぎ、必要な担当分割と実行計画を開始してください。\n\n## Source run ID\n{}\n\n## Original request\n{}\n\n## Findings\n",

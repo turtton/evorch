@@ -469,19 +469,22 @@ async fn invalid_meta_arguments_return_error_and_run_continues() {
 async fn escalate_records_memo_and_terminates_run_done() {
     // Given: 有効な引数の escalate を 1 件要求する Worker root run
     // (バスは run 開始前に購読しておく)
-    let model = Arc::new(ScriptedModel::new([Ok(tool_response(
-        "esc",
-        "escalate",
-        json!({
-            "original_request": "依存関係の更新を Direct run で完了する",
-            "escalation_reason": "編集失敗が連続し単独では解消できない",
-            "findings": ["cargo test が失敗する"],
-            "files_touched": ["crates/runtime/src/lib.rs"],
-            "blockers": ["権限が不足している"],
-            "workspace_state": "M crates/runtime/src/lib.rs",
-            "suggested_next": "Orchestrator で担当を分割する"
-        }),
-    ))]));
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "esc",
+            "escalate",
+            json!({
+                "original_request": "依存関係の更新を Direct run で完了する",
+                "escalation_reason": "編集失敗が連続し単独では解消できない",
+                "findings": ["cargo test が失敗する"],
+                "files_touched": ["crates/runtime/src/lib.rs"],
+                "blockers": ["権限が不足している"],
+                "workspace_state": "M crates/runtime/src/lib.rs",
+                "suggested_next": "Orchestrator で担当を分割する"
+            }),
+        )),
+        Ok(text_response("handoff done", FinishReason::Stop)),
+    ]));
     let bus = Arc::new(EventBus::new(128));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
@@ -496,7 +499,7 @@ async fn escalate_records_memo_and_terminates_run_done() {
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
 
     // Then: メモは呼び出し元 run を source_run_id として記録され、
-    // run は 1 回のモデル呼び出しで Done ("escalated") に終端する
+    // source run は Done ("escalated") に終端し、新 Orchestrator が 1 回呼び出される
     assert_eq!(
         runtime.escalation_memo(run_id),
         Some(EscalationMemo {
@@ -510,7 +513,14 @@ async fn escalate_records_memo_and_terminates_run_done() {
             suggested_next: "Orchestrator で担当を分割する".to_string(),
         })
     );
-    assert_eq!(model.observed().await.len(), 1);
+    timeout(Duration::from_secs(5), async {
+        while model.observed().await.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("escalation handoff model call timeout");
+    assert_eq!(model.observed().await.len(), 2);
     let events = drain_events(&mut receiver).await;
     assert!(
         events.iter().any(|event| matches!(

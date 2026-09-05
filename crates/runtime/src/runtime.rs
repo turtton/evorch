@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 use tools::ToolExecutor;
 
-use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
+use crate::agent_loop::{LoopChannels, LoopShared, RunHandoff, RunTask, run_agent};
 use crate::compaction::policy::CompactionSettings;
 use crate::entry_routing::EntryRouter;
 use crate::escalation::{EscalationMemo, EscalationSettings};
@@ -28,7 +28,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
-use crate::workspace::{Project, WorktreeManager};
+use crate::workspace::{OwnedWorktree, Project, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
@@ -101,6 +101,7 @@ struct RunEntry {
     model: String,
     config: RunConfig,
     parent: Option<RunId>,
+    escalated_from: Option<RunId>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -443,7 +444,19 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> RunId {
+        self.spawn_run_with_handoff(parent, role, prompt, config, None)
+    }
+
+    fn spawn_run_with_handoff(
+        &self,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+        handoff: Option<RunHandoff>,
+    ) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         let name = config
             .name
             .clone()
@@ -466,6 +479,7 @@ impl AgentRuntime {
             config: config.clone(),
             parent,
             mailbox: Arc::clone(&mailbox),
+            handoff,
         };
         let channels = LoopChannels {
             phase_tx,
@@ -485,6 +499,7 @@ impl AgentRuntime {
                 model,
                 config: config.clone(),
                 parent,
+                escalated_from,
                 phase_tx: phase_tx_entry,
                 phase_rx,
                 message_count_rx,
@@ -524,6 +539,43 @@ impl AgentRuntime {
             entry._join = Some(join);
         }
         run_id
+    }
+
+    pub(crate) fn spawn_escalated_root(
+        &self,
+        memo: EscalationMemo,
+        source_config: &RunConfig,
+        worktree: Option<OwnedWorktree>,
+    ) -> RunId {
+        let config = RunConfig {
+            interactive: false,
+            name: Some("escalation-orchestrator".to_string()),
+            category: None,
+            load_skills: Vec::new(),
+            workspace_mode: source_config.workspace_mode,
+            merge_mode: source_config.merge_mode,
+            network_access: Default::default(),
+            workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
+        };
+        let source_run_id = memo.source_run_id;
+        self.spawn_run_with_handoff(
+            None,
+            Role::Orchestrator,
+            crate::escalation::prompt::render_escalation_prompt(&memo),
+            config,
+            Some(RunHandoff {
+                source_run_id,
+                worktree,
+            }),
+        )
+    }
+
+    /// エスカレーションで生成された run の移譲元を返す。
+    ///
+    /// # Errors
+    /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn escalation_source(&self, run_id: RunId) -> Result<Option<RunId>, RuntimeError> {
+        Ok(self.entry(run_id)?.escalated_from)
     }
 
     /// 対話待機中の run へユーザーメッセージを送る。

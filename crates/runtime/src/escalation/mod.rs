@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod detector;
+pub(crate) mod handoff;
 pub(crate) mod prompt;
 
 /// Direct run から Orchestrator root run へ渡す固定スキーマの引継ぎメモ。
@@ -30,6 +31,23 @@ pub struct EscalationMemo {
     pub escalation_reason: String,
     /// Orchestrator が次に取るべき推奨アクション。
     pub suggested_next: String,
+}
+
+impl EscalationMemo {
+    /// lifecycle event に載せる引継ぎメモの要約を返す。
+    pub(crate) fn summary(&self) -> event_bus::EscalationMemoSummary {
+        event_bus::EscalationMemoSummary {
+            original_request: self.original_request.clone(),
+            escalation_reason: self.escalation_reason.clone(),
+            files_touched: self
+                .files_touched
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            blockers: self.blockers.clone(),
+            suggested_next: self.suggested_next.clone(),
+        }
+    }
 }
 
 /// Direct run を Orchestrator へ昇格する検出閾値。
