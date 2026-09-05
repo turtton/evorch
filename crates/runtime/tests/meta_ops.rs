@@ -1,20 +1,24 @@
 mod support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agents::Role;
 use config::{CompactionConfig, SummarizerKind};
-use event_bus::{AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind};
+use event_bus::{
+    AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind, LifecycleEvent,
+};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
 use runtime::workspace::{Project, WorktreeManager};
-use runtime::{AgentRuntime, IsolatedMounts, RunConfig, WorkspaceMode};
+use runtime::{AgentRuntime, EscalationMemo, IsolatedMounts, RunConfig, WorkspaceMode};
 use sandbox::DirectSandbox;
 use serde_json::json;
 use tokio::time::{Duration, sleep, timeout};
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, init_git_repo, recording_factory, text_response, tool_response};
+use support::{
+    ScriptedModel, drain_events, init_git_repo, recording_factory, text_response, tool_response,
+};
 
 fn runtime_with(model: Arc<ScriptedModel>) -> AgentRuntime {
     let bus = Arc::new(EventBus::new(128));
@@ -459,4 +463,154 @@ async fn invalid_meta_arguments_return_error_and_run_continues() {
         assert!(matches!(tool_result(final_turn, call_id), Some((_, true))));
     }
     assert_eq!(runtime.list_agents().len(), 1);
+}
+
+#[tokio::test]
+async fn escalate_records_memo_and_terminates_run_done() {
+    // Given: 有効な引数の escalate を 1 件要求する Worker root run
+    // (バスは run 開始前に購読しておく)
+    let model = Arc::new(ScriptedModel::new([Ok(tool_response(
+        "esc",
+        "escalate",
+        json!({
+            "original_request": "依存関係の更新を Direct run で完了する",
+            "escalation_reason": "編集失敗が連続し単独では解消できない",
+            "findings": ["cargo test が失敗する"],
+            "files_touched": ["crates/runtime/src/lib.rs"],
+            "blockers": ["権限が不足している"],
+            "workspace_state": "M crates/runtime/src/lib.rs",
+            "suggested_next": "Orchestrator で担当を分割する"
+        }),
+    ))]));
+    let bus = Arc::new(EventBus::new(128));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
+    let mut receiver = bus.subscribe();
+
+    // When: run を実行して終端を待つ
+    let run_id =
+        runtime.delegate_background(Role::Worker, "ESCALATE".to_string(), RunConfig::default());
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    // Then: メモは呼び出し元 run を source_run_id として記録され、
+    // run は 1 回のモデル呼び出しで Done ("escalated") に終端する
+    assert_eq!(
+        runtime.escalation_memo(run_id),
+        Some(EscalationMemo {
+            source_run_id: run_id,
+            original_request: "依存関係の更新を Direct run で完了する".to_string(),
+            findings: vec!["cargo test が失敗する".to_string()],
+            files_touched: vec![PathBuf::from("crates/runtime/src/lib.rs")],
+            blockers: vec!["権限が不足している".to_string()],
+            workspace_state: "M crates/runtime/src/lib.rs".to_string(),
+            escalation_reason: "編集失敗が連続し単独では解消できない".to_string(),
+            suggested_next: "Orchestrator で担当を分割する".to_string(),
+        })
+    );
+    assert_eq!(model.observed().await.len(), 1);
+    let events = drain_events(&mut receiver).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Done,
+                reason: Some(reason),
+                ..
+            }) if reason == "escalated"
+        )),
+        "escalated 理由の Done 遷移イベントが欠落: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn escalate_with_invalid_args_is_rejected_and_run_continues() {
+    // Given: 必須フィールド欠落・モデル供給 source_run_id・空 escalation_reason の
+    // escalate を順に要求した後、自然 Stop する Worker root run
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "bad-missing",
+            "escalate",
+            json!({ "original_request": "元の依頼" }),
+        )),
+        Ok(tool_response(
+            "bad-run-id",
+            "escalate",
+            json!({
+                "original_request": "元の依頼",
+                "escalation_reason": "理由",
+                "source_run_id": "run-99"
+            }),
+        )),
+        Ok(tool_response(
+            "bad-empty",
+            "escalate",
+            json!({ "original_request": "元の依頼", "escalation_reason": "" }),
+        )),
+        Ok(text_response("fallback done", FinishReason::Stop)),
+    ]));
+    let runtime = runtime_with(Arc::clone(&model));
+
+    // When: run を終端まで実行する
+    let run_id =
+        runtime.delegate_background(Role::Worker, "INVALID".to_string(), RunConfig::default());
+
+    // Then: 3 件とも fail-closed の error result になり、メモは記録されず
+    // run は自然 Stop で Done に至る
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    assert_eq!(runtime.escalation_memo(run_id), None);
+    let observed = model.observed().await;
+    assert_eq!(observed.len(), 4);
+    let (missing_text, missing_error) =
+        tool_result(&observed[1], "bad-missing").expect("missing result");
+    assert!(missing_error);
+    assert!(
+        missing_text.contains("escalation_reason"),
+        "欠落フィールド識別子が欠落: {missing_text}"
+    );
+    let (runid_text, runid_error) = tool_result(&observed[2], "bad-run-id").expect("run-id result");
+    assert!(runid_error);
+    assert!(
+        runid_text.contains("source_run_id"),
+        "モデル供給 source_run_id の拒否識別子が欠落: {runid_text}"
+    );
+    let (empty_text, empty_error) = tool_result(&observed[3], "bad-empty").expect("empty result");
+    assert!(empty_error);
+    assert!(
+        empty_text.contains("escalation_reason"),
+        "空 escalation_reason の拒否識別子が欠落: {empty_text}"
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_cannot_escalate() {
+    // Given: escalate を要求する Orchestrator (capability 外)
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "esc-orch",
+            "escalate",
+            json!({ "original_request": "元の依頼", "escalation_reason": "理由" }),
+        )),
+        Ok(text_response("orchestrator done", FinishReason::Stop)),
+    ]));
+    let runtime = runtime_with(Arc::clone(&model));
+
+    // When: run を終端まで実行する
+    let run_id =
+        runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default());
+
+    // Then: capability 拒否の error result になり、メモは記録されず
+    // run は継続して自然 Stop で Done に至る
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    assert_eq!(runtime.escalation_memo(run_id), None);
+    let observed = model.observed().await;
+    assert_eq!(observed.len(), 2);
+    let (content, is_error) = tool_result(&observed[1], "esc-orch").expect("escalate result");
+    assert!(is_error);
+    assert!(
+        content.contains("escalate"),
+        "capability 拒否にはツール名が含まれる: {content}"
+    );
 }

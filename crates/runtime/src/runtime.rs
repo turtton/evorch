@@ -385,10 +385,6 @@ impl AgentRuntime {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "エスカレーション handoff は後続タスクでこの記録口を呼び出す"
-    )]
     pub(crate) fn record_escalation_memo(&self, run_id: RunId, memo: EscalationMemo) {
         self.shared
             .escalations

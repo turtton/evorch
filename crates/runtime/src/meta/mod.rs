@@ -1,11 +1,12 @@
 //! モデルが要求したメタ操作を AgentRuntime API へ接続する。
 //!
 //! dispatch と共通ヘルパーをここに置き、ハンドラは責務ごとに
-//! [`compaction`] / [`delegation`] / [`messaging`] / [`runs`] / [`skills`]
-//! へ分離する。
+//! [`compaction`] / [`delegation`] / [`escalation`] / [`messaging`] / [`runs`] /
+//! [`skills`] へ分離する。
 
 mod compaction;
 mod delegation;
+mod escalation;
 mod messaging;
 mod runs;
 mod skills;
@@ -16,10 +17,21 @@ use tools::ToolResult;
 
 use crate::RunId;
 use crate::agent_loop::LoopState;
+use crate::escalation::EscalationMemo;
+
+/// dispatch が run ループへ返す終端指示。
+pub(crate) enum Terminal {
+    /// run を継続する。
+    Continue,
+    /// 最終テキストを公開して run を正常終端させる (finish meta-op)。
+    Finish(String),
+    /// メモ記録済みのまま run をエスカレーション終端させる (escalate meta-op)。
+    Escalate(Box<EscalationMemo>),
+}
 
 pub(crate) struct DispatchResult {
     pub(crate) result: ToolResult,
-    pub(crate) finish: Option<String>,
+    pub(crate) terminal: Terminal,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +65,7 @@ pub(crate) async fn dispatch(
         "skill_load" => skills::skill_load(state, input),
         "compact" => compaction::compact(state, input).await,
         "finish" => finish(state, &runtime, input).await,
+        "escalate" => escalation::escalate(state, &runtime, input).await,
         _ => error(format!("unknown meta-op: {name}")),
     }
 }
@@ -69,13 +82,13 @@ async fn finish(
     let Some(gate) = runtime.goal_gate() else {
         return DispatchResult {
             result: ToolResult::success(&args.result),
-            finish: Some(args.result),
+            terminal: Terminal::Finish(args.result),
         };
     };
     match gate.evaluate_finish(state.caller_run_id()).await {
         None | Some(crate::orchestration::gate::GateVerdict::Accept(_)) => DispatchResult {
             result: ToolResult::success(&args.result),
-            finish: Some(args.result),
+            terminal: Terminal::Finish(args.result),
         },
         Some(crate::orchestration::gate::GateVerdict::Reject(rejected)) => DispatchResult {
             result: ToolResult::error(
@@ -85,7 +98,7 @@ async fn finish(
                 })
                 .to_string(),
             ),
-            finish: None,
+            terminal: Terminal::Continue,
         },
     }
 }
@@ -146,13 +159,13 @@ pub(super) fn serialize(value: &impl serde::Serialize) -> DispatchResult {
 pub(super) fn success(content: impl Into<String>) -> DispatchResult {
     DispatchResult {
         result: ToolResult::success(content),
-        finish: None,
+        terminal: Terminal::Continue,
     }
 }
 
 pub(super) fn error(content: impl Into<String>) -> DispatchResult {
     DispatchResult {
         result: ToolResult::error(content),
-        finish: None,
+        terminal: Terminal::Continue,
     }
 }

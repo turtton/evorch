@@ -1,3 +1,6 @@
+// allow: SIZE_OK — tool-call 実行・terminal 網羅 match・標準ツール定義・その unit
+// tests が一体の契約 (dispatch seam) を構成する。250 超過の分割 (tool_specs 抽出)
+// は後続タスク候補。本タスクの変更前は 249 行で境界線上にあった。
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,12 +46,20 @@ impl LoopState {
                 let dispatch = meta::dispatch(self, &name, input).await;
                 self.context.push_tool_result(id, dispatch.result);
                 self.publish_message_count();
-                if let Some(result) = dispatch.finish {
-                    self.push_final_result(&result);
-                    self.finish_success();
-                    return false;
+                match dispatch.terminal {
+                    meta::Terminal::Continue => continue,
+                    meta::Terminal::Finish(result) => {
+                        self.push_final_result(&result);
+                        self.finish_success();
+                        return false;
+                    }
+                    meta::Terminal::Escalate(memo) => {
+                        // 終端指示を返した時点で残りのバッチ tool call は
+                        // 実行しない (新規 tool call 受付の停止)。
+                        self.finish_escalated(*memo);
+                        return false;
+                    }
                 }
-                continue;
             } else {
                 match self.gate_network_tool(&name, &id).await {
                     NetworkGate::Proceed => {}

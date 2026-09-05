@@ -19,7 +19,7 @@ use crate::compaction;
 use crate::compaction::policy::{
     CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
 };
-use crate::escalation::EscalationSettings;
+use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
 use crate::rules::{self, RulesSession, RulesSource};
@@ -84,6 +84,7 @@ pub(crate) struct LoopState {
     pub(crate) compaction: CompactionLoopState,
     pub(crate) last_usage: Option<Usage>,
     resumed: bool,
+    pending_escalation: Option<EscalationMemo>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
@@ -104,6 +105,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         compaction: CompactionLoopState::default(),
         last_usage: None,
         resumed: false,
+        pending_escalation: None,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
@@ -632,6 +634,36 @@ impl LoopState {
                     task_id: self.task.run_id.to_string(),
                 }));
         }
+    }
+
+    /// エスカレーションで run を終端させる。
+    ///
+    /// [`LoopState::finish_success`] と異なり最終テキストを `result_tx` へ公開しない。
+    /// 昇格 run の成果物は自然文の final result ではなく [`EscalationMemo`] であり、
+    /// 公開すべき final text を持たないためである。メモは `pending_escalation` に
+    /// 退避され、引き継ぎ側 (handoff タスク) が [`LoopState::take_pending_escalation`]
+    /// で回収する。
+    pub(crate) fn finish_escalated(&mut self, memo: EscalationMemo) {
+        self.pending_escalation = Some(memo);
+        if self
+            .transition(AgentRunPhase::Done, Some("escalated".to_string()))
+            .is_ok()
+        {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::BackgroundTaskCompleted {
+                    task_id: self.task.run_id.to_string(),
+                }));
+        }
+    }
+
+    /// 記録済みのエスカレーションメモを取り出す (取り出し後は `None`)。
+    #[expect(
+        dead_code,
+        reason = "エスカレーション handoff (後続タスク) がこの回収口を呼び出す"
+    )]
+    pub(crate) fn take_pending_escalation(&mut self) -> Option<EscalationMemo> {
+        self.pending_escalation.take()
     }
 
     /// 最終 assistant メッセージの Text ブロックを連結して返す。
