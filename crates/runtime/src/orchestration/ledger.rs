@@ -244,6 +244,21 @@ pub struct GoalLedger {
 }
 
 impl GoalLedger {
+    /// 永続化済みスナップショットから ledger を復元する。
+    pub fn from_snapshot(snapshot: GoalSnapshot) -> Self {
+        Self { snapshot }
+    }
+
+    /// 再起動後の runtime から切り離された状態を設定する。
+    pub fn set_detached(&mut self, detached: bool) {
+        self.snapshot.detached = detached;
+    }
+
+    /// terminal / recovery により idle epoch を 1 つ進める。
+    pub fn advance_epoch(&mut self) -> u64 {
+        self.snapshot.epoch = self.snapshot.epoch.saturating_add(1);
+        self.snapshot.epoch
+    }
     /// `GoalCreated` から ledger を初期化する。
     ///
     /// # Panics
