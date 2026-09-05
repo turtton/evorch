@@ -1,8 +1,9 @@
+use event_bus::{CiState, GateSnapshot, MergeBinding};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::{
-    CiStatus, LoopEvent, MergeApprovalView, MergeDecision, PacketReference, PrRef, ReferenceKind,
-    ReviewerStatus, WorkbenchCommand,
+    CiStatus, GateItemView, LoopEvent, MergeApprovalView, MergeDecision, PacketReference, PrRef,
+    ReferenceKind, ReviewerStatus, WorkbenchCommand,
 };
 use gui::model::tasks::AgentRunSource;
 use runtime::AgentSummary;
@@ -61,8 +62,34 @@ fn pending_merge_view() -> MergeApprovalView {
         reviewer: ReviewerStatus::Pending,
         diff_summary: Some("model-only change".into()),
         resolution: None,
-        binding: None,
-        gate: Vec::new(),
+        binding: Some(MergeBinding {
+            token_id: "token-65".into(),
+            repo: "turtton/evorch".into(),
+            pr_number: 65,
+            head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
+            snapshot: GateSnapshot {
+                repo: "turtton/evorch".into(),
+                pr_number: 65,
+                base_ref: "main".into(),
+                head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
+                ci: CiState::Green,
+                criteria_round: 1,
+                review_round: 1,
+                reviewer_run_id: "run-review-1".into(),
+            },
+        }),
+        gate: vec![
+            GateItemView {
+                label: "pull_request".into(),
+                ok: true,
+                detail: "#65 (turtton/evorch)".into(),
+            },
+            GateItemView {
+                label: "ci".into(),
+                ok: true,
+                detail: "green".into(),
+            },
+        ],
         blocked: None,
     }
 }
@@ -186,13 +213,18 @@ fn merge_view_updates_from_loop_event() {
         .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
     harness.run();
 
-    // Then: the PR info, badges, and diff summary are visible
+    // Then: the PR info, badges, diff summary, binding head/token, and gate
+    // checklist are visible
     assert!(harness.has_label("PR #65"));
     assert!(harness.has_label("Workbench restructure"));
     assert!(harness.has_label("https://github.com/turtton/evorch/pull/65"));
     assert!(harness.has_label("ci: pending"));
     assert!(harness.has_label("reviewer: pending"));
     assert!(harness.has_label("model-only change"));
+    assert!(harness.has_label("head: a1b2c3d4"));
+    assert!(harness.has_label("token: token-65"));
+    assert!(harness.has_label("gate: pull_request ok"));
+    assert!(harness.has_label("gate: ci ok"));
 }
 
 #[test]
@@ -212,11 +244,12 @@ fn approve_click_issues_exactly_one_command_even_if_clicked_twice() {
     harness.click_label("Approve");
     harness.run();
 
-    // Then: exactly one DecideMerge command was issued
+    // Then: exactly one DecideMerge command was issued with the binding token
     let decisions = issued_decisions(&harness);
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");
     assert_eq!(decisions[0].decision, MergeDecision::Approve);
     assert_eq!(decisions[0].thread_id, "thread-1");
+    assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
     assert!(harness.has_label("resolved: approved"));
 }
 

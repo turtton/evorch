@@ -4,6 +4,7 @@ use workspace_ui::{KeyAction, PanelId, ThreadRunPhase, Workspace};
 
 use super::WorkbenchState;
 use crate::dock::{from_dock_state, to_dock_state};
+use crate::model::commands::apply_orchestrator_event;
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -71,7 +72,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_) => {}
             // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
-            EventKind::Orchestrator(_) => {}
+            EventKind::Orchestrator(ev) => {
+                apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);
+            }
         }
     }
 
