@@ -84,11 +84,15 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 
 **実装確定（issue #69、PR #70、2026-09-03）**: Intent Gate 分類ルール（8 分類軸・タスク種別判定表・ExecutionShape 判定・mutation 非持越ルール）は `crates/runtime/src/prompt/intent_gate_policy.rs` の型付きポリシーモジュールへコード化済み。prompt 生成は同モジュールからのレンダリングに統一（単一ソース化）し、Orchestrator 向け本文は entry pre-routing の選択結果を検証する枠組みに更新済み。routing prompt（Layer A）と Orchestrator prompt の両方を同一型定義から生成する API が公開され、出力は byte-identical golden test で決定論性を固定。
 
+## v0.2 確定（PR #76）: direct escalation handoff
+
+- Worker 専用 meta-op `escalate` が `EscalationMemo`（source_run_id / original_request / findings / files_touched / blockers / workspace_state / escalation_reason / suggested_next）を凍結・記録し、旧 run を `Done("escalated")` へ terminal 化。`OwnedWorktree` は値移動で新規 Orchestrator root run（parent None、ADR 0022 準拠・child 経路不使用）へ排他譲渡し、memo を初期 context として起動する。`EscalationRequested`（source_run_id/new_run_id/memo summary）を LifecycleEvent として発行
+- 安全網: runtime per-run detector が連続 edit 失敗（既定 3）・同一ファイル反復書き換え（既定 5）・tool call 閾値（既定 200）で観測専用 `EscalationProposed`（latch 1 回、`EscalationSettings` で調整可能）を発行。自動昇格・履歴注入は行わない
+- feasibility 確定: 実行中 tool は run 内逐次実行により構造的に in-flight 不在（batch 先行完了・後続不実行、abort 不導入）。Shared mode は逐次保証、Isolated は所有権 move。escalated run は run_result == None（契約としてテスト固定）
+- follow-up 候補: EscalationSettings の config crate 配線、GUI での escalation event 描画、handoff 後の未 commit 変更の child run 継承方針、memo store の上限/redaction 方針
+
 ## 受け入れ基準
 
-- Intent Gate が Direct / Coordinated を返し、Coordinated の場合のみ Orchestrator が起動すること
-- Orchestrator に mutation tool が無いこと（runtime レベルで拒否されること）
-- delegation の理由が説明可能であること
 
 ## Related decisions
 
