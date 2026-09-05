@@ -120,6 +120,11 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.key_press_modifiers(modifiers, key);
     }
 
+    /// ポインタを指定座標へ移動します（hover 状態の capture 用）。
+    pub fn pointer_move(&self, pos: egui::Pos2) {
+        self.harness.hover_at(pos);
+    }
+
     /// 現在の UI を RGBA8 フレームとして取得します。
     ///
     /// # Errors

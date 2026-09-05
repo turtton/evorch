@@ -14,6 +14,7 @@ struct CaptureArgs {
     output: PathBuf,
     demo: bool,
     activate: Option<String>,
+    pointer: Option<(f32, f32)>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -49,6 +50,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
+    if let Some((x, y)) = capture.pointer {
+        workbench.pointer_move(egui::pos2(x, y));
+        // hover スタイルを反映させるため再度安定化する
+        workbench.run();
+    }
     let frame = workbench.capture()?;
     frame.save_png(&capture.output)?;
     println!("{}", capture.output.display());
@@ -61,6 +67,7 @@ fn parse_args(
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
     let mut activate: Option<String> = None;
+    let mut pointer: Option<(f32, f32)> = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--out") => {
@@ -73,6 +80,26 @@ fn parse_args(
                 }
                 let id = arguments.next().ok_or("--activate requires a panel id")?;
                 activate = Some(id.to_string_lossy().into_owned());
+            }
+            Some("--pointer") => {
+                if pointer.is_some() {
+                    return Err("unexpected additional arguments".into());
+                }
+                let x = arguments
+                    .next()
+                    .ok_or("--pointer requires X and Y coordinates")?;
+                let y = arguments
+                    .next()
+                    .ok_or("--pointer requires X and Y coordinates")?;
+                let x: f32 = x
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "--pointer requires numeric coordinates")?;
+                let y: f32 = y
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "--pointer requires numeric coordinates")?;
+                pointer = Some((x, y));
             }
             Some("--demo") if demo => return Err("unexpected additional arguments".into()),
             Some("--demo") => demo = true,
@@ -91,12 +118,13 @@ fn parse_args(
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
         activate,
+        pointer,
     })
 }
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--activate ID] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
 
 Captures a 1280x720 headless workbench frame as PNG.
 
@@ -104,6 +132,7 @@ Modes:
   (default)      empty workbench state
   --demo         deterministic populated workbench (fixture::populate)
   --activate ID  activate the given panel tab before capturing (e.g. merge-main)
+  --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
 The output path comes from --out PATH or a single positional PATH
 (default: {DEFAULT_OUTPUT}).
@@ -250,5 +279,51 @@ mod tests {
 
         // Then: the existing missing-value error is reported
         assert_eq!(error.to_string(), "--out requires an output path");
+    }
+
+    #[test]
+    fn parse_args_accepts_pointer_coordinates() {
+        // Given: --pointer with numeric X and Y alongside other flags
+        let arguments = args(["--demo", "--pointer", "600.5", "37", "--out", "x.png"]);
+
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("pointer form must parse");
+
+        // Then: the coordinates are preserved and other flags still apply
+        assert_eq!(capture.pointer, Some((600.5, 37.0)));
+        assert!(capture.demo);
+    }
+
+    #[test]
+    fn parse_args_rejects_pointer_without_coordinates() {
+        // Given: --pointer without both coordinates
+        let missing = args(["--pointer"]);
+        let partial = args(["--pointer", "10"]);
+
+        // When: the arguments are parsed
+        let missing_error = parse_args(missing).expect_err("missing coordinates must fail");
+        let partial_error = parse_args(partial).expect_err("partial coordinates must fail");
+
+        // Then: the coordinate error is reported
+        assert_eq!(
+            missing_error.to_string(),
+            "--pointer requires X and Y coordinates"
+        );
+        assert_eq!(
+            partial_error.to_string(),
+            "--pointer requires X and Y coordinates"
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_non_numeric_pointer() {
+        // Given: --pointer with a non-numeric coordinate
+        let arguments = args(["--pointer", "left", "37"]);
+
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("non-numeric coordinates must fail");
+
+        // Then: the numeric error is reported
+        assert_eq!(error.to_string(), "--pointer requires numeric coordinates");
     }
 }
