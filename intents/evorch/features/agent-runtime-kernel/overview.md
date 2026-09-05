@@ -130,6 +130,14 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - 実行ガード: 試行予算・自動トリガの ratchet・手動 compact の in-flight 拒否・cooldown/hysteresis・diagnostics（security 審査 4 findings 修正済み）
 - 検証: 長期 session fixture（replay→自動 compaction→Done 継続、summary/tail/AGENT_MESSAGE 含有）・audit byte-proof・失敗原子性・新境界意味論
 
+## v0.3 provider composition root の実装確定（issue #79、PR #80、2026-09-05）
+
+- composition root は `routing::compose_providers`（config → profile 検証 → factory で client 構築 → env 認証解決 → ModelCatalog へ model 登録 → Router 構築）と `runtime::compose_runtime`（ModelSource / WorkspaceSeam / RoutedModel の注入 seam。GUI demo/non-demo・headless(`evorch run`)・test の 3 経路で同一構成）の 2 層。注入 seam は AgentModel
+- openai-compatible 最終 schema: `[providers.<name>] type = "openai-compatible"` + `base_url` / `api_key_env` / `models` / `default_model`（`api_protocol` 省略時は openai-completions 自動既定）。mirror deserializer で deny_unknown_fields を維持
+- credential 受け口は `api_key_env` が指す環境変数のみ。平文 key や keyring 参照は fail-closed 拒否
+- headless 実 run E2E は 127.0.0.1 recording mock 方式で、goal → worker → edit tool → 応答テキストの MessageDelta 発行までを検証
+- CI 安定化（同 PR 同梱）: WorkspaceSeam::with_factory による test 用 seam 注入、goal 結合 race の決定論化（GoalCreated 待機）、worktree branch 解放 race の有限 retry（100×100ms）
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
