@@ -128,8 +128,9 @@ impl Default for CredentialRefConfig {
 /// プロバイダプロファイル 1 件分の設定。
 ///
 /// [`super::Config`] の `providers` マップのキーがプロファイル名になります。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+#[schemars(transform = add_sugar_properties)]
 pub struct ProviderProfileConfig {
     /// プロバイダの種別。
     pub provider_type: ProviderTypeConfig,
@@ -156,6 +157,114 @@ impl Default for ProviderProfileConfig {
             default_model: "claude-sonnet-4-5".to_string(),
         }
     }
+}
+
+// sugar 形式 (type エイリアスと api_key_env) を正規形へ畳み込む必要があるため、
+// CredentialRefDe と同じミラー構造体パターンで deserialization を行う。
+// deny_unknown_fields はミラー側で維持される。
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ProviderProfileDe {
+    #[serde(alias = "type")]
+    provider_type: ProviderTypeConfig,
+    api_protocol: Option<ApiProtocolConfig>,
+    base_url: String,
+    credential: Option<CredentialRefConfig>,
+    api_key_env: Option<String>,
+    models: Vec<String>,
+    default_model: String,
+}
+
+// 省略フィールドは公開構造体の既定値で補完する (コンテナ serde(default) の契約)。
+// api_protocol と credential の既定化は TryFrom 側で sugar 規則を考慮して行う。
+impl Default for ProviderProfileDe {
+    fn default() -> Self {
+        Self {
+            provider_type: ProviderTypeConfig::default(),
+            api_protocol: None,
+            base_url: "https://api.anthropic.com".to_string(),
+            credential: None,
+            api_key_env: None,
+            models: vec!["claude-sonnet-4-5".to_string()],
+            default_model: "claude-sonnet-4-5".to_string(),
+        }
+    }
+}
+
+impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
+    type Error = String;
+
+    fn try_from(value: ProviderProfileDe) -> Result<Self, Self::Error> {
+        if value.credential.is_some() && value.api_key_env.is_some() {
+            return Err(
+                "api_key_env and credential are mutually exclusive; use one or the other"
+                    .to_string(),
+            );
+        }
+        if value
+            .api_key_env
+            .as_ref()
+            .is_some_and(|var| var.trim().is_empty())
+        {
+            return Err("api_key_env must not be empty".to_string());
+        }
+        let credential = match value.api_key_env {
+            Some(var) => CredentialRefConfig::Env { var },
+            None => value.credential.unwrap_or_default(),
+        };
+        // api_protocol が省略された場合のみ、openai-compatible の既定プロトコル
+        // (openai-completions) を適用する。明示指定は常に優先される。
+        let api_protocol = value.api_protocol.unwrap_or(match value.provider_type {
+            ProviderTypeConfig::OpenAiCompatible => ApiProtocolConfig::OpenAiCompletions,
+            _ => ApiProtocolConfig::default(),
+        });
+        Ok(Self {
+            provider_type: value.provider_type,
+            api_protocol,
+            base_url: value.base_url,
+            credential,
+            models: value.models,
+            default_model: value.default_model,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderProfileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ProviderProfileConfig::try_from(ProviderProfileDe::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+// 公開フィールドに加えて sugar 形式の type エイリアスと api_key_env を
+// optional property として schema に載せる (deny_unknown_fields 対応のため
+// additionalProperties は false のまま)。
+fn add_sugar_properties(schema: &mut schemars::Schema) {
+    let object = schema.ensure_object();
+    let properties = object
+        .entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(properties) = properties.as_object_mut() else {
+        return;
+    };
+    properties.insert(
+        "type".to_string(),
+        serde_json::json!({
+            "description": "`provider_type` のエイリアス。",
+            "$ref": "#/$defs/ProviderTypeConfig"
+        }),
+    );
+    properties.insert(
+        "api_key_env".to_string(),
+        serde_json::json!({
+            "description": "`credential = { type = \"env\", var = \"...\" }` の糖衣構文。`credential` とは併用できない。",
+            "type": "string",
+            "minLength": 1
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -285,6 +394,236 @@ default_model = "gpt-5.3-codex"
         assert_eq!(
             serde_json::to_value(&json_profile).expect("Codex Responses の JSON を直列化できる")["api_protocol"],
             "openai-codex-responses"
+        );
+    }
+
+    // Given: openai-compatible の sugar 形式 (type エイリアス + api_key_env) / When: TOML をパースする
+    // Then: type エイリアスが解決され、api_key_env が env credential へ正規化され、
+    //       api_protocol は openai-completions へ自動既定化される
+    #[test]
+    fn provider_profile_openai_compatible_sugar_parses() {
+        let doc = r#"
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["local-model"]
+default_model = "local-model"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("openai-compatible の sugar 形式を解析できる");
+
+        assert_eq!(profile.provider_type, ProviderTypeConfig::OpenAiCompatible);
+        assert_eq!(
+            profile.credential,
+            CredentialRefConfig::Env {
+                var: "LOCAL_API_KEY".to_string()
+            }
+        );
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiCompletions);
+        assert_eq!(profile.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(profile.models, ["local-model"]);
+        assert_eq!(profile.default_model, "local-model");
+    }
+
+    // Given: 正式キー provider_type = "openai-compatible" で api_protocol 省略 / When: パースする
+    // Then: openai-completions へ自動既定化される (type は provider_type のエイリアスのため)
+    #[test]
+    fn provider_profile_openai_compatible_canonical_key_auto_protocol_default() {
+        let doc = r#"
+provider_type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["local-model"]
+default_model = "local-model"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("正式キーの openai-compatible を解析できる");
+
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiCompletions);
+    }
+
+    // Given: openai-compatible 以外で api_protocol 省略 / When: パースする
+    // Then: 従来どおり anthropic-messages が既定になる
+    #[test]
+    fn provider_profile_non_compatible_keeps_default_protocol() {
+        let doc = r#"
+provider_type = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+models = ["model-a"]
+default_model = "model-a"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("openrouter の sugar 形式を解析できる");
+
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::AnthropicMessages);
+        assert_eq!(
+            profile.credential,
+            CredentialRefConfig::Env {
+                var: "OPENROUTER_API_KEY".to_string()
+            }
+        );
+    }
+
+    // Given: openai-compatible で明示的な api_protocol / When: パースする
+    // Then: 自動既定化より明示指定が優先される
+    #[test]
+    fn provider_profile_explicit_api_protocol_wins_over_sugar_default() {
+        let doc = r#"
+type = "openai-compatible"
+api_protocol = "openai-responses"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["local-model"]
+default_model = "local-model"
+"#;
+
+        let profile: ProviderProfileConfig =
+            toml::from_str(doc).expect("明示 protocol 付き sugar 形式を解析できる");
+
+        assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiResponses);
+    }
+
+    // Given: api_key_env と credential の併用 / When: パースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn provider_profile_api_key_env_and_credential_mutually_exclusive() {
+        let doc = r#"
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+credential = { type = "env", var = "OTHER_KEY" }
+models = ["local-model"]
+default_model = "local-model"
+"#;
+
+        let result = toml::from_str::<ProviderProfileConfig>(doc);
+
+        let err = result.expect_err("api_key_env と credential の併用は拒否される");
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "併用エラーであることを示す: {err}"
+        );
+    }
+
+    // Given: 空文字列または空白のみの api_key_env / When: パースする
+    // Then: エラーとして拒否される
+    #[test]
+    fn provider_profile_api_key_env_empty_rejected() {
+        for var in ["", "   "] {
+            let doc = format!(
+                r#"
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "{var}"
+models = ["local-model"]
+default_model = "local-model"
+"#
+            );
+
+            let result = toml::from_str::<ProviderProfileConfig>(&doc);
+
+            assert!(
+                result.is_err(),
+                "空の api_key_env ({var:?}) は拒否される: {result:?}"
+            );
+        }
+    }
+
+    // Given: sugar 形式でパースしたプロファイル / When: TOML へ直列化する
+    // Then: 正規形 (provider_type / credential) のみが出力され、sugar は現れず、
+    //       正規形として再パースできる
+    #[test]
+    fn provider_profile_sugar_serializes_to_canonical_form() {
+        let doc = r#"
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["local-model"]
+default_model = "local-model"
+"#;
+        let profile: ProviderProfileConfig = toml::from_str(doc).expect("sugar 形式を解析できる");
+
+        let serialized = toml::to_string(&profile).expect("正規形へ直列化できる");
+        assert!(
+            serialized.contains("provider_type = \"openai-compatible\""),
+            "provider_type を出力する: {serialized}"
+        );
+        assert!(
+            serialized.contains("type = \"env\""),
+            "credential の type タグを出力する: {serialized}"
+        );
+        assert!(
+            !serialized.contains("api_key_env"),
+            "sugar を出力しない: {serialized}"
+        );
+
+        let reparsed: ProviderProfileConfig =
+            toml::from_str(&serialized).expect("正規形として再パースできる");
+        assert_eq!(reparsed, profile);
+    }
+
+    // Given: sugar 形式に未知キーを混在させる / When: パースする
+    // Then: 未知キーは deny_unknown_fields により拒否される
+    #[test]
+    fn provider_profile_unknown_field_rejected_alongside_sugar() {
+        let doc = r#"
+type = "openai-compatible"
+api_key_env = "LOCAL_API_KEY"
+base_url = "http://127.0.0.1:8080/v1"
+models = ["local-model"]
+default_model = "local-model"
+typo_field = true
+"#;
+
+        let result = toml::from_str::<ProviderProfileConfig>(doc);
+
+        assert!(
+            result.is_err(),
+            "sugar 形式でも未知フィールドは拒否される: {result:?}"
+        );
+    }
+
+    // Given: 不正な type エイリアス値 / When: パースする
+    // Then: ProviderTypeConfig の variant でないため拒否される
+    #[test]
+    fn provider_profile_invalid_type_alias_rejected() {
+        let result = toml::from_str::<ProviderProfileConfig>(
+            "type = \"not-a-provider\"\nbase_url = \"https://x\"\n",
+        );
+
+        assert!(result.is_err(), "不正な type 値は拒否される: {result:?}");
+    }
+
+    // Given: ProviderProfileConfig の生成 JSON Schema / When: properties を確認する
+    // Then: sugar 形式の type エイリアスと api_key_env が optional property として含まれる
+    #[test]
+    fn provider_profile_schema_includes_sugar_properties() {
+        let schema = schemars::schema_for!(ProviderProfileConfig);
+        let json = serde_json::to_value(&schema).expect("schema を JSON 化できる");
+
+        let properties = json["properties"]
+            .as_object()
+            .expect("schema は object properties を持つ");
+        assert!(
+            properties.contains_key("type"),
+            "type エイリアスを schema に含める"
+        );
+        assert!(
+            properties.contains_key("api_key_env"),
+            "api_key_env を schema に含める"
+        );
+        assert!(
+            !json["required"]
+                .as_array()
+                .map(|required| required
+                    .iter()
+                    .any(|name| name == "type" || name == "api_key_env"))
+                .unwrap_or(false),
+            "sugar property は必須にしない"
         );
     }
 }
