@@ -126,6 +126,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             LifecycleEvent::AgentRunStarted { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
+            LifecycleEvent::EscalationRequested { .. } => {}
+            LifecycleEvent::EscalationProposed { .. } => {}
             LifecycleEvent::Completed { .. } => {
                 set_status(state, stored, SessionStatus::Completed);
             }

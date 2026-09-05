@@ -62,7 +62,9 @@ impl SpanMapper {
             LifecycleEvent::Delegated { .. }
             | LifecycleEvent::BackgroundTaskCompleted { .. }
             | LifecycleEvent::BackgroundTaskCancelled { .. }
-            | LifecycleEvent::RoutingDecision { .. } => Vec::new(),
+            | LifecycleEvent::RoutingDecision { .. }
+            | LifecycleEvent::EscalationRequested { .. }
+            | LifecycleEvent::EscalationProposed { .. } => Vec::new(),
         }
     }
 
