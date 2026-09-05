@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "v0.3: provider composition root + OpenAI 互換 provider 設定で headless 実 run E2E"
+  issue_kind: feature
+  source_execution_unit: v03-provider-composition-root
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/config/ crates/providers/"
+  target_part: "config から provider client を構築して AgentRuntime へ注入する provider composition root。[providers.*] の openai-compatible(base_url / API key / models / default_model)設定を確定し、GUI 非依存の headless 実 run E2E（実 provider に 1 回問い合わせて応答が返る）までを成立させる"
+  dependencies: []
+  technical_baseline:
+    - "crates/providers/src/http/openai_compat.rs: OpenAiCompatibleClient は実装済み（base_url + label + timeout、chat completions 互換）。client 層は流用する"
+    - "crates/config に [providers.*] テーブルと openai-compatible variant が存在するが汎用プレースホルダ（api_key_env のみ、base_url / models / default_model なし）"
+    - "crates/routing の factory は config 型から provider client を構築する経路を持つ（v02-prompt-assembly の logical model / profile 解決の接続先）"
+    - "AgentRuntime::production / agent loop は provider client 注入の seam を持つが、現行は config→factory→runtime の composition root が無く、GUI / headless 双方から実 provider で run を起動する経路がない"
+    - "credential は keychain 優先・0600 fallback（ADR 0008 脅威モデル）。本 slice の API key は環境変数（api_key_env 経由）を v0.3 既定とし、keyring 保存は既存 codex パターンへの接続余地として扱う"
+    - "GUI 描画（実 provider 応答の transcript 表示）は本 slice の対象外 — headless 経路で agent が実 provider 応答を生成・tool 実行まで到達することを検証する"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0020-canonical-message-normalization.md
+    - intents/evorch/technology/mvp-roadmap.md
+  acceptance_criteria:
+    - "provider composition root（config → routing factory → AgentRuntime 注入）が存在し、GUI/headless/テストの 3 経路から同一構成で実 provider client を組み立てられる unit test がある"
+    - "[providers.*] openai-compatible variant が base_url / api_key_env / models（logical model 名の列挙）/ default_model を持ち、deny_unknown_fields を維持したまま schema 拡張として実装される"
+    - "API key は設定ファイルに平文で書けず、api_key_env で参照された環境変数のみから読まれる（平文混入は fail-closed で拒否）ことを検証する test がある"
+    - "openai-compat provider を default_model で構成した状態で、headless 経路の実 run が実 provider に 1 回問い合わせ、応答テキストが run の transcript/event に到達することを検証する E2E（deny-by-default の network test、または recording fixture で mode-lock）がある"
+    - "既定（provider 未設定）では従来どおりの動作を維持し、設定追加が既存テストの回帰を起こさない"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents:
+      - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+      - intents/evorch/technology/mvp-roadmap.md
+    new_intent_needed: false
+    placement_rationale: "runtime の provider 配線欠落（composition root）を埋める slice。OpenAI 互換 provider 設定の確定は config schema 拡張として ADR 0014 系に接続。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/agent-runtime-kernel/overview.md
+      summary: "provider composition root の確定構成（config→factory→runtime 注入）と openai-compatible 設定 schema（base_url / api_key_env / models / default_model）、headless 実 run E2E の成立を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "composition root の位置と注入 seam、openai-compat 設定の最終 schema、credential 受け口（env のみ）の確定、E2E の fixture/network test 方式を agent-runtime-kernel overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "agent-runtime-kernel overview の provider 配線"
+      role: Operator
+      target_surface: "evorch.toml [providers.*] openai-compatible 設定"
