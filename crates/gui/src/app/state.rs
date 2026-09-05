@@ -43,6 +43,7 @@ pub struct WorkbenchState<S> {
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
     pub(super) focus: ConversationFocus,
+    pub(super) theme_installed: bool,
     pub(super) diff: DiffModel,
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
@@ -59,7 +60,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         workspace
             .validate()
             .map_err(WorkbenchError::InvalidWorkspace)?;
-        let dock = to_dock_state(&workspace)?;
+        let mut dock = to_dock_state(&workspace)?;
+        crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
         let mut state = Self {
             pump: None,
             transcripts: TranscriptRegistry::new(),
@@ -75,6 +77,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sidebar: SidebarState::default(),
             sidebar_path: None,
             focus: ConversationFocus::Thread,
+            theme_installed: false,
             diff: DiffModel::new(),
             diff_source: Arc::new(GitCliDiffSource),
             goal_form: GoalFormModel::default(),

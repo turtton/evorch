@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use egui_dock::{DockState, Node, NodeIndex, NodePath, Split as DockSplit, Surface, SurfaceIndex};
 use thiserror::Error;
 use workspace_ui::{
-    LayoutNode, Panel, PanelId, Split, SplitDirection, Tabs, Window, WindowRect, Workspace,
+    LayoutNode, Panel, PanelId, PanelKind, Split, SplitDirection, Tabs, Window, WindowRect,
+    Workspace,
 };
 
 /// DockState と Workspace の変換エラー。
@@ -41,6 +42,67 @@ pub fn to_dock_state(workspace: &Workspace) -> Result<DockState<PanelId>, DockCo
         )?;
     }
     Ok(dock)
+}
+
+/// サイドバーを左側に持つ水平 split の fraction 下限。
+/// 従来のスレッド行（pin/タイトル/状態/Pause）が狭いウィンドウでクリップされ、
+/// ボタンが操作不能になるのを防ぐ（800px で約 235px、1280px で約 380px）。
+pub const MIN_SIDEBAR_FRACTION: f32 = 0.30;
+
+/// サイドバーパネルを左サブツリーに持つ水平 split の fraction を下限値に引き上げます。
+pub fn enforce_sidebar_min_fraction(dock: &mut DockState<PanelId>, workspace: &Workspace) {
+    let sidebar_ids: Vec<&PanelId> = workspace
+        .panels
+        .values()
+        .filter(|panel| panel.kind == PanelKind::Sidebar)
+        .map(|panel| &panel.id)
+        .collect();
+    if sidebar_ids.is_empty() {
+        return;
+    }
+    let root = NodePath::new(SurfaceIndex::main(), NodeIndex::root());
+    let mut targets = Vec::new();
+    collect_sidebar_split_paths(dock, root, &sidebar_ids, &mut targets);
+    for path in targets {
+        if let Ok(Node::Horizontal(split)) = dock.node_mut(path) {
+            split.fraction = split.fraction.max(MIN_SIDEBAR_FRACTION);
+        }
+    }
+}
+
+fn collect_sidebar_split_paths(
+    dock: &DockState<PanelId>,
+    path: NodePath,
+    sidebar_ids: &[&PanelId],
+    targets: &mut Vec<NodePath>,
+) {
+    let Ok(node) = dock.node(path) else {
+        return;
+    };
+    if matches!(node, Node::Horizontal(_))
+        && subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
+    {
+        targets.push(path);
+    }
+    if matches!(node, Node::Horizontal(_) | Node::Vertical(_)) {
+        collect_sidebar_split_paths(dock, child_path(path, true), sidebar_ids, targets);
+        collect_sidebar_split_paths(dock, child_path(path, false), sidebar_ids, targets);
+    }
+}
+
+fn subtree_contains_sidebar(
+    dock: &DockState<PanelId>,
+    path: NodePath,
+    sidebar_ids: &[&PanelId],
+) -> bool {
+    match dock.node(path) {
+        Ok(Node::Leaf(leaf)) => leaf.tabs.iter().any(|tab| sidebar_ids.contains(&tab)),
+        Ok(Node::Horizontal(_)) | Ok(Node::Vertical(_)) => {
+            subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
+                || subtree_contains_sidebar(dock, child_path(path, false), sidebar_ids)
+        }
+        _ => false,
+    }
 }
 
 /// DockState から rect に依存しない Workspace を抽出します。
@@ -174,4 +236,152 @@ fn extract_node(dock: &DockState<PanelId>, path: NodePath) -> Result<LayoutNode,
 fn child_path(path: NodePath, first: bool) -> NodePath {
     let offset = if first { 1 } else { 2 };
     NodePath::new(path.surface, NodeIndex(path.node.0 * 2 + offset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_SIDEBAR_FRACTION, enforce_sidebar_min_fraction, to_dock_state};
+    use egui_dock::{Node, NodeIndex, NodePath, SurfaceIndex};
+    use std::collections::BTreeMap;
+    use workspace_ui::{
+        LayoutNode, Panel, PanelId, PanelKind, Split, SplitDirection, Tabs, Window, Workspace,
+    };
+
+    fn panel(id: &str, kind: PanelKind) -> (PanelId, Panel) {
+        let panel_id = PanelId::new(id);
+        (
+            panel_id.clone(),
+            Panel {
+                id: panel_id,
+                kind,
+                title: id.to_owned(),
+                target: None,
+            },
+        )
+    }
+
+    fn tabs(panels: &[&str]) -> LayoutNode {
+        LayoutNode::Tabs(Tabs {
+            panels: panels.iter().map(|id| PanelId::new(*id)).collect(),
+            active: 0,
+        })
+    }
+
+    fn root_fraction(dock: &egui_dock::DockState<PanelId>) -> f32 {
+        let root = NodePath::new(SurfaceIndex::main(), NodeIndex::root());
+        match dock.node(root) {
+            Ok(Node::Horizontal(split)) | Ok(Node::Vertical(split)) => split.fraction,
+            other => panic!("expected split root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_raises_sidebar_split_fraction_to_minimum() {
+        // Given: a horizontal root split with the sidebar on the left below the minimum
+        let panels: BTreeMap<_, _> = [
+            panel("sidebar", PanelKind::Sidebar),
+            panel("agent", PanelKind::Agent),
+            panel("goal", PanelKind::Goal),
+        ]
+        .into_iter()
+        .collect();
+        let workspace = Workspace {
+            version: 1,
+            panels,
+            main: Window {
+                root: LayoutNode::Split(Split {
+                    direction: SplitDirection::Horizontal,
+                    fraction: 0.2,
+                    first: Box::new(tabs(&["sidebar"])),
+                    second: Box::new(LayoutNode::Split(Split {
+                        direction: SplitDirection::Vertical,
+                        fraction: 0.6,
+                        first: Box::new(tabs(&["agent"])),
+                        second: Box::new(tabs(&["goal"])),
+                    })),
+                }),
+                floating: Vec::new(),
+                rect: None,
+            },
+            extra_windows: Vec::new(),
+        };
+        let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
+
+        // When: enforcing the sidebar minimum fraction
+        enforce_sidebar_min_fraction(&mut dock, &workspace);
+
+        // Then: the sidebar split is raised while the unrelated split keeps its fraction
+        assert_eq!(root_fraction(&dock), MIN_SIDEBAR_FRACTION);
+        let right = NodePath::new(SurfaceIndex::main(), NodeIndex(2));
+        match dock.node(right) {
+            Ok(Node::Vertical(split)) => assert_eq!(split.fraction, 0.6),
+            other => panic!("expected vertical right split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_keeps_fraction_already_above_minimum() {
+        // Given: a sidebar split already above the minimum
+        let panels: BTreeMap<_, _> = [
+            panel("sidebar", PanelKind::Sidebar),
+            panel("agent", PanelKind::Agent),
+        ]
+        .into_iter()
+        .collect();
+        let workspace = Workspace {
+            version: 1,
+            panels,
+            main: Window {
+                root: LayoutNode::Split(Split {
+                    direction: SplitDirection::Horizontal,
+                    fraction: 0.45,
+                    first: Box::new(tabs(&["sidebar"])),
+                    second: Box::new(tabs(&["agent"])),
+                }),
+                floating: Vec::new(),
+                rect: None,
+            },
+            extra_windows: Vec::new(),
+        };
+        let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
+
+        // When: enforcing the sidebar minimum fraction
+        enforce_sidebar_min_fraction(&mut dock, &workspace);
+
+        // Then: the existing fraction is preserved
+        assert_eq!(root_fraction(&dock), 0.45);
+    }
+
+    #[test]
+    fn enforce_is_noop_without_sidebar() {
+        // Given: a horizontal split with no sidebar panel anywhere
+        let panels: BTreeMap<_, _> = [
+            panel("agent", PanelKind::Agent),
+            panel("goal", PanelKind::Goal),
+        ]
+        .into_iter()
+        .collect();
+        let workspace = Workspace {
+            version: 1,
+            panels,
+            main: Window {
+                root: LayoutNode::Split(Split {
+                    direction: SplitDirection::Horizontal,
+                    fraction: 0.2,
+                    first: Box::new(tabs(&["agent"])),
+                    second: Box::new(tabs(&["goal"])),
+                }),
+                floating: Vec::new(),
+                rect: None,
+            },
+            extra_windows: Vec::new(),
+        };
+        let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
+
+        // When: enforcing the sidebar minimum fraction
+        enforce_sidebar_min_fraction(&mut dock, &workspace);
+
+        // Then: the fraction is untouched
+        assert_eq!(root_fraction(&dock), 0.2);
+    }
 }

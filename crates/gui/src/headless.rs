@@ -110,9 +110,19 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.query_by_label(label).is_some()
     }
 
+    /// 指定ラベルに一致する UI node の数を返します。
+    pub fn count_labels(&self, label: &str) -> usize {
+        self.harness.query_all_by_label(label).count()
+    }
+
     /// modifier 付きキー入力を次フレームへ送ります。
     pub fn key_press(&self, modifiers: Modifiers, key: Key) {
         self.harness.key_press_modifiers(modifiers, key);
+    }
+
+    /// ポインタを指定座標へ移動します（hover 状態の capture 用）。
+    pub fn pointer_move(&self, pos: egui::Pos2) {
+        self.harness.hover_at(pos);
     }
 
     /// 現在の UI を RGBA8 フレームとして取得します。

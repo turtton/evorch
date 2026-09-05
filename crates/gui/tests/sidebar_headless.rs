@@ -5,6 +5,7 @@ use std::time::Duration;
 use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
 use gui::app::WorkbenchState;
 use gui::events::EventPump;
+use gui::fixture::{demo_events, demo_sidebar};
 use gui::headless::HeadlessWorkbench;
 use gui::model::project_bridge::run_membership;
 use gui::model::tasks::AgentRunSource;
@@ -288,4 +289,55 @@ fn thread_shows_branch_and_worktree_indicator() {
     // Then: the branch and worktree are shown together
     let indicator = format!("evorch/task/run-2 @ {}", worktree.display());
     assert!(harness.has_label(&indicator));
+}
+
+#[test]
+fn sidebar_without_projects_shows_placeholder_and_single_add_project_cta() {
+    // Given: a default workbench with no projects
+    let workbench = WorkbenchState::new(MockSource::default(), &UiSettings::default())
+        .expect("default state builds");
+    let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
+    harness.run();
+
+    // Then: the placeholder is visible and only one "Add project" node exists
+    assert!(harness.has_label("No projects yet"));
+    assert_eq!(harness.count_labels("Add project"), 1);
+    assert!(harness.has_label("Projects"));
+}
+
+#[test]
+fn sidebar_with_project_but_no_threads_shows_thread_placeholder() {
+    // Given: a rendered sidebar with one selected project and no threads
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sidebar = sidebar_with_project(temp.path());
+    let mut harness = HeadlessWorkbench::new(state(MockSource::default(), sidebar), [800.0, 600.0]);
+    harness.run();
+
+    // Then: the thread placeholder is shown with a single "New thread" CTA
+    assert!(harness.has_label("No threads yet"));
+    assert_eq!(harness.count_labels("New thread"), 1);
+
+    // When: the operator clicks the CTA
+    harness.click_label("New thread");
+    harness.run();
+
+    // Then: the placeholder disappears and the new thread title is rendered
+    assert!(!harness.has_label("No threads yet"));
+    assert!(harness.has_label("thread-1"));
+}
+
+#[test]
+fn sidebar_thread_rows_expose_state_text() {
+    // Given: a demo sidebar populated with lifecycle events
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let workbench = state(MockSource::default(), sidebar);
+    let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
+    harness.run();
+    harness.state_mut().apply_events(demo_events());
+    harness.run();
+
+    // Then: running and paused thread states are both exposed as labels
+    assert!(harness.has_label("Running"));
+    assert!(harness.has_label("Paused"));
 }
