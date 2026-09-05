@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-05T05:42:09.3141886+00:00",
+  "updated_at": "2026-09-05T05:44:13.5274806+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -933,6 +933,11 @@
         "implementation": ".intent-cli/issues/v02-direct-escalation-handoff/implementation.md",
         "review_context": ".intent-cli/issues/v02-direct-escalation-handoff/review-context.md",
         "yaml": ".intent-cli/issues/v02-direct-escalation-handoff/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 75,
+        "url": "https://github.com/turtton/evorch/issues/75"
       },
       "worker_role": "implementation",
       "review_role": "review",
