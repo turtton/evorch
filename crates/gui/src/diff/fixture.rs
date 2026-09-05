@@ -36,6 +36,14 @@ impl FixtureDiffSource {
             Err(DiffError::Io(message.to_string())),
         )
     }
+
+    /// evorch-gui `--demo` と同じ canned diff を返す source を生成する。
+    pub fn demo() -> Self {
+        Self::new(
+            Ok("diff --git a/src/demo.rs b/src/demo.rs\n--- a/src/demo.rs\n+++ b/src/demo.rs\n@@ -1 +1 @@\n-old\n+demo\ndiff --git a/tests/demo.rs b/tests/demo.rs\n--- /dev/null\n+++ b/tests/demo.rs\n@@ -0,0 +1 @@\n+demo test\n".to_string()),
+            Ok("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+demo branch\n".to_string()),
+        )
+    }
 }
 
 impl DiffSource for FixtureDiffSource {

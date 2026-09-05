@@ -6,6 +6,7 @@ pub mod app;
 pub mod diff;
 pub mod dock;
 pub mod events;
+pub mod fixture;
 pub mod headless;
 pub mod keymap;
 pub mod model;
