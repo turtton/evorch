@@ -19,6 +19,7 @@ use crate::compaction;
 use crate::compaction::policy::{
     CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
 };
+use crate::escalation::EscalationSettings;
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
 use crate::rules::{self, RulesSession, RulesSource};
@@ -63,6 +64,11 @@ pub(crate) struct LoopShared {
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
     pub(crate) compaction_configured: bool,
+    #[expect(
+        dead_code,
+        reason = "エスカレーション検出器は後続タスクで LoopShared からこの設定を消費する"
+    )]
+    pub(crate) escalation: EscalationSettings,
     pub(crate) runtime: Weak<Shared>,
 }
 

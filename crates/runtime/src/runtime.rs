@@ -19,6 +19,7 @@ use tools::ToolExecutor;
 use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
 use crate::compaction::policy::CompactionSettings;
 use crate::entry_routing::EntryRouter;
+use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::mailbox::{PushError, RunMailbox};
 use crate::orchestration::GoalGate;
 use crate::prompt::{
@@ -52,6 +53,8 @@ pub(crate) struct Shared {
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
     pub(crate) compaction_configured: AtomicBool,
+    pub(crate) escalation_settings: OnceLock<EscalationSettings>,
+    pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
     /// goal gate (finish 判定 seam、issue #73 T1.3)。未設定なら finish は
     /// legacy の即時受理のまま残る (T3.1 が `meta::finish` から参照する)。
     pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
@@ -138,6 +141,8 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                escalation_settings: OnceLock::new(),
+                escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
@@ -158,6 +163,14 @@ impl AgentRuntime {
         self.shared
             .compaction_configured
             .store(true, Ordering::Release);
+        self
+    }
+
+    /// エスカレーション検出設定を接続したランタイムを返す。
+    ///
+    /// 設定済みの場合は 2 回目以降の呼び出しを無視する先勝ち契約である。
+    pub fn with_escalation_settings(self, settings: EscalationSettings) -> Self {
+        let _ = self.shared.escalation_settings.set(settings);
         self
     }
 
@@ -338,6 +351,8 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                escalation_settings: OnceLock::new(),
+                escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
@@ -368,6 +383,28 @@ impl AgentRuntime {
         if let Some(gate) = self.goal_gate() {
             gate.attach_child(parent, child, role);
         }
+    }
+
+    #[expect(
+        dead_code,
+        reason = "エスカレーション handoff は後続タスクでこの記録口を呼び出す"
+    )]
+    pub(crate) fn record_escalation_memo(&self, run_id: RunId, memo: EscalationMemo) {
+        self.shared
+            .escalations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id, memo);
+    }
+
+    /// 指定 run に記録されたエスカレーションメモを返す。
+    pub fn escalation_memo(&self, run_id: RunId) -> Option<EscalationMemo> {
+        self.shared
+            .escalations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .cloned()
     }
 
     /// entry pre-routing 判定器を返す。
@@ -967,6 +1004,11 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
         rules: shared.rules.get().cloned(),
         compaction: shared.compaction.get().cloned().unwrap_or_default(),
         compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
+        escalation: shared
+            .escalation_settings
+            .get()
+            .copied()
+            .unwrap_or_default(),
         runtime: Arc::downgrade(&shared),
     })
 }

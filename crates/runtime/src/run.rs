@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// [`Display`](std::fmt::Display) はイベントペイロードの `run_id` 文字列と
 /// 同一の `run-{n}` 形式を返す。イベントへの載せ替えはこの形式で行う。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunId(u64);
 
 impl RunId {
