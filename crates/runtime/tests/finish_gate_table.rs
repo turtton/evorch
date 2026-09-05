@@ -138,6 +138,19 @@ fn stale_pr_head() {
     );
 }
 
+// Given: 全証跡が揃っているが最新 remote head を取得できない / When: gate を評価する / Then: RemoteHeadUnavailable で拒否される
+#[test]
+fn head_unavailable_rejects() {
+    let mut f = Fixture::passing();
+    f.current_head = None;
+    assert_reject(
+        f,
+        vec![GateRejection::RemoteHeadUnavailable {
+            detail: "remote head could not be fetched".to_string(),
+        }],
+    );
+}
+
 #[test]
 fn ci_missing() {
     let mut f = Fixture::passing();

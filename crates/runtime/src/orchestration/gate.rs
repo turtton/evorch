@@ -114,7 +114,13 @@ pub fn evaluate(inputs: &GateInputs<'_>) -> GateVerdict {
         });
     }
 
-    let current_head = inputs.current_head.unwrap_or(pr.head_sha.as_str());
+    let Some(current_head) = inputs.current_head else {
+        // 最新 remote head を証明できない限り受理しない (fail-closed, AC3)。
+        rejections.push(GateRejection::RemoteHeadUnavailable {
+            detail: "remote head could not be fetched".to_string(),
+        });
+        return GateVerdict::Reject(rejections);
+    };
     if pr.head_sha != current_head {
         rejections.push(GateRejection::StaleHead {
             evidence: "pull_request".to_string(),

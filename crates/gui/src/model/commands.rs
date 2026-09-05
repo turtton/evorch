@@ -335,6 +335,7 @@ fn rejection_label(rejection: &GateRejection) -> String {
         GateRejection::PullRequestRepoMismatch { .. } => "pull_request_repo_mismatch",
         GateRejection::PullRequestBaseMismatch { .. } => "pull_request_base_mismatch",
         GateRejection::StaleHead { .. } => "stale_head",
+        GateRejection::RemoteHeadUnavailable { .. } => "remote_head_unavailable",
         GateRejection::CiMissing { .. } => "ci_missing",
         GateRejection::CiPending { .. } => "ci_pending",
         GateRejection::CiFailing { .. } => "ci_failing",

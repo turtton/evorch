@@ -428,3 +428,77 @@ async fn finish_after_head_change_rejected_stale_head() {
         matches!(rejected, OrchestratorEvent::FinishRejected { rejections, .. } if rejections.iter().any(|item| matches!(item, GateRejection::StaleHead { evidence, evidence_head, current_head } if evidence == "pull_request" && evidence_head == HEAD_A && current_head == HEAD_B)))
     );
 }
+
+#[tokio::test]
+async fn finish_is_rejected_when_remote_head_unavailable() {
+    // Given: PR 証跡を持つ goal と、pr_status が常に失敗する delivery adapter
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(tool_response(
+            "finish",
+            "finish",
+            json!({"result": "delivered"}),
+        ))],
+        Arc::clone(&gate),
+    ));
+    let bus = Arc::new(EventBus::new(256));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+    let mut events = bus.subscribe();
+    let handle = GoalSupervisor::spawn(
+        runtime.clone(),
+        Arc::clone(&bus),
+        Arc::new(FixtureDeliveryAdapter::default()),
+        OrchestrationSettings::default(),
+    );
+    let root =
+        runtime.delegate_background(Role::Orchestrator, "HEAD-LOSS".into(), RunConfig::default());
+    let goal_id = handle.create_goal(spec(), root);
+    timeout(Duration::from_secs(2), async {
+        while handle.snapshot(&goal_id).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("goal creation timeout");
+    for event in [
+        OrchestratorEvent::DeliverableBranchBound {
+            goal_id: goal_id.clone(),
+            branch: "feature".into(),
+            run_id: root.to_string(),
+        },
+        OrchestratorEvent::EvidenceRecorded {
+            goal_id: goal_id.clone(),
+            evidence: GateEvidence::PullRequest {
+                repo: "turtton/evorch".into(),
+                number: 101,
+                url: "url".into(),
+                base_ref: "main".into(),
+                head_sha: HEAD_A.into(),
+            },
+        },
+    ] {
+        bus.emit(event_bus::Event::new(event));
+    }
+    gate.notify_one();
+
+    // When: remote head を取得できないまま finish が評価される
+    let rejected = wait_for_event(&mut events, |event| {
+        matches!(event, OrchestratorEvent::FinishRejected { goal_id: id, .. } if id == &goal_id)
+    })
+    .await;
+
+    // Then: RemoteHeadUnavailable で拒否され、goal は Active のまま
+    assert!(
+        matches!(rejected, OrchestratorEvent::FinishRejected { rejections, .. } if rejections.iter().any(|item| matches!(item, GateRejection::RemoteHeadUnavailable { .. })))
+    );
+    assert_eq!(
+        handle.snapshot(&goal_id).expect("snapshot").state,
+        GoalState::Active
+    );
+    gate.notify_waiters();
+    runtime.cancel(root).expect("cancel root");
+}

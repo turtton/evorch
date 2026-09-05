@@ -76,12 +76,14 @@ impl GoalRegistry {
         let current_head = if let Some(number) = pr_number {
             match self.delivery.pr_status(&repo, number).await {
                 Ok(GateEvidence::PullRequest { head_sha, .. }) => Some(head_sha),
+                // remote head を取得できない場合は保存済み head へ逃がさず
+                // 取得不能として gate へ渡す (fail-closed, AC3)。
                 Ok(
                     GateEvidence::Ci { .. }
                     | GateEvidence::Criteria { .. }
                     | GateEvidence::Review { .. },
                 )
-                | Err(_) => fallback_head,
+                | Err(_) => None,
             }
         } else {
             fallback_head

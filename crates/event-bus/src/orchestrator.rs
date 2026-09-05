@@ -223,6 +223,11 @@ pub enum GateRejection {
         /// 現在の head SHA。
         current_head: String,
     },
+    /// 最新 remote head を取得できず鮮度を証明できない (fail-closed)。
+    RemoteHeadUnavailable {
+        /// 取得失敗の詳細。
+        detail: String,
+    },
     /// 現在 head の CI 状態が存在しない。
     CiMissing {
         /// 現在の head SHA。
@@ -914,6 +919,14 @@ mod tests {
         let restored: GateRejection =
             serde_json::from_str(&json).expect("deserialize ReviewRoundsExhausted");
         assert_eq!(exhausted, restored);
+
+        let unavailable = GateRejection::RemoteHeadUnavailable {
+            detail: "remote head could not be fetched".into(),
+        };
+        let json = serde_json::to_string(&unavailable).expect("serialize RemoteHeadUnavailable");
+        let restored: GateRejection =
+            serde_json::from_str(&json).expect("deserialize RemoteHeadUnavailable");
+        assert_eq!(unavailable, restored);
     }
 
     // Given: スキーマ補助型の全バリアント
