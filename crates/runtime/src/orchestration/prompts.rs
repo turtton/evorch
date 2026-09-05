@@ -83,6 +83,39 @@ pub fn render_recovery_prompt(snapshot: &GoalSnapshot, transcript: &[AgentMessag
     prompt
 }
 
+/// SHA-bound reviewer run の構造化プロンプトを生成する。
+pub fn render_review_prompt(snapshot: &GoalSnapshot, round: u32) -> String {
+    let mut prompt = format!(
+        "[evorch review round={round} goal={}]\n\n## Goal\n{}\n\n## Acceptance criteria\n",
+        snapshot.goal_id, snapshot.goal
+    );
+    append_lines(
+        &mut prompt,
+        snapshot
+            .constraints
+            .iter()
+            .enumerate()
+            .map(|(index, criterion)| format!("- ac-{}: {criterion}", index + 1)),
+    );
+    prompt.push_str(
+        "\nRespond with a fenced ```json block: {\"verdict\":\"approve\"|\"request-update\",\"findings\":[...],\"criteria\":[{\"id\",\"status\":\"met\"|\"unmet\"|\"unknown\",\"note\"}]}\n",
+    );
+    prompt
+}
+
+/// reviewer findings を同じ deliverable branch の repair worker へ渡す。
+pub fn render_repair_prompt(snapshot: &GoalSnapshot, round: u32, findings: &[String]) -> String {
+    let mut prompt = format!(
+        "[evorch repair round={round} goal={}]\n\n## Goal\n{}\n\n## Findings\n",
+        snapshot.goal_id, snapshot.goal
+    );
+    append_lines(
+        &mut prompt,
+        findings.iter().map(|finding| format!("- {finding}")),
+    );
+    prompt
+}
+
 fn append_lines(output: &mut String, lines: impl Iterator<Item = String>) {
     for line in lines {
         output.push_str(&line);

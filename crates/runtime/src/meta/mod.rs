@@ -52,18 +52,41 @@ pub(crate) async fn dispatch(
         "inspect_agent" => runs::inspect_agent(&runtime, input),
         "skill_load" => skills::skill_load(state, input),
         "compact" => compaction::compact(state, input).await,
-        "finish" => finish(input),
+        "finish" => finish(state, &runtime, input).await,
         _ => error(format!("unknown meta-op: {name}")),
     }
 }
 
-fn finish(input: serde_json::Value) -> DispatchResult {
-    match parse::<FinishArgs>(input) {
-        Ok(args) => DispatchResult {
+async fn finish(
+    state: &LoopState,
+    runtime: &crate::AgentRuntime,
+    input: serde_json::Value,
+) -> DispatchResult {
+    let args = match parse::<FinishArgs>(input) {
+        Ok(args) => args,
+        Err(message) => return error(message),
+    };
+    let Some(gate) = runtime.goal_gate() else {
+        return DispatchResult {
+            result: ToolResult::success(&args.result),
+            finish: Some(args.result),
+        };
+    };
+    match gate.evaluate_finish(state.caller_run_id()).await {
+        None | Some(crate::orchestration::gate::GateVerdict::Accept(_)) => DispatchResult {
             result: ToolResult::success(&args.result),
             finish: Some(args.result),
         },
-        Err(message) => error(message),
+        Some(crate::orchestration::gate::GateVerdict::Reject(rejected)) => DispatchResult {
+            result: ToolResult::error(
+                serde_json::json!({
+                    "rejected": rejected,
+                    "next_action": "satisfy the reported gate conditions, then call finish again"
+                })
+                .to_string(),
+            ),
+            finish: None,
+        },
     }
 }
 

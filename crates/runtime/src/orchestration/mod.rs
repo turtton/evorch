@@ -26,7 +26,11 @@ pub mod stall;
 pub mod supervisor;
 pub mod types;
 
+pub use approval::MergeApprovals;
 pub use delivery::{DeliveryError, DeliveryPort, FixtureDeliveryAdapter};
+pub use ledger::{GoalLedger, GoalSnapshot, OrchestrationSettings};
+pub use shell_delivery::ShellDeliveryAdapter;
+pub use supervisor::{GoalSpec, GoalSupervisor, SupervisorHandle};
 pub use types::{
     ApprovedMerge, GateRejection, GateSnapshot, GoalStage, GoalState, MergeBinding,
     OrchestratorEvent,
@@ -39,6 +43,9 @@ pub use types::{
 /// 参照する。返り値の future は hand-written boxed future (async-trait desugar
 /// 形) とし、async-trait crate の新規依存を導入しない。
 pub trait GoalGate: Send + Sync {
+    /// goal-bound parent が委譲した run を supervisor ledger に同期接続する。
+    fn attach_child(&self, _parent: RunId, _child: RunId, _role: crate::Role) {}
+
     /// caller run の finish を判定する。
     ///
     /// `None` は「caller run がどの goal にも紐付いていない」ことを意味し、

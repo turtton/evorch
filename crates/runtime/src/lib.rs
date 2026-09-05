@@ -52,7 +52,9 @@ pub use network::{
 };
 pub use orchestration::{
     ApprovedMerge, DeliveryError, DeliveryPort, FixtureDeliveryAdapter, GateRejection,
-    GateSnapshot, GoalStage, GoalState, MergeBinding, OrchestratorEvent,
+    GateSnapshot, GoalLedger, GoalSnapshot, GoalSpec, GoalStage, GoalState, GoalSupervisor,
+    MergeApprovals, MergeBinding, OrchestrationSettings, OrchestratorEvent, ShellDeliveryAdapter,
+    SupervisorHandle,
 };
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 pub use prompt::{

@@ -24,6 +24,7 @@ use tokio::time::{Duration, timeout};
 pub struct ScriptedModel {
     script: Mutex<VecDeque<Result<ChatResponse, RuntimeError>>>,
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
+    keyed_gates: Mutex<HashMap<String, Arc<Notify>>>,
     observed: Mutex<Vec<Vec<Message>>>,
     gate: Option<Arc<Notify>>,
     selected_model: Option<String>,
@@ -52,6 +53,7 @@ impl ScriptedModel {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             keyed: Mutex::new(HashMap::new()),
+            keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
             gate: None,
             selected_model: None,
@@ -65,6 +67,7 @@ impl ScriptedModel {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             keyed: Mutex::new(HashMap::new()),
+            keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
             gate: Some(gate),
             selected_model: None,
@@ -85,6 +88,13 @@ impl ScriptedModel {
             .lock()
             .await
             .insert(marker.to_string(), script.into_iter().collect());
+    }
+
+    pub async fn gate_key(&self, marker: &str, gate: Arc<Notify>) {
+        self.keyed_gates
+            .lock()
+            .await
+            .insert(marker.to_string(), gate);
     }
 
     pub async fn observed(&self) -> Vec<Vec<Message>> {
@@ -118,8 +128,22 @@ impl AgentModel for ScriptedModel {
                 })
             });
         if let Some(marker) = marker {
+            let gate = self
+                .keyed_gates
+                .lock()
+                .await
+                .iter()
+                .find_map(|(key, gate)| marker.contains(key).then(|| Arc::clone(gate)));
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             let mut keyed = self.keyed.lock().await;
-            if let Some(script) = keyed.get_mut(marker) {
+            let key = keyed
+                .keys()
+                .filter(|key| marker.contains(key.as_str()))
+                .max_by_key(|key| key.len())
+                .cloned();
+            if let Some(script) = key.and_then(|key| keyed.get_mut(&key)) {
                 return script.pop_front().unwrap_or_else(|| {
                     Err(RuntimeError::Model {
                         reason: format!("script exhausted for {marker}"),

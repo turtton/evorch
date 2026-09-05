@@ -360,12 +360,14 @@ impl AgentRuntime {
     }
 
     /// 接続済みの goal gate を返す (未設定なら `None`)。
-    #[expect(
-        dead_code,
-        reason = "read by meta::finish wiring (T3.1) via LoopState::runtime()"
-    )]
     pub(crate) fn goal_gate(&self) -> Option<Arc<dyn GoalGate>> {
         self.shared.goals.get().cloned()
+    }
+
+    pub(crate) fn attach_goal_child(&self, parent: RunId, child: RunId, role: Role) {
+        if let Some(gate) = self.goal_gate() {
+            gate.attach_child(parent, child, role);
+        }
     }
 
     /// entry pre-routing 判定器を返す。
