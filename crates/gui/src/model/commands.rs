@@ -282,6 +282,11 @@ pub fn apply_orchestrator_event(
             view.gate = gate_rows(&binding.snapshot);
             view.blocked = None;
         }
+        OrchestratorEvent::MergeApprovalInvalidated { reason, .. } => {
+            view.binding = None;
+            view.resolution = None;
+            view.blocked = Some(invalidation_label(reason).to_owned());
+        }
         OrchestratorEvent::CloseoutStepRecorded { step, ok, .. } => {
             if let Some(entry) = status
                 .closeout
@@ -341,6 +346,17 @@ fn rejection_label(rejection: &GateRejection) -> String {
         GateRejection::ReviewRoundsExhausted { .. } => "review_rounds_exhausted",
     }
     .to_owned()
+}
+
+fn invalidation_label(reason: &event_bus::InvalidationReason) -> &'static str {
+    match reason {
+        event_bus::InvalidationReason::HeadChanged { .. } => "stale_head",
+        event_bus::InvalidationReason::CiChanged => "stale_ci",
+        event_bus::InvalidationReason::ReviewChanged => "stale_review",
+        event_bus::InvalidationReason::Consumed => "approval_consumed",
+        event_bus::InvalidationReason::Rejected => "approval_rejected",
+        event_bus::InvalidationReason::GoalNotActive => "goal_not_active",
+    }
 }
 
 fn ci_status_of(state: &CiState) -> CiStatus {
