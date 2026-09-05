@@ -23,32 +23,45 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_mut()
             .map_or_else(Vec::new, crate::events::EventPump::drain);
         for event in events {
-            // Fold lifecycle state first so each following stream delta observes all earlier phase
-            // events in this drain. Deltas have no run_id, so mirror only when exactly one run is
-            // Running; zero or concurrent Running runs remain thread-only to prevent contamination.
-            self.apply_runtime_event(&event);
-            self.transcripts.apply(&event);
-            if matches!(
-                event.kind,
-                EventKind::Message(
-                    MessageEvent::MessageDelta { .. } | MessageEvent::ReasoningDelta { .. }
-                )
-            ) {
-                let mut running = self
-                    .phases
-                    .iter()
-                    .filter(|(_, phase)| **phase == ThreadRunPhase::Running)
-                    .map(|(run_id, _)| run_id.as_str());
-                if let Some(run_id) = running.next()
-                    && running.next().is_none()
-                {
-                    self.transcripts.apply_stream_delta(run_id, &event);
-                }
-            }
-            self.tasks.apply_event(&event);
-            self.telemetry.apply_event(&event);
+            self.fold_event(&event);
         }
         self.refresh_active_thread_workspace();
+    }
+
+    /// Synchronous fold for fixtures/tests/headless capture; production uses
+    /// `EventPump`.
+    pub fn apply_events(&mut self, events: impl IntoIterator<Item = Event>) {
+        for event in events {
+            self.fold_event(&event);
+        }
+        self.refresh_active_thread_workspace();
+    }
+
+    fn fold_event(&mut self, event: &Event) {
+        // Fold lifecycle state first so each following stream delta observes all earlier phase
+        // events in this fold. Deltas have no run_id, so mirror only when exactly one run is
+        // Running; zero or concurrent Running runs remain thread-only to prevent contamination.
+        self.apply_runtime_event(event);
+        self.transcripts.apply(event);
+        if matches!(
+            event.kind,
+            EventKind::Message(
+                MessageEvent::MessageDelta { .. } | MessageEvent::ReasoningDelta { .. }
+            )
+        ) {
+            let mut running = self
+                .phases
+                .iter()
+                .filter(|(_, phase)| **phase == ThreadRunPhase::Running)
+                .map(|(run_id, _)| run_id.as_str());
+            if let Some(run_id) = running.next()
+                && running.next().is_none()
+            {
+                self.transcripts.apply_stream_delta(run_id, event);
+            }
+        }
+        self.tasks.apply_event(event);
+        self.telemetry.apply_event(event);
     }
 
     fn apply_runtime_event(&mut self, event: &Event) {
