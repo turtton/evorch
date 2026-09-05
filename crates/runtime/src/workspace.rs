@@ -168,6 +168,10 @@ impl WorktreeManager {
     /// 修復ラウンドの run が同一 deliverable branch を再利用する)。worktree path
     /// は branch 名からではなく run 名から導出される。
     ///
+    /// 直前 run の worktree cleanup は終端 event 発行後に非同期で走るため、同一
+    /// branch の引き継ぎ checkout は git の "already used by worktree" 衝突を
+    /// 有限 retry で待ち合わせる。
+    ///
     /// # Errors
     /// branch 不在、path 衝突、git command、または filesystem 操作の失敗時に
     /// [`WorkspaceError`] を返す。worktree add の失敗時は部分ディレクトリだけを
@@ -181,7 +185,17 @@ impl WorktreeManager {
         if !branch_exists(&self.project.repo_root, &branch)? {
             return Err(WorkspaceError::BranchMissing { branch });
         }
-        self.add_worktree(run_id.to_string(), branch, false)
+        let mut attempt = 0;
+        loop {
+            match self.add_worktree(run_id.to_string(), branch.clone(), false) {
+                Ok(owned) => return Ok(owned),
+                Err(error) if attempt < BRANCH_RELEASE_MAX_ATTEMPTS && is_branch_held(&error) => {
+                    attempt += 1;
+                    std::thread::sleep(BRANCH_RELEASE_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// worktree 本体の作成共通部。`create_branch` が真のときだけ branch を
@@ -290,6 +304,16 @@ impl OwnedWorktree {
         }
         run_git(&self.repo_root, &["worktree", "prune"])
     }
+}
+
+const BRANCH_RELEASE_MAX_ATTEMPTS: u32 = 100;
+const BRANCH_RELEASE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn is_branch_held(error: &WorkspaceError) -> bool {
+    matches!(
+        error,
+        WorkspaceError::Git { detail } if detail.contains("already used by worktree")
+    )
 }
 
 fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool, WorkspaceError> {
@@ -467,6 +491,29 @@ mod tests {
             .status
             .success()
         );
+    }
+
+    // Given: 先行 run が保持する branch / When: 保持側を遅延 cleanup しつつ同一 branch を checkout / Then: retry で待ち合わせて作成できる
+    #[test]
+    fn create_on_branch_waits_for_branch_release() {
+        let (_temp, repo) = init_repo();
+        let manager = manager(&repo);
+        let held = manager
+            .create(RunId::new(1))
+            .expect("先行 run の worktree を作成できる");
+        let branch = held.branch.clone();
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            held.cleanup().expect("先行 worktree を cleanup できる");
+        });
+        let adopted = manager
+            .create_on_branch(RunId::new(2), &branch)
+            .expect("branch 解放後の checkout が retry で成功する");
+        releaser.join().expect("releaser を join できる");
+
+        assert_eq!(adopted.branch, branch);
+        assert!(adopted.path.join(".git").exists());
     }
 
     // Given: 1 commit を持つ git repo / When: 異なる run の worktree を 2 回作成 / Then: info/exclude の .evorch/ は 1 行だけ
