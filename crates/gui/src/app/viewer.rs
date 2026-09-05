@@ -56,7 +56,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 merge: &self.merge,
                 merge_action: &mut merge_action,
             };
-            DockArea::new(&mut self.dock).show_inside(ui, &mut viewer);
+            DockArea::new(&mut self.dock)
+                .style(crate::theme::dock::dock_style(ui.style()))
+                .show_inside(ui, &mut viewer);
         }
         if let Some(mode) = diff_request {
             self.request_diff(mode);

@@ -10,6 +10,10 @@ use crate::model::tasks::AgentRunSource;
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if !self.theme_installed {
+            crate::theme::install(&ctx);
+            self.theme_installed = true;
+        }
         self.drain_pump();
         self.diff.poll();
         self.drain_pty(&ctx);

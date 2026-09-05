@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use egui_dock::{DockState, Node, NodeIndex, NodePath, Split as DockSplit, Surface, SurfaceIndex};
 use thiserror::Error;
 use workspace_ui::{
-    LayoutNode, Panel, PanelId, Split, SplitDirection, Tabs, Window, WindowRect, Workspace,
+    LayoutNode, Panel, PanelId, PanelKind, Split, SplitDirection, Tabs, Window, WindowRect,
+    Workspace,
 };
 
 /// DockState と Workspace の変換エラー。
@@ -41,6 +42,67 @@ pub fn to_dock_state(workspace: &Workspace) -> Result<DockState<PanelId>, DockCo
         )?;
     }
     Ok(dock)
+}
+
+/// サイドバーを左側に持つ水平 split の fraction 下限。
+/// 従来のスレッド行（pin/タイトル/状態/Pause）が狭いウィンドウでクリップされ、
+/// ボタンが操作不能になるのを防ぐ（800px で約 235px、1280px で約 380px）。
+pub const MIN_SIDEBAR_FRACTION: f32 = 0.30;
+
+/// サイドバーパネルを左サブツリーに持つ水平 split の fraction を下限値に引き上げます。
+pub fn enforce_sidebar_min_fraction(dock: &mut DockState<PanelId>, workspace: &Workspace) {
+    let sidebar_ids: Vec<&PanelId> = workspace
+        .panels
+        .values()
+        .filter(|panel| panel.kind == PanelKind::Sidebar)
+        .map(|panel| &panel.id)
+        .collect();
+    if sidebar_ids.is_empty() {
+        return;
+    }
+    let root = NodePath::new(SurfaceIndex::main(), NodeIndex::root());
+    let mut targets = Vec::new();
+    collect_sidebar_split_paths(dock, root, &sidebar_ids, &mut targets);
+    for path in targets {
+        if let Ok(Node::Horizontal(split)) = dock.node_mut(path) {
+            split.fraction = split.fraction.max(MIN_SIDEBAR_FRACTION);
+        }
+    }
+}
+
+fn collect_sidebar_split_paths(
+    dock: &DockState<PanelId>,
+    path: NodePath,
+    sidebar_ids: &[&PanelId],
+    targets: &mut Vec<NodePath>,
+) {
+    let Ok(node) = dock.node(path) else {
+        return;
+    };
+    if matches!(node, Node::Horizontal(_))
+        && subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
+    {
+        targets.push(path);
+    }
+    if matches!(node, Node::Horizontal(_) | Node::Vertical(_)) {
+        collect_sidebar_split_paths(dock, child_path(path, true), sidebar_ids, targets);
+        collect_sidebar_split_paths(dock, child_path(path, false), sidebar_ids, targets);
+    }
+}
+
+fn subtree_contains_sidebar(
+    dock: &DockState<PanelId>,
+    path: NodePath,
+    sidebar_ids: &[&PanelId],
+) -> bool {
+    match dock.node(path) {
+        Ok(Node::Leaf(leaf)) => leaf.tabs.iter().any(|tab| sidebar_ids.contains(&tab)),
+        Ok(Node::Horizontal(_)) | Ok(Node::Vertical(_)) => {
+            subtree_contains_sidebar(dock, child_path(path, true), sidebar_ids)
+                || subtree_contains_sidebar(dock, child_path(path, false), sidebar_ids)
+        }
+        _ => false,
+    }
 }
 
 /// DockState から rect に依存しない Workspace を抽出します。
