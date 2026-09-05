@@ -20,6 +20,7 @@ event-bus = { path = "../event-bus" }
 image = { workspace = true, default-features = false, features = ["png"] }
 portable-pty = { workspace = true }
 providers = { path = "../providers" }
+routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 sandbox = { path = "../sandbox" }
 serde = { workspace = true }

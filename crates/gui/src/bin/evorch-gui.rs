@@ -11,12 +11,20 @@ use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
 use portable_pty::CommandBuilder;
+use routing::ProcessEnv;
 use runtime::orchestration::delivery::DeliveryPort;
+use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
-    AgentRuntime, ExecutionPolicy, FixtureDeliveryAdapter, GoalLedger, GoalSupervisor,
-    OrchestrationSettings, Role, RunConfig, ShellDeliveryAdapter, SupervisorHandle,
+    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
+    FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, IsolatedMounts, ModelSource,
+    OrchestrationSettings, Role, RunConfig, RuntimeComposition, RuntimeError, SandboxFactory,
+    SandboxNetworkMode, ShellDeliveryAdapter, SupervisorHandle, compose_runtime,
+    production_executor,
 };
-use sandbox::{BwrapConfig, Sandbox, production_sandbox};
+use sandbox::{
+    BwrapConfig, BwrapSandbox, CredentialError, CredentialStore, Sandbox, SandboxError, Secret,
+    production_sandbox,
+};
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
@@ -38,6 +46,8 @@ enum GuiError {
     Eframe(String),
     #[error("runtime initialization failed: {0}")]
     Runtime(#[from] runtime::RuntimeError),
+    #[error("runtime composition failed: {0}")]
+    Composition(#[from] CompositionError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("sidebar state failed: {0}")]
@@ -455,6 +465,62 @@ fn spawn_event_bridge(
         .map_err(|error| GuiError::Arguments(format!("event bridge startup failed: {error}")))
 }
 
+/// ModelSource::Fixed の runtime は credential store を消費しないため、この
+/// ストアは構築副作用を持たない。もし将来 Configured 経路へ切り替えた場合に
+/// 誤って参照されても fail-closed でエラーになる。
+struct UnwiredCredentialStore;
+
+impl CredentialStore for UnwiredCredentialStore {
+    fn get(&self, _key: &str) -> Result<Option<Secret>, CredentialError> {
+        Err(Self::unwired())
+    }
+
+    fn set(&self, _key: &str, _value: &Secret) -> Result<(), CredentialError> {
+        Err(Self::unwired())
+    }
+
+    fn delete(&self, _key: &str) -> Result<(), CredentialError> {
+        Err(Self::unwired())
+    }
+}
+
+impl UnwiredCredentialStore {
+    fn unwired() -> CredentialError {
+        CredentialError::KeychainUnavailable {
+            detail: String::from("GUI runtime は credential store を接続していない"),
+        }
+    }
+}
+
+/// runtime::network::BwrapFactory (pub(crate)) と同一構成の production sandbox
+/// factory。
+///
+/// compose_runtime (ModelSource::Fixed) は workspace context を表現できないため、
+/// demo 経路の workspace handling を旧 production_with_project と同一に保つ間だけ
+/// 同一構成をここで再現する。runtime 側に compose 経由の workspace seam が追加された
+/// ら、この factory と with_workspace_context の併用は削除する。
+struct ProductionSandboxFactory;
+
+impl SandboxFactory for ProductionSandboxFactory {
+    fn build(
+        &self,
+        policy: &ExecutionPolicy,
+        mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        let mut config = BwrapConfig::new(mounts.workspace_root.clone()).allow_network(matches!(
+            policy.sandbox_network_mode(),
+            SandboxNetworkMode::ParentNetns
+        ));
+        for path in &mounts.ro_binds {
+            config = config.ro_bind(path.clone());
+        }
+        for path in &mounts.rw_binds {
+            config = config.rw_bind(path.clone());
+        }
+        BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+    }
+}
+
 fn run() -> Result<(), GuiError> {
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
@@ -466,22 +532,75 @@ fn run() -> Result<(), GuiError> {
     let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
 
+    // runtime 構築は provider composition root (compose_runtime) 経由で行う
+    // (issue #79 T4.2)。ModelSource::Fixed は demo / 非 demo とも DemoScriptModel
+    // を model 境界に固定し続ける。Fixed 経路は credential / env を消費しないため、
+    // 構築副作用のない fail-closed store と ProcessEnv を渡す。
+    let composition_config = config::Config::default();
+    let credential_store = Arc::new(UnwiredCredentialStore);
     let runtime = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
-            AgentRuntime::production_with_project(
+            // 旧 AgentRuntime::production_with_project と同一の project 検出。
+            // Project::new で repo root を確定し、sandbox root と WorktreeManager
+            // の両方に使う。
+            let project =
+                Project::new(demo_repo.clone()).map_err(|error| RuntimeError::Workspace {
+                    detail: error.to_string(),
+                })?;
+            let executor = production_executor(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                demo_repo.clone(),
-                Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo)),
-            )?
+                project.repo_root().to_path_buf(),
+            )?;
+            let demo_model: Arc<dyn AgentModel> =
+                Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo));
+            let ComposedRuntime { model_identity, .. } = compose_runtime(RuntimeComposition {
+                config: &composition_config,
+                bus: Arc::clone(&bus),
+                executor: Arc::clone(&executor),
+                credential_store,
+                env: Arc::new(ProcessEnv),
+                model_source: ModelSource::Fixed(Arc::clone(&demo_model)),
+            })?;
+            tracing::debug!(
+                ?model_identity,
+                "demo runtime composed via provider composition root"
+            );
+            // compose_runtime の Fixed 経路は workspace context を接続しないため、
+            // 旧 production_with_project と同一の kernel 構成 (WorktreeManager +
+            // production bwrap factory) をここで接続する。
+            AgentRuntime::with_workspace_context(
+                Arc::clone(&bus),
+                executor,
+                demo_model,
+                WorktreeManager::new(project),
+                Arc::new(ProductionSandboxFactory),
+            )
         }
-        None => AgentRuntime::production(
-            Arc::clone(&bus),
-            &ExecutionPolicy::for_role(Role::Orchestrator),
-            repo_root.clone(),
-            Arc::new(DemoScriptModel::new(Arc::clone(&bus))),
-        )?,
+        None => {
+            let executor = production_executor(
+                Arc::clone(&bus),
+                &ExecutionPolicy::for_role(Role::Orchestrator),
+                repo_root.clone(),
+            )?;
+            let ComposedRuntime {
+                runtime,
+                model_identity,
+            } = compose_runtime(RuntimeComposition {
+                config: &composition_config,
+                bus: Arc::clone(&bus),
+                executor,
+                credential_store,
+                env: Arc::new(ProcessEnv),
+                model_source: ModelSource::Fixed(Arc::new(DemoScriptModel::new(Arc::clone(&bus)))),
+            })?;
+            tracing::debug!(
+                ?model_identity,
+                "runtime composed via provider composition root"
+            );
+            runtime
+        }
     };
 
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
