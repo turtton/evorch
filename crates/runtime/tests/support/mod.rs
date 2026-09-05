@@ -128,19 +128,22 @@ impl AgentModel for ScriptedModel {
                 })
             });
         if let Some(marker) = marker {
+            // ルーティングは先頭 User テキストの「prefix 一致」。部分一致 (contains) だと
+            // compaction summarizer の要約要求 (本文に元 goal 文字列を含む) が誤ルーティング
+            // され、run の scripted reply を消費してしまう (compaction_engine 回帰)。
             let gate = self
                 .keyed_gates
                 .lock()
                 .await
                 .iter()
-                .find_map(|(key, gate)| marker.contains(key).then(|| Arc::clone(gate)));
+                .find_map(|(key, gate)| marker.starts_with(key).then(|| Arc::clone(gate)));
             if let Some(gate) = gate {
                 gate.notified().await;
             }
             let mut keyed = self.keyed.lock().await;
             let key = keyed
                 .keys()
-                .filter(|key| marker.contains(key.as_str()))
+                .filter(|key| marker.starts_with(key.as_str()))
                 .max_by_key(|key| key.len())
                 .cloned();
             if let Some(script) = key.and_then(|key| keyed.get_mut(&key)) {
