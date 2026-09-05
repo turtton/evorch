@@ -1,8 +1,4 @@
 //! 観測専用の停滞検出器。提案イベントを返すだけで自動昇格は行わない。
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T7でruntimeへ接続するまでの純粋コンポーネント")
-)]
 
 #[cfg(test)]
 mod tests {

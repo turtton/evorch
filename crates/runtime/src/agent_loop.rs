@@ -19,6 +19,7 @@ use crate::compaction;
 use crate::compaction::policy::{
     CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
 };
+use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
@@ -74,10 +75,6 @@ pub(crate) struct LoopShared {
     pub(crate) rules: Option<Arc<RulesSource>>,
     pub(crate) compaction: CompactionSettings,
     pub(crate) compaction_configured: bool,
-    #[expect(
-        dead_code,
-        reason = "エスカレーション検出器は後続タスクで LoopShared からこの設定を消費する"
-    )]
     pub(crate) escalation: EscalationSettings,
     pub(crate) runtime: Weak<Shared>,
 }
@@ -95,6 +92,7 @@ pub(crate) struct LoopState {
     pub(crate) last_usage: Option<Usage>,
     resumed: bool,
     pending_escalation: Option<EscalationMemo>,
+    escalation_detector: EscalationDetector,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
@@ -116,6 +114,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         last_usage: None,
         resumed: false,
         pending_escalation: None,
+        escalation_detector: EscalationDetector::default(),
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。

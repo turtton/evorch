@@ -1,15 +1,18 @@
 // allow: SIZE_OK — tool-call 実行・terminal 網羅 match・標準ツール定義・その unit
 // tests が一体の契約 (dispatch seam) を構成する。250 超過の分割 (tool_specs 抽出)
 // は後続タスク候補。本タスクの変更前は 249 行で境界線上にあった。
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use event_bus::{Event, LifecycleEvent};
 use providers::ToolSpec;
 use sandbox::{ApprovalGate, ApprovalOutcome, PolicyDecision};
 use serde_json::Value;
 use tools::{ToolExecutionContext, ToolResult};
 
 use super::LoopState;
+use crate::escalation::detector::ToolObservation;
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
@@ -88,6 +91,28 @@ impl LoopState {
                     Ok(result) => result,
                     Err(error) => ToolResult::error(error.to_string()),
                 };
+                // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
+                // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
+                let observation_path = if name == "edit" {
+                    rule_target.as_deref().map(PathBuf::from)
+                } else {
+                    None
+                };
+                if let Some(trigger) = self.escalation_detector.observe(
+                    &ToolObservation {
+                        tool: name.as_str(),
+                        path: observation_path,
+                        is_error: result.is_error,
+                    },
+                    &self.shared.escalation,
+                ) {
+                    self.shared
+                        .bus
+                        .emit(Event::new(LifecycleEvent::EscalationProposed {
+                            run_id: self.caller_run_id().to_string(),
+                            trigger,
+                        }));
+                }
                 if !result.is_error
                     && let Some(target) = rule_target
                 {
