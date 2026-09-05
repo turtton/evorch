@@ -113,3 +113,9 @@ GUI の goal 投入時に Orchestrator 起動へ進む前に Execution Shape を
 
 ## 検証・ゲート実績
 6 commits 17 files +1802/-7 / CI 系全 PASS（146 suites 0 failed、otel-exporter feature 両面）/ Reviewer Gate APPROVED_WITH_NOTES（blocker 0、note 2）。canonical: claim/result-summary/complete 全 applied、issue #71 intent-pr-created。**queue-state linked_pr 同期は sandbox RO で失敗 → lead 側で closeout-plan --write-recovered-linkage が必要**。
+
+## v0.2 確定（PR #74）: orchestrator loop 内製
+
+goal 投入から PR・review・merge 承認まで継続する durable orchestration loop を `crates/runtime/src/orchestration/`（supervisor/gate/approval/continuation/stall/review/closeout/ledger/delivery/shell_delivery/types/registry/prompts）に実装。GoalState（active/paused/complete）は SQLite event sourcing で durable、restart 後に session/goal を再構成。finish は PR 実在・CI green・packet 照合・最新 Reviewer approval の composite gate でのみ受理（欠落は理由付き拒否+goal active 維持）。gate 未充足 idle で continuation prompt を自動 dispatch（同一 idle epoch で二重発火しない）。review 修復往復は config bounded、stalled は event 時刻+progress signal で判定して nudge→blocked。実装・commit/push・PR・CI・review・closeout は approved shell tool 経由（専用 bridge/新 CLI なし）。merge のみ人間 approval 必須で、approval は PR/head SHA/gate snapshot に bind され変化で失効、reject は goal active continuation へ戻す。crash 復旧は transcript+durable state から新規 run 再構成（厳密 revive なし）。gui headless fixture で goal→worker→PR/CI→review→repair→approval→merge→closeout を完走検証、--demo は決定的 adapter で再現。実バイナリ検証で continuation cascade バグを発見・修正済（1015b23）。
+
+**残務（self-dogfood）**: queued v0.2 unit 1 本以上を実 loop で消費した evidence を closeout writeback と mvp-roadmap.md に記録すること（本 loop の実運用初回検証。closeout 時義務）。

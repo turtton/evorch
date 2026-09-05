@@ -111,3 +111,5 @@ test harness instance
 - ~~v0.1 で用意する provider は OpenAI / Anthropic / OpenAI-compatible の3種で確定か~~ → 2026-08-29 確定（PR #13 で `ProviderClient` 3 実装としてコード化、ADR 0020）
 - Planner / Multimodal role の導入 version
 - 各 version のリリース基準（tag / ブランチ戦略）
+
+（v0.2 追記・PR #74）orchestrator loop（goal→PR→review→merge 承認まで継続する durable loop）を crates/runtime/src/orchestration/ に内製化済み。self-dogfood（queued unit 1 本の実 loop 消費 evidence）は closeout 時義務として残存。
