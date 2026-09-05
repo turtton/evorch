@@ -5,7 +5,8 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{
-    Event, EventKind, EventMeta, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+    Event, EventKind, EventMeta, GoalState, LifecycleEvent, MessageEvent, OrchestratorEvent,
+    ProviderEvent, ToolEvent,
 };
 use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
@@ -231,6 +232,79 @@ fn rejected_event_preserves_events_rows_and_session_bytes() {
     let rows_after = db.events_all_ordered().unwrap().len();
     assert_eq!(rows_after, rows_before);
     assert_eq!(bytes_after, bytes_before);
+}
+
+#[test]
+fn orchestrator_event_payload_is_secret_checked() {
+    // Given: goal 本文に secret 形状値を含む Orchestrator::GoalCreated イベント
+    let temp = TempDir::new().expect("temporary directory must be created");
+    let storage = Storage::open(config(&temp)).expect("storage must open");
+    let handle = storage.handle();
+    let secret = "sk-test-evorch-9f8e7d6c5b4a3f2e1d";
+
+    // When: 公開経路で追記する
+    let result = handle.append_event(
+        Some("s"),
+        &event(
+            OrchestratorEvent::GoalCreated {
+                goal_id: "goal-1".into(),
+                session_id: "s".into(),
+                project_id: "evorch".into(),
+                thread_id: "t".into(),
+                goal: format!("implement {secret}"),
+                references: Vec::new(),
+                constraints: Vec::new(),
+                repo: "turtton/evorch".into(),
+                base_ref: "main".into(),
+                root_run_id: "run-1".into(),
+            }
+            .into(),
+        ),
+    );
+
+    // Then: payload 全体の走査で拒否され、診断に値本体が含まれない
+    let Err(error) = result else {
+        panic!("orchestrator payload containing a secret must be rejected");
+    };
+    assert!(matches!(
+        error,
+        StorageError::SecretDetected {
+            entity: "event",
+            field: "Orchestrator.payload",
+            ..
+        }
+    ));
+    let rendered = format!("{error:?}");
+    assert!(
+        !rendered.contains(secret),
+        "diagnostic leaked the secret value"
+    );
+    storage.close();
+
+    // And: events テーブルは空のまま
+    let db = Database::open(&config(&temp)).expect("database must open");
+    assert!(db.events_all_ordered().unwrap().is_empty());
+
+    // And: secret を含まない Orchestrator イベントは受理されて永続化される
+    let storage = Storage::open(config(&temp)).expect("storage must open");
+    let handle = storage.handle();
+    handle
+        .append_event(
+            Some("s"),
+            &event(
+                OrchestratorEvent::GoalStateChanged {
+                    goal_id: "goal-1".into(),
+                    from: GoalState::Active,
+                    to: GoalState::Paused,
+                    reason: "operator pause".into(),
+                }
+                .into(),
+            ),
+        )
+        .expect("clean orchestrator event must be accepted");
+    storage.close();
+    let db = Database::open(&config(&temp)).expect("database must open");
+    assert_eq!(db.events_all_ordered().unwrap().len(), 1);
 }
 
 #[test]

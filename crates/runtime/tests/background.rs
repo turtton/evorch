@@ -7,10 +7,11 @@ use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
 use sandbox::DirectSandbox;
+use serde_json::json;
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, collect_events, text_response};
+use support::{ScriptedModel, collect_events, text_response, tool_response};
 
 fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(64));
@@ -66,6 +67,66 @@ async fn cancel_mid_model_turn_emits_cancelled_and_error() {
     let events = collect_events(&mut events, 2).await;
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCancelled { task_id }) if task_id == &run_id.to_string())));
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { to: AgentRunPhase::Error, reason: Some(reason), .. }) if reason == "cancelled")));
+}
+
+#[tokio::test]
+async fn run_result_exposes_final_assistant_text() {
+    // Given: Stop で "done" を返す worker run
+    let (runtime, _bus) = runtime_with(ScriptedModel::new([Ok(text_response(
+        "done",
+        FinishReason::Stop,
+    ))]));
+    let run_id =
+        runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
+
+    // When: run を完了させる
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    // Then: 最終 assistant テキストが run_result で観測できる
+    assert_eq!(runtime.run_result(run_id), Ok(Some("done".to_string())));
+
+    // Given: finish meta-op で結果を返す Orchestrator run
+    let meta_model = ScriptedModel::new([]);
+    meta_model
+        .add_keyed(
+            "META",
+            [Ok(tool_response(
+                "finish",
+                "finish",
+                json!({ "result": "meta done" }),
+            ))],
+        )
+        .await;
+    let (meta_runtime, _meta_bus) = runtime_with(meta_model);
+    let meta_run = meta_runtime.delegate_background(
+        Role::Orchestrator,
+        "META".to_string(),
+        RunConfig::default(),
+    );
+
+    // When: finish meta-op で run を終端させる
+    assert_eq!(meta_runtime.wait(meta_run).await, Ok(AgentRunPhase::Done));
+
+    // Then: finish meta-op の result も run_result で観測できる
+    assert_eq!(
+        meta_runtime.run_result(meta_run),
+        Ok(Some("meta done".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn run_result_reports_error_for_unknown_run() {
+    // Given: 空の runtime
+    let (runtime, _bus) = runtime_with(ScriptedModel::new([]));
+    let missing = RunId::new(999);
+
+    // When / Then: 未登録 run は UnknownRun で拒否する
+    assert_eq!(
+        runtime.run_result(missing),
+        Err(RuntimeError::UnknownRun {
+            run_id: missing.to_string()
+        })
+    );
 }
 
 #[tokio::test]

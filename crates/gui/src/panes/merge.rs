@@ -27,10 +27,25 @@ pub fn merge_pane(ui: &mut egui::Ui, merge: &MergeApprovalModel) -> Option<Merge
     if let Some(summary) = &view.diff_summary {
         ui.label(summary);
     }
+    if let Some(binding) = &view.binding {
+        ui.label(format!("head: {}", short_id(&binding.head_sha)));
+        ui.label(format!("token: {}", short_id(&binding.token_id)));
+    }
+    for item in &view.gate {
+        ui.label(format!(
+            "gate: {} {}",
+            item.label,
+            if item.ok { "ok" } else { "missing" }
+        ));
+    }
+    if let Some(reason) = &view.blocked {
+        ui.label(format!("blocked: {reason}"));
+    }
 
     let resolved = view.resolution.is_some();
+    let approve_enabled = view.binding.is_some() && view.blocked.is_none() && !resolved;
     if ui
-        .add_enabled(!resolved, egui::Button::new("Approve"))
+        .add_enabled(approve_enabled, egui::Button::new("Approve"))
         .clicked()
     {
         action = Some(MergeAction::Decide(MergeDecision::Approve));
@@ -66,6 +81,10 @@ pub fn merge_pane(ui: &mut egui::Ui, merge: &MergeApprovalModel) -> Option<Merge
         None => {}
     }
     action
+}
+
+fn short_id(id: &str) -> &str {
+    &id[..id.len().min(8)]
 }
 
 fn ci_badge(status: CiStatus) -> &'static str {

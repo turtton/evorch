@@ -56,6 +56,21 @@
         "retention_days": 30
       }
     },
+    "orchestration": {
+      "description": "オーケストレーションループ設定。",
+      "$ref": "#/$defs/OrchestrationConfig",
+      "default": {
+        "ci_poll_secs": 30,
+        "ci_timeout_secs": 3600,
+        "in_flight_tool_multiplier": 3,
+        "max_continuations": 8,
+        "max_nudges": 2,
+        "max_review_rounds": 3,
+        "repeated_error_threshold": 5,
+        "stall_after_secs": 600,
+        "stall_check_secs": 30
+      }
+    },
     "panel": {
       "description": "パネル UI 設定。",
       "$ref": "#/$defs/PanelConfig",
@@ -384,6 +399,76 @@
           "description": "メトリクスの保持日数。",
           "type": "integer",
           "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "OrchestrationConfig": {
+      "description": "オーケストレーションループの境界設定。\n\nすべての上限は正の値でなければならず、既定値は issue #73 の\nbounded 契約 (AC5) で固定される。",
+      "type": "object",
+      "properties": {
+        "ci_poll_secs": {
+          "description": "CI 状態のポーリング間隔秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "ci_timeout_secs": {
+          "description": "CI 完了待機のタイムアウト秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "in_flight_tool_multiplier": {
+          "description": "ツール in-flight 中に stall 窓へ掛ける倍率。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "max_continuations": {
+          "description": "idle 継続ディスパッチ回数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 8,
+          "minimum": 0
+        },
+        "max_nudges": {
+          "description": "stall した run への連続 nudge 回数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "max_review_rounds": {
+          "description": "レビュー (request-update → repair) ラウンド数の上限。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "repeated_error_threshold": {
+          "description": "stall と判定する連続ツールエラー回数のしきい値。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "stall_after_secs": {
+          "description": "進捗なしと判定するまでの無活動秒数。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "stall_check_secs": {
+          "description": "stall 観測サンプラの実行間隔秒数。",
+          "type": "integer",
+          "format": "uint64",
           "default": 30,
           "minimum": 0
         }

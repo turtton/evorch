@@ -377,6 +377,31 @@ async fn delegate_background_rejects_unknown_workspace_mode() {
 }
 
 #[tokio::test]
+async fn finish_without_goal_gate_keeps_legacy_immediate_accept() {
+    // Given: goal gate 未接続の runtime で finish を要求する Orchestrator
+    let model = Arc::new(ScriptedModel::new([Ok(tool_response(
+        "finish",
+        "finish",
+        json!({ "result": "legacy accept" }),
+    ))]));
+    let runtime = runtime_with(Arc::clone(&model));
+
+    // When: finish meta-op で run を終端させる
+    let run_id =
+        runtime.delegate_background(Role::Orchestrator, "META".to_string(), RunConfig::default());
+
+    // Then: gate なしでは finish は即時に受理され、run が Done になる。
+    // finish の ToolResult は run 終端で model に返らないため、観測可能な契約は
+    // result の公開 (run_result) と、追加 model 呼び出しがないことである
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    assert_eq!(
+        runtime.run_result(run_id),
+        Ok(Some("legacy accept".to_string()))
+    );
+    assert_eq!(model.observed().await.len(), 1);
+}
+
+#[tokio::test]
 async fn invalid_meta_arguments_return_error_and_run_continues() {
     // Given: 不正引数・未知 run・未知 role の後に finish を要求する Orchestrator
     let model = Arc::new(ScriptedModel::new([

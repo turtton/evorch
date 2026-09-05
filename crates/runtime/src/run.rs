@@ -74,6 +74,10 @@ pub struct RunConfig {
     /// この run の session ネットワーク要件 (3 層 AND の session 層)。既定は Denied (fail-closed)。
     /// network 権限を持つツール (web_search / web_fetch) にのみ作用する。
     pub network_access: NetworkAccess,
+    /// isolated workspace で checkout する既存 branch。`None` なら run 専用の新規
+    /// branch (`evorch/task/run-N`) を作成する。既定は `None`。worktree path は
+    /// この値からは導出されず、常に run 名 (`run-N`) から決まる (issue #73 D2)。
+    pub workspace_branch: Option<String>,
 }
 
 /// AgentRun に割り当てられた workspace の検査用 DTO。
@@ -185,6 +189,12 @@ mod tests {
     #[test]
     fn default_network_access_is_denied() {
         assert_eq!(RunConfig::default().network_access, NetworkAccess::Denied);
+    }
+
+    // Given: RunConfig / When: Default / Then: workspace_branch は None (専用 branch 新規作成が既定)
+    #[test]
+    fn run_config_default_has_no_workspace_branch() {
+        assert!(RunConfig::default().workspace_branch.is_none());
     }
 
     // Given: Isolated workspace mode / When: JSON 化 / Then: lowercase の "isolated" となる

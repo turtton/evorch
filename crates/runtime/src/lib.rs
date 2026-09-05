@@ -24,6 +24,7 @@ pub mod mailbox;
 mod meta;
 pub mod model;
 pub mod network;
+pub mod orchestration;
 pub mod policy;
 pub mod prompt;
 pub mod rules;
@@ -44,9 +45,16 @@ pub use event_bus::{AgentRunPhase, RoutingSource};
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
 pub use model::{AgentInvocationContext, AgentModel};
+// オーケストレーション契約型は後続ウェーブ (T1.2–T3.1) がこの経路で参照する。
 pub use network::{
     NetworkAccessDecision, SandboxNetworkMode, build_sandbox, judge_web_network_access,
     sandbox_network_mode,
+};
+pub use orchestration::{
+    ApprovedMerge, DeliveryError, DeliveryPort, FixtureDeliveryAdapter, GateRejection,
+    GateSnapshot, GoalLedger, GoalSnapshot, GoalSpec, GoalStage, GoalState, GoalSupervisor,
+    MergeApprovals, MergeBinding, OrchestrationSettings, OrchestratorEvent, ShellDeliveryAdapter,
+    SupervisorHandle,
 };
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
 pub use prompt::{

@@ -13,6 +13,9 @@ async-trait = { workspace = true }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 globset = { workspace = true }
+# merge approval トークン (128-bit random, D8) の生成に使用する (T2.2)。
+# W0 で manifest を固定するために宣言済み (既存 workspace 依存の追加のみ)。
+getrandom = { workspace = true }
 providers = { path = "../providers" }
 regex = { workspace = true }
 serde = { workspace = true }

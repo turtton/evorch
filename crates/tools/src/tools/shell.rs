@@ -14,17 +14,47 @@ use serde::Deserialize;
 use crate::error::ToolError;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool};
+use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 
 /// コマンドを実行するツール。
 #[derive(Clone)]
 pub struct Shell {
     sandbox: Arc<dyn Sandbox>,
+    contract: ShellCommandContract,
+    extra_env: Vec<(String, String)>,
 }
 
 impl Shell {
     /// 指定したサンドボックスでコマンドを実行する shell ツールを生成する。
+    ///
+    /// 契約は [`ShellCommandContract::standard`]（deny-list）が適用される。
     pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
-        Self { sandbox }
+        Self::with_contract(sandbox, ShellCommandContract::standard())
+    }
+
+    /// 実行コマンドの可否を判定する契約を指定して shell ツールを生成する。
+    pub fn with_contract(sandbox: Arc<dyn Sandbox>, contract: ShellCommandContract) -> Self {
+        Self {
+            sandbox,
+            contract,
+            extra_env: Vec::new(),
+        }
+    }
+
+    /// 契約と子プロセスへ追加で渡す環境変数を指定して shell ツールを生成する。
+    ///
+    /// `extra_env` は [`CommandSpec::extra_env`] 経由で sandbox の
+    /// 環境統合（PATH/TERM/LANG/LC_ALL への追加）に渡される。
+    pub fn with_contract_and_env(
+        sandbox: Arc<dyn Sandbox>,
+        contract: ShellCommandContract,
+        extra_env: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            sandbox,
+            contract,
+            extra_env,
+        }
     }
 }
 
@@ -81,13 +111,21 @@ impl Tool for Shell {
             serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
                 detail: error.to_string(),
             })?;
+        // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを
+        // 起動しない。拒否は Err ではなく is_error 付きの結果として返し、
+        // モデルへツールエラーとして見せる（計画 S9）。
+        if let CommandVerdict::Deny { reason } = self.contract.evaluate(&args.command, &args.args) {
+            return Ok(ToolResult::error(format!(
+                "shell command denied by contract: {reason}"
+            )));
+        }
         let wrapped = self
             .sandbox
             .wrap(CommandSpec {
                 program: args.command.clone(),
                 args: args.args.clone(),
                 cwd: args.cwd.as_ref().map(PathBuf::from),
-                extra_env: Vec::new(),
+                extra_env: self.extra_env.clone(),
             })
             .map_err(|error| ToolError::SandboxUnavailable {
                 detail: error.to_string(),

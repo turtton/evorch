@@ -9,16 +9,17 @@ use std::time::{Duration, Instant};
 use egui::{Key, Modifiers};
 use egui_dock::SurfaceIndex;
 use event_bus::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
-    EventBus, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CiState, DeliveryDisposition,
+    Event, EventBus, GateSnapshot, LifecycleEvent, MergeBinding, MessageEvent, ProviderEvent,
+    ToolEvent,
 };
 use gui::app::{ConversationFocus, WorkbenchError, WorkbenchState};
 use gui::diff::{DiffMode, DiffState, FixtureDiffSource};
 use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::{
-    CiStatus, GoalSubmission, LoopEvent, MergeApprovalView, MergeCommand, MergeDecision, PrRef,
-    ReviewerStatus, WorkbenchCommand,
+    CiStatus, GateItemView, GoalSubmission, LoopEvent, MergeApprovalView, MergeCommand,
+    MergeDecision, PrRef, ReviewerStatus, WorkbenchCommand,
 };
 use gui::model::tasks::AgentRunSource;
 use gui::model::transcript::TranscriptEntry;
@@ -193,6 +194,35 @@ fn pending_merge_view() -> MergeApprovalView {
         reviewer: ReviewerStatus::Pending,
         diff_summary: Some("model-only change".into()),
         resolution: None,
+        binding: Some(MergeBinding {
+            token_id: "token-65".into(),
+            repo: "turtton/evorch".into(),
+            pr_number: 65,
+            head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
+            snapshot: GateSnapshot {
+                repo: "turtton/evorch".into(),
+                pr_number: 65,
+                base_ref: "main".into(),
+                head_sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0".into(),
+                ci: CiState::Green,
+                criteria_round: 1,
+                review_round: 1,
+                reviewer_run_id: "run-review-1".into(),
+            },
+        }),
+        gate: vec![
+            GateItemView {
+                label: "pull_request".into(),
+                ok: true,
+                detail: "#65 (turtton/evorch)".into(),
+            },
+            GateItemView {
+                label: "ci".into(),
+                ok: true,
+                detail: "green".into(),
+            },
+        ],
+        blocked: None,
     }
 }
 
@@ -513,7 +543,10 @@ fn v02_end_to_end_chained_scenario() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
-            WorkbenchCommand::DecideMerge(_) => None,
+            WorkbenchCommand::DecideMerge(_)
+            | WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");
@@ -535,7 +568,7 @@ fn v02_end_to_end_chained_scenario() {
     fixture
         .workbench
         .state_mut()
-        .apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     fixture
         .workbench
         .state_mut()
@@ -549,12 +582,16 @@ fn v02_end_to_end_chained_scenario() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
-            WorkbenchCommand::SubmitGoal(_) => None,
+            WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::PauseGoal { .. }
+            | WorkbenchCommand::ResumeGoal { .. }
+            | WorkbenchCommand::CancelGoal { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");
     assert_eq!(decisions[0].thread_id, "thread-1");
     assert_eq!(decisions[0].decision, MergeDecision::Approve);
+    assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
     assert_eq!(
         fixture.workbench.state().merge().view.resolution,
         Some(MergeDecision::Approve)
@@ -750,7 +787,7 @@ fn operator_error_paths_stay_explicit() {
         state
             .create_thread("error path thread")
             .expect("thread created");
-        state.apply_loop_event(LoopEvent::MergeStateUpdated(pending_merge_view()));
+        state.apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     }
     workbench.state_mut().decide_merge(MergeDecision::Reject {
         reason: String::new(),

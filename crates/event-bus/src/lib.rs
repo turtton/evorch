@@ -2,6 +2,7 @@
 
 pub mod bus;
 pub mod event;
+pub mod orchestrator;
 pub mod otel;
 pub mod ring;
 pub mod usage;
@@ -12,6 +13,11 @@ pub use event::{
     CompactionReason, DeliveryDisposition, Event, EventKind, EventMeta, FallbackAxis, FaultEvent,
     LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, RoutingSource,
     SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
+};
+pub use orchestrator::{
+    ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,
+    GateRejection, GateSnapshot, GoalReference, GoalStage, GoalState, InvalidationReason,
+    MergeBinding, OrchestratorEvent, ReviewVerdict, RunPurpose, StallSignal, SuppressReason,
 };
 pub use otel::{
     ATTRIBUTE_WHITELIST, CardinalityViolation, MetricAttribute, MetricMeasurement, MetricValue,

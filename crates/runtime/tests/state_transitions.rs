@@ -49,7 +49,8 @@ async fn run_emits_pending_running_done_in_order() {
             | EventKind::Provider(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_) => None,
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => None,
         })
         .collect();
     assert!(matches!(

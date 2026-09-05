@@ -11,7 +11,7 @@ use crate::dock::to_dock_state;
 use crate::events::EventPump;
 use crate::keymap::Keymap;
 use crate::model::commands::{
-    CiStatus, CommandSink, FixtureLoopAdapter, GoalFormModel, MergeApprovalModel,
+    CiStatus, CommandSink, FixtureLoopAdapter, GoalFormModel, LoopStatusView, MergeApprovalModel,
     MergeApprovalView, ReviewerStatus, WorkbenchCommand,
 };
 use crate::model::tasks::{AgentRunSource, TasksModel};
@@ -47,6 +47,7 @@ pub struct WorkbenchState<S> {
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
     pub(super) merge: MergeApprovalModel,
+    pub(super) loop_status: LoopStatusView,
     pub(super) sink: Box<dyn CommandSink>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
@@ -84,8 +85,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     reviewer: ReviewerStatus::Unknown,
                     diff_summary: None,
                     resolution: None,
+                    binding: None,
+                    gate: Vec::new(),
+                    blocked: None,
                 },
             },
+            loop_status: LoopStatusView::default(),
             sink: Box::new(FixtureLoopAdapter::default()),
             issued: Vec::new(),
             phases: BTreeMap::new(),
@@ -164,6 +169,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub const fn merge(&self) -> &MergeApprovalModel {
         &self.merge
+    }
+    pub const fn loop_status(&self) -> &LoopStatusView {
+        &self.loop_status
     }
     pub const fn thread_phases(&self) -> &BTreeMap<String, workspace_ui::ThreadRunPhase> {
         &self.phases

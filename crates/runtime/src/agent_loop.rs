@@ -49,6 +49,9 @@ pub(crate) struct LoopChannels {
     pub(crate) compact_rx: watch::Receiver<u64>,
     /// 実行中の圧縮を runtime 側 (AgentRuntime::compact) と共有するフラグ。
     pub(crate) compaction_busy: Arc<AtomicBool>,
+    /// run の最終 assistant テキストを runtime 表層 (AgentRuntime::run_result)
+    /// へ公開する channel。正常終了時のみ `Some` になる。
+    pub(crate) result_tx: watch::Sender<Option<String>>,
 }
 
 pub(crate) struct LoopShared {
@@ -169,7 +172,12 @@ async fn setup_isolated_workspace(
     // inspection は sandbox build より先に登録する。factory.build の完了を観測してから
     // inspect する利用者が Shared fallback を読まないようにするため (issue #71 CI 失敗の
     // root cause: 旧実装は build 完了後に登録しており、その間の inspect が Shared を返した)。
-    let (planned_branch, planned_path) = workspace.manager.planned(run_id);
+    // workspace_branch 指定時は既存 branch の checkout 用に、path 導出だけを run 名で行う
+    // (issue #73 D2)。
+    let (planned_branch, planned_path) = match state.task.config.workspace_branch.as_deref() {
+        Some(branch) => workspace.manager.planned_on_branch(run_id, branch),
+        None => workspace.manager.planned(run_id),
+    };
     runtime_shared
         .workspaces
         .lock()
@@ -183,8 +191,14 @@ async fn setup_isolated_workspace(
                 merge_mode: state.task.config.merge_mode,
             },
         );
+    let branch_override = state.task.config.workspace_branch.clone();
     let manager = workspace.manager.clone();
-    let owned = match tokio::task::spawn_blocking(move || manager.create(run_id)).await {
+    let owned = match tokio::task::spawn_blocking(move || match branch_override {
+        Some(branch) => manager.create_on_branch(run_id, &branch),
+        None => manager.create(run_id),
+    })
+    .await
+    {
         Ok(Ok(owned)) => owned,
         Ok(Err(error)) => {
             remove_workspace_inspection(runtime_shared, run_id);
@@ -599,6 +613,12 @@ impl LoopState {
     }
 
     pub(crate) fn finish_success(&mut self) {
+        // 位相遷移より先に公開する。wait() は Done 位相で return するため、
+        // run_result() を wait 後に読む利用者に最終テキストが確定済みであることを
+        // 保証するためである。
+        if let Some(text) = self.final_assistant_text() {
+            self.channels.result_tx.send_replace(Some(text));
+        }
         if self.transition(AgentRunPhase::Done, None).is_ok() {
             self.shared
                 .bus
@@ -606,6 +626,33 @@ impl LoopState {
                     task_id: self.task.run_id.to_string(),
                 }));
         }
+    }
+
+    /// 最終 assistant メッセージの Text ブロックを連結して返す。
+    ///
+    /// Text を持つ assistant メッセージが履歴になければ `None` (自然 Stop の
+    /// model 応答と finish meta-op の push_final_result の両方が Text を持つため、
+    /// 通常は `Some`)。Text 以外のブロック (ToolUse / Reasoning / ToolResult) は
+    /// 対象外とする。
+    fn final_assistant_text(&self) -> Option<String> {
+        let message = self
+            .context
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == providers::Role::Assistant)?;
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
     }
 
     fn finish_error(&mut self, reason: String) {

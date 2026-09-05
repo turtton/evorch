@@ -21,7 +21,9 @@ image = { workspace = true, default-features = false, features = ["png"] }
 portable-pty = { workspace = true }
 providers = { path = "../providers" }
 runtime = { path = "../runtime" }
+sandbox = { path = "../sandbox" }
 serde = { workspace = true }
+storage = { path = "../storage" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tempfile = { workspace = true }

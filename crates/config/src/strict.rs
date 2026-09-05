@@ -17,6 +17,7 @@ const ROOT_KEYS: &[&str] = &[
     "agents",
     "rules",
     "compaction",
+    "orchestration",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -50,6 +51,17 @@ const COMPACTION_KEYS: &[&str] = &[
     "max_compactions_per_run",
     "max_summary_bytes",
     "summarizer",
+];
+const ORCHESTRATION_KEYS: &[&str] = &[
+    "max_review_rounds",
+    "max_nudges",
+    "stall_after_secs",
+    "stall_check_secs",
+    "in_flight_tool_multiplier",
+    "repeated_error_threshold",
+    "max_continuations",
+    "ci_poll_secs",
+    "ci_timeout_secs",
 ];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
@@ -103,7 +115,8 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
     validate_section(root, "metrics", METRICS_KEYS)?;
     validate_section(root, "rules", RULES_KEYS)?;
-    validate_section(root, "compaction", COMPACTION_KEYS)
+    validate_section(root, "compaction", COMPACTION_KEYS)?;
+    validate_section(root, "orchestration", ORCHESTRATION_KEYS)
 }
 
 fn validate_credential(

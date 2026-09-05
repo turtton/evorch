@@ -214,12 +214,35 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    pub fn pause_goal(&mut self) {
+        self.submit_goal_control(|goal_id| WorkbenchCommand::PauseGoal { goal_id });
+    }
+
+    pub fn resume_goal(&mut self) {
+        self.submit_goal_control(|goal_id| WorkbenchCommand::ResumeGoal { goal_id });
+    }
+
+    pub fn cancel_goal(&mut self) {
+        self.submit_goal_control(|goal_id| WorkbenchCommand::CancelGoal { goal_id });
+    }
+
+    fn submit_goal_control(&mut self, build: impl FnOnce(String) -> WorkbenchCommand) {
+        let Some(goal_id) = self.loop_status.goal_id.clone() else {
+            return;
+        };
+        self.submit_command(build(goal_id));
+    }
+
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
             LoopEvent::GoalAccepted { goal_id, .. } => self.goal_form.last_accepted = Some(goal_id),
-            LoopEvent::MergeStateUpdated(view) => self.merge.view = view,
+            LoopEvent::MergeStateUpdated(view) => self.merge.view = *view,
             LoopEvent::MergeResolved { decision, .. } => {
                 self.merge.view.resolution = Some(decision)
+            }
+            LoopEvent::LoopStatusUpdated(status) => self.loop_status = status,
+            LoopEvent::CommandRejected { reason } => {
+                tracing::warn!(%reason, "goal loop command rejected");
             }
         }
     }

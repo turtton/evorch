@@ -363,7 +363,9 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         | EventKind::Fault(_)
         | EventKind::AgentMessage(_)
         // 圧縮イベントは semconv metrics の写像対象外 (issue #63)。
-        | EventKind::Compaction(_) => Vec::new(),
+        | EventKind::Compaction(_)
+        // オーケストレーションイベントは semconv metrics の写像対象外。
+        | EventKind::Orchestrator(_) => Vec::new(),
     }
 }
 

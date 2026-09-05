@@ -13,7 +13,8 @@ impl SpanMapper {
             | EventKind::Usage(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_) => Vec::new(),
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => Vec::new(),
         }
     }
 }

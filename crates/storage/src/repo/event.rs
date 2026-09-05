@@ -200,6 +200,7 @@ const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::AgentMessage(_) => "AgentMessage",
         // issue #63 で指定された小文字の kind。
         EventKind::Compaction(_) => "compaction",
+        EventKind::Orchestrator(_) => "Orchestrator",
     }
 }
 

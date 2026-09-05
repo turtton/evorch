@@ -20,6 +20,8 @@ struct DelegateBackgroundArgs {
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
     #[serde(default)]
+    workspace_branch: Option<String>,
+    #[serde(default)]
     load_skills: Vec<String>,
 }
 
@@ -33,6 +35,8 @@ struct DelegateArgs {
     category: Option<String>,
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
+    #[serde(default)]
+    workspace_branch: Option<String>,
     #[serde(default)]
     load_skills: Vec<String>,
 }
@@ -99,10 +103,14 @@ pub(super) fn delegate_background(
             category,
             load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
+            workspace_branch: args.workspace_branch,
             ..RunConfig::default()
         },
     ) {
-        Ok(run_id) => success(run_id.to_string()),
+        Ok(run_id) => {
+            runtime.attach_goal_child(state.caller_run_id(), run_id, role);
+            success(run_id.to_string())
+        }
         Err(runtime_error) => error(runtime_error.to_string()),
     }
 }
@@ -137,12 +145,14 @@ pub(super) async fn delegate(
             category,
             load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
+            workspace_branch: args.workspace_branch,
             ..RunConfig::default()
         },
     ) {
         Ok(child) => child,
         Err(runtime_error) => return error(runtime_error.to_string()),
     };
+    runtime.attach_goal_child(state.caller_run_id(), child, role);
     state.emit_delegated(&state.caller_run_id().to_string(), &child.to_string());
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
