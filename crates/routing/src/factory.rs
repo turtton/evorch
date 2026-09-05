@@ -1,12 +1,14 @@
 //! [`ProviderProfile`] から provider client を構築するファクトリを提供します。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use event_bus::EventBus;
 use providers::ProviderClient;
 use providers::error::ProviderError;
 use providers::provider::codex::tokens::{CodexTokenStore, TokenBundle};
 use providers::provider::codex::{CodexClient, CodexConfig};
+use providers::provider::openai_compatible::OpenAiCompatibleClient;
 use sandbox::credential::{CredentialStore, Secret};
 
 use crate::{CredentialRef, ProviderProfile, RoutingError};
@@ -15,6 +17,8 @@ use crate::{CredentialRef, ProviderProfile, RoutingError};
 pub const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 /// codex backend の既定ベース URL。
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com";
+/// provider request の既定タイムアウト。
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// [`sandbox::credential::CredentialStore`] を codex の [`CodexTokenStore`]
 /// 契約へ適合させるアダプタ。
@@ -59,21 +63,21 @@ impl CodexTokenStore for CredentialStoreTokenStore {
     }
 }
 
-/// [`FactoryOptions`] は codex client 構築時の上書き設定です。
+/// [`FactoryOptions`] は provider client 構築時の上書き設定です。
 #[derive(Debug, Clone, Default)]
 pub struct FactoryOptions {
     /// OAuth 認証先ベース URL の上書き。`None` なら [`DEFAULT_AUTH_BASE_URL`]
     /// を使用する。
     pub auth_base_url_override: Option<String>,
+    /// provider request timeout の上書き。`None` なら60秒。
+    pub request_timeout: Option<Duration>,
 }
 
-/// プロファイルから codex subscription client を構築します。
+/// プロファイルから対応する provider client を構築します。
 ///
-/// codex 以外の [`model::ProviderType`] は未対応で、
-/// [`RoutingError::UnsupportedProviderType`] を返します。codex の場合は
-/// protocol が `openai-codex-responses` かつ認証参照が
-/// [`CredentialRef::Keyring`] であることを要求し、違反は
-/// [`RoutingError::InvalidProfile`] で通知します。
+/// codexは`openai-codex-responses`と[`CredentialRef::Keyring`]、OpenAI互換は
+/// `openai-completions`と[`CredentialRef::Env`]を要求します。その他のprovider種別は
+/// [`RoutingError::UnsupportedProviderType`]を返します。
 ///
 /// キーリングの参照先は `credential.account` をキーとし、service フィールドは
 /// 現状の [`sandbox::credential::CredentialStore`] 実装では装飾的な値です。
@@ -88,13 +92,26 @@ pub fn build_provider_client(
     options: &FactoryOptions,
 ) -> Result<Box<dyn ProviderClient>, RoutingError> {
     match profile.provider_type {
-        model::ProviderType::OpenAiCodex => {}
-        other => {
-            return Err(RoutingError::UnsupportedProviderType {
-                provider_type: provider_type_label(other).to_string(),
-            });
+        model::ProviderType::OpenAiCodex => build_codex(profile, store, event_bus, options),
+        model::ProviderType::OpenAiCompatible => {
+            build_openai_compatible(profile, event_bus, options)
         }
+        other @ (model::ProviderType::Anthropic
+        | model::ProviderType::AnthropicSubscription
+        | model::ProviderType::OpenAi
+        | model::ProviderType::GithubCopilot
+        | model::ProviderType::Openrouter) => Err(RoutingError::UnsupportedProviderType {
+            provider_type: provider_type_label(other).to_string(),
+        }),
     }
+}
+
+fn build_codex(
+    profile: &ProviderProfile,
+    store: Arc<dyn CredentialStore>,
+    event_bus: Option<Arc<EventBus>>,
+    options: &FactoryOptions,
+) -> Result<Box<dyn ProviderClient>, RoutingError> {
     if profile.api_protocol != model::ApiProtocol::OpenAiCodexResponses {
         return Err(RoutingError::InvalidProfile {
             reason: format!(
@@ -132,6 +149,37 @@ pub fn build_provider_client(
             reason: format!("codex client の構築に失敗しました: {error}"),
         }
     })?;
+    Ok(Box::new(client))
+}
+
+fn build_openai_compatible(
+    profile: &ProviderProfile,
+    event_bus: Option<Arc<EventBus>>,
+    options: &FactoryOptions,
+) -> Result<Box<dyn ProviderClient>, RoutingError> {
+    if profile.api_protocol != model::ApiProtocol::OpenAiCompletions {
+        return Err(RoutingError::InvalidProfile {
+            reason: format!(
+                "provider type `openai-compatible` は api protocol `openai-completions` のみをサポートします (actual: {})",
+                protocol_label(profile.api_protocol)
+            ),
+        });
+    }
+    match &profile.credential {
+        CredentialRef::Env { .. } => {}
+        CredentialRef::Keyring { .. } => {
+            return Err(RoutingError::InvalidProfile {
+                reason: "openai-compatible supports env credential only in this slice".to_string(),
+            });
+        }
+    }
+    let timeout = options.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
+    let client =
+        OpenAiCompatibleClient::new(&profile.base_url, "openai-compatible", timeout, event_bus)
+            .map_err(|error| RoutingError::InvalidProfile {
+                reason: format!("openai-compatible client の構築に失敗しました: {error}"),
+            })?
+            .with_profile(&profile.name);
     Ok(Box::new(client))
 }
 

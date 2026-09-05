@@ -94,6 +94,7 @@ async fn codex_tokens_never_reach_sandbox_child_env() {
         None,
         &FactoryOptions {
             auth_base_url_override: Some(server.uri()),
+            ..FactoryOptions::default()
         },
     )
     .expect("codex client is built");
