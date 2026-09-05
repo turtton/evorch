@@ -58,6 +58,9 @@ fn header_strip(
     ctx: &ConversationContext<'_>,
     action: &mut Option<AgentPaneAction>,
 ) {
+    if identity.is_none() && ctx.active_thread_title.is_none() {
+        return;
+    }
     surface_frame(SURFACE).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
