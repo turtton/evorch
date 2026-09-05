@@ -1,0 +1,63 @@
+implementation_issue_packet:
+  issue_title: "v0.3: GUI デザインシステム整備（t3code 風ダークテーマへの洗練）"
+  issue_kind: feature
+  source_execution_unit: v03-gui-design-refinement
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/"
+  target_part: "design token / theme の単一モジュール化、3 領域レイアウトの視覚品質（sidebar 階層・conversation フォーカス・右 tabs 状態表現）、空状態 placeholder、headless_capture の populated state 対応と before/after 証跡"
+  dependencies: [v02-gui-workbench-restructure]
+  technical_baseline:
+    - "egui + eframe + egui_dock（ADR 0007）。現状は Visuals / theme のカスタマイズが一切なく egui 既定ダークテーマのまま（grep で Visuals/dark_theme/Theme 参照ゼロ確認済み）"
+    - "v02-gui-workbench-restructure で 3 領域レイアウト（左 project/thread sidebar・中央 conversation・右 tabbed surfaces）、PanelKind 拡張、schema v2 migration、HeadlessWorkbench/egui_kittest が landed"
+    - "headless_capture bin（crates/gui/src/bin/headless_capture.rs）は WorkbenchState::new(EmptySource) の空状態 1 フレームのみ出力する。populated state の capture は未対応"
+    - "t3code b883fc0 をデザイン prior art とする（gui-workbench packet でも参照）。ダークテーマ維持は確定"
+    - "デザイン評価（lead 実測、headless capture 2026-09-05）: レイアウト崩れなしだが、右 Agents 表の列クリッピング、タブと本文見出しの重複、極端な上下空白、egui 既定ウィジェットそのまま、アクセント/状態表現なし、空状態 placeholder なし"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0007-gui-framework-egui-first.md
+    - intents/evorch/interviews/grill-v02-loop-foundation.json
+  acceptance_criteria:
+    - "design token（color palette / spacing scale / corner radius / typography hierarchy / 状態色）を定義する単一の theme モジュールが crates/gui に新設され、全 pane・surface がそこから参照する。ダークテーマは維持する"
+    - "左 sidebar が project/thread の階層表示・選択ハイライト・状態 indicator（active/running/waiting 等）を持ち、中央 conversation が視覚的 focal point（message card / composer）として識別可能、右 tabs が active/hover/通知状態をアクセントで示すことを headless capture スクリーンショットで検証する"
+    - "空状態（project 未追加 / thread 未選択 / conversation 空）に placeholder と主要アクション（CTA）が表示される"
+    - "タブ名と本文見出しの重複表示が解消され、余白スケール（4px 基準 grid 等）が全領域で一貫する"
+    - "headless_capture が demo populated state を出力できるように拡張され（--demo 等の flag）、本 PR に before/after スクリーンショットが添付される"
+    - "t3code b883fc0 のデザイン言語（密度・階調・状態表現）を参照しつつ、コピーではなく evorch 固有の workbench 構造に適合させたことが PR body で説明される"
+    - "既存の headless / egui_kittest テストと workspace schema の後方互換が維持される（schema 変更は migration 経由）"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/decisions/0007-gui-framework-egui-first.md
+    new_intent_needed: false
+    placement_rationale: "gui-workbench overview の workbench 構造確定に対する視覚設計の深化 slice。ADR 0007（egui-first）の枠組み内で完結するため新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "design token / theme モジュールの構成、デザイン言語の確定点（palette / spacing / 状態表現）、headless_capture の populated 対応を gui-workbench overview へ反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "theme モジュールの公開 surface、デザイン言語の確定点、populated capture の仕組みを gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+  guide_reachability:
+    no_role_facing_surface: false
+    routes:
+      - guide_surface: "gui-workbench overview の workbench surface"
+        role: "Operator"
+        target_surface: "GUI 3 領域レイアウトの視覚状態（sidebar / conversation / tabs）"

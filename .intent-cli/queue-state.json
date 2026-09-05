@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-05T13:02:47.083187+00:00",
+  "updated_at": "2026-09-05T13:15:37.990516+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -989,6 +989,25 @@
         "repo": "turtton/evorch",
         "number": 79,
         "url": "https://github.com/turtton/evorch/issues/79"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v03-gui-design-refinement",
+      "title": "v0.3: GUI \u30C7\u30B6\u30A4\u30F3\u30B7\u30B9\u30C6\u30E0\u6574\u5099\uFF08t3code \u98A8\u30C0\u30FC\u30AF\u30C6\u30FC\u30DE\u3078\u306E\u6D17\u7DF4\uFF09",
+      "state": "queued",
+      "dependencies": [
+        "v02-gui-workbench-restructure"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v03-gui-design-refinement/implementation.md",
+        "review_context": ".intent-cli/issues/v03-gui-design-refinement/review-context.md",
+        "yaml": ".intent-cli/issues/v03-gui-design-refinement/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",
