@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod detector;
 pub(crate) mod prompt;
 
 /// Direct run から Orchestrator root run へ渡す固定スキーマの引継ぎメモ。
