@@ -11,11 +11,12 @@ use model::ModelCatalog;
 use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, MapEnv, compose_providers};
 use runtime::{
-    AgentModel, AgentRunPhase, ModelIdentity, ModelSource, Role, RoutedModel, RunConfig,
-    RuntimeComposition, WorkspaceMode, WorkspaceSeam, compose_runtime,
+    AgentModel, AgentRunPhase, ExecutionPolicy, IsolatedMounts, ModelIdentity, ModelSource, Role,
+    RoutedModel, RunConfig, RuntimeComposition, SandboxFactory, WorkspaceMode, WorkspaceSeam,
+    compose_runtime,
 };
-use sandbox::DirectSandbox;
 use sandbox::credential::{CredentialStore, FileCredentialStore};
+use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
@@ -25,6 +26,18 @@ use support::{ScriptedModel, drain_events, init_git_repo, text_response};
 const PROFILE: &str = "local";
 const MODEL: &str = "local-model";
 const KEY_ENV: &str = "EVORCH_TEST_KEY_COMPOSITION_ROOT";
+
+struct DirectSandboxFactory;
+
+impl SandboxFactory for DirectSandboxFactory {
+    fn build(
+        &self,
+        _policy: &ExecutionPolicy,
+        _mounts: &IsolatedMounts,
+    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        Ok(Arc::new(DirectSandbox::new_unchecked()))
+    }
+}
 
 fn credential_store() -> Arc<dyn CredentialStore> {
     let directory = tempfile::tempdir().expect("credential directory");
@@ -169,7 +182,7 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
     }
 }
 
-// Given: production workspace seam と完了を gate した固定モデル
+// Given: test factory seam (bwrap 非依存) と完了を gate した固定モデル
 // When: compose_runtime が返した runtime で isolated Worker を起動する
 // Then: モデル呼び出し中に run 専用 worktree が存在し、run は正常終了する
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -185,7 +198,8 @@ async fn fixed_composition_uses_workspace_seam_for_isolated_run() {
         ))],
         Arc::clone(&gate),
     ));
-    let seam = WorkspaceSeam::production(repo.clone()).expect("workspace seam");
+    let seam = WorkspaceSeam::with_factory(repo.clone(), Arc::new(DirectSandboxFactory))
+        .expect("workspace seam");
     let composed = compose_runtime(composition(
         &config,
         bus,

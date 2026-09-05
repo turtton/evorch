@@ -300,12 +300,9 @@ impl AgentRuntime {
         let seam = crate::compose::WorkspaceSeam::production(project_root)?;
         let executor =
             production_executor(Arc::clone(&bus), policy, seam.repo_root().to_path_buf())?;
+        let (manager, factory) = seam.into_manager_and_factory();
         Ok(Self::with_workspace_context(
-            bus,
-            executor,
-            model,
-            WorktreeManager::new(seam.into_project()),
-            Arc::new(crate::network::BwrapFactory),
+            bus, executor, model, manager, factory,
         ))
     }
 

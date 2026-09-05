@@ -19,6 +19,7 @@ use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError
 /// composition root に production workspace context を渡す seam。
 pub struct WorkspaceSeam {
     project: Project,
+    factory: Arc<dyn crate::SandboxFactory>,
 }
 
 impl WorkspaceSeam {
@@ -27,10 +28,24 @@ impl WorkspaceSeam {
     /// # Errors
     /// project root が有効な git repository でない場合に [`RuntimeError::Workspace`] を返す。
     pub fn production(project_root: PathBuf) -> Result<Self, RuntimeError> {
+        Self::with_factory(project_root, Arc::new(crate::network::BwrapFactory))
+    }
+
+    /// sandbox factory を明示した workspace seam を生成する。
+    ///
+    /// bwrap 実行環境を持たない CI でも isolated workspace の結線を検証できるように
+    /// するテスト seam。production 経路は [`WorkspaceSeam::production`] を使うこと。
+    ///
+    /// # Errors
+    /// project root が有効な git repository でない場合に [`RuntimeError::Workspace`] を返す。
+    pub fn with_factory(
+        project_root: PathBuf,
+        factory: Arc<dyn crate::SandboxFactory>,
+    ) -> Result<Self, RuntimeError> {
         let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
             detail: error.to_string(),
         })?;
-        Ok(Self { project })
+        Ok(Self { project, factory })
     }
 
     /// 検証済み repository root を返す。
@@ -38,8 +53,10 @@ impl WorkspaceSeam {
         self.project.repo_root()
     }
 
-    pub(crate) fn into_project(self) -> Project {
-        self.project
+    pub(crate) fn into_manager_and_factory(
+        self,
+    ) -> (WorktreeManager, Arc<dyn crate::SandboxFactory>) {
+        (WorktreeManager::new(self.project), self.factory)
     }
 }
 
@@ -131,13 +148,10 @@ fn compose_agent_runtime(
     workspace: Option<WorkspaceSeam>,
 ) -> AgentRuntime {
     match workspace {
-        Some(seam) => AgentRuntime::with_workspace_context(
-            bus,
-            executor,
-            model,
-            WorktreeManager::new(seam.into_project()),
-            Arc::new(crate::network::BwrapFactory),
-        ),
+        Some(seam) => {
+            let (manager, factory) = seam.into_manager_and_factory();
+            AgentRuntime::with_workspace_context(bus, executor, model, manager, factory)
+        }
         None => AgentRuntime::new(bus, executor, model),
     }
 }
