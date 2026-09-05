@@ -13,6 +13,7 @@ const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
 struct CaptureArgs {
     output: PathBuf,
     demo: bool,
+    activate: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -26,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let capture = parse_args(arguments.into_iter())?;
     let demo_dir = capture.demo.then(tempfile::tempdir).transpose()?;
-    let state = match demo_dir.as_ref() {
+    let mut state = match demo_dir.as_ref() {
         Some(dir) => {
             let sidebar = demo_sidebar(dir.path())?;
             populate(
@@ -36,6 +37,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())?,
     };
+    if let Some(id) = capture.activate.as_deref() {
+        let path = state
+            .dock()
+            .find_tab(&workspace_ui::PanelId::new(id))
+            .ok_or_else(|| format!("--activate: no tab for panel id '{id}'"))?;
+        state
+            .dock_mut()
+            .set_active_tab(path)
+            .map_err(|_| format!("--activate: failed to activate '{id}'"))?;
+    }
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
     let frame = workbench.capture()?;
@@ -49,11 +60,19 @@ fn parse_args(
 ) -> Result<CaptureArgs, Box<dyn Error>> {
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
+    let mut activate: Option<String> = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--out") => {
                 let path = arguments.next().ok_or("--out requires an output path")?;
                 output = Some(PathBuf::from(path));
+            }
+            Some("--activate") => {
+                if activate.is_some() {
+                    return Err("unexpected additional arguments".into());
+                }
+                let id = arguments.next().ok_or("--activate requires a panel id")?;
+                activate = Some(id.to_string_lossy().into_owned());
             }
             Some("--demo") if demo => return Err("unexpected additional arguments".into()),
             Some("--demo") => demo = true,
@@ -71,18 +90,20 @@ fn parse_args(
     Ok(CaptureArgs {
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
+        activate,
     })
 }
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--activate ID] [--out PATH] [PATH]
 
 Captures a 1280x720 headless workbench frame as PNG.
 
 Modes:
-  (default)  empty workbench state
-  --demo     deterministic populated workbench (fixture::populate)
+  (default)      empty workbench state
+  --demo         deterministic populated workbench (fixture::populate)
+  --activate ID  activate the given panel tab before capturing (e.g. merge-main)
 
 The output path comes from --out PATH or a single positional PATH
 (default: {DEFAULT_OUTPUT}).
@@ -176,6 +197,44 @@ mod tests {
 
         // When: the arguments are parsed
         let error = parse_args(arguments).expect_err("unknown flag must fail");
+
+        // Then: the existing unexpected-arguments error is reported
+        assert_eq!(error.to_string(), "unexpected additional arguments");
+    }
+
+    #[test]
+    fn parse_args_accepts_activate_flag() {
+        // Given: --activate with a panel id alongside other flags
+        let arguments = args(["--demo", "--activate", "merge-main", "--out", "x.png"]);
+
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("activate form must parse");
+
+        // Then: the panel id is preserved and other flags still apply
+        assert_eq!(capture.activate.as_deref(), Some("merge-main"));
+        assert!(capture.demo);
+        assert_eq!(capture.output, std::path::PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn parse_args_rejects_activate_without_value() {
+        // Given: --activate without a following panel id
+        let arguments = args(["--activate"]);
+
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("missing --activate value must fail");
+
+        // Then: the missing-value error is reported
+        assert_eq!(error.to_string(), "--activate requires a panel id");
+    }
+
+    #[test]
+    fn parse_args_rejects_duplicate_activate() {
+        // Given: --activate supplied twice
+        let arguments = args(["--activate", "merge-main", "--activate", "goal-main"]);
+
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("duplicate --activate must fail");
 
         // Then: the existing unexpected-arguments error is reported
         assert_eq!(error.to_string(), "unexpected additional arguments");
