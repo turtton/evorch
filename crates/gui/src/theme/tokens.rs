@@ -31,6 +31,7 @@ pub const SP_3: f32 = 12.0;
 pub const SP_4: f32 = 16.0;
 pub const ROW_COMPACT: f32 = 36.0;
 pub const TAB_HEIGHT: f32 = 24.0;
+// 4px grid の半値例外: タブ本体は TAB_HEIGHT で grid 整合しており、間隔のみ光学補正として 2px を使う。
 pub const TAB_GAP: f32 = 2.0;
 pub const TAB_MAX_WIDTH: f32 = 144.0;
 pub const TOPBAR: f32 = 52.0;
