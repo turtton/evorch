@@ -19,6 +19,9 @@ pub enum WorkspaceError {
     /// 作成対象の branch が既に存在する。
     #[error("branch already exists: {branch}")]
     BranchExists { branch: String },
+    /// checkout 対象として指定された branch が存在しない。
+    #[error("branch not found: {branch}")]
+    BranchMissing { branch: String },
     /// 作成対象の path が既に存在する。
     #[error("worktree path already exists: {path}", path = path.display())]
     PathExists { path: PathBuf },
@@ -126,13 +129,22 @@ impl WorktreeManager {
     pub(crate) fn planned(&self, run_id: RunId) -> (String, PathBuf) {
         let run_name = run_id.to_string();
         let branch = format!("{BRANCH_PREFIX}{run_name}");
+        self.planned_on_branch(run_id, &branch)
+    }
+
+    /// 指定 branch の checkout 用に、run 名から worktree path を作成前に導出する。
+    ///
+    /// path は branch 名から導出せず run 名 (`run-N`) から決める。既存 branch を
+    /// 別 run が再 checkout しても path が衝突しないためである (issue #73 D2)。
+    pub(crate) fn planned_on_branch(&self, run_id: RunId, branch: &str) -> (String, PathBuf) {
+        let run_name = run_id.to_string();
         let path = self
             .project
             .repo_root
             .join(".evorch")
             .join("worktrees")
             .join(&run_name);
-        (branch, path)
+        (branch.to_string(), path)
     }
 
     /// run 専用 branch と worktree を二段階で作成する。
@@ -142,11 +154,50 @@ impl WorktreeManager {
     /// [`WorkspaceError`] を返す。worktree add の失敗時だけ、この呼出しで作成した
     /// branch と部分ディレクトリを rollback する。
     pub fn create(&self, run_id: RunId) -> Result<OwnedWorktree, WorkspaceError> {
-        let (branch, path) = self.planned(run_id);
-
+        let run_name = run_id.to_string();
+        let branch = format!("{BRANCH_PREFIX}{run_name}");
         if branch_exists(&self.project.repo_root, &branch)? {
             return Err(WorkspaceError::BranchExists { branch });
         }
+        self.add_worktree(run_name, branch, true)
+    }
+
+    /// 既存 branch を checkout する worktree を run 名の path に作成する。
+    ///
+    /// branch は新規作成せず、存在しなければ fail-closed で拒否する (issue #73 D2:
+    /// 修復ラウンドの run が同一 deliverable branch を再利用する)。worktree path
+    /// は branch 名からではなく run 名から導出される。
+    ///
+    /// # Errors
+    /// branch 不在、path 衝突、git command、または filesystem 操作の失敗時に
+    /// [`WorkspaceError`] を返す。worktree add の失敗時は部分ディレクトリだけを
+    /// rollback する (branch は呼出し前から存在するため削除しない)。
+    pub fn create_on_branch(
+        &self,
+        run_id: RunId,
+        branch: &str,
+    ) -> Result<OwnedWorktree, WorkspaceError> {
+        let branch = branch.to_string();
+        if !branch_exists(&self.project.repo_root, &branch)? {
+            return Err(WorkspaceError::BranchMissing { branch });
+        }
+        self.add_worktree(run_id.to_string(), branch, false)
+    }
+
+    /// worktree 本体の作成共通部。`create_branch` が真のときだけ branch を
+    /// `HEAD` から新規作成し、rollback も branch を含める。
+    fn add_worktree(
+        &self,
+        run_name: String,
+        branch: String,
+        create_branch: bool,
+    ) -> Result<OwnedWorktree, WorkspaceError> {
+        let path = self
+            .project
+            .repo_root
+            .join(".evorch")
+            .join("worktrees")
+            .join(&run_name);
         if path.try_exists().map_err(|source| WorkspaceError::Io {
             path: path.clone(),
             source,
@@ -154,10 +205,12 @@ impl WorktreeManager {
             return Err(WorkspaceError::PathExists { path });
         }
 
-        run_git(
-            &self.project.repo_root,
-            &["branch", branch.as_str(), "HEAD"],
-        )?;
+        if create_branch {
+            run_git(
+                &self.project.repo_root,
+                &["branch", branch.as_str(), "HEAD"],
+            )?;
+        }
         let add_result = run_git(
             &self.project.repo_root,
             &[
@@ -168,7 +221,11 @@ impl WorktreeManager {
             ],
         );
         if let Err(error) = add_result {
-            rollback_created_branch(&self.project.repo_root, &path, &branch);
+            if create_branch {
+                rollback_created_branch(&self.project.repo_root, &path, &branch);
+            } else {
+                rollback_preexisting_branch_worktree(&self.project.repo_root, &path);
+            }
             return Err(error);
         }
 
@@ -178,6 +235,7 @@ impl WorktreeManager {
         Ok(OwnedWorktree {
             path,
             branch,
+            run_name,
             repo_root: self.project.repo_root.clone(),
         })
     }
@@ -190,6 +248,9 @@ pub struct OwnedWorktree {
     pub path: PathBuf,
     /// merge deliverable として cleanup 後も保持する branch 名。
     pub branch: String,
+    /// worktree path の導出元 run 名 (`run-N`)。cleanup の所有判定は
+    /// branch 名からではなくこの値で行う (issue #73 D2)。
+    pub run_name: String,
     repo_root: PathBuf,
 }
 
@@ -200,9 +261,11 @@ impl OwnedWorktree {
     /// manager の所有範囲外の path、または削除・prune の失敗時に
     /// [`WorkspaceError`] を返す。
     pub fn cleanup(self) -> Result<(), WorkspaceError> {
-        let run_name = self.branch.strip_prefix(BRANCH_PREFIX);
-        let expected = run_name.map(|name| self.repo_root.join(".evorch/worktrees").join(name));
-        if expected.as_ref() != Some(&self.path) {
+        let expected = self
+            .repo_root
+            .join(".evorch/worktrees")
+            .join(&self.run_name);
+        if expected != self.path {
             return Err(WorkspaceError::ForeignPath { path: self.path });
         }
 
@@ -251,6 +314,15 @@ fn rollback_created_branch(repo_root: &Path, path: &Path, branch: &str) {
     }
     let _ = run_git(repo_root, &["worktree", "prune"]);
     let _ = run_git(repo_root, &["branch", "-D", branch]);
+}
+
+/// 事前存在 branch の worktree add 失敗時の rollback。branch は呼出し前から
+/// 存在するため削除せず、部分生成物だけを撤去する。
+fn rollback_preexisting_branch_worktree(repo_root: &Path, path: &Path) {
+    if path.exists() {
+        let _ = fs::remove_dir_all(path);
+    }
+    let _ = run_git(repo_root, &["worktree", "prune"]);
 }
 
 fn ensure_git_metadata(repo_root: &Path) -> Result<(), WorkspaceError> {
@@ -539,6 +611,7 @@ mod tests {
         let owned = OwnedWorktree {
             path: foreign.clone(),
             branch: "evorch/task/run-9".to_string(),
+            run_name: "run-9".to_string(),
             repo_root: repo,
         };
 
@@ -546,5 +619,54 @@ mod tests {
 
         assert!(matches!(error, WorkspaceError::ForeignPath { path } if path == foreign));
         assert!(foreign.is_dir());
+    }
+
+    // Given: 既存 branch を持つ repo / When: create_on_branch で別 run 名の path を作成 / Then: branch を checkout し cleanup でも branch は保持される
+    #[test]
+    fn create_on_branch_checks_out_existing_branch_at_run_named_path() {
+        let (_temp, repo) = init_repo();
+        assert!(
+            git(&repo, &["branch", "evorch/task/run-1", "HEAD"])
+                .status
+                .success()
+        );
+
+        let owned = manager(&repo)
+            .create_on_branch(RunId::new(10), "evorch/task/run-1")
+            .expect("既存 branch の worktree を作成できる");
+        let path = owned.path.clone();
+
+        assert_eq!(path, repo.join(".evorch/worktrees/run-10"));
+        assert_eq!(owned.branch, "evorch/task/run-1");
+        assert_eq!(owned.run_name, "run-10");
+        assert!(path.join(".git").exists());
+
+        owned.cleanup().expect("worktree を削除できる");
+
+        assert!(!path.exists());
+        assert!(
+            git(
+                &repo,
+                &["show-ref", "--verify", "refs/heads/evorch/task/run-1"]
+            )
+            .status
+            .success()
+        );
+    }
+
+    // Given: branch が存在しない repo / When: create_on_branch / Then: BranchMissing で fail-closed に拒否する
+    #[test]
+    fn create_on_branch_fails_closed_when_branch_missing() {
+        let (_temp, repo) = init_repo();
+
+        let error = manager(&repo)
+            .create_on_branch(RunId::new(11), "evorch/task/absent")
+            .expect_err("不在 branch を拒否する");
+
+        assert!(matches!(
+            error,
+            WorkspaceError::BranchMissing { branch } if branch == "evorch/task/absent"
+        ));
+        assert!(!repo.join(".evorch/worktrees/run-11").exists());
     }
 }

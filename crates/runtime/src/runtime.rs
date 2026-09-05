@@ -20,6 +20,7 @@ use crate::agent_loop::{LoopChannels, LoopShared, RunTask, run_agent};
 use crate::compaction::policy::CompactionSettings;
 use crate::entry_routing::EntryRouter;
 use crate::mailbox::{PushError, RunMailbox};
+use crate::orchestration::GoalGate;
 use crate::prompt::{
     CatalogBuildInput, PromptCompositionError, SystemPromptCatalog, build_catalog,
 };
@@ -51,6 +52,9 @@ pub(crate) struct Shared {
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
     pub(crate) compaction_configured: AtomicBool,
+    /// goal gate (finish 判定 seam、issue #73 T1.3)。未設定なら finish は
+    /// legacy の即時受理のまま残る (T3.1 が `meta::finish` から参照する)。
+    pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     next_run_id: AtomicU64,
@@ -100,6 +104,8 @@ struct RunEntry {
     inbox_tx: mpsc::Sender<String>,
     cancel_tx: watch::Sender<bool>,
     compact_tx: watch::Sender<u64>,
+    /// run の最終 assistant テキスト (loop 側 result_tx と対になる観測口)。
+    result_rx: watch::Receiver<Option<String>>,
     /// 実行中の圧縮を loop 側と共有するフラグ (compact() の in-flight 拒否判定用)。
     compaction_busy: Arc<AtomicBool>,
     mailbox: Arc<RunMailbox>,
@@ -132,6 +138,7 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -331,6 +338,7 @@ impl AgentRuntime {
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
+                goals: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -339,6 +347,25 @@ impl AgentRuntime {
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// goal gate (finish 判定 seam) を設定したランタイムを返すビルダーメソッド。
+    ///
+    /// 設定済みの場合は 2 回目以降の呼び出しは無視される (先勝ち、compaction
+    /// 設定と同一規約)。gate 未設定の finish は legacy の即時受理のまま残り、
+    /// gate 経由の判定への差し替えは T3.1 が `meta::finish` で行う。
+    pub fn with_goal_gate(self, gate: Arc<dyn GoalGate>) -> Self {
+        let _ = self.shared.goals.set(gate);
+        self
+    }
+
+    /// 接続済みの goal gate を返す (未設定なら `None`)。
+    #[expect(
+        dead_code,
+        reason = "read by meta::finish wiring (T3.1) via LoopState::runtime()"
+    )]
+    pub(crate) fn goal_gate(&self) -> Option<Arc<dyn GoalGate>> {
+        self.shared.goals.get().cloned()
     }
 
     /// entry pre-routing 判定器を返す。
@@ -392,6 +419,7 @@ impl AgentRuntime {
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
+        let (result_tx, result_rx) = watch::channel(None::<String>);
         let compaction_busy = Arc::new(AtomicBool::new(false));
         let phase_tx_entry = phase_tx.clone();
         let mailbox = Arc::new(RunMailbox::new());
@@ -412,6 +440,7 @@ impl AgentRuntime {
             mailbox_version_rx,
             compact_rx,
             compaction_busy: compaction_busy.clone(),
+            result_tx,
         };
         lock_runs(&self.shared.runs).insert(
             run_id,
@@ -427,6 +456,7 @@ impl AgentRuntime {
                 inbox_tx,
                 cancel_tx,
                 compact_tx,
+                result_rx,
                 compaction_busy: Arc::clone(&compaction_busy),
                 mailbox: Arc::clone(&mailbox),
                 _join: None,
@@ -484,6 +514,19 @@ impl AgentRuntime {
                 return Ok(*phase_rx.borrow());
             }
         }
+    }
+
+    /// run の最終 assistant テキストを返す (未確定なら `None`)。
+    ///
+    /// 正常終了 (モデルの自然 Stop または finish meta-op) でのみ記録され、
+    /// Error / cancel 終端の run は `None` のままである。reviewer 判定の解析
+    /// のように run 出力を観測する supervisor 経路 (issue #73 §7) のための API である。
+    ///
+    /// # Errors
+    /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn run_result(&self, run_id: RunId) -> Result<Option<String>, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        Ok(entry.result_rx.borrow().clone())
     }
 
     /// run へキャンセルを通知する。複数回の通知は同じ結果となる。

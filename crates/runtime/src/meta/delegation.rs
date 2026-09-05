@@ -20,6 +20,8 @@ struct DelegateBackgroundArgs {
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
     #[serde(default)]
+    workspace_branch: Option<String>,
+    #[serde(default)]
     load_skills: Vec<String>,
 }
 
@@ -33,6 +35,8 @@ struct DelegateArgs {
     category: Option<String>,
     #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
+    #[serde(default)]
+    workspace_branch: Option<String>,
     #[serde(default)]
     load_skills: Vec<String>,
 }
@@ -99,6 +103,7 @@ pub(super) fn delegate_background(
             category,
             load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
+            workspace_branch: args.workspace_branch,
             ..RunConfig::default()
         },
     ) {
@@ -137,6 +142,7 @@ pub(super) async fn delegate(
             category,
             load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),
+            workspace_branch: args.workspace_branch,
             ..RunConfig::default()
         },
     ) {

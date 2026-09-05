@@ -366,6 +366,82 @@ async fn parallel_isolated_runs_get_distinct_worktrees() {
     assert!(branch_exists(&repo, &second_branch));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn isolated_run_can_check_out_existing_branch() {
+    // Given: run A を isolated で完了させ、deliverable branch を残す
+    let (_temp, repo) = init_git_repo();
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            Ok(text_response("first", FinishReason::Stop)),
+            Ok(text_response("second", FinishReason::Stop)),
+        ],
+        Arc::clone(&gate),
+    ));
+    let (runtime, mounts, _bus) = runtime_with_workspace(&repo, Arc::clone(&model));
+    let run_a = runtime.delegate_background(Role::Worker, "first".to_string(), isolated_config());
+    wait_for_model_calls(&model, 1).await;
+    gate.notify_one();
+    assert_eq!(runtime.wait(run_a).await, Ok(AgentRunPhase::Done));
+    let branch = format!("evorch/task/{run_a}");
+    assert!(branch_exists(&repo, &branch));
+    wait_until(|| {
+        !repo
+            .join(".evorch/worktrees")
+            .join(run_a.to_string())
+            .exists()
+    })
+    .await;
+
+    // When: run B が既存 branch を workspace_branch に指定して isolated 開始する
+    let run_b = runtime.delegate_background(
+        Role::Worker,
+        "second".to_string(),
+        RunConfig {
+            workspace_mode: WorkspaceMode::Isolated,
+            workspace_branch: Some(branch.clone()),
+            ..RunConfig::default()
+        },
+    );
+    wait_until(|| {
+        repo.join(".evorch/worktrees")
+            .join(run_b.to_string())
+            .exists()
+            && branch_exists(&repo, &branch)
+            && captured_mounts(&mounts).len() == 2
+    })
+    .await;
+    wait_for_model_calls(&model, 2).await;
+
+    // Then: B の inspection は指定 branch と、branch 名に由来しない worktree path を報告する
+    let inspection = runtime
+        .inspect_agent(run_b)
+        .expect("run B を inspection できる")
+        .workspace
+        .expect("isolated run B の workspace inspection が常にある");
+    assert_eq!(inspection.branch.as_deref(), Some(branch.as_str()));
+    assert_eq!(
+        inspection.worktree_path,
+        Some(repo.join(".evorch/worktrees").join(run_b.to_string()))
+    );
+    assert_ne!(
+        inspection.worktree_path,
+        Some(repo.join(".evorch/worktrees").join(&branch))
+    );
+
+    // cleanup も成功し、既存 branch は保持される
+    gate.notify_one();
+    assert_eq!(runtime.wait(run_b).await, Ok(AgentRunPhase::Done));
+    wait_until(|| {
+        !repo
+            .join(".evorch/worktrees")
+            .join(run_b.to_string())
+            .exists()
+    })
+    .await;
+    assert!(branch_exists(&repo, &branch));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_without_workspace_context_fails_closed() {
     // Given
