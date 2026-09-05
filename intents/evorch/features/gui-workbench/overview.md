@@ -67,6 +67,15 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - goal-submission / merge-approval は WorkbenchCommand + FixtureLoopAdapter で型付き・決定的（orchestrator-loop 未接続でも fixture で操作可能）
 - `--demo` は 3 役 delegate + AgentMessage + telemetry + diff/goal/merge を外部 provider なしで再現、`--state` で sidebar 永続化、手動確認手順は `--help` に同梱（NixOS は LD_LIBRARY_PATH+WGPU_BACKEND=gl+llvmpipe が必要）
 - HeadlessWorkbench 統合テスト（chained scenario + v1 migration + error paths）を含む。GUI 95 / workspace-ui 38 test green、Reviewer Gate 3 round で APPROVED（AC5 非混線・AC10 migration・AC11 scope 外項を最終修正）
+## v0.3 デザインシステム（t3code 準拠ダークテーマ）の実装確定（issue #81、PR #82、2026-09-06）
+
+- 単一テーマモジュール crates/gui/src/theme/（tokens/style/text/widgets/dock）。t3code b883fc0 のトークンを egui/egui_dock に適合: canvas #0a0a0a / sidebar #000 / surface #111-#191 / accent #346bf1 / 4px grid / radius 6-10 / body 14px
+- pane_root（Role::Pane）ランドマークでタブ/見出し重複を解消しつつ kittest の has_label 契約を維持。ラベル一意性ガードテスト追加
+- タブアテンション: tab_style_override + U+2022 "•"（U+25CF は egui 同梱フォント欠如で tofu 化）
+- 空状態+CTA: No projects yet / No project selected / No thread selected / No messages yet + Go to Projects / Start a thread / Go to Goal
+- headless 検証基盤: --demo fixture / --activate <panel> / --pointer X Y（hover capture）。crates/gui/docs/screenshots/v03 に before/after 6 枚+再現手順
+- 既知の制約: kittest click はノード rect 中心の模擬ポインタでクリップ外はクリック不能 → MIN_SIDEBAR_FRACTION=0.30 で最小幅保証。agents グリッドは horizontal scroll で列到達性確保（列幅自動フィットは follow-up 候補）
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
