@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use agents::Role;
-use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
+use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent};
 use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
 use sandbox::DirectSandbox;
@@ -42,7 +42,8 @@ async fn background_start_is_observable_before_wait_and_completion_is_success_on
     // Then
     assert!(first_three.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let remaining = collect_events(&mut events, 3).await;
+    let remaining = collect_events(&mut events, 4).await;
+    assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Message(MessageEvent::MessageDelta { delta }) if delta == "done")));
     assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())));
 }
 

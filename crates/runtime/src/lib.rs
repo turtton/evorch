@@ -11,12 +11,12 @@
 //!   複数 AgentRun の文脈独立性は所有権によって構成上保証される。
 //! - **capability 強制**: [`policy::ExecutionPolicy`] が ADR 0002 の境界を
 //!   ツール認可とモデルへのツール公開の 2 点で強制する。
-//! - **ルーティングの委譲**: role → model の解決・フォールバックは
-//!   v01-routing-profiles が [`model::AgentModel`] 境界の実装として提供する。
-//!   runtime は model 名を一切持たない。
+//! - **ルーティング境界**: kernel の agent loop は [`model::AgentModel`] だけを参照し、
+//!   role → model 解決を行わない。edge の [`compose`] が設定・routing・provider を接続する。
 
 mod agent_loop;
 pub(crate) mod compaction;
+pub mod compose;
 pub mod context;
 pub mod entry_routing;
 pub mod error;
@@ -35,6 +35,10 @@ pub mod skill;
 pub mod state;
 pub mod workspace;
 
+pub use compose::{
+    ComposedRuntime, CompositionError, ModelIdentity, ModelSource, RoutedModel, RuntimeComposition,
+    WorkspaceSeam, compose_runtime,
+};
 pub use context::{AgentContext, CompactionCheckpoint};
 pub use entry_routing::{
     COORDINATION_KEYWORDS, DIRECT_KEYWORDS, EntryRouter, LocalVerdict, RoutingDecision,
@@ -67,7 +71,7 @@ pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
     AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode,
 };
-pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory};
+pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,

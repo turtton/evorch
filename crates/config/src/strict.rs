@@ -21,9 +21,11 @@ const ROOT_KEYS: &[&str] = &[
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
+    "type",
     "api_protocol",
     "base_url",
     "credential",
+    "api_key_env",
     "models",
     "default_model",
 ];
@@ -104,6 +106,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
             };
             let profile_path = format!("providers.{name}");
             check_credential_scope_keys(profile, &profile_path, PROVIDER_KEYS)?;
+            validate_api_key_env(profile, &profile_path)?;
             validate_credential(profile, &profile_path)?;
         }
     }
@@ -117,6 +120,33 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
+}
+
+// api_key_env は credential と併用できず、空でない文字列でなければならない。
+// デシリアライズ前に生テーブルで検査することで、エラーに完全な config path を載せる。
+fn validate_api_key_env(
+    profile: &toml::value::Table,
+    profile_path: &str,
+) -> Result<(), ConfigError> {
+    let Some(api_key_env) = profile.get("api_key_env") else {
+        return Ok(());
+    };
+    let path = format!("{profile_path}.api_key_env");
+    if profile.contains_key("credential") {
+        return Err(ConfigError::InvalidField {
+            path,
+            message: "mutually exclusive with `credential`; use one or the other".to_string(),
+        });
+    }
+    match api_key_env.as_str() {
+        Some(var) if !var.trim().is_empty() => Ok(()),
+        _ => Err(ConfigError::InvalidField {
+            path,
+            message: "must be a non-empty environment variable name; \
+                      use credential = { type = \"env\", var = \"...\" } for a reference"
+                .to_string(),
+        }),
+    }
 }
 
 fn validate_credential(

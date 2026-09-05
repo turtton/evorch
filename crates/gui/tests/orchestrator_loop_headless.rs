@@ -33,7 +33,7 @@ const GOAL: &str = "DEMO-GOAL implement queued fixture unit";
 const HEAD_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const HEAD_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
 const HEAD_C: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
-const TIMEOUT: Duration = Duration::from_secs(20);
+const TIMEOUT: Duration = Duration::from_secs(60);
 
 struct RecordingSandboxFactory;
 
@@ -49,6 +49,7 @@ impl SandboxFactory for RecordingSandboxFactory {
 
 struct NoPullRequestModel {
     root_turn: AtomicUsize,
+    goal_events: tokio::sync::Mutex<event_bus::EventReceiver>,
 }
 
 #[async_trait]
@@ -75,6 +76,9 @@ impl AgentModel for NoPullRequestModel {
         if prompt.starts_with("[evorch continuation") {
             return std::future::pending().await;
         }
+        if self.root_turn.load(Ordering::Acquire) == 0 {
+            self.wait_goal_created().await;
+        }
         let turn = self.root_turn.fetch_add(1, Ordering::AcqRel);
         if turn == 0 {
             return Ok(ChatResponse {
@@ -95,6 +99,28 @@ impl AgentModel for NoPullRequestModel {
 
     fn selected_model(&self, role: Role) -> String {
         format!("headless-{}", role.name().to_lowercase())
+    }
+}
+
+impl NoPullRequestModel {
+    // create() は ledger 挿入後に GoalCreated を emit するため、これを待てば
+    // finish gate の goal_for_run が必ず成功する (CPU 飢餓時の結合 race 回避)。
+    async fn wait_goal_created(&self) {
+        let mut receiver = self.goal_events.lock().await;
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    if matches!(
+                        event.kind,
+                        EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. })
+                    ) {
+                        return;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            }
+        }
     }
 }
 
@@ -182,17 +208,23 @@ fn spawn_storage_bridge(
     })
 }
 
+type SharedOrchestratorEvents = Arc<Mutex<Vec<OrchestratorEvent>>>;
+type SharedEventLog = Arc<Mutex<Vec<String>>>;
+
 fn spawn_collector(
     runtime: &tokio::runtime::Runtime,
     bus: &Arc<EventBus>,
-) -> Arc<Mutex<Vec<OrchestratorEvent>>> {
+) -> (SharedOrchestratorEvents, SharedEventLog) {
     let events = Arc::new(Mutex::new(Vec::new()));
+    let all_events = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&events);
+    let all_sink = Arc::clone(&all_events);
     let mut receiver = bus.subscribe();
     runtime.spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
+                    lock(&all_sink).push(format!("{:?}", event.kind));
                     if let EventKind::Orchestrator(event) = event.kind {
                         lock(&sink).push(event);
                     }
@@ -202,7 +234,7 @@ fn spawn_collector(
             }
         }
     });
-    events
+    (events, all_events)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -252,7 +284,8 @@ struct Fixture {
     bus: Arc<EventBus>,
     repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
-    events: Arc<Mutex<Vec<OrchestratorEvent>>>,
+    events: SharedOrchestratorEvents,
+    all_events: SharedEventLog,
 }
 
 impl Fixture {
@@ -266,9 +299,10 @@ impl Fixture {
         Self::with_model(
             FixtureDeliveryAdapter::default(),
             OrchestrationSettings::default(),
-            |_bus, _repo| {
+            |bus, _repo| {
                 Arc::new(NoPullRequestModel {
                     root_turn: AtomicUsize::new(0),
+                    goal_events: tokio::sync::Mutex::new(bus.subscribe()),
                 })
             },
         )
@@ -289,7 +323,7 @@ impl Fixture {
         let storage = Storage::open(storage_config.clone()).expect("storage opens");
         let bus = Arc::new(EventBus::new(2048));
         let bridge = spawn_storage_bridge(&runtime, &bus, storage.handle());
-        let events = spawn_collector(&runtime, &bus);
+        let (events, all_events) = spawn_collector(&runtime, &bus);
         let executor = Arc::new(ToolExecutor::with_standard_tools(
             Arc::clone(&bus),
             Arc::new(DirectSandbox::new_unchecked()),
@@ -342,6 +376,7 @@ impl Fixture {
             repaint_rx,
             harness,
             events,
+            all_events,
         }
     }
 
@@ -358,8 +393,8 @@ impl Fixture {
         while !self.harness.has_label(label) {
             assert!(
                 Instant::now() < deadline,
-                "label {label:?} missing; events={:#?}",
-                lock(&self.events)
+                "label {label:?} missing; all_events={:#?}",
+                lock(&self.all_events)
             );
             let _ = self.repaint_rx.recv_timeout(Duration::from_millis(100));
             self.harness.run();

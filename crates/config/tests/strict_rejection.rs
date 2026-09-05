@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use config::{Config, ConfigError, CredentialRefConfig, LoadOptions};
+use config::{
+    ApiProtocolConfig, Config, ConfigError, CredentialRefConfig, LoadOptions, ProviderTypeConfig,
+};
 
 fn write_file(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
@@ -408,4 +410,102 @@ fn agents_category_unknown_name_is_rejected_with_path() {
 
     // Then: キーまでの完全なパス (agents.worker.categories.quick.weight) を含むエラーになる
     assert_error_contains(result, &["agents.worker.categories.quick.weight"]);
+}
+
+// Given: openai-compatible の sugar 形式 (type エイリアス + api_key_env) / When: 読み込む
+// Then: 正規化された OpenAiCompatible + env credential として受理される
+#[test]
+fn openai_compatible_sugar_form_accepted() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let config = load_project(
+        &tmp,
+        r#"version = 2
+
+[providers.local]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["local-model"]
+default_model = "local-model"
+"#,
+    )
+    .expect("openai-compatible の sugar 形式を読み込める");
+
+    let profile = config
+        .providers
+        .get("local")
+        .expect("プロファイルが存在する");
+    assert_eq!(profile.provider_type, ProviderTypeConfig::OpenAiCompatible);
+    assert_eq!(profile.api_protocol, ApiProtocolConfig::OpenAiCompletions);
+    match &profile.credential {
+        CredentialRefConfig::Env { var } => assert_eq!(var, "LOCAL_API_KEY"),
+        CredentialRefConfig::Keyring { .. } => panic!("env credential を期待した"),
+    }
+    assert_eq!(profile.base_url, "http://127.0.0.1:8080/v1");
+    assert_eq!(profile.models, ["local-model"]);
+    assert_eq!(profile.default_model, "local-model");
+}
+
+// Given: api_key_env と credential の併用 / When: 読み込む
+// Then: providers.<name>.api_key_env をパスに含むエラーになる
+#[test]
+fn api_key_env_with_credential_rejected_with_path() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let result = load_project(
+        &tmp,
+        r#"[providers.local]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+credential = { type = "env", var = "OTHER_KEY" }
+models = ["local-model"]
+default_model = "local-model"
+"#,
+    );
+
+    assert_error_contains(
+        result,
+        &[
+            "providers.local.api_key_env",
+            "mutually exclusive with `credential`",
+        ],
+    );
+}
+
+// Given: 空の api_key_env / When: 読み込む
+// Then: providers.<name>.api_key_env をパスに含むエラーになる
+#[test]
+fn api_key_env_empty_rejected_with_path() {
+    for var in ["", "   "] {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+        let content = format!(
+            "[providers.local]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:8080/v1\"\napi_key_env = \"{var}\"\nmodels = [\"local-model\"]\ndefault_model = \"local-model\"\n"
+        );
+
+        assert_error_contains(
+            load_project(&tmp, &content),
+            &["providers.local.api_key_env", "non-empty"],
+        );
+    }
+}
+
+// Given: sugar 形式に未知キーを混在させる / When: 読み込む
+// Then: sugar が受理可能でも未知キーは拒否される
+#[test]
+fn provider_unknown_key_alongside_sugar_rejected() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    assert_error_contains(
+        load_project(
+            &tmp,
+            r#"[providers.local]
+type = "openai-compatible"
+api_key_env = "LOCAL_API_KEY"
+base_url = "http://127.0.0.1:8080/v1"
+models = ["local-model"]
+default_model = "local-model"
+typo_field = true
+"#,
+        ),
+        &["providers.local.typo_field", "unknown field"],
+    );
 }

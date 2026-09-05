@@ -11,12 +11,15 @@ use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
 use portable_pty::CommandBuilder;
+use routing::ProcessEnv;
 use runtime::orchestration::delivery::DeliveryPort;
 use runtime::{
-    AgentRuntime, ExecutionPolicy, FixtureDeliveryAdapter, GoalLedger, GoalSupervisor,
-    OrchestrationSettings, Role, RunConfig, ShellDeliveryAdapter, SupervisorHandle,
+    AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
+    FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, ModelSource, OrchestrationSettings, Role,
+    RunConfig, RuntimeComposition, ShellDeliveryAdapter, SupervisorHandle, WorkspaceSeam,
+    compose_runtime, production_executor,
 };
-use sandbox::{BwrapConfig, Sandbox, production_sandbox};
+use sandbox::{BwrapConfig, CredentialError, CredentialStore, Sandbox, Secret, production_sandbox};
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
@@ -38,6 +41,8 @@ enum GuiError {
     Eframe(String),
     #[error("runtime initialization failed: {0}")]
     Runtime(#[from] runtime::RuntimeError),
+    #[error("runtime composition failed: {0}")]
+    Composition(#[from] CompositionError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("sidebar state failed: {0}")]
@@ -455,6 +460,33 @@ fn spawn_event_bridge(
         .map_err(|error| GuiError::Arguments(format!("event bridge startup failed: {error}")))
 }
 
+/// ModelSource::Fixed の runtime は credential store を消費しないため、この
+/// ストアは構築副作用を持たない。もし将来 Configured 経路へ切り替えた場合に
+/// 誤って参照されても fail-closed でエラーになる。
+struct UnwiredCredentialStore;
+
+impl CredentialStore for UnwiredCredentialStore {
+    fn get(&self, _key: &str) -> Result<Option<Secret>, CredentialError> {
+        Err(Self::unwired())
+    }
+
+    fn set(&self, _key: &str, _value: &Secret) -> Result<(), CredentialError> {
+        Err(Self::unwired())
+    }
+
+    fn delete(&self, _key: &str) -> Result<(), CredentialError> {
+        Err(Self::unwired())
+    }
+}
+
+impl UnwiredCredentialStore {
+    fn unwired() -> CredentialError {
+        CredentialError::KeychainUnavailable {
+            detail: String::from("GUI runtime は credential store を接続していない"),
+        }
+    }
+}
+
 fn run() -> Result<(), GuiError> {
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
@@ -466,22 +498,65 @@ fn run() -> Result<(), GuiError> {
     let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
 
+    // runtime 構築は provider composition root (compose_runtime) 経由で行う
+    // (issue #79 T4.2)。ModelSource::Fixed は demo / 非 demo とも DemoScriptModel
+    // を model 境界に固定し続ける。Fixed 経路は credential / env を消費しないため、
+    // 構築副作用のない fail-closed store と ProcessEnv を渡す。
+    let composition_config = config::Config::default();
+    let credential_store = Arc::new(UnwiredCredentialStore);
     let runtime = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
-            AgentRuntime::production_with_project(
+            let seam = WorkspaceSeam::production(demo_repo.clone())?;
+            let executor = production_executor(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                demo_repo.clone(),
-                Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo)),
-            )?
+                seam.repo_root().to_path_buf(),
+            )?;
+            let demo_model: Arc<dyn AgentModel> =
+                Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo));
+            let ComposedRuntime {
+                runtime,
+                model_identity,
+            } = compose_runtime(RuntimeComposition {
+                config: &composition_config,
+                bus: Arc::clone(&bus),
+                executor,
+                credential_store,
+                env: Arc::new(ProcessEnv),
+                model_source: ModelSource::Fixed(demo_model),
+                workspace: Some(seam),
+            })?;
+            tracing::debug!(
+                ?model_identity,
+                "demo runtime composed via provider composition root"
+            );
+            runtime
         }
-        None => AgentRuntime::production(
-            Arc::clone(&bus),
-            &ExecutionPolicy::for_role(Role::Orchestrator),
-            repo_root.clone(),
-            Arc::new(DemoScriptModel::new(Arc::clone(&bus))),
-        )?,
+        None => {
+            let executor = production_executor(
+                Arc::clone(&bus),
+                &ExecutionPolicy::for_role(Role::Orchestrator),
+                repo_root.clone(),
+            )?;
+            let ComposedRuntime {
+                runtime,
+                model_identity,
+            } = compose_runtime(RuntimeComposition {
+                config: &composition_config,
+                bus: Arc::clone(&bus),
+                executor,
+                credential_store,
+                env: Arc::new(ProcessEnv),
+                model_source: ModelSource::Fixed(Arc::new(DemoScriptModel::new(Arc::clone(&bus)))),
+                workspace: None,
+            })?;
+            tracing::debug!(
+                ?model_identity,
+                "runtime composed via provider composition root"
+            );
+            runtime
+        }
     };
 
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;

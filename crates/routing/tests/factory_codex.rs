@@ -145,6 +145,7 @@ async fn factory_builds_codex_client_from_profile() {
     profile.base_url = server.uri();
     let options = FactoryOptions {
         auth_base_url_override: Some(server.uri()),
+        ..FactoryOptions::default()
     };
 
     let client = build_provider_client(&profile, store, None, &options)

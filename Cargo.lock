@@ -1545,6 +1545,18 @@ dependencies = [
 [[package]]
 name = "evorch"
 version = "0.1.0"
+dependencies = [
+ "config",
+ "event-bus",
+ "routing",
+ "runtime",
+ "sandbox",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+]
 
 [[package]]
 name = "fallible-iterator"
@@ -2053,6 +2065,7 @@ dependencies = [
  "image",
  "portable-pty",
  "providers",
+ "routing",
  "runtime",
  "sandbox",
  "serde",
@@ -4500,8 +4513,10 @@ dependencies = [
  "event-bus",
  "getrandom 0.3.4",
  "globset",
+ "model",
  "providers",
  "regex",
+ "routing",
  "sandbox",
  "serde",
  "serde_json",

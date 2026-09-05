@@ -28,7 +28,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
-use crate::workspace::{OwnedWorktree, Project, WorktreeManager};
+use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
@@ -279,18 +279,7 @@ impl AgentRuntime {
         workspace_root: PathBuf,
         model: Arc<dyn AgentModel>,
     ) -> Result<Self, RuntimeError> {
-        let sandbox = crate::network::build_sandbox(policy, workspace_root).map_err(|error| {
-            RuntimeError::Sandbox {
-                detail: error.to_string(),
-            }
-        })?;
-        let executor = Arc::new(
-            ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox)
-                .with_web_tools()
-                .map_err(|error| RuntimeError::NetworkGuard {
-                    detail: error.to_string(),
-                })?,
-        );
+        let executor = production_executor(Arc::clone(&bus), policy, workspace_root)?;
         Ok(Self::new(bus, executor, model))
     }
 
@@ -308,26 +297,12 @@ impl AgentRuntime {
         project_root: PathBuf,
         model: Arc<dyn AgentModel>,
     ) -> Result<Self, RuntimeError> {
-        let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
-            detail: error.to_string(),
-        })?;
-        let sandbox = crate::network::build_sandbox(policy, project.repo_root().to_path_buf())
-            .map_err(|error| RuntimeError::Sandbox {
-                detail: error.to_string(),
-            })?;
-        let executor = Arc::new(
-            ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox)
-                .with_web_tools()
-                .map_err(|error| RuntimeError::NetworkGuard {
-                    detail: error.to_string(),
-                })?,
-        );
+        let seam = crate::compose::WorkspaceSeam::production(project_root)?;
+        let executor =
+            production_executor(Arc::clone(&bus), policy, seam.repo_root().to_path_buf())?;
+        let (manager, factory) = seam.into_manager_and_factory();
         Ok(Self::with_workspace_context(
-            bus,
-            executor,
-            model,
-            WorktreeManager::new(project),
-            Arc::new(crate::network::BwrapFactory),
+            bus, executor, model, manager, factory,
         ))
     }
 
@@ -1016,6 +991,28 @@ impl AgentRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         sent.remove(message_id);
     }
+}
+
+/// production sandbox と標準ツール群を持つ executor を構築する。
+///
+/// # Errors
+/// sandbox 構築または web tool の network guard 初期化に失敗した場合に返す。
+pub fn production_executor(
+    bus: Arc<EventBus>,
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    let sandbox = crate::network::build_sandbox(policy, workspace_root).map_err(|error| {
+        RuntimeError::Sandbox {
+            detail: error.to_string(),
+        }
+    })?;
+    ToolExecutor::with_standard_tools(bus, sandbox)
+        .with_web_tools()
+        .map(Arc::new)
+        .map_err(|error| RuntimeError::NetworkGuard {
+            detail: error.to_string(),
+        })
 }
 
 struct RunEntryView<'a> {
