@@ -1,4 +1,5 @@
 use egui::Color32;
+use event_bus::AgentRunPhase;
 use workspace_ui::{ThreadRunPhase, ThreadState};
 
 pub const CANVAS: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0a);
@@ -83,6 +84,16 @@ pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
         ThreadRunPhase::Waiting => WARNING_FG,
         ThreadRunPhase::Done => SUCCESS,
         ThreadRunPhase::Error => ERROR_FG,
+    }
+}
+
+pub const fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
+    match phase {
+        AgentRunPhase::Pending => TEXT_MUTED,
+        AgentRunPhase::Running => INFO,
+        AgentRunPhase::Waiting => WARNING_FG,
+        AgentRunPhase::Done => SUCCESS,
+        AgentRunPhase::Error => ERROR_FG,
     }
 }
 
