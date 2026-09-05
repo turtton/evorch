@@ -1,8 +1,10 @@
 //! eframe App とフレーム駆動の WorkbenchState を実装します。
 
 mod actions;
+mod attention;
 mod frame;
 mod state;
+mod tab_viewer;
 mod viewer;
 
 pub use state::{ConversationFocus, WorkbenchState};

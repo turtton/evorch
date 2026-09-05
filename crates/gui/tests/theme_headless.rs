@@ -133,3 +133,24 @@ fn attention_tab_style_overrides_text_and_outline() {
     assert_eq!(attention.active.outline_color, color);
     assert_eq!(attention.hovered.text_color, color);
 }
+
+#[test]
+fn demo_state_marks_merge_tab_as_warning() {
+    // Given: a populated demo workbench with a bound, unresolved PR
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sidebar = gui::fixture::demo_sidebar(dir.path()).expect("demo sidebar");
+    let state = gui::fixture::populate(
+        gui::app::WorkbenchState::new(
+            gui::fixture::DemoSource(gui::fixture::demo_runs()),
+            &workspace_ui::UiSettings::default(),
+        )
+        .expect("default state builds"),
+        sidebar,
+    );
+
+    // Then: the merge tab carries the warning attention accent.
+    assert_eq!(
+        state.pane_attention(&workspace_ui::PanelId::new("merge-main")),
+        Some(gui::theme::tokens::WARNING_FG)
+    );
+}
