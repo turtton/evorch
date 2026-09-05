@@ -159,6 +159,7 @@ pub async fn run_headless(
         credential_store,
         env,
         model_source: ModelSource::Configured,
+        workspace: None,
     })?;
 
     let run_id = composed

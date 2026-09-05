@@ -13,18 +13,13 @@ use gui::runtime_sink::{
 use portable_pty::CommandBuilder;
 use routing::ProcessEnv;
 use runtime::orchestration::delivery::DeliveryPort;
-use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
     AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
-    FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, IsolatedMounts, ModelSource,
-    OrchestrationSettings, Role, RunConfig, RuntimeComposition, RuntimeError, SandboxFactory,
-    SandboxNetworkMode, ShellDeliveryAdapter, SupervisorHandle, compose_runtime,
-    production_executor,
+    FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, ModelSource, OrchestrationSettings, Role,
+    RunConfig, RuntimeComposition, ShellDeliveryAdapter, SupervisorHandle, WorkspaceSeam,
+    compose_runtime, production_executor,
 };
-use sandbox::{
-    BwrapConfig, BwrapSandbox, CredentialError, CredentialStore, Sandbox, SandboxError, Secret,
-    production_sandbox,
-};
+use sandbox::{BwrapConfig, CredentialError, CredentialStore, Sandbox, Secret, production_sandbox};
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
@@ -492,35 +487,6 @@ impl UnwiredCredentialStore {
     }
 }
 
-/// runtime::network::BwrapFactory (pub(crate)) と同一構成の production sandbox
-/// factory。
-///
-/// compose_runtime (ModelSource::Fixed) は workspace context を表現できないため、
-/// demo 経路の workspace handling を旧 production_with_project と同一に保つ間だけ
-/// 同一構成をここで再現する。runtime 側に compose 経由の workspace seam が追加された
-/// ら、この factory と with_workspace_context の併用は削除する。
-struct ProductionSandboxFactory;
-
-impl SandboxFactory for ProductionSandboxFactory {
-    fn build(
-        &self,
-        policy: &ExecutionPolicy,
-        mounts: &IsolatedMounts,
-    ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-        let mut config = BwrapConfig::new(mounts.workspace_root.clone()).allow_network(matches!(
-            policy.sandbox_network_mode(),
-            SandboxNetworkMode::ParentNetns
-        ));
-        for path in &mounts.ro_binds {
-            config = config.ro_bind(path.clone());
-        }
-        for path in &mounts.rw_binds {
-            config = config.rw_bind(path.clone());
-        }
-        BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
-    }
-}
-
 fn run() -> Result<(), GuiError> {
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
@@ -541,42 +507,31 @@ fn run() -> Result<(), GuiError> {
     let runtime = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
-            // 旧 AgentRuntime::production_with_project と同一の project 検出。
-            // Project::new で repo root を確定し、sandbox root と WorktreeManager
-            // の両方に使う。
-            let project =
-                Project::new(demo_repo.clone()).map_err(|error| RuntimeError::Workspace {
-                    detail: error.to_string(),
-                })?;
+            let seam = WorkspaceSeam::production(demo_repo.clone())?;
             let executor = production_executor(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                project.repo_root().to_path_buf(),
+                seam.repo_root().to_path_buf(),
             )?;
             let demo_model: Arc<dyn AgentModel> =
                 Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo));
-            let ComposedRuntime { model_identity, .. } = compose_runtime(RuntimeComposition {
+            let ComposedRuntime {
+                runtime,
+                model_identity,
+            } = compose_runtime(RuntimeComposition {
                 config: &composition_config,
                 bus: Arc::clone(&bus),
-                executor: Arc::clone(&executor),
+                executor,
                 credential_store,
                 env: Arc::new(ProcessEnv),
-                model_source: ModelSource::Fixed(Arc::clone(&demo_model)),
+                model_source: ModelSource::Fixed(demo_model),
+                workspace: Some(seam),
             })?;
             tracing::debug!(
                 ?model_identity,
                 "demo runtime composed via provider composition root"
             );
-            // compose_runtime の Fixed 経路は workspace context を接続しないため、
-            // 旧 production_with_project と同一の kernel 構成 (WorktreeManager +
-            // production bwrap factory) をここで接続する。
-            AgentRuntime::with_workspace_context(
-                Arc::clone(&bus),
-                executor,
-                demo_model,
-                WorktreeManager::new(project),
-                Arc::new(ProductionSandboxFactory),
-            )
+            runtime
         }
         None => {
             let executor = production_executor(
@@ -594,6 +549,7 @@ fn run() -> Result<(), GuiError> {
                 credential_store,
                 env: Arc::new(ProcessEnv),
                 model_source: ModelSource::Fixed(Arc::new(DemoScriptModel::new(Arc::clone(&bus)))),
+                workspace: None,
             })?;
             tracing::debug!(
                 ?model_identity,

@@ -584,8 +584,25 @@ impl LoopState {
                 })
                 .collect();
             let has_tool_uses = !tool_uses.is_empty();
+            let message_deltas = response
+                .message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } if !text.is_empty() => Some(text.clone()),
+                    ContentBlock::Text { .. }
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. } => None,
+                })
+                .collect::<Vec<_>>();
             self.context.push_assistant(response.message);
             self.publish_message_count();
+            for delta in message_deltas {
+                self.shared
+                    .bus
+                    .emit(Event::new(event_bus::MessageEvent::MessageDelta { delta }));
+            }
             if !self.execute_tools(tool_uses).await {
                 return;
             }

@@ -36,7 +36,7 @@ async fn run_emits_pending_running_done_in_order() {
     let run_id =
         runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let events = collect_events(&mut events, 5).await;
+    let events = collect_events(&mut events, 6).await;
 
     // Then
     let lifecycle: Vec<&LifecycleEvent> = events

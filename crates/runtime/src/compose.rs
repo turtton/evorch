@@ -1,6 +1,7 @@
 //! 設定済み provider と runtime kernel を接続する edge composition root。
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -12,7 +13,35 @@ use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
 use sandbox::credential::CredentialStore;
 use tools::ToolExecutor;
 
+use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
+
+/// composition root に production workspace context を渡す seam。
+pub struct WorkspaceSeam {
+    project: Project,
+}
+
+impl WorkspaceSeam {
+    /// production project を検証して workspace seam を生成する。
+    ///
+    /// # Errors
+    /// project root が有効な git repository でない場合に [`RuntimeError::Workspace`] を返す。
+    pub fn production(project_root: PathBuf) -> Result<Self, RuntimeError> {
+        let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
+            detail: error.to_string(),
+        })?;
+        Ok(Self { project })
+    }
+
+    /// 検証済み repository root を返す。
+    pub fn repo_root(&self) -> &Path {
+        self.project.repo_root()
+    }
+
+    pub(crate) fn into_project(self) -> Project {
+        self.project
+    }
+}
 
 /// runtime の全外部依存を一度に渡す composition 入力。
 pub struct RuntimeComposition<'a> {
@@ -22,6 +51,7 @@ pub struct RuntimeComposition<'a> {
     pub credential_store: Arc<dyn CredentialStore>,
     pub env: Arc<dyn routing::EnvLookup>,
     pub model_source: ModelSource,
+    pub workspace: Option<WorkspaceSeam>,
 }
 
 /// runtime が使用するモデル境界の供給元。
@@ -62,7 +92,7 @@ pub struct ComposedRuntime {
 pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime, CompositionError> {
     match input.model_source {
         ModelSource::Fixed(model) => Ok(ComposedRuntime {
-            runtime: AgentRuntime::new(input.bus, input.executor, model),
+            runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
             model_identity: ModelIdentity::Fixed,
         }),
         ModelSource::Configured => {
@@ -87,10 +117,28 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                 .map(|role| (role_key(role).to_string(), model.selected_model(role)))
                 .collect();
             Ok(ComposedRuntime {
-                runtime: AgentRuntime::new(input.bus, input.executor, model),
+                runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
                 model_identity: ModelIdentity::Routed { profiles, selected },
             })
         }
+    }
+}
+
+fn compose_agent_runtime(
+    bus: Arc<EventBus>,
+    executor: Arc<ToolExecutor>,
+    model: Arc<dyn AgentModel>,
+    workspace: Option<WorkspaceSeam>,
+) -> AgentRuntime {
+    match workspace {
+        Some(seam) => AgentRuntime::with_workspace_context(
+            bus,
+            executor,
+            model,
+            WorktreeManager::new(seam.into_project()),
+            Arc::new(crate::network::BwrapFactory),
+        ),
+        None => AgentRuntime::new(bus, executor, model),
     }
 }
 

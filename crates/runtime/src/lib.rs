@@ -37,7 +37,7 @@ pub mod workspace;
 
 pub use compose::{
     ComposedRuntime, CompositionError, ModelIdentity, ModelSource, RoutedModel, RuntimeComposition,
-    compose_runtime,
+    WorkspaceSeam, compose_runtime,
 };
 pub use context::{AgentContext, CompactionCheckpoint};
 pub use entry_routing::{

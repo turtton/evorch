@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use config::{Config, LoadOptions};
-use event_bus::{AgentRunPhase, EventBus, EventKind, ProviderEvent, ToolEvent};
+use event_bus::{AgentRunPhase, EventBus, EventKind, MessageEvent, ProviderEvent, ToolEvent};
 use routing::MapEnv;
 use runtime::{
     CompositionError, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime,
@@ -95,6 +95,7 @@ fn composition<'a>(
         credential_store: credential_store(root),
         env: Arc::new(env),
         model_source: ModelSource::Configured,
+        workspace: None,
     }
 }
 
@@ -167,6 +168,15 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
         EventKind::Tool(ToolEvent::ToolCompleted { tool_name, is_error: false, .. })
             if tool_name == "edit"
     )));
+    let message_deltas = drained
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Message(MessageEvent::MessageDelta { delta }) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(message_deltas.contains(&"worker final text"));
+    assert!(message_deltas.contains(&"orchestrator final text"));
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 4);

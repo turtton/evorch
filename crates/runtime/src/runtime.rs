@@ -28,7 +28,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
-use crate::workspace::{OwnedWorktree, Project, WorktreeManager};
+use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
 const INBOX_CAPACITY: usize = 32;
@@ -297,25 +297,14 @@ impl AgentRuntime {
         project_root: PathBuf,
         model: Arc<dyn AgentModel>,
     ) -> Result<Self, RuntimeError> {
-        let project = Project::new(project_root).map_err(|error| RuntimeError::Workspace {
-            detail: error.to_string(),
-        })?;
-        let sandbox = crate::network::build_sandbox(policy, project.repo_root().to_path_buf())
-            .map_err(|error| RuntimeError::Sandbox {
-                detail: error.to_string(),
-            })?;
-        let executor = Arc::new(
-            ToolExecutor::with_standard_tools(Arc::clone(&bus), sandbox)
-                .with_web_tools()
-                .map_err(|error| RuntimeError::NetworkGuard {
-                    detail: error.to_string(),
-                })?,
-        );
+        let seam = crate::compose::WorkspaceSeam::production(project_root)?;
+        let executor =
+            production_executor(Arc::clone(&bus), policy, seam.repo_root().to_path_buf())?;
         Ok(Self::with_workspace_context(
             bus,
             executor,
             model,
-            WorktreeManager::new(project),
+            WorktreeManager::new(seam.into_project()),
             Arc::new(crate::network::BwrapFactory),
         ))
     }

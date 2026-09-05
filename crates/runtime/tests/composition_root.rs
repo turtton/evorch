@@ -12,13 +12,15 @@ use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, MapEnv, compose_providers};
 use runtime::{
     AgentModel, AgentRunPhase, ModelIdentity, ModelSource, Role, RoutedModel, RunConfig,
-    RuntimeComposition, compose_runtime,
+    RuntimeComposition, WorkspaceMode, WorkspaceSeam, compose_runtime,
 };
 use sandbox::DirectSandbox;
 use sandbox::credential::{CredentialStore, FileCredentialStore};
+use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, text_response};
+use support::{ScriptedModel, drain_events, init_git_repo, text_response};
 
 const PROFILE: &str = "local";
 const MODEL: &str = "local-model";
@@ -59,6 +61,7 @@ fn composition<'a>(
     config: &'a Config,
     bus: Arc<EventBus>,
     model_source: ModelSource,
+    workspace: Option<WorkspaceSeam>,
 ) -> RuntimeComposition<'a> {
     RuntimeComposition {
         config,
@@ -67,6 +70,7 @@ fn composition<'a>(
         credential_store: credential_store(),
         env: Arc::new(MapEnv::from_iter([(KEY_ENV, "test-key")])),
         model_source,
+        workspace,
     }
 }
 
@@ -84,6 +88,7 @@ async fn fixed_source_ignores_missing_providers() {
             "fixed done",
             providers::FinishReason::Stop,
         ))]))),
+        None,
     ))
     .expect("fixed model composes without providers");
 
@@ -108,7 +113,7 @@ async fn fixed_source_ignores_missing_providers() {
 fn configured_source_rejects_missing_providers() {
     let config = Config::default();
     let bus = Arc::new(EventBus::new(32));
-    let error = match compose_runtime(composition(&config, bus, ModelSource::Configured)) {
+    let error = match compose_runtime(composition(&config, bus, ModelSource::Configured, None)) {
         Ok(_) => panic!("configured source requires providers"),
         Err(error) => error,
     };
@@ -130,6 +135,7 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
         &config,
         Arc::clone(&bus),
         ModelSource::Configured,
+        None,
     ))
     .expect("runtime composition succeeds");
     let direct = RoutedModel::new(
@@ -161,4 +167,90 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
             Some(&direct.selected_model(role))
         );
     }
+}
+
+// Given: production workspace seam と完了を gate した固定モデル
+// When: compose_runtime が返した runtime で isolated Worker を起動する
+// Then: モデル呼び出し中に run 専用 worktree が存在し、run は正常終了する
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_composition_uses_workspace_seam_for_isolated_run() {
+    let (_directory, repo) = init_git_repo();
+    let config = Config::default();
+    let bus = Arc::new(EventBus::new(64));
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(text_response(
+            "isolated done",
+            providers::FinishReason::Stop,
+        ))],
+        Arc::clone(&gate),
+    ));
+    let seam = WorkspaceSeam::production(repo.clone()).expect("workspace seam");
+    let composed = compose_runtime(composition(
+        &config,
+        bus,
+        ModelSource::Fixed(model),
+        Some(seam),
+    ))
+    .expect("fixed model composes with workspace");
+
+    let run = composed.runtime.delegate_background(
+        Role::Worker,
+        "isolated".to_string(),
+        RunConfig {
+            workspace_mode: WorkspaceMode::Isolated,
+            ..RunConfig::default()
+        },
+    );
+    let worktree = repo.join(".evorch/worktrees").join(run.to_string());
+    timeout(Duration::from_secs(5), async {
+        while !worktree.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("isolated worktree appears");
+    gate.notify_one();
+
+    assert_eq!(composed.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+}
+
+// Given: workspace seam を持たない固定モデル composition
+// When: composed runtime で isolated Worker を起動する
+// Then: workspace context 必須エラーをイベントで公開して Error 終了する
+#[tokio::test]
+async fn fixed_composition_without_workspace_rejects_isolated_run() {
+    let config = Config::default();
+    let bus = Arc::new(EventBus::new(64));
+    let mut events = bus.subscribe();
+    let composed = compose_runtime(composition(
+        &config,
+        bus,
+        ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
+            "unused",
+            providers::FinishReason::Stop,
+        ))]))),
+        None,
+    ))
+    .expect("fixed model composes without workspace");
+
+    let run = composed.runtime.delegate_background(
+        Role::Worker,
+        "isolated".to_string(),
+        RunConfig {
+            workspace_mode: WorkspaceMode::Isolated,
+            ..RunConfig::default()
+        },
+    );
+
+    assert_eq!(composed.runtime.wait(run).await, Ok(AgentRunPhase::Error));
+    let drained = drain_events(&mut events).await;
+    assert!(drained.iter().any(|event| matches!(
+        &event.kind,
+        event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Error,
+            reason: Some(reason),
+            ..
+        }) if reason == "workspace isolation requires workspace context"
+    )));
 }

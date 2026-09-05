@@ -78,6 +78,7 @@ fn compose(config: &Config, root: &std::path::Path) -> Result<(), CompositionErr
         credential_store,
         env: Arc::new(ProcessEnv),
         model_source: ModelSource::Configured,
+        workspace: None,
     })
     .map(|_| ())
 }
