@@ -335,12 +335,14 @@ async fn dispatch_stays_deferred_while_implement_worker_is_alive() {
 
     // 別の run 状態変化で再チェックが走っても、Implement worker 稼働中は
     // dispatch されない (実バイナリで観測された cascade 回帰)。
-    fixture.bus.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
-        run_id: child.to_string(),
-        from: AgentRunPhase::Pending,
-        to: AgentRunPhase::Running,
-        reason: None,
-    }));
+    fixture
+        .bus
+        .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: child.to_string(),
+            from: AgentRunPhase::Pending,
+            to: AgentRunPhase::Running,
+            reason: None,
+        }));
     fixture.settle().await;
     assert_eq!(
         fixture
