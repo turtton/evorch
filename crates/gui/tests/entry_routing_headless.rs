@@ -1,5 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -9,81 +8,36 @@ use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
 use gui::model::tasks::TaskRow;
 use gui::runtime_sink::RuntimeCommandSink;
-use providers::{
-    ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
+use providers::{ChatResponse, Message, ToolSpec};
+use runtime::{
+    AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
+    OrchestrationSettings, Role, RuntimeError,
 };
-use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 use tokio::time::timeout;
 use tools::ToolExecutor;
 use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 
-/// Prompt-marker keyed scripted model: the goal text becomes the first User
-/// message of the launched run, so each key matches exactly one submitted goal.
-struct ScriptedModel {
-    scripts: Mutex<HashMap<String, VecDeque<ChatResponse>>>,
-}
-
-impl ScriptedModel {
-    fn new() -> Self {
-        Self {
-            scripts: Mutex::new(HashMap::from([
-                (
-                    "direct: fix the typo in README".to_string(),
-                    VecDeque::from([text_response("worker done", FinishReason::Stop)]),
-                ),
-                (
-                    "implement issue #65".to_string(),
-                    VecDeque::from([text_response("orchestrator done", FinishReason::Stop)]),
-                ),
-            ])),
-        }
-    }
-}
+/// どんなプロンプトにも応答せず run を走らせ続ける stub モデル。
+///
+/// supervisor を接続すると run の terminal 遷移が continuation 起動に繋がり、
+/// 行アサーション (「Orchestrator 行は現れない」等) と競合するため、
+/// ルーティング検証に不要な run 終端を行わない。
+struct HeldModel;
 
 #[async_trait]
-impl AgentModel for ScriptedModel {
+impl AgentModel for HeldModel {
     async fn complete(
         &self,
         _invocation: &AgentInvocationContext,
         _role: Role,
-        messages: &[Message],
+        _messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        let marker = messages
-            .iter()
-            .find(|message| message.role == MessageRole::User)
-            .and_then(|message| {
-                message.content.iter().find_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
-                })
-            });
-        let mut scripts = self.scripts.lock().expect("script lock must not poison");
-        scripts
-            .get_mut(marker.as_deref().unwrap_or_default())
-            .and_then(VecDeque::pop_front)
-            .ok_or_else(|| RuntimeError::Model {
-                reason: format!("script exhausted for {marker:?}"),
-            })
+        std::future::pending().await
     }
 
     fn selected_model(&self, role: Role) -> String {
         format!("test-{}", role.name().to_lowercase())
-    }
-}
-
-fn text_response(text: &str, finish_reason: FinishReason) -> ChatResponse {
-    ChatResponse {
-        message: Message {
-            role: MessageRole::Assistant,
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
-        },
-        usage: Usage::default(),
-        finish_reason,
     }
 }
 
@@ -128,8 +82,16 @@ impl Fixture {
         let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
         let bus = Arc::new(EventBus::new(256));
         let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
-        let model = Arc::new(ScriptedModel::new());
+        let model = Arc::new(HeldModel);
         let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
+        let supervisor = rt.block_on(async {
+            GoalSupervisor::spawn(
+                runtime.clone(),
+                Arc::clone(&bus),
+                Arc::new(FixtureDeliveryAdapter::default()),
+                OrchestrationSettings::default(),
+            )
+        });
         let (repaint_tx, repaint_rx) = mpsc::channel();
         let pump = EventPump::spawn(
             rt.handle(),
@@ -146,6 +108,7 @@ impl Fixture {
             .with_command_sink(Box::new(RuntimeCommandSink::new(
                 runtime.clone(),
                 rt.handle().clone(),
+                supervisor,
             )));
         let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
         activate_panel(&mut harness, "goal-main");
