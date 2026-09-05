@@ -125,10 +125,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .get(tab)
             .map(|panel| panel.title.clone())
             .unwrap_or_else(|| tab.to_string());
-        // egui_dock paints tab titles without accesskit nodes, so the "● " prefix
+        // egui_dock paints tab titles without accesskit nodes, so the "• " prefix
         // never reaches label-based test queries; the tab title text is unchanged.
+        // U+2022 is used because egui's bundled fonts lack U+25CF (renders as tofu).
         match self.attention_for_tab(tab).color() {
-            Some(color) => egui::RichText::new(format!("● {title}"))
+            Some(color) => egui::RichText::new(format!("• {title}"))
                 .color(color)
                 .into(),
             None => title.into(),
