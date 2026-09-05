@@ -11,7 +11,7 @@ use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
 use crate::model::transcript_registry::TranscriptRegistry;
 use crate::panes::{
-    agent::{AgentIdentity, agent_pane},
+    agent::{AgentIdentity, AgentPaneAction, ConversationContext, agent_pane},
     agent_transcript::agent_transcript_pane,
     agents::{AgentsAction, agents_pane},
     diff::diff_pane,
@@ -34,6 +34,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut diff_request = None;
         let mut goal_action = None;
         let mut merge_action = None;
+        let mut focus_request = None;
         {
             let mut viewer = WorkbenchTabViewer {
                 transcripts: &self.transcripts,
@@ -55,10 +56,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 loop_status: &self.loop_status,
                 merge: &self.merge,
                 merge_action: &mut merge_action,
+                focus_request: &mut focus_request,
             };
             DockArea::new(&mut self.dock)
                 .style(crate::theme::dock::dock_style(ui.style()))
                 .show_inside(ui, &mut viewer);
+        }
+        if let Some(id) = focus_request {
+            self.focus_panel(id);
         }
         if let Some(mode) = diff_request {
             self.request_diff(mode);
@@ -127,6 +132,7 @@ struct WorkbenchTabViewer<'a, S> {
     loop_status: &'a LoopStatusView,
     merge: &'a MergeApprovalModel,
     merge_action: &'a mut Option<MergeAction>,
+    focus_request: &'a mut Option<&'static str>,
 }
 
 impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
@@ -176,8 +182,26 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         )
                     }
                 };
-                if let Some(action) = agent_pane(ui, transcript, identity) {
-                    *self.agents_action = Some(action);
+                let active_thread = self
+                    .sidebar
+                    .active_thread
+                    .as_ref()
+                    .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
+                let ctx = ConversationContext {
+                    has_project: self.sidebar.selected_project.is_some(),
+                    active_thread_title: active_thread.map(|thread| thread.title.as_str()),
+                    phase: active_thread
+                        .and_then(|thread| thread.run_ids.last())
+                        .and_then(|run_id| self.phases.get(run_id))
+                        .copied(),
+                    next_thread_title: format!("thread-{}", self.sidebar.threads.len() + 1),
+                };
+                if let Some(action) = agent_pane(ui, transcript, identity, ctx) {
+                    match action {
+                        AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
+                        AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
+                        AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),
+                    }
                 }
             }
             PanelKind::Sidebar => {
