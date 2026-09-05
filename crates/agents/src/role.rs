@@ -99,6 +99,7 @@ impl Role {
                     "send",
                     "wait_reply",
                     "inbox",
+                    "escalate",
                 ],
                 NetworkAccess::Denied,
                 false,

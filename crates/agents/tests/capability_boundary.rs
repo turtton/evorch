@@ -45,6 +45,7 @@ const WORKER_TOOLS: &[&str] = &[
     "send",
     "wait_reply",
     "inbox",
+    "escalate",
 ];
 
 /// ADR 0002 が定める Reviewer の許可ツール集合 (期待値、詳細はワークスペース決定)。
@@ -225,6 +226,33 @@ fn worker_denies_delegation_tools() {
         caps.check_tool("Worker", "delegate_background"),
         "Worker",
         "delegate_background",
+    );
+}
+
+#[test]
+fn worker_allows_escalate() {
+    // Given: Worker ロール
+    // When: escalate の使用可否を問い合わせる
+    // Then: Allowed になる
+    let caps = Role::Worker.capabilities();
+
+    assert_eq!(
+        caps.check_tool(Role::Worker.name(), "escalate"),
+        CapabilityDecision::Allowed
+    );
+}
+
+#[test]
+fn orchestrator_denies_escalate() {
+    // Given: Orchestrator ロール
+    // When: escalate の使用可否を問い合わせる
+    // Then: Denied になる
+    let caps = Role::Orchestrator.capabilities();
+
+    assert_denied(
+        caps.check_tool(Role::Orchestrator.name(), "escalate"),
+        Role::Orchestrator.name(),
+        "escalate",
     );
 }
 

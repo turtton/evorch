@@ -282,6 +282,18 @@ mod tests {
         assert!(names(&specs).contains(&"skill_load"));
     }
 
+    // Given: Worker のポリシー
+    // When: visible_tool_specs を呼ぶ
+    // Then: escalate がモデルに見える
+    #[test]
+    fn visible_tool_specs_exposes_escalate_for_worker() {
+        let policy = ExecutionPolicy::for_role(Role::Worker);
+
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+
+        assert!(names(&specs).contains(&"escalate"));
+    }
+
     // Given: Worker のポリシーと skills 未設定
     // When: visible_tool_specs を呼ぶ
     // Then: skill_load は除去され、capability 内の通常ツールは保持される
