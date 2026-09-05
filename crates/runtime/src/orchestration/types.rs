@@ -10,6 +10,22 @@ pub use event_bus::{
 /// crate 外に constructor を持たず、`MergeApprovals::approve` (T2.2) のみが
 /// 構築できるため、[`DeliveryPort::merge_pr`](crate::orchestration::DeliveryPort::merge_pr)
 /// は承認を経由しないマージ要求を型で受け付けない。
+///
+/// ```compile_fail,E0451
+/// use event_bus::{CiState, GateSnapshot, MergeBinding};
+/// use runtime::orchestration::ApprovedMerge;
+///
+/// let snapshot = GateSnapshot {
+///     repo: "turtton/evorch".into(), pr_number: 101, base_ref: "main".into(),
+///     head_sha: "a".repeat(40), ci: CiState::Green, criteria_round: 1,
+///     review_round: 1, reviewer_run_id: "review-1".into(),
+/// };
+/// let binding = MergeBinding {
+///     token_id: "token".into(), repo: snapshot.repo.clone(), pr_number: 101,
+///     head_sha: snapshot.head_sha.clone(), snapshot,
+/// };
+/// let _forged = ApprovedMerge { binding };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovedMerge {
     pub(crate) binding: MergeBinding,
@@ -20,11 +36,7 @@ impl ApprovedMerge {
     ///
     /// T2.2 の `MergeApprovals` が構築し、T2.3 の `ShellDeliveryAdapter` が
     /// `--match-head-commit` 引数の構築に使うまでの仮死状態である。
-    #[expect(
-        dead_code,
-        reason = "constructed by MergeApprovals (T2.2) and read by ShellDeliveryAdapter (T2.3)"
-    )]
-    pub(crate) fn binding(&self) -> &MergeBinding {
+    pub fn binding(&self) -> &MergeBinding {
         &self.binding
     }
 }
