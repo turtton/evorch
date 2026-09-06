@@ -22,7 +22,7 @@ issue #87「v0.3: GUI デザイン修正（project 名ボックス過大・状�
 ## 取得手順（再現コマンド）
 
 ```sh
-# before: commit 12e478f（描画コードは修正前と同一。--error-thread はこの commit で追加）
+# before: commit 12e478f（描画コードは修正前と同一。--error-thread は fa1eab2 で追加済み）
 nix develop -c env WGPU_BACKEND=vulkan cargo run -q -p gui --bin headless_capture -- --demo --out target/shots/before-demo.png
 nix develop -c env WGPU_BACKEND=vulkan cargo run -q -p gui --bin headless_capture -- --demo --error-thread --out target/shots/before-demo-error.png
 
