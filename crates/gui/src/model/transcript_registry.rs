@@ -1,9 +1,10 @@
 //! run ID ごとに transcript を分離し、相関可能なイベントだけを決定的に配送する。
 //!
-//! `MessageDelta` / `ReasoningDelta` は event-bus 上に `run_id` を持たないため、通常の
-//! route では thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件
-//! の場合だけ、明示的に run transcript へ同じ delta を適用できる。Running が 0 件または
-//! 複数なら thread のみに留め、推測による run 間の混線を防ぐ。
+//! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら thread と
+//! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の legacy delta は
+//! thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件の場合だけ、
+//! 明示的に run transcript へ同じ delta を適用できる（legacy fallback）。Running が
+//! 0 件または複数なら thread のみに留め、推測による run 間の混線を防ぐ。
 
 use std::collections::BTreeMap;
 
