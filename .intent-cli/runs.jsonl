@@ -196,3 +196,6 @@
 {"ts":"2026-09-05T20:37:27.2912754+00:00","execution_unit":"v03-gui-design-refinement","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":82}
 {"ts":"2026-09-06T04:53:50.0408512+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v03-demo-loop-flake-fix/"}
 {"ts":"2026-09-06T04:53:57.9880737+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#83","reason":"https://github.com/turtton/evorch/issues/83"}
+{"ts":"2026-09-06T06:35:40.1358438+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":84}
+{"ts":"2026-09-06T06:36:00.8339685+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":84}
+{"ts":"2026-09-06T06:36:00.8339685+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":84}

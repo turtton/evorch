@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T04:53:57.9880737+00:00",
+  "updated_at": "2026-09-06T06:36:00.8437116+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1024,7 +1024,7 @@
     {
       "execution_unit": "v03-demo-loop-flake-fix",
       "title": "v0.3: demo_loop \u30C6\u30B9\u30C8 flake \u306E\u6839\u6CBB\uFF08goal \u7D50\u5408 race / \u975E\u6C7A\u5B9A\u30B7\u30FC\u30B1\u30F3\u30B9\u306E\u6C7A\u5B9A\u8AD6\u5316\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1038,6 +1038,7 @@
         "number": 83,
         "url": "https://github.com/turtton/evorch/issues/83"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/84",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
