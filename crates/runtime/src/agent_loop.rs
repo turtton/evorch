@@ -584,12 +584,23 @@ impl LoopState {
                 })
                 .collect();
             let has_tool_uses = !tool_uses.is_empty();
-            let message_deltas = response
+            let message_events = response
                 .message
                 .content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::Text { text } if !text.is_empty() => Some(text.clone()),
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        Some(event_bus::MessageEvent::MessageDelta {
+                            delta: text.clone(),
+                            run_id: Some(self.task.run_id.to_string()),
+                        })
+                    }
+                    ContentBlock::Reasoning { text } if !text.is_empty() => {
+                        Some(event_bus::MessageEvent::ReasoningDelta {
+                            delta: text.clone(),
+                            run_id: Some(self.task.run_id.to_string()),
+                        })
+                    }
                     ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
@@ -598,13 +609,8 @@ impl LoopState {
                 .collect::<Vec<_>>();
             self.context.push_assistant(response.message);
             self.publish_message_count();
-            for delta in message_deltas {
-                self.shared
-                    .bus
-                    .emit(Event::new(event_bus::MessageEvent::MessageDelta {
-                        delta,
-                        run_id: Some(self.task.run_id.to_string()),
-                    }));
+            for event in message_events {
+                self.shared.bus.emit(Event::new(event));
             }
             if !self.execute_tools(tool_uses).await {
                 return;
