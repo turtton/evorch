@@ -320,6 +320,8 @@ fn assert_run_transcript(
         .filter_map(|entry| match entry {
             TranscriptEntry::Tool { call_id, .. } => Some(call_id.as_str()),
             TranscriptEntry::Message { .. }
+            | TranscriptEntry::UserMessage { .. }
+            | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. } => None,
         })
@@ -329,6 +331,8 @@ fn assert_run_transcript(
         .filter_map(|entry| match entry {
             TranscriptEntry::AgentMessage { content, .. } => Some(content.as_str()),
             TranscriptEntry::Message { .. }
+            | TranscriptEntry::UserMessage { .. }
+            | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. } => None,
         })
@@ -545,6 +549,7 @@ fn v02_end_to_end_chained_scenario() {
         .filter_map(|command| match command {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
             WorkbenchCommand::DecideMerge(_)
+            | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,
@@ -584,6 +589,7 @@ fn v02_end_to_end_chained_scenario() {
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,

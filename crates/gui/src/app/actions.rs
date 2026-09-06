@@ -235,6 +235,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
+            LoopEvent::ChatAccepted { .. } => {}
+            LoopEvent::ChatRejected { reason, .. } => {
+                tracing::warn!(%reason, "chat command rejected");
+                self.push_notice(format!("chat failed: {reason}"));
+            }
             LoopEvent::GoalAccepted { goal_id, .. } => self.goal_form.last_accepted = Some(goal_id),
             LoopEvent::MergeStateUpdated(view) => self.merge.view = *view,
             LoopEvent::MergeResolved { decision, .. } => {

@@ -7,6 +7,7 @@ use super::ConversationFocus;
 use super::attention::{AttentionInputs, PaneAttention, attention_for};
 use crate::diff::{DiffMode, DiffModel};
 use crate::model::commands::{GoalFormModel, LoopStatusView, MergeApprovalModel};
+use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
@@ -15,6 +16,7 @@ use crate::panes::{
     agent::{AgentIdentity, AgentPaneAction, ConversationContext, agent_pane},
     agent_transcript::agent_transcript_pane,
     agents::{AgentsAction, agents_pane},
+    composer::ComposerAction,
     diff::diff_pane,
     goal::{GoalAction, goal_pane},
     merge::{MergeAction, merge_pane},
@@ -41,6 +43,9 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) diff_request: &'a mut Option<DiffMode>,
     pub(super) goal_form: &'a GoalFormModel,
     pub(super) goal_action: &'a mut Option<GoalAction>,
+    pub(super) composer: &'a mut ComposerModel,
+    pub(super) provider_status: &'a ProviderStatus,
+    pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) loop_status: &'a LoopStatusView,
     pub(super) merge: &'a MergeApprovalModel,
     pub(super) merge_action: &'a mut Option<MergeAction>,
@@ -95,6 +100,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
         let ctx = ConversationContext {
             has_project: self.sidebar.selected_project.is_some(),
+            has_active_thread: self.sidebar.active_thread.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
             phase: active_thread
                 .and_then(|thread| thread.run_ids.last())
@@ -102,11 +108,19 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .copied(),
             next_thread_title: format!("thread-{}", self.sidebar.threads.len() + 1),
         };
-        if let Some(action) = agent_pane(ui, transcript, identity, ctx) {
+        if let Some(action) = agent_pane(
+            ui,
+            transcript,
+            identity,
+            ctx,
+            self.composer,
+            self.provider_status,
+        ) {
             match action {
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),
+                AgentPaneAction::Composer(a) => *self.composer_action = Some(a),
             }
         }
     }

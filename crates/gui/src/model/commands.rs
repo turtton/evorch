@@ -47,7 +47,14 @@ pub struct MergeCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSubmission {
+    pub thread_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkbenchCommand {
+    SendChat(ChatSubmission),
     SubmitGoal(GoalSubmission),
     DecideMerge(MergeCommand),
     PauseGoal { goal_id: String },
@@ -109,6 +116,14 @@ pub struct LoopStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopEvent {
+    ChatAccepted {
+        thread_id: String,
+        run_id: String,
+    },
+    ChatRejected {
+        thread_id: String,
+        reason: String,
+    },
     GoalAccepted {
         thread_id: String,
         goal_id: String,
@@ -143,6 +158,7 @@ impl CommandSink for RecordingSink {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureLoopAdapter {
     accepted_goals: u64,
+    accepted_chats: u64,
 }
 
 impl FixtureLoopAdapter {
@@ -167,6 +183,13 @@ impl FixtureLoopAdapter {
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
+            WorkbenchCommand::SendChat(submission) => {
+                self.accepted_chats = self.accepted_chats.saturating_add(1);
+                vec![LoopEvent::ChatAccepted {
+                    thread_id: submission.thread_id,
+                    run_id: format!("chat-{}", self.accepted_chats),
+                }]
+            }
             WorkbenchCommand::SubmitGoal(submission) => {
                 self.accepted_goals = self.accepted_goals.saturating_add(1);
                 vec![
@@ -407,6 +430,33 @@ fn gate_rows(snapshot: &GateSnapshot) -> Vec<GateItemView> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_adapter_accepts_chat_with_sequential_run_ids() {
+        // Given: a fresh adapter and submissions on distinct threads.
+        let mut adapter = FixtureLoopAdapter::default();
+        // When: both chats are submitted in order.
+        let events = ["t1", "t2"].map(|thread_id| {
+            adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                thread_id: thread_id.into(),
+                text: "hi".into(),
+            }))
+        });
+        // Then: each acceptance retains its thread and receives a sequential ID.
+        assert_eq!(
+            events,
+            [
+                vec![LoopEvent::ChatAccepted {
+                    thread_id: "t1".into(),
+                    run_id: "chat-1".into()
+                }],
+                vec![LoopEvent::ChatAccepted {
+                    thread_id: "t2".into(),
+                    run_id: "chat-2".into()
+                }],
+            ]
+        );
+    }
 
     fn pending_view() -> MergeApprovalView {
         MergeApprovalView {

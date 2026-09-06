@@ -5,12 +5,13 @@
 // (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
 // テストを別ファイルへ分離すると impl+test ペアリング規約に反する。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use event_bus::{ApprovalDecision, GoalReference};
 use runtime::orchestration::supervisor::SupervisorError;
-use runtime::{AgentRuntime, GoalSpec, RunConfig, SupervisorHandle};
+use runtime::{AgentRuntime, GoalSpec, Role, RunConfig, RunId, SupervisorHandle};
 
 use crate::model::commands::{
     CommandSink, GoalSubmission, LoopEvent, MergeDecision, ReferenceKind, WorkbenchCommand,
@@ -25,6 +26,8 @@ pub const STORAGE_SESSION_ID: &str = "evorch-gui";
 /// token なし DecideMerge を拒否する理由。
 const MISSING_TOKEN_REASON: &str =
     "merge decision requires an approval token issued by MergeApprovalRequested";
+
+const CHAT_ROLE: Role = Role::Worker;
 
 /// goal の配送先リポジトリ識別子。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +48,7 @@ pub struct RuntimeCommandSink {
     supervisor: SupervisorHandle,
     accepted_goals: u64,
     repo_identity: OnceLock<RepoIdentity>,
+    chat_runs: BTreeMap<String, RunId>,
 }
 
 impl RuntimeCommandSink {
@@ -60,6 +64,7 @@ impl RuntimeCommandSink {
             supervisor,
             accepted_goals: 0,
             repo_identity: OnceLock::new(),
+            chat_runs: BTreeMap::new(),
         }
     }
 
@@ -161,6 +166,38 @@ impl CommandSink for RuntimeCommandSink {
             }
             WorkbenchCommand::CancelGoal { goal_id } => {
                 self.route_goal_command(|supervisor| supervisor.cancel(&goal_id))
+            }
+            WorkbenchCommand::SendChat(submission) => {
+                let thread_id = submission.thread_id;
+                if let Some(&run_id) = self.chat_runs.get(&thread_id) {
+                    match self.runtime.send_message(run_id, submission.text.clone()) {
+                        Ok(()) => {
+                            return vec![LoopEvent::ChatAccepted {
+                                thread_id,
+                                run_id: run_id.to_string(),
+                            }];
+                        }
+                        Err(_) => {
+                            self.chat_runs.remove(&thread_id);
+                        }
+                    }
+                }
+                let _guard = self.handle.enter();
+                let run_id = self.runtime.delegate_background(
+                    CHAT_ROLE,
+                    submission.text,
+                    RunConfig {
+                        name: Some(format!("chat:{thread_id}")),
+                        interactive: true,
+                        keep_alive: true,
+                        ..RunConfig::default()
+                    },
+                );
+                self.chat_runs.insert(thread_id.clone(), run_id);
+                vec![LoopEvent::ChatAccepted {
+                    thread_id,
+                    run_id: run_id.to_string(),
+                }]
             }
         }
     }
