@@ -152,6 +152,12 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - burst 検証: EventBus(容量 8192)→EventPump→WorkbenchState へ 1500 events/tick × 20 ticks（計 30,000 MessageDelta、2 run 交互）で drop/lag ゼロ、run 別順序と連結本文の完全一致。計測 508,075 events/sec、tick latency p50 1.925ms / max 2.632ms（bus→pump drain のみ）
 - ボトルネック所見: 現在の runtime agent run は provider SSE を使わず complete() 一発（stream:false）。per-token streaming を GUI に届けるには AgentModel trait の stream 対応 + agent_loop の delta 中継が別途必要。event-bus→GUI 経路は 30k events/60ms を処理可能。主な drop リスクは broadcast 容量超過時の Lagged（EventPump が無視）+ GUI frame 停止時の受信停滞
 
+## v0.3 follow-up cleanups の実装確定（issue #96、PR #97、2026-09-06）
+
+- ReasoningDelta production emit: agent_loop が非空 Reasoning ブロックを ReasoningDelta（run_id: Some）として emit（PR #86 規約整合）。GUI 実配線到達テスト（reasoning_stream_wiring.rs）
+- frame.rs legacy mirror 撤去: run_id:None delta は TranscriptRegistry 層で drop + tracing::warn（ルーティング権威の単一化、payload run_id 帰属経路のみ）
+- agents グリッド列幅自動フィット: theme tokens AGENTS_COL_MIN=56/AGENTS_COL_MAX=160/CELL_PAD_X=8、可視 clip 幅基準 fit_columns + truncate。列幅測定は available_width ではなく min(clip_rect.width()) を使う（dock 非有界幅の落とし穴）
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
