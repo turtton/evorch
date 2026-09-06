@@ -3,14 +3,16 @@
 //! The runtime uses `complete()`, sending `stream: false`: these tests exercise
 //! the mock's JSON mode, including argument/text fragment reassembly. SSE mode
 //! is covered separately by client-level tests.
-
-mod support;
+//! Completion is asserted via both `wait()` and the bus lifecycle Done event.
+//! Collection stops on the required-event predicate; timeouts are failsafes only.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use config::{Config, LoadOptions};
-use event_bus::{AgentRunPhase, EventBus, EventKind, MessageEvent, ProviderEvent, ToolEvent};
+use event_bus::{
+    AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+};
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::{ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
@@ -19,11 +21,10 @@ use sandbox::credential::{CredentialStore, FileCredentialStore};
 use serde_json::json;
 use tools::ToolExecutor;
 
-use support::drain_events;
-
 const KEY_ENV: &str = "EVORCH_TEST_KEY_STREAMING_MOCK_E2E";
 const KEY: &str = "streaming-mock-e2e-key";
 const MODEL: &str = "local-model";
+const MAX_RECV_ITERS: usize = 10_000;
 
 fn load_config(root: &std::path::Path, base_url: &str) -> Config {
     std::fs::write(
@@ -96,7 +97,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
     ]);
     let config = load_config(directory.path(), &mock.base_url());
     let bus = Arc::new(EventBus::new(256));
-    let mut events = bus.subscribe();
+    let mut receiver = bus.subscribe();
     let composed = compose_runtime(composition(
         &config,
         Arc::clone(&bus),
@@ -122,65 +123,93 @@ async fn worker_run_with_tool_call_completes_over_mock() {
             .expect("edited file")
             .contains("written by streaming mock e2e")
     );
-    let events = drain_events(&mut events).await;
     let expected_run_id = run_id.to_string();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.kind,
-                EventKind::Provider(ProviderEvent::RequestStarted { profile, run_id, .. })
-                    if profile.as_deref() == Some("local")
-                        && run_id.as_deref() == Some(expected_run_id.as_str())
-            ))
-            .count(),
-        2
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.kind,
-                EventKind::Provider(ProviderEvent::RequestCompleted { profile, run_id, .. })
-                    if profile.as_deref() == Some("local")
-                        && run_id.as_deref() == Some(expected_run_id.as_str())
-            ))
-            .count(),
-        2
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.kind,
-                EventKind::Tool(ToolEvent::ToolStarted { tool_name, run_id, .. })
-                    if tool_name == "edit" && run_id.as_deref() == Some(expected_run_id.as_str())
-            ))
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                &event.kind,
-                EventKind::Tool(ToolEvent::ToolCompleted { tool_name, run_id, is_error: false, .. })
-                    if tool_name == "edit" && run_id.as_deref() == Some(expected_run_id.as_str())
-            ))
-            .count(),
-        1
-    );
-    let message_deltas = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { delta, run_id })
-                if run_id.as_deref() == Some(expected_run_id.as_str()) =>
-            {
-                Some(delta.as_str())
+    let mut provider_started = 0;
+    let mut provider_completed = 0;
+    let mut tool_started = 0;
+    let mut tool_completed = 0;
+    let mut message_deltas = Vec::new();
+    let mut lifecycle_done = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for _ in 0..MAX_RECV_ITERS {
+            let event = receiver.recv().await.expect("event loss or bus closure");
+            match &event.kind {
+                EventKind::Provider(ProviderEvent::RequestStarted {
+                    profile, run_id, ..
+                }) if profile.as_deref() == Some("local")
+                    && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+                {
+                    provider_started += 1;
+                }
+                EventKind::Provider(ProviderEvent::RequestCompleted {
+                    profile, run_id, ..
+                }) if profile.as_deref() == Some("local")
+                    && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+                {
+                    provider_completed += 1;
+                }
+                EventKind::Tool(ToolEvent::ToolStarted {
+                    tool_name, run_id, ..
+                }) if tool_name == "edit"
+                    && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+                {
+                    tool_started += 1;
+                }
+                EventKind::Tool(ToolEvent::ToolCompleted {
+                    tool_name,
+                    run_id,
+                    is_error: false,
+                    ..
+                }) if tool_name == "edit"
+                    && run_id.as_deref() == Some(expected_run_id.as_str()) =>
+                {
+                    tool_completed += 1;
+                }
+                EventKind::Message(MessageEvent::MessageDelta { delta, run_id })
+                    if run_id.as_deref() == Some(expected_run_id.as_str()) =>
+                {
+                    message_deltas.push(delta.clone());
+                }
+                // event-bus/src/event.rs defines `to`; see also
+                // state_transitions.rs::run_emits_pending_running_done_in_order.
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id,
+                    to: AgentRunPhase::Done,
+                    ..
+                }) if run_id == &expected_run_id => lifecycle_done = true,
+                EventKind::Lifecycle(_)
+                | EventKind::Provider(_)
+                | EventKind::Tool(_)
+                | EventKind::Message(_)
+                | EventKind::Usage(_)
+                | EventKind::Fault(_)
+                | EventKind::AgentMessage(_)
+                | EventKind::Compaction(_)
+                | EventKind::Orchestrator(_) => {}
             }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+            let all_required = provider_started == 2
+                && provider_completed == 2
+                && tool_started == 1
+                && tool_completed == 1
+                && !message_deltas.is_empty()
+                && message_deltas.concat() == "All done."
+                && lifecycle_done;
+            if all_required {
+                return;
+            }
+        }
+        panic!("required events missing after {MAX_RECV_ITERS} receives");
+    })
+    .await
+    .expect("required events missing within overall collection failsafe");
+    assert_eq!(provider_started, 2);
+    assert_eq!(provider_completed, 2);
+    assert_eq!(tool_started, 1);
+    assert_eq!(tool_completed, 1);
+    assert!(
+        lifecycle_done,
+        "target run must emit lifecycle Done on the bus"
+    );
     assert!(!message_deltas.is_empty());
     assert_eq!(message_deltas.concat(), "All done.");
 
