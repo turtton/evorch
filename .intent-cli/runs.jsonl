@@ -201,3 +201,6 @@
 {"ts":"2026-09-06T06:36:00.8339685+00:00","execution_unit":"v03-demo-loop-flake-fix","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":84}
 {"ts":"2026-09-06T06:36:51.6866598+00:00","execution_unit":"v03-event-runid-attribution","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v03-event-runid-attribution/"}
 {"ts":"2026-09-06T06:36:53.7726711+00:00","execution_unit":"v03-event-runid-attribution","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#85","reason":"https://github.com/turtton/evorch/issues/85"}
+{"ts":"2026-09-06T07:31:48.8804267+00:00","execution_unit":"v03-event-runid-attribution","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":86}
+{"ts":"2026-09-06T07:32:09.5882417+00:00","execution_unit":"v03-event-runid-attribution","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":86}
+{"ts":"2026-09-06T07:32:09.5882417+00:00","execution_unit":"v03-event-runid-attribution","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":86}

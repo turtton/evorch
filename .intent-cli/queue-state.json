@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T06:36:53.7726711+00:00",
+  "updated_at": "2026-09-06T07:32:09.5972812+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1047,7 +1047,7 @@
     {
       "execution_unit": "v03-event-runid-attribution",
       "title": "v0.3: event-bus MessageDelta/ReasoningDelta \u306B run_id \u3092\u4ED8\u4E0E\u3057\u4E26\u884C run streaming \u306E attribution \u3092\u6210\u7ACB\u3055\u305B\u308B",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1061,6 +1061,7 @@
         "number": 85,
         "url": "https://github.com/turtton/evorch/issues/85"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/86",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
