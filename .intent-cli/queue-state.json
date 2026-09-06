@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T07:32:09.5972812+00:00",
+  "updated_at": "2026-09-06T08:18:45.5543983+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1062,6 +1062,28 @@
         "url": "https://github.com/turtton/evorch/issues/85"
       },
       "linked_pr": "https://github.com/turtton/evorch/pull/86",
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v03-gui-design-fixes",
+      "title": "v0.3: GUI \u30C7\u30B6\u30A4\u30F3\u4FEE\u6B63\uFF08project \u540D\u30DC\u30C3\u30AF\u30B9\u904E\u5927\u30FB\u72B6\u614B\u30C9\u30C3\u30C8\u914D\u7F6E/\u30B5\u30A4\u30BA\uFF09",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v03-gui-design-fixes/implementation.md",
+        "review_context": ".intent-cli/issues/v03-gui-design-fixes/review-context.md",
+        "yaml": ".intent-cli/issues/v03-gui-design-fixes/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 87,
+        "url": "https://github.com/turtton/evorch/issues/87"
+      },
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
