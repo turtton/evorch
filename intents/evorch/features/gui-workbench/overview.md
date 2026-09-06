@@ -84,6 +84,14 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - テストの gate 解放は notify_one（permit 保持）を使う。末尾 sleep polling は collector mpsc done 通知の recv_timeout 待機へ置換
 - 検証: taskset -c 0,1 負荷下 30 連続 PASS ×2 セット（変更前 11/30 FAIL）
 
+## v0.3 GUI デザイン修正の実装確定（issue #87、PR #88、2026-09-06）
+
+- 状態ドット規約: 直径 DOT_SIZE=10px token（半径は DOT_SIZE/2.0 で導出）、配置は行内テキスト左・垂直中央（compact_row の left_to_right(Align::Center) 固定高レイアウトに委譲）。4px grid の半値例外（body 14px の cap height 光学値）
+- sidebar 行サイジング規約: project/thread 行は ROW_DENSE=28px token 固定高・非折返し単一行。ROW_COMPACT=36px はエディタ系（agent.rs composer）専用として残存。行内末尾要素は with_layout(right_to_left(Align::Center)) で右端配置、タイトルは残り幅に truncate+halign(Align::LEFT)
+- ハードコード禁止の実例: status_dot の 8.0/4.0、projects.rs の 40.0、threads.rs の THREAD_ROW_RIGHT_WIDTH=140.0 を撤去し token 化
+- 検証手順: geometry は headless テストで assert（theme_headless::compact_row_is_dense_and_centers_status_dot / sidebar_headless::sidebar_rows_are_single_line_dense_rows）。before/after 画像は headless_capture --demo [--error-thread] で取得し crates/gui/docs/screenshots/<unit>/ に README 付きで commit。赤ドット検証には --error-thread（demo fixture に Error 状態がないため追加）
+- 落とし穴: horizontal_wrapped + add_sized(固定高 Label) は行を下方向にのみ拡張し小要素が上寄せになる。固定高行には allocate_ui_with_layout + Align::Center を使う
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
