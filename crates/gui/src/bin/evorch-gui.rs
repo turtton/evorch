@@ -5,6 +5,7 @@ use event_bus::{Event, EventBus, EventKind, LifecycleEvent, RecvError};
 use gui::app::{WorkbenchApp, WorkbenchState};
 use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
+use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::pty::PtySession;
 use gui::runtime_sink::{
@@ -621,6 +622,9 @@ fn run() -> Result<(), GuiError> {
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
+        .with_provider_status(ProviderStatus::NotConfigured {
+            guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
+        })
         .with_pump(pump)
         .with_pty(pty)
         .with_command_sink(Box::new(RuntimeCommandSink::new(
