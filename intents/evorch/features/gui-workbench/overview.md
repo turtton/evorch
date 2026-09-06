@@ -76,6 +76,14 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - headless 検証基盤: --demo fixture / --activate <panel> / --pointer X Y（hover capture）。crates/gui/docs/screenshots/v03 に before/after 6 枚+再現手順
 - 既知の制約: kittest click はノード rect 中心の模擬ポインタでクリップ外はクリック不能 → MIN_SIDEBAR_FRACTION=0.30 で最小幅保証。agents グリッドは horizontal scroll で列到達性確保（列幅自動フィットは follow-up 候補）
 
+## v0.3 demo_loop flake 根治の実装確定（issue #83/#77、PR #84、2026-09-06）
+
+- orchestration イベント発行は spawn 前（reserve+emit→spawn）が規約 — runtime に reserve_run_id/spawn_reserved API を追加し dispatch_continuation を emit-before-spawn 化（ContinuationDispatched が FinishAccepted に逆転する race を解消）
+- worker RunAttached の発行元は delegate tool 経路（registry）に単一化（registry/supervisor 二重発行 race 解消）
+- DemoScriptModel は構築時 subscribe + inbox replay 化（demo root 最終ターン待機の取り逃し解消）、create_goal は同期 insert
+- テストの gate 解放は notify_one（permit 保持）を使う。末尾 sleep polling は collector mpsc done 通知の recv_timeout 待機へ置換
+- 検証: taskset -c 0,1 負荷下 30 連続 PASS ×2 セット（変更前 11/30 FAIL）
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
