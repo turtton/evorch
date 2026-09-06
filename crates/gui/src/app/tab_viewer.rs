@@ -192,6 +192,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 *self.goal_action = goal_pane(
                     ui,
                     self.goal_form,
+                    self.provider_status,
                     self.loop_status,
                     self.merge.view.blocked.as_deref(),
                     self.sidebar.active_thread.is_some(),

@@ -8,6 +8,7 @@ use crate::panes::{
     composer::ComposerAction,
     goal::{GoalAction, GoalFormSync},
     merge::MergeAction,
+    provider_settings::{ProviderSettingsAction, provider_settings_modal},
     sidebar::{SidebarAction, set_sidebar_error},
 };
 
@@ -86,6 +87,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(action) = goal_action {
             match action {
                 GoalAction::Submit => self.submit_goal(),
+                GoalAction::OpenSettings => self.open_provider_settings(),
                 GoalAction::PauseGoal => self.pause_goal(),
                 GoalAction::ResumeGoal => self.resume_goal(),
                 GoalAction::CancelGoal => self.cancel_goal(),
@@ -104,6 +106,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::Send => self.submit_composer(),
+                ComposerAction::OpenSettings => self.open_provider_settings(),
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }
@@ -111,6 +114,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(MergeAction::Decide(decision)) = merge_action {
             self.decide_merge(decision);
+        }
+        if self.provider_settings.open
+            && let Some(action) = provider_settings_modal(ui.ctx(), &mut self.provider_settings)
+        {
+            match action {
+                ProviderSettingsAction::Save => self.submit_provider_settings(),
+                ProviderSettingsAction::Cancel => self.close_provider_settings(),
+            }
         }
     }
 }

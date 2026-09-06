@@ -1,9 +1,12 @@
 //! Goal submission pane.
 
-use event_bus::{CloseoutStep, GoalStage, GoalState};
+use event_bus::GoalState;
+
+use super::goal_labels::{stage_label, state_label, step_label};
 
 use crate::model::commands::{GoalFormModel, LoopStatusView, PacketReference, ReferenceKind};
-use crate::theme::text::h4;
+use crate::model::composer::{GOAL_PROVIDER_GUIDANCE, ProviderStatus};
+use crate::theme::text::{h4, muted};
 use crate::theme::tokens::{ERROR_FG, SUCCESS, TEXT, WARNING_FG};
 use crate::theme::widgets::{pane_root, primary_button};
 
@@ -54,11 +57,13 @@ pub enum GoalAction {
     PauseGoal,
     ResumeGoal,
     CancelGoal,
+    OpenSettings,
 }
 
 pub fn goal_pane(
     ui: &mut egui::Ui,
     goal: &GoalFormModel,
+    provider: &ProviderStatus,
     status: &LoopStatusView,
     blocked: Option<&str>,
     has_active_thread: bool,
@@ -121,6 +126,17 @@ pub fn goal_pane(
             draft.constraints.push(String::new());
         }
 
+        match provider {
+            ProviderStatus::Configured => {}
+            ProviderStatus::NotConfigured { .. } => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(muted(GOAL_PROVIDER_GUIDANCE));
+                    if ui.button("Configure provider").clicked() {
+                        action = Some(GoalAction::OpenSettings);
+                    }
+                });
+            }
+        }
         if !has_active_thread {
             ui.label(egui::RichText::new("no active thread").color(TEXT));
         }
@@ -212,37 +228,4 @@ pub fn goal_pane(
             Some(GoalAction::SyncForm(sync))
         }
     })
-}
-
-fn state_label(state: GoalState) -> &'static str {
-    match state {
-        GoalState::Active => "active",
-        GoalState::Paused => "paused",
-        GoalState::Blocked => "blocked",
-        GoalState::Complete => "complete",
-        GoalState::Cancelled => "cancelled",
-    }
-}
-
-fn stage_label(stage: GoalStage) -> &'static str {
-    match stage {
-        GoalStage::Implementing => "implementing",
-        GoalStage::Delivering => "delivering",
-        GoalStage::AwaitingCi => "awaiting_ci",
-        GoalStage::Reviewing => "reviewing",
-        GoalStage::Repairing => "repairing",
-        GoalStage::ReadyToFinish => "ready_to_finish",
-        GoalStage::AwaitingMergeApproval => "awaiting_merge_approval",
-        GoalStage::Merging => "merging",
-        GoalStage::Closeout => "closeout",
-        GoalStage::Done => "done",
-    }
-}
-
-fn step_label(step: CloseoutStep) -> &'static str {
-    match step {
-        CloseoutStep::WorkerClaim => "worker_claim",
-        CloseoutStep::ResultSummary => "result_summary",
-        CloseoutStep::WorkerComplete => "worker_complete",
-    }
 }

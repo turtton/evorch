@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui_dock::DockState;
@@ -15,6 +15,7 @@ use crate::model::commands::{
     MergeApprovalView, ReviewerStatus, WorkbenchCommand,
 };
 use crate::model::composer::{ComposerModel, ProviderStatus};
+use crate::model::provider_settings::ProviderSettingsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
@@ -50,6 +51,8 @@ pub struct WorkbenchState<S> {
     pub(super) goal_form: GoalFormModel,
     pub(super) composer: ComposerModel,
     pub(super) provider_status: ProviderStatus,
+    pub(super) provider_settings: ProviderSettingsModel,
+    pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) sink: Box<dyn CommandSink>,
@@ -86,6 +89,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             goal_form: GoalFormModel::default(),
             composer: ComposerModel::default(),
             provider_status: ProviderStatus::default(),
+            provider_settings: ProviderSettingsModel::default(),
+            provider_settings_path: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
                     pr: None,
@@ -187,6 +192,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub const fn provider_status(&self) -> &ProviderStatus {
         &self.provider_status
+    }
+    pub fn with_provider_settings(mut self, model: ProviderSettingsModel) -> Self {
+        self.provider_settings = model;
+        self
+    }
+    pub fn with_provider_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.provider_settings_path = Some(path.into());
+        self
+    }
+    pub const fn provider_settings(&self) -> &ProviderSettingsModel {
+        &self.provider_settings
+    }
+    pub const fn provider_settings_mut(&mut self) -> &mut ProviderSettingsModel {
+        &mut self.provider_settings
+    }
+    pub fn provider_settings_path(&self) -> Option<&Path> {
+        self.provider_settings_path.as_deref()
     }
     pub const fn merge(&self) -> &MergeApprovalModel {
         &self.merge
