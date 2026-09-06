@@ -7,6 +7,7 @@ use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
+use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::pty::PtySession;
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
@@ -417,13 +418,27 @@ fn restore_goals(storage_config: &StorageConfig, supervisor: &SupervisorHandle) 
 /// GUI binary は config::Config を必須としないため、読み込み失敗時は
 /// 既定値へ fallback して警告を出す。
 fn orchestration_settings_or_default(
-    loaded: Result<config::Config, config::ConfigError>,
+    loaded: &Result<config::Config, config::ConfigError>,
 ) -> OrchestrationSettings {
     match loaded {
         Ok(config) => OrchestrationSettings::from(&config.orchestration),
         Err(error) => {
             tracing::warn!(%error, "config load failed; using default orchestration settings");
             OrchestrationSettings::default()
+        }
+    }
+}
+
+fn detected_provider_status(
+    loaded: &Result<config::Config, config::ConfigError>,
+) -> ProviderStatus {
+    match loaded {
+        Ok(config) => provider_status_of(config),
+        Err(_) => {
+            tracing::warn!("config load failed; provider remains not configured");
+            ProviderStatus::NotConfigured {
+                guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
+            }
         }
     }
 }
@@ -497,6 +512,14 @@ fn run() -> Result<(), GuiError> {
         std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
     }
     let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
+    let loaded_config: Option<Result<config::Config, config::ConfigError>> = if arguments.demo {
+        None
+    } else {
+        Some(config::Config::load(&config::LoadOptions {
+            project_dir: Some(repo_root.clone()),
+            ..Default::default()
+        }))
+    };
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
 
     // runtime 構築は provider composition root (compose_runtime) 経由で行う
@@ -580,10 +603,26 @@ fn run() -> Result<(), GuiError> {
 
     // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる
     // (計画 Clarification C)。
-    let orchestration = if arguments.demo {
-        OrchestrationSettings::default()
-    } else {
-        orchestration_settings_or_default(config::Config::load(&config::LoadOptions::default()))
+    let (orchestration, provider_status, provider_settings) = match loaded_config.as_ref() {
+        Some(loaded) => (
+            orchestration_settings_or_default(loaded),
+            detected_provider_status(loaded),
+            match loaded {
+                Ok(config) => ProviderSettingsModel::seed_from_config(config),
+                Err(_) => ProviderSettingsModel::default(),
+            },
+        ),
+        None => (
+            OrchestrationSettings::default(),
+            ProviderStatus::NotConfigured {
+                guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
+            },
+            ProviderSettingsModel::default(),
+        ),
+    };
+    let provider_settings_path = match demo_directory.as_ref() {
+        Some(directory) => directory.path().join("evorch.toml"),
+        None => repo_root.join("evorch.toml"),
     };
 
     let delivery: Arc<dyn DeliveryPort> = match demo_directory.as_ref() {
@@ -622,9 +661,9 @@ fn run() -> Result<(), GuiError> {
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
-        .with_provider_status(ProviderStatus::NotConfigured {
-            guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
-        })
+        .with_provider_status(provider_status)
+        .with_provider_settings(provider_settings)
+        .with_provider_settings_path(provider_settings_path)
         .with_pump(pump)
         .with_pty(pty)
         .with_command_sink(Box::new(RuntimeCommandSink::new(
@@ -712,13 +751,56 @@ mod tests {
     use config::ConfigError;
     use runtime::OrchestrationSettings;
 
+    #[test]
+    fn detected_provider_status_fails_closed_on_config_error() {
+        // Given: config loading failed
+        let loaded = Err(ConfigError::Migration("test".to_owned()));
+        // When: provider availability is detected
+        let status = super::detected_provider_status(&loaded);
+        // Then: submission remains disabled with the existing guidance
+        assert_eq!(
+            status,
+            super::ProviderStatus::NotConfigured {
+                guidance: super::PROVIDER_MISSING_GUIDANCE.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn detected_provider_status_is_configured_with_one_provider() {
+        // Given: one registered provider
+        let mut config = config::Config::default();
+        config
+            .providers
+            .insert("local".into(), config::ProviderProfileConfig::default());
+        // When: provider availability is detected
+        let status = super::detected_provider_status(&Ok(config));
+        // Then: the provider is configured
+        assert_eq!(status, super::ProviderStatus::Configured);
+    }
+
+    #[test]
+    fn detected_provider_status_is_not_configured_without_providers() {
+        // Given: an empty provider configuration
+        let loaded = Ok(config::Config::default());
+        // When: provider availability is detected
+        let status = super::detected_provider_status(&loaded);
+        // Then: submission remains disabled
+        assert_eq!(
+            status,
+            super::ProviderStatus::NotConfigured {
+                guidance: super::PROVIDER_MISSING_GUIDANCE.to_owned(),
+            }
+        );
+    }
+
     // Given: config 読み込みが失敗したとき
     // When: orchestration 設定を解決する
     // Then: 既定値へ fallback する
     #[test]
     fn orchestration_settings_fall_back_to_default_on_config_error() {
         assert_eq!(
-            orchestration_settings_or_default(Err(ConfigError::Migration("test".to_owned()))),
+            orchestration_settings_or_default(&Err(ConfigError::Migration("test".to_owned()))),
             OrchestrationSettings::default()
         );
     }
