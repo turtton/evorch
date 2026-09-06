@@ -3,8 +3,10 @@
 use egui::Color32;
 use workspace_ui::ThreadRunPhase;
 
+use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
+use crate::panes::composer::{ComposerAction, composer_strip};
 use crate::panes::sidebar::SidebarAction;
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
@@ -30,6 +32,7 @@ pub enum AgentPaneAction {
     Agents(AgentsAction),
     Sidebar(SidebarAction),
     FocusPanel(&'static str),
+    Composer(ComposerAction),
 }
 
 /// トランスクリプトモデルを egui 上に描画します。
@@ -38,6 +41,8 @@ pub fn agent_pane(
     model: &TranscriptModel,
     identity: Option<AgentIdentity<'_>>,
     ctx: ConversationContext<'_>,
+    composer: &mut ComposerModel,
+    provider: &ProviderStatus,
 ) -> Option<AgentPaneAction> {
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
@@ -47,7 +52,9 @@ pub fn agent_pane(
         } else {
             transcript_body(ui, model);
         }
-        footer_strip(ui);
+        if let Some(composer_action) = composer_strip(ui, composer, provider) {
+            action = Some(AgentPaneAction::Composer(composer_action));
+        }
         action
     })
 }
@@ -117,7 +124,7 @@ fn empty_state_body(
     } else if empty_state(
         ui,
         "No messages yet",
-        "Submit a goal to start the run.",
+        "Type a message in the composer below, or submit a goal.",
         Some("Go to Goal"),
     ) {
         *action = Some(AgentPaneAction::FocusPanel("goal-main"));
@@ -140,6 +147,8 @@ pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
 
 fn entry_accent(entry: &TranscriptEntry) -> Color32 {
     match entry {
+        TranscriptEntry::UserMessage { .. } => TEXT,
+        TranscriptEntry::Notice { .. } => TEXT_MUTED,
         TranscriptEntry::Message { .. } => ACCENT,
         TranscriptEntry::Reasoning { .. } => TEXT_MUTED,
         TranscriptEntry::Tool { .. } => INFO,
@@ -152,6 +161,8 @@ fn entry_accent(entry: &TranscriptEntry) -> Color32 {
 
 fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
+        TranscriptEntry::UserMessage { text } => format!("You: {text}"),
+        TranscriptEntry::Notice { text } => text.clone(),
         TranscriptEntry::Message { text } => format!("Message: {text}"),
         TranscriptEntry::Reasoning { text } => format!("Reasoning: {text}"),
         TranscriptEntry::Tool {
@@ -172,13 +183,4 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             format!("{prefix} {peer_run_id}: {content}")
         }
     }
-}
-
-fn footer_strip(ui: &mut egui::Ui) {
-    surface_frame(SURFACE_RAISED).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
-            ui.label(muted("Goal-driven — compose in the Goal panel"));
-        });
-    });
 }

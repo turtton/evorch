@@ -5,6 +5,7 @@ use super::tab_viewer::WorkbenchTabViewer;
 use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
+    composer::ComposerAction,
     goal::{GoalAction, GoalFormSync},
     merge::MergeAction,
     sidebar::{SidebarAction, set_sidebar_error},
@@ -20,6 +21,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut agents_action = None;
         let mut diff_request = None;
         let mut goal_action = None;
+        let mut composer_action = None;
         let mut merge_action = None;
         let mut focus_request = None;
         let dock_style = crate::theme::dock::dock_style(ui.style());
@@ -42,6 +44,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 diff_request: &mut diff_request,
                 goal_form: &self.goal_form,
                 goal_action: &mut goal_action,
+                composer: &mut self.composer,
+                provider_status: &self.provider_status,
+                composer_action: &mut composer_action,
                 loop_status: &self.loop_status,
                 merge: &self.merge,
                 merge_action: &mut merge_action,
@@ -93,6 +98,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     form.goal = goal;
                     form.references = references;
                     form.constraints = constraints;
+                }
+            }
+        }
+        if let Some(action) = composer_action {
+            match action {
+                ComposerAction::Send => self.submit_composer(),
+                ComposerAction::Complete(name) => {
+                    self.composer_mut().input = format!("/{name} ");
                 }
             }
         }

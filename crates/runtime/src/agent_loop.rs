@@ -623,7 +623,9 @@ impl LoopState {
                     if self.flush_aside() {
                         continue;
                     }
-                    if !self.task.config.interactive || self.resumed {
+                    if !self.task.config.interactive
+                        || (self.resumed && !self.task.config.keep_alive)
+                    {
                         self.finish_success();
                         return;
                     }
@@ -695,6 +697,7 @@ impl LoopState {
         reason: Option<String>,
     ) -> Result<(), ()> {
         if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+            self.channels.inbox_rx.close();
             self.task.mailbox.close();
         }
         let event = self

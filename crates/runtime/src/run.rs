@@ -60,6 +60,8 @@ pub enum MergeMode {
 pub struct RunConfig {
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。
     pub interactive: bool,
+    /// Interactive run keeps waiting after each Stop until cancel/inbox close (chat session).
+    pub keep_alive: bool,
     /// run の表示名。`None` の場合はロール名へフォールバックする。
     pub name: Option<String>,
     /// run のタスクカテゴリ。システムプロンプトの category overlay 選択に使う。

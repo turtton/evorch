@@ -590,6 +590,8 @@ fn assert_run_entries(
         .filter_map(|entry| match entry {
             TranscriptEntry::Tool { call_id, .. } => Some(call_id.as_str()),
             TranscriptEntry::Message { .. }
+            | TranscriptEntry::UserMessage { .. }
+            | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. } => None,
         })
@@ -599,6 +601,8 @@ fn assert_run_entries(
         .filter_map(|entry| match entry {
             TranscriptEntry::AgentMessage { content, .. } => Some(content.as_str()),
             TranscriptEntry::Message { .. }
+            | TranscriptEntry::UserMessage { .. }
+            | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. } => None,
         })

@@ -20,6 +20,12 @@ pub enum MessageDirection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
+    UserMessage {
+        text: String,
+    },
+    Notice {
+        text: String,
+    },
     Message {
         text: String,
     },
@@ -84,6 +90,14 @@ impl TranscriptModel {
 
     pub fn push_message(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::Message { text: text.into() });
+    }
+
+    pub fn push_user_message(&mut self, text: impl Into<String>) {
+        self.push(TranscriptEntry::UserMessage { text: text.into() });
+    }
+
+    pub fn push_notice(&mut self, text: impl Into<String>) {
+        self.push(TranscriptEntry::Notice { text: text.into() });
     }
 
     pub fn push_reasoning(&mut self, text: impl Into<String>) {
@@ -186,7 +200,10 @@ impl TranscriptModel {
                     TranscriptEntry::Message { text } | TranscriptEntry::Reasoning { text } => {
                         text.push_str(delta)
                     }
-                    TranscriptEntry::Tool { .. } | TranscriptEntry::AgentMessage { .. } => {}
+                    TranscriptEntry::UserMessage { .. }
+                    | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::Tool { .. }
+                    | TranscriptEntry::AgentMessage { .. } => {}
                 }
             }
         } else if reasoning {
@@ -234,6 +251,46 @@ mod tests {
         AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
         DeliveryDisposition, EventKind, MessageEvent, ToolEvent,
     };
+
+    #[test]
+    fn message_delta_after_user_message_starts_new_entry() {
+        // Given: a user message is the last entry.
+        let mut model = TranscriptModel::new();
+        model.push_user_message("hi");
+        // When: the assistant streams a delta.
+        model.apply(&Event::new(MessageEvent::MessageDelta {
+            delta: "yo".into(),
+            run_id: Some("r1".into()),
+        }));
+        // Then: the user message remains separate.
+        assert_eq!(
+            model.entries(),
+            &[
+                TranscriptEntry::UserMessage { text: "hi".into() },
+                TranscriptEntry::Message { text: "yo".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn message_delta_after_notice_starts_new_entry() {
+        // Given: a notice is the last entry.
+        let mut model = TranscriptModel::new();
+        model.push_notice("n");
+        // When: the assistant streams a delta.
+        model.apply(&Event::new(MessageEvent::MessageDelta {
+            delta: "yo".into(),
+            run_id: Some("r1".into()),
+        }));
+        // Then: the notice remains separate.
+        assert_eq!(
+            model.entries(),
+            &[
+                TranscriptEntry::Notice { text: "n".into() },
+                TranscriptEntry::Message { text: "yo".into() },
+            ]
+        );
+    }
 
     #[test]
     fn message_deltas_coalesce_into_single_entry() {

@@ -2,6 +2,7 @@
 
 mod actions;
 mod attention;
+mod composer;
 mod frame;
 mod state;
 mod tab_viewer;

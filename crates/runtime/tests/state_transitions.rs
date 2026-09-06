@@ -152,3 +152,102 @@ async fn interactive_run_waits_for_message_then_completes() {
     let inspection = runtime.inspect_agent(run_id).expect("run exists");
     assert_eq!(inspection.message_count, 4);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_message_after_terminal_is_rejected() {
+    for _ in 0..5 {
+        // Given: an interactive run cancelled after reaching Waiting.
+        let (runtime, bus) = runtime_with(ScriptedModel::new([Ok(text_response(
+            "question",
+            FinishReason::Stop,
+        ))]));
+        let mut events = bus.subscribe();
+        let run_id = runtime.delegate_background(
+            Role::Worker,
+            "work".to_string(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..RunConfig::default()
+            },
+        );
+        loop {
+            let event = collect_events(&mut events, 1).await.remove(0);
+            if matches!(
+                event.kind,
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Waiting,
+                    ..
+                })
+            ) {
+                break;
+            }
+        }
+        assert_eq!(runtime.cancel(run_id), Ok(()));
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
+
+        // When
+        let result = runtime.send_message(run_id, "too late".to_string());
+
+        // Then
+        assert_eq!(
+            result,
+            Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn interactive_keep_alive_run_waits_again_after_resume() {
+    // Given
+    let (runtime, bus) = runtime_with(ScriptedModel::new([
+        Ok(text_response("question", FinishReason::Stop)),
+        Ok(text_response("answer", FinishReason::Stop)),
+        Ok(text_response("follow-up", FinishReason::Stop)),
+    ]));
+    let mut events = bus.subscribe();
+    let config = RunConfig {
+        interactive: true,
+        keep_alive: true,
+        ..RunConfig::default()
+    };
+
+    // When
+    let run_id = runtime.delegate_background(Role::Reviewer, "review".to_string(), config);
+
+    // Then: every Stop waits again, including after two resumes.
+    for expected in [
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+        AgentRunPhase::Waiting,
+        AgentRunPhase::Running,
+        AgentRunPhase::Waiting,
+        AgentRunPhase::Running,
+        AgentRunPhase::Waiting,
+    ] {
+        loop {
+            let event = collect_events(&mut events, 1).await.remove(0);
+            if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id: event_run_id,
+                to,
+                ..
+            }) = event.kind
+            {
+                assert_eq!(event_run_id, run_id.to_string());
+                assert_eq!(to, expected);
+                break;
+            }
+        }
+        if expected == AgentRunPhase::Waiting {
+            let inspection = runtime.inspect_agent(run_id).expect("run exists");
+            assert_eq!(inspection.phase, AgentRunPhase::Waiting);
+            if inspection.message_count < 6 {
+                assert_eq!(runtime.send_message(run_id, "continue".to_string()), Ok(()));
+            }
+        }
+    }
+    assert_eq!(runtime.cancel(run_id), Ok(()));
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
+}

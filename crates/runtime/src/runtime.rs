@@ -586,6 +586,7 @@ impl AgentRuntime {
             merge_mode: source_config.merge_mode,
             network_access: Default::default(),
             workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
+            ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
@@ -612,6 +613,12 @@ impl AgentRuntime {
 
     /// 対話待機中の run へユーザーメッセージを送る。
     pub fn send_message(&self, run_id: RunId, text: String) -> Result<(), RuntimeError> {
+        let phase = *self.entry(run_id)?.phase_rx.borrow();
+        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
+        }
         let sender = self.entry(run_id)?.inbox_tx.clone();
         sender
             .try_send(text)

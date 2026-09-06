@@ -14,6 +14,7 @@ use crate::model::commands::{
     CiStatus, CommandSink, FixtureLoopAdapter, GoalFormModel, LoopStatusView, MergeApprovalModel,
     MergeApprovalView, ReviewerStatus, WorkbenchCommand,
 };
+use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
@@ -47,6 +48,8 @@ pub struct WorkbenchState<S> {
     pub(super) diff: DiffModel,
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
+    pub(super) composer: ComposerModel,
+    pub(super) provider_status: ProviderStatus,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) sink: Box<dyn CommandSink>,
@@ -81,6 +84,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             diff: DiffModel::new(),
             diff_source: Arc::new(GitCliDiffSource),
             goal_form: GoalFormModel::default(),
+            composer: ComposerModel::default(),
+            provider_status: ProviderStatus::default(),
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
                     pr: None,
@@ -169,6 +174,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub const fn goal_form_mut(&mut self) -> &mut GoalFormModel {
         &mut self.goal_form
+    }
+    pub fn with_provider_status(mut self, status: ProviderStatus) -> Self {
+        self.provider_status = status;
+        self
+    }
+    pub const fn composer(&self) -> &ComposerModel {
+        &self.composer
+    }
+    pub const fn composer_mut(&mut self) -> &mut ComposerModel {
+        &mut self.composer
+    }
+    pub const fn provider_status(&self) -> &ProviderStatus {
+        &self.provider_status
     }
     pub const fn merge(&self) -> &MergeApprovalModel {
         &self.merge

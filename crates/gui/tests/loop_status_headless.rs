@@ -142,7 +142,9 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             WorkbenchCommand::PauseGoal { goal_id } => pauses.push(goal_id.as_str()),
             WorkbenchCommand::ResumeGoal { goal_id } => resumes.push(goal_id.as_str()),
             WorkbenchCommand::CancelGoal { goal_id } => cancels.push(goal_id.as_str()),
-            WorkbenchCommand::SubmitGoal(_) | WorkbenchCommand::DecideMerge(_) => {}
+            WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::DecideMerge(_) => {}
         }
     }
     (pauses, resumes, cancels)
@@ -251,6 +253,7 @@ fn merge_pane_approve_disabled_until_binding_and_shows_head_and_token() {
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, demo_error_events, demo_runs, demo_sidebar, populate};
 use gui::headless::HeadlessWorkbench;
+use gui::model::composer::ProviderStatus;
 use workspace_ui::UiSettings;
 
 const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
@@ -14,6 +15,7 @@ struct CaptureArgs {
     output: PathBuf,
     demo: bool,
     error_thread: bool,
+    provider_configured: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
 }
@@ -39,6 +41,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())?,
     };
+    if capture.provider_configured {
+        state = state.with_provider_status(ProviderStatus::Configured);
+    }
     if capture.error_thread {
         state.apply_events(demo_error_events());
     }
@@ -71,6 +76,7 @@ fn parse_args(
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
     let mut error_thread = false;
+    let mut provider_configured = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
     while let Some(argument) = arguments.next() {
@@ -112,6 +118,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--error-thread") => error_thread = true,
+            Some("--provider-configured") if provider_configured => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--provider-configured") => provider_configured = true,
             Some(flag) if flag.starts_with('-') => {
                 return Err("unexpected additional arguments".into());
             }
@@ -130,6 +140,7 @@ fn parse_args(
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
         error_thread,
+        provider_configured,
         activate,
         pointer,
     })
@@ -137,7 +148,7 @@ fn parse_args(
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--error-thread] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
 
 Captures a 1280x720 headless workbench frame as PNG.
 
@@ -145,6 +156,7 @@ Modes:
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
+   --provider-configured  enable the composer without provider setup guidance (capture only)
    --activate ID  activate the given panel tab before capturing (e.g. merge-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
@@ -178,6 +190,7 @@ mod tests {
         // Then: the documented target path is selected without demo mode
         assert_eq!(capture.output, std::path::PathBuf::from(DEFAULT_OUTPUT));
         assert!(!capture.demo);
+        assert!(!capture.provider_configured);
     }
 
     #[test]
@@ -220,6 +233,18 @@ mod tests {
         assert!(parsed.iter().all(|capture| capture.demo));
         assert_eq!(parsed[1].output, std::path::PathBuf::from("x.png"));
         assert_eq!(parsed[2].output, std::path::PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn parse_args_accepts_provider_configured_with_demo() {
+        // Given: an explicitly configured provider in demo mode
+        let arguments = args(["--demo", "--provider-configured"]);
+
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("configured-provider demo form must parse");
+
+        // Then: the capture mode is accepted
+        assert!(capture.provider_configured);
     }
 
     #[test]

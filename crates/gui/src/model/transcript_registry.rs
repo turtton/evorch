@@ -146,6 +146,10 @@ impl TranscriptRegistry {
         &self.thread
     }
 
+    pub fn push_thread(&mut self, entry: TranscriptEntry) {
+        self.thread.push(entry);
+    }
+
     pub fn run(&self, run_id: &str) -> Option<&TranscriptModel> {
         self.runs.get(run_id)
     }
@@ -177,6 +181,20 @@ mod tests {
             },
             disposition: DeliveryDisposition::Aside,
         })
+    }
+
+    #[test]
+    fn push_thread_appends_to_thread_only() {
+        // Given: a registry with no run transcripts.
+        let mut registry = TranscriptRegistry::new();
+        // When: a notice is appended directly to the thread.
+        registry.push_thread(TranscriptEntry::Notice { text: "n".into() });
+        // Then: only the thread contains the notice; no run is created.
+        assert_eq!(
+            registry.thread().entries(),
+            &[TranscriptEntry::Notice { text: "n".into() },]
+        );
+        assert!(registry.runs.is_empty());
     }
 
     #[test]

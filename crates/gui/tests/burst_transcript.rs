@@ -107,6 +107,8 @@ fn transcript_text(model: &TranscriptModel) -> String {
         .map(|entry| match entry {
             TranscriptEntry::Message { text } => text.as_str(),
             TranscriptEntry::Reasoning { .. }
+            | TranscriptEntry::UserMessage { .. }
+            | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::AgentMessage { .. } => panic!("unexpected transcript entry"),
         })
