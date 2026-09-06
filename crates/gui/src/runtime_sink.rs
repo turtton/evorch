@@ -118,7 +118,14 @@ impl CommandSink for RuntimeCommandSink {
                 };
                 self.handle.spawn(async move {
                     let decision = runtime.entry_router().classify(&goal_for_log).await;
-                    let root_run = runtime.delegate_background(
+                    // issue #83: root run の起動より先に goal を登録する。
+                    // 先に起動すると root の delegate / finish 評価が goal 未登録の
+                    // ledger に到達しうるため、reserved id で順序を組む。
+                    let root_run = runtime.reserve_run_id();
+                    supervisor.create_goal(spec, root_run);
+                    runtime.spawn_reserved(
+                        root_run,
+                        None,
                         decision.role(),
                         prompt,
                         RunConfig {
@@ -126,7 +133,6 @@ impl CommandSink for RuntimeCommandSink {
                             ..RunConfig::default()
                         },
                     );
-                    supervisor.create_goal(spec, root_run);
                 });
                 vec![LoopEvent::GoalAccepted { thread_id, goal_id }]
             }

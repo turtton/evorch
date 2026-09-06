@@ -403,13 +403,67 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        let run_id = self.reserve_child_run_id(parent)?;
+        Ok(self.spawn_reserved_child(parent, run_id, role, prompt, config))
+    }
+
+    /// 親 run の存在を検証したうえで、次の run ID を事前採番する。
+    ///
+    /// supervisor が child 起動前に `RunAttached` / `ContinuationDispatched` を
+    /// emit するための happens-before を組む用途 (issue #83)。採番後は
+    /// [`AgentRuntime::spawn_reserved_child`] で必ず起動すること (採番だけして
+    /// 起動しないと run ID に欠番が生じる)。
+    ///
+    /// # Errors
+    /// 親 run が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn reserve_child_run_id(&self, parent: RunId) -> Result<RunId, RuntimeError> {
         {
             let runs = lock_runs(&self.shared.runs);
             if !runs.contains_key(&parent) {
                 return Err(unknown_run(parent));
             }
         }
-        Ok(self.spawn_run(Some(parent), role, prompt.into(), config))
+        Ok(self.reserve_run_id())
+    }
+
+    /// 次の run ID を事前採番する。
+    ///
+    /// root run のように親を持たない run でも、起動前に ID を確定させて
+    /// イベント発行との happens-before を組む用途 (issue #83)。採番後は
+    /// [`AgentRuntime::spawn_reserved`] で必ず起動すること。
+    pub fn reserve_run_id(&self) -> RunId {
+        RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// [`AgentRuntime::reserve_run_id`] / [`AgentRuntime::reserve_child_run_id`]
+    /// で事前採番した ID を使って run を登録し、バックグラウンド実行を開始する。
+    ///
+    /// 呼び出し側が起動前に run ID 確定のイベントを emit 済みでも、bus 上の
+    /// 順序が run の活動より必ず先行するよう、登録・起動はこの呼び出しで
+    /// 一括して行う。
+    pub fn spawn_reserved(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: impl Into<String>,
+        config: RunConfig,
+    ) -> RunId {
+        self.spawn_run_with_handoff(run_id, parent, role, prompt.into(), config, None)
+    }
+
+    /// [`AgentRuntime::reserve_child_run_id`] で事前採番した ID を使って
+    /// child run を登録し、バックグラウンド実行を開始する。
+    /// parent の存在検証は reserve 時に済んでいる前提。
+    pub fn spawn_reserved_child(
+        &self,
+        parent: RunId,
+        run_id: RunId,
+        role: Role,
+        prompt: impl Into<String>,
+        config: RunConfig,
+    ) -> RunId {
+        self.spawn_reserved(run_id, Some(parent), role, prompt, config)
     }
 
     fn spawn_run(
@@ -419,18 +473,19 @@ impl AgentRuntime {
         prompt: String,
         config: RunConfig,
     ) -> RunId {
-        self.spawn_run_with_handoff(parent, role, prompt, config, None)
+        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        self.spawn_run_with_handoff(run_id, parent, role, prompt, config, None)
     }
 
     fn spawn_run_with_handoff(
         &self,
+        run_id: RunId,
         parent: Option<RunId>,
         role: Role,
         prompt: String,
         config: RunConfig,
         handoff: Option<RunHandoff>,
     ) -> RunId {
-        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         let name = config
             .name
@@ -533,7 +588,9 @@ impl AgentRuntime {
             workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
         };
         let source_run_id = memo.source_run_id;
+        let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
         self.spawn_run_with_handoff(
+            run_id,
             None,
             Role::Orchestrator,
             crate::escalation::prompt::render_escalation_prompt(&memo),

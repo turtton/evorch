@@ -84,6 +84,28 @@ impl SupervisorHandle {
             .as_millis();
         let sequence = NEXT_GOAL_ID.fetch_add(1, Ordering::Relaxed);
         let goal_id = format!("goal-{wall_ms}-{sequence}");
+        // issue #83: GoalCreated の ledger 適用と bus emit は actor 処理を
+        // 待たずここで同期に行う。GUI の goal submit は root run 起動前に
+        // create_goal を呼ぶ (reserved run id 経由) ため、これで GoalCreated
+        // が root / worker / finish 評価の全イベントへ必ず先行する。
+        // actor 側 create() は重複 insert / emit を行わない。
+        let created = OrchestratorEvent::GoalCreated {
+            goal_id: goal_id.clone(),
+            session_id: spec.session_id.clone(),
+            project_id: spec.project_id.clone(),
+            thread_id: spec.thread_id.clone(),
+            goal: spec.goal.clone(),
+            references: spec.references.clone(),
+            constraints: spec.constraints.clone(),
+            repo: spec.repo.clone(),
+            base_ref: spec.base_ref.clone(),
+            root_run_id: root_run.to_string(),
+        };
+        self.ledgers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(goal_id.clone(), GoalLedger::new(&created));
+        self.bus.emit(Event::new(created));
         let _ = self.tx.send(SupervisorCommand::Create {
             goal_id: goal_id.clone(),
             spec: Box::new(spec),
@@ -353,10 +375,21 @@ impl SupervisorActor {
             base_ref: spec.base_ref,
             root_run_id: root_run.to_string(),
         };
-        self.ledgers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(goal_id.clone(), GoalLedger::new(&event));
+        // handle 側で同期 insert / emit 済みの場合は、それ以降に適用された
+        // イベントを保持するため上書き・再 emit しない (issue #83)。
+        let already_registered = {
+            let mut ledgers = self
+                .ledgers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match ledgers.entry(goal_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(_) => true,
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(GoalLedger::new(&event));
+                    false
+                }
+            }
+        };
         self.progress.insert(
             root_run.to_string(),
             ProgressTrack::new(AgentRunPhase::Pending),
@@ -365,10 +398,14 @@ impl SupervisorActor {
             goal_id.clone(),
             ReviewLoop::new(self.settings.max_review_rounds),
         );
-        self.bus.emit(Event::new(event));
+        if !already_registered {
+            self.bus.emit(Event::new(event));
+        }
         if let Some(children) = self.pending_children.remove(&root_run.to_string()) {
+            // goal 登録前に起動していた子 run の補完 attach。delegate tool 経路は
+            // goal 未登録時に発行できないため、ここで RunAttached を補完 emit する。
             for (run_id, role) in children {
-                self.attach_started_run(&goal_id, run_id, root_run.to_string(), role);
+                self.attach_started_run(&goal_id, run_id, root_run.to_string(), role, true);
             }
         }
         let terminal = self
@@ -664,11 +701,18 @@ impl SupervisorActor {
             return;
         }
         for goal_id in goals {
+            // issue #83: goal 登録後に起動した worker の RunAttached は
+            // delegate tool 経路 (GoalRegistry) が root の delegate 処理中に
+            // 発行するため、supervisor は発行しない。両経路が発行すると
+            // check-then-emit の race で非隣接の重複 RunAttached が bus に
+            // 現れ、イベント列が非決定化する (demo_loop flake の残存根因)。
+            // ここでは progress 追跡のみ行う。
             self.attach_started_run(
                 &goal_id,
                 run_id.clone(),
                 parent_run_id.clone(),
                 role.clone(),
+                false,
             );
         }
     }
@@ -679,6 +723,7 @@ impl SupervisorActor {
         run_id: String,
         parent_run_id: String,
         role: String,
+        emit: bool,
     ) {
         if !role.eq_ignore_ascii_case("worker") {
             return;
@@ -694,23 +739,25 @@ impl SupervisorActor {
         let Some(snapshot) = self.snapshot(goal_id) else {
             return;
         };
-        let purpose = if snapshot.stage == GoalStage::Repairing {
-            RunPurpose::Repair {
-                round: snapshot.repair_rounds,
-            }
-        } else {
-            RunPurpose::Implement
-        };
-        self.emit_for_goal(
-            goal_id,
-            OrchestratorEvent::RunAttached {
-                goal_id: goal_id.to_string(),
-                run_id: run_id.clone(),
-                parent_run_id: Some(parent_run_id),
-                role,
-                purpose,
-            },
-        );
+        if emit {
+            let purpose = if snapshot.stage == GoalStage::Repairing {
+                RunPurpose::Repair {
+                    round: snapshot.repair_rounds,
+                }
+            } else {
+                RunPurpose::Implement
+            };
+            self.emit_for_goal(
+                goal_id,
+                OrchestratorEvent::RunAttached {
+                    goal_id: goal_id.to_string(),
+                    run_id: run_id.clone(),
+                    parent_run_id: Some(parent_run_id),
+                    role: role.clone(),
+                    purpose,
+                },
+            );
+        }
         self.progress
             .insert(run_id, ProgressTrack::new(AgentRunPhase::Pending));
     }
@@ -850,22 +897,12 @@ impl SupervisorActor {
         let Some(parent) = self.find_run(&snapshot.root_run_id) else {
             return;
         };
-        let run = match self.runtime.delegate_background_as_child(
-            parent,
-            Role::Orchestrator,
-            render_continuation_prompt(
-                &snapshot,
-                &unmet,
-                self.reject_reasons
-                    .get(&snapshot.goal_id)
-                    .map_or(&[], Vec::as_slice),
-                snapshot.nudges.len() as u32,
-            ),
-            RunConfig {
-                name: Some(format!("{}/c{}", snapshot.goal_id, snapshot.epoch)),
-                ..RunConfig::default()
-            },
-        ) {
+        // issue #83: continuation child の起動より先に RunAttached /
+        // ContinuationDispatched を emit して happens-before を張る。
+        // spawn 後に emit すると、即座に finish する child が registry 経由で
+        // FinishAccepted / MergeApprovalRequested を 2 つの emit の間に割り込ませ、
+        // bus 上のイベント順がスケジューリング依存になる (demo_loop flake の根因)。
+        let run = match self.runtime.reserve_child_run_id(parent) {
             Ok(run) => run,
             Err(_) => return,
         };
@@ -886,9 +923,26 @@ impl SupervisorActor {
             OrchestratorEvent::ContinuationDispatched {
                 goal_id: snapshot.goal_id.clone(),
                 epoch: snapshot.epoch,
-                trigger_run_id: snapshot.current_orchestrator_run_id,
+                trigger_run_id: snapshot.current_orchestrator_run_id.clone(),
                 new_run_id: run.to_string(),
-                unmet,
+                unmet: unmet.clone(),
+            },
+        );
+        self.runtime.spawn_reserved_child(
+            parent,
+            run,
+            Role::Orchestrator,
+            render_continuation_prompt(
+                &snapshot,
+                &unmet,
+                self.reject_reasons
+                    .get(&snapshot.goal_id)
+                    .map_or(&[], Vec::as_slice),
+                snapshot.nudges.len() as u32,
+            ),
+            RunConfig {
+                name: Some(format!("{}/c{}", snapshot.goal_id, snapshot.epoch)),
+                ..RunConfig::default()
             },
         );
         self.progress
