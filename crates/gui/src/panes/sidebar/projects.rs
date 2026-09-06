@@ -1,7 +1,7 @@
-use egui::{Sense, Ui};
+use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{SidebarState, TrustState};
 
-use crate::theme::tokens::{ACCENT, ERROR_FG, ROW_COMPACT, SP_1, SP_2, SURFACE_RAISED, TEXT_MUTED};
+use crate::theme::tokens::{ACCENT, ERROR_FG, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED};
 use crate::theme::widgets::{badge, compact_row, empty_state, primary_button, status_dot};
 
 use super::{SidebarAction, SidebarUiState};
@@ -32,21 +32,21 @@ pub fn render(
                 .iter()
                 .filter(|thread| thread.project_id == project.id)
                 .count();
-            let right_width = if count > 0 { 40.0 } else { 0.0 };
-            let title_width = (ui.available_width() - right_width).max(40.0);
-            let title_response = ui.add_sized(
-                egui::vec2(title_width, ROW_COMPACT),
-                egui::Label::new(&project.name)
-                    .truncate()
-                    .sense(Sense::click()),
-            );
-            if title_response.clicked() {
-                *action = Some(SidebarAction::SelectProject(project.id.clone()));
-            }
-            if count > 0 {
-                ui.add_space(SP_1);
-                badge(ui, count.to_string(), TEXT_MUTED, SURFACE_RAISED);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if count > 0 {
+                    badge(ui, count.to_string(), TEXT_MUTED, SURFACE_RAISED);
+                }
+                let title_response = ui.add_sized(
+                    egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
+                    egui::Label::new(&project.name)
+                        .truncate()
+                        .halign(Align::LEFT)
+                        .sense(Sense::click()),
+                );
+                if title_response.clicked() {
+                    *action = Some(SidebarAction::SelectProject(project.id.clone()));
+                }
+            });
         });
     }
 
