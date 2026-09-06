@@ -925,6 +925,16 @@ mod tests {
             }),
             Event::new(MessageEvent::MessageDelta {
                 delta: "he".to_owned(),
+                run_id: None,
+            }),
+            // run_id 付き delta も従来どおり非写像であることを lock する。
+            Event::new(MessageEvent::MessageDelta {
+                delta: "he".to_owned(),
+                run_id: Some("run-1".to_owned()),
+            }),
+            Event::new(MessageEvent::ReasoningDelta {
+                delta: "th".to_owned(),
+                run_id: Some("run-1".to_owned()),
             }),
             Event::new(FaultEvent::SubscriberLagged {
                 subscriber_id: 1,

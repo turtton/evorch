@@ -314,11 +314,23 @@ pub enum MessageEvent {
     MessageDelta {
         /// 追加されたテキスト。
         delta: String,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// 推論テキストの差分。
     ReasoningDelta {
         /// 追加された推論テキスト。
         delta: String,
+        /// 観測相関用の実行 ID。
+        ///
+        /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
+        /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
     },
 }
 
@@ -926,12 +938,17 @@ mod tests {
             ),
             (
                 "Message",
-                MessageEvent::MessageDelta { delta: "he".into() }.into(),
+                MessageEvent::MessageDelta {
+                    delta: "he".into(),
+                    run_id: Some("run-1".into()),
+                }
+                .into(),
             ),
             (
                 "Message",
                 MessageEvent::ReasoningDelta {
                     delta: "thinking".into(),
+                    run_id: None,
                 }
                 .into(),
             ),
@@ -1285,6 +1302,83 @@ mod tests {
                 run_id: None,
             })
         );
+    }
+
+    #[test]
+    fn message_delta_legacy_payload_without_run_id_deserializes() {
+        // Given: a v0.1 payload without attribution.
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {"kind":"Message","payload":{"kind":"MessageDelta","payload":{"delta":"hi"}}}
+        }"#;
+
+        // When: the legacy event is decoded.
+        let restored: Event = serde_json::from_str(legacy).expect("legacy event decodes");
+
+        // Then: attribution defaults to None.
+        assert_eq!(restored.meta.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            restored.kind,
+            EventKind::Message(MessageEvent::MessageDelta {
+                delta: "hi".into(),
+                run_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_delta_legacy_payload_without_run_id_deserializes() {
+        // Given: a v0.1 payload without attribution.
+        let legacy = r#"{
+            "meta": {
+                "schema_version": 1,
+                "monotonic": {"secs": 0, "nanos": 0},
+                "wall_clock": {"secs_since_epoch": 0, "nanos_since_epoch": 0}
+            },
+            "kind": {"kind":"Message","payload":{"kind":"ReasoningDelta","payload":{"delta":"hi"}}}
+        }"#;
+
+        // When: the legacy event is decoded.
+        let restored: Event = serde_json::from_str(legacy).expect("legacy event decodes");
+
+        // Then: attribution defaults to None.
+        assert_eq!(restored.meta.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            restored.kind,
+            EventKind::Message(MessageEvent::ReasoningDelta {
+                delta: "hi".into(),
+                run_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn message_and_reasoning_delta_round_trip_with_run_id() {
+        // Given: both delta variants with explicit attribution.
+        for delta in [
+            MessageEvent::MessageDelta {
+                delta: "hi".into(),
+                run_id: Some("run-7".into()),
+            },
+            MessageEvent::ReasoningDelta {
+                delta: "thinking".into(),
+                run_id: Some("run-7".into()),
+            },
+        ] {
+            let event = Event::new(delta);
+
+            // When: the event is serialized and decoded.
+            let json = serde_json::to_string(&event).expect("event serializes");
+            let restored: Event = serde_json::from_str(&json).expect("event decodes");
+
+            // Then: the wire payload and restored event preserve attribution.
+            assert!(json.contains(r#""run_id":"run-7""#));
+            assert_eq!(restored, event);
+        }
     }
 
     #[test]

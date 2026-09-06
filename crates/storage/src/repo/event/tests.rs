@@ -2,7 +2,7 @@ use std::time::UNIX_EPOCH;
 
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
-    DeliveryDisposition, EventMeta, LifecycleEvent, OrchestratorEvent, UsageEvent,
+    DeliveryDisposition, EventMeta, LifecycleEvent, MessageEvent, OrchestratorEvent, UsageEvent,
 };
 
 use super::*;
@@ -47,6 +47,124 @@ fn append_then_list_preserves_full_event() {
 
     // Then: イベント全体が一致する
     assert_eq!(stored[0].event, expected);
+}
+
+#[test]
+fn message_delta_with_run_id_round_trips_through_sqlite() {
+    // Given: 移行済み DB と run_id を持つメッセージ差分
+    let connection = fixture();
+    let expected = Event {
+        meta: EventMeta {
+            schema_version: event_bus::SCHEMA_VERSION,
+            monotonic: Duration::ZERO,
+            wall_clock: UNIX_EPOCH,
+        },
+        kind: MessageEvent::MessageDelta {
+            delta: "hi".into(),
+            run_id: Some("run-7".into()),
+        }
+        .into(),
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: イベントを SQLite へ追記して一覧を取得する
+    append_event(
+        &connection,
+        Some("s1"),
+        &expected,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .unwrap();
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: run_id を含むイベント全体が一致する
+    assert_eq!(stored[0].event, expected);
+}
+
+#[test]
+fn reasoning_delta_with_run_id_round_trips_through_sqlite() {
+    // Given: 移行済み DB と run_id を持つ推論差分
+    let connection = fixture();
+    let expected = Event {
+        meta: EventMeta {
+            schema_version: event_bus::SCHEMA_VERSION,
+            monotonic: Duration::ZERO,
+            wall_clock: UNIX_EPOCH,
+        },
+        kind: MessageEvent::ReasoningDelta {
+            delta: "thinking".into(),
+            run_id: Some("run-7".into()),
+        }
+        .into(),
+    };
+    let mut accounting = EventAccounting::default();
+
+    // When: イベントを SQLite へ追記して一覧を取得する
+    append_event(
+        &connection,
+        Some("s1"),
+        &expected,
+        &HardLimits::default(),
+        &mut accounting,
+    )
+    .unwrap();
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: run_id を含むイベント全体が一致する
+    assert_eq!(stored[0].event, expected);
+}
+
+#[test]
+fn legacy_delta_row_without_run_id_reads_as_none() {
+    // Given: run_id のない旧形式のメッセージ差分行
+    let connection = fixture();
+    connection
+        .execute(
+            "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+             VALUES ('s1', 1, 0, 0, 'Message', '{\"kind\":\"Message\",\"payload\":{\"kind\":\"MessageDelta\",\"payload\":{\"delta\":\"old\"}}}')",
+            [],
+        )
+        .unwrap();
+
+    // When: セッションのイベントを読み出す
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: 旧形式の欠落した run_id は None として復元される
+    assert_eq!(
+        stored[0].event.kind,
+        MessageEvent::MessageDelta {
+            delta: "old".into(),
+            run_id: None,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn legacy_reasoning_delta_row_without_run_id_reads_as_none() {
+    // Given: run_id のない旧形式の推論差分行
+    let connection = fixture();
+    connection
+        .execute(
+            "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+             VALUES ('s1', 1, 0, 0, 'Message', '{\"kind\":\"Message\",\"payload\":{\"kind\":\"ReasoningDelta\",\"payload\":{\"delta\":\"old reasoning\"}}}')",
+            [],
+        )
+        .unwrap();
+
+    // When: セッションのイベントを読み出す
+    let stored = list_by_session(&connection, "s1").unwrap();
+
+    // Then: 旧形式の欠落した run_id は None として復元される
+    assert_eq!(
+        stored[0].event.kind,
+        MessageEvent::ReasoningDelta {
+            delta: "old reasoning".into(),
+            run_id: None,
+        }
+        .into()
+    );
 }
 
 #[test]

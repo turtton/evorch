@@ -1,3 +1,4 @@
+// allow: SIZE_OK - issue #85 requires the four fold regressions alongside the shared event helpers.
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -37,6 +38,7 @@ fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
+            run_id: None,
         }),
     ]);
 
@@ -62,6 +64,7 @@ fn apply_events_matches_pump_drain_ordering() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
+            run_id: None,
         }),
     ];
 
@@ -88,6 +91,161 @@ fn apply_events_matches_pump_drain_ordering() {
     // Then: both paths fold identical thread transcript entries and phases.
     assert_eq!(sync_state.transcripts().thread().entries(), pump_entries);
     assert_eq!(sync_state.thread_phases(), &pump_phases);
+}
+
+#[test]
+fn attributed_deltas_route_to_their_own_run_under_concurrency() {
+    // Given: two runs are Running.
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
+    for run_id in ["run-1", "run-2"] {
+        state.apply_events([
+            run_started(run_id, "worker", "worker"),
+            run_state_changed(run_id, AgentRunPhase::Pending, AgentRunPhase::Running),
+        ]);
+    }
+
+    // When: attributed message and reasoning deltas arrive interleaved.
+    state.apply_events([
+        Event::new(MessageEvent::MessageDelta {
+            delta: "m1".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(MessageEvent::ReasoningDelta {
+            delta: "r2".into(),
+            run_id: Some("run-2".into()),
+        }),
+        Event::new(MessageEvent::ReasoningDelta {
+            delta: "r1".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(MessageEvent::MessageDelta {
+            delta: "m2".into(),
+            run_id: Some("run-2".into()),
+        }),
+    ]);
+
+    // Then: runs remain isolated and the thread retains all text in arrival order.
+    assert_eq!(
+        state
+            .transcripts()
+            .run("run-1")
+            .expect("run-1 transcript")
+            .entries(),
+        &[
+            TranscriptEntry::Message { text: "m1".into() },
+            TranscriptEntry::Reasoning { text: "r1".into() },
+        ]
+    );
+    assert_eq!(
+        state
+            .transcripts()
+            .run("run-2")
+            .expect("run-2 transcript")
+            .entries(),
+        &[
+            TranscriptEntry::Reasoning { text: "r2".into() },
+            TranscriptEntry::Message { text: "m2".into() },
+        ]
+    );
+    assert_eq!(
+        state.transcripts().thread().entries(),
+        &[
+            TranscriptEntry::Message { text: "m1".into() },
+            // Consecutive reasoning deltas coalesce in the existing thread model.
+            TranscriptEntry::Reasoning {
+                text: "r2r1".into()
+            },
+            TranscriptEntry::Message { text: "m2".into() },
+        ]
+    );
+}
+
+#[test]
+fn attributed_delta_is_applied_exactly_once_to_sole_running_run() {
+    // Given: run-1 is the sole Running run.
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
+    state.apply_events([run_state_changed(
+        "run-1",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    )]);
+
+    // When: an attributed delta targets that run.
+    state.apply_events([Event::new(MessageEvent::MessageDelta {
+        delta: "once".into(),
+        run_id: Some("run-1".into()),
+    })]);
+
+    // Then: routing and the legacy mirror must not duplicate the text.
+    assert_eq!(
+        state
+            .transcripts()
+            .run("run-1")
+            .expect("run transcript")
+            .entries(),
+        &[TranscriptEntry::Message {
+            text: "once".into()
+        },]
+    );
+}
+
+#[test]
+fn attributed_delta_targets_its_run_even_when_another_run_is_sole_running() {
+    // Given: only run-1 is Running; run-2 has never started.
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
+    state.apply_events([run_state_changed(
+        "run-1",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    )]);
+
+    // When: a delta explicitly targets run-2.
+    state.apply_events([Event::new(MessageEvent::MessageDelta {
+        delta: "x".into(),
+        run_id: Some("run-2".into()),
+    })]);
+
+    // Then: only the attributed run receives it, regardless of lifecycle state.
+    assert_eq!(
+        state
+            .transcripts()
+            .run("run-2")
+            .expect("run-2 transcript")
+            .entries(),
+        &[TranscriptEntry::Message { text: "x".into() },]
+    );
+    assert!(state.transcripts().run("run-1").is_none());
+}
+
+#[test]
+fn legacy_runless_delta_still_mirrors_to_sole_running_run() {
+    // Given: run-1 is the sole Running run.
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
+    state.apply_events([run_state_changed(
+        "run-1",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    )]);
+
+    // When: a legacy run-less delta arrives.
+    state.apply_events([Event::new(MessageEvent::MessageDelta {
+        delta: "legacy".into(),
+        run_id: None,
+    })]);
+
+    // Then: the sole run and thread both retain the delta exactly once.
+    let expected = [TranscriptEntry::Message {
+        text: "legacy".into(),
+    }];
+    assert_eq!(
+        state
+            .transcripts()
+            .run("run-1")
+            .expect("run transcript")
+            .entries(),
+        &expected
+    );
+    assert_eq!(state.transcripts().thread().entries(), &expected);
 }
 
 struct Fixture {

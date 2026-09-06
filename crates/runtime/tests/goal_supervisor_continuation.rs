@@ -197,6 +197,7 @@ async fn message_delta_and_timer_advance_never_dispatch() {
         .bus
         .emit(Event::new(event_bus::MessageEvent::MessageDelta {
             delta: "done".into(),
+            run_id: None,
         }));
     fixture.settle().await;
 

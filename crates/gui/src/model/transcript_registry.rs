@@ -1,9 +1,10 @@
 //! run ID ごとに transcript を分離し、相関可能なイベントだけを決定的に配送する。
 //!
-//! `MessageDelta` / `ReasoningDelta` は event-bus 上に `run_id` を持たないため、通常の
-//! route では thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件
-//! の場合だけ、明示的に run transcript へ同じ delta を適用できる。Running が 0 件または
-//! 複数なら thread のみに留め、推測による run 間の混線を防ぐ。
+//! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら thread と
+//! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の legacy delta は
+//! thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件の場合だけ、
+//! 明示的に run transcript へ同じ delta を適用できる（legacy fallback）。Running が
+//! 0 件または複数なら thread のみに留め、推測による run 間の混線を防ぐ。
 
 use std::collections::BTreeMap;
 
@@ -41,10 +42,11 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { .. }) => {
-                vec![TranscriptKey::Thread]
-            }
+            EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
+                Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                None => vec![TranscriptKey::Thread],
+            },
             EventKind::Tool(ToolEvent::ToolStarted { run_id, .. })
             | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
                 run_id.as_ref().map_or_else(
@@ -153,6 +155,7 @@ impl TranscriptRegistry {
     }
 }
 
+// allow: SIZE_OK - issue #85 keeps routing regressions beside the existing registry tests.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,12 +181,37 @@ mod tests {
 
     #[test]
     fn route_message_delta_to_thread_only() {
+        // legacy run-less delta
         let registry = TranscriptRegistry::new();
         let event = Event::new(MessageEvent::MessageDelta {
             delta: "hello".into(),
+            run_id: None,
         });
 
         assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
+    }
+
+    #[test]
+    fn route_attributed_delta_to_thread_and_run() {
+        // Given: both stream variants carry an explicit run attribution.
+        let registry = TranscriptRegistry::new();
+        let events = [
+            MessageEvent::MessageDelta {
+                delta: "hello".into(),
+                run_id: Some("run-2".into()),
+            },
+            MessageEvent::ReasoningDelta {
+                delta: "thinking".into(),
+                run_id: Some("run-2".into()),
+            },
+        ];
+
+        // When: both deltas are routed.
+        let routes = events.map(|event| registry.route(&Event::new(event)));
+
+        // Then: each reaches the thread and its own run, in that order.
+        let expected = vec![TranscriptKey::Thread, TranscriptKey::Run("run-2".into())];
+        assert_eq!(routes, [expected.clone(), expected]);
     }
 
     #[test]
@@ -192,6 +220,7 @@ mod tests {
         let mut registry = TranscriptRegistry::new();
         let event = Event::new(MessageEvent::ReasoningDelta {
             delta: "considering".into(),
+            run_id: None,
         });
 
         // When: the stream delta is explicitly applied to that run.
@@ -301,6 +330,7 @@ mod tests {
         }
         registry.apply(&Event::new(MessageEvent::MessageDelta {
             delta: "thread-only".into(),
+            run_id: None,
         }));
 
         for run_id in ["run-1", "run-2", "run-3"] {

@@ -121,6 +121,7 @@ fn seed_audit_events(bus: &EventBus) -> Vec<String> {
     }));
     bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: transcript[0].clone(),
+        run_id: None,
     }));
     bus.emit(Event::new(ToolEvent::ToolStarted {
         tool_name: "read".to_string(),
@@ -152,6 +153,7 @@ fn seed_audit_events(bus: &EventBus) -> Vec<String> {
     }));
     bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: transcript[1].clone(),
+        run_id: None,
     }));
     transcript
 }
@@ -568,7 +570,7 @@ async fn raw_transcript_reconstructs_in_order() {
     let rebuilt = events
         .iter()
         .filter_map(|stored| match &stored.event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { delta }) => Some(delta.clone()),
+            EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => Some(delta.clone()),
             EventKind::Lifecycle(_)
             | EventKind::Message(MessageEvent::ReasoningDelta { .. })
             | EventKind::Tool(_)

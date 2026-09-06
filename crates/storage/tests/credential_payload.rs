@@ -37,10 +37,12 @@ fn event_kinds() -> [EventKind; 14] {
         .into(),
         MessageEvent::MessageDelta {
             delta: "text".into(),
+            run_id: None,
         }
         .into(),
         MessageEvent::ReasoningDelta {
             delta: "thought".into(),
+            run_id: None,
         }
         .into(),
         ToolEvent::ToolStarted {

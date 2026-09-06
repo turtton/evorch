@@ -28,7 +28,7 @@ fn total_event_bytes(conn: &Connection, session_id: &str) -> u64 {
 
 #[test]
 fn interrupted_session_restores_pending_output_and_open_tool_call() {
-    /* Given: 応答・推論・未完了ツールを持つセッション */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(MessageEvent::MessageDelta { delta: "Hello".into() }, 2)); append(&handle, Some("s1"), &event(MessageEvent::ReasoningDelta { delta: "think".into() }, 3)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into(), run_id: None }, 4)); storage.close(); let db = Database::open(&config).unwrap();
+    /* Given: 応答・推論・未完了ツールを持つセッション */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, Some("s1"), &event(started(), 1)); append(&handle, Some("s1"), &event(MessageEvent::MessageDelta { delta: "Hello".into(), run_id: None }, 2)); append(&handle, Some("s1"), &event(MessageEvent::ReasoningDelta { delta: "think".into(), run_id: None }, 3)); append(&handle, Some("s1"), &event(ToolEvent::ToolStarted { tool_name: "tool".into(), call_id: "c1".into(), run_id: None }, 4)); storage.close(); let db = Database::open(&config).unwrap();
     /* When: セッションを復元する */ let actual = db.restore_session("s1").unwrap();
     /* Then: 保留状態を全て復元する */ assert_eq!(actual, Some(SessionSnapshot { pending_message: "Hello".into(), pending_reasoning: "think".into(), open_tool_calls: vec![("tool".into(), "c1".into())], ..running() }));
 }
@@ -63,7 +63,7 @@ fn background_task_reconciles_completed_task_and_session_rows() {
 
 #[test]
 fn unattributed_message_is_skipped_by_restore_and_reconcile() {
-    /* Given: 帰属のないメッセージ */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, None, &event(MessageEvent::MessageDelta { delta: "orphan".into() }, 1));
+    /* Given: 帰属のないメッセージ */ let temp = TempDir::new().unwrap(); let (config, storage, handle) = open(&temp); append(&handle, None, &event(MessageEvent::MessageDelta { delta: "orphan".into(), run_id: None }, 1));
     /* When: 復元して再調整する */ let summary = handle.reconcile().unwrap(); storage.close(); let db = Database::open(&config).unwrap(); let restored = db.restore_sessions().unwrap();
     /* Then: セッション行を作らない */ assert_eq!(restored, Vec::<SessionSnapshot>::new()); assert_eq!(summary, ReconcileSummary { sessions_upserted: 0, tasks_upserted: 0 }); assert_eq!(db.session("s1").unwrap(), None);
 }

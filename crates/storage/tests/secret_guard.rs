@@ -36,6 +36,7 @@ fn message_delta(text: &str) -> Event {
     event(
         MessageEvent::MessageDelta {
             delta: text.to_owned(),
+            run_id: None,
         }
         .into(),
     )

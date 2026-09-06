@@ -138,12 +138,12 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
                 }
             }
         },
-        EventKind::Message(MessageEvent::MessageDelta { delta }) => {
+        EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
             if let Some(session) = state.session(stored) {
                 session.snapshot.pending_message.push_str(delta);
             }
         }
-        EventKind::Message(MessageEvent::ReasoningDelta { delta }) => {
+        EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => {
             if let Some(session) = state.session(stored) {
                 session.snapshot.pending_reasoning.push_str(delta);
             }
@@ -287,8 +287,9 @@ mod tests {
     #[test] fn task_started_maps_running() { /* Given/When: タスク開始を適用する */ let state = apply(LifecycleEvent::BackgroundTaskStarted { task_id: "t".into() }, Some("s1")); /* Then: 状態と帰属を写像する */ assert_eq!(state.tasks.get("t").map(|v| (v.status, v.session_id.as_deref())), Some((TaskStatus::Running, Some("s1")))); assert_eq!(session(&state).map(|v| v.task_ids.as_slice()), Some(["t".into()].as_slice())); }
     #[test] fn task_completed_maps_completed() { /* Given/When: detached タスク完了を適用する */ let state = apply(LifecycleEvent::BackgroundTaskCompleted { task_id: "t".into() }, None); /* Then: 完了状態を保持する */ assert_eq!(state.tasks.get("t").map(|v| v.status), Some(TaskStatus::Completed)); }
     #[test] fn task_cancelled_maps_failed() { /* Given/When: detached タスクキャンセルを適用する */ let state = apply(LifecycleEvent::BackgroundTaskCancelled { task_id: "t".into() }, None); /* Then: tasks.status の CHECK 制約により失敗状態へ写像される */ assert_eq!(state.tasks.get("t").map(|v| v.status), Some(TaskStatus::Failed)); }
-    #[test] fn message_delta_appends() { /* Given/When: メッセージ差分を適用する */ let state = apply(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1")); /* Then: 保留本文へ追加する */ assert_eq!(session(&state).map(|v| v.pending_message.as_str()), Some("m")); }
-    #[test] fn reasoning_delta_appends() { /* Given/When: 推論差分を適用する */ let state = apply(MessageEvent::ReasoningDelta { delta: "r".into() }, Some("s1")); /* Then: 保留推論へ追加する */ assert_eq!(session(&state).map(|v| v.pending_reasoning.as_str()), Some("r")); }
+    #[test] fn message_delta_appends() { /* Given/When: メッセージ差分を適用する */ let state = apply(MessageEvent::MessageDelta { delta: "m".into(), run_id: None }, Some("s1")); /* Then: 保留本文へ追加する */ assert_eq!(session(&state).map(|v| v.pending_message.as_str()), Some("m")); }
+    #[test] fn message_delta_with_run_id_appends() { /* Given/When: run_id 付きメッセージ差分を適用する */ let state = apply(MessageEvent::MessageDelta { delta: "m".into(), run_id: Some("run-1".into()) }, Some("s1")); /* Then: run_id を無視して保留本文へ追加する */ assert_eq!(session(&state).map(|v| v.pending_message.as_str()), Some("m")); }
+    #[test] fn reasoning_delta_appends() { /* Given/When: 推論差分を適用する */ let state = apply(MessageEvent::ReasoningDelta { delta: "r".into(), run_id: None }, Some("s1")); /* Then: 保留推論へ追加する */ assert_eq!(session(&state).map(|v| v.pending_reasoning.as_str()), Some("r")); }
     #[test] fn tool_started_opens_call() { /* Given/When: ツール開始を適用する */ let state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1")); /* Then: 未完了呼び出しへ追加する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.clone()), Some(vec![("x".into(), "c".into())])); }
     #[test] fn tool_completed_closes_call() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1")); /* When: 完了を適用する */ apply_event(&mut state, &stored(ToolEvent::ToolCompleted { tool_name: "x".into(), call_id: "c".into(), is_error: false, detail: None, run_id: None }, Some("s1"))); /* Then: 未完了一覧から除く */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([].as_slice())); }
     #[test] fn approval_requested_does_not_mutate_open_calls() { /* Given: 開いている呼び出し */ let mut state = apply(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1")); /* When: 承認要求を適用する */ apply_event(&mut state, &stored(ToolEvent::ApprovalRequested { tool_name: "y".into(), call_id: "d".into() }, Some("s1"))); /* Then: 未完了一覧を保持する */ assert_eq!(session(&state).map(|v| v.open_tool_calls.as_slice()), Some([("x".into(), "c".into())].as_slice())); }
@@ -302,7 +303,7 @@ mod tests {
     noop_test!(routing_decision_does_not_touch_sessions_or_tasks, LifecycleEvent::RoutingDecision { shape: "Direct".into(), reason: "direct-keyword".into(), source: RoutingSource::LocalRule { rule: "direct-keyword:direct".into() } });
     #[test] fn projection_ignores_agent_message_events() {
         // Given: Message/Lifecycle イベントのみで構成したイベント列
-        let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1"))];
+    let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into(), run_id: None }, Some("s1"))];
         // When: 同一列の末尾へ AgentMessage イベントを追加する
         let mut with_agent_message = base.to_vec();
         with_agent_message.push(stored(AgentMessageEvent::Delivered { message: AgentMessage { message_id: "msg-1".into(), sender_run_id: "run-1".into(), recipient_run_id: "run-2".into(), kind: AgentMessageKind::Send, content: "ping".into(), reply_to: None }, disposition: DeliveryDisposition::Steering }, Some("s1")));
@@ -311,7 +312,7 @@ mod tests {
     }
     #[test] fn projection_ignores_compaction_events() {
         // Given: Message/Lifecycle/Tool イベントのみで構成したイベント列
-        let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into() }, Some("s1")), stored(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1"))];
+    let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into(), run_id: None }, Some("s1")), stored(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None }, Some("s1"))];
         // When: 同一列の末尾へ Compaction イベントを追加する
         let mut with_compaction = base.to_vec();
         with_compaction.push(stored(CompactionEvent::Compacted { run_id: "run-1".into(), reason: CompactionReason::Automatic, threshold: 0.8, context_window_tokens: 200_000, estimated_tokens_before: 180_000, estimated_tokens_after: 60_000, compacted_range_start: 0, compacted_range_end: 42, checkpoint_id: "checkpoint-1".into(), summary: "s".into() }, Some("s1")));

@@ -16,9 +16,11 @@ pub fn demo_events() -> Vec<Event> {
         run_state_changed("run-3", AgentRunPhase::Pending, AgentRunPhase::Waiting),
         Event::new(MessageEvent::MessageDelta {
             delta: "Analysing t3code design language and mapping tokens to egui Visuals…".into(),
+            run_id: None,
         }),
         Event::new(MessageEvent::ReasoningDelta {
             delta: "Sidebar darker than canvas; surfaces stay within one luminance step.".into(),
+            run_id: None,
         }),
         tool_started("run-1", "read_file", "call-1"),
         delivered("run-1", "run-2", "Implement theme module"),
