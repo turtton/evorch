@@ -586,6 +586,7 @@ impl AgentRuntime {
             merge_mode: source_config.merge_mode,
             network_access: Default::default(),
             workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
+            ..RunConfig::default()
         };
         let source_run_id = memo.source_run_id;
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
