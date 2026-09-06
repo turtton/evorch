@@ -100,6 +100,14 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - provider 未設定ガード: ProviderStatus を composition root input として fail-closed（真の検出配線は provider-settings slice）
 - 終端整合: send_message は終端 phase 記録後に必ず拒否。terminal 公開前に user inbox close で受理→喪失 race を封鎖
 
+## v0.3 Settings surface の実装確定（issue #93、PR #94、2026-09-06）
+
+- 配置=egui::Modal の中央 overlay（dock/layout 不変、PanelKind 拡張なし）。導線=composer 案内行「Open Settings」（chat は NotConfigured でブロック継続）と Goal pane「Configure provider」（goal は非ブロッキング案内のみ）
+- 編集項目=openai-compatible の base_url/api_key_env/models/default_model（sugar 形式）。保存先=project 層 evorch.toml、config::save_openai_compatible_provider が toml_edit で additive 書き戻し（他テーブル/コメント保持、schema v2 維持、version!=2 拒否、migrate/strict/Config 逆直列化の fail-closed 事前検証、atomic tmp+rename）
+- credential ガード=api_key_env に大文字環境変数名 ^[A-Z_][A-Z0-9_]*$ のみ受理（平文拒否・ADR 0008）
+- 検出=evorch-gui 非 demo 起動時 Config::load(project_dir) の providers 非空判定（真の配線、load 失敗は NotConfigured fail-closed）
+- 検証: crates/gui/tests/provider_settings_headless.rs 9 件 + headless_capture --demo --open-settings（lavapipe）
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
