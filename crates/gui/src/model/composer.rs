@@ -74,7 +74,10 @@ pub fn help_text() -> String {
         .join("\n")
 }
 
-pub const PROVIDER_MISSING_GUIDANCE: &str = "No provider configured yet — set up a provider in provider settings (coming in v0.3). /goal and /help still work.";
+pub const PROVIDER_MISSING_GUIDANCE: &str = "No provider configured yet — open Settings to add an openai-compatible provider. /goal and /help still work.";
+
+/// Goal ペイン専用の案内。ペイン間でラベルが重複しない文面にする。
+pub const GOAL_PROVIDER_GUIDANCE: &str = "No provider configured — goals can be submitted, but agents cannot run until a provider is set up in Settings.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderStatus {
@@ -98,6 +101,22 @@ pub struct ComposerModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guidance_points_to_settings_with_distinct_pane_labels() {
+        // Given
+        let composer = PROVIDER_MISSING_GUIDANCE;
+        let goal = GOAL_PROVIDER_GUIDANCE;
+        // When
+        let settings_available =
+            composer.contains("Settings") && !composer.contains("coming in v0.3");
+        // Then
+        assert!(
+            settings_available,
+            "composer guidance must point to available Settings"
+        );
+        assert_ne!(goal, composer);
+    }
 
     #[test]
     fn parse_empty_and_whitespace_is_empty() {
