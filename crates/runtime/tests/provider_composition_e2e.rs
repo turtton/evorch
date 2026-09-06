@@ -171,12 +171,17 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     let message_deltas = drained
         .iter()
         .filter_map(|event| match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => Some(delta.as_str()),
+            EventKind::Message(MessageEvent::MessageDelta { delta, run_id }) => {
+                Some((delta.as_str(), run_id.clone()))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(message_deltas.contains(&"worker final text"));
-    assert!(message_deltas.contains(&"orchestrator final text"));
+    assert!(
+        message_deltas.contains(&("worker final text", Some(worker.run_id.to_string()))),
+        "worker attribution missing: {message_deltas:?}"
+    );
+    assert!(message_deltas.contains(&("orchestrator final text", Some(root.to_string()))));
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 4);
