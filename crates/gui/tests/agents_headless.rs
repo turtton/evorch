@@ -258,6 +258,7 @@ fn three_transcript_panes_do_not_mix_run_events() {
 
 #[test]
 fn stream_delta_mirrors_to_sole_running_run_pane() {
+    // legacy run-less delta
     // Given: exactly one run has entered Running phase.
     let mut fixture = Fixture::new(vec![summary(1, "worker-one", "worker")]);
     fixture.bus.emit(run_state_changed(
@@ -314,6 +315,7 @@ fn stream_delta_mirrors_to_sole_running_run_pane() {
 
 #[test]
 fn stream_delta_stays_thread_only_when_two_runs_running() {
+    // legacy run-less delta
     // Given: two runs have both entered Running phase.
     let mut fixture = Fixture::new(vec![
         summary(1, "worker-one", "worker"),
@@ -350,6 +352,43 @@ fn stream_delta_stays_thread_only_when_two_runs_running() {
             text: "shared ambiguity".into(),
         }]
     );
+}
+
+#[test]
+fn attributed_stream_delta_renders_in_its_run_pane() {
+    // Given: two runs have both entered Running phase.
+    let mut fixture = Fixture::new(vec![
+        summary(1, "worker-one", "worker"),
+        summary(2, "reviewer-two", "reviewer"),
+    ]);
+    for run_id in ["run-1", "run-2"] {
+        fixture.emit(run_state_changed(
+            run_id,
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+        ));
+    }
+
+    // When: run-2 emits an attributed stream delta through the event pump.
+    fixture.emit(Event::new(MessageEvent::MessageDelta {
+        delta: "attributed response".into(),
+        run_id: Some("run-2".into()),
+    }));
+
+    // Then: only run-2's pane renders the message.
+    for (run_id, visible) in [("run-2", true), ("run-1", false)] {
+        let transcript = fixture.workbench.state().transcripts().run(run_id).cloned();
+        let mut pane = Harness::new_ui(move |ui| {
+            gui::panes::agent_transcript::agent_transcript_pane(ui, run_id, transcript.as_ref());
+        });
+        pane.run();
+        assert_eq!(
+            pane.query_by_label("Message: attributed response")
+                .is_some(),
+            visible,
+            "{run_id}"
+        );
+    }
 }
 
 #[test]

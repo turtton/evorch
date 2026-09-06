@@ -41,10 +41,11 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { .. }) => {
-                vec![TranscriptKey::Thread]
-            }
+            EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
+                Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                None => vec![TranscriptKey::Thread],
+            },
             EventKind::Tool(ToolEvent::ToolStarted { run_id, .. })
             | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
                 run_id.as_ref().map_or_else(
@@ -153,6 +154,7 @@ impl TranscriptRegistry {
     }
 }
 
+// allow: SIZE_OK - issue #85 keeps routing regressions beside the existing registry tests.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +180,7 @@ mod tests {
 
     #[test]
     fn route_message_delta_to_thread_only() {
+        // legacy run-less delta
         let registry = TranscriptRegistry::new();
         let event = Event::new(MessageEvent::MessageDelta {
             delta: "hello".into(),
@@ -185,6 +188,29 @@ mod tests {
         });
 
         assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
+    }
+
+    #[test]
+    fn route_attributed_delta_to_thread_and_run() {
+        // Given: both stream variants carry an explicit run attribution.
+        let registry = TranscriptRegistry::new();
+        let events = [
+            MessageEvent::MessageDelta {
+                delta: "hello".into(),
+                run_id: Some("run-2".into()),
+            },
+            MessageEvent::ReasoningDelta {
+                delta: "thinking".into(),
+                run_id: Some("run-2".into()),
+            },
+        ];
+
+        // When: both deltas are routed.
+        let routes = events.map(|event| registry.route(&Event::new(event)));
+
+        // Then: each reaches the thread and its own run, in that order.
+        let expected = vec![TranscriptKey::Thread, TranscriptKey::Run("run-2".into())];
+        assert_eq!(routes, [expected.clone(), expected]);
     }
 
     #[test]

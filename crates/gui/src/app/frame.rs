@@ -42,17 +42,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_event(&mut self, event: &Event) {
-        // Fold lifecycle state first so each following stream delta observes all earlier phase
-        // events in this fold. Deltas have no run_id, so mirror only when exactly one run is
-        // Running; zero or concurrent Running runs remain thread-only to prevent contamination.
+        // Fold lifecycle state first so deltas observe earlier phase events.
+        // Attributed deltas route by payload run_id in TranscriptRegistry::route;
+        // this sole-Running mirror is a legacy fallback for run-less deltas only.
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
-        if matches!(
-            event.kind,
-            EventKind::Message(
-                MessageEvent::MessageDelta { .. } | MessageEvent::ReasoningDelta { .. }
-            )
-        ) {
+        if let EventKind::Message(
+            MessageEvent::MessageDelta { run_id: None, .. }
+            | MessageEvent::ReasoningDelta { run_id: None, .. },
+        ) = &event.kind
+        {
             let mut running = self
                 .phases
                 .iter()
