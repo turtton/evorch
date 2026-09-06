@@ -49,6 +49,7 @@ tokio = { version = "1", features = ["sync"] }
 tokio-rustls = "0.26"
 # Used by workspace-ui for development-time configuration serialization.
 toml = "1"
+toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 wiremock = "0.6"
