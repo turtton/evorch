@@ -1,6 +1,6 @@
 use egui::{
-    Button, Color32, CornerRadius, Frame, Margin, Response, RichText, Sense, Stroke, Ui, UiBuilder,
-    WidgetInfo, WidgetType,
+    Align, Button, Color32, CornerRadius, Frame, Layout, Margin, Response, RichText, Sense, Stroke,
+    Ui, UiBuilder, WidgetInfo, WidgetType,
 };
 
 use super::text::{h3, muted};
@@ -36,9 +36,9 @@ pub fn card(ui: &mut Ui, accent: Color32, add: impl FnOnce(&mut Ui)) {
 }
 
 pub fn status_dot(ui: &mut Ui, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-    let center = rect.center();
-    ui.painter().circle_filled(center, 4.0, color);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(DOT_SIZE, DOT_SIZE), Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), DOT_SIZE / 2.0, color);
     response
 }
 
@@ -83,17 +83,27 @@ pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> 
     } else {
         ui.visuals().faint_bg_color
     };
-    Frame::new()
+    let mut prepared = Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(R_SM))
-        .show(ui, |ui| {
-            let response = ui.horizontal_wrapped(|ui| add(ui)).response;
-            let hovered = response.hovered();
-            if hovered && !selected {
-                ui.painter()
-                    .rect_filled(response.rect, CornerRadius::same(R_SM), HOVER_ROW);
-            }
-            response
-        })
-        .response
+        .inner_margin(Margin::symmetric(SP_2 as i8, 0))
+        .begin(ui);
+    let response = {
+        let content = &mut prepared.content_ui;
+        let width = content.available_width();
+        content
+            .allocate_ui_with_layout(
+                egui::vec2(width, ROW_DENSE),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_size(egui::vec2(width, ROW_DENSE));
+                    add(ui)
+                },
+            )
+            .response
+    };
+    if response.hovered() && !selected {
+        prepared.frame.fill = HOVER_ROW;
+    }
+    prepared.end(ui)
 }

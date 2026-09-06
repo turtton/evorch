@@ -115,6 +115,14 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.query_all_by_label(label).count()
     }
 
+    /// 指定ラベルに一致する UI node の矩形を出現順で返します（geometry 検証用）。
+    pub fn label_rects(&self, label: &str) -> Vec<egui::Rect> {
+        self.harness
+            .query_all_by_label(label)
+            .map(|node| node.rect())
+            .collect()
+    }
+
     /// modifier 付きキー入力を次フレームへ送ります。
     pub fn key_press(&self, modifiers: Modifiers, key: Key) {
         self.harness.key_press_modifiers(modifiers, key);

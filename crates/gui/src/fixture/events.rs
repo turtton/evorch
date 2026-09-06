@@ -29,6 +29,15 @@ pub fn demo_events() -> Vec<Event> {
     ]
 }
 
+/// demo の active thread (run-3 経由) を Error 状態にする追加 event。headless capture の赤ドット検証用。
+pub fn demo_error_events() -> Vec<Event> {
+    vec![run_state_changed(
+        "run-3",
+        AgentRunPhase::Waiting,
+        AgentRunPhase::Error,
+    )]
+}
+
 fn run_started(run_id: &str, agent_name: &str, role: &str, parent_run_id: Option<&str>) -> Event {
     Event::new(LifecycleEvent::AgentRunStarted {
         run_id: run_id.into(),

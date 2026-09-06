@@ -3,7 +3,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use gui::app::WorkbenchState;
-use gui::fixture::{DemoSource, demo_runs, demo_sidebar, populate};
+use gui::fixture::{DemoSource, demo_error_events, demo_runs, demo_sidebar, populate};
 use gui::headless::HeadlessWorkbench;
 use workspace_ui::UiSettings;
 
@@ -13,6 +13,7 @@ const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
 struct CaptureArgs {
     output: PathBuf,
     demo: bool,
+    error_thread: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
 }
@@ -38,6 +39,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())?,
     };
+    if capture.error_thread {
+        state.apply_events(demo_error_events());
+    }
     if let Some(id) = capture.activate.as_deref() {
         let path = state
             .dock()
@@ -66,6 +70,7 @@ fn parse_args(
 ) -> Result<CaptureArgs, Box<dyn Error>> {
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
+    let mut error_thread = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
     while let Some(argument) = arguments.next() {
@@ -103,6 +108,10 @@ fn parse_args(
             }
             Some("--demo") if demo => return Err("unexpected additional arguments".into()),
             Some("--demo") => demo = true,
+            Some("--error-thread") if error_thread => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--error-thread") => error_thread = true,
             Some(flag) if flag.starts_with('-') => {
                 return Err("unexpected additional arguments".into());
             }
@@ -114,9 +123,13 @@ fn parse_args(
             }
         }
     }
+    if error_thread && !demo {
+        return Err("--error-thread requires --demo".into());
+    }
     Ok(CaptureArgs {
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
+        error_thread,
         activate,
         pointer,
     })
@@ -124,14 +137,15 @@ fn parse_args(
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--error-thread] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
 
 Captures a 1280x720 headless workbench frame as PNG.
 
 Modes:
-  (default)      empty workbench state
-  --demo         deterministic populated workbench (fixture::populate)
-  --activate ID  activate the given panel tab before capturing (e.g. merge-main)
+   (default)      empty workbench state
+   --demo         deterministic populated workbench (fixture::populate)
+   --error-thread  with --demo: mark the active demo thread as Error (red status dot)
+   --activate ID  activate the given panel tab before capturing (e.g. merge-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
 The output path comes from --out PATH or a single positional PATH
@@ -145,6 +159,7 @@ CI:    the headless-capture job runs the same command with WGPU_BACKEND=vulkan.
 }
 
 #[cfg(test)]
+// allow: SIZE_OK — private CLI parser の既存BDDテストを同一ファイルに維持するため。
 mod tests {
     use super::{DEFAULT_OUTPUT, parse_args};
 
@@ -205,6 +220,42 @@ mod tests {
         assert!(parsed.iter().all(|capture| capture.demo));
         assert_eq!(parsed[1].output, std::path::PathBuf::from("x.png"));
         assert_eq!(parsed[2].output, std::path::PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn parse_args_accepts_error_thread_with_demo() {
+        // Given: --error-thread alongside --demo
+        let arguments = args(["--demo", "--error-thread"]);
+
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("error-thread demo form must parse");
+
+        // Then: the demo error-thread mode is enabled
+        assert!(capture.error_thread);
+    }
+
+    #[test]
+    fn parse_args_rejects_error_thread_without_demo() {
+        // Given: --error-thread without --demo
+        let arguments = args(["--error-thread"]);
+
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("error-thread without demo must fail");
+
+        // Then: the demo-mode requirement is reported
+        assert_eq!(error.to_string(), "--error-thread requires --demo");
+    }
+
+    #[test]
+    fn parse_args_rejects_duplicate_error_thread() {
+        // Given: --error-thread supplied twice in demo mode
+        let arguments = args(["--demo", "--error-thread", "--error-thread"]);
+
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("duplicate --error-thread must fail");
+
+        // Then: the existing unexpected-arguments error is reported
+        assert_eq!(error.to_string(), "unexpected additional arguments");
     }
 
     #[test]

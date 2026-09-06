@@ -4,6 +4,53 @@ use egui_kittest::{
     Harness,
     kittest::{By, Queryable},
 };
+use gui::theme::tokens::{ACCENT, DOT_SIZE, ROW_DENSE};
+use gui::theme::widgets::{compact_row, status_dot};
+
+#[test]
+fn compact_row_is_dense_and_centers_status_dot() {
+    // Given: a themed compact row containing a status dot and a single-line title
+    let row_rect = std::cell::Cell::new(egui::Rect::ZERO);
+    let dot_rect = std::cell::Cell::new(egui::Rect::ZERO);
+    let title_rect = std::cell::Cell::new(egui::Rect::ZERO);
+    let mut harness = Harness::builder()
+        .with_size(vec2(400.0, 300.0))
+        .build_ui(|ui| {
+            gui::theme::install(ui.ctx());
+            row_rect.set(
+                compact_row(ui, false, |ui| {
+                    dot_rect.set(status_dot(ui, ACCENT).rect);
+                    title_rect.set(
+                        ui.add_sized(
+                            vec2(ui.available_width(), ROW_DENSE),
+                            egui::Label::new("evorch")
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        )
+                        .rect,
+                    );
+                })
+                .rect,
+            );
+        });
+
+    // When: the layout settles
+    harness.run();
+
+    // Then: the dense row centers both widgets without overlap
+    let row = row_rect.get();
+    let dot = dot_rect.get();
+    let title = title_rect.get();
+    assert!(
+        (row.height() - ROW_DENSE).abs() <= 0.5,
+        "row height {} should be {ROW_DENSE} +/- 0.5; row={row:?}, dot={dot:?}, title={title:?}",
+        row.height()
+    );
+    assert_eq!(dot.size(), vec2(DOT_SIZE, DOT_SIZE));
+    assert!((dot.center().y - row.center().y).abs() <= 0.5);
+    assert!((title.center().y - row.center().y).abs() <= 0.5);
+    assert!(dot.right() <= title.left());
+}
 
 #[test]
 fn pane_root_exposes_title_as_accessible_pane_landmark() {

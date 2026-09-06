@@ -16,7 +16,7 @@ use crate::model::commands::{
 };
 use crate::model::tasks::AgentRunSource;
 
-pub use events::demo_events;
+pub use events::{demo_error_events, demo_events};
 pub use sidebar::{FixtureError, demo_sidebar};
 
 /// demo 固定 run 一覧を返す [`AgentRunSource`]。

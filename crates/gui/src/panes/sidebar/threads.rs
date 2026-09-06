@@ -1,16 +1,14 @@
 use std::collections::BTreeMap;
 
-use egui::{Sense, Ui};
+use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{ProjectRecord, SidebarState, ThreadRunPhase, ThreadState};
 
 use crate::theme::text::h4;
 use crate::theme::tokens::state_color;
-use crate::theme::tokens::{ROW_COMPACT, SP_2};
+use crate::theme::tokens::{ROW_DENSE, SP_2};
 use crate::theme::widgets::{compact_row, empty_state, primary_button, status_dot};
 
 use super::{SidebarAction, SidebarUiState};
-
-const THREAD_ROW_RIGHT_WIDTH: f32 = 140.0;
 
 pub fn render(
     ui: &mut Ui,
@@ -59,21 +57,23 @@ pub fn render(
                 *action = Some(SidebarAction::TogglePin(thread.id.clone()));
             }
             status_dot(ui, state_color(state));
-            let title_width = (ui.available_width() - THREAD_ROW_RIGHT_WIDTH).max(40.0);
-            let title_response = ui.add_sized(
-                egui::vec2(title_width, ROW_COMPACT),
-                egui::Label::new(&thread.title)
-                    .truncate()
-                    .sense(Sense::click()),
-            );
-            if title_response.clicked() {
-                *action = Some(SidebarAction::SwitchThread(thread.id.clone()));
-            }
-            ui.label(thread_state_label(state));
-            let pause = if thread.paused { "Resume" } else { "Pause" };
-            if ui.button(pause).clicked() {
-                *action = Some(SidebarAction::TogglePause(thread.id.clone()));
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let pause = if thread.paused { "Resume" } else { "Pause" };
+                if ui.button(pause).clicked() {
+                    *action = Some(SidebarAction::TogglePause(thread.id.clone()));
+                }
+                ui.label(thread_state_label(state));
+                let title_response = ui.add_sized(
+                    egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
+                    egui::Label::new(&thread.title)
+                        .truncate()
+                        .halign(Align::LEFT)
+                        .sense(Sense::click()),
+                );
+                if title_response.clicked() {
+                    *action = Some(SidebarAction::SwitchThread(thread.id.clone()));
+                }
+            });
         });
         if let (Some(branch), Some(worktree)) = (&thread.branch, &thread.worktree_path) {
             ui.label(crate::theme::text::muted(format!(
