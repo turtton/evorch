@@ -216,3 +216,6 @@
 {"ts":"2026-09-06T11:06:08.7723066+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":90}
 {"ts":"2026-09-06T11:07:58.330344+00:00","execution_unit":"v03-gui-chat-composer","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v03-gui-chat-composer/"}
 {"ts":"2026-09-06T11:08:00.7194093+00:00","execution_unit":"v03-gui-chat-composer","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#91","reason":"https://github.com/turtton/evorch/issues/91"}
+{"ts":"2026-09-06T13:04:09.9972479+00:00","execution_unit":"v03-gui-chat-composer","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":92}
+{"ts":"2026-09-06T13:09:20.1067213+00:00","execution_unit":"v03-gui-chat-composer","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":92}
+{"ts":"2026-09-06T13:09:20.1067213+00:00","execution_unit":"v03-gui-chat-composer","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":92}
