@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T16:05:25.5645146+00:00",
+  "updated_at": "2026-09-06T19:02:19.7410999+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1162,7 +1162,7 @@
     {
       "execution_unit": "v03-followup-cleanups",
       "title": "v0.3: follow-up \u6574\u7406\uFF08ReasoningDelta production emit / frame.rs legacy mirror \u64A4\u53BB / agents \u30B0\u30EA\u30C3\u30C9\u5217\u5E45\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1176,6 +1176,7 @@
         "number": 96,
         "url": "https://github.com/turtton/evorch/issues/96"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/97",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
