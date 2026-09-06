@@ -138,6 +138,13 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - headless 実 run E2E は 127.0.0.1 recording mock 方式で、goal → worker → edit tool → 応答テキストの MessageDelta 発行までを検証
 - CI 安定化（同 PR 同梱）: WorkspaceSeam::with_factory による test 用 seam 注入、goal 結合 race の決定論化（GoalCreated 待機）、worktree branch 解放 race の有限 retry（100×100ms）
 
+## v0.3 run_id attribution の実装確定（issue #85/#78、PR #86、2026-09-06）
+
+- run_id attribution の確定方式: MessageDelta/ReasoningDelta への `#[serde(default)] run_id: Option<String>` additive 拡張（ToolStarted/ToolCompleted 先例準拠、SCHEMA_VERSION=1 維持、skip_serializing_if なし）。emit 側は `Some(self.task.run_id.to_string())`（runtime/agent_loop.rs）
+- 並行 run streaming の配送保証: payload の run_id が唯一の帰属根拠。GUI TranscriptRegistry::route は Some→[Thread, Run(id)] / None→[Thread] のみ。frame.rs の単一 Running 推測ミラーは run_id: None の legacy delta 限定に縮小（二重適用防止）
+- otel / storage への追従: otel は Message variant 全体を従来どおり非写像（run_id 付きでも lock テスト済み）。storage は EventKind 全体を JSON payload 保存のため schema migration 不要、projection は run_id を無視して蓄積、SecretGuard は run_id をスキャンしない（内部生成識別子）
+- follow-up 候補: ReasoningDelta の production emit 経路新設（現状 runtime は Reasoning を bus event 化しない）、frame.rs legacy mirror（run_id: None 向け）の将来的撤去
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
