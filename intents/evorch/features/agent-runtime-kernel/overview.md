@@ -145,6 +145,13 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 - otel / storage への追従: otel は Message variant 全体を従来どおり非写像（run_id 付きでも lock テスト済み）。storage は EventKind 全体を JSON payload 保存のため schema migration 不要、projection は run_id を無視して蓄積、SecretGuard は run_id をスキャンしない（内部生成識別子）
 - follow-up 候補: ReasoningDelta の production emit 経路新設（現状 runtime は Reasoning を bus event 化しない）、frame.rs legacy mirror（run_id: None 向け）の将来的撤去
 
+## v0.3 streaming mock + burst 検証の実装確定（issue #89、PR #90、2026-09-06）
+
+- streaming mock は新規 crate crates/mock-openai（lib のみ、std+serde_json で外部依存ゼロ）。ScriptedResponse::text_stream/tool_call が OpenAI wire 形式の SSE frame 列を生成し、StreamingMockOpenAi が std-TCP HTTP/1.1 server として script を FIFO 消費・request 記録（path/authorization/body/stream flag）。body["stream"]==true なら SSE（FramePerWrite/WholeBody 両モード）、それ以外なら JSON（dual-mode）
+- 消費側検証: mock crate の client contract テスト（providers の実 client で SSE 検証）+ runtime E2E（compose_runtime 経由の complete()/JSON 経路、実 edit tool 完走）
+- burst 検証: EventBus(容量 8192)→EventPump→WorkbenchState へ 1500 events/tick × 20 ticks（計 30,000 MessageDelta、2 run 交互）で drop/lag ゼロ、run 別順序と連結本文の完全一致。計測 508,075 events/sec、tick latency p50 1.925ms / max 2.632ms（bus→pump drain のみ）
+- ボトルネック所見: 現在の runtime agent run は provider SSE を使わず complete() 一発（stream:false）。per-token streaming を GUI に届けるには AgentModel trait の stream 対応 + agent_loop の delta 中継が別途必要。event-bus→GUI 経路は 30k events/60ms を処理可能。主な drop リスクは broadcast 容量超過時の Lagged（EventPump が無視）+ GUI frame 停止時の受信停滞
+
 ## 受け入れ基準
 
 - AgentRun を Tokio task として起動・停止でき、各 run が独立 context を持つこと
