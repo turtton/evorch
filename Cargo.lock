@@ -2077,6 +2077,7 @@ dependencies = [
  "tokio",
  "tools",
  "tracing",
+ "tracing-subscriber",
  "workspace-ui",
 ]
 

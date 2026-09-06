@@ -1,4 +1,4 @@
-use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::RunId;
 use workspace_ui::{KeyAction, PanelId, ThreadRunPhase, Workspace};
 
@@ -42,27 +42,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_event(&mut self, event: &Event) {
-        // Fold lifecycle state first so deltas observe earlier phase events.
-        // Attributed deltas route by payload run_id in TranscriptRegistry::route;
-        // this sole-Running mirror is a legacy fallback for run-less deltas only.
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
-        if let EventKind::Message(
-            MessageEvent::MessageDelta { run_id: None, .. }
-            | MessageEvent::ReasoningDelta { run_id: None, .. },
-        ) = &event.kind
-        {
-            let mut running = self
-                .phases
-                .iter()
-                .filter(|(_, phase)| **phase == ThreadRunPhase::Running)
-                .map(|(run_id, _)| run_id.as_str());
-            if let Some(run_id) = running.next()
-                && running.next().is_none()
-            {
-                self.transcripts.apply_stream_delta(run_id, event);
-            }
-        }
         self.tasks.apply_event(event);
         self.telemetry.apply_event(event);
     }

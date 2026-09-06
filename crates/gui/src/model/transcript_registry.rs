@@ -1,10 +1,8 @@
-//! run ID ごとに transcript を分離し、相関可能なイベントだけを決定的に配送する。
+//! Transcript 配送の責務を集約し、run ID ごとにイベントを分離する。
 //!
 //! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら thread と
-//! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の legacy delta は
-//! thread transcript のみに残る。呼び出し側で Running の run が厳密に 1 件の場合だけ、
-//! 明示的に run transcript へ同じ delta を適用できる（legacy fallback）。Running が
-//! 0 件または複数なら thread のみに留め、推測による run 間の混線を防ぐ。
+//! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
+//! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
 
 use std::collections::BTreeMap;
 
@@ -45,7 +43,7 @@ impl TranscriptRegistry {
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
                 Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
-                None => vec![TranscriptKey::Thread],
+                None => Vec::new(),
             },
             EventKind::Tool(ToolEvent::ToolStarted { run_id, .. })
             | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
@@ -76,6 +74,32 @@ impl TranscriptRegistry {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::Message(
+                MessageEvent::MessageDelta { run_id: None, .. }
+                | MessageEvent::ReasoningDelta { run_id: None, .. },
+            ) => {
+                tracing::warn!("dropped run-less stream delta");
+                return;
+            }
+            EventKind::Message(
+                MessageEvent::MessageDelta {
+                    run_id: Some(_), ..
+                }
+                | MessageEvent::ReasoningDelta {
+                    run_id: Some(_), ..
+                },
+            )
+            | EventKind::Lifecycle(_)
+            | EventKind::Tool(_)
+            | EventKind::Usage(_)
+            | EventKind::Provider(_)
+            | EventKind::Fault(_)
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => {}
+        }
+
         if let EventKind::Tool(ToolEvent::ToolStarted {
             call_id,
             run_id: Some(run_id),
@@ -114,24 +138,6 @@ impl TranscriptRegistry {
                     self.runs.entry(run_id).or_default().apply(event);
                 }
             }
-        }
-    }
-
-    /// `run_id` を持たない stream delta を、既知の対象 run に明示的に適用する。
-    pub fn apply_stream_delta(&mut self, run_id: &str, event: &Event) {
-        match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { .. }) => {
-                self.runs.entry(run_id.to_owned()).or_default().apply(event);
-            }
-            EventKind::Lifecycle(_)
-            | EventKind::Tool(_)
-            | EventKind::Usage(_)
-            | EventKind::Provider(_)
-            | EventKind::Fault(_)
-            | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) => {}
         }
     }
 
@@ -198,15 +204,25 @@ mod tests {
     }
 
     #[test]
-    fn route_message_delta_to_thread_only() {
-        // legacy run-less delta
+    fn route_runless_delta_to_nowhere() {
+        // Given: both stream variants have no run attribution.
         let registry = TranscriptRegistry::new();
-        let event = Event::new(MessageEvent::MessageDelta {
-            delta: "hello".into(),
-            run_id: None,
-        });
+        let events = [
+            MessageEvent::MessageDelta {
+                delta: "hello".into(),
+                run_id: None,
+            },
+            MessageEvent::ReasoningDelta {
+                delta: "thinking".into(),
+                run_id: None,
+            },
+        ];
 
-        assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
+        // When: both deltas are routed.
+        let routes = events.map(|event| registry.route(&Event::new(event)));
+
+        // Then: neither has a transcript destination.
+        assert_eq!(routes, [vec![], vec![]]);
     }
 
     #[test]
@@ -230,28 +246,6 @@ mod tests {
         // Then: each reaches the thread and its own run, in that order.
         let expected = vec![TranscriptKey::Thread, TranscriptKey::Run("run-2".into())];
         assert_eq!(routes, [expected.clone(), expected]);
-    }
-
-    #[test]
-    fn apply_stream_delta_creates_and_updates_target_run() {
-        // Given: no transcript model exists for the target run.
-        let mut registry = TranscriptRegistry::new();
-        let event = Event::new(MessageEvent::ReasoningDelta {
-            delta: "considering".into(),
-            run_id: None,
-        });
-
-        // When: the stream delta is explicitly applied to that run.
-        registry.apply_stream_delta("run-1", &event);
-
-        // Then: the target model is created with the reasoning entry only.
-        assert_eq!(
-            registry.run("run-1").expect("run transcript").entries(),
-            &[TranscriptEntry::Reasoning {
-                text: "considering".into(),
-            }]
-        );
-        assert!(registry.thread().entries().is_empty());
     }
 
     #[test]
@@ -361,11 +355,6 @@ mod tests {
                 }]
             );
         }
-        assert_eq!(
-            registry.thread().entries(),
-            &[TranscriptEntry::Message {
-                text: "thread-only".into(),
-            }]
-        );
+        assert!(registry.thread().entries().is_empty());
     }
 }

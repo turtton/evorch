@@ -121,7 +121,7 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
     ]);
     fixture.emit(Event::new(MessageEvent::MessageDelta {
         delta: "thread-only text".into(),
-        run_id: None,
+        run_id: Some("run-1".into()),
     }));
     fixture.emit(tool_started("run-1", "read-one", "call-one"));
     fixture.emit(tool_started("run-2", "review-two", "call-two"));
@@ -257,8 +257,7 @@ fn three_transcript_panes_do_not_mix_run_events() {
 }
 
 #[test]
-fn stream_delta_mirrors_to_sole_running_run_pane() {
-    // legacy run-less delta
+fn runless_delta_never_reaches_sole_running_run_pane() {
     // Given: exactly one run has entered Running phase.
     let mut fixture = Fixture::new(vec![summary(1, "worker-one", "worker")]);
     fixture.bus.emit(run_state_changed(
@@ -284,38 +283,36 @@ fn stream_delta_mirrors_to_sole_running_run_pane() {
         .state()
         .transcripts()
         .run("run-1")
-        .expect("run transcript")
-        .clone();
+        .cloned();
     let mut pane = Harness::new_ui(move |ui| {
-        gui::panes::agent_transcript::agent_transcript_pane(ui, "run-1", Some(&transcript));
+        gui::panes::agent_transcript::agent_transcript_pane(ui, "run-1", transcript.as_ref());
     });
     pane.run();
 
-    // Then: the run pane renders the response and the thread retains it too.
-    assert!(pane.query_by_label("Message: sole run response").is_some());
-    assert_eq!(
+    // Then: the run pane stays empty and neither transcript retains the delta.
+    assert!(pane.query_by_label("no events for run-1").is_some());
+    assert!(pane.query_by_label("Message: sole run response").is_none());
+    assert!(
         fixture
             .workbench
             .state()
             .transcripts()
             .run("run-1")
-            .expect("run transcript")
-            .entries(),
-        &[TranscriptEntry::Message {
-            text: "sole run response".into(),
-        }]
+            .is_none()
     );
-    assert_eq!(
-        fixture.workbench.state().transcripts().thread().entries(),
-        &[TranscriptEntry::Message {
-            text: "sole run response".into(),
-        }]
+    assert!(
+        fixture
+            .workbench
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .is_empty()
     );
 }
 
 #[test]
-fn stream_delta_stays_thread_only_when_two_runs_running() {
-    // legacy run-less delta
+fn runless_reasoning_delta_is_dropped_when_two_runs_running() {
     // Given: two runs have both entered Running phase.
     let mut fixture = Fixture::new(vec![
         summary(1, "worker-one", "worker"),
@@ -335,7 +332,7 @@ fn stream_delta_stays_thread_only_when_two_runs_running() {
         run_id: None,
     }));
 
-    // Then: neither run is guessed, while the thread transcript receives the delta.
+    // Then: neither run is guessed and the thread also stays empty.
     for run_id in ["run-1", "run-2"] {
         assert!(
             fixture
@@ -346,11 +343,14 @@ fn stream_delta_stays_thread_only_when_two_runs_running() {
                 .is_none()
         );
     }
-    assert_eq!(
-        fixture.workbench.state().transcripts().thread().entries(),
-        &[TranscriptEntry::Reasoning {
-            text: "shared ambiguity".into(),
-        }]
+    assert!(
+        fixture
+            .workbench
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .is_empty()
     );
 }
 
