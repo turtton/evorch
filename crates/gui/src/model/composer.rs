@@ -1,0 +1,230 @@
+pub struct SlashCommandSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub argument_hint: Option<&'static str>,
+}
+
+pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
+    SlashCommandSpec {
+        name: "goal",
+        description: "Submit a goal through the Goal panel flow",
+        argument_hint: Some("<text>"),
+    },
+    SlashCommandSpec {
+        name: "help",
+        description: "Show available commands",
+        argument_hint: None,
+    },
+];
+
+pub enum ComposerInput<'a> {
+    Empty,
+    Chat(&'a str),
+    Command {
+        spec: &'static SlashCommandSpec,
+        args: &'a str,
+    },
+    UnknownCommand {
+        name: &'a str,
+    },
+}
+
+pub fn parse_input(raw: &str) -> ComposerInput<'_> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ComposerInput::Empty;
+    }
+    let Some(command) = trimmed.strip_prefix('/') else {
+        return ComposerInput::Chat(trimmed);
+    };
+    let (name, rest) = command
+        .split_once(char::is_whitespace)
+        .unwrap_or((command, ""));
+    match SLASH_COMMANDS.iter().find(|spec| spec.name == name) {
+        Some(spec) => ComposerInput::Command {
+            spec,
+            args: rest.trim(),
+        },
+        None => ComposerInput::UnknownCommand { name },
+    }
+}
+
+pub fn completions(raw: &str) -> Vec<&'static SlashCommandSpec> {
+    let Some(prefix) = raw.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if prefix.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    SLASH_COMMANDS
+        .iter()
+        .filter(|spec| spec.name.starts_with(prefix))
+        .collect()
+}
+
+/// Lists commands in declaration order, without a trailing newline.
+pub fn help_text() -> String {
+    SLASH_COMMANDS
+        .iter()
+        .map(|spec| match spec.argument_hint {
+            Some(hint) => format!("/{} {hint} — {}", spec.name, spec.description),
+            None => format!("/{} — {}", spec.name, spec.description),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub const PROVIDER_MISSING_GUIDANCE: &str = "No provider configured yet — set up a provider in provider settings (coming in v0.3). /goal and /help still work.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderStatus {
+    Configured,
+    NotConfigured { guidance: String },
+}
+
+impl Default for ProviderStatus {
+    fn default() -> Self {
+        Self::NotConfigured {
+            guidance: PROVIDER_MISSING_GUIDANCE.into(),
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct ComposerModel {
+    pub input: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_empty_and_whitespace_is_empty() {
+        // Given
+        for raw in ["", "  \t\n", "\u{3000}"] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Empty));
+        }
+    }
+
+    #[test]
+    fn parse_plain_text_is_chat() {
+        // Given
+        for (raw, expected) in [
+            (" hi there \n", "hi there"),
+            ("日本語 /help", "日本語 /help"),
+        ] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Chat(text) if text == expected));
+        }
+    }
+
+    #[test]
+    fn parse_goal_with_args_and_help() {
+        // Given
+        for (raw, name, expected_args) in [
+            (" /goal  ship the feature \n", "goal", "ship the feature"),
+            ("/goal\t日本語\u{3000}", "goal", "日本語"),
+            ("/goal", "goal", ""),
+            ("/help", "help", ""),
+            ("/help extra", "help", "extra"),
+        ] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::Command { spec, args }
+                if spec.name == name && args == expected_args));
+        }
+    }
+
+    #[test]
+    fn parse_unknown_slash_is_unknown_not_chat() {
+        // Given
+        for (raw, expected) in [
+            ("/unknown args", "unknown"),
+            ("/Goal x", "Goal"),
+            ("//help", "/help"),
+        ] {
+            // When
+            let parsed = parse_input(raw);
+            // Then
+            assert!(matches!(parsed, ComposerInput::UnknownCommand { name } if name == expected));
+        }
+    }
+
+    #[test]
+    fn parse_slash_alone_is_unknown() {
+        // Given
+        let raw = "/";
+        // When
+        let parsed = parse_input(raw);
+        // Then
+        assert!(matches!(parsed, ComposerInput::UnknownCommand { name: "" }));
+    }
+
+    #[test]
+    fn completions_prefix_match_and_stop_after_space() {
+        // Given
+        let cases: &[(&str, &[&str])] = &[
+            ("/", &["goal", "help"]),
+            ("/g", &["goal"]),
+            ("/goal", &["goal"]),
+            ("/h", &["help"]),
+            ("/goal x", &[]),
+            ("hi", &[]),
+            ("", &[]),
+            (" /g", &[]),
+            ("/G", &[]),
+            ("/unknown", &[]),
+            ("/goal ", &[]),
+            ("/goal\t", &[]),
+            ("/\n", &[]),
+            ("/g\u{3000}", &[]),
+        ];
+        for (raw, expected) in cases {
+            // When
+            let names: Vec<_> = completions(raw).iter().map(|spec| spec.name).collect();
+            // Then
+            assert_eq!(&names, expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn help_text_lists_every_command() {
+        // Given
+        let expected = [
+            "/goal <text> — Submit a goal through the Goal panel flow",
+            "/help — Show available commands",
+        ];
+        // When
+        let text = help_text();
+        // Then
+        assert_eq!(text, expected.join("\n"));
+        assert_eq!(text.lines().count(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn provider_status_default_is_not_configured_with_guidance() {
+        // Given
+        let expected = ProviderStatus::NotConfigured {
+            guidance: PROVIDER_MISSING_GUIDANCE.into(),
+        };
+        // When
+        let status = ProviderStatus::default();
+        // Then
+        assert_eq!(status, expected);
+    }
+
+    #[test]
+    fn composer_model_default_has_empty_input() {
+        // Given / When
+        let model = ComposerModel::default();
+        // Then
+        assert_eq!(model.input, "");
+    }
+}
