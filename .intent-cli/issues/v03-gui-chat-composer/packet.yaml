@@ -1,0 +1,58 @@
+implementation_issue_packet:
+  issue_title: "v0.3: GUI chat composer（senpi 踏襲の通常チャット + スラッシュコマンド）"
+  issue_kind: feature
+  source_execution_unit: v03-gui-chat-composer
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/runtime/"
+  target_part: "GUI workbench に chat composer を新設する。senpi がやっているように、通常メッセージはチャットとして agent に送り、/goal 等のスラッシュコマンドで goal 設定等のコマンドを発行できる composer にする。現状 GUI は goal 設定しかできず、通常の agent harness としてのチャットができない状態を解消する"
+  dependencies: []
+  technical_baseline:
+    - "crates/gui/src/: 現状の workbench は goal 設定経路を持ち、通常チャットの composer は存在しない"
+    - "crates/runtime/: AgentMessage の send / reply / steering と transcript 永続化は v02 で実装済み（agent harness としての経路は存在）"
+    - "goal 設定フロー（Goal ペイン経路）は既存のまま維持する"
+    - "provider 未設定時の composer 入力は v03-provider-composition-root 系の構成に依存する"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  acceptance_criteria:
+    - "composer が通常チャット送信を受け付け、agent 応答（streaming MessageDelta 含む）が transcript に流れる（provider 設定済みの場合）"
+    - "/goal コマンドで従来の goal 設定が可能で、既存 Goal フロー（goal ペイン・状態遷移）が維持される"
+    - "コマンド一覧が /help または入力補完で確認できる（少なくとも /goal と /help）"
+    - "provider 未設定時は分かりやすいエラー/案内（設定への誘導）が表示され、空回り・ハングしない"
+    - "headless または kittest ベースの composer 操作テストがある、cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+    new_intent_needed: false
+    placement_rationale: "composer は workbench の主要入力 surface であり gui-workbench overview の確定 surface。runtime 側のメッセージング経路は v02 実装を利用。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "chat composer の確定 surface（通常チャットと /goal 等のスラッシュコマンド分岐）、コマンド一覧の提供方式、provider 未設定時の案内設計を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "composer の入力モデル（通常チャット vs スラッシュコマンドの分岐方式）、コマンド登録・拡張の仕組み、provider 未設定ガードの設計、headless/kittest の操作テスト方式を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の chat composer"
+      role: Operator
+      target_surface: "workbench のチャット入力欄とスラッシュコマンド"

@@ -1,0 +1,55 @@
+implementation_issue_packet:
+  issue_title: "v0.3: OpenAI 互換 streaming mock server + 高レート streaming 安定性検証"
+  issue_kind: feature
+  source_execution_unit: v03-mock-streaming-provider-e2e
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/providers/ crates/runtime/ crates/gui/"
+  target_part: "実 provider の代わりに OpenAI API 形式（chat completions streaming SSE）で応答を返すモック server を test/fixture として新設し、通常応答・tool call 応答を返せるようにする。さらに 1500 tok/s 程度の高レート streaming をシステム全体（event-bus → GUI transcript）が落ちずに処理できることを検証するテストを作成する"
+  dependencies: []
+  technical_baseline:
+    - "crates/providers/src/http/openai_compat.rs: OpenAiCompatibleClient 実装済み（base_url + label + timeout、chat completions 互換、SSE streaming）"
+    - "provider composition root（v03-provider-composition-root）により headless 経路の実 run 構成（compose_runtime）が存在する"
+    - "SSE 受信層（crates/providers の stream 層）は実装済みだが、高レート burst に対する backpressure / 詰まり検証は未実施"
+    - "GUI transcript（TranscriptRegistry）と event-bus の配送経路が streaming イベントの下流にある"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "OpenAI 互換 SSE streaming mock server が test/fixture として新設され、通常応答（テキスト streaming）と tool call 応答を返せる"
+    - "compose_runtime 経由の headless run が mock server に接続し、tool call を含む run が完走する E2E test がある"
+    - "1500 tok/s 相当の burst streaming でイベントの drop / 詰まりがないことを検証するテストがあり、計測記録（スループット・遅延）が残る"
+    - "テストは tick/flush ベースの決定論的駆動で、CI で安定して pass する（wall-clock sleep 依存のない実装）"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+    new_intent_needed: false
+    placement_rationale: "mock server と高レート検証は runtime の provider 接続契約に関わる。mock server の配置決定（crates/providers/tests/support/ か新規 crate か）は実装時に調査して決める。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/agent-runtime-kernel/overview.md
+      summary: "OpenAI 互換 streaming mock server の確定構成（配置・決定論的駆動方式）、1500 tok/s burst 検証の結果、高レート streaming のボトルネック所見を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "mock server の配置と interface 契約（SSE 生成側の決定論的制御）、burst 検証の駆動方式（tick/flush）、計測方法論、event-bus → GUI transcript のスループット所見を agent-runtime-kernel overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

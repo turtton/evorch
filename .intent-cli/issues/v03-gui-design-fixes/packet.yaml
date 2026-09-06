@@ -1,0 +1,56 @@
+implementation_issue_packet:
+  issue_title: "v0.3: GUI デザイン修正（project 名ボックス過大・状態ドット配置/サイズ）"
+  issue_kind: feature
+  source_execution_unit: v03-gui-design-fixes
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/"
+  target_part: "GUI workbench のデザイン修正 2 件: (1) project 名の表示ボックスが異常に大きい問題 (2) 選択状態を表す青点/赤点の配置がエリア右上に偏り、サイズが小さい問題。operator 実使用での指摘に基づく"
+  dependencies: []
+  technical_baseline:
+    - "crates/gui/src/: egui + egui_dock ベースの workbench（project/thread 中心の 3 領域レイアウト、PR #66 で再構成済み）"
+    - "crates/gui/src/theme/: theme token（style.rs / widgets.rs）が存在し、色・間隔・サイズの一元管理の経路がある"
+    - "project 名ボックスと状態ドットの現行実装はサイズ/配置のハードコードを含む（theme token 非経由）"
+    - "headless capture 基盤（crates/gui/src/headless.rs）があり、before/after の画像検証が可能"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "project 名の表示ボックスが内容に見合ったサイズになり、異常な余白/拡大が解消されている（operator 指摘 (1) の修正）"
+    - "選択状態ドット（青/赤）がエリア右上への偏りを解消し、見えるサイズ・適切な位置に配置されている（operator 指摘 (2) の修正）"
+    - "両修正とも theme token（crates/gui/src/theme/）経由で実装され、色・サイズ・間隔のハードコードが残っていない"
+    - "headless capture の before/after 画像を PR に添付し、変更前後の差分が視覚的に確認できる"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents: []
+    new_intent_needed: false
+    placement_rationale: "workbench 視覚デザインの確定修正は gui-workbench overview の実装確定節へ反映する。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "project 名ボックスサイズと状態ドット配置の確定デザイン、theme token 経由実装の規約（ハードコード禁止）を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "状態ドットの配置ルール（基準点・アンカー）とサイズ token、project 名ボックスのサイジング規約、headless capture による before/after 検証手順を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の workbench 視覚デザイン"
+      role: Operator
+      target_surface: "project セレクタの表示と状態ドット"

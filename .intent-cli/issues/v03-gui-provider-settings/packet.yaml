@@ -1,0 +1,60 @@
+implementation_issue_packet:
+  issue_title: "v0.3: GUI provider 設定 surface（base_url / api_key_env / model 選択）"
+  issue_kind: feature
+  source_execution_unit: v03-gui-provider-settings
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/config/"
+  target_part: "provider 設定の導線を GUI から提供する（現状は evorch.toml 直編集のみ）。Settings surface（新規 panel またはモーダル）から openai-compatible provider の設定（base_url / api_key_env / model）と default_model 選択ができるようにする。credential は api_key_env の環境変数名のみ（平文禁止、fail-closed 規約維持）"
+  dependencies: []
+  technical_baseline:
+    - "crates/config/: [providers.*] openai-compatible variant（base_url / api_key_env / models / default_model）は v03-provider-composition-root で確定済み（deny_unknown_fields 維持）"
+    - "credential は api_key_env の環境変数名のみで、設定ファイルへの平文混入は fail-closed で拒否される（ADR 0008 脅威モデル）"
+    - "crates/gui/: Settings surface は存在せず、provider 設定は evorch.toml 直編集のみ"
+    - "保存は evorch.toml への書き戻しで、schema v2 を維持し migration 不要な additive のみとする"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+  acceptance_criteria:
+    - "Settings surface（新規 panel またはモーダル）から openai-compatible provider の base_url / api_key_env / models / default_model の表示・編集ができる"
+    - "保存は evorch.toml への書き戻しで、schema v2 を維持し、既存設定の migration なしで読み戻せる（additive のみ）"
+    - "credential 入力は api_key_env の環境変数名のみ（平文 API key の入力・保存は拒否、fail-closed 規約維持）"
+    - "provider 未設定時は composer / goal 実行前に Settings への誘導が表示される"
+    - "headless capture で設定 surface の表示・編集・保存の検証があり、cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    new_intent_needed: false
+    placement_rationale: "Settings surface は gui-workbench の operator 対向 surface。設定 schema の拡張方針は provider-routing と ADR 0008 credential 分離に接続。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "Settings surface の確定構成（panel/モーダル、編集項目、保存先 evorch.toml）、credential 入力の規約（api_key_env のみ、平文拒否）、未設定時の誘導設計を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "Settings surface の配置（panel/モーダル）と導線、evorch.toml 書き戻しの実装方式（schema v2 維持・additive 制約）、credential ガードの設計、headless capture 検証手順を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の provider 設定 surface"
+      role: Operator
+      target_surface: "Settings surface（base_url / api_key_env / model 選択）"

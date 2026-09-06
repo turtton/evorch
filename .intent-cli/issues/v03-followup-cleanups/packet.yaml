@@ -1,0 +1,57 @@
+implementation_issue_packet:
+  issue_title: "v0.3: follow-up 整理（ReasoningDelta production emit / frame.rs legacy mirror 撤去 / agents グリッド列幅）"
+  issue_kind: feature
+  source_execution_unit: v03-followup-cleanups
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/ crates/gui/"
+  target_part: "v0.3 進行中に蓄積した follow-up 3 件の整理: (a) ReasoningDelta の production emit 経路新設（runtime が Reasoning コンテンツを bus event 化）(b) crates/gui/src/app/frame.rs の run_id: None legacy mirror 撤去（PR #86 で縮小済みの残り）(c) agents グリッド列幅の自動フィット（horizontal scroll の代替）"
+  dependencies: []
+  technical_baseline:
+    - "crates/runtime/src/agent_loop.rs: ContentBlock::Reasoning を処理する経路はあるが、Reasoning コンテンツが MessageEvent::ReasoningDelta として bus emit される production 経路は未完成（Text のみが MessageDelta 化されている）"
+    - "crates/gui/src/app/frame.rs:51-52: MessageEvent::MessageDelta { run_id: None, .. } | ReasoningDelta { run_id: None, .. } の legacy match arm が残っている（run_id attribution 前の mirror、PR #86 で縮小済みの残り）"
+    - "agents グリッド（crates/gui/src/panes/agent.rs 系）は列幅が固定で、内容に対し horizontal scroll が発生する"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "(a) runtime が Reasoning コンテンツを MessageEvent::ReasoningDelta として bus emit する production 経路があり、agent loop の streaming で GUI transcript に Reasoning 表示が到達する test がある"
+    - "(b) crates/gui/src/app/frame.rs の run_id: None legacy mirror（MessageDelta / ReasoningDelta の catch-all arm）が撤去され、既存表示が run_id attribution 経路で維持される test がある"
+    - "(c) agents グリッドの列幅が内容に自動フィットし、horizontal scroll が不要になる（または最小限化される）"
+    - "3 件とも既存テストの回帰がなく、cargo test --workspace が pass する"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents:
+      - intents/evorch/features/gui-workbench/overview.md
+    new_intent_needed: false
+    placement_rationale: "ReasoningDelta emit は runtime のイベント契約、frame.rs 撤去とグリッド列幅は GUI の保守整理。確定方式をそれぞれの overview に反映。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/agent-runtime-kernel/overview.md
+      summary: "ReasoningDelta production emit の確定経路、frame.rs legacy mirror 撤去の完了、agents グリッド列幅自動フィットの方式を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "ReasoningDelta emit の設計（ContentBlock::Reasoning → event 変換のタイミング）、legacy mirror の撤去基準（run_id attribution 完成の定義）、グリッド列幅フィットの実装方式を agent-runtime-kernel overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の agents グリッド"
+      role: Operator
+      target_surface: "agents グリッドの列幅自動フィット"
