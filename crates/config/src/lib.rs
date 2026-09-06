@@ -12,6 +12,7 @@ mod merge;
 mod migrate;
 pub mod presets;
 pub mod prompt_sources;
+pub mod save;
 mod schema;
 mod strict;
 pub mod types;
@@ -20,6 +21,10 @@ pub use error::ConfigError;
 pub use load::{LoadOptions, user_config_dir};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
+pub use save::{
+    OpenAiCompatibleProviderInput, save_openai_compatible_provider,
+    validate_openai_compatible_provider_input,
+};
 pub use schema::json_schema;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,

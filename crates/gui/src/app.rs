@@ -4,6 +4,7 @@ mod actions;
 mod attention;
 mod composer;
 mod frame;
+mod provider_settings;
 mod state;
 mod tab_viewer;
 mod viewer;

@@ -16,6 +16,7 @@ struct CaptureArgs {
     demo: bool,
     error_thread: bool,
     provider_configured: bool,
+    open_settings: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
 }
@@ -43,6 +44,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     if capture.provider_configured {
         state = state.with_provider_status(ProviderStatus::Configured);
+    }
+    if capture.open_settings {
+        let settings = state.provider_settings_mut();
+        settings.name = "local".into();
+        settings.base_url = "https://api.example.invalid/v1".into();
+        settings.api_key_env = "EXAMPLE_API_KEY".into();
+        settings.models_text = "gpt-4.1\ngpt-4.1-mini".into();
+        settings.default_model = "gpt-4.1".into();
+        settings.open = true;
+    }
+    if let Some(dir) = demo_dir.as_ref() {
+        state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
     }
     if capture.error_thread {
         state.apply_events(demo_error_events());
@@ -77,6 +90,7 @@ fn parse_args(
     let mut demo = false;
     let mut error_thread = false;
     let mut provider_configured = false;
+    let mut open_settings = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
     while let Some(argument) = arguments.next() {
@@ -122,6 +136,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--provider-configured") => provider_configured = true,
+            Some("--open-settings") if open_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-settings") => open_settings = true,
             Some(flag) if flag.starts_with('-') => {
                 return Err("unexpected additional arguments".into());
             }
@@ -141,6 +159,7 @@ fn parse_args(
         demo,
         error_thread,
         provider_configured,
+        open_settings,
         activate,
         pointer,
     })
@@ -148,7 +167,7 @@ fn parse_args(
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
 
 Captures a 1280x720 headless workbench frame as PNG.
 
@@ -157,6 +176,7 @@ Modes:
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --provider-configured  enable the composer without provider setup guidance (capture only)
+   --open-settings  open the provider settings modal with demo values pre-filled
    --activate ID  activate the given panel tab before capturing (e.g. merge-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
@@ -191,6 +211,38 @@ mod tests {
         assert_eq!(capture.output, std::path::PathBuf::from(DEFAULT_OUTPUT));
         assert!(!capture.demo);
         assert!(!capture.provider_configured);
+        assert!(!capture.open_settings);
+    }
+
+    #[test]
+    fn parse_args_accepts_open_settings_flag() {
+        // Given: settings requested alongside demo mode
+        let arguments = args(["--demo", "--open-settings"]);
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("open-settings demo form must parse");
+        // Then: the settings modal is requested
+        assert!(capture.open_settings);
+    }
+
+    #[test]
+    fn parse_args_accepts_open_settings_without_demo() {
+        // Given: settings requested without demo mode
+        let arguments = args(["--open-settings"]);
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("standalone open-settings must parse");
+        // Then: no demo requirement is imposed
+        assert!(capture.open_settings);
+        assert!(!capture.demo);
+    }
+
+    #[test]
+    fn parse_args_rejects_duplicate_open_settings() {
+        // Given: settings requested twice
+        let arguments = args(["--open-settings", "--open-settings"]);
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("duplicate --open-settings must fail");
+        // Then: the existing unexpected-arguments error is reported
+        assert_eq!(error.to_string(), "unexpected additional arguments");
     }
 
     #[test]

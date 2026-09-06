@@ -9,6 +9,7 @@ use crate::theme::widgets::{primary_button, surface_frame};
 pub enum ComposerAction {
     Send,
     Complete(&'static str),
+    OpenSettings,
 }
 
 pub fn composer_strip(
@@ -39,6 +40,9 @@ pub fn composer_strip(
                 ProviderStatus::Configured => {}
                 ProviderStatus::NotConfigured { guidance } => {
                     ui.label(muted(guidance));
+                    if primary_button(ui, "Open Settings").clicked() {
+                        action = Some(ComposerAction::OpenSettings);
+                    }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

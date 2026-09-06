@@ -4,6 +4,7 @@ pub mod commands;
 pub mod composer;
 pub mod demo;
 pub mod project_bridge;
+pub mod provider_settings;
 pub mod tasks;
 pub mod telemetry;
 pub mod terminal;
