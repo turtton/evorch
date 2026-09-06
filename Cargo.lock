@@ -2949,7 +2949,11 @@ dependencies = [
 name = "mock-openai"
 version = "0.1.0"
 dependencies = [
+ "event-bus",
+ "futures-util",
+ "providers",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -4520,6 +4524,7 @@ dependencies = [
  "event-bus",
  "getrandom 0.3.4",
  "globset",
+ "mock-openai",
  "model",
  "providers",
  "regex",

@@ -9,3 +9,9 @@ name = "mock_openai"
 
 [dependencies]
 serde_json = { workspace = true }
+
+[dev-dependencies]
+event-bus = { path = "../event-bus" }
+futures-util = { workspace = true }
+providers = { path = "../providers" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
