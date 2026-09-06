@@ -180,6 +180,22 @@ pub fn text_response(text: &str, finish_reason: FinishReason) -> ChatResponse {
     )
 }
 
+pub fn reasoning_response(
+    reasoning: &str,
+    text: &str,
+    finish_reason: FinishReason,
+) -> ChatResponse {
+    response(
+        vec![
+            ContentBlock::Reasoning {
+                text: reasoning.into(),
+            },
+            ContentBlock::Text { text: text.into() },
+        ],
+        finish_reason,
+    )
+}
+
 pub fn tool_response(id: &str, name: &str, input: serde_json::Value) -> ChatResponse {
     response(
         vec![ContentBlock::ToolUse {

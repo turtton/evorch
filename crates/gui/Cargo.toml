@@ -33,5 +33,6 @@ tracing = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tools = { path = "../tools" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

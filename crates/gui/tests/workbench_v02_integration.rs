@@ -426,7 +426,7 @@ fn v02_end_to_end_chained_scenario() {
     fixture.emit(delivered("run-2", "run-3", "two-to-three"));
     fixture.emit(Event::new(MessageEvent::MessageDelta {
         delta: "thread-only progress".into(),
-        run_id: None,
+        run_id: Some("run-1".into()),
     }));
 
     // Then: every model received its events: thread attachment, run phase,

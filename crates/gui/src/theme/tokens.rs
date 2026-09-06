@@ -41,6 +41,13 @@ pub const TAB_GAP: f32 = 2.0;
 pub const TAB_MAX_WIDTH: f32 = 144.0;
 pub const TOPBAR: f32 = 52.0;
 
+/// Agents telemetry grid の列幅希望下限。最後の手段でこれを下回る縮小も許容する。
+pub const AGENTS_COL_MIN: f32 = 56.0;
+/// Agents telemetry grid の列幅上限。自然幅が大きすぎる列を抑制する。
+pub const AGENTS_COL_MAX: f32 = 160.0;
+/// Agents telemetry grid のセル内テキスト左右の最小余白。
+pub const CELL_PAD_X: f32 = 8.0;
+
 pub const R_SM: u8 = 6;
 pub const R_MD: u8 = 8;
 pub const R_LG: u8 = 10;
@@ -142,9 +149,17 @@ mod tests {
             ROW_DENSE,
             TAB_HEIGHT,
             TOPBAR,
+            AGENTS_COL_MIN,
+            AGENTS_COL_MAX,
+            CELL_PAD_X,
         ] {
             assert!(value % 4.0 == 0.0, "{value} is not a multiple of 4");
         }
+    }
+
+    #[test]
+    fn agents_column_bounds_are_ordered() {
+        const _: () = assert!(AGENTS_COL_MIN < AGENTS_COL_MAX);
     }
 
     #[test]

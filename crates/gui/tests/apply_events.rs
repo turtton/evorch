@@ -38,7 +38,7 @@ fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
-            run_id: None,
+            run_id: Some("run-1".into()),
         }),
     ]);
 
@@ -64,7 +64,7 @@ fn apply_events_matches_pump_drain_ordering() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
-            run_id: None,
+            run_id: Some("run-1".into()),
         }),
     ];
 
@@ -176,7 +176,7 @@ fn attributed_delta_is_applied_exactly_once_to_sole_running_run() {
         run_id: Some("run-1".into()),
     })]);
 
-    // Then: routing and the legacy mirror must not duplicate the text.
+    // Then: routing must not duplicate the text.
     assert_eq!(
         state
             .transcripts()
@@ -218,7 +218,7 @@ fn attributed_delta_targets_its_run_even_when_another_run_is_sole_running() {
 }
 
 #[test]
-fn legacy_runless_delta_still_mirrors_to_sole_running_run() {
+fn runless_delta_is_dropped_even_when_one_run_is_running() {
     // Given: run-1 is the sole Running run.
     let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
     state.apply_events([run_state_changed(
@@ -233,19 +233,9 @@ fn legacy_runless_delta_still_mirrors_to_sole_running_run() {
         run_id: None,
     })]);
 
-    // Then: the sole run and thread both retain the delta exactly once.
-    let expected = [TranscriptEntry::Message {
-        text: "legacy".into(),
-    }];
-    assert_eq!(
-        state
-            .transcripts()
-            .run("run-1")
-            .expect("run transcript")
-            .entries(),
-        &expected
-    );
-    assert_eq!(state.transcripts().thread().entries(), &expected);
+    // Then: the run-less delta reaches neither transcript.
+    assert!(state.transcripts().run("run-1").is_none());
+    assert!(state.transcripts().thread().entries().is_empty());
 }
 
 struct Fixture {
