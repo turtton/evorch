@@ -211,3 +211,6 @@
 {"ts":"2026-09-06T09:18:07.7225571+00:00","execution_unit":"v03-gui-design-fixes","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":88}
 {"ts":"2026-09-06T09:19:07.7136828+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v03-mock-streaming-provider-e2e/"}
 {"ts":"2026-09-06T09:19:09.8016224+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#89","reason":"https://github.com/turtton/evorch/issues/89"}
+{"ts":"2026-09-06T11:05:45.1833884+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"linkage-recovered","by":"intent-cli review closeout-plan","repo":"turtton/evorch","pr":90}
+{"ts":"2026-09-06T11:06:08.7723066+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":90}
+{"ts":"2026-09-06T11:06:08.7723066+00:00","execution_unit":"v03-mock-streaming-provider-e2e","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":90}

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T09:19:09.8016224+00:00",
+  "updated_at": "2026-09-06T11:06:08.7814152+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1093,7 +1093,7 @@
     {
       "execution_unit": "v03-mock-streaming-provider-e2e",
       "title": "v0.3: OpenAI \u4E92\u63DB streaming mock server \u002B \u9AD8\u30EC\u30FC\u30C8 streaming \u5B89\u5B9A\u6027\u691C\u8A3C",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1107,6 +1107,7 @@
         "number": 89,
         "url": "https://github.com/turtton/evorch/issues/89"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/90",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
