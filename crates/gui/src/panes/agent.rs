@@ -22,7 +22,6 @@ pub struct AgentIdentity<'a> {
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
     pub has_project: bool,
-    pub has_active_thread: bool,
     pub active_thread_title: Option<&'a str>,
     pub phase: Option<ThreadRunPhase>,
     pub next_thread_title: String,
@@ -53,8 +52,7 @@ pub fn agent_pane(
         } else {
             transcript_body(ui, model);
         }
-        if let Some(composer_action) = composer_strip(ui, composer, provider, ctx.has_active_thread)
-        {
+        if let Some(composer_action) = composer_strip(ui, composer, provider) {
             action = Some(AgentPaneAction::Composer(composer_action));
         }
         action
@@ -126,7 +124,7 @@ fn empty_state_body(
     } else if empty_state(
         ui,
         "No messages yet",
-        "Submit a goal to start the run.",
+        "Type a message in the composer below, or submit a goal.",
         Some("Go to Goal"),
     ) {
         *action = Some(AgentPaneAction::FocusPanel("goal-main"));

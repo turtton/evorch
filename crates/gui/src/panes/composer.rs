@@ -15,7 +15,6 @@ pub fn composer_strip(
     ui: &mut egui::Ui,
     model: &mut ComposerModel,
     provider: &crate::model::composer::ProviderStatus,
-    has_thread: bool,
 ) -> Option<ComposerAction> {
     let mut action = None;
     surface_frame(SURFACE_RAISED).show(ui, |ui| {
@@ -43,7 +42,7 @@ pub fn composer_strip(
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let can_send = !model.input.trim().is_empty() && has_thread;
+                let can_send = !model.input.trim().is_empty();
                 let send = if can_send {
                     primary_button(ui, "Send")
                 } else {
@@ -59,7 +58,7 @@ pub fn composer_strip(
                     && ui.input(|input| {
                         input.key_pressed(egui::Key::Enter) && !input.modifiers.shift
                     });
-                if !model.input.trim().is_empty() && has_thread && (send.clicked() || enter) {
+                if can_send && (send.clicked() || enter) {
                     action = Some(ComposerAction::Send);
                 }
             });
@@ -81,21 +80,14 @@ mod tests {
     struct Fixture {
         model: ComposerModel,
         provider: ProviderStatus,
-        has_thread: bool,
         action: Option<ComposerAction>,
     }
 
-    fn harness(
-        input: &str,
-        provider: ProviderStatus,
-        has_thread: bool,
-    ) -> Harness<'static, Fixture> {
+    fn harness(input: &str, provider: ProviderStatus) -> Harness<'static, Fixture> {
         Harness::builder().build_ui_state(
             |ui, state: &mut Fixture| {
                 crate::theme::install(ui.ctx());
-                if let Some(action) =
-                    composer_strip(ui, &mut state.model, &state.provider, state.has_thread)
-                {
+                if let Some(action) = composer_strip(ui, &mut state.model, &state.provider) {
                     state.action = Some(action);
                 }
             },
@@ -104,7 +96,6 @@ mod tests {
                     input: input.into(),
                 },
                 provider,
-                has_thread,
                 action: None,
             },
         )
@@ -113,7 +104,7 @@ mod tests {
     #[test]
     fn send_button_disabled_on_empty_input() {
         // Given
-        let mut harness = harness("", ProviderStatus::Configured, true);
+        let mut harness = harness("", ProviderStatus::Configured);
         // When
         harness.run();
         // Then
@@ -124,7 +115,7 @@ mod tests {
     #[test]
     fn send_click_emits_send_action() {
         // Given
-        let mut harness = harness("hi", ProviderStatus::Configured, true);
+        let mut harness = harness("hi", ProviderStatus::Configured);
         harness.run();
         // When
         harness.get_by_label("Send").click();
@@ -136,7 +127,7 @@ mod tests {
     #[test]
     fn slash_prefix_shows_completion_candidates_and_click_fills_via_action() {
         // Given
-        let mut harness = harness("/", ProviderStatus::Configured, true);
+        let mut harness = harness("/", ProviderStatus::Configured);
         harness.run();
         harness.get_by_label("/help");
         // When
@@ -153,7 +144,7 @@ mod tests {
     #[test]
     fn guidance_label_shown_when_provider_missing() {
         // Given
-        let mut harness = harness("", ProviderStatus::default(), true);
+        let mut harness = harness("", ProviderStatus::default());
         // When
         harness.run();
         // Then
@@ -163,17 +154,7 @@ mod tests {
     #[test]
     fn send_button_disabled_on_whitespace_input() {
         // Given
-        let mut harness = harness("  ", ProviderStatus::Configured, true);
-        // When
-        harness.run();
-        // Then
-        assert!(harness.get_by_label("Send").accesskit_node().is_disabled());
-    }
-
-    #[test]
-    fn send_button_disabled_without_thread() {
-        // Given
-        let mut harness = harness("hi", ProviderStatus::Configured, false);
+        let mut harness = harness("  ", ProviderStatus::Configured);
         // When
         harness.run();
         // Then

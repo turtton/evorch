@@ -100,7 +100,6 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
         let ctx = ConversationContext {
             has_project: self.sidebar.selected_project.is_some(),
-            has_active_thread: self.sidebar.active_thread.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
             phase: active_thread
                 .and_then(|thread| thread.run_ids.last())

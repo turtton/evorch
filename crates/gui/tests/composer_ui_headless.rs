@@ -121,3 +121,20 @@ fn composer_visible_on_empty_conversation_state() {
     assert!(harness.has_label("No messages yet"));
     assert!(harness.has_label("Send"));
 }
+
+#[test]
+fn send_without_thread_shows_dispatch_notice() {
+    // Given: no project or thread, so the conversation shows the thread prompt.
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds")
+        .with_provider_status(ProviderStatus::Configured);
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.state_mut().composer_mut().input = "hello".into();
+    harness.run();
+    // When: chat is sent from the real composer without a thread.
+    harness.click_label("Send");
+    harness.run();
+    // Then: the pane routes to the dispatch guard instead of issuing a command.
+    assert!(harness.has_label("Select or start a thread first"));
+    assert!(harness.state().issued().is_empty());
+}
