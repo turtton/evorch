@@ -697,6 +697,7 @@ impl LoopState {
         reason: Option<String>,
     ) -> Result<(), ()> {
         if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+            self.channels.inbox_rx.close();
             self.task.mailbox.close();
         }
         let event = self

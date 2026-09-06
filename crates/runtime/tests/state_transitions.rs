@@ -153,6 +153,52 @@ async fn interactive_run_waits_for_message_then_completes() {
     assert_eq!(inspection.message_count, 4);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_message_after_terminal_is_rejected() {
+    for _ in 0..5 {
+        // Given: an interactive run cancelled after reaching Waiting.
+        let (runtime, bus) = runtime_with(ScriptedModel::new([Ok(text_response(
+            "question",
+            FinishReason::Stop,
+        ))]));
+        let mut events = bus.subscribe();
+        let run_id = runtime.delegate_background(
+            Role::Worker,
+            "work".to_string(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..RunConfig::default()
+            },
+        );
+        loop {
+            let event = collect_events(&mut events, 1).await.remove(0);
+            if matches!(
+                event.kind,
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Waiting,
+                    ..
+                })
+            ) {
+                break;
+            }
+        }
+        assert_eq!(runtime.cancel(run_id), Ok(()));
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
+
+        // When
+        let result = runtime.send_message(run_id, "too late".to_string());
+
+        // Then
+        assert_eq!(
+            result,
+            Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            })
+        );
+    }
+}
+
 #[tokio::test]
 async fn interactive_keep_alive_run_waits_again_after_resume() {
     // Given
