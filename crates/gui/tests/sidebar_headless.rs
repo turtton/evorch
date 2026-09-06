@@ -9,6 +9,7 @@ use gui::fixture::{demo_events, demo_sidebar};
 use gui::headless::HeadlessWorkbench;
 use gui::model::project_bridge::run_membership;
 use gui::model::tasks::AgentRunSource;
+use gui::theme::tokens::ROW_DENSE;
 use runtime::{
     AgentInspection, AgentSummary, MergeMode, RunId, WorkspaceInspection, WorkspaceMode,
 };
@@ -340,4 +341,46 @@ fn sidebar_thread_rows_expose_state_text() {
     // Then: running and paused thread states are both exposed as labels
     assert!(harness.has_label("Running"));
     assert!(harness.has_label("Paused"));
+}
+
+#[test]
+fn sidebar_rows_are_single_line_dense_rows() {
+    // Given: a demo sidebar populated with lifecycle events
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let workbench = state(MockSource::default(), sidebar);
+    let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
+    harness.run();
+    harness.state_mut().apply_events(demo_events());
+
+    // When: the populated sidebar layout settles
+    harness.run();
+
+    // Then: project and thread titles are dense and controls stay on the title line
+    let project = harness.label_rects("evorch")[0];
+    let title = harness.label_rects("Refine GUI design system")[0];
+    let pauses = harness.label_rects("Pause");
+    let running = harness.label_rects("Running");
+    assert!(
+        (project.height() - ROW_DENSE).abs() <= 0.5,
+        "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, pauses={pauses:?}, running={running:?}",
+        project.height()
+    );
+    assert!(
+        (title.height() - ROW_DENSE).abs() <= 0.5,
+        "thread title height {} should be {ROW_DENSE} +/- 0.5",
+        title.height()
+    );
+    assert!(
+        pauses
+            .iter()
+            .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
+        "Pause must share the title line: title={title:?}, pauses={pauses:?}"
+    );
+    assert!(
+        running
+            .iter()
+            .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
+        "Running must share the title line: title={title:?}, running={running:?}"
+    );
 }

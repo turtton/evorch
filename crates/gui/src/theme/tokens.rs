@@ -30,6 +30,11 @@ pub const SP_2: f32 = 8.0;
 pub const SP_3: f32 = 12.0;
 pub const SP_4: f32 = 16.0;
 pub const ROW_COMPACT: f32 = 36.0;
+/// sidebar の project / thread 行の高さ。ROW_COMPACT (36) はエディタ系 (agent.rs) 向けに残す。
+pub const ROW_DENSE: f32 = 28.0;
+/// 状態ドットの直径。半径は DOT_SIZE / 2.0 で導出する。
+// 4px grid の半値例外: body 14px の cap height (~10px) に合わせる光学値。
+pub const DOT_SIZE: f32 = 10.0;
 pub const TAB_HEIGHT: f32 = 24.0;
 // 4px grid の半値例外: タブ本体は TAB_HEIGHT で grid 整合しており、間隔のみ光学補正として 2px を使う。
 pub const TAB_GAP: f32 = 2.0;
@@ -128,8 +133,27 @@ mod tests {
 
     #[test]
     fn spacing_consts_are_multiples_of_four() {
-        for value in [SP_1, SP_2, SP_3, SP_4, ROW_COMPACT, TAB_HEIGHT, TOPBAR] {
+        for value in [
+            SP_1,
+            SP_2,
+            SP_3,
+            SP_4,
+            ROW_COMPACT,
+            ROW_DENSE,
+            TAB_HEIGHT,
+            TOPBAR,
+        ] {
             assert!(value % 4.0 == 0.0, "{value} is not a multiple of 4");
         }
+    }
+
+    #[test]
+    fn dense_row_is_shorter_than_compact_row() {
+        const _: () = assert!(ROW_DENSE < ROW_COMPACT);
+    }
+
+    #[test]
+    fn dot_fits_inside_dense_row() {
+        const _: () = assert!(DOT_SIZE < ROW_DENSE / 2.0);
     }
 }
