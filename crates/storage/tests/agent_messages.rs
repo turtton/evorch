@@ -68,6 +68,7 @@ fn agent_messages_by_session_restores_order_and_correlation() {
             &event(
                 MessageEvent::MessageDelta {
                     delta: "interleaved".into(),
+                    run_id: None,
                 },
                 2,
             ),

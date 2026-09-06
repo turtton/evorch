@@ -37,6 +37,7 @@ fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
+            run_id: None,
         }),
     ]);
 
@@ -62,6 +63,7 @@ fn apply_events_matches_pump_drain_ordering() {
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         Event::new(MessageEvent::MessageDelta {
             delta: "thread-only text".into(),
+            run_id: None,
         }),
     ];
 

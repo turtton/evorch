@@ -162,6 +162,7 @@ fn append_event_end_to_end_enforces_event_and_session_limits() {
     let oversized = event(
         MessageEvent::MessageDelta {
             delta: "x".repeat(300_000),
+            run_id: None,
         },
         1,
     );
@@ -187,6 +188,7 @@ fn append_event_end_to_end_enforces_event_and_session_limits() {
     let small = event(
         MessageEvent::MessageDelta {
             delta: "small".into(),
+            run_id: None,
         },
         2,
     );

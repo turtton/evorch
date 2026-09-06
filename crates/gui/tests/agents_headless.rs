@@ -121,6 +121,7 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
     ]);
     fixture.emit(Event::new(MessageEvent::MessageDelta {
         delta: "thread-only text".into(),
+        run_id: None,
     }));
     fixture.emit(tool_started("run-1", "read-one", "call-one"));
     fixture.emit(tool_started("run-2", "review-two", "call-two"));
@@ -268,6 +269,7 @@ fn stream_delta_mirrors_to_sole_running_run_pane() {
     // When: the phase event and following run-less delta are drained in event order.
     fixture.bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: "sole run response".into(),
+        run_id: None,
     }));
     for _ in 0..2 {
         fixture
@@ -328,6 +330,7 @@ fn stream_delta_stays_thread_only_when_two_runs_running() {
     // When: an uncorrelated model stream delta arrives.
     fixture.emit(Event::new(MessageEvent::ReasoningDelta {
         delta: "shared ambiguity".into(),
+        run_id: None,
     }));
 
     // Then: neither run is guessed, while the thread transcript receives the delta.

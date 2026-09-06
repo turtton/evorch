@@ -280,6 +280,7 @@ mod secret_guard_tests {
         let bad = event_with(
             MessageEvent::MessageDelta {
                 delta: "leak sk-test-evorch-9f8e7d6c5b4a3f2e1d".into(),
+                run_id: None,
             }
             .into(),
         );

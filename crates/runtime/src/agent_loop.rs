@@ -601,7 +601,10 @@ impl LoopState {
             for delta in message_deltas {
                 self.shared
                     .bus
-                    .emit(Event::new(event_bus::MessageEvent::MessageDelta { delta }));
+                    .emit(Event::new(event_bus::MessageEvent::MessageDelta {
+                        delta,
+                        run_id: None,
+                    }));
             }
             if !self.execute_tools(tool_uses).await {
                 return;

@@ -925,6 +925,7 @@ mod tests {
             }),
             Event::new(MessageEvent::MessageDelta {
                 delta: "he".to_owned(),
+                run_id: None,
             }),
             Event::new(FaultEvent::SubscriberLagged {
                 subscriber_id: 1,

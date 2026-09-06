@@ -95,6 +95,7 @@ fn unknown_end_is_noop_with_typed_drop_and_nonmapped_event_is_empty() {
     let nonmapped = mapper.ingest(&event(
         MessageEvent::MessageDelta {
             delta: "ignored".to_owned(),
+            run_id: None,
         },
         2,
     ));

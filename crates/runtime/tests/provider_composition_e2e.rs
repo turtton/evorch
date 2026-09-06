@@ -171,7 +171,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     let message_deltas = drained
         .iter()
         .filter_map(|event| match &event.kind {
-            EventKind::Message(MessageEvent::MessageDelta { delta }) => Some(delta.as_str()),
+            EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => Some(delta.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();

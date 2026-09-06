@@ -67,6 +67,7 @@ fn oversized_event_is_rejected_before_insert() {
     let event = event_at(
         MessageEvent::MessageDelta {
             delta: "x".repeat(300_000),
+            run_id: None,
         },
         1,
     );
@@ -103,12 +104,14 @@ fn session_budget_rejects_only_the_overflowing_event() {
     let first = event_at(
         MessageEvent::MessageDelta {
             delta: "a".repeat(20),
+            run_id: None,
         },
         1,
     );
     let second = event_at(
         MessageEvent::MessageDelta {
             delta: "b".repeat(20),
+            run_id: None,
         },
         2,
     );
@@ -150,12 +153,14 @@ fn daily_budget_rejects_event_crossing_same_utc_day_limit() {
     let first = event_at(
         MessageEvent::MessageDelta {
             delta: "a".repeat(20),
+            run_id: None,
         },
         day + 1,
     );
     let second = event_at(
         MessageEvent::MessageDelta {
             delta: "b".repeat(20),
+            run_id: None,
         },
         day + 2,
     );
@@ -199,6 +204,7 @@ fn accepted_events_round_trip_with_exact_timestamps() {
         event_at(
             MessageEvent::MessageDelta {
                 delta: "hello".into(),
+                run_id: None,
             },
             456,
         ),
@@ -233,10 +239,17 @@ fn cjk_session_size_counts_utf8_bytes() {
     let cjk_event = event_at(
         MessageEvent::MessageDelta {
             delta: "日".repeat(100),
+            run_id: None,
         },
         1,
     );
-    let small_event = event_at(MessageEvent::MessageDelta { delta: "ok".into() }, 2);
+    let small_event = event_at(
+        MessageEvent::MessageDelta {
+            delta: "ok".into(),
+            run_id: None,
+        },
+        2,
+    );
     let cjk_bytes = payload_len(&cjk_event);
     let small_bytes = payload_len(&small_event);
     let limits = HardLimits {

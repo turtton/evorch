@@ -73,9 +73,11 @@ async fn main() {
     });
     emit!(MessageEvent::MessageDelta {
         delta: "Hello, event bus".into(),
+        run_id: None,
     });
     emit!(MessageEvent::ReasoningDelta {
         delta: "selecting a tool".into(),
+        run_id: None,
     });
     emit!(ToolEvent::ToolStarted {
         tool_name: "search_docs".into(),
@@ -92,6 +94,7 @@ async fn main() {
     for index in 0..12 {
         bus.emit(Event::new(MessageEvent::MessageDelta {
             delta: format!(" burst-{index}"),
+            run_id: None,
         }));
         tokio::time::sleep(Duration::from_millis(1)).await;
     }

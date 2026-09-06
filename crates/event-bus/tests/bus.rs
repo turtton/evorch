@@ -4,6 +4,7 @@
 //! 出し、時間ベースの sleep は使用しない。唯一の例外は、抑制中に 2 つ目の
 //! fault が emit されないことを確認する短い `timeout` による否定アサートである。
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use event_bus::bus::{EventBus, RecvError};
@@ -18,6 +19,7 @@ fn sample_event(index: usize) -> Event {
         .into(),
         1 => MessageEvent::MessageDelta {
             delta: format!("delta-{index}"),
+            run_id: None,
         }
         .into(),
         _ => ToolEvent::ToolStarted {
@@ -28,6 +30,65 @@ fn sample_event(index: usize) -> Event {
         .into(),
     };
     Event::new(kind)
+}
+
+#[tokio::test]
+async fn interleaved_deltas_from_two_runs_are_attributed_by_payload_run_id() {
+    // Given: two runs sharing one bus and subscriber.
+    let bus = EventBus::new(16);
+    let mut rx = bus.subscribe();
+    let deltas = [
+        MessageEvent::MessageDelta {
+            delta: "m1".into(),
+            run_id: Some("run-1".into()),
+        },
+        MessageEvent::ReasoningDelta {
+            delta: "r2".into(),
+            run_id: Some("run-2".into()),
+        },
+        MessageEvent::MessageDelta {
+            delta: "m2".into(),
+            run_id: Some("run-2".into()),
+        },
+        MessageEvent::ReasoningDelta {
+            delta: "r1".into(),
+            run_id: Some("run-1".into()),
+        },
+    ];
+
+    // When: interleaved deltas are delivered through the bus.
+    for delta in deltas {
+        bus.emit(Event::new(delta));
+    }
+    let mut by_run: BTreeMap<String, Vec<(&str, String)>> = BTreeMap::new();
+    for _ in 0..4 {
+        let EventKind::Message(message) = rx.recv().await.expect("delta arrives").kind else {
+            panic!("expected a message event");
+        };
+        let (run_id, kind, delta) = match message {
+            MessageEvent::MessageDelta { delta, run_id } => (run_id, "Message", delta),
+            MessageEvent::ReasoningDelta { delta, run_id } => (run_id, "Reasoning", delta),
+        };
+        by_run
+            .entry(run_id.expect("delta is attributed"))
+            .or_default()
+            .push((kind, delta));
+    }
+
+    // Then: each run receives exactly its own deltas in emit order.
+    assert_eq!(
+        by_run,
+        BTreeMap::from([
+            (
+                "run-1".into(),
+                vec![("Message", "m1".into()), ("Reasoning", "r1".into())]
+            ),
+            (
+                "run-2".into(),
+                vec![("Reasoning", "r2".into()), ("Message", "m2".into())]
+            ),
+        ])
+    );
 }
 
 #[tokio::test]

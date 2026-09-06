@@ -199,6 +199,7 @@ fn transcript_text_appears_after_bus_event() {
     // When: a message delta is emitted and forwarded
     bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: "hello from bus".into(),
+        run_id: None,
     }));
     assert!(repaint_rx.recv_timeout(Duration::from_secs(1)).is_ok());
     harness.run();

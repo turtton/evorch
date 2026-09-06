@@ -297,10 +297,10 @@ impl SecretGuard {
             EventKind::Lifecycle(LifecycleEvent::RoutingDecision { reason, .. }) => {
                 self.check_text("event", "RoutingDecision.reason", reason)
             }
-            EventKind::Message(MessageEvent::MessageDelta { delta }) => {
+            EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
                 self.check_text("event", "MessageDelta.delta", delta)
             }
-            EventKind::Message(MessageEvent::ReasoningDelta { delta }) => {
+            EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => {
                 self.check_text("event", "ReasoningDelta.delta", delta)
             }
             EventKind::Tool(ToolEvent::ExecutionDenied { reason, .. }) => {
@@ -699,6 +699,7 @@ mod tests {
                 "MessageDelta.delta",
                 MessageEvent::MessageDelta {
                     delta: format!("out {KNOWN_VALUE}"),
+                    run_id: None,
                 }
                 .into(),
             ),
@@ -706,6 +707,7 @@ mod tests {
                 "ReasoningDelta.delta",
                 MessageEvent::ReasoningDelta {
                     delta: format!("think {KNOWN_VALUE}"),
+                    run_id: None,
                 }
                 .into(),
             ),

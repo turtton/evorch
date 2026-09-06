@@ -181,6 +181,7 @@ mod tests {
         let registry = TranscriptRegistry::new();
         let event = Event::new(MessageEvent::MessageDelta {
             delta: "hello".into(),
+            run_id: None,
         });
 
         assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
@@ -192,6 +193,7 @@ mod tests {
         let mut registry = TranscriptRegistry::new();
         let event = Event::new(MessageEvent::ReasoningDelta {
             delta: "considering".into(),
+            run_id: None,
         });
 
         // When: the stream delta is explicitly applied to that run.
@@ -301,6 +303,7 @@ mod tests {
         }
         registry.apply(&Event::new(MessageEvent::MessageDelta {
             delta: "thread-only".into(),
+            run_id: None,
         }));
 
         for run_id in ["run-1", "run-2", "run-3"] {

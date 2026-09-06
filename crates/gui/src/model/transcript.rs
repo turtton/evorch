@@ -105,10 +105,10 @@ impl TranscriptModel {
 
     pub fn apply(&mut self, event: &Event) {
         match &event.kind {
-            event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta { delta }) => {
+            event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) => {
                 self.append_text(delta, false)
             }
-            event_bus::EventKind::Message(event_bus::MessageEvent::ReasoningDelta { delta }) => {
+            event_bus::EventKind::Message(event_bus::MessageEvent::ReasoningDelta { delta, .. }) => {
                 self.append_text(delta, true)
             }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
@@ -240,9 +240,11 @@ mod tests {
         let mut model = TranscriptModel::new();
         model.apply(&Event::new(MessageEvent::MessageDelta {
             delta: "hel".into(),
+            run_id: None,
         }));
         model.apply(&Event::new(MessageEvent::MessageDelta {
             delta: "lo".into(),
+            run_id: None,
         }));
         assert_eq!(
             model.entries(),
