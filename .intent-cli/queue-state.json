@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T13:09:20.1189122+00:00",
+  "updated_at": "2026-09-06T13:12:33.3147875+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1131,6 +1131,28 @@
         "url": "https://github.com/turtton/evorch/issues/91"
       },
       "linked_pr": "https://github.com/turtton/evorch/pull/92",
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v03-gui-provider-settings",
+      "title": "v0.3: GUI provider \u8A2D\u5B9A surface\uFF08base_url / api_key_env / model \u9078\u629E\uFF09",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v03-gui-provider-settings/implementation.md",
+        "review_context": ".intent-cli/issues/v03-gui-provider-settings/review-context.md",
+        "yaml": ".intent-cli/issues/v03-gui-provider-settings/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 93,
+        "url": "https://github.com/turtton/evorch/issues/93"
+      },
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
