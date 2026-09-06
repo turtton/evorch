@@ -92,6 +92,14 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - 検証手順: geometry は headless テストで assert（theme_headless::compact_row_is_dense_and_centers_status_dot / sidebar_headless::sidebar_rows_are_single_line_dense_rows）。before/after 画像は headless_capture --demo [--error-thread] で取得し crates/gui/docs/screenshots/<unit>/ に README 付きで commit。赤ドット検証には --error-thread（demo fixture に Error 状態がないため追加）
 - 落とし穴: horizontal_wrapped + add_sized(固定高 Label) は行を下方向にのみ拡張し小要素が上寄せになる。固定高行には allocate_ui_with_layout + Align::Center を使う
 
+## v0.3 GUI chat composer の実装確定（issue #91、PR #92、2026-09-06）
+
+- composer surface: Conversation ペイン footer（通常入力=chat、先頭 `/`+既知名=command dispatch）。入力モデル parse_input（Empty/Chat/Command/UnknownCommand）、補完は `/` 直後の無空白間のみ、`/` 単独で全件。コマンド registry は SLASH_COMMANDS（metadata 追加 + run_slash_command 分岐で拡張、senpi 踏襲）
+- typing モデル: user message は TranscriptEntry::UserMessage、案内/エラー/help は Notice。MessageDelta の連結を分断しないよう別 entry として積む
+- chat 経路: SendChat→chat_runs（thread→RunId map）→既存 keep-alive interactive run へ send_message、終端時は再 spawn。chat run は goal ledger 非登録。RunConfig.keep_alive で resume 後も待機継続
+- provider 未設定ガード: ProviderStatus を composition root input として fail-closed（真の検出配線は provider-settings slice）
+- 終端整合: send_message は終端 phase 記録後に必ず拒否。terminal 公開前に user inbox close で受理→喪失 race を封鎖
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
