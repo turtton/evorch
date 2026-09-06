@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, Event, EventBus,
-    EventKind, OrchestratorEvent, ProviderEvent,
+    EventKind, EventReceiver, OrchestratorEvent, ProviderEvent, RecvError,
 };
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
@@ -22,9 +22,6 @@ const REPAIR_KEY: &str = "[evorch repair";
 const CONTINUATION_KEY: &str = "[evorch continuation";
 const WORKTREE_PLACEHOLDER: &str = "{worktree}";
 
-/// goal 登録と worker の RunAttached 発行が root run の finish 評価へ確実に
-/// 先行するよう、DEMO-GOAL root の各ターンへ入れる固定遅延。
-const ROOT_TURN_DELAY: Duration = Duration::from_millis(50);
 /// bus イベント待ちゲート (worker 初回応答・root 最終ターン) の上限。
 const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -38,10 +35,22 @@ pub struct DemoScriptModel {
     worker_reply_sent: Notify,
     reviewer_reply_sent: Notify,
     children_joined: AtomicBool,
+    // issue #83: イベント待ちゲートの取り逃し防止。構築時に subscribe して
+    // おき、最初のゲート待ちで drain task を起動して全イベントを inbox に
+    // 蓄積する。待機は inbox の replay から始めるため、対象イベントが
+    // subscribe より前に発行済みでも miss しない (旧実装は生 receiver を
+    // その場で subscribe するため、発行済みイベントを取り逃して GATE_TIMEOUT
+    // まで待ち、timeout 後はゲートなしで続行 → イベント順が非決定化する
+    // flake の一因だった)。
+    inbox: Arc<Mutex<Vec<Event>>>,
+    receiver: Mutex<Option<EventReceiver>>,
+    inbox_notify: Arc<Notify>,
+    drain_started: AtomicBool,
 }
 
 impl DemoScriptModel {
     pub fn new(bus: Arc<EventBus>) -> Self {
+        let event_receiver = bus.subscribe();
         Self {
             bus,
             scripts: Mutex::new(HashMap::from([
@@ -200,6 +209,10 @@ impl DemoScriptModel {
             worker_reply_sent: Notify::new(),
             reviewer_reply_sent: Notify::new(),
             children_joined: AtomicBool::new(false),
+            inbox: Arc::new(Mutex::new(Vec::new())),
+            receiver: Mutex::new(Some(event_receiver)),
+            inbox_notify: Arc::new(Notify::new()),
+            drain_started: AtomicBool::new(false),
         }
     }
 
@@ -243,22 +256,69 @@ impl DemoScriptModel {
             .map_or(0, VecDeque::len)
     }
 
-    /// bus 上で predicate を満たすイベントを GATE_TIMEOUT まで待つ。
-    ///
-    /// timeout 超過や bus 終了時はゲートなしで続行する (決定的順序は失われるが
-    /// demo が hang することはない)。
-    async fn wait_for_event(&self, predicate: fn(&Event) -> bool) {
-        let mut receiver = self.bus.subscribe();
-        let _ = tokio::time::timeout(GATE_TIMEOUT, async {
+    /// 構築時に確保した receiver を drain する task を一度だけ起動する。
+    /// receiver は構築時点以降のイベントを broadcast buffer に保持するため、
+    /// drain 開始が遅れても取り逃さない (capacity 超過時は Lagged で流す)。
+    fn ensure_drain(&self) {
+        if self.drain_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(mut receiver) = self
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let inbox = Arc::clone(&self.inbox);
+        let notify = Arc::clone(&self.inbox_notify);
+        tokio::spawn(async move {
             loop {
                 match receiver.recv().await {
-                    Ok(event) if predicate(&event) => return,
-                    Ok(_) => {}
-                    Err(_) => return,
+                    Ok(event) => {
+                        inbox
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(event);
+                        notify.notify_waiters();
+                    }
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
                 }
+            }
+        });
+    }
+
+    /// predicate を満たすイベントが inbox に現れるまで GATE_TIMEOUT まで待つ。
+    ///
+    /// 構築時からの全イベントを replay してから待つため取り逃しは起きない。
+    /// timeout 超過は待機条件の破綻 (イベント列が非決定化する状態) を意味する
+    /// ため、ゲートなしで続行せず明示的に失敗させる (issue #83)。
+    async fn wait_for_event(&self, predicate: fn(&Event) -> bool) {
+        self.ensure_drain();
+        let result = tokio::time::timeout(GATE_TIMEOUT, async {
+            loop {
+                let notified = self.inbox_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self
+                    .inbox
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .any(predicate)
+                {
+                    return;
+                }
+                notified.await;
             }
         })
         .await;
+        assert!(
+            result.is_ok(),
+            "demo script gate timed out after {GATE_TIMEOUT:?}"
+        );
     }
 
     /// worker 系 script の `{worktree}` placeholder を run の isolated worktree
@@ -313,16 +373,17 @@ impl AgentModel for DemoScriptModel {
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         let marker = script_key(initial_marker(messages)?);
-        if marker == DEMO_GOAL_KEY {
-            tokio::time::sleep(ROOT_TURN_DELAY).await;
-            if self.remaining_turns(marker) == 1 {
-                // 最終ターン (finish せず終わる応答) は review round 1 の開始まで
-                // 遅らせる。supervisor の pipeline busy は Review/Repair run のみを
-                // 数えるため、root が Implement worker のみの間に終端すると
-                // continuation が即座に dispatch されてしまう。reviewer 稼働後に
-                // 終端すれば dispatch は ReadyToFinish まで deferred される。
-                self.wait_for_event(is_review_round_started).await;
-            }
+        if marker == DEMO_GOAL_KEY && self.remaining_turns(marker) == 1 {
+            // 最終ターン (finish せず終わる応答) は ReadyToFinish まで待つ。
+            // issue #83: 以前は ReviewRoundStarted 待ち + 固定 sleep だったが、
+            // round 不問の待機は subscribe 後のイベントしか捕捉できず、root
+            // 終端と pipeline drain の相対順で supervisor の
+            // ContinuationSuppressed の有無・位置が変わる flake の根因だった。
+            // ReadyToFinish は必ず全 Implement/Review/Repair run の終端後に
+            // 発行され、この待機は turn-2 (早期 finish 拒否) より後に張るため
+            // 取り逃しも起きない。root 終端時に pipeline は必ず空になり、
+            // continuation dispatch は suppress を経ない単一経路に決定される。
+            self.wait_for_event(is_ready_to_finish).await;
         }
         if marker == DEMO_IMPL_KEY && self.mark_worker_gate(&invocation.run_id) {
             // 初回応答は root の早期 finish 拒否 (FinishRejected) まで遅らせ、
@@ -457,10 +518,13 @@ fn script_key(prompt: &str) -> &str {
     prompt
 }
 
-fn is_review_round_started(event: &Event) -> bool {
+fn is_ready_to_finish(event: &Event) -> bool {
     matches!(
         &event.kind,
-        EventKind::Orchestrator(OrchestratorEvent::ReviewRoundStarted { .. })
+        EventKind::Orchestrator(OrchestratorEvent::GoalStageChanged {
+            to: event_bus::GoalStage::ReadyToFinish,
+            ..
+        })
     )
 }
 

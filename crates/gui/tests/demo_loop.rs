@@ -103,20 +103,32 @@ fn activate_panel(harness: &mut HeadlessWorkbench<AgentRuntime>, panel_id: &str)
     leaf.set_active_tab(path.tab.0).expect("tab index is valid");
 }
 
-/// bus 上の OrchestratorEvent を発行順に収集する。
+/// bus 上の OrchestratorEvent を発行順に収集する。戻り値の receiver は
+/// goal の終端イベント (GoalStageChanged -> Done) 到着を通知する。
 fn spawn_collector(
     runtime: &tokio::runtime::Runtime,
     bus: &Arc<EventBus>,
-) -> Arc<Mutex<Vec<OrchestratorEvent>>> {
+) -> (Arc<Mutex<Vec<OrchestratorEvent>>>, mpsc::Receiver<()>) {
     let collected: Arc<Mutex<Vec<OrchestratorEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&collected);
+    let (done_tx, done_rx) = mpsc::channel();
     let mut receiver = bus.subscribe();
     runtime.spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
                     if let EventKind::Orchestrator(orchestrator) = event.kind {
+                        let is_done = matches!(
+                            orchestrator,
+                            OrchestratorEvent::GoalStageChanged {
+                                to: event_bus::GoalStage::Done,
+                                ..
+                            }
+                        );
                         lock(&sink).push(orchestrator);
+                        if is_done {
+                            let _ = done_tx.send(());
+                        }
                     }
                 }
                 Err(RecvError::Lagged(skipped)) => {
@@ -126,7 +138,7 @@ fn spawn_collector(
             }
         }
     });
-    collected
+    (collected, done_rx)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -143,6 +155,7 @@ struct DemoFixture {
     repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
     collected: Arc<Mutex<Vec<OrchestratorEvent>>>,
+    done_rx: mpsc::Receiver<()>,
 }
 
 impl DemoFixture {
@@ -182,7 +195,7 @@ impl DemoFixture {
                 let _ = repaint_tx.send(());
             })),
         );
-        let collected = spawn_collector(&rt, &bus);
+        let (collected, done_rx) = spawn_collector(&rt, &bus);
         let state = WorkbenchState::new(runtime.clone(), &UiSettings::default())
             .expect("default state builds")
             .with_pump(pump)
@@ -201,6 +214,7 @@ impl DemoFixture {
             repaint_rx,
             harness,
             collected,
+            done_rx,
         }
     }
 
@@ -244,28 +258,15 @@ impl DemoFixture {
         assert!(self.harness.has_label("closeout: result_summary ok"));
         assert!(self.harness.has_label("closeout: worker_complete ok"));
 
-        // collector が末尾イベント (Complete → Done stage) まで受信するのを待つ。
-        let deadline = Instant::now() + LABEL_TIMEOUT;
-        loop {
-            let done = lock(&self.collected).iter().any(|event| {
-                matches!(
-                    event,
-                    OrchestratorEvent::GoalStateChanged {
-                        to: GoalState::Complete,
-                        ..
-                    }
-                )
-            });
-            if done {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "collector did not observe goal completion within {LABEL_TIMEOUT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        // collector が末尾イベント (GoalStageChanged -> Done stage) に
+        // 到達するのを待つ。issue #83: 以前は GoalStateChanged::Complete の
+        // 検出後に固定 sleep (100ms) で後続イベントの到着を仮定していたが、
+        // 高負荷下では GSC(closeout -> done) が 100ms を超えて遅れうる。
+        // フローの真の終端は Done stage なので、collector からの到着通知を
+        // deadline 付きで受信する (sleep/poll ではなく event 待機)。
+        self.done_rx
+            .recv_timeout(LABEL_TIMEOUT)
+            .expect("collector did not observe goal completion");
     }
 
     fn events(&self) -> Vec<OrchestratorEvent> {
@@ -275,12 +276,10 @@ impl DemoFixture {
 
 /// 比較用に goal/run/token の動的 ID を出現順のプレースホルダへ正規化する。
 ///
-/// 隣接する完全同一イベントは畳み込む。runtime は worker 起動時に
-/// `attach_goal_child` (delegate tool 経路) と supervisor の
-/// `on_run_started` の双方から同一の RunAttached を emit しうる (ledger
-/// apply は冪等なので状態には影響しないが、bus 上のイベント列には
-/// スケジューリング次第で重複が現れる)。runtime API は frozen のため、
-/// demo 側の決定性はこの既知の重複を除いた列で評価する。
+/// 隣接する完全同一イベントは畳み込む。worker の RunAttached は
+/// `attach_goal_child` (delegate tool 経路) が単一の発行元であり
+/// (issue #83: supervisor の `on_run_started` 経路は emit しない)、
+/// 重複は発生しないはずだが、畳み込みは防御として残す。
 fn normalized_sequence(events: &[OrchestratorEvent]) -> Vec<serde_json::Value> {
     let mut goals = HashMap::new();
     let mut runs = HashMap::new();

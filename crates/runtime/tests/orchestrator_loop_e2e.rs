@@ -156,7 +156,7 @@ async fn goal_runs_to_awaiting_merge_then_complete_with_one_request_update_round
     })
     .await
     .expect("goal creation timeout");
-    root_gate.notify_waiters();
+    root_gate.notify_one();
     timeout(Duration::from_secs(2), async {
         while handle
             .snapshot(&goal_id)
@@ -167,7 +167,7 @@ async fn goal_runs_to_awaiting_merge_then_complete_with_one_request_update_round
     })
     .await
     .expect("deliverable timeout");
-    root_gate.notify_waiters();
+    root_gate.notify_one();
     let (approval, observed_events) = timeout(Duration::from_secs(5), async {
         let mut observed = Vec::new();
         loop {
