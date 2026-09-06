@@ -1,0 +1,55 @@
+implementation_issue_packet:
+  issue_title: "v0.3: demo_loop テスト flake の根治（goal 結合 race / 非決定シーケンスの決定論化）"
+  issue_kind: bug
+  source_execution_unit: v03-demo-loop-flake-fix
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/runtime/"
+  target_part: "demo_loop テストの非決定的失敗の根治。waiting→completion 遷移の timing 依存（poll interval / event ordering / goal 結合 race）を特定し、sleep 依存の撤廃と event 待機ベースの決定論化で固定化する"
+  dependencies: []
+  technical_baseline:
+    - "crates/gui/tests/demo_loop.rs: demo_goal_reaches_awaiting_merge_then_complete_deterministically が同一 head SHA で旧 run fail / 最新 run pass を繰り返す（CI runs 89065321929 fail → 89065899906 pass、直近 PR #82 CI push run で再発して rerun で pass）"
+    - "flake は PR #74 orchestrator-loop で導入された demo loop テスト由来で PR #76 / #82 変更とは無関係の pre-existing flake"
+    - "テストは assert_milestone_order（milestone イベントの出現順序）と normalized_sequence（ID/タイミング除去後のイベント列一致）で決定性を検証しているが、waiting→completion 遷移に poll 間隔・イベント順序の timing 依存が残存する"
+    - "runtime 側の goal supervisor / orchestrator loop（crates/runtime/）が waiting→awaiting_merge→complete 遷移を非同期的に進める構造で、demo fixture の駆動側に固定待機が残っている可能性がある"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  acceptance_criteria:
+    - "flake をローカルで高負荷再現（taskset -c 0,1 等の CPU 制限付き連続実行）し、失敗の再現条件と根本原因（poll 間隔 / イベント順序 / goal 結合 race のどれか）を特定した調査記録がある"
+    - "根本原因が決定論化されている（sleep / poll interval 依存の撤廃、event 待機ベースの milestone 検出等）。決定論化の方式と経路がコード内コメントで説明されている"
+    - "高負荷条件（taskset -c 0,1 相当）下で該当テストが連続 N≥20 回 pass することを確認する記録（コマンドと結果）がある"
+    - "既存テストの回帰がなく、cargo test --workspace が通常条件でも pass する"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+    new_intent_needed: false
+    placement_rationale: "demo_loop テストは gui-workbench の demo fixture 駆動であり、root cause は runtime の goal 遷移の非決定性。テスト決定論化の確定方式を gui-workbench overview に反映し、runtime 側の遷移設計の学びは agent-runtime-kernel overview へ writeback する。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "demo_loop テスト flake の根本原因（waiting→completion 遷移の timing 依存）と決定論化の確定方式（sleep 撤廃 / event 待機ベース化）、高負荷連続 pass の検証結果を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "flake の根本原因分類（race / poll 依存 / イベント順序）、決定論化の確定方式（event 待機 primitive の導入有無、fixture 駆動の待機パターン）、高負荷再現・検証の標準手順を gui-workbench overview（および必要なら agent-runtime-kernel overview）に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

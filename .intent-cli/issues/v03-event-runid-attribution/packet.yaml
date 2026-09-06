@@ -1,0 +1,55 @@
+implementation_issue_packet:
+  issue_title: "v0.3: event-bus MessageDelta/ReasoningDelta に run_id を付与し並行 run streaming の attribution を成立させる"
+  issue_kind: feature
+  source_execution_unit: v03-event-runid-attribution
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/event-bus/ crates/runtime/ crates/gui/"
+  target_part: "crates/event-bus/src/event.rs の MessageDelta / ReasoningDelta に run_id field を追加し、並行 run の streaming イベントが run 別に attribution されるようにする。GUI TranscriptRegistry の決定的配送、otel mapping、storage schema への追従を含む"
+  dependencies: []
+  technical_baseline:
+    - "crates/event-bus/src/event.rs: MessageEvent::MessageDelta / ReasoningDelta は delta のみで run_id を持たない（他のイベント variant には run_id / parent_run_id 相関 field が存在する）"
+    - "v02-gui-workbench-restructure（PR #66）で複数 transcript pane を並行表示する際、run_id 欠落により並行 run の streaming が単一 pane に混線する制約を検出済み（gui-workbench overview 実装確定節に記録）"
+    - "GUI TranscriptRegistry はイベント配送を行うが、MessageDelta / ReasoningDelta の run 別振り分けができない構造"
+    - "otel mapping（metrics/span exporter）と storage schema がイベント定義に追従する必要がある"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "MessageDelta / ReasoningDelta event に run_id field が追加され、serialization / deserialization / replay が既存の後方互換方針（additive 拡張 or versioning）に従って実装されている"
+    - "並行 run（同一 bus 上で複数 run が同時 streaming）のテストがあり、各 MessageDelta / ReasoningDelta が正しい run_id で attribution されることを検証する"
+    - "GUI / headless の既存 transcript 表示に回帰がなく、単一 run 表示が従来どおり動作する"
+    - "otel mapping / storage schema が run_id 追加に追従し、既存の exporter / 永続化テストが pass する"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents:
+      - intents/evorch/features/gui-workbench/overview.md
+    new_intent_needed: false
+    placement_rationale: "event schema の相関 field 拡張は agent-runtime-kernel のイベント契約に属する。GUI の並行 pane 配送への利用は gui-workbench 側の確定として追従する。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/agent-runtime-kernel/overview.md
+      summary: "MessageDelta / ReasoningDelta の run_id 追加確定、後方互換方針（additive / versioning）の採用決定、並行 run streaming の attribution 成立を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "run_id attribution の確定方式（additive field or schema versioning）、並行 run streaming の配送保証、otel / storage への追従方法を agent-runtime-kernel overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
