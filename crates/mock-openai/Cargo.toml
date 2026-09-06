@@ -1,0 +1,11 @@
+[package]
+name = "mock-openai"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "mock_openai"
+
+[dependencies]
+serde_json = { workspace = true }
