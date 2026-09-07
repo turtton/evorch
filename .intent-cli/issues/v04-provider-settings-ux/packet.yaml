@@ -1,0 +1,61 @@
+implementation_issue_packet:
+  issue_title: "v0.4: Provider Settings UX 拡張（modal 幅・/v1/models 自動補完・default_model 見直し）"
+  issue_kind: feature
+  source_execution_unit: v04-provider-settings-ux
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/config/ crates/providers/"
+  target_part: "Provider Settings modal の UX 拡張: (a) modal 幅を viewport 連動（上限 token 付き）にし文字切れ解消 (b) provider の GET /v1/models から model 候補を取得して選択 UI（取得失敗時は手動入力 fallback）(c) 除外モデルフィルタ設定（config schema additive）(d) default_model の存廃判断。mock-openai に /v1/models endpoint を追加してテスト利用"
+  dependencies: []
+  technical_baseline:
+    - "crates/gui/src/panes/provider_settings.rs:17 provider_settings_modal は egui::Modal を使用。横幅は Modal 既定で狭く、長い base_url / api_key_env / model 名が見切れやすい"
+    - "crates/mock-openai/src/server.rs: blocking OpenAI-compatible fixture。/v1/chat/completions と汎用 JSON/SSE を返すが /v1/models endpoint は未実装"
+    - "crates/config/src/types/provider.rs:144 ProviderProfileConfig は models: Vec<String> / default_model: String を持つ必須フィールド。api_key_env sugar 対応、deny_unknown_fields 維持"
+    - "crates/routing/src/router.rs:109-207 resolve() のコメント・実装より、concrete model は (1) session affinity の再ピン時にはピン先プロファイルの default_model (2) 候補の model 上書きがなければ default_model で解決。routing.routes が空の場合は default_logical_models(agents) の各論理 model を first profile の default_model へ結ぶ。category 別割当は agents.<role>.categories.<category>.logical_model で指定するが、route candidate の model 未指定時は default_model で concrete model を解決する"
+    - "上記より default_model は『route で concrete model が未指定の場合の fallback』および『ピン再度の再解決の concrete model anchor』として技術的に冗長ではない（ただし operator からは「category 別割当があれば不要」と見える）。接続テスト用途としても残る"
+    - "codex / OpenAI Codex サブスクリプションは provider 種別として定義済み（connectors API）だが /v1/models は openai-compatible 汎用プロバイダで利用する想定"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "modal 幅が viewport サイズに連動し、上限 token 付きで文字が見切れなくなる。headless capture で before/after を検証する"
+    - "openai-compatible provider の base_url から GET /v1/models を呼び出し、取得した model id を combo box 候補とする。取得失敗時は手動入力（models_text / default_model）を維持する fallback"
+    - "除外モデルフィルタを additive config 追加（既存 evorch.toml/schema は後方互換）。GUI から edit して保存できる"
+    - "default_model を見直し: 上記 routing 実態に基づき、route candidate の model 未指定 / session affinity 再解決の anchor として必要なら維持（UI で利用目的を明示）、冗長と判断できれば廃止（既存 config は読める後方互換維持）。判断を PR body に記録する"
+    - "crates/mock-openai/src/server.rs に /v1/models endpoint を追加し、provider settings headless test と通常テストで利用する"
+    - "headless capture + cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+    new_intent_needed: false
+    placement_rationale: "Provider Settings は workbench の operator 対向 surface。/v1/models 連携や default_model 見直しは provider routing / config schema の接続点だが、主要変更は GUI surface。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "Provider Settings modal の確定 UX（viewport 連動幅、/v1/models 自動補完、除外フィルタ、default_model の利用目的明示/廃止判断）を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "modal 幅の決定方式（viewport 計算・上限 token）、/v1/models クライアント実装とエラーハンドリング、除外フィルタの config schema 追加、default_model の存廃判断と後方互換の維持方式を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の Provider Settings"
+      role: Operator
+      target_surface: "Settings surface（provider 追加/編集、model 選択、除外フィルタ）"

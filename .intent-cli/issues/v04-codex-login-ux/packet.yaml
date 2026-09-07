@@ -1,0 +1,62 @@
+implementation_issue_packet:
+  issue_title: "v0.4: codex サブスクリプションのログイン導線（GUI からの認証開始/状態表示）"
+  issue_kind: feature
+  source_execution_unit: v04-codex-login-ux
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/providers/"
+  target_part: "GUI から codex サブスクリプション（OpenAI Codex / ChatGPT subscription）の認証フローを開始できる導線、および認証状態を表示する surface を追加する。既存の codex device OAuth client（crates/providers/src/provider/codex/oauth/device.rs）とトークン管理（crates/providers/src/provider/codex/tokens.rs）を再利用し、平文 credential 禁止・fail-closed 規約（ADR 0008）を維持する"
+  dependencies: []
+  technical_baseline:
+    - "crates/providers/src/provider/codex/oauth/device.rs: DeviceAuthClient による device authorization フロー（user_code / verification_url / polling interval）。auth.openai.com/codex/device 固定 URL"
+    - "crates/providers/src/provider/codex/tokens.rs: CodexTokenStore、TokenBundle（access_token / refresh_token / id_token）を JSON として永続化。Debug は redacted"
+    - "crates/providers/src/provider/codex/session.rs: CodexSessionManager が credential store 統合。トークンの refresh 取得まで provider 層で閉じている"
+    - "crates/providers/src/provider/codex/client.rs: CodexClient が ProviderClient 実装。設定には base_url / auth_base_url / timeout。CodexSubscription 用の provider 種別は config で OpenAiCodex として定義済み"
+    - "現状 crates/gui/src/ には codex 認証に関する導線がない（ provider settings は OpenAI 互換プロバイダのみ対象）"
+    - "認証トークンの実体は provider 層 / credential store に閉じ、GUI は認証開始・状態・有効期限の表示のみを扱う。平文 credential GUI 入力は禁止（ADR 0008）"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+  acceptance_criteria:
+    - "GUI Settings/providers surface から codex サブスクリプションの認証フロー（device authorization）を開始できる。既存 CLI/認証機構（DeviceAuthClient + CodexTokenStore）を再利用し、重複実装を避ける"
+    - "認証状態（未認証 / 認証中（user_code・verification url 表示）/ 認証済み）が GUI で確認できる。トークン実体は GUI からは触れない"
+    - "未認証時には明確な案内（device code 入力 URL と手順）が表示され、いきなり API 呼び出しで失敗しない"
+    - "平文 credential の GUI 入力は許容せず、fail-closed 規約（ADR 0008）を維持する。保存/読み出しは keychain または provider 層の token store のみを使う"
+    - "headless capture で認証開始フローと状態遷移を検証し、cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    new_intent_needed: false
+    placement_rationale: "codex ログイン導線は operator 対向 surface であり gui-workbench の範囲。認証フローは provider 層（provider-routing）を再利用し、credential 規約は ADR 0008 に接続。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "codex サブスクリプション認証導線の確定表面（GUI 開始ボタン、状態表示、user_code 表示）、トークン実体の GUI 非接触規約、credential store 再利用方式を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "codex device OAuth の GUI 統合方式（既存 client 再利用）、認証状態モデル、エラーハンドリングと有効期限表示、headless capture 検証手順を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: "gui-workbench overview の codex ログイン導線"
+      role: Operator
+      target_surface: "Settings surface（OpenAI Codex 認証開始・状態表示）"
