@@ -115,6 +115,15 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - 検出=evorch-gui 非 demo 起動時 Config::load(project_dir) の providers 非空判定（真の配線、load 失敗は NotConfigured fail-closed）
 - 検証: crates/gui/tests/provider_settings_headless.rs 9 件 + headless_capture --demo --open-settings（lavapipe）
 
+## v0.4 Provider Settings UX 拡張の実装確定（issue #100、PR #101、2026-09-07）
+
+- modal 幅: min(viewport×0.6, PROVIDER_MODAL_MAX_WIDTH=720px) clamp + 新 theme token。caption は combo 行から分離（同列配置だと modal が ~1180px に膨張し cap 突破）。検証: headless 幾何学テスト（input >400px・modal 右端 ≤720）+ PNG capture 800/1600px
+- /v1/models 補完: providers::list_models(base_url, &ProviderAuth) が GET {base_url}/models を Bearer で呼ぶ。GUI は std::thread + tokio current_thread + mpsc で非同期取得（UI スレッド非ブロック）、ModelsFetchState {Idle/Loading/Loaded/Failed} を表示。成功時は fetched ids を default_model combo 候補に採用（現在値は選択可能を維持）、失敗時は models_text/default_model 手動入力 fallback + Refresh models 再取得
+- 除外モデルフィルタ: ProviderProfileConfig.excluded_models を #[serde(default)] で additive 追加（旧 evorch.toml 読込可、deny_unknown_fields 維持、strict.rs PROVIDER_KEYS 追加）。正規化（trim/空除去/重複排除・初出順）後、非空のときのみ TOML 書き出し（空配列ノイズなし）。GUI multiline フィールドで編集・保存（round-trip 検証）
+- default_model 見直し: 維持。router.rs resolve() の (1) session affinity 再解決時の concrete model (2) route candidate の model 未指定時 (3) fallback パスの anchor として必須（logical_model は論理名）。UI に用途を明示: "Used when a route doesn't override the model and when re-resolving a pinned session."
+- mock-openai: spawn_with_models で /v1/models endpoint（OpenAI 互換 list 形式、scripts キュー非消費）を追加し headless/通常テスト両方で利用
+- 検証: cargo test --workspace 1834/0（clippy -D warnings / fmt --check / git diff --check 全 PASS）。fetch headless テストは kittest step() による 1 フレーム確定進行（Loading 中 spinner の継続 repaint で run() が max_steps(4) を超過する CI flake を request-update で修正、commit 64f9c52）
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）

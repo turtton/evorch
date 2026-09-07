@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-07T02:14:23.3336293+00:00",
+  "updated_at": "2026-09-07T05:41:16.6111719+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1208,7 +1208,7 @@
     {
       "execution_unit": "v04-provider-settings-ux",
       "title": "v0.4: Provider Settings UX \u62E1\u5F35\uFF08modal \u5E45\u30FB/v1/models \u81EA\u52D5\u88DC\u5B8C\u30FBdefault_model \u898B\u76F4\u3057\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1222,6 +1222,7 @@
         "number": 100,
         "url": "https://github.com/turtton/evorch/issues/100"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/101",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
