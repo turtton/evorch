@@ -128,3 +128,51 @@ fn manual_models_remain_available_when_request_fails() {
     harness.run();
     assert!(harness.has_label("manual-model"));
 }
+
+#[test]
+fn save_persists_fetched_selection_when_manual_models_differ() {
+    // Given: a real models endpoint and a provider with only a manual model.
+    let server = StreamingMockOpenAi::spawn_with_models(
+        vec![],
+        WriteMode::default(),
+        vec!["mock-model-a".into()],
+    );
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench_with_seeded_settings(
+        temp.path(),
+        ProviderSettingsModel {
+            name: "local".into(),
+            base_url: server.base_url(),
+            api_key_env: "TEST_KEY".into(),
+            models_text: "manual-model".into(),
+            default_model: "manual-model".into(),
+            ..ProviderSettingsModel::default()
+        },
+        [1200.0, 900.0],
+    );
+    harness.click_label("Open Settings");
+    harness.run();
+    harness
+        .state_mut()
+        .provider_settings_mut()
+        .start_models_fetch_with_key(Some("sk-test".into()));
+    run_until_fetch_finishes(&mut harness);
+    assert_eq!(
+        harness.state().provider_settings().models_fetch_state,
+        ModelsFetchState::Loaded
+    );
+    harness.state_mut().provider_settings_mut().default_model = "mock-model-a".into();
+    harness.run();
+    // When: the fetched selection is saved through the modal.
+    harness.click_label("Save");
+    harness.run();
+    // Then: the modal closes and the selected model is persisted as a member.
+    assert!(!harness.state().provider_settings().open);
+    assert!(!harness.has_label("Save"));
+    let raw = std::fs::read_to_string(temp.path().join("evorch.toml")).expect("saved config");
+    assert!(raw.contains("default_model = \"mock-model-a\""));
+    let saved = super::load_config(temp.path());
+    let provider = saved.providers.get("local").expect("saved provider");
+    assert_eq!(provider.default_model, "mock-model-a");
+    assert_eq!(provider.models, ["manual-model", "mock-model-a"]);
+}

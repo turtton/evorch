@@ -77,19 +77,7 @@ pub fn provider_settings_modal(
                     .labelled_by(excluded_models.id);
                     ui.end_row();
                     let default_model = ui.label("Default model");
-                    let choices = model
-                        .available_models
-                        .as_ref()
-                        .map(|fetched| {
-                            let mut choices = fetched.clone();
-                            if !model.default_model.is_empty()
-                                && !choices.iter().any(|m| m == &model.default_model)
-                            {
-                                choices.push(model.default_model.clone());
-                            }
-                            choices
-                        })
-                        .unwrap_or_else(|| model.parsed_models());
+                    let choices = model.candidate_models();
                     let max_display_chars =
                         ((input_width - 24.0) / 8.0).max(10.0) as usize;
                     let default_model_text =
