@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-06T19:02:19.7410999+00:00",
+  "updated_at": "2026-09-07T01:20:36.8247385+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1177,6 +1177,28 @@
         "url": "https://github.com/turtton/evorch/issues/96"
       },
       "linked_pr": "https://github.com/turtton/evorch/pull/97",
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v03-chat-sink-flake-fix",
+      "title": "v0.3: chat_sink_runtime flake \u6839\u6CBB\uFF08second_chat_reuses_same_run_and_run_survives_resume \u975E\u6C7A\u5B9A\u5931\u6557\uFF09",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v03-chat-sink-flake-fix/implementation.md",
+        "review_context": ".intent-cli/issues/v03-chat-sink-flake-fix/review-context.md",
+        "yaml": ".intent-cli/issues/v03-chat-sink-flake-fix/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 98,
+        "url": "https://github.com/turtton/evorch/issues/98"
+      },
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
