@@ -237,3 +237,4 @@
 {"ts":"2026-09-07T02:14:23.3336293+00:00","execution_unit":"v04-provider-settings-ux","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#100","reason":"https://github.com/turtton/evorch/issues/100"}
 {"ts":"2026-09-07T05:41:16.6020061+00:00","execution_unit":"v04-provider-settings-ux","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":101}
 {"ts":"2026-09-07T05:41:16.6020061+00:00","execution_unit":"v04-provider-settings-ux","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":101}
+{"ts":"2026-09-07T05:43:42.7747643+00:00","execution_unit":"v04-codex-login-ux","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#102","reason":"https://github.com/turtton/evorch/issues/102"}
