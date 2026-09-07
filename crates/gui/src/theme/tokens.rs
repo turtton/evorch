@@ -45,6 +45,8 @@ pub const TOPBAR: f32 = 52.0;
 pub const AGENTS_COL_MIN: f32 = 56.0;
 /// Agents telemetry grid の列幅上限。自然幅が大きすぎる列を抑制する。
 pub const AGENTS_COL_MAX: f32 = 160.0;
+/// Provider settings modal の幅上限。viewport 幅の 60% を超えないよう制限する。
+pub const PROVIDER_MODAL_MAX_WIDTH: f32 = 720.0;
 /// Agents telemetry grid のセル内テキスト左右の最小余白。
 pub const CELL_PAD_X: f32 = 8.0;
 

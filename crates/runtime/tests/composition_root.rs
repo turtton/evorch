@@ -63,6 +63,7 @@ fn configured() -> Config {
                     var: KEY_ENV.to_string(),
                 },
                 models: vec![MODEL.to_string()],
+                excluded_models: Vec::new(),
                 default_model: MODEL.to_string(),
             },
         )]),

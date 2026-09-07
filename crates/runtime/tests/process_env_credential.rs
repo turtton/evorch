@@ -56,6 +56,7 @@ fn config() -> Config {
                     var: KEY_ENV.to_string(),
                 },
                 models: vec!["local-model".to_string()],
+                excluded_models: Vec::new(),
                 default_model: "local-model".to_string(),
             },
         )]),

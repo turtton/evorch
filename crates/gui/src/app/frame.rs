@@ -18,6 +18,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.diff.poll();
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
+        if self.provider_settings.poll_models() {
+            ctx.request_repaint();
+        }
         self.render(ui);
     }
 
