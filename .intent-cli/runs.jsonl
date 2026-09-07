@@ -230,3 +230,5 @@
 {"ts":"2026-09-06T19:02:19.7327978+00:00","execution_unit":"v03-followup-cleanups","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":97}
 {"ts":"2026-09-07T01:20:34.4560639+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v03-chat-sink-flake-fix/"}
 {"ts":"2026-09-07T01:20:36.8247385+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#98","reason":"https://github.com/turtton/evorch/issues/98"}
+{"ts":"2026-09-07T02:12:16.9124421+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":99}
+{"ts":"2026-09-07T02:12:16.9124421+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":99}

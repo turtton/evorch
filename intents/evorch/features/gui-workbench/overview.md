@@ -100,6 +100,13 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - provider 未設定ガード: ProviderStatus を composition root input として fail-closed（真の検出配線は provider-settings slice）
 - 終端整合: send_message は終端 phase 記録後に必ず拒否。terminal 公開前に user inbox close で受理→喪失 race を封鎖
 
+## v0.3 chat_sink_runtime flake 根治の実装確定（issue #98、PR #99、2026-09-07）
+
+- 位相遷移の可観測規約: 状態確定は必ず通知に happens-before させる（commit-before-emit）。AgentRunStateChanged を観測した直後に phase 参照すると旧位相を読みうる emit-before-commit の順序を、agent_loop.rs LoopState::transition / runtime.rs transition_phase の両遷移経路で phase_tx.send_replace → emit に反転（PR #84 由来の決定論化規約に準拠）
+- spawn の registered emit（Pending→Pending）は watch 初期値と一致するため対象外。テスト側はイベント待機 + 直後の inspect が安全
+- run 状態復帰（send_message）と chat_runs キャッシュは、Waiting 到達を保証する wait_for_reply 後には決定的。resume 保証は phase 確定（:140 Waiting）に依存
+- 検証: workspace tests 193 ok、修正対象テストを逐次 30/30 + taskset -c 0,1 6 並行 30 runs 30/30 の 2 条件で連続 PASS（変更前は 6 並行で 1 FAIL / x12 を記録、窓は CPU 競合でのみ露出）
+
 ## v0.3 Settings surface の実装確定（issue #93、PR #94、2026-09-06）
 
 - 配置=egui::Modal の中央 overlay（dock/layout 不変、PanelKind 拡張なし）。導線=composer 案内行「Open Settings」（chat は NotConfigured でブロック継続）と Goal pane「Configure provider」（goal は非ブロッキング案内のみ）
