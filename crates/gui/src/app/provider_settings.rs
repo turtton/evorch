@@ -6,6 +6,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn open_provider_settings(&mut self) {
         self.provider_settings.error = None;
         self.provider_settings.open = true;
+        self.provider_settings.start_models_fetch();
     }
 
     pub const fn close_provider_settings(&mut self) {

@@ -26,6 +26,7 @@ fn provider_config(provider_type: ProviderTypeConfig) -> ProviderProfileConfig {
             var: API_KEY_ENV.to_string(),
         },
         models: vec![MODEL.to_string()],
+        excluded_models: Vec::new(),
         default_model: MODEL.to_string(),
     }
 }

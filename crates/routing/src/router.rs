@@ -361,6 +361,7 @@ mod tests {
                 var: "API_KEY".to_string(),
             },
             models: vec![default_model.to_string()],
+            excluded_models: Vec::new(),
             default_model: default_model.to_string(),
         };
         ProviderProfile::try_from((name, &profile_config)).expect("有効な設定は変換できる")

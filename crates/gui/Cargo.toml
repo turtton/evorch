@@ -33,6 +33,7 @@ tracing = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
+mock-openai = { path = "../mock-openai" }
 tracing-subscriber = { workspace = true }
 tools = { path = "../tools" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -4,7 +4,15 @@ use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
 use gui::model::composer::{GOAL_PROVIDER_GUIDANCE, PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+use gui::model::provider_settings::ProviderSettingsModel;
+use gui::theme::tokens::PROVIDER_MODAL_MAX_WIDTH;
 use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+
+#[path = "provider_settings/fetch.rs"]
+mod fetch;
+
+#[path = "provider_settings/capture.rs"]
+mod capture;
 
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
@@ -274,6 +282,34 @@ fn configure_provider_button_in_goal_pane_opens_modal() {
     assert!(harness.has_label("Save"));
 }
 
+fn workbench_with_seeded_settings(
+    root: &std::path::Path,
+    model: ProviderSettingsModel,
+    size: [f32; 2],
+) -> HeadlessWorkbench<DemoSource> {
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("demo");
+    sidebar
+        .add_project(project_id.clone(), "demo", root)
+        .expect("project added");
+    sidebar
+        .select_project(&project_id)
+        .expect("project selected");
+    sidebar
+        .create_thread(ThreadId::new("thread-1"), project_id, "thread-1")
+        .expect("thread created");
+    sidebar
+        .switch_thread(&ThreadId::new("thread-1"))
+        .expect("thread selected");
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds")
+        .with_sidebar(sidebar)
+        .with_provider_status(ProviderStatus::default())
+        .with_provider_settings_path(root.join("evorch.toml"))
+        .with_provider_settings(model);
+    HeadlessWorkbench::new(state, size)
+}
+
 #[test]
 fn save_without_config_path_shows_inline_error() {
     // Given: valid settings but no configured save path.
@@ -297,4 +333,66 @@ fn save_without_config_path_shows_inline_error() {
         harness.state().provider_status(),
         &ProviderStatus::default()
     );
+}
+
+#[test]
+fn modal_width_scales_with_viewport_and_respects_cap() {
+    // Given: a provider with a very long base URL and model name.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let model = ProviderSettingsModel {
+        name: "local".into(),
+        base_url: "https://api.example.invalid/v1/chat/completions/very/long/path/that/should/not/clip/in/the/provider/settings/modal".into(),
+        api_key_env: "LOCAL_API_KEY_WITH_A_VERY_LONG_NAME".into(),
+        models_text: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
+        default_model: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
+        ..ProviderSettingsModel::default()
+    };
+    for (viewport_width, expect_capped) in [(1200.0, true), (800.0, false)] {
+        let mut harness =
+            workbench_with_seeded_settings(temp.path(), model.clone(), [viewport_width, 600.0]);
+        // When: settings are opened at the given viewport width.
+        harness.click_label("Open Settings");
+        harness.run();
+        // Then: controls are visible and the modal fits within the viewport.
+        let caption =
+            "Used when a route doesn't override the model and when re-resolving a pinned session.";
+        let caption_rects = harness.label_rects(caption);
+        assert!(
+            !caption_rects.is_empty(),
+            "Default model caption should exist at {viewport_width}px"
+        );
+        let caption_rect = caption_rects[0];
+        assert!(
+            caption_rect.right() <= viewport_width,
+            "Default model caption right edge ({}) must fit within {viewport_width}px viewport",
+            caption_rect.right()
+        );
+
+        let base_url_rects = harness.label_rects("Base URL");
+        assert!(
+            !base_url_rects.is_empty(),
+            "Base URL input should exist at {viewport_width}px"
+        );
+        let input_rect = base_url_rects[0];
+        if expect_capped {
+            assert!(
+                input_rect.width() > 400.0,
+                "input field should be wider than default narrow width, got {}",
+                input_rect.width()
+            );
+        }
+
+        let name_rects = harness.label_rects("Name");
+        assert!(
+            !name_rects.is_empty(),
+            "Name label should exist at {viewport_width}px"
+        );
+        let name_rect = name_rects[0];
+        // Modal width ≈ rightmost input right - leftmost label left + frame margins.
+        let modal_width_approx = input_rect.right() - name_rect.left() + 50.0;
+        assert!(
+            modal_width_approx <= PROVIDER_MODAL_MAX_WIDTH,
+            "modal should not exceed PROVIDER_MODAL_MAX_WIDTH ({PROVIDER_MODAL_MAX_WIDTH}), got {modal_width_approx}"
+        );
+    }
 }

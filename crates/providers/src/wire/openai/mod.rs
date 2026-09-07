@@ -1,11 +1,13 @@
 //! OpenAI Chat Completions の wire 形式を扱います。
 
+mod models;
 mod request;
 mod response;
 mod response_types;
 mod stream;
 mod types;
 
+pub use models::{WireModel, WireModelList};
 pub use request::{from_wire_messages, to_wire_request};
 pub use response::{from_wire_response, to_finish_reason};
 pub use response_types::{

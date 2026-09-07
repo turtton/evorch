@@ -31,6 +31,97 @@ fn post(server: &StreamingMockOpenAi, body: &Value) -> (String, String) {
     (headers.to_owned(), body.to_owned())
 }
 
+fn get(server: &StreamingMockOpenAi, path: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(address(server)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    (headers.to_owned(), body.to_owned())
+}
+
+#[test]
+fn serves_models_when_ids_are_configured() {
+    for ids in [vec!["model-beta", "model-alpha"], vec![]] {
+        // Given
+        let server = StreamingMockOpenAi::spawn_with_models(
+            vec![],
+            WriteMode::FramePerWrite,
+            ids.iter().map(|id| (*id).to_owned()).collect(),
+        );
+        // When
+        let (headers, body) = get(&server, "/v1/models");
+        // Then
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(
+            headers
+                .lines()
+                .any(|line| line == "Content-Type: application/json")
+        );
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["object"], "list");
+        let models = body["data"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        for model in models {
+            assert_eq!(model["object"], "model");
+            assert_eq!(model["created"], 0);
+            assert_eq!(model["owned_by"], "mock-openai");
+        }
+        let requests = server.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/models");
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].body, Value::Null);
+        assert!(!requests[0].stream);
+    }
+}
+
+#[test]
+fn serves_default_models_when_scripts_are_empty() {
+    // Given
+    let server = StreamingMockOpenAi::spawn(vec![]);
+    // When
+    let (_, body) = get(&server, "/v1/models");
+    // Then
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({
+            "object": "list",
+            "data": [{"id": "mock-model", "object": "model", "created": 0, "owned_by": "mock-openai"}]
+        })
+    );
+}
+
+#[test]
+fn preserves_chat_script_when_models_are_requested() {
+    // Given
+    let response = ScriptedResponse::text_stream("after-models", "m", ["hello"]);
+    let server = StreamingMockOpenAi::spawn(vec![response.clone()]);
+    // When
+    get(&server, "/v1/models");
+    // Then
+    assert_eq!(server.remaining_scripts(), 1);
+    assert_eq!(post(&server, &json!({"stream": true})).1, response.body());
+    assert_eq!(server.recorded_requests()[1].method, "POST");
+    assert_eq!(server.remaining_scripts(), 0);
+}
+
 #[test]
 fn serves_sse_for_stream_true_and_records_request() {
     // Given

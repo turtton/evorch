@@ -539,6 +539,14 @@
           "type": "string",
           "default": "claude-sonnet-4-5"
         },
+        "excluded_models": {
+          "description": "除外するモデル ID の一覧。",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "models": {
           "description": "利用可能なモデル ID の一覧。",
           "type": "array",

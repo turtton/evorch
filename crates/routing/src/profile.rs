@@ -92,6 +92,7 @@ mod tests {
                 var: "API_KEY".to_string(),
             },
             models: vec!["model-a".to_string(), "model-b".to_string()],
+            excluded_models: Vec::new(),
             default_model: "model-b".to_string(),
         }
     }

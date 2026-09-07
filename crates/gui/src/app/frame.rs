@@ -18,7 +18,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.diff.poll();
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
+        if self.provider_settings.poll_models() {
+            ctx.request_repaint();
+        }
         self.render(ui);
+        if matches!(
+            self.provider_settings.models_fetch_state,
+            crate::model::provider_settings::ModelsFetchState::Loading
+        ) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
     }
 
     fn drain_pump(&mut self) {
