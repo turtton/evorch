@@ -15,6 +15,7 @@ use crate::ScriptedResponse;
 /// A parsed request, retained even when the response queue is exhausted.
 #[derive(Clone, Debug)]
 pub struct RecordedRequest {
+    pub method: String,
     pub path: String,
     pub authorization: Option<String>,
     pub body: Value,
@@ -54,6 +55,23 @@ impl StreamingMockOpenAi {
     /// Panics if the OS cannot create the listener or accept thread. This
     /// test-fixture constructor returns `Self`, so setup failures are fatal.
     pub fn spawn_with(responses: Vec<ScriptedResponse>, mode: WriteMode) -> Self {
+        Self::spawn_with_models(responses, mode, vec!["mock-model".to_owned()])
+    }
+
+    /// Starts a fixture serving the given model IDs in order, independently of scripts.
+    ///
+    /// # Panics
+    /// Panics if the OS cannot create the listener or accept thread.
+    pub fn spawn_with_models(
+        responses: Vec<ScriptedResponse>,
+        mode: WriteMode,
+        models: Vec<String>,
+    ) -> Self {
+        let models: Vec<_> = models
+            .into_iter()
+            .map(|id| json!({"id": id, "object": "model", "created": 0, "owned_by": "mock-openai"}))
+            .collect();
+        let models = json!({"object": "list", "data": models});
         let listener = TcpListener::bind("127.0.0.1:0")
             .unwrap_or_else(|error| panic!("mock_openai bind failed: {error}"));
         let address = listener
@@ -83,11 +101,15 @@ impl StreamingMockOpenAi {
                     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
                     let request = read_request(&mut stream)?;
                     let streaming = request.stream;
+                    let listing_models = request.method == "GET" && request.path == "/v1/models";
                     // Poison recovery retains fixture evidence instead of panicking again.
                     recorded
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(request);
+                    if listing_models {
+                        return write_json(&mut stream, "200 OK", &models);
+                    }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
                     match response {
                         Some(response) if streaming => write_sse(&mut stream, &response, mode),
@@ -155,9 +177,13 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    let path = line
-        .split_whitespace()
-        .nth(1)
+    let mut parts = line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request method"))?
+        .to_owned();
+    let path = parts
+        .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request path"))?
         .to_owned();
     let mut content_length = 0;
@@ -184,9 +210,14 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
     }
     let mut bytes = vec![0; content_length];
     reader.read_exact(&mut bytes)?;
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let body: Value = if method == "GET" && bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+    };
     Ok(RecordedRequest {
+        method,
         path,
         authorization,
         stream: body["stream"] == true,
