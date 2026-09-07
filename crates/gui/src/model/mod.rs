@@ -1,5 +1,6 @@
 //! egui-free view models shared by the panes.
 
+pub mod codex_auth;
 pub mod commands;
 pub mod composer;
 pub mod demo;
