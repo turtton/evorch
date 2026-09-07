@@ -5,8 +5,9 @@ use gui::model::provider_settings::{ModelsFetchState, ProviderSettingsModel};
 use mock_openai::{StreamingMockOpenAi, WriteMode};
 
 fn run_until_fetch_finishes(harness: &mut HeadlessWorkbench<DemoSource>) {
+    // run() は Loading 中の repaint 要求を消化し続け max_steps を超過し得るため、確定的に 1 フレームずつ進める。
     for _ in 0..200 {
-        harness.run();
+        harness.step();
         match &harness.state().provider_settings().models_fetch_state {
             ModelsFetchState::Loaded | ModelsFetchState::Failed(_) => return,
             ModelsFetchState::Idle | ModelsFetchState::Loading => std::thread::yield_now(),
