@@ -232,3 +232,6 @@
 {"ts":"2026-09-07T01:20:36.8247385+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#98","reason":"https://github.com/turtton/evorch/issues/98"}
 {"ts":"2026-09-07T02:12:16.9124421+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":99}
 {"ts":"2026-09-07T02:12:16.9124421+00:00","execution_unit":"v03-chat-sink-flake-fix","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":99}
+{"ts":"2026-09-07T02:14:12.9517121+00:00","execution_unit":"v04-provider-settings-ux","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v04-provider-settings-ux/"}
+{"ts":"2026-09-07T02:14:13.5411452+00:00","execution_unit":"v04-codex-login-ux","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v04-codex-login-ux/"}
+{"ts":"2026-09-07T02:14:23.3336293+00:00","execution_unit":"v04-provider-settings-ux","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#100","reason":"https://github.com/turtton/evorch/issues/100"}
