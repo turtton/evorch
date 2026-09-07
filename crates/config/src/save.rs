@@ -17,6 +17,8 @@ pub struct OpenAiCompatibleProviderInput {
     pub api_key_env: String,
     /// モデル ID 一覧 (空白・空要素・重複は除去する)。
     pub models: Vec<String>,
+    /// 除外するモデル ID の一覧 (空白・空要素・重複は除去する)。
+    pub excluded_models: Vec<String>,
     /// 正規化済みモデル一覧に含まれる既定モデル ID。
     pub default_model: String,
 }
@@ -56,7 +58,7 @@ pub fn validate_openai_compatible_provider_input(
             "api_key_env must be an environment variable NAME matching ^[A-Z_][A-Z0-9_]*$ (never the API key itself; plaintext credentials are rejected per ADR 0008)",
         ));
     }
-    let models = normalized_models(input);
+    let models = normalized_models(&input.models);
     if models.is_empty() {
         return Err(invalid(
             "models",
@@ -121,8 +123,19 @@ pub fn save_openai_compatible_provider(
     profile.insert("api_key_env", value(input.api_key_env.as_str()));
     profile.insert(
         "models",
-        value(normalized_models(input).into_iter().collect::<Array>()),
+        value(
+            normalized_models(&input.models)
+                .into_iter()
+                .collect::<Array>(),
+        ),
     );
+    let excluded_models = normalized_models(&input.excluded_models);
+    if !excluded_models.is_empty() {
+        profile.insert(
+            "excluded_models",
+            value(excluded_models.into_iter().collect::<Array>()),
+        );
+    }
     profile.insert("default_model", value(input.default_model.as_str()));
     let providers = doc.entry("providers").or_insert_with(|| {
         let mut table = Table::new();
@@ -169,9 +182,9 @@ fn invalid_field(path: &str, message: &str) -> ConfigError {
     }
 }
 
-fn normalized_models(input: &OpenAiCompatibleProviderInput) -> Vec<&str> {
+fn normalized_models(input: &[String]) -> Vec<&str> {
     let mut models = Vec::new();
-    for model in &input.models {
+    for model in input {
         let model = model.trim();
         if !model.is_empty() && !models.contains(&model) {
             models.push(model);

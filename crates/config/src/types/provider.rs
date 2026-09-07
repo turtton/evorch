@@ -142,6 +142,8 @@ pub struct ProviderProfileConfig {
     pub credential: CredentialRefConfig,
     /// 利用可能なモデル ID の一覧。
     pub models: Vec<String>,
+    /// 除外するモデル ID の一覧。
+    pub excluded_models: Vec<String>,
     /// 既定で使用するモデル ID。
     pub default_model: String,
 }
@@ -154,6 +156,7 @@ impl Default for ProviderProfileConfig {
             base_url: "https://api.anthropic.com".to_string(),
             credential: CredentialRefConfig::default(),
             models: vec!["claude-sonnet-4-5".to_string()],
+            excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
         }
     }
@@ -172,6 +175,7 @@ struct ProviderProfileDe {
     credential: Option<CredentialRefConfig>,
     api_key_env: Option<String>,
     models: Vec<String>,
+    excluded_models: Vec<String>,
     default_model: String,
 }
 
@@ -186,6 +190,7 @@ impl Default for ProviderProfileDe {
             credential: None,
             api_key_env: None,
             models: vec!["claude-sonnet-4-5".to_string()],
+            excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
         }
     }
@@ -224,6 +229,7 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             base_url: value.base_url,
             credential,
             models: value.models,
+            excluded_models: value.excluded_models,
             default_model: value.default_model,
         })
     }

@@ -27,6 +27,7 @@ const PROVIDER_KEYS: &[&str] = &[
     "credential",
     "api_key_env",
     "models",
+    "excluded_models",
     "default_model",
 ];
 const KEYRING_KEYS: &[&str] = &["type", "service", "account"];

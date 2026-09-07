@@ -20,6 +20,7 @@ fn input() -> OpenAiCompatibleProviderInput {
             "model-a".into(),
         ],
         default_model: "model-a".into(),
+        excluded_models: vec![],
     }
 }
 
@@ -244,6 +245,7 @@ fn validation_reports_first_invalid_field_in_order() {
         base_url: String::new(),
         api_key_env: String::new(),
         models: vec![],
+        excluded_models: vec![],
         default_model: String::new(),
     };
     for field in ["name", "base_url", "api_key_env", "models", "default_model"] {
