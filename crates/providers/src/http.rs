@@ -32,7 +32,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// # Errors
 /// reqwest クライアントの構築に失敗した場合 [`ProviderError::Request`] を返す。
-#[allow(dead_code)] // TODO(T5/T6): provider 実装が利用するまでの一時許可
 pub(crate) fn build_http_client(
     timeout: Option<Duration>,
 ) -> Result<reqwest::Client, ProviderError> {
@@ -51,7 +50,6 @@ pub(crate) fn build_http_client(
 /// その他のステータスは [`ProviderError::Http`] へ変換する。
 /// 成功レスポンス (2xx/3xx) に対しては呼び出さないこと。
 /// 本文の読み取りに失敗した場合はその詳細を `body` に含める。
-#[allow(dead_code)] // TODO(T5/T6): provider 実装が利用するまでの一時許可
 pub(crate) async fn map_response_error(response: reqwest::Response) -> ProviderError {
     let status = response.status().as_u16();
     let retry_after = if status == 429 {
@@ -102,7 +100,6 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 ///
 /// タイムアウトは [`ProviderError::Timeout`]、それ以外は
 /// [`ProviderError::Request`] へ変換する。
-#[allow(dead_code)] // TODO(T5/T6): provider 実装が利用するまでの一時許可
 pub(crate) fn map_request_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout

@@ -5,6 +5,7 @@ pub mod client;
 pub mod error;
 pub mod http;
 pub mod message;
+mod models;
 pub(crate) mod observe;
 pub mod provider;
 pub mod sse;
@@ -18,4 +19,5 @@ pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ObservationContext,
     ProviderCapabilities, Role, ToolResultContent, ToolSpec, Usage,
 };
+pub use models::list_models;
 pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};
