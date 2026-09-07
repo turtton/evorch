@@ -1030,6 +1030,15 @@ impl AgentRuntime {
         if !crate::state::is_valid_transition(from, to) {
             return Err(RuntimeError::InvalidTransition { from, to });
         }
+        // issue #98: LoopState::transition (agent_loop.rs) と同じく、位相 commit を
+        // イベント発行に happens-before させる。逆順だと emit 直後の観測者が
+        // phase_rx から旧位相を読みうる (chat_sink_runtime flake の根本原因)。
+        let phase_tx = {
+            let runs = lock_runs(&self.shared.runs);
+            let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+            entry.phase_tx.clone()
+        };
+        phase_tx.send_replace(to);
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
@@ -1038,12 +1047,6 @@ impl AgentRuntime {
                 to,
                 reason: None,
             }));
-        let phase_tx = {
-            let runs = lock_runs(&self.shared.runs);
-            let entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-            entry.phase_tx.clone()
-        };
-        phase_tx.send_replace(to);
         Ok(())
     }
 
