@@ -2,7 +2,10 @@
 
 use crate::model::composer::{ComposerModel, ProviderStatus, completions};
 use crate::theme::text::muted;
-use crate::theme::tokens::{INPUT, ROW_COMPACT, SP_1, SP_2, SURFACE_RAISED};
+use crate::theme::tokens::{
+    COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, INPUT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3,
+    SURFACE_RAISED,
+};
 use crate::theme::widgets::{primary_button, surface_frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +21,10 @@ pub fn composer_strip(
     provider: &crate::model::composer::ProviderStatus,
 ) -> Option<ComposerAction> {
     let mut action = None;
-    surface_frame(SURFACE_RAISED).show(ui, |ui| {
+    surface_frame(SURFACE_RAISED)
+        .corner_radius(R_2XL)
+        .inner_margin(egui::vec2(SP_3, SP_2))
+        .show(ui, |ui| {
         ui.vertical(|ui| {
             ui.set_min_height(ROW_COMPACT);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
@@ -49,19 +55,44 @@ pub fn composer_strip(
                     }
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty();
                 let send = if can_send {
                     primary_button(ui, "Send")
                 } else {
                     ui.add_enabled(false, egui::Button::new("Send"))
                 };
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut model.input)
-                        .hint_text("Message or /command")
-                        .desired_width(f32::INFINITY)
-                        .background_color(INPUT),
-                );
+                let ime_id = ui.id().with("ime-composing");
+                let mut ime_composing = ui.data(|data| data.get_temp::<bool>(ime_id).unwrap_or_default());
+                ui.input(|input| {
+                    for event in &input.events {
+                        if let egui::Event::Ime(event) = event {
+                            #[allow(deprecated)] // Accept legacy backend Enabled/Disabled events too.
+                            match event {
+                                egui::ImeEvent::Preedit { text, .. } => ime_composing = !text.is_empty(),
+                                egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => ime_composing = false,
+                                egui::ImeEvent::Enabled | egui::ImeEvent::DeleteSurrounding { .. } => {}
+                            }
+                        }
+                    }
+                });
+                let input = egui::ScrollArea::vertical()
+                    .min_scrolled_height(COMPOSER_MIN_HEIGHT - 2.0 * SP_2)
+                    .max_height(COMPOSER_MAX_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut model.input)
+                            .hint_text("Message or /command  (Enter to send, Shift+Enter for newline)")
+                            .desired_rows(1)
+                            .desired_width(f32::INFINITY)
+                            .min_size(egui::vec2(0.0, COMPOSER_MIN_HEIGHT - 2.0 * SP_2))
+                            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter))
+                            .frame(egui::Frame::NONE.inner_margin(egui::vec2(SP_3, SP_2)))
+                            .margin(egui::vec2(SP_3, SP_2))
+                            .background_color(INPUT))
+                        }).inner
+                    }).inner;
                 input.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::TextEdit,
@@ -69,14 +100,17 @@ pub fn composer_strip(
                         "Message or /command",
                     )
                 });
-                let enter = input.lost_focus()
+                let enter = input.has_focus()
                     && ui.input(|input| {
-                        input.key_pressed(egui::Key::Enter) && !input.modifiers.shift
-                    });
-                if can_send && (send.clicked() || enter) {
+                        input.key_pressed(egui::Key::Enter) && !input.modifiers.shift && !input.modifiers.command
+                    }) && !ime_composing;
+                let focused = input.has_focus();
+                ui.data_mut(|data| data.insert_temp(ime_id, ime_composing && focused));
+                if !model.input.trim().is_empty() && (send.clicked() || enter) {
                     action = Some(ComposerAction::Send);
+                    input.request_focus();
                 }
-            });
+            }); });
         });
     });
     action

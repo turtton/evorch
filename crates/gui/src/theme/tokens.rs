@@ -30,7 +30,7 @@ pub const SP_2: f32 = 8.0;
 pub const SP_3: f32 = 12.0;
 pub const SP_4: f32 = 16.0;
 pub const ROW_COMPACT: f32 = 36.0;
-pub const COMPOSER_MIN_HEIGHT: f32 = 52.0;
+pub const COMPOSER_MIN_HEIGHT: f32 = 48.0;
 pub const COMPOSER_MAX_HEIGHT: f32 = 180.0;
 /// sidebar の project / thread 行の高さ。ROW_COMPACT (36) はエディタ系 (agent.rs) 向けに残す。
 pub const ROW_DENSE: f32 = 28.0;
