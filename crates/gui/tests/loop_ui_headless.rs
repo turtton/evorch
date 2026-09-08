@@ -113,6 +113,30 @@ fn issued_decisions(
 }
 
 #[test]
+fn merge_decision_via_state_issues_decide_merge_after_pane_removal() {
+    // Given: a pending merge delivered through the retained runtime seam.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench_with_thread(temp.path());
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
+    // When: a caller submits approval through state, without a pane.
+    harness.state_mut().decide_merge(MergeDecision::Approve);
+    // Then: the bound approval command still reaches the sink.
+    let decisions = issued_decisions(&harness);
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].decision, MergeDecision::Approve);
+    assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
+    assert!(
+        harness
+            .state()
+            .dock()
+            .find_tab(&PanelId::new("merge-main"))
+            .is_none()
+    );
+}
+
+#[test]
 fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
     // Given: an active project+thread and a goal form filled through the public state API
     let temp = tempfile::tempdir().expect("temp dir");

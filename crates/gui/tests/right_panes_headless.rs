@@ -80,3 +80,14 @@ fn merge_pane_without_pr_shows_single_placeholder() {
     // Then: the "no pull request" placeholder appears exactly once.
     assert_eq!(harness.query_all_by_label("no pull request").count(), 1);
 }
+
+#[test]
+fn workbench_tabs_exclude_goal_and_merge() {
+    // Given: default settings.
+    // When: constructing the real workbench.
+    let state = gui::app::WorkbenchState::new(MockSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds");
+    // Then: neither removed surface is registered in the dock.
+    assert!(state.dock().find_tab(&PanelId::new("goal-main")).is_none());
+    assert!(state.dock().find_tab(&PanelId::new("merge-main")).is_none());
+}
