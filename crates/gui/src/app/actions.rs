@@ -18,13 +18,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn add_project(&mut self, path: impl AsRef<Path>) -> Result<ProjectId, WorkbenchError> {
-        let path = path.as_ref();
+        let path =
+            crate::model::project_path::expand_tilde(path.as_ref(), self.home_dir.as_deref())?;
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("project");
         let id = ProjectId::new(name);
-        self.sidebar.add_project(id.clone(), name, path)?;
+        self.sidebar.add_project(id.clone(), name, &path)?;
         if self.sidebar.selected_project.is_none() {
             self.sidebar.select_project(&id)?;
         }

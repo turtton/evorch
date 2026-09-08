@@ -1,7 +1,9 @@
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{SidebarState, TrustState};
 
-use crate::theme::tokens::{ACCENT, ERROR_FG, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED};
+use crate::theme::tokens::{
+    ACCENT, ERROR_FG, FONT_SMALL, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED,
+};
 use crate::theme::widgets::{badge, compact_row, empty_state, primary_button, status_dot};
 
 use super::{SidebarAction, SidebarUiState};
@@ -48,15 +50,25 @@ pub fn render(
                 }
             });
         });
+        let path = project.repo_root.display().to_string();
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&path)
+                    .size(FONT_SMALL)
+                    .color(TEXT_MUTED),
+            )
+            .truncate(),
+        )
+        .on_hover_text(&path);
     }
 
     ui.add_space(SP_2);
+    ui.add(
+        egui::TextEdit::singleline(&mut pane_state.project_path)
+            .hint_text("Project path (~ allowed)")
+            .desired_width(ui.available_width()),
+    );
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut pane_state.project_path)
-                .hint_text("Project path")
-                .desired_width(140.0),
-        );
         if primary_button(ui, "Add project").clicked() && !pane_state.project_path.trim().is_empty()
         {
             *action = Some(SidebarAction::AddProject(std::path::PathBuf::from(

@@ -45,6 +45,7 @@ pub struct WorkbenchState<S> {
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
+    pub(super) home_dir: Option<PathBuf>,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
     pub(super) diff: DiffModel,
@@ -86,6 +87,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             save_path: None,
             sidebar: SidebarState::default(),
             sidebar_path: None,
+            home_dir: std::env::home_dir(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
             diff: DiffModel::new(),
@@ -141,6 +143,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_sidebar_path(mut self, path: PathBuf) -> Self {
         self.sidebar_path = Some(path);
+        self
+    }
+
+    pub fn with_home_dir(mut self, home: PathBuf) -> Self {
+        self.home_dir = Some(home);
         self
     }
 

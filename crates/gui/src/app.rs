@@ -17,6 +17,8 @@ use crate::model::tasks::AgentRunSource;
 /// WorkbenchState 構築・運用時のエラーです。
 #[derive(Debug, thiserror::Error)]
 pub enum WorkbenchError {
+    #[error(transparent)]
+    ProjectPath(#[from] crate::model::project_path::ProjectPathError),
     #[error("workspace validation failed: {0}")]
     InvalidWorkspace(#[from] workspace_ui::LayoutError),
     #[error("dock conversion failed: {0}")]
