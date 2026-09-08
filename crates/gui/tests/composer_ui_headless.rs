@@ -84,29 +84,27 @@ fn provider_guidance_visible_in_pane() {
 }
 
 #[test]
-fn goal_panel_submit_still_works_with_composer_present() {
+fn goal_command_submits_via_state_without_goal_pane() {
     // Given: the integrated workbench with a populated Goal form.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new("goal-main"))
-        .expect("goal tab exists");
-    dock.leaf_mut(path.node_path())
-        .expect("leaf exists")
-        .set_active_tab(path.tab.0)
-        .expect("tab index is valid");
-    harness.run();
     harness.state_mut().goal_form_mut().goal = "implement issue #91".into();
     harness.run();
-    // When: the existing Goal Submit button is clicked.
-    harness.click_label("Submit");
+    // When: the retained state API submits the goal.
+    harness.state_mut().submit_goal();
     harness.run();
     // Then: the existing submission and acceptance feedback still work.
     let [WorkbenchCommand::SubmitGoal(goal)] = harness.state().issued() else {
         panic!("expected exactly one SubmitGoal");
     };
     assert_eq!(goal.goal, "implement issue #91");
+    assert!(
+        harness
+            .state()
+            .dock()
+            .find_tab(&PanelId::new("goal-main"))
+            .is_none()
+    );
     assert!(harness.has_label("accepted: goal-1"));
 }
 

@@ -100,20 +100,34 @@ fn goal_command_reuses_goal_flow() {
 }
 
 #[test]
-fn goal_command_without_args_shows_usage() {
+fn goal_command_without_args_shows_usage_without_focusing_a_tab() {
     // Given: an active thread.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::default());
+    let path = harness
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("agents-main"))
+        .expect("agents tab");
+    let before = harness
+        .state()
+        .dock()
+        .leaf(path.node_path())
+        .expect("leaf")
+        .active;
     // When: /goal has no arguments.
     submit(&mut harness, "/goal");
-    // Then: usage is visible and the Goal panel is activated without submission.
+    // Then: usage is visible without changing tab focus or submitting.
     assert!(harness.has_label("usage: /goal <text>"));
     assert!(harness.state().issued().is_empty());
-    let dock = harness.state().dock();
-    let path = dock.find_tab(&PanelId::new("goal-main")).expect("goal tab");
     assert_eq!(
-        dock.leaf(path.node_path()).expect("goal leaf").active.0,
-        path.tab.0
+        harness
+            .state()
+            .dock()
+            .leaf(path.node_path())
+            .expect("leaf")
+            .active,
+        before
     );
 }
 
