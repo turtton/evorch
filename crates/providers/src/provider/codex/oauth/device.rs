@@ -15,7 +15,8 @@ pub const CODEX_SCOPE: &str =
 /// ユーザーが device code を入力する URL。
 pub const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 /// device code の authorization code exchange に使う redirect URI。
-pub const DEVICE_REDIRECT_URI: &str = DEVICE_VERIFICATION_URL;
+pub const DEVICE_EXCHANGE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+pub const DEVICE_REDIRECT_URI: &str = DEVICE_EXCHANGE_REDIRECT_URI;
 
 /// Codex device OAuth HTTP クライアント。
 pub struct DeviceAuthClient {
@@ -233,20 +234,13 @@ impl DeviceAuthClient {
         &self,
         code: &AgentCodeBundle,
     ) -> Result<TokenBundle, ProviderError> {
-        let response = self
-            .http
-            .post(format!("{}/oauth/token", self.auth_base_url))
-            .form(&ExchangeRequest {
-                grant_type: "authorization_code",
-                code: &code.authorization_code,
-                redirect_uri: DEVICE_REDIRECT_URI,
-                client_id: CODEX_CLIENT_ID,
-                code_verifier: &code.code_verifier,
-            })
-            .send()
-            .await
-            .map_err(map_request_error)?;
-        parse_success_json(response).await
+        exchange_authorization_code(
+            &self.http,
+            &self.auth_base_url,
+            &code.authorization_code,
+            DEVICE_EXCHANGE_REDIRECT_URI,
+            &code.code_verifier,
+        ).await
     }
 
     /// refresh token を使って token bundle を更新する。
@@ -278,6 +272,28 @@ impl DeviceAuthClient {
             id_token: rotated.id_token.unwrap_or_else(|| current.id_token.clone()),
         })
     }
+}
+
+pub(super) async fn exchange_authorization_code(
+    http: &reqwest::Client,
+    auth_base_url: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<TokenBundle, ProviderError> {
+    let response = http
+        .post(format!("{auth_base_url}/oauth/token"))
+        .form(&ExchangeRequest {
+            grant_type: "authorization_code",
+            code,
+            redirect_uri,
+            client_id: CODEX_CLIENT_ID,
+            code_verifier,
+        })
+        .send()
+        .await
+        .map_err(map_request_error)?;
+    parse_success_json(response).await
 }
 
 async fn parse_success_json<T: for<'de> Deserialize<'de>>(

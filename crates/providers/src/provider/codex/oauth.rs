@@ -11,7 +11,7 @@ use crate::error::ProviderError;
 mod device;
 
 pub use device::{
-    AgentCodeBundle, CODEX_CLIENT_ID, CODEX_SCOPE, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL,
+    AgentCodeBundle, CODEX_CLIENT_ID, CODEX_SCOPE, DEVICE_EXCHANGE_REDIRECT_URI, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL,
     DeviceAuthClient, PollOptions, UserCodeResponse,
 };
 
