@@ -140,7 +140,7 @@ fn help_command_lists_goal_and_help() {
     submit(&mut harness, "/help");
     // Then: the command list is visible without issuing a command.
     assert!(harness.has_label(
-        "/goal <text> — Submit a goal through the Goal panel flow\n/help — Show available commands"
+        "/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
     ));
     assert!(harness.state().issued().is_empty());
 }
@@ -178,7 +178,7 @@ fn chat_without_provider_shows_guidance_and_issues_nothing() {
     submit(&mut harness, "/help");
     // Then: help is appended without an additional command.
     assert!(harness.has_label(
-        "/goal <text> — Submit a goal through the Goal panel flow\n/help — Show available commands"
+        "/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
     ));
     assert_eq!(harness.state().issued().len(), 1);
 }

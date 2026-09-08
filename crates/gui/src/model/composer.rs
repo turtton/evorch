@@ -7,7 +7,7 @@ pub struct SlashCommandSpec {
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "goal",
-        description: "Submit a goal through the Goal panel flow",
+        description: "Submit a goal to the orchestrator loop",
         argument_hint: Some("<text>"),
     },
     SlashCommandSpec {
@@ -217,7 +217,7 @@ mod tests {
     fn help_text_lists_every_command() {
         // Given
         let expected = [
-            "/goal <text> — Submit a goal through the Goal panel flow",
+            "/goal <text> — Submit a goal to the orchestrator loop",
             "/help — Show available commands",
         ];
         // When

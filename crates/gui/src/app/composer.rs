@@ -37,7 +37,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 "goal" => {
                     if args.is_empty() {
                         self.push_notice("usage: /goal <text>");
-                        self.focus_panel("goal-main");
                     } else {
                         self.goal_form.goal = args.into();
                         self.submit_goal();
