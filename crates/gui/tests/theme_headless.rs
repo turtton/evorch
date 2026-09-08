@@ -182,7 +182,7 @@ fn attention_tab_style_overrides_text_and_outline() {
 }
 
 #[test]
-fn demo_state_marks_merge_tab_as_warning() {
+fn demo_state_has_no_attention_for_removed_merge_tab() {
     // Given: a populated demo workbench with a bound, unresolved PR
     let dir = tempfile::tempdir().expect("temp dir");
     let sidebar = gui::fixture::demo_sidebar(dir.path()).expect("demo sidebar");
@@ -198,6 +198,6 @@ fn demo_state_marks_merge_tab_as_warning() {
     // Then: the merge tab carries the warning attention accent.
     assert_eq!(
         state.pane_attention(&workspace_ui::PanelId::new("merge-main")),
-        Some(gui::theme::tokens::WARNING_FG)
+        None
     );
 }

@@ -15,8 +15,6 @@ fn demo_fixture_populates_sidebar_conversation_and_agents() {
     );
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
-    activate_tab(&mut workbench, "merge-main");
-    workbench.run();
 
     // Then: the selected project's threads, thread transcript, and merge state render.
     assert!(workbench.has_label("Thread: Refine GUI design system"));
@@ -24,7 +22,16 @@ fn demo_fixture_populates_sidebar_conversation_and_agents() {
     assert!(workbench.has_label(
         "Message: Analysing t3code design language and mapping tokens to egui Visuals…"
     ));
-    assert!(workbench.has_label("PR #81"));
+    assert_eq!(
+        workbench
+            .state()
+            .merge()
+            .view
+            .pr
+            .as_ref()
+            .map(|pr| pr.number),
+        Some(81)
+    );
     assert_eq!(
         workbench.state().thread_phases().get("run-1"),
         Some(&ThreadRunPhase::Running)
@@ -57,10 +64,6 @@ fn demo_state_has_no_duplicate_interactive_labels() {
         "New thread",
         "Go to Projects",
         "Start a thread",
-        "Go to Goal",
-        "Approve",
-        "Reject",
-        "Submit",
         "Open default panes",
         "Working tree",
         "Branch vs main",
@@ -68,17 +71,8 @@ fn demo_state_has_no_duplicate_interactive_labels() {
         "Projects",
         "Conversation",
         "Agents",
-        "Goal",
-        "Merge",
-        "no pull request",
     ];
-    const RIGHT_TABS: &[&str] = &[
-        "agents-main",
-        "goal-main",
-        "merge-main",
-        "diff-main",
-        "terminal-main",
-    ];
+    const RIGHT_TABS: &[&str] = &["agents-main", "diff-main", "terminal-main"];
 
     let dir = tempfile::tempdir().expect("temp dir");
     let demo = populate(
