@@ -2,6 +2,7 @@ use config::{ApiProtocolConfig, CredentialRefConfig, ProviderTypeConfig};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
+use gui::model::codex_auth::CODEX_LOGIN_BUTTON;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
 use gui::model::composer::{GOAL_PROVIDER_GUIDANCE, PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::provider_settings::ProviderSettingsModel;
@@ -67,6 +68,22 @@ fn clicking_open_settings_shows_modal_fields() {
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("Save"));
     assert!(harness.has_label("Cancel"));
+}
+
+#[test]
+fn settings_button_opens_modal_when_provider_is_configured() {
+    // Given: a configured conversation offers the compact settings action.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.run();
+    assert!(!harness.has_label("Open Settings"));
+    assert!(harness.has_label("Settings"));
+    // When: settings are opened through the composer.
+    harness.click_label("Settings");
+    harness.run();
+    // Then: the modal still offers Codex login.
+    assert!(harness.has_label("Provider settings"));
+    assert!(harness.has_label(CODEX_LOGIN_BUTTON));
 }
 
 fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
