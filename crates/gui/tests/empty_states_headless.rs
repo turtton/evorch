@@ -131,3 +131,23 @@ fn composer_is_docked_at_bottom_in_empty_state() {
     );
     assert!(harness.label_rects("No messages yet")[0].center().y < send.min.y);
 }
+
+#[test]
+#[ignore = "writes PNG review evidence using an offscreen GPU adapter"]
+fn capture_empty_composer_evidence() {
+    // Given
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("state")
+        .with_sidebar(demo_sidebar(temp.path()).expect("sidebar"));
+    let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
+    // When
+    harness.run();
+    // Then
+    assert!(harness.has_label("No messages yet"));
+    harness
+        .capture()
+        .expect("capture")
+        .save_png(std::path::Path::new("/tmp/opencode/w-d-empty.png"))
+        .expect("PNG saved");
+}
