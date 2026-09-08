@@ -113,6 +113,8 @@ fn trust_click_approves_allowed_directory_and_persists_sidebar() {
     harness.run();
 
     // When: the operator clicks Trust and saves through the public state surface.
+    harness.click_label("Allowed directories (1)");
+    harness.run();
     harness.click_label("Trust");
     harness.run();
     harness.state().save_sidebar();

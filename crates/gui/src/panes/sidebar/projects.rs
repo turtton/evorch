@@ -2,7 +2,7 @@ use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{SidebarState, TrustState};
 
 use crate::theme::tokens::{
-    ACCENT, ERROR_FG, FONT_SMALL, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED,
+    ACCENT, ERROR_FG, FONT_SMALL, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED, WARNING,
 };
 use crate::theme::widgets::{badge, compact_row, empty_state, primary_button, status_dot};
 
@@ -91,25 +91,41 @@ pub fn render(
         ui.colored_label(ERROR_FG, error);
     }
 
-    if let Some(project) = selected {
+    if let Some(project) = selected
+        && !project.allowed_directories.is_empty()
+    {
         ui.separator();
-        ui.label("Allowed directories");
-        for directory in &project.allowed_directories {
-            ui.label(directory.path.display().to_string());
-            ui.horizontal(|ui| match directory.trust {
-                TrustState::Approved => {
-                    ui.label("trusted");
+        egui::CollapsingHeader::new(format!(
+            "Allowed directories ({})",
+            project.allowed_directories.len()
+        ))
+        .id_salt((&project.id, "allowed-directories"))
+        .default_open(false)
+        .show(ui, |ui| {
+            for directory in &project.allowed_directories {
+                let path = directory.path.display().to_string();
+                if ui
+                    .add(egui::Label::new(&path).truncate().sense(Sense::click()))
+                    .on_hover_text(format!("{path}\nClick to copy"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(path);
                 }
-                TrustState::Unapproved => {
-                    ui.label("untrusted");
-                    if ui.button("Trust").clicked() {
-                        *action = Some(SidebarAction::SetTrust {
-                            path: directory.path.clone(),
-                            trust: TrustState::Approved,
-                        });
+                ui.horizontal(|ui| match directory.trust {
+                    TrustState::Approved => {
+                        badge(ui, "trusted", TEXT_MUTED, SURFACE_RAISED);
                     }
-                }
-            });
-        }
+                    TrustState::Unapproved => {
+                        badge(ui, "untrusted", WARNING, SURFACE_RAISED);
+                        if ui.button("Trust").clicked() {
+                            *action = Some(SidebarAction::SetTrust {
+                                path: directory.path.clone(),
+                                trust: TrustState::Approved,
+                            });
+                        }
+                    }
+                });
+            }
+        });
     }
 }
