@@ -47,7 +47,7 @@ fn load_rejects_unsupported_and_invalid_layouts() {
         unsupported_result,
         Err(PersistError::Layout(LayoutError::UnsupportedVersion {
             found: 99,
-            supported: 2,
+            supported: 3,
         }))
     );
     assert!(matches!(

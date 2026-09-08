@@ -27,8 +27,8 @@ fn public_settings_toml_contains_layout_panel_kinds_and_keybinds() {
     assert!(serialized.contains("sidebar"));
     assert!(serialized.contains("agents"));
     assert!(serialized.contains("diff"));
-    assert!(serialized.contains("goal"));
-    assert!(serialized.contains("merge_approval"));
+    assert!(!serialized.contains("goal"));
+    assert!(!serialized.contains("merge_approval"));
     assert!(parsed.get("keybinds").is_some());
     assert_eq!(restored, settings);
     assert_eq!(
@@ -72,7 +72,7 @@ fn settings_with_embedded_v1_workspace_migrates() {
     assert_eq!(restored.version, 1);
     assert_eq!(
         restored.layout.workspace.expect("workspace exists").version,
-        2
+        3
     );
 }
 
@@ -86,6 +86,24 @@ fn missing_sections_fall_back_to_defaults() {
 
     // Then: backward-compatible defaults fill both sections.
     assert_eq!(parsed, UiSettings::default());
+}
+
+#[test]
+fn embedded_v2_workspace_prunes_removed_panels_before_deserialization() {
+    // Given: TOML containing the frozen v2 workspace with obsolete enum values.
+    let directory = tempdir().expect("temp dir");
+    let path = directory.path().join("ui.toml");
+    let workspace: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workspace_v2.json")).expect("fixture");
+    let settings = serde_json::json!({"version": 1, "layout": {"workspace": workspace}});
+    std::fs::write(&path, toml::to_string(&settings).expect("TOML")).expect("write fixture");
+    // When: the public settings loader parses the document.
+    let restored = load_settings(&path).expect("v2 settings migrate");
+    // Then: the shared migration produces the current layout.
+    assert_eq!(
+        restored.layout.workspace,
+        Some(workspace_ui::Workspace::default_v02())
+    );
 }
 
 #[test]
