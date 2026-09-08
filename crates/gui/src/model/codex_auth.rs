@@ -1,13 +1,12 @@
-//! egui に依存しない Codex device 認証状態。
+//! egui に依存しない Codex browser 認証状態。
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-pub const CODEX_DEVICE_URL: &str = providers::provider::codex::oauth::DEVICE_VERIFICATION_URL;
-pub const CODEX_LOGIN_BUTTON: &str = "Log in with Codex";
-pub const CODEX_UNAUTHENTICATED_GUIDANCE: &str = "Click Log in with Codex, open the device page in a browser, and enter the code shown. Tokens go straight to the credential store; nothing is typed in the GUI.";
-pub const CODEX_REQUESTING_LABEL: &str = "Requesting device code…";
-pub const CODEX_WAITING_LABEL: &str = "Waiting for approval in the browser…";
+pub const CODEX_LOGIN_BUTTON: &str = "Sign in with browser";
+pub const CODEX_UNAUTHENTICATED_GUIDANCE: &str = "Sign in to Codex in your browser. Credentials are saved directly to the credential store; nothing is typed in the GUI.";
+pub const CODEX_REQUESTING_LABEL: &str = "Preparing browser sign-in…";
+pub const CODEX_WAITING_LABEL: &str = "Waiting for browser sign-in…";
 pub const CODEX_AUTHENTICATED_LABEL: &str = "Authenticated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -20,12 +19,15 @@ pub enum CodexAuthError {
     Rejected,
     #[error("Codex login unavailable")]
     Unavailable,
+    #[error("Codex callback ports 1455 and 1457 are busy")]
+    CallbackPortBusy,
+    #[error("Codex browser sign-in timed out")]
+    Timeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodexUserCodePrompt {
-    pub user_code: String,
-    pub verification_url: String,
+pub struct CodexLoginPrompt {
+    pub authorize_url: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,14 +38,21 @@ pub struct CodexAuthSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAuthState {
     Unauthenticated,
-    Authenticating { prompt: Option<CodexUserCodePrompt> },
-    Authenticated { expires_at_unix: Option<u64> },
-    Failed { failure: CodexAuthError },
+    Authenticating {
+        prompt: Option<CodexLoginPrompt>,
+        opened_browser: bool,
+    },
+    Authenticated {
+        expires_at_unix: Option<u64>,
+    },
+    Failed {
+        failure: CodexAuthError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAuthEvent {
-    Prompt(CodexUserCodePrompt),
+    Prompt(CodexLoginPrompt),
     Finished(Result<CodexAuthSummary, CodexAuthError>),
 }
 
@@ -61,7 +70,7 @@ pub trait CodexAuthBackend: Send + Sync {
     /// 認証または資格情報の保存失敗を返す。
     fn authenticate(
         &self,
-        on_prompt: &mut (dyn FnMut(CodexUserCodePrompt) + Send),
+        on_prompt: &mut (dyn FnMut(CodexLoginPrompt) + Send),
     ) -> Result<CodexAuthSummary, CodexAuthError>;
 }
 
@@ -148,7 +157,10 @@ impl CodexAuthModel {
             };
             return;
         };
-        self.state = CodexAuthState::Authenticating { prompt: None };
+        self.state = CodexAuthState::Authenticating {
+            prompt: None,
+            opened_browser: false,
+        };
         let (tx, rx) = channel();
         match std::thread::Builder::new()
             .name("evorch-codex-login".into())
@@ -178,6 +190,7 @@ impl CodexAuthModel {
                 Ok(CodexAuthEvent::Prompt(prompt)) => {
                     let next = CodexAuthState::Authenticating {
                         prompt: Some(prompt),
+                        opened_browser: false,
                     };
                     changed |= self.state != next;
                     self.state = next;
@@ -200,6 +213,22 @@ impl CodexAuthModel {
             break;
         }
         changed
+    }
+
+    pub fn take_url_to_open(&mut self) -> Option<String> {
+        match &mut self.state {
+            CodexAuthState::Authenticating {
+                prompt: Some(prompt),
+                opened_browser,
+            } if !*opened_browser => {
+                *opened_browser = true;
+                Some(prompt.authorize_url.clone())
+            }
+            CodexAuthState::Authenticating { .. }
+            | CodexAuthState::Unauthenticated
+            | CodexAuthState::Authenticated { .. }
+            | CodexAuthState::Failed { .. } => None,
+        }
     }
 
     #[cfg(test)]

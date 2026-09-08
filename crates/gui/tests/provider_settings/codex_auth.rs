@@ -4,9 +4,9 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, ScriptedCodexAuthBackend};
 use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::{
-    CODEX_AUTHENTICATED_LABEL, CODEX_LOGIN_BUTTON,
-    CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthBackend, CodexAuthError,
-    CodexAuthModel, CodexAuthState, CodexAuthSummary,
+    CODEX_AUTHENTICATED_LABEL, CODEX_LOGIN_BUTTON, CODEX_UNAUTHENTICATED_GUIDANCE,
+    CODEX_WAITING_LABEL, CodexAuthBackend, CodexAuthError, CodexAuthModel, CodexAuthState,
+    CodexAuthSummary,
 };
 use gui::model::provider_settings::ProviderSettingsModel;
 use gui::panes::codex_auth::{
@@ -76,7 +76,15 @@ fn authenticating_state_shows_waiting_and_reopen_link() {
     harness.click_label(CODEX_LOGIN_BUTTON);
     step_until(
         &mut harness,
-        |state| matches!(state, CodexAuthState::Authenticating { prompt: Some(_), .. }),
+        |state| {
+            matches!(
+                state,
+                CodexAuthState::Authenticating {
+                    prompt: Some(_),
+                    ..
+                }
+            )
+        },
         "prompt",
     );
     // Then
@@ -212,6 +220,9 @@ fn take_url_to_open_fires_exactly_once() {
     let first = model.take_url_to_open();
     let second = model.take_url_to_open();
     // Then
-    assert_eq!(first, Some(ScriptedCodexAuthBackend::prompt().authorize_url));
+    assert_eq!(
+        first,
+        Some(ScriptedCodexAuthBackend::prompt().authorize_url)
+    );
     assert_eq!(second, None);
 }

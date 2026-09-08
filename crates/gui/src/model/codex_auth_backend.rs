@@ -1,35 +1,32 @@
-//! provider の device OAuth と資格情報ストアを GUI の要約境界へ接続する。
+//! provider の browser OAuth と資格情報ストアを GUI の要約境界へ接続する。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use config::{CredentialRefConfig, ProviderTypeConfig};
 use providers::ProviderError;
-use providers::provider::codex::oauth::{DeviceAuthClient, PollOptions, UserCodeResponse};
+use providers::provider::codex::oauth::{BrowserAuthClient, BrowserAuthError, CallbackServer};
 use providers::provider::codex::tokens::{CodexTokenStore, TokenBundle, parse_jwt_claims};
 use routing::factory::CredentialStoreTokenStore;
 use sandbox::CredentialStore;
 
-use super::codex_auth::{CodexAuthBackend, CodexAuthError, CodexAuthSummary, CodexUserCodePrompt};
+use super::codex_auth::{CodexAuthBackend, CodexAuthError, CodexAuthSummary, CodexLoginPrompt};
 
 pub const DEFAULT_CODEX_CREDENTIAL_ACCOUNT: &str = "codex";
 pub const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct ProviderCodexAuthBackend {
-    client: DeviceAuthClient,
+    client: BrowserAuthClient,
     store: Arc<dyn CodexTokenStore>,
-    poll: PollOptions,
+    callback_ports: Vec<u16>,
 }
 
 impl ProviderCodexAuthBackend {
-    pub const fn new(client: DeviceAuthClient, store: Arc<dyn CodexTokenStore>) -> Self {
+    pub fn new(client: BrowserAuthClient, store: Arc<dyn CodexTokenStore>) -> Self {
         Self {
             client,
             store,
-            poll: PollOptions {
-                interval_override: None,
-                timeout: CODEX_LOGIN_TIMEOUT,
-            },
+            callback_ports: vec![1455, 1457],
         }
     }
 
@@ -43,7 +40,7 @@ impl ProviderCodexAuthBackend {
         auth_base_url: &str,
     ) -> Result<Self, CodexAuthError> {
         let client =
-            DeviceAuthClient::with_default_http(auth_base_url).map_err(classify_provider_error)?;
+            BrowserAuthClient::with_default_http(auth_base_url).map_err(classify_provider_error)?;
         let store = Arc::new(CredentialStoreTokenStore::new(credential_store, account));
         Ok(Self::new(client, store))
     }
@@ -59,19 +56,21 @@ fn summary_of(bundle: &TokenBundle) -> Result<CodexAuthSummary, CodexAuthError> 
 
 fn classify_provider_error(error: ProviderError) -> CodexAuthError {
     match error {
-        ProviderError::Timeout | ProviderError::Request(_) | ProviderError::RateLimited { .. } => {
-            CodexAuthError::Network
-        }
+        ProviderError::Timeout => CodexAuthError::Timeout,
+        ProviderError::Request(_) | ProviderError::RateLimited { .. } => CodexAuthError::Network,
         ProviderError::Http { .. } => CodexAuthError::Rejected,
         ProviderError::InvalidJson { .. } => CodexAuthError::StoreUnavailable,
         ProviderError::InvalidSse { .. } => CodexAuthError::Unavailable,
     }
 }
 
-fn prompt_of(code: &UserCodeResponse) -> CodexUserCodePrompt {
-    CodexUserCodePrompt {
-        user_code: code.user_code.clone(),
-        verification_url: code.verification_url.to_owned(),
+fn classify_browser_error(error: BrowserAuthError) -> CodexAuthError {
+    match error {
+        BrowserAuthError::CallbackPortBusy => CodexAuthError::CallbackPortBusy,
+        BrowserAuthError::Timeout => CodexAuthError::Timeout,
+        BrowserAuthError::Rejected => CodexAuthError::Rejected,
+        BrowserAuthError::Io(_) | BrowserAuthError::InvalidUrl => CodexAuthError::Unavailable,
+        BrowserAuthError::Provider(error) => classify_provider_error(error),
     }
 }
 
@@ -87,21 +86,27 @@ impl CodexAuthBackend for ProviderCodexAuthBackend {
 
     fn authenticate(
         &self,
-        on_prompt: &mut (dyn FnMut(CodexUserCodePrompt) + Send),
+        on_prompt: &mut (dyn FnMut(CodexLoginPrompt) + Send),
     ) -> Result<CodexAuthSummary, CodexAuthError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|_| CodexAuthError::Unavailable)?;
-        let mut forward = |code: &UserCodeResponse| on_prompt(prompt_of(code));
+        let callback =
+            CallbackServer::bind_ports(&self.callback_ports).map_err(classify_browser_error)?;
+        let request = self
+            .client
+            .begin(&callback)
+            .map_err(classify_browser_error)?;
+        on_prompt(CodexLoginPrompt {
+            authorize_url: request.authorize_url.clone(),
+        });
+        let code = callback
+            .wait_for_code(&request.state, CODEX_LOGIN_TIMEOUT)
+            .map_err(classify_browser_error)?;
         let bundle = runtime
-            .block_on(async {
-                let code = self.client.request_user_code().await?;
-                forward(&code);
-                let agent_code = self.client.poll_agent_code(&code, &self.poll).await?;
-                self.client.exchange_code(&agent_code).await
-            })
-            .map_err(classify_provider_error)?;
+            .block_on(self.client.complete(request, &code))
+            .map_err(classify_browser_error)?;
         let summary = summary_of(&bundle)?;
         self.store
             .save(&bundle)

@@ -53,7 +53,13 @@ fn start_shows_prompt_then_authenticated_when_backend_succeeds() {
     let mut model = CodexAuthModel::with_backend(backend, "personal");
     // When: ログインを開始して結果を処理する。
     model.start();
-    assert_eq!(model.state, CodexAuthState::Authenticating { prompt: None });
+    assert_eq!(
+        model.state,
+        CodexAuthState::Authenticating {
+            prompt: None,
+            opened_browser: false
+        }
+    );
     poll_until(&mut model, |state| {
         matches!(state, CodexAuthState::Authenticated { .. })
     });
@@ -77,13 +83,20 @@ fn start_is_ignored_while_authenticating() {
     model.start();
     model.start();
     poll_until(&mut model, |state| {
-        matches!(state, CodexAuthState::Authenticating { prompt: Some(_) })
+        matches!(
+            state,
+            CodexAuthState::Authenticating {
+                prompt: Some(_),
+                ..
+            }
+        )
     });
     // Then: コードが表示され、認証は一度だけ実行される。
     assert_eq!(
         model.state,
         CodexAuthState::Authenticating {
-            prompt: Some(ScriptedCodexAuthBackend::prompt())
+            prompt: Some(ScriptedCodexAuthBackend::prompt()),
+            opened_browser: false,
         }
     );
     assert_eq!(backend.authenticate_calls(), 1);
@@ -189,6 +202,7 @@ fn debug_output_contains_no_channel_payload() {
     model.set_receiver_for_test(rx);
     model.state = CodexAuthState::Authenticating {
         prompt: Some(ScriptedCodexAuthBackend::prompt()),
+        opened_browser: false,
     };
     // When: Debug 表示。
     let debug = format!("{model:?}");

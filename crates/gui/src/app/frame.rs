@@ -24,6 +24,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.codex_auth.poll() {
             ctx.request_repaint();
         }
+        if let Some(url) = self.codex_auth.take_url_to_open() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
         self.render(ui);
         if matches!(
             self.provider_settings.models_fetch_state,

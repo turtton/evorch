@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::model::codex_auth::{
-    CODEX_DEVICE_URL, CodexAuthBackend, CodexAuthError, CodexAuthSummary, CodexUserCodePrompt,
+    CodexAuthBackend, CodexAuthError, CodexAuthSummary, CodexLoginPrompt,
 };
 
 enum ScriptedOutcome {
@@ -20,10 +20,9 @@ pub struct ScriptedCodexAuthBackend {
 }
 
 impl ScriptedCodexAuthBackend {
-    pub fn prompt() -> CodexUserCodePrompt {
-        CodexUserCodePrompt {
-            user_code: "ABCD-1234".into(),
-            verification_url: CODEX_DEVICE_URL.into(),
+    pub fn prompt() -> CodexLoginPrompt {
+        CodexLoginPrompt {
+            authorize_url: "https://auth.invalid/oauth/authorize?state=fixture".into(),
         }
     }
 
@@ -74,7 +73,7 @@ impl CodexAuthBackend for ScriptedCodexAuthBackend {
 
     fn authenticate(
         &self,
-        on_prompt: &mut (dyn FnMut(CodexUserCodePrompt) + Send),
+        on_prompt: &mut (dyn FnMut(CodexLoginPrompt) + Send),
     ) -> Result<CodexAuthSummary, CodexAuthError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         on_prompt(Self::prompt());
