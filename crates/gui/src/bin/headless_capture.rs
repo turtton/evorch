@@ -177,7 +177,7 @@ Modes:
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  open the provider settings modal with demo values pre-filled
-   --activate ID  activate the given panel tab before capturing (e.g. merge-main)
+   --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
 The output path comes from --out PATH or a single positional PATH
