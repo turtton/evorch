@@ -65,6 +65,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(action) = sidebar_action {
             let result = match action {
+                SidebarAction::BrowseForProject => {
+                    set_sidebar_error(&ctx, self.folder_picker.start().err());
+                    ctx.request_repaint();
+                    return;
+                }
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),
                 SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),

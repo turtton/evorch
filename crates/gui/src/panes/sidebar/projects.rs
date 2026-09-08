@@ -63,12 +63,21 @@ pub fn render(
     }
 
     ui.add_space(SP_2);
-    ui.add(
+    let path_input = ui.add(
         egui::TextEdit::singleline(&mut pane_state.project_path)
             .hint_text("Project path (~ allowed)")
             .desired_width(ui.available_width()),
     );
+    path_input.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Project path (~ allowed)")
+    });
     ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!pane_state.picker_busy, egui::Button::new("Browse…"))
+            .clicked()
+        {
+            *action = Some(SidebarAction::BrowseForProject);
+        }
         if primary_button(ui, "Add project").clicked() && !pane_state.project_path.trim().is_empty()
         {
             *action = Some(SidebarAction::AddProject(std::path::PathBuf::from(

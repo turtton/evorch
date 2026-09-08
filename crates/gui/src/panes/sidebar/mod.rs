@@ -15,12 +15,14 @@ const UI_STATE_ID: &str = "sidebar-ui-state";
 struct SidebarUiState {
     project_path: String,
     error: Option<String>,
+    picker_busy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarAction {
     SelectProject(ProjectId),
     AddProject(PathBuf),
+    BrowseForProject,
     CreateThread(String),
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
@@ -59,6 +61,13 @@ pub fn set_sidebar_error(ctx: &egui::Context, error: Option<String>) {
     ctx.data_mut(|data| {
         let state = data.get_temp_mut_or_default::<SidebarUiState>(id);
         state.error = error;
+    });
+}
+
+pub fn set_picker_busy(ctx: &egui::Context, busy: bool) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SidebarUiState>(egui::Id::new(UI_STATE_ID))
+            .picker_busy = busy;
     });
 }
 

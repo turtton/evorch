@@ -19,6 +19,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
         self.poll_provider_save();
+        if let Some(result) = self.folder_picker.poll() {
+            let error = match result {
+                Ok(Some(path)) => {
+                    let result = self.add_project(path);
+                    if result.is_ok() {
+                        self.save_sidebar();
+                    }
+                    result.err().map(|error| error.to_string())
+                }
+                Ok(None) => None,
+                Err(error) => Some(error),
+            };
+            crate::panes::sidebar::set_sidebar_error(&ctx, error);
+            ctx.request_repaint();
+        }
+        crate::panes::sidebar::set_picker_busy(&ctx, self.folder_picker.is_busy());
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }
@@ -34,6 +50,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             crate::model::provider_settings::ModelsFetchState::Loading
         ) || self.codex_auth.is_authenticating()
             || self.provider_save_rx.is_some()
+            || self.folder_picker.is_busy()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

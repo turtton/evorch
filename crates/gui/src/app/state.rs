@@ -46,6 +46,7 @@ pub struct WorkbenchState<S> {
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
     pub(super) home_dir: Option<PathBuf>,
+    pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
     pub(super) diff: DiffModel,
@@ -88,6 +89,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sidebar: SidebarState::default(),
             sidebar_path: None,
             home_dir: std::env::home_dir(),
+            folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
             diff: DiffModel::new(),
@@ -148,6 +150,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_home_dir(mut self, home: PathBuf) -> Self {
         self.home_dir = Some(home);
+        self
+    }
+
+    pub fn with_folder_picker(
+        mut self,
+        picker: Arc<dyn crate::model::folder_picker::FolderPicker>,
+    ) -> Self {
+        self.folder_picker = crate::model::folder_picker::FolderPickerModel::new(picker);
         self
     }
 

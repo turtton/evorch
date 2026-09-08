@@ -688,6 +688,7 @@ fn run() -> Result<(), GuiError> {
     let settings_store = credential_dir(demo_directory.as_ref())
         .and_then(|directory| sandbox::open_default(directory).ok());
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
+        .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_provider_settings_path(provider_settings_path)

@@ -34,6 +34,8 @@ fn add_project_expands_tilde_before_dispatch() {
             workbench,
         );
     // When: the operator types a tilde path and presses Add project.
+    harness.get_by_label("Project path (~ allowed)").click();
+    harness.run();
     harness
         .get_by_label("Project path (~ allowed)")
         .type_text("~/repo");
