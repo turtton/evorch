@@ -11,7 +11,8 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
 
     // Then: the exact three-region tree and panel registry are present.
     assert_eq!(workspace.version, WORKSPACE_SCHEMA_VERSION);
-    assert_eq!(workspace.panels.len(), 7);
+    assert_eq!(workspace.version, 3);
+    assert_eq!(workspace.panels.len(), 5);
     let LayoutNode::Split(root) = &workspace.main.root else {
         panic!("default root must be a horizontal split");
     };
@@ -43,8 +44,6 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
                 PanelId::new("agents-main"),
                 PanelId::new("diff-main"),
                 PanelId::new("terminal-main"),
-                PanelId::new("goal-main"),
-                PanelId::new("merge-main"),
             ],
             active: 0,
         })
@@ -61,14 +60,17 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
         workspace.panels[&PanelId::new("diff-main")].kind,
         PanelKind::Diff
     );
-    assert_eq!(
-        workspace.panels[&PanelId::new("goal-main")].kind,
-        PanelKind::Goal
-    );
-    assert_eq!(
-        workspace.panels[&PanelId::new("merge-main")].kind,
-        PanelKind::MergeApproval
-    );
     assert_eq!(Workspace::default(), workspace);
     assert_eq!(validate(&workspace), Ok(()));
+}
+
+#[test]
+fn default_v02_has_no_goal_or_merge_panels() {
+    // Given: the default workspace constructor.
+    // When: constructing a workspace.
+    let ws = Workspace::default_v02();
+    // Then: removed surfaces are absent under schema v3.
+    assert_eq!(ws.version, 3);
+    assert!(!ws.panels.contains_key(&PanelId::new("goal-main")));
+    assert!(!ws.panels.contains_key(&PanelId::new("merge-main")));
 }

@@ -3,6 +3,41 @@ use workspace_ui::{
 };
 
 #[test]
+fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
+    // Given: a frozen snapshot of the previous default, not the new constructor.
+    let source = include_str!("fixtures/workspace_v2.json");
+    // When: loading through the public persistence boundary.
+    let ws = from_json(source).expect("v2 layout migrates");
+    // Then: only the surviving default panels remain.
+    assert_eq!(ws.version, 3);
+    assert_eq!(ws.panels.len(), 5);
+    assert_eq!(ws, Workspace::default_v02());
+}
+
+#[test]
+fn v2_layout_whose_tabs_node_only_held_goal_collapses_split() {
+    // Given: a goal-only side of a split and a surviving conversation.
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workspace_v2.json")).expect("fixture");
+    value["main"]["root"] = serde_json::json!({
+        "type": "split", "direction": "horizontal", "fraction": 0.3,
+        "first": {"type": "tabs", "panels": ["goal-main"], "active": 0},
+        "second": {"type": "tabs", "panels": ["agent-main", "merge-main"], "active": 1}
+    });
+    // When: loading the old split.
+    let ws = from_json(&value.to_string()).expect("split migrates");
+    // Then: the surviving tabs become the root and active is clamped.
+    assert_eq!(ws.version, 3);
+    assert_eq!(
+        ws.main.root,
+        workspace_ui::LayoutNode::Tabs(workspace_ui::Tabs {
+            panels: vec![PanelId::new("agent-main")],
+            active: 0,
+        })
+    );
+}
+
+#[test]
 fn v1_fixture_loads_and_migrates_to_v2() {
     // Given: the frozen JSON emitted by Workspace::default_v01().
     let source = include_str!("fixtures/workspace_v1.json");

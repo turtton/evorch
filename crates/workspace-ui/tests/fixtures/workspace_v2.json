@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "panels": {
+    "agent-main": {"id":"agent-main","kind":"agent","title":"Conversation"},
+    "agents-main": {"id":"agents-main","kind":"agents","title":"Agents"},
+    "diff-main": {"id":"diff-main","kind":"diff","title":"Diff"},
+    "goal-main": {"id":"goal-main","kind":"goal","title":"Goal"},
+    "merge-main": {"id":"merge-main","kind":"merge_approval","title":"Merge"},
+    "sidebar-main": {"id":"sidebar-main","kind":"sidebar","title":"Projects"},
+    "terminal-main": {"id":"terminal-main","kind":"terminal","title":"Terminal"}
+  },
+  "main": {
+    "root": {
+      "type":"split","direction":"horizontal","fraction":0.2,
+      "first":{"type":"tabs","panels":["sidebar-main"],"active":0},
+      "second":{
+        "type":"split","direction":"horizontal","fraction":0.625,
+        "first":{"type":"tabs","panels":["agent-main"],"active":0},
+        "second":{"type":"tabs","panels":["agents-main","diff-main","terminal-main","goal-main","merge-main"],"active":0}
+      }
+    },
+    "floating":[]
+  },
+  "extra_windows":[]
+}
