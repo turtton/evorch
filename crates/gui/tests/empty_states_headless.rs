@@ -114,7 +114,11 @@ fn capture_cjk_conversation_png_evidence() {
         .select_project(&project_id)
         .expect("project selected");
     sidebar
-        .create_thread(ThreadId::new("thread-jp"), project_id, "コンポーザー検証スレッド")
+        .create_thread(
+            ThreadId::new("thread-jp"),
+            project_id,
+            "コンポーザー検証スレッド",
+        )
         .expect("thread created");
     sidebar
         .switch_thread(&ThreadId::new("thread-jp"))
