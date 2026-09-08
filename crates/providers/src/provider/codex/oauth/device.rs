@@ -240,7 +240,8 @@ impl DeviceAuthClient {
             &code.authorization_code,
             DEVICE_EXCHANGE_REDIRECT_URI,
             &code.code_verifier,
-        ).await
+        )
+        .await
     }
 
     /// refresh token を使って token bundle を更新する。

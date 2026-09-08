@@ -8,17 +8,17 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ProviderError;
 
-mod device;
 mod browser;
 mod callback;
+mod device;
 
 pub use browser::{BrowserAuthClient, BrowserAuthError, BrowserAuthRequest};
 pub use callback::CallbackServer;
 pub use reqwest::Url as AuthorizeUrl;
 
 pub use device::{
-    AgentCodeBundle, CODEX_CLIENT_ID, CODEX_SCOPE, DEVICE_EXCHANGE_REDIRECT_URI, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL,
-    DeviceAuthClient, PollOptions, UserCodeResponse,
+    AgentCodeBundle, CODEX_CLIENT_ID, CODEX_SCOPE, DEVICE_EXCHANGE_REDIRECT_URI,
+    DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL, DeviceAuthClient, PollOptions, UserCodeResponse,
 };
 
 /// PKCE の challenge メソッド。

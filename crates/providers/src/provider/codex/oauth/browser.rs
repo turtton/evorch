@@ -7,9 +7,9 @@ use crate::ProviderError;
 use crate::http::build_http_client;
 use crate::provider::codex::tokens::TokenBundle;
 
-use super::{CODEX_CLIENT_ID, CODEX_SCOPE, PKCE_CHALLENGE_METHOD, PkcePair};
 use super::callback::CallbackServer;
 use super::device::exchange_authorization_code;
+use super::{CODEX_CLIENT_ID, CODEX_SCOPE, PKCE_CHALLENGE_METHOD, PkcePair};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserAuthError {
@@ -71,8 +71,14 @@ impl BrowserAuthClient {
                 ("id_token_add_organizations", "true"),
                 ("originator", "evorch"),
             ],
-        ).map_err(|_| BrowserAuthError::InvalidUrl)?;
-        Ok(BrowserAuthRequest { authorize_url: url.into(), state, redirect_uri, pkce })
+        )
+        .map_err(|_| BrowserAuthError::InvalidUrl)?;
+        Ok(BrowserAuthRequest {
+            authorize_url: url.into(),
+            state,
+            redirect_uri,
+            pkce,
+        })
     }
 
     pub async fn complete(
@@ -81,7 +87,12 @@ impl BrowserAuthClient {
         code: &str,
     ) -> Result<TokenBundle, BrowserAuthError> {
         Ok(exchange_authorization_code(
-            &self.http, &self.auth_base_url, code, &request.redirect_uri, &request.pkce.verifier,
-        ).await?)
+            &self.http,
+            &self.auth_base_url,
+            code,
+            &request.redirect_uri,
+            &request.pkce.verifier,
+        )
+        .await?)
     }
 }
