@@ -173,7 +173,7 @@ impl ProviderSettingsModel {
         config::OpenAiCompatibleProviderInput {
             name: self.name.clone(),
             base_url: self.base_url.clone(),
-            api_key_env: self.api_key_env.clone(),
+            credential: config::ProviderCredentialInput::Env { var: self.api_key_env.clone() },
             models,
             excluded_models: self.parsed_excluded_models(),
             default_model: self.default_model.clone(),

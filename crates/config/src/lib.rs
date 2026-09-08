@@ -22,7 +22,7 @@ pub use load::{LoadOptions, user_config_dir};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use save::{
-    OpenAiCompatibleProviderInput, save_openai_compatible_provider,
+    OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
     validate_openai_compatible_provider_input,
 };
 pub use schema::json_schema;

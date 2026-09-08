@@ -3,9 +3,16 @@
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
 use crate::{CURRENT_VERSION, Config, ConfigError};
+
+/// 秘密値ではなく資格情報の参照先。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderCredentialInput {
+    Env { var: String },
+    Keyring { service: String, account: String },
+}
 
 /// OpenAI 互換プロバイダの保存入力。
 pub struct OpenAiCompatibleProviderInput {
@@ -14,7 +21,7 @@ pub struct OpenAiCompatibleProviderInput {
     /// HTTP または HTTPS のベース URL (前後の空白は除去する)。
     pub base_url: String,
     /// 秘密値ではなく、その参照先の環境変数名。
-    pub api_key_env: String,
+    pub credential: ProviderCredentialInput,
     /// モデル ID 一覧 (空白・空要素・重複は除去する)。
     pub models: Vec<String>,
     /// 除外するモデル ID の一覧 (空白・空要素・重複は除去する)。
@@ -47,16 +54,35 @@ pub fn validate_openai_compatible_provider_input(
             "base_url must start with http:// or https://",
         ));
     }
-    let mut bytes = input.api_key_env.bytes();
-    if !bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    {
-        return Err(invalid(
-            "api_key_env",
-            "api_key_env must be an environment variable NAME matching ^[A-Z_][A-Z0-9_]*$ (never the API key itself; plaintext credentials are rejected per ADR 0008)",
-        ));
+    match &input.credential {
+        ProviderCredentialInput::Env { var } => {
+            let mut bytes = var.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
+                || !bytes
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err(invalid(
+                    "api_key_env",
+                    "api_key_env must be an environment variable NAME matching ^[A-Z_][A-Z0-9_]*$ (never the API key itself; plaintext credentials are rejected per ADR 0008)",
+                ));
+            }
+        }
+        ProviderCredentialInput::Keyring { service, account } => {
+            if service.trim().is_empty() {
+                return Err(invalid(
+                    "credential.service",
+                    "keyring service must not be empty",
+                ));
+            }
+            if account.trim().is_empty() {
+                return Err(invalid(
+                    "credential.account",
+                    "keyring account must not be empty",
+                ));
+            }
+        }
     }
     let models = normalized_models(&input.models);
     if models.is_empty() {
@@ -120,7 +146,18 @@ pub fn save_openai_compatible_provider(
     let mut profile = Table::new();
     profile.insert("type", value("openai-compatible"));
     profile.insert("base_url", value(input.base_url.trim()));
-    profile.insert("api_key_env", value(input.api_key_env.as_str()));
+    match &input.credential {
+        ProviderCredentialInput::Env { var } => {
+            profile.insert("api_key_env", value(var.as_str()));
+        }
+        ProviderCredentialInput::Keyring { service, account } => {
+            let mut reference = InlineTable::new();
+            reference.insert("type", "keyring".into());
+            reference.insert("service", service.as_str().into());
+            reference.insert("account", account.as_str().into());
+            profile.insert("credential", value(reference));
+        }
+    }
     profile.insert(
         "models",
         value(

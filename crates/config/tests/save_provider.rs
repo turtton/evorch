@@ -12,7 +12,9 @@ fn input() -> OpenAiCompatibleProviderInput {
     OpenAiCompatibleProviderInput {
         name: "local".into(),
         base_url: " http://localhost:11434/v1 ".into(),
-        api_key_env: "LOCAL_API_KEY".into(),
+        credential: config::ProviderCredentialInput::Env {
+            var: "LOCAL_API_KEY".into(),
+        },
         models: vec![
             " model-a ".into(),
             "".into(),
@@ -30,14 +32,23 @@ fn save_writes_keyring_credential_inline_table_and_omits_api_key_env() {
     let tmp = tempfile::tempdir().unwrap();
     let mut candidate = input();
     candidate.name = "openai-compat".into();
-    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "openai-compat".into() };
+    candidate.credential = config::ProviderCredentialInput::Keyring {
+        service: "evorch".into(),
+        account: "openai-compat".into(),
+    };
     // When
     save_openai_compatible_provider(&tmp.path().join("evorch.toml"), &candidate).unwrap();
     // Then
     let text = std::fs::read_to_string(tmp.path().join("evorch.toml")).unwrap();
     assert!(text.contains("credential = {"));
     assert!(!text.contains("api_key_env"));
-    assert_eq!(load(tmp.path()).providers["openai-compat"].credential, CredentialRefConfig::Keyring { service: "evorch".into(), account: "openai-compat".into() });
+    assert_eq!(
+        load(tmp.path()).providers["openai-compat"].credential,
+        CredentialRefConfig::Keyring {
+            service: "evorch".into(),
+            account: "openai-compat".into()
+        }
+    );
 }
 
 #[test]
@@ -47,18 +58,28 @@ fn save_replacing_env_profile_with_keyring_drops_api_key_env() {
     let path = tmp.path().join("evorch.toml");
     let mut candidate = input();
     save_openai_compatible_provider(&path, &candidate).unwrap();
-    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "local".into() };
+    candidate.credential = config::ProviderCredentialInput::Keyring {
+        service: "evorch".into(),
+        account: "local".into(),
+    };
     // When
     save_openai_compatible_provider(&path, &candidate).unwrap();
     // Then
-    assert!(!std::fs::read_to_string(path).unwrap().contains("api_key_env"));
+    assert!(
+        !std::fs::read_to_string(path)
+            .unwrap()
+            .contains("api_key_env")
+    );
 }
 
 #[test]
 fn validation_rejects_empty_keyring_account() {
     // Given
     let mut candidate = input();
-    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: String::new() };
+    candidate.credential = config::ProviderCredentialInput::Keyring {
+        service: "evorch".into(),
+        account: String::new(),
+    };
     // When
     let result = validate_openai_compatible_provider_input(&candidate);
     // Then
@@ -174,7 +195,7 @@ fn save_rejects_plaintext_like_api_key_env_and_leaves_file_untouched() {
                 std::fs::write(&path, text).unwrap();
             }
             let mut candidate = input();
-            candidate.api_key_env = value.into();
+            candidate.credential = config::ProviderCredentialInput::Env { var: value.into() };
             // When: 保存を要求する
             let result = save_openai_compatible_provider(&path, &candidate);
             // Then: フィールドエラーになりファイルは変更されない
@@ -284,7 +305,7 @@ fn validation_reports_first_invalid_field_in_order() {
     let mut candidate = OpenAiCompatibleProviderInput {
         name: String::new(),
         base_url: String::new(),
-        api_key_env: String::new(),
+        credential: config::ProviderCredentialInput::Env { var: String::new() },
         models: vec![],
         excluded_models: vec![],
         default_model: String::new(),
@@ -297,7 +318,11 @@ fn validation_reports_first_invalid_field_in_order() {
         match field {
             "name" => candidate.name = "Local_1-test".into(),
             "base_url" => candidate.base_url = "https://example.com".into(),
-            "api_key_env" => candidate.api_key_env = "_KEY_1".into(),
+            "api_key_env" => {
+                candidate.credential = config::ProviderCredentialInput::Env {
+                    var: "_KEY_1".into(),
+                }
+            }
             "models" => candidate.models = vec!["model-a".into()],
             "default_model" => candidate.default_model = "model-a".into(),
             _ => unreachable!(),

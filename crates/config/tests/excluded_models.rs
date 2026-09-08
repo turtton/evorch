@@ -91,7 +91,9 @@ fn save_round_trips_exclusions_when_input_needs_normalization() {
     let input = OpenAiCompatibleProviderInput {
         name: "local".into(),
         base_url: "https://example.com/v1".into(),
-        api_key_env: "LOCAL_KEY".into(),
+        credential: config::ProviderCredentialInput::Env {
+            var: "LOCAL_KEY".into(),
+        },
         models: vec!["manual".into()],
         excluded_models: vec![" m1 ".into(), "".into(), "m2".into(), "m1".into()],
         default_model: "manual".into(),
@@ -118,7 +120,9 @@ fn save_omits_exclusions_when_normalized_input_is_empty() {
         let input = OpenAiCompatibleProviderInput {
             name: "local".into(),
             base_url: "https://example.com/v1".into(),
-            api_key_env: "LOCAL_KEY".into(),
+            credential: config::ProviderCredentialInput::Env {
+                var: "LOCAL_KEY".into(),
+            },
             models: vec!["manual".into()],
             excluded_models,
             default_model: "manual".into(),
