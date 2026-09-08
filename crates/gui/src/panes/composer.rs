@@ -37,7 +37,11 @@ pub fn composer_strip(
                 });
             }
             match provider {
-                ProviderStatus::Configured => {}
+                ProviderStatus::Configured => {
+                    if ui.add(egui::Button::new("Settings").small()).clicked() {
+                        action = Some(ComposerAction::OpenSettings);
+                    }
+                }
                 ProviderStatus::NotConfigured { guidance } => {
                     ui.label(muted(guidance));
                     if primary_button(ui, "Open Settings").clicked() {

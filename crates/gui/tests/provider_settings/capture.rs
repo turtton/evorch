@@ -1,8 +1,136 @@
 use gui::app::WorkbenchState;
-use gui::fixture::DemoSource;
-use gui::headless::HeadlessWorkbench;
+use gui::fixture::{DemoSource, ScriptedCodexAuthBackend};
+use gui::headless::{HeadlessWorkbench, OffscreenError};
+use gui::model::codex_auth::{
+    CODEX_AUTHENTICATED_LABEL, CODEX_DEVICE_URL, CODEX_LOGIN_BUTTON,
+    CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthModel, CodexAuthState,
+    CodexAuthSummary,
+};
 use gui::model::provider_settings::ProviderSettingsModel;
 use workspace_ui::UiSettings;
+
+#[test]
+#[should_panic(expected = "Codex PNG capture required")]
+fn codex_capture_panics_when_adapter_unavailable() {
+    // Given: an unavailable adapter.
+    let frame = Err(OffscreenError::AdapterUnavailable("test adapter".into()));
+    // When: mandatory evidence is saved.
+    save_codex_frame(frame, std::path::Path::new("unused.png"));
+    // Then: the evidence test must fail, not skip.
+}
+
+#[test]
+#[should_panic(expected = "Codex PNG saved")]
+fn codex_capture_panics_when_png_save_fails() {
+    // Given: a frame and a directory rather than a writable PNG path.
+    let directory = tempfile::tempdir().expect("temp directory");
+    let frame = gui::headless::CapturedFrame {
+        width: 1200,
+        height: 900,
+        rgba: vec![0; 1200 * 900 * 4],
+    };
+    // When / Then: saving mandatory evidence must fail.
+    save_codex_frame(Ok(frame), directory.path());
+}
+
+#[test]
+#[ignore = "writes PNG review evidence using an offscreen GPU adapter"]
+// CI headless-capture runs this explicitly; missing evidence is a failure.
+fn capture_codex_auth_png_evidence() {
+    // Given: an isolated scripted login and a writable review evidence directory.
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.opencode/v04-captures");
+    std::fs::create_dir_all(&directory).expect("Codex capture directory required");
+    let (backend, tx) = ScriptedCodexAuthBackend::gated();
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds")
+        .with_provider_settings(ProviderSettingsModel {
+            open: true,
+            ..Default::default()
+        })
+        .with_codex_auth(CodexAuthModel::with_backend(backend, "codex"));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    // When: the unauthenticated modal renders.
+    harness.run();
+    // Then: guidance is visible before login starts.
+    for label in [
+        CODEX_UNAUTHENTICATED_GUIDANCE,
+        CODEX_DEVICE_URL,
+        CODEX_LOGIN_BUTTON,
+    ] {
+        assert!(harness.has_label(label), "{label}");
+    }
+    let unauthenticated = harness.capture();
+
+    // When: device login starts and publishes its prompt.
+    harness.click_label(CODEX_LOGIN_BUTTON);
+    step_until(&mut harness, |state| {
+        matches!(state, CodexAuthState::Authenticating { prompt: Some(_) })
+    });
+    // Then: the device code and waiting state are visible.
+    assert!(harness.has_label("ABCD-1234"));
+    assert!(harness.has_label(CODEX_WAITING_LABEL));
+    let authenticating = harness.capture();
+
+    // When: the scripted browser approval completes.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    tx.send(Ok(CodexAuthSummary {
+        expires_at_unix: Some(now + 3600),
+    }))
+    .expect("approval");
+    step_until(&mut harness, |state| {
+        matches!(state, CodexAuthState::Authenticated { .. })
+    });
+    // Then: authentication is visible without exposing tokens.
+    assert!(harness.has_label(CODEX_AUTHENTICATED_LABEL));
+    let authenticated = harness.capture();
+    for (frame, name) in [
+        (unauthenticated, "codex-auth-unauthenticated.png"),
+        (authenticating, "codex-auth-authenticating.png"),
+        (authenticated, "codex-auth-authenticated.png"),
+    ] {
+        save_codex_frame(frame, &directory.join(name));
+    }
+}
+
+fn step_until(
+    harness: &mut HeadlessWorkbench<DemoSource>,
+    predicate: impl Fn(&CodexAuthState) -> bool,
+) {
+    for _ in 0..200 {
+        harness.step();
+        if predicate(&harness.state().codex_auth().state) {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!(
+        "Codex state not reached: {:?}",
+        harness.state().codex_auth().state
+    );
+}
+
+fn save_codex_frame(
+    frame: Result<gui::headless::CapturedFrame, OffscreenError>,
+    path: &std::path::Path,
+) {
+    match frame {
+        Ok(frame) => {
+            assert_eq!((frame.width, frame.height), (1200, 900));
+            frame.save_png(path).expect("Codex PNG saved");
+        }
+        Err(OffscreenError::AdapterUnavailable(message)) => {
+            panic!(
+                "Codex PNG capture required at {}: AdapterUnavailable: {message}",
+                path.display()
+            );
+        }
+        Err(error) => panic!("unexpected Codex capture error: {error}"),
+    }
+}
 
 #[test]
 #[ignore = "writes PNG review evidence using an offscreen GPU adapter"]

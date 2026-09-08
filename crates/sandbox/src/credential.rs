@@ -98,8 +98,11 @@ impl CredentialStore for FileCredentialStore {
 
     fn set(&self, key: &str, value: &Secret) -> Result<(), CredentialError> {
         let mut values = self.values.write().map_err(lock_error)?;
-        values.insert(key.to_owned(), value.expose().to_owned());
-        self.persist(&values)
+        let mut next = values.clone();
+        next.insert(key.to_owned(), value.expose().to_owned());
+        self.persist(&next)?;
+        *values = next;
+        Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<(), CredentialError> {
@@ -144,6 +147,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn failed_set_preserves_memory_and_disk() {
+        // Given: a persisted store whose directory is temporarily moved away.
+        let parent = tempdir().expect("temporary directory");
+        let dir = parent.path().join("store");
+        let backup = parent.path().join("backup");
+        let store = FileCredentialStore::open(&dir).expect("store");
+        let previous = Secret::from("previous".to_owned());
+        store.set("existing", &previous).expect("seed");
+        fs::rename(&dir, &backup).expect("move store directory");
+        // When: inserting or replacing a secret cannot be persisted.
+        for key in ["new", "existing"] {
+            assert!(
+                store
+                    .set(key, &Secret::from("sentinel-access-abc".to_owned()))
+                    .is_err()
+            );
+        }
+        fs::rename(&backup, &dir).expect("restore persisted directory");
+        // Then: both readers still observe only the committed values.
+        let reopened = FileCredentialStore::open(&dir).expect("reopen");
+        for reader in [&store, &reopened] {
+            assert_eq!(reader.get("new").expect("get"), None);
+            assert_eq!(reader.get("existing").expect("get"), Some(previous.clone()));
+        }
+    }
 
     // Given: 空のファイルストア / When: 設定・取得・削除 / Then: 値のライフサイクルが保存される
     #[test]

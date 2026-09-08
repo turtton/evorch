@@ -49,7 +49,14 @@ jobs:
         run: cargo run -p gui --bin headless_capture -- /tmp/headless-capture.png
         env:
           WGPU_BACKEND: vulkan
+      - name: Run Codex login capture evidence test
+        run: cargo test -p gui --test provider_settings_headless capture::capture_codex_auth_png_evidence -- --ignored --exact --test-threads=1 --show-output
+        env:
+          WGPU_BACKEND: vulkan
       - uses: actions/upload-artifact@v4
         with:
           name: headless-capture
-          path: /tmp/headless-capture.png
+          include-hidden-files: true
+          path: |
+            /tmp/headless-capture.png
+            .opencode/v04-captures

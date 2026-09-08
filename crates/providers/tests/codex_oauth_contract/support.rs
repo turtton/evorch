@@ -8,7 +8,7 @@ use providers::provider::codex::oauth::{
 use providers::provider::codex::tokens::TokenBundle;
 use serde_json::json;
 use wiremock::matchers::{body_json, method, path};
-use wiremock::{Mock, MockServer};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::support::{fixture, json_response};
 
@@ -65,6 +65,44 @@ pub async fn mount_pending(server: &MockServer) {
             403,
             &fixture("codex", "device_token_pending.json"),
         ))
+        .mount(server)
+        .await;
+}
+
+pub async fn mount_login(server: &MockServer, pending_count: u64, exchange: ResponseTemplate) {
+    Mock::given(method("POST"))
+        .and(path("/api/accounts/deviceauth/usercode"))
+        .respond_with(json_response(
+            200,
+            &fixture("codex", "device_usercode_response.json"),
+        ))
+        .expect(1)
+        .mount(server)
+        .await;
+    if pending_count > 0 {
+        Mock::given(method("POST"))
+            .and(path("/api/accounts/deviceauth/token"))
+            .respond_with(json_response(
+                403,
+                &fixture("codex", "device_token_pending.json"),
+            ))
+            .up_to_n_times(pending_count)
+            .expect(pending_count)
+            .mount(server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/accounts/deviceauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authorization_code": "code-1", "code_verifier": "cv-srv"
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(exchange)
+        .expect(1)
         .mount(server)
         .await;
 }

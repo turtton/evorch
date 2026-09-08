@@ -4,8 +4,8 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProviderError;
-use crate::http::{map_request_error, map_response_error};
-use crate::provider::codex::tokens::TokenBundle;
+use crate::http::{build_http_client, map_request_error, map_response_error};
+use crate::provider::codex::tokens::{CodexTokenStore, TokenBundle};
 
 /// Codex OAuth の公開クライアント ID。
 pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -107,6 +107,32 @@ struct RefreshResponse {
 }
 
 impl DeviceAuthClient {
+    /// 共通の HTTP 設定で OAuth クライアントを生成する。
+    ///
+    /// # Errors
+    /// HTTP クライアントの構築失敗を返す。
+    pub fn with_default_http(auth_base_url: impl Into<String>) -> Result<Self, ProviderError> {
+        Ok(Self::new(auth_base_url, build_http_client(None)?))
+    }
+
+    /// ユーザーコードを通知し、認証完了後にトークン一式を保存する。
+    ///
+    /// # Errors
+    /// コード要求、polling、token exchange、またはストアへの保存失敗を返す。
+    pub async fn login_and_store(
+        &self,
+        store: &dyn CodexTokenStore,
+        opts: &PollOptions,
+        on_user_code: &mut (dyn FnMut(&UserCodeResponse) + Send),
+    ) -> Result<TokenBundle, ProviderError> {
+        let user_code = self.request_user_code().await?;
+        on_user_code(&user_code);
+        let code = self.poll_agent_code(&user_code, opts).await?;
+        let bundle = self.exchange_code(&code).await?;
+        store.save(&bundle)?;
+        Ok(bundle)
+    }
+
     /// 指定 OAuth base URL と構築済み HTTP client から生成する。
     pub fn new(auth_base_url: impl Into<String>, http: reqwest::Client) -> Self {
         Self {

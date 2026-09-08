@@ -4,15 +4,83 @@ mod support;
 
 use std::time::Duration;
 
-use oauth_support::{client, current_tokens, make_dummy_jwt, mount_pending, user_code_response};
+use oauth_support::{
+    client, current_tokens, make_dummy_jwt, mount_login, mount_pending, user_code_response,
+};
 use providers::ProviderError;
 use providers::provider::codex::oauth::{
-    CODEX_CLIENT_ID, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL, PollOptions,
+    CODEX_CLIENT_ID, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL, DeviceAuthClient, PollOptions,
 };
+use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore};
 use serde_json::json;
 use support::{fixture, json_response};
 use wiremock::matchers::{body_json, body_string, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_and_store_prompts_user_code_and_persists_bundle() {
+    // Given: pending を 2 回返してから認証に成功するサーバーと空のストア。
+    let server = MockServer::start().await;
+    mount_login(
+        &server,
+        2,
+        ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": make_dummy_jwt("acct-1"),
+            "access_token": "access-tok-1", "refresh_token": "refresh-tok-1"
+        })),
+    )
+    .await;
+    let client = DeviceAuthClient::with_default_http(server.uri()).expect("client");
+    let store = InMemoryTokenStore::new();
+    let mut seen = Vec::new();
+    // When: コードを通知してログインする。
+    let bundle = client
+        .login_and_store(
+            &store,
+            &PollOptions {
+                interval_override: Some(Duration::from_millis(10)),
+                timeout: Duration::from_secs(2),
+            },
+            &mut |u| seen.push(u.user_code.clone()),
+        )
+        .await
+        .expect("login");
+    // Then: 通知されたコードと保存された bundle が一致する。
+    assert_eq!(seen, ["ABCD-1234"]);
+    assert_eq!(bundle.access_token, "access-tok-1");
+    assert_eq!(store.load().expect("load"), Some(bundle));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_and_store_leaves_store_empty_when_exchange_fails() {
+    // Given: token exchange が失敗するサーバーと空のストア。
+    let server = MockServer::start().await;
+    mount_login(
+        &server,
+        0,
+        ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"})),
+    )
+    .await;
+    let client = DeviceAuthClient::with_default_http(server.uri()).expect("client");
+    let store = InMemoryTokenStore::new();
+    // When: ログインする。
+    let result = client
+        .login_and_store(
+            &store,
+            &PollOptions {
+                interval_override: Some(Duration::from_millis(10)),
+                timeout: Duration::from_secs(2),
+            },
+            &mut |_| {},
+        )
+        .await;
+    // Then: HTTP エラーを返し、途中結果を保存しない。
+    assert!(matches!(
+        result,
+        Err(ProviderError::Http { status: 400, .. })
+    ));
+    assert!(store.load().expect("load").is_none());
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn device_flow_issues_usercode_then_polls_to_token() {

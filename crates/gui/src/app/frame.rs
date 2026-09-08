@@ -21,11 +21,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }
+        if self.codex_auth.poll() {
+            ctx.request_repaint();
+        }
         self.render(ui);
         if matches!(
             self.provider_settings.models_fetch_state,
             crate::model::provider_settings::ModelsFetchState::Loading
-        ) {
+        ) || self.codex_auth.is_authenticating()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }

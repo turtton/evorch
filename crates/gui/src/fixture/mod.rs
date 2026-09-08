@@ -1,5 +1,6 @@
 //! Deterministic populated workbench state for headless capture and tests.
 
+mod codex_auth;
 mod events;
 mod sidebar;
 
@@ -16,6 +17,7 @@ use crate::model::commands::{
 };
 use crate::model::tasks::AgentRunSource;
 
+pub use codex_auth::ScriptedCodexAuthBackend;
 pub use events::{demo_error_events, demo_events};
 pub use sidebar::{FixtureError, demo_sidebar};
 
