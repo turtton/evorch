@@ -2,9 +2,8 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, ScriptedCodexAuthBackend};
 use gui::headless::{HeadlessWorkbench, OffscreenError};
 use gui::model::codex_auth::{
-    CODEX_AUTHENTICATED_LABEL, CODEX_DEVICE_URL, CODEX_LOGIN_BUTTON,
-    CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthModel, CodexAuthState,
-    CodexAuthSummary,
+    CODEX_AUTHENTICATED_LABEL, CODEX_LOGIN_BUTTON, CODEX_UNAUTHENTICATED_GUIDANCE,
+    CODEX_WAITING_LABEL, CodexAuthModel, CodexAuthState, CodexAuthSummary,
 };
 use gui::model::provider_settings::ProviderSettingsModel;
 use workspace_ui::UiSettings;
@@ -53,22 +52,24 @@ fn capture_codex_auth_png_evidence() {
     // When: the unauthenticated modal renders.
     harness.run();
     // Then: guidance is visible before login starts.
-    for label in [
-        CODEX_UNAUTHENTICATED_GUIDANCE,
-        CODEX_DEVICE_URL,
-        CODEX_LOGIN_BUTTON,
-    ] {
+    for label in [CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_LOGIN_BUTTON] {
         assert!(harness.has_label(label), "{label}");
     }
     let unauthenticated = harness.capture();
 
-    // When: device login starts and publishes its prompt.
+    // When: browser login starts and publishes its prompt.
     harness.click_label(CODEX_LOGIN_BUTTON);
     step_until(&mut harness, |state| {
-        matches!(state, CodexAuthState::Authenticating { prompt: Some(_) })
+        matches!(
+            state,
+            CodexAuthState::Authenticating {
+                prompt: Some(_),
+                ..
+            }
+        )
     });
-    // Then: the device code and waiting state are visible.
-    assert!(harness.has_label("ABCD-1234"));
+    // Then: the reopen link and waiting state are visible.
+    assert!(harness.has_label("Open the sign-in page again"));
     assert!(harness.has_label(CODEX_WAITING_LABEL));
     let authenticating = harness.capture();
 
