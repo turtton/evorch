@@ -118,4 +118,5 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_style_of(Theme::Dark, style());
     // A stray light preference should still render the dark design.
     ctx.set_style_of(Theme::Light, style());
+    super::fonts::install(ctx);
 }
