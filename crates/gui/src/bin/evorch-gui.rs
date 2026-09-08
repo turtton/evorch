@@ -5,6 +5,10 @@ use event_bus::{Event, EventBus, EventKind, LifecycleEvent, RecvError};
 use gui::app::{WorkbenchApp, WorkbenchState};
 use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
+use gui::model::codex_auth::CodexAuthModel;
+use gui::model::codex_auth_backend::{
+    DEFAULT_CODEX_CREDENTIAL_ACCOUNT, ProviderCodexAuthBackend, codex_credential_account,
+};
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
@@ -14,6 +18,7 @@ use gui::runtime_sink::{
 };
 use portable_pty::CommandBuilder;
 use routing::ProcessEnv;
+use routing::factory::DEFAULT_AUTH_BASE_URL;
 use runtime::orchestration::delivery::DeliveryPort;
 use runtime::{
     AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
@@ -503,6 +508,41 @@ impl UnwiredCredentialStore {
     }
 }
 
+fn credential_dir(demo_directory: Option<&tempfile::TempDir>) -> Option<PathBuf> {
+    match demo_directory {
+        Some(directory) => Some(directory.path().join("credentials")),
+        None => config::user_config_dir().map(|directory| directory.join("credentials")),
+    }
+}
+
+fn codex_auth_model(
+    loaded: Option<&Result<config::Config, config::ConfigError>>,
+    credential_dir: Option<PathBuf>,
+) -> CodexAuthModel {
+    let account = loaded
+        .and_then(|loaded| loaded.as_ref().ok())
+        .and_then(codex_credential_account)
+        .unwrap_or_else(|| DEFAULT_CODEX_CREDENTIAL_ACCOUNT.to_owned());
+    let Some(directory) = credential_dir else {
+        tracing::warn!("credential directory unavailable; Codex login remains disabled");
+        return CodexAuthModel::default();
+    };
+    let store = match sandbox::open_default(directory) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(%error, "credential store unavailable; Codex login remains disabled");
+            return CodexAuthModel::default();
+        }
+    };
+    match ProviderCodexAuthBackend::production(store, account.clone(), DEFAULT_AUTH_BASE_URL) {
+        Ok(backend) => CodexAuthModel::with_backend(Arc::new(backend), account),
+        Err(error) => {
+            tracing::warn!(%error, "Codex backend initialization failed; login remains disabled");
+            CodexAuthModel::default()
+        }
+    }
+}
+
 fn run() -> Result<(), GuiError> {
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
@@ -664,6 +704,10 @@ fn run() -> Result<(), GuiError> {
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_provider_settings_path(provider_settings_path)
+        .with_codex_auth(codex_auth_model(
+            loaded_config.as_ref(),
+            credential_dir(demo_directory.as_ref()),
+        ))
         .with_pump(pump)
         .with_pty(pty)
         .with_command_sink(Box::new(RuntimeCommandSink::new(
@@ -750,6 +794,45 @@ mod tests {
     use super::orchestration_settings_or_default;
     use config::ConfigError;
     use runtime::OrchestrationSettings;
+
+    #[test]
+    fn codex_auth_model_has_no_backend_without_credential_dir() {
+        // Given: no credential directory is available.
+        // When: the login model is constructed.
+        let model = super::codex_auth_model(None, None);
+        // Then: login remains unavailable without preventing startup.
+        assert!(!model.has_backend());
+        assert_eq!(
+            model.state,
+            gui::model::codex_auth::CodexAuthState::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn codex_auth_model_uses_profile_account_and_opens_store_in_temp_dir() {
+        // Given: a Codex profile overrides the default account.
+        let mut config = config::Config::default();
+        config.providers.insert(
+            "c".into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAiCodex,
+                credential: config::CredentialRefConfig::Keyring {
+                    service: "evorch".into(),
+                    account: "work".into(),
+                },
+                ..Default::default()
+            },
+        );
+        for (config, account) in [(config, "work"), (config::Config::default(), "codex")] {
+            let directory = tempfile::tempdir().expect("credential directory");
+            // When: the production backend is constructed without starting login.
+            let model =
+                super::codex_auth_model(Some(&Ok(config)), Some(directory.path().to_path_buf()));
+            // Then: the backend uses the selected account.
+            assert!(model.has_backend());
+            assert_eq!(model.credential_account, account);
+        }
+    }
 
     #[test]
     fn detected_provider_status_fails_closed_on_config_error() {
