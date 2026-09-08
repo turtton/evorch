@@ -124,6 +124,16 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - mock-openai: spawn_with_models で /v1/models endpoint（OpenAI 互換 list 形式、scripts キュー非消費）を追加し headless/通常テスト両方で利用
 - 検証: cargo test --workspace 1834/0（clippy -D warnings / fmt --check / git diff --check 全 PASS）。fetch headless テストは kittest step() による 1 フレーム確定進行（Loading 中 spinner の継続 repaint で run() が max_steps(4) を超過する CI flake を request-update で修正、commit 64f9c52）
 
+## v0.4 codex subscription ログイン導線の実装確定（issue #102、PR #103、2026-09-08）
+
+- codex subscription 認証導線: Settings modal 内 Codex subscription セクション。状態遷移は未認証 guidance（device URL + 手順）→ 認証中（user code + verification URL）→ 認証済み（expiry 表示）→ 失敗時固定文言 4 種
+- トークン GUI 非接触規約: GUI 型は `CodexAuthSummary { expires_at_unix }` のみ。TokenBundle は provider adapter（`ProviderCodexAuthBackend`）内に限定、Debug も state 名のみ。`classify_provider_error` で provider/network エラー文字列（HTTP body 等）を GUI に流さず CodexAuthError（Network/StoreUnavailable/Rejected/Unavailable）に写像
+- credential store 再利用: `routing::CredentialStoreTokenStore` 経由で既存 `CodexTokenStore` 契約を共有。credential key = openai-codex profile keyring account（default "codex"）、実体は `sandbox::open_default(<user-config-dir>/credentials)`
+- adapter 構成: `DeviceAuthClient::with_default_http` + `CredentialStoreTokenStore`（`login_and_store` 合成）。GUI は CodexAuthModel（mpsc + named thread `evorch-codex-login` + per-frame poll）経由の CodexAuthBackend trait 越しで状態のみ受領
+- 副作用の信頼性: `FileCredentialStore::set` を persist-first 化（保存失敗後の誤 Authenticated を排除、failed_set_preserves_memory_and_disk テスト）
+- conductor 到達性: composer に Configured 状態用の Settings compact ボタン追加
+- 検証: workspace 1866/0、clippy/fmt/diff-check clean。headless capture は kittest `Harness::step()` polling（継続 repaint 状態で run() による max_steps 超過 flake を回避）で 3 状態 PNG 証跡を CI lavapipe headless-capture ジョブで exact 名実行して必須化（codex-auth-authenticating/authenticated 等）
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
