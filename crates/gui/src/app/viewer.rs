@@ -6,7 +6,6 @@ use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
     composer::ComposerAction,
-    goal::{GoalAction, GoalFormSync},
     merge::MergeAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
     sidebar::{SidebarAction, set_sidebar_error},
@@ -21,7 +20,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut diff_request = None;
-        let mut goal_action = None;
         let mut composer_action = None;
         let mut merge_action = None;
         let mut focus_request = None;
@@ -43,12 +41,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 focus: &self.focus,
                 diff: &self.diff,
                 diff_request: &mut diff_request,
-                goal_form: &self.goal_form,
-                goal_action: &mut goal_action,
                 composer: &mut self.composer,
                 provider_status: &self.provider_status,
                 composer_action: &mut composer_action,
-                loop_status: &self.loop_status,
                 merge: &self.merge,
                 merge_action: &mut merge_action,
                 focus_request: &mut focus_request,
@@ -83,25 +78,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SetTrust { path, trust } => self.set_allowed_trust(path, trust),
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
-        }
-        if let Some(action) = goal_action {
-            match action {
-                GoalAction::Submit => self.submit_goal(),
-                GoalAction::OpenSettings => self.open_provider_settings(),
-                GoalAction::PauseGoal => self.pause_goal(),
-                GoalAction::ResumeGoal => self.resume_goal(),
-                GoalAction::CancelGoal => self.cancel_goal(),
-                GoalAction::SyncForm(GoalFormSync {
-                    goal,
-                    references,
-                    constraints,
-                }) => {
-                    let form = self.goal_form_mut();
-                    form.goal = goal;
-                    form.references = references;
-                    form.constraints = constraints;
-                }
-            }
         }
         if let Some(action) = composer_action {
             match action {

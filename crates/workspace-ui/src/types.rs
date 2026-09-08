@@ -134,7 +134,6 @@ impl Workspace {
             "agents-main",
             "diff-main",
             "terminal-main",
-            "goal-main",
             "merge-main",
         ];
 

@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use egui::Color32;
-use event_bus::{AgentRunPhase, GoalState};
+use event_bus::AgentRunPhase;
 use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
 
 use super::WorkbenchState;
-use crate::model::commands::{LoopStatusView, MergeApprovalView};
+use crate::model::commands::MergeApprovalView;
 use crate::model::tasks::{AgentRunSource, TaskRow};
 use crate::theme::tokens::{ERROR_FG, INFO, WARNING_FG};
 
@@ -30,7 +30,6 @@ impl PaneAttention {
 
 pub(super) struct AttentionInputs<'a> {
     pub merge: &'a MergeApprovalView,
-    pub loop_status: &'a LoopStatusView,
     pub phases: &'a BTreeMap<String, ThreadRunPhase>,
     pub tasks_rows: &'a [TaskRow],
 }
@@ -46,19 +45,6 @@ pub(super) fn attention_for(
                 PaneAttention::Error
             } else if inputs.merge.pr.is_some() && inputs.merge.resolution.is_none() {
                 PaneAttention::Warning
-            } else {
-                PaneAttention::None
-            }
-        }
-        PanelKind::Goal => {
-            if inputs.merge.blocked.is_some() {
-                PaneAttention::Error
-            } else if inputs.loop_status.state == Some(GoalState::Paused) {
-                PaneAttention::Warning
-            } else if inputs.loop_status.goal_id.is_some()
-                && inputs.loop_status.state == Some(GoalState::Active)
-            {
-                PaneAttention::Info
             } else {
                 PaneAttention::None
             }
@@ -103,7 +89,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             panel.target.as_deref(),
             &AttentionInputs {
                 merge: &self.merge.view,
-                loop_status: &self.loop_status,
                 phases: &self.phases,
                 tasks_rows: self.tasks.rows(),
             },
@@ -158,7 +143,6 @@ mod tests {
         let merge = merge_view(Some(demo_pr()), None, None);
         let inputs = AttentionInputs {
             merge: &merge,
-            loop_status: &LoopStatusView::default(),
             phases: &BTreeMap::new(),
             tasks_rows: &[],
         };
@@ -177,7 +161,6 @@ mod tests {
         let merge = merge_view(Some(demo_pr()), None, Some("goal blocked".to_owned()));
         let inputs = AttentionInputs {
             merge: &merge,
-            loop_status: &LoopStatusView::default(),
             phases: &BTreeMap::new(),
             tasks_rows: &[],
         };
@@ -200,7 +183,6 @@ mod tests {
         let merge = merge_view(None, None, None);
         let inputs = AttentionInputs {
             merge: &merge,
-            loop_status: &LoopStatusView::default(),
             phases: &BTreeMap::new(),
             tasks_rows: &rows,
         };
@@ -223,10 +205,6 @@ mod tests {
         let rows = [task_row(AgentRunPhase::Error)];
         let inputs = AttentionInputs {
             merge: &merge,
-            loop_status: &LoopStatusView {
-                state: Some(GoalState::Paused),
-                ..LoopStatusView::default()
-            },
             phases: &BTreeMap::new(),
             tasks_rows: &rows,
         };

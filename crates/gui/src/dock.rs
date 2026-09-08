@@ -281,7 +281,7 @@ mod tests {
         let panels: BTreeMap<_, _> = [
             panel("sidebar", PanelKind::Sidebar),
             panel("agent", PanelKind::Agent),
-            panel("goal", PanelKind::Goal),
+                panel("goal", PanelKind::Diff),
         ]
         .into_iter()
         .collect();
@@ -357,7 +357,7 @@ mod tests {
         // Given: a horizontal split with no sidebar panel anywhere
         let panels: BTreeMap<_, _> = [
             panel("agent", PanelKind::Agent),
-            panel("goal", PanelKind::Goal),
+                panel("goal", PanelKind::Diff),
         ]
         .into_iter()
         .collect();

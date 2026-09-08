@@ -6,7 +6,7 @@ use workspace_ui::{Panel, PanelId, PanelKind, SidebarState};
 use super::ConversationFocus;
 use super::attention::{AttentionInputs, PaneAttention, attention_for};
 use crate::diff::{DiffMode, DiffModel};
-use crate::model::commands::{GoalFormModel, LoopStatusView, MergeApprovalModel};
+use crate::model::commands::MergeApprovalModel;
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
@@ -18,7 +18,6 @@ use crate::panes::{
     agents::{AgentsAction, agents_pane},
     composer::ComposerAction,
     diff::diff_pane,
-    goal::{GoalAction, goal_pane},
     merge::{MergeAction, merge_pane},
     sidebar::{SidebarAction, sidebar_pane},
     tasks::tasks_pane,
@@ -41,12 +40,9 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) focus: &'a ConversationFocus,
     pub(super) diff: &'a DiffModel,
     pub(super) diff_request: &'a mut Option<DiffMode>,
-    pub(super) goal_form: &'a GoalFormModel,
-    pub(super) goal_action: &'a mut Option<GoalAction>,
     pub(super) composer: &'a mut ComposerModel,
     pub(super) provider_status: &'a ProviderStatus,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
-    pub(super) loop_status: &'a LoopStatusView,
     pub(super) merge: &'a MergeApprovalModel,
     pub(super) merge_action: &'a mut Option<MergeAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
@@ -63,7 +59,6 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             panel.target.as_deref(),
             &AttentionInputs {
                 merge: &self.merge.view,
-                loop_status: self.loop_status,
                 phases: self.phases,
                 tasks_rows: self.tasks.rows(),
             },
@@ -187,16 +182,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 if let Some(mode) = diff_pane(ui, self.diff) {
                     *self.diff_request = Some(mode);
                 }
-            }
-            PanelKind::Goal => {
-                *self.goal_action = goal_pane(
-                    ui,
-                    self.goal_form,
-                    self.provider_status,
-                    self.loop_status,
-                    self.merge.view.blocked.as_deref(),
-                    self.sidebar.active_thread.is_some(),
-                );
             }
             PanelKind::MergeApproval => {
                 *self.merge_action = merge_pane(ui, self.merge);
