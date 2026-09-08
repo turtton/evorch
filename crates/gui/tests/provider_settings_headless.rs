@@ -12,6 +12,9 @@ use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 #[path = "provider_settings/fetch.rs"]
 mod fetch;
 
+#[path = "provider_settings/tabs.rs"]
+mod tabs;
+
 #[path = "provider_settings/capture.rs"]
 mod capture;
 

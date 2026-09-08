@@ -24,6 +24,47 @@ fn input() -> OpenAiCompatibleProviderInput {
     }
 }
 
+#[test]
+fn save_writes_keyring_credential_inline_table_and_omits_api_key_env() {
+    // Given
+    let tmp = tempfile::tempdir().unwrap();
+    let mut candidate = input();
+    candidate.name = "openai-compat".into();
+    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "openai-compat".into() };
+    // When
+    save_openai_compatible_provider(&tmp.path().join("evorch.toml"), &candidate).unwrap();
+    // Then
+    let text = std::fs::read_to_string(tmp.path().join("evorch.toml")).unwrap();
+    assert!(text.contains("credential = {"));
+    assert!(!text.contains("api_key_env"));
+    assert_eq!(load(tmp.path()).providers["openai-compat"].credential, CredentialRefConfig::Keyring { service: "evorch".into(), account: "openai-compat".into() });
+}
+
+#[test]
+fn save_replacing_env_profile_with_keyring_drops_api_key_env() {
+    // Given
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("evorch.toml");
+    let mut candidate = input();
+    save_openai_compatible_provider(&path, &candidate).unwrap();
+    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "local".into() };
+    // When
+    save_openai_compatible_provider(&path, &candidate).unwrap();
+    // Then
+    assert!(!std::fs::read_to_string(path).unwrap().contains("api_key_env"));
+}
+
+#[test]
+fn validation_rejects_empty_keyring_account() {
+    // Given
+    let mut candidate = input();
+    candidate.credential = config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: String::new() };
+    // When
+    let result = validate_openai_compatible_provider_input(&candidate);
+    // Then
+    assert_field(result, "providers.local.credential.account");
+}
+
 fn load(dir: &Path) -> Config {
     Config::load(&LoadOptions {
         project_dir: Some(dir.to_path_buf()),

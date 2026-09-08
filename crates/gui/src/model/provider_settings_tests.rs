@@ -1,6 +1,27 @@
 use super::*;
 use config::{Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig};
 
+#[test]
+fn seed_from_config_selects_codex_tab_when_only_codex_profile() {
+    // Given
+    let mut config = Config::default();
+    config.providers.insert("codex".into(), ProviderProfileConfig { provider_type: ProviderTypeConfig::OpenAiCodex, ..Default::default() });
+    // When
+    let model = ProviderSettingsModel::seed_from_config(&config);
+    // Then
+    assert_eq!(model.tab, ProviderSettingsTab::Codex);
+}
+
+#[test]
+fn to_input_maps_keyring_mode_to_service_evorch_account_name() {
+    // Given
+    let model = ProviderSettingsModel::default();
+    // When
+    let input = model.to_input();
+    // Then
+    assert_eq!(input.credential, config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "openai-compat".into() });
+}
+
 fn compatible(credential: CredentialRefConfig) -> ProviderProfileConfig {
     ProviderProfileConfig {
         provider_type: ProviderTypeConfig::OpenAiCompatible,
