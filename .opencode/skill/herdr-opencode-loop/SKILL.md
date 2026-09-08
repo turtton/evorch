@@ -141,6 +141,11 @@ review-fix 時はできるだけ短く、具体的に:
 Fix review comments in PR #2. In src/lib.rs, remove the unused import flagged by clippy and run 'cargo fmt --check', 'cargo check --workspace', 'cargo clippy --workspace -- -D warnings', and 'cargo test --workspace'. Push to the PR branch and reply with [herdr-relay] when CI is green.
 ```
 
+**repair ラウンドで worker が canonical にラベル遷移する場合**（issue 委譲と同じ worker が repair も担うとき）は、修復完了手順に以下の repair lane 手順を明記する（2026-09-07 実績: これを書かないと child が詰む。既知の落とし穴「repair lane の claim」参照）:
+
+1. repair push 前に `intent-cli worker claim --repo <r> --kind pr --number <n> --write` を実行して `intent-pr-update-in-progress` を付ける（kind は **pr**、初回委譲時の `--kind issue` とは別物）
+2. push 後に `worker result-summary --kind pr-comment-fix --outcome repair-pushed` → `worker complete --kind pr --number <n> --outcome repair-pushed --write` で `intent-pr-rereview-ready` へ swap（`intent-pr-update-in-progress` 前提のため claim 必須。claim なしだと `stale.not-claimed` で拒否される）
+
 ## プロンプト規約 (worker → lead リレー)
 
 -   **`[herdr-relay]` prefix** を必須とする。
@@ -174,6 +179,7 @@ Fix review comments in PR #2. In src/lib.rs, remove the unused import flagged by
 | worktree の置き場所（ro mount / sandbox） | worktree の標準配置は **対象プロジェクト配下の `.worktrees/<unit>`**（名前固定。初回は `.git/info/exclude` に `.worktrees/` を追記し `git status` で非表示を確認）。プロジェクト外は失敗する: ドキュメント類ディレクトリ直下は ro mount で `<project>-worktrees/` に作ると checkout が read-only になり `git reset --hard` / commit が「Read-only file system」で失敗。汎用 worktrees ディレクトリは opencode-sandbox が chdir を拒否（herdr-opencode-loop 実績）。 |
 | bundle の host への受け渡し | worker sandbox の `/tmp` は host から見えない。bundle は checkout ディレクトリ（worker から writable で host と共有）経由で受け渡す（herdr-opencode-loop 実績）。 |
 | 複数 opencode セッション併存時の誤リレー | worker が送り先を画面タイトルや focused 状態で推測すると、無関係な lead セッションへリレーし得る。委譲プロンプトと契約ファイルに lead pane ID を明記して「他 pane が見えても固定」と指示し、着手時の送り先確認リレーで配線を検証する（herdr-opencode-loop 実績: 2 セッション併存環境で pane 固定指定により正しく配送）。 |
+| repair ラウンドで worker が `worker complete --kind pr --outcome repair-pushed` を `stale.not-claimed` で拒否される | **ラベル遷移を worker に任せる場合は repair lane 手順が必須**: repair push 前に `intent-cli worker claim --repo <r> --kind pr --number <n> --write` で `intent-pr-update-in-progress` を付ける（kind は pr。issue 委譲時の `--kind issue` claim とは別 lane）。claim なしで repair-pushed を実行すると `complete.stale.not-claimed: PR does not carry 'intent-pr-update-in-progress'` で拒否され、child に迂回手段がなく詰む。委譲 contract / repair プロンプトにこの 2 ステップ（claim --kind pr → complete repair-pushed）を書かないと再発する（intent-cli 0.26.0、2026-09-07 PR #101 で実測）。エラーメッセージは claim 手順を導かないため child を誤誘導する点は upstream 改善提案候補。worker がラベル遷移を諦めて lead に委ねる運用でも動くが、その場合は lead の `approved` 遷移が `intent-pr-request-update` を同時除去するので結果として rereview-ready を経ずに closeout できる（rereview プロセスを skip するので意図的にのみ使う）。 |
 
 ## 運用チェックリスト
 

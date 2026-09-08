@@ -49,9 +49,12 @@ fn capture_codex_auth_png_evidence() {
         })
         .with_codex_auth(CodexAuthModel::with_backend(backend, "codex"));
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
-    // When: the unauthenticated modal renders.
+    // Given: the modal is opened on its default OpenAI tab.
     harness.run();
-    // Then: guidance is visible before login starts.
+    // When: the Codex subscription tab is selected and rendered.
+    harness.click_label("Codex subscription");
+    harness.run();
+    // Then: the browser sign-in guidance is visible before login starts.
     for label in [CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_LOGIN_BUTTON] {
         assert!(harness.has_label(label), "{label}");
     }
