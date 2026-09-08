@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use config::{CredentialRefConfig, ProviderTypeConfig};
+use providers::ProviderError;
 use providers::provider::codex::oauth::{DeviceAuthClient, PollOptions, UserCodeResponse};
 use providers::provider::codex::tokens::{CodexTokenStore, TokenBundle, parse_jwt_claims};
 use routing::factory::CredentialStoreTokenStore;
 use sandbox::CredentialStore;
 
-use super::codex_auth::{CodexAuthBackend, CodexAuthSummary, CodexUserCodePrompt};
+use super::codex_auth::{CodexAuthBackend, CodexAuthError, CodexAuthSummary, CodexUserCodePrompt};
 
 pub const DEFAULT_CODEX_CREDENTIAL_ACCOUNT: &str = "codex";
 pub const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -40,19 +41,30 @@ impl ProviderCodexAuthBackend {
         credential_store: Arc<dyn CredentialStore>,
         account: String,
         auth_base_url: &str,
-    ) -> Result<Self, String> {
-        let client = DeviceAuthClient::with_default_http(auth_base_url)
-            .map_err(|error| error.to_string())?;
+    ) -> Result<Self, CodexAuthError> {
+        let client =
+            DeviceAuthClient::with_default_http(auth_base_url).map_err(classify_provider_error)?;
         let store = Arc::new(CredentialStoreTokenStore::new(credential_store, account));
         Ok(Self::new(client, store))
     }
 }
 
-fn summary_of(bundle: &TokenBundle) -> CodexAuthSummary {
-    CodexAuthSummary {
-        expires_at_unix: parse_jwt_claims(&bundle.id_token)
-            .ok()
-            .map(|claims| claims.exp),
+fn summary_of(bundle: &TokenBundle) -> Result<CodexAuthSummary, CodexAuthError> {
+    let claims =
+        parse_jwt_claims(&bundle.id_token).map_err(|_| CodexAuthError::StoreUnavailable)?;
+    Ok(CodexAuthSummary {
+        expires_at_unix: Some(claims.exp),
+    })
+}
+
+fn classify_provider_error(error: ProviderError) -> CodexAuthError {
+    match error {
+        ProviderError::Timeout | ProviderError::Request(_) | ProviderError::RateLimited { .. } => {
+            CodexAuthError::Network
+        }
+        ProviderError::Http { .. } => CodexAuthError::Rejected,
+        ProviderError::InvalidJson { .. } => CodexAuthError::StoreUnavailable,
+        ProviderError::InvalidSse { .. } => CodexAuthError::Unavailable,
     }
 }
 
@@ -64,29 +76,37 @@ fn prompt_of(code: &UserCodeResponse) -> CodexUserCodePrompt {
 }
 
 impl CodexAuthBackend for ProviderCodexAuthBackend {
-    fn load_summary(&self) -> Result<Option<CodexAuthSummary>, String> {
+    fn load_summary(&self) -> Result<Option<CodexAuthSummary>, CodexAuthError> {
         self.store
             .load()
-            .map(|bundle| bundle.as_ref().map(summary_of))
-            .map_err(|error| error.to_string())
+            .map_err(|_| CodexAuthError::StoreUnavailable)?
+            .as_ref()
+            .map(summary_of)
+            .transpose()
     }
 
     fn authenticate(
         &self,
         on_prompt: &mut (dyn FnMut(CodexUserCodePrompt) + Send),
-    ) -> Result<CodexAuthSummary, String> {
+    ) -> Result<CodexAuthSummary, CodexAuthError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| CodexAuthError::Unavailable)?;
         let mut forward = |code: &UserCodeResponse| on_prompt(prompt_of(code));
-        runtime
-            .block_on(
-                self.client
-                    .login_and_store(self.store.as_ref(), &self.poll, &mut forward),
-            )
-            .map_err(|error| error.to_string())
-            .map(|bundle| summary_of(&bundle))
+        let bundle = runtime
+            .block_on(async {
+                let code = self.client.request_user_code().await?;
+                forward(&code);
+                let agent_code = self.client.poll_agent_code(&code, &self.poll).await?;
+                self.client.exchange_code(&agent_code).await
+            })
+            .map_err(classify_provider_error)?;
+        let summary = summary_of(&bundle)?;
+        self.store
+            .save(&bundle)
+            .map_err(|_| CodexAuthError::StoreUnavailable)?;
+        Ok(summary)
     }
 }
 

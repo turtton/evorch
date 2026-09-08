@@ -9,9 +9,18 @@ pub const CODEX_UNAUTHENTICATED_GUIDANCE: &str = "Click Log in with Codex, open 
 pub const CODEX_REQUESTING_LABEL: &str = "Requesting device code…";
 pub const CODEX_WAITING_LABEL: &str = "Waiting for approval in the browser…";
 pub const CODEX_AUTHENTICATED_LABEL: &str = "Authenticated";
-pub const CODEX_BACKEND_MISSING: &str =
-    "Codex login is unavailable: no credential store is wired for this session";
-pub const CODEX_LOGIN_ENDED_WITHOUT_RESULT: &str = "Codex login ended without a result";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CodexAuthError {
+    #[error("Codex network unavailable")]
+    Network,
+    #[error("Codex credential store unavailable")]
+    StoreUnavailable,
+    #[error("Codex authorization rejected")]
+    Rejected,
+    #[error("Codex login unavailable")]
+    Unavailable,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUserCodePrompt {
@@ -29,13 +38,13 @@ pub enum CodexAuthState {
     Unauthenticated,
     Authenticating { prompt: Option<CodexUserCodePrompt> },
     Authenticated { expires_at_unix: Option<u64> },
-    Failed { message: String },
+    Failed { failure: CodexAuthError },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAuthEvent {
     Prompt(CodexUserCodePrompt),
-    Finished(Result<CodexAuthSummary, String>),
+    Finished(Result<CodexAuthSummary, CodexAuthError>),
 }
 
 /// トークン本体を GUI に渡さない認証境界。
@@ -44,7 +53,7 @@ pub trait CodexAuthBackend: Send + Sync {
     ///
     /// # Errors
     /// ストアの読み取り失敗を返す。
-    fn load_summary(&self) -> Result<Option<CodexAuthSummary>, String>;
+    fn load_summary(&self) -> Result<Option<CodexAuthSummary>, CodexAuthError>;
 
     /// コードを通知して認証を完了し、保存済み情報の要約を返す。
     ///
@@ -53,7 +62,7 @@ pub trait CodexAuthBackend: Send + Sync {
     fn authenticate(
         &self,
         on_prompt: &mut (dyn FnMut(CodexUserCodePrompt) + Send),
-    ) -> Result<CodexAuthSummary, String>;
+    ) -> Result<CodexAuthSummary, CodexAuthError>;
 }
 
 pub struct CodexAuthModel {
@@ -124,7 +133,7 @@ impl CodexAuthModel {
                     expires_at_unix: summary.expires_at_unix,
                 },
                 Ok(None) => CodexAuthState::Unauthenticated,
-                Err(message) => CodexAuthState::Failed { message },
+                Err(failure) => CodexAuthState::Failed { failure },
             },
         };
     }
@@ -135,7 +144,7 @@ impl CodexAuthModel {
         }
         let Some(backend) = self.backend.clone() else {
             self.state = CodexAuthState::Failed {
-                message: CODEX_BACKEND_MISSING.into(),
+                failure: CodexAuthError::Unavailable,
             };
             return;
         };
@@ -150,9 +159,9 @@ impl CodexAuthModel {
                 let _ = tx.send(CodexAuthEvent::Finished(result));
             }) {
             Ok(_) => self.rx = Some(rx),
-            Err(error) => {
+            Err(_) => {
                 self.state = CodexAuthState::Failed {
-                    message: error.to_string(),
+                    failure: CodexAuthError::Unavailable,
                 }
             }
         }
@@ -177,13 +186,13 @@ impl CodexAuthModel {
                 Ok(CodexAuthEvent::Finished(Ok(summary))) => CodexAuthState::Authenticated {
                     expires_at_unix: summary.expires_at_unix,
                 },
-                Ok(CodexAuthEvent::Finished(Err(message))) => CodexAuthState::Failed { message },
+                Ok(CodexAuthEvent::Finished(Err(failure))) => CodexAuthState::Failed { failure },
                 Err(TryRecvError::Empty) => {
                     self.rx = Some(rx);
                     break;
                 }
                 Err(TryRecvError::Disconnected) => CodexAuthState::Failed {
-                    message: CODEX_LOGIN_ENDED_WITHOUT_RESULT.into(),
+                    failure: CodexAuthError::Unavailable,
                 },
             };
             changed |= self.state != next;

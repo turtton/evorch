@@ -38,7 +38,7 @@ fn start_without_backend_fails_closed() {
     assert_eq!(
         model.state,
         CodexAuthState::Failed {
-            message: CODEX_BACKEND_MISSING.into()
+            failure: CodexAuthError::Unavailable
         }
     );
     assert!(!model.poll());
@@ -98,9 +98,9 @@ fn start_is_ignored_while_authenticating() {
 }
 
 #[test]
-fn failure_surfaces_message_and_allows_restart() {
+fn failure_surfaces_category_and_allows_restart() {
     // Given: 認証が失敗する backend。
-    let backend = ScriptedCodexAuthBackend::immediate(Err("boom".into()));
+    let backend = ScriptedCodexAuthBackend::immediate(Err(CodexAuthError::Rejected));
     let mut model = CodexAuthModel::with_backend(backend.clone(), "codex");
     model.start();
     poll_until(&mut model, |state| {
@@ -109,7 +109,7 @@ fn failure_surfaces_message_and_allows_restart() {
     assert_eq!(
         model.state,
         CodexAuthState::Failed {
-            message: "boom".into()
+            failure: CodexAuthError::Rejected
         }
     );
     // When: 再度ログインを開始する。
@@ -138,12 +138,12 @@ fn refresh_from_store_maps_summary_error_and_absence() {
     backend.set_stored(Ok(None));
     model.refresh_from_store();
     assert_eq!(model.state, CodexAuthState::Unauthenticated);
-    backend.set_stored(Err("keychain locked".into()));
+    backend.set_stored(Err(CodexAuthError::StoreUnavailable));
     model.refresh_from_store();
     assert_eq!(
         model.state,
         CodexAuthState::Failed {
-            message: "keychain locked".into()
+            failure: CodexAuthError::StoreUnavailable
         }
     );
 }
@@ -160,7 +160,7 @@ fn disconnected_channel_becomes_failed() {
     assert_eq!(
         model.state,
         CodexAuthState::Failed {
-            message: CODEX_LOGIN_ENDED_WITHOUT_RESULT.into()
+            failure: CodexAuthError::Unavailable
         }
     );
     assert!(!model.poll());

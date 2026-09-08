@@ -4,11 +4,14 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, ScriptedCodexAuthBackend};
 use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::{
-    CODEX_AUTHENTICATED_LABEL, CODEX_BACKEND_MISSING, CODEX_DEVICE_URL, CODEX_LOGIN_BUTTON,
-    CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthBackend, CodexAuthModel,
-    CodexAuthState, CodexAuthSummary,
+    CODEX_AUTHENTICATED_LABEL, CODEX_DEVICE_URL, CODEX_LOGIN_BUTTON,
+    CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthBackend, CodexAuthError,
+    CodexAuthModel, CodexAuthState, CodexAuthSummary,
 };
 use gui::model::provider_settings::ProviderSettingsModel;
+use gui::panes::codex_auth::{
+    CODEX_LOGIN_FAILED_REJECTED, CODEX_LOGIN_FAILED_STORE, CODEX_LOGIN_FAILED_UNAVAILABLE,
+};
 use workspace_ui::UiSettings;
 
 fn workbench(backend: Arc<dyn CodexAuthBackend>) -> HeadlessWorkbench<DemoSource> {
@@ -104,7 +107,7 @@ fn clicking_log_in_shows_user_code_then_authenticated_after_approval() {
 #[test]
 fn failed_login_shows_error_and_keeps_login_available() {
     // Given
-    let backend = ScriptedCodexAuthBackend::immediate(Err("device flow rejected".into()));
+    let backend = ScriptedCodexAuthBackend::immediate(Err(CodexAuthError::Rejected));
     let mut harness = workbench(backend);
     harness.run();
     // When
@@ -115,7 +118,8 @@ fn failed_login_shows_error_and_keeps_login_available() {
         "failed",
     );
     // Then
-    assert!(harness.has_label("Codex login failed: device flow rejected"));
+    assert!(harness.has_label(CODEX_LOGIN_FAILED_REJECTED));
+    assert!(!harness.has_label("sentinel-access-abc"));
     assert!(harness.has_label(CODEX_LOGIN_BUTTON));
     assert!(harness.has_label(CODEX_DEVICE_URL));
 }
@@ -132,6 +136,30 @@ fn authenticated_store_seeds_authenticated_state() {
     // Then
     assert!(harness.has_label(CODEX_AUTHENTICATED_LABEL));
     assert!(!harness.has_label(CODEX_UNAUTHENTICATED_GUIDANCE));
+}
+
+#[test]
+fn save_failure_shows_fixed_message_and_refresh_stays_unauthenticated() {
+    // Given: a login whose credential save fails.
+    let backend = ScriptedCodexAuthBackend::immediate(Err(CodexAuthError::StoreUnavailable));
+    let mut harness = workbench(backend);
+    harness.run();
+    // When: the login finishes with a store failure.
+    harness.click_label(CODEX_LOGIN_BUTTON);
+    step_until(
+        &mut harness,
+        |state| matches!(state, CodexAuthState::Failed { .. }),
+        "save failure",
+    );
+    // Then: the fixed store message is shown and refresh cannot authenticate.
+    assert!(harness.has_label(CODEX_LOGIN_FAILED_STORE));
+    harness.state_mut().open_provider_settings();
+    harness.step();
+    assert_eq!(
+        harness.state().codex_auth().state,
+        CodexAuthState::Unauthenticated
+    );
+    assert!(!harness.has_label(CODEX_AUTHENTICATED_LABEL));
 }
 
 #[test]
@@ -172,5 +200,5 @@ fn login_without_backend_fails_closed_in_ui() {
     );
     harness.step();
     // Then
-    assert!(harness.has_label(&format!("Codex login failed: {CODEX_BACKEND_MISSING}")));
+    assert!(harness.has_label(CODEX_LOGIN_FAILED_UNAVAILABLE));
 }
