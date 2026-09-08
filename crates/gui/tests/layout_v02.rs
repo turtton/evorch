@@ -46,8 +46,6 @@ fn default_layout_is_sidebar_center_right_tabs() {
                 PanelId::new("agents-main"),
                 PanelId::new("diff-main"),
                 PanelId::new("terminal-main"),
-                PanelId::new("goal-main"),
-                PanelId::new("merge-main"),
             ],
         ]
     );
@@ -110,8 +108,6 @@ fn reset_layout_restores_v02_default() {
         "agents-main",
         "diff-main",
         "terminal-main",
-        "goal-main",
-        "merge-main",
     ] {
         let tab = workbench
             .state()
@@ -201,8 +197,6 @@ fn undock_to_floating_and_reload_preserves_v02_panels() {
         "agents-main",
         "diff-main",
         "terminal-main",
-        "goal-main",
-        "merge-main",
     ] {
         assert!(reloaded.dock().find_tab(&PanelId::new(id)).is_some());
     }
