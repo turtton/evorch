@@ -113,8 +113,9 @@ entry router and launches a pre-routed background run: an explicit "direct"
 keyword starts a Worker run directly; otherwise an Orchestrator run is
 started. Delivery (git push / gh pr / intent-cli worker closeout) runs through
 ShellDeliveryAdapter, so `gh auth status` must succeed or goals block at the
-delivery stage. Only the final merge requires operator approval in the Merge
-pane; every other step (implement, push, PR, CI watch, review, repair,
+delivery stage. Only the final merge requires operator approval; the request
+appears as a conversation notice, with no approval button in this UI yet.
+Every other step (implement, push, PR, CI watch, review, repair,
 re-review, closeout) is automatic.
 既知の制限: エージェント応答の描画は demo スクリプトモデルのままであり、provider composition root 導入まで実 provider の応答は表示されない。
 
@@ -139,21 +140,12 @@ Demo mode manual verification:
 4. Open default panes: 3 transcripts; run-2 contains incoming "implement the goal"
    and outgoing "worker done" only.
 5. Diff: Working tree shows 2 fixture files; Branch vs main shows 1.
-6. Goal loop: submit `DEMO-GOAL implement fixture unit` in the Goal pane and
-   confirm "accepted: goal-1". The Goal pane then walks the deterministic loop:
-   stage implementing -> delivering -> awaiting_ci -> reviewing (round 1
-   requests an update) -> repairing -> delivering -> awaiting_ci -> reviewing
-   (round 2 approves) -> ready_to_finish -> awaiting_merge_approval.
-   Finish gate rejection: before the pipeline delivers a PR, the root run's
-   early finish attempt is rejected and the status block shows
-   `rejected: no_pull_request`; the run ends without finish, and the first
-   continuation epoch calls finish once the gate evidence is green.
-7. Merge: the Merge pane binds PR #101 with head a2a2a2a2, all gate rows ok,
-   and a token; Approve stays disabled until the binding exists (try it before
-   the loop reaches awaiting_merge_approval). Approve executes the merge,
-   records the 3 closeout steps, and the Goal pane shows `state: complete`.
-   Reject (with a reason) instead returns the goal to Active and dispatches a
-   continuation epoch.
+6. Goal loop: send `/goal DEMO-GOAL implement fixture unit` in the conversation
+   composer and confirm "accepted: goal-1". The deterministic runtime loop
+   implements, reviews, repairs, and then requests merge approval.
+7. Merge approval currently appears as a conversation notice only. The runtime
+   approval port remains available; a Diff-view approval surface is a follow-up.
+   There is no approval button in this UI.
 8. Ctrl+S saves layout; Ctrl+Shift+R resets it. `bwrap` must be on PATH.
 
 Requirements:
