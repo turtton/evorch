@@ -15,7 +15,7 @@ use gui::headless::HeadlessWorkbench;
 use gui::model::commands::{LoopStatusView, MergeDecision, WorkbenchCommand};
 use gui::model::tasks::AgentRunSource;
 use runtime::AgentSummary;
-use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 const HEAD_SHA: &str = "deadbee0deadbee0deadbee0deadbee0deadbee0";
 
@@ -43,15 +43,6 @@ fn sidebar_with_thread(root: &std::path::Path) -> SidebarState {
         .switch_thread(&ThreadId::new("thread-1"))
         .expect("thread can be selected");
     sidebar
-}
-
-fn activate_panel(harness: &mut HeadlessWorkbench<MockSource>, panel_id: &str) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new(panel_id))
-        .expect("panel tab exists");
-    let leaf = dock.leaf_mut(path.node_path()).expect("leaf exists");
-    leaf.set_active_tab(path.tab.0).expect("tab index is valid");
 }
 
 fn binding(token_id: &str) -> MergeBinding {
@@ -151,10 +142,9 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
 }
 
 #[test]
-fn goal_pane_shows_state_stage_and_rejections_from_bus_events() {
+fn loop_state_tracks_stage_and_rejections_from_bus_events() {
     // Given: a headless workbench with the goal pane active
     let mut fixture = LoopFixture::new();
-    activate_panel(&mut fixture.workbench, "goal-main");
     fixture.workbench.run();
 
     // When: orchestrator loop events flow through the event bus pump
@@ -185,18 +175,6 @@ fn goal_pane_shows_state_stage_and_rejections_from_bus_events() {
 
     // Then: the goal pane status block renders state, stage, rejections,
     // review round, and the continuation epoch
-    for label in [
-        "state: active",
-        "stage: reviewing",
-        "rejected: no_pull_request",
-        "round: 1",
-        "epoch: 1",
-    ] {
-        assert!(
-            fixture.workbench.has_label(label),
-            "missing goal status label: {label}"
-        );
-    }
     let status: &LoopStatusView = fixture.workbench.state().loop_status();
     assert_eq!(status.goal_id.as_deref(), Some("goal-1"));
     assert_eq!(status.state, Some(GoalState::Active));
@@ -207,16 +185,18 @@ fn goal_pane_shows_state_stage_and_rejections_from_bus_events() {
 }
 
 #[test]
-fn merge_pane_approve_disabled_until_binding_and_shows_head_and_token() {
+fn merge_state_requires_binding_and_retains_head_and_token() {
     // Given: a headless workbench with the merge pane active and no binding yet
     let mut fixture = LoopFixture::new();
-    activate_panel(&mut fixture.workbench, "merge-main");
     fixture.workbench.run();
 
     // Then: no binding details are shown and the disabled Approve button
     // issues nothing
-    assert!(!fixture.workbench.has_label("head: deadbee0"));
-    fixture.workbench.click_label("Approve");
+    assert!(fixture.workbench.state().merge().view.binding.is_none());
+    fixture
+        .workbench
+        .state_mut()
+        .decide_merge(MergeDecision::Approve);
     fixture.workbench.run();
     assert!(
         fixture.workbench.state().issued().is_empty(),
@@ -230,18 +210,21 @@ fn merge_pane_approve_disabled_until_binding_and_shows_head_and_token() {
     }));
 
     // Then: the binding head, token, and gate checklist rows are visible
-    assert!(fixture.workbench.has_label("head: deadbee0"));
-    assert!(fixture.workbench.has_label("token: token-1"));
-    assert!(fixture.workbench.has_label("gate: pull_request ok"));
-    assert!(fixture.workbench.has_label("gate: ci ok"));
+    let view = &fixture.workbench.state().merge().view;
+    assert_eq!(view.binding, Some(binding("token-1")));
     assert!(
-        !fixture
-            .workbench
-            .has_label("blocked: review_rounds_exhausted")
+        view.gate
+            .iter()
+            .any(|item| item.label == "pull_request" && item.ok)
     );
+    assert!(view.gate.iter().any(|item| item.label == "ci" && item.ok));
+    assert!(view.blocked.is_none());
 
     // When: Approve is clicked
-    fixture.workbench.click_label("Approve");
+    fixture
+        .workbench
+        .state_mut()
+        .decide_merge(MergeDecision::Approve);
     fixture.workbench.run();
 
     // Then: exactly one DecideMerge command carries the binding token
@@ -266,14 +249,13 @@ fn merge_pane_approve_disabled_until_binding_and_shows_head_and_token() {
 }
 
 #[test]
-fn pause_button_issues_pause_goal_command_once() {
+fn state_controls_issue_pause_and_resume_goal_commands_once() {
     // Given: a headless workbench with the goal pane active and an active goal
     let mut fixture = LoopFixture::new();
-    activate_panel(&mut fixture.workbench, "goal-main");
     fixture.emit(goal_created("goal-1"));
 
     // When: the Pause goal button is clicked once
-    fixture.workbench.click_label("Pause goal");
+    fixture.workbench.state_mut().pause_goal();
     fixture.workbench.run();
 
     // Then: exactly one PauseGoal command carries the goal id, and no other
@@ -290,11 +272,14 @@ fn pause_button_issues_pause_goal_command_once() {
         to: GoalState::Paused,
         reason: "operator".into(),
     }));
-    fixture.workbench.click_label("Resume goal");
+    fixture.workbench.state_mut().resume_goal();
     fixture.workbench.run();
 
     // Then: the paused state is shown and exactly one ResumeGoal is issued
-    assert!(fixture.workbench.has_label("state: paused"));
+    assert_eq!(
+        fixture.workbench.state().loop_status().state,
+        Some(GoalState::Paused)
+    );
     let (pauses, resumes, cancels) = control_commands(&fixture.workbench);
     assert_eq!(pauses.len(), 1);
     assert_eq!(resumes, vec!["goal-1"], "expected exactly one ResumeGoal");

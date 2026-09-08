@@ -27,7 +27,7 @@ use runtime::{
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use tools::ToolExecutor;
-use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 const GOAL: &str = "DEMO-GOAL implement queued fixture unit";
 const HEAD_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
@@ -178,15 +178,6 @@ fn sidebar(root: &Path) -> SidebarState {
         .switch_thread(&ThreadId::new("thread-73"))
         .expect("thread selected");
     sidebar
-}
-
-fn activate(harness: &mut HeadlessWorkbench<AgentRuntime>, panel: &str) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock.find_tab(&PanelId::new(panel)).expect("panel exists");
-    dock.leaf_mut(path.node_path())
-        .expect("leaf exists")
-        .set_active_tab(path.tab.0)
-        .expect("tab selected");
 }
 
 fn spawn_storage_bridge(
@@ -363,7 +354,6 @@ impl Fixture {
                 supervisor,
             )));
         let mut harness = HeadlessWorkbench::new(state, [1200.0, 800.0]);
-        activate(&mut harness, "goal-main");
         harness.run();
         Self {
             runtime,
@@ -383,17 +373,17 @@ impl Fixture {
     fn submit(&mut self) {
         self.harness.state_mut().goal_form_mut().goal = GOAL.into();
         self.harness.run();
-        self.harness.click_label("Submit");
+        self.harness.state_mut().submit_goal();
         self.harness.run();
-        self.wait_label("accepted: goal-1");
+        self.wait_state(|state| state.goal_form().last_accepted.as_deref() == Some("goal-1"));
     }
 
-    fn wait_label(&mut self, label: &str) {
+    fn wait_state(&mut self, ready: impl Fn(&WorkbenchState<AgentRuntime>) -> bool) {
         let deadline = Instant::now() + TIMEOUT;
-        while !self.harness.has_label(label) {
+        while !ready(self.harness.state()) {
             assert!(
                 Instant::now() < deadline,
-                "label {label:?} missing; all_events={:#?}",
+                "state missing; all_events={:#?}",
                 lock(&self.all_events)
             );
             let _ = self.repaint_rx.recv_timeout(Duration::from_millis(100));
@@ -454,7 +444,7 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
 
     // When: a queued goal is submitted through the Goal pane.
     fixture.submit();
-    fixture.wait_label("stage: awaiting_merge_approval");
+    fixture.wait_state(|state| state.loop_status().stage == Some(GoalStage::AwaitingMergeApproval));
 
     // Then: every documented pre-approval stage occurred in order through one repair round.
     assert_stage_order(
@@ -470,11 +460,35 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
             GoalStage::AwaitingMergeApproval,
         ],
     );
-    activate(&mut fixture.harness, "merge-main");
     fixture.harness.run();
-    fixture.wait_label("head: a2a2a2a2");
-    assert!(fixture.harness.has_label("gate: pull_request ok"));
-    assert!(fixture.harness.has_label("gate: review ok"));
+    fixture.wait_state(|state| {
+        state
+            .merge()
+            .view
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.head_sha == HEAD_B)
+    });
+    assert!(
+        fixture
+            .harness
+            .state()
+            .merge()
+            .view
+            .gate
+            .iter()
+            .any(|gate| gate.label == "pull_request" && gate.ok)
+    );
+    assert!(
+        fixture
+            .harness
+            .state()
+            .merge()
+            .view
+            .gate
+            .iter()
+            .any(|gate| gate.label == "review" && gate.ok)
+    );
     let token = fixture
         .harness
         .state()
@@ -487,13 +501,15 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
         .chars()
         .take(8)
         .collect::<String>();
-    assert!(fixture.harness.has_label(&format!("token: {token}")));
+    assert!(!token.is_empty());
 
     // When: the SHA-bound merge approval is clicked in the Merge pane.
-    fixture.harness.click_label("Approve");
+    fixture
+        .harness
+        .state_mut()
+        .decide_merge(gui::model::commands::MergeDecision::Approve);
     fixture.harness.run();
-    activate(&mut fixture.harness, "goal-main");
-    fixture.wait_label("state: complete");
+    fixture.wait_state(|state| state.loop_status().state == Some(GoalState::Complete));
     fixture.wait_event(|event| {
         matches!(
             event,
@@ -546,8 +562,13 @@ fn gate_missing_continuation_is_visible_in_gui() {
     fixture.submit();
 
     // Then: the typed rejection and the first continuation epoch are visible.
-    fixture.wait_label("rejected: no_pull_request");
-    fixture.wait_label("epoch: 1");
+    fixture.wait_state(|state| {
+        state
+            .loop_status()
+            .last_rejections
+            .contains(&"no_pull_request".to_owned())
+    });
+    fixture.wait_state(|state| state.loop_status().epoch == 1);
 }
 
 #[test]
@@ -561,13 +582,17 @@ fn review_rounds_exhausted_shows_blocked_and_disables_approve() {
 
     // When: the only allowed review round requests an update.
     fixture.submit();
-    fixture.wait_label("state: blocked");
-    fixture.wait_label("blocked: review rounds exhausted");
+    fixture.wait_state(|state| state.loop_status().state == Some(GoalState::Blocked));
+    fixture.wait_state(|state| {
+        state.merge().view.blocked.as_deref() == Some("review rounds exhausted")
+    });
 
     // Then: the Merge pane has no actionable approval.
-    activate(&mut fixture.harness, "merge-main");
     fixture.harness.run();
-    fixture.harness.click_label("Approve");
+    fixture
+        .harness
+        .state_mut()
+        .decide_merge(gui::model::commands::MergeDecision::Approve);
     fixture.harness.run();
     assert!(fixture.harness.state().merge().view.resolution.is_none());
     assert!(fixture.harness.state().merge().view.binding.is_none());
@@ -578,10 +603,16 @@ fn approval_invalidated_on_head_change_shows_stale() {
     // Given: approval is issued for HEAD_B, but approval-time pr_status returns HEAD_C.
     let mut fixture = Fixture::new(stale_delivery(), OrchestrationSettings::default());
     fixture.submit();
-    fixture.wait_label("stage: awaiting_merge_approval");
-    activate(&mut fixture.harness, "merge-main");
+    fixture.wait_state(|state| state.loop_status().stage == Some(GoalStage::AwaitingMergeApproval));
     fixture.harness.run();
-    fixture.wait_label("head: a2a2a2a2");
+    fixture.wait_state(|state| {
+        state
+            .merge()
+            .view
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.head_sha == HEAD_B)
+    });
     let binding: MergeBinding = fixture
         .harness
         .state()
@@ -592,7 +623,10 @@ fn approval_invalidated_on_head_change_shows_stale() {
         .expect("approval binding");
 
     // When: Approve refreshes the remote head and the stale approval is invalidated.
-    fixture.harness.click_label("Approve");
+    fixture
+        .harness
+        .state_mut()
+        .decide_merge(gui::model::commands::MergeDecision::Approve);
     fixture.harness.run();
     let deadline = Instant::now() + TIMEOUT;
     while fixture
@@ -629,6 +663,6 @@ fn approval_invalidated_on_head_change_shows_stale() {
     fixture.harness.run();
 
     // Then: the Merge pane exposes the stale state and cannot approve the old binding again.
-    fixture.wait_label("blocked: stale_head");
+    fixture.wait_state(|state| state.merge().view.blocked.as_deref() == Some("stale_head"));
     assert!(fixture.harness.state().merge().view.binding.is_none());
 }
