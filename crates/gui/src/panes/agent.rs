@@ -121,13 +121,13 @@ fn empty_state_body(
                 ctx.next_thread_title.clone(),
             )));
         }
-    } else if empty_state(
-        ui,
-        "No messages yet",
-        "Type a message in the composer below, or submit a goal.",
-        Some("Go to Goal"),
-    ) {
-        *action = Some(AgentPaneAction::FocusPanel("goal-main"));
+    } else {
+        empty_state(
+            ui,
+            "No messages yet",
+            "Type a message below, or /goal <text> to start the loop.",
+            None,
+        );
     }
 }
 

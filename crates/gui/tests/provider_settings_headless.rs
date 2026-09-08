@@ -4,10 +4,10 @@ use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::CODEX_LOGIN_BUTTON;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
-use gui::model::composer::{GOAL_PROVIDER_GUIDANCE, PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::provider_settings::ProviderSettingsModel;
 use gui::theme::tokens::PROVIDER_MODAL_MAX_WIDTH;
-use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[path = "provider_settings/fetch.rs"]
 mod fetch;
@@ -136,18 +136,6 @@ fn load_config(root: &std::path::Path) -> config::Config {
     .expect("saved config loads")
 }
 
-fn activate_goal(harness: &mut HeadlessWorkbench<DemoSource>) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new("goal-main"))
-        .expect("goal tab exists");
-    dock.leaf_mut(path.node_path())
-        .expect("leaf exists")
-        .set_active_tab(path.tab.0)
-        .expect("tab index is valid");
-    harness.run();
-}
-
 #[test]
 fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     // Given: an unconfigured conversation and valid settings with a project path.
@@ -270,36 +258,13 @@ fn cancel_closes_modal_without_writing() {
 }
 
 #[test]
-fn goal_pane_shows_guidance_and_configure_button_when_not_configured() {
-    // Given: the Goal pane is active without a provider.
+fn open_settings_from_composer_when_not_configured() {
+    // Given: an unconfigured conversation offers provider setup.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::default());
-    activate_goal(&mut harness);
-    assert!(harness.has_label(GOAL_PROVIDER_GUIDANCE));
-    assert!(harness.has_label("Configure provider"));
-    harness.state_mut().goal_form_mut().goal = "x".into();
     harness.run();
-    // When: the user submits a goal despite the guidance.
-    harness.click_label("Submit");
-    harness.run();
-    // Then: provider setup is not a prerequisite for goal submission.
-    let [WorkbenchCommand::SubmitGoal(goal)] = harness.state().issued() else {
-        panic!(
-            "expected exactly one SubmitGoal, got {:?}",
-            harness.state().issued()
-        );
-    };
-    assert_eq!(goal.goal, "x");
-}
-
-#[test]
-fn configure_provider_button_in_goal_pane_opens_modal() {
-    // Given: the unconfigured Goal pane offers provider setup.
-    let temp = tempfile::tempdir().expect("temp dir");
-    let mut harness = workbench(temp.path(), ProviderStatus::default());
-    activate_goal(&mut harness);
-    // When: the Goal pane's configure action is clicked.
-    harness.click_label("Configure provider");
+    // When: the composer's settings action is clicked.
+    harness.click_label("Open Settings");
     harness.run();
     // Then: the same provider Settings modal opens.
     assert!(harness.has_label("Provider settings"));
