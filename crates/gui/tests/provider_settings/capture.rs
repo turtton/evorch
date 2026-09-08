@@ -10,20 +10,37 @@ use gui::model::provider_settings::ProviderSettingsModel;
 use workspace_ui::UiSettings;
 
 #[test]
+#[should_panic(expected = "Codex PNG capture required")]
+fn codex_capture_panics_when_adapter_unavailable() {
+    // Given: an unavailable adapter.
+    let frame = Err(OffscreenError::AdapterUnavailable("test adapter".into()));
+    // When: mandatory evidence is saved.
+    save_codex_frame(frame, std::path::Path::new("unused.png"));
+    // Then: the evidence test must fail, not skip.
+}
+
+#[test]
+#[should_panic(expected = "Codex PNG saved")]
+fn codex_capture_panics_when_png_save_fails() {
+    // Given: a frame and a directory rather than a writable PNG path.
+    let directory = tempfile::tempdir().expect("temp directory");
+    let frame = gui::headless::CapturedFrame {
+        width: 1200,
+        height: 900,
+        rgba: vec![0; 1200 * 900 * 4],
+    };
+    // When / Then: saving mandatory evidence must fail.
+    save_codex_frame(Ok(frame), directory.path());
+}
+
+#[test]
 #[ignore = "writes PNG review evidence using an offscreen GPU adapter"]
+// CI headless-capture runs this explicitly; missing evidence is a failure.
 fn capture_codex_auth_png_evidence() {
     // Given: an isolated scripted login and a writable review evidence directory.
     let directory =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.opencode/v04-captures");
-    let probe = std::fs::create_dir_all(&directory)
-        .and_then(|()| tempfile::NamedTempFile::new_in(&directory));
-    match probe {
-        Ok(probe) => drop(probe),
-        Err(error) => {
-            eprintln!("Codex capture evidence directory unavailable: {error}");
-            return;
-        }
-    }
+    std::fs::create_dir_all(&directory).expect("Codex capture directory required");
     let (backend, tx) = ScriptedCodexAuthBackend::gated();
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("default state builds")
@@ -43,10 +60,7 @@ fn capture_codex_auth_png_evidence() {
     ] {
         assert!(harness.has_label(label), "{label}");
     }
-    let capture_available = capture_codex_frame(
-        &mut harness,
-        &directory.join("codex-auth-unauthenticated.png"),
-    );
+    let unauthenticated = harness.capture();
 
     // When: device login starts and publishes its prompt.
     harness.click_label(CODEX_LOGIN_BUTTON);
@@ -56,11 +70,7 @@ fn capture_codex_auth_png_evidence() {
     // Then: the device code and waiting state are visible.
     assert!(harness.has_label("ABCD-1234"));
     assert!(harness.has_label(CODEX_WAITING_LABEL));
-    let capture_available = capture_available
-        && capture_codex_frame(
-            &mut harness,
-            &directory.join("codex-auth-authenticating.png"),
-        );
+    let authenticating = harness.capture();
 
     // When: the scripted browser approval completes.
     let now = std::time::SystemTime::now()
@@ -76,11 +86,13 @@ fn capture_codex_auth_png_evidence() {
     });
     // Then: authentication is visible without exposing tokens.
     assert!(harness.has_label(CODEX_AUTHENTICATED_LABEL));
-    if capture_available {
-        capture_codex_frame(
-            &mut harness,
-            &directory.join("codex-auth-authenticated.png"),
-        );
+    let authenticated = harness.capture();
+    for (frame, name) in [
+        (unauthenticated, "codex-auth-unauthenticated.png"),
+        (authenticating, "codex-auth-authenticating.png"),
+        (authenticated, "codex-auth-authenticated.png"),
+    ] {
+        save_codex_frame(frame, &directory.join(name));
     }
 }
 
@@ -101,22 +113,20 @@ fn step_until(
     );
 }
 
-fn capture_codex_frame(
-    harness: &mut HeadlessWorkbench<DemoSource>,
+fn save_codex_frame(
+    frame: Result<gui::headless::CapturedFrame, OffscreenError>,
     path: &std::path::Path,
-) -> bool {
-    match harness.capture() {
+) {
+    match frame {
         Ok(frame) => {
             assert_eq!((frame.width, frame.height), (1200, 900));
             frame.save_png(path).expect("Codex PNG saved");
-            true
         }
         Err(OffscreenError::AdapterUnavailable(message)) => {
-            eprintln!(
-                "Skipping remaining Codex PNG captures at {}: {message}",
+            panic!(
+                "Codex PNG capture required at {}: AdapterUnavailable: {message}",
                 path.display()
             );
-            false
         }
         Err(error) => panic!("unexpected Codex capture error: {error}"),
     }
