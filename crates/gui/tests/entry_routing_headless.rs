@@ -15,7 +15,7 @@ use runtime::{
 };
 use tokio::time::timeout;
 use tools::ToolExecutor;
-use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 /// どんなプロンプトにも応答せず run を走らせ続ける stub モデル。
 ///
@@ -57,15 +57,6 @@ fn sidebar_with_thread(root: &std::path::Path) -> SidebarState {
         .switch_thread(&ThreadId::new("thread-1"))
         .expect("thread can be selected");
     sidebar
-}
-
-fn activate_panel(harness: &mut HeadlessWorkbench<AgentRuntime>, panel_id: &str) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new(panel_id))
-        .expect("panel tab exists");
-    let leaf = dock.leaf_mut(path.node_path()).expect("leaf exists");
-    leaf.set_active_tab(path.tab.0).expect("tab index is valid");
 }
 
 /// Headless workbench wired to the real runtime through the production sink.
@@ -111,7 +102,6 @@ impl Fixture {
                 supervisor,
             )));
         let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
-        activate_panel(&mut harness, "goal-main");
         harness.run();
         Self {
             runtime: rt,
@@ -124,9 +114,9 @@ impl Fixture {
 }
 
 fn submit_goal(fixture: &mut Fixture, goal: &str) {
-    fixture.harness.state_mut().goal_form_mut().goal = goal.into();
+    fixture.harness.state_mut().composer_mut().input = format!("/goal {goal}");
     fixture.harness.run();
-    fixture.harness.click_label("Submit");
+    fixture.harness.click_label("Send");
     fixture.harness.run();
 }
 

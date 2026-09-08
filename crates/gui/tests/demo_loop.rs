@@ -25,7 +25,7 @@ use runtime::{
 };
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tools::ToolExecutor;
-use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 const DEMO_GOAL: &str = "DEMO-GOAL implement fixture unit";
 const LABEL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -92,15 +92,6 @@ fn sidebar_with_thread(root: &Path) -> SidebarState {
         .switch_thread(&ThreadId::new("thread-1"))
         .expect("thread can be selected");
     sidebar
-}
-
-fn activate_panel(harness: &mut HeadlessWorkbench<AgentRuntime>, panel_id: &str) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new(panel_id))
-        .expect("panel tab exists");
-    let leaf = dock.leaf_mut(path.node_path()).expect("leaf exists");
-    leaf.set_active_tab(path.tab.0).expect("tab index is valid");
 }
 
 /// bus 上の OrchestratorEvent を発行順に収集する。戻り値の receiver は
@@ -206,7 +197,6 @@ impl DemoFixture {
                 supervisor,
             )));
         let mut harness = HeadlessWorkbench::new(state, [1200.0, 800.0]);
-        activate_panel(&mut harness, "goal-main");
         harness.run();
         Self {
             _runtime: rt,
@@ -218,12 +208,12 @@ impl DemoFixture {
         }
     }
 
-    fn run_until(&mut self, label: &str) {
+    fn run_until(&mut self, ready: impl Fn(&WorkbenchState<AgentRuntime>) -> bool) {
         let deadline = Instant::now() + LABEL_TIMEOUT;
-        while !self.harness.has_label(label) {
+        while !ready(self.harness.state()) {
             assert!(
                 Instant::now() < deadline,
-                "label {label:?} did not appear within {LABEL_TIMEOUT:?}; events: {:#?}",
+                "state did not arrive within {LABEL_TIMEOUT:?}; events: {:#?}",
                 lock(&self.collected)
             );
             let _ = self.repaint_rx.recv_timeout(Duration::from_millis(200));
@@ -233,30 +223,66 @@ impl DemoFixture {
 
     /// DEMO-GOAL を投入し、merge approve まで駆動して goal を complete させる。
     fn drive_demo_goal(&mut self) {
-        self.harness.state_mut().goal_form_mut().goal = DEMO_GOAL.into();
+        self.harness.state_mut().composer_mut().input = format!("/goal {DEMO_GOAL}");
         self.harness.run();
-        self.harness.click_label("Submit");
+        self.harness.click_label("Send");
         self.harness.run();
-        self.run_until("accepted: goal-1");
+        self.run_until(|state| state.goal_form().last_accepted.as_deref() == Some("goal-1"));
+        assert!(self.harness.has_label("accepted: goal-1"));
 
         // 配信パイプラインが PR を出す前の早期 finish は gate に拒否され、
         // run は finish せずに終わる (continuation epoch が後で発火する)。
-        self.run_until("rejected: no_pull_request");
-        self.run_until("stage: awaiting_merge_approval");
+        self.run_until(|state| {
+            state
+                .loop_status()
+                .last_rejections
+                .contains(&"no_pull_request".to_owned())
+        });
+        self.run_until(|state| {
+            state.loop_status().stage == Some(event_bus::GoalStage::AwaitingMergeApproval)
+        });
 
-        activate_panel(&mut self.harness, "merge-main");
         // FixtureDeliveryAdapter::scripted_happy_path の PR #101 head a2…。
-        self.run_until("head: a2a2a2a2");
-        assert!(self.harness.has_label("gate: pull_request ok"));
-        assert!(self.harness.has_label("gate: ci ok"));
-        self.harness.click_label("Approve");
+        self.run_until(|state| {
+            state
+                .merge()
+                .view
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.head_sha.starts_with("a2a2a2a2"))
+        });
+        assert!(
+            self.harness
+                .state()
+                .merge()
+                .view
+                .gate
+                .iter()
+                .any(|gate| gate.label == "pull_request" && gate.ok)
+        );
+        assert!(
+            self.harness
+                .state()
+                .merge()
+                .view
+                .gate
+                .iter()
+                .any(|gate| gate.label == "ci" && gate.ok)
+        );
+        self.harness
+            .state_mut()
+            .decide_merge(gui::model::commands::MergeDecision::Approve);
         self.harness.run();
 
-        activate_panel(&mut self.harness, "goal-main");
-        self.run_until("state: complete");
-        assert!(self.harness.has_label("closeout: worker_claim ok"));
-        assert!(self.harness.has_label("closeout: result_summary ok"));
-        assert!(self.harness.has_label("closeout: worker_complete ok"));
+        self.run_until(|state| state.loop_status().state == Some(GoalState::Complete));
+        assert_eq!(
+            self.harness.state().loop_status().closeout,
+            vec![
+                (event_bus::CloseoutStep::WorkerClaim, true),
+                (event_bus::CloseoutStep::ResultSummary, true),
+                (event_bus::CloseoutStep::WorkerComplete, true),
+            ]
+        );
 
         // collector が末尾イベント (GoalStageChanged -> Done stage) に
         // 到達するのを待つ。issue #83: 以前は GoalStateChanged::Complete の
