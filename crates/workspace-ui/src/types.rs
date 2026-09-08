@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::LayoutError;
 use crate::panels::{Panel, PanelId, default_panels, default_panels_v02};
 
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 2;
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 3;
 
 /// 二分割の方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,11 +130,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let workbench_panels: &[&str] = &[
-            "agents-main",
-            "diff-main",
-            "terminal-main",
-        ];
+        let workbench_panels: &[&str] = &["agents-main", "diff-main", "terminal-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,

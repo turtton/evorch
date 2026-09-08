@@ -38,7 +38,7 @@ fn v2_layout_whose_tabs_node_only_held_goal_collapses_split() {
 }
 
 #[test]
-fn v1_fixture_loads_and_migrates_to_v2() {
+fn v1_fixture_loads_and_migrates_to_v3() {
     // Given: the frozen JSON emitted by Workspace::default_v01().
     let source = include_str!("fixtures/workspace_v1.json");
 
@@ -46,7 +46,7 @@ fn v1_fixture_loads_and_migrates_to_v2() {
     let workspace = from_json(source).expect("v1 workspace must migrate");
 
     // Then: the tree and old panels survive under schema v2.
-    assert_eq!(workspace.version, 2);
+    assert_eq!(workspace.version, 3);
     assert_eq!(workspace.panels.len(), 3);
     assert_eq!(workspace.main, Workspace::default_v01().main);
     assert_eq!(workspace.panels, Workspace::default_v01().panels);
@@ -67,6 +67,39 @@ fn missing_version_is_rejected() {
 }
 
 #[test]
+fn v2_floating_and_extra_windows_prune_custom_ids_and_empty_nodes() {
+    // Given: removed kinds have custom ids in floating and extra windows.
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workspace_v2.json")).expect("fixture");
+    value["panels"]["old-goal"] =
+        serde_json::json!({"id":"old-goal", "kind":"goal", "title":"Custom"});
+    value["main"]["floating"] = serde_json::json!([
+        {"node":{"type":"tabs","panels":["old-goal"],"active":0},"rect":{"x":0,"y":0,"width":100,"height":100}}
+    ]);
+    value["extra_windows"] = serde_json::json!([
+        {"root":{"type":"tabs","panels":["merge-main"],"active":0},"floating":[]},
+        {"root":{"type":"split","direction":"vertical","fraction":0.4,
+            "first":{"type":"tabs","panels":["old-goal"],"active":0},
+            "second":{"type":"tabs","panels":["terminal-main","merge-main"],"active":1}},"floating":[]}
+    ]);
+    value["main"]["root"]["second"]["second"]["panels"] =
+        serde_json::json!(["agents-main", "diff-main"]);
+    // When: loading through JSON migration.
+    let ws = from_json(&value.to_string()).expect("windows migrate");
+    // Then: empty containers disappear and the extra split collapses.
+    assert!(ws.main.floating.is_empty());
+    assert_eq!(ws.extra_windows.len(), 1);
+    assert_eq!(
+        ws.extra_windows[0].root,
+        workspace_ui::LayoutNode::Tabs(workspace_ui::Tabs {
+            panels: vec![PanelId::new("terminal-main")],
+            active: 0,
+        })
+    );
+    assert!(!ws.panels.contains_key(&PanelId::new("old-goal")));
+}
+
+#[test]
 fn future_version_is_rejected() {
     // Given: a syntactically valid future workspace version.
     let source = r#"{"version":99}"#;
@@ -79,7 +112,7 @@ fn future_version_is_rejected() {
         result,
         Err(PersistError::Layout(LayoutError::UnsupportedVersion {
             found: 99,
-            supported: 2,
+            supported: 3,
         }))
     );
 }
