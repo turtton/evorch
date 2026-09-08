@@ -4,6 +4,20 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use super::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProviderSettingsTab {
+    #[default]
+    OpenAi,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CredentialMode {
+    #[default]
+    Keyring,
+    Env,
+}
+
 /// /v1/models からのモデル一覧取得状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelsFetchState {
@@ -16,6 +30,10 @@ pub enum ModelsFetchState {
 /// OpenAI 互換プロバイダの編集状態。
 pub struct ProviderSettingsModel {
     pub open: bool,
+    pub tab: ProviderSettingsTab,
+    pub credential_mode: CredentialMode,
+    pub api_key_input: String,
+    pub api_key_stored: bool,
     pub name: String,
     pub base_url: String,
     pub api_key_env: String,
@@ -33,6 +51,10 @@ impl Default for ProviderSettingsModel {
     fn default() -> Self {
         Self {
             open: false,
+            tab: ProviderSettingsTab::default(),
+            credential_mode: CredentialMode::default(),
+            api_key_input: String::new(),
+            api_key_stored: false,
             name: "openai-compat".into(),
             base_url: String::new(),
             api_key_env: String::new(),
@@ -71,6 +93,10 @@ impl Clone for ProviderSettingsModel {
     fn clone(&self) -> Self {
         Self {
             open: self.open,
+            tab: self.tab,
+            credential_mode: self.credential_mode,
+            api_key_input: String::new(),
+            api_key_stored: self.api_key_stored,
             name: self.name.clone(),
             base_url: self.base_url.clone(),
             api_key_env: self.api_key_env.clone(),
@@ -89,6 +115,9 @@ impl Clone for ProviderSettingsModel {
 impl PartialEq for ProviderSettingsModel {
     fn eq(&self, other: &Self) -> bool {
         self.open == other.open
+            && self.tab == other.tab
+            && self.credential_mode == other.credential_mode
+            && self.api_key_stored == other.api_key_stored
             && self.name == other.name
             && self.base_url == other.base_url
             && self.api_key_env == other.api_key_env
@@ -110,7 +139,7 @@ impl ProviderSettingsModel {
         let Some((name, profile)) = config.providers.iter().find(|(_, profile)| {
             profile.provider_type == config::ProviderTypeConfig::OpenAiCompatible
         }) else {
-            return Self::default();
+            return Self { tab: if config.providers.values().any(|p| p.provider_type == config::ProviderTypeConfig::OpenAiCodex) { ProviderSettingsTab::Codex } else { ProviderSettingsTab::OpenAi }, ..Self::default() };
         };
         let api_key_env = match &profile.credential {
             config::CredentialRefConfig::Env { var } => var.clone(),
@@ -118,6 +147,8 @@ impl ProviderSettingsModel {
         };
         Self {
             name: name.clone(),
+            credential_mode: match &profile.credential { config::CredentialRefConfig::Env { .. } => CredentialMode::Env, config::CredentialRefConfig::Keyring { .. } => CredentialMode::Keyring },
+            api_key_stored: matches!(&profile.credential, config::CredentialRefConfig::Keyring { .. }),
             base_url: profile.base_url.clone(),
             api_key_env,
             models_text: profile.models.join("\n"),
@@ -173,7 +204,10 @@ impl ProviderSettingsModel {
         config::OpenAiCompatibleProviderInput {
             name: self.name.clone(),
             base_url: self.base_url.clone(),
-            credential: config::ProviderCredentialInput::Env { var: self.api_key_env.clone() },
+            credential: match self.credential_mode {
+                CredentialMode::Env => config::ProviderCredentialInput::Env { var: self.api_key_env.clone() },
+                CredentialMode::Keyring => config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: self.name.clone() },
+            },
             models,
             excluded_models: self.parsed_excluded_models(),
             default_model: self.default_model.clone(),
