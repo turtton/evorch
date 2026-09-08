@@ -56,7 +56,7 @@ fn conversation_with_project_but_no_thread_offers_start_thread() {
     harness.run();
     assert!(harness.state().sidebar().active_thread.is_some());
     assert!(harness.has_label("No messages yet"));
-    assert!(harness.has_label("Go to Goal"));
+    assert!(harness.has_label("Type a message below, or /goal <text> to start the loop."));
 }
 
 #[test]
