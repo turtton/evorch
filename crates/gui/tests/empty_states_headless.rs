@@ -1,7 +1,7 @@
 use gui::app::{ConversationFocus, WorkbenchState};
 use gui::fixture::{DemoSource, demo_events, demo_runs, demo_sidebar};
 use gui::headless::HeadlessWorkbench;
-use workspace_ui::{PanelId, ProjectId, SidebarState, UiSettings};
+use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn is_active_tab(dock: &egui_dock::DockState<PanelId>, panel_id: &PanelId) -> bool {
     let Some(tab_path) = dock.find_tab(panel_id) else {
@@ -98,6 +98,39 @@ fn agent_focus_header_keeps_identity_label_and_return_button() {
     harness.click_label("← Thread");
     harness.run();
     assert_eq!(harness.state().focus(), &ConversationFocus::Thread);
+}
+
+#[test]
+#[ignore = "writes CJK PNG review evidence using an offscreen GPU adapter"]
+fn capture_cjk_conversation_png_evidence() {
+    // Given: a Japanese-named project and thread with a Japanese message.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut sidebar = SidebarState::default();
+    let project_id = ProjectId::new("evorch-日本語");
+    sidebar
+        .add_project(project_id.clone(), "evorch-日本語", temp.path())
+        .expect("project added");
+    sidebar
+        .select_project(&project_id)
+        .expect("project selected");
+    sidebar
+        .create_thread(ThreadId::new("thread-jp"), project_id, "コンポーザー検証スレッド")
+        .expect("thread created");
+    sidebar
+        .switch_thread(&ThreadId::new("thread-jp"))
+        .expect("thread selected");
+    let workbench = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("default state builds")
+        .with_sidebar(sidebar);
+    let mut harness = HeadlessWorkbench::new(workbench, [1200.0, 900.0]);
+    harness.run();
+    // Then: the Japanese names render without tofu or clipping and the composer stays docked.
+    assert!(harness.has_label("evorch-日本語"));
+    assert!(harness.has_label("コンポーザー検証スレッド"));
+    let frame = harness.capture().expect("offscreen adapter");
+    frame
+        .save_png(std::path::Path::new("/tmp/opencode/w-cjk.png"))
+        .expect("png saved");
 }
 
 #[test]
