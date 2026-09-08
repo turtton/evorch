@@ -62,6 +62,13 @@ pub fn composer_strip(
                         .desired_width(f32::INFINITY)
                         .background_color(INPUT),
                 );
+                input.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::TextEdit,
+                        true,
+                        "Message or /command",
+                    )
+                });
                 let enter = input.lost_focus()
                     && ui.input(|input| {
                         input.key_pressed(egui::Key::Enter) && !input.modifiers.shift
@@ -84,6 +91,7 @@ mod tests {
 
     use super::*;
     use crate::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+    use crate::theme::tokens::SP_3;
 
     struct Fixture {
         model: ComposerModel,
@@ -167,5 +175,105 @@ mod tests {
         harness.run();
         // Then
         assert!(harness.get_by_label("Send").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn enter_with_focus_emits_send() {
+        // Given
+        let mut harness = harness("hi", ProviderStatus::Configured);
+        harness.get_by_label("Message or /command").focus();
+        harness.run();
+        // When
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        // Then
+        assert_eq!(harness.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_and_does_not_send() {
+        // Given
+        let mut harness = harness("hi", ProviderStatus::Configured);
+        harness.get_by_label("Message or /command").focus();
+        harness.run();
+        // When
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        harness.run();
+        // Then
+        assert_eq!(harness.state().action, None);
+        assert!(harness.state().model.input.contains('\n'));
+    }
+
+    #[test]
+    fn enter_during_ime_preedit_does_not_send() {
+        // Given: composition persists across frames without another preedit event.
+        let mut harness = harness("hi", ProviderStatus::Configured);
+        harness.get_by_label("Message or /command").focus();
+        harness.run();
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: "あ".into(),
+                active_range_chars: None,
+            }));
+        harness.run();
+        // When
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        // Then
+        assert_eq!(harness.state().action, None);
+    }
+
+    #[test]
+    fn enter_after_ime_commit_emits_send() {
+        // Given
+        let mut harness = harness("hi", ProviderStatus::Configured);
+        harness.get_by_label("Message or /command").focus();
+        harness.run();
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: "あ".into(),
+                active_range_chars: None,
+            }));
+        harness.run();
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Ime(egui::ImeEvent::Commit("あ".into())));
+        harness.run();
+        // When
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        // Then
+        assert_eq!(harness.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn composer_respects_min_height_token() {
+        // Given
+        let mut harness = harness("", ProviderStatus::Configured);
+        // When
+        harness.run();
+        // Then
+        let rect = harness.get_by_label("Message or /command").rect();
+        assert!(rect.height() >= crate::theme::tokens::COMPOSER_MIN_HEIGHT - 2.0 * SP_2 - 1.0);
+    }
+
+    #[test]
+    fn composer_caps_height_and_scrolls() {
+        // Given
+        let mut harness = harness(&"line\n".repeat(40), ProviderStatus::Configured);
+        // When
+        harness.run();
+        // Then: a scrollable text document is taller than its bounded viewport.
+        let rect = harness.get_by_label("Message or /command").rect();
+        assert!(rect.height() > crate::theme::tokens::COMPOSER_MAX_HEIGHT);
+        assert!(
+            harness.get_by_label("Send").rect().max.y
+                <= crate::theme::tokens::COMPOSER_MAX_HEIGHT + ROW_COMPACT + 2.0 * SP_3
+        );
     }
 }

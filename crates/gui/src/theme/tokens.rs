@@ -30,6 +30,8 @@ pub const SP_2: f32 = 8.0;
 pub const SP_3: f32 = 12.0;
 pub const SP_4: f32 = 16.0;
 pub const ROW_COMPACT: f32 = 36.0;
+pub const COMPOSER_MIN_HEIGHT: f32 = 52.0;
+pub const COMPOSER_MAX_HEIGHT: f32 = 180.0;
 /// sidebar の project / thread 行の高さ。ROW_COMPACT (36) はエディタ系 (agent.rs) 向けに残す。
 pub const ROW_DENSE: f32 = 28.0;
 /// 状態ドットの直径。半径は DOT_SIZE / 2.0 で導出する。
@@ -54,6 +56,7 @@ pub const R_SM: u8 = 6;
 pub const R_MD: u8 = 8;
 pub const R_LG: u8 = 10;
 pub const R_XL: u8 = 14;
+pub const R_2XL: u8 = 20;
 pub const R_PILL: u8 = u8::MAX;
 
 pub const FONT_BODY: f32 = 14.0;

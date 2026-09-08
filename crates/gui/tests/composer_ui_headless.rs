@@ -136,3 +136,24 @@ fn send_without_thread_shows_dispatch_notice() {
     assert!(harness.has_label("Select or start a thread first"));
     assert!(harness.state().issued().is_empty());
 }
+
+#[test]
+fn composer_stays_at_bottom_with_messages() {
+    // Given
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.run();
+    let empty_bottom = harness.label_rects("Send")[0].max.y;
+    // When: submit 30 real messages to populate the conversation.
+    for index in 0..30 {
+        harness.state_mut().composer_mut().input = format!("message {index}");
+        harness.state_mut().submit_composer();
+    }
+    harness.run();
+    // Then
+    let populated_bottom = harness.label_rects("Send")[0].max.y;
+    assert!(
+        (populated_bottom - empty_bottom).abs() <= 1.0,
+        "empty={empty_bottom}, populated={populated_bottom}"
+    );
+}

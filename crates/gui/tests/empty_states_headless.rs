@@ -99,3 +99,35 @@ fn agent_focus_header_keeps_identity_label_and_return_button() {
     harness.run();
     assert_eq!(harness.state().focus(), &ConversationFocus::Thread);
 }
+
+#[test]
+fn composer_is_docked_at_bottom_in_empty_state() {
+    // Given
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .expect("state")
+        .with_sidebar(demo_sidebar(temp.path()).expect("sidebar"));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    // When
+    harness.run();
+    // Then
+    let path = harness
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("agent-main"))
+        .expect("conversation");
+    let bottom = harness
+        .state()
+        .dock()
+        .leaf(path.node_path())
+        .expect("leaf")
+        .rect
+        .max
+        .y;
+    let send = harness.label_rects("Send")[0];
+    assert!(
+        send.max.y >= bottom - gui::theme::tokens::SP_4 - gui::theme::tokens::SP_3 - 1.0,
+        "send={send:?}, bottom={bottom}"
+    );
+    assert!(harness.label_rects("No messages yet")[0].center().y < send.min.y);
+}
