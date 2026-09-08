@@ -124,15 +124,27 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - mock-openai: spawn_with_models で /v1/models endpoint（OpenAI 互換 list 形式、scripts キュー非消費）を追加し headless/通常テスト両方で利用
 - 検証: cargo test --workspace 1834/0（clippy -D warnings / fmt --check / git diff --check 全 PASS）。fetch headless テストは kittest step() による 1 フレーム確定進行（Loading 中 spinner の継続 repaint で run() が max_steps(4) を超過する CI flake を request-update で修正、commit 64f9c52）
 
-## v0.4 codex subscription ログイン導線の実装確定（issue #102、PR #103、2026-09-08）
-
-- codex subscription 認証導線: Settings modal 内 Codex subscription セクション。状態遷移は未認証 guidance（device URL + 手順）→ 認証中（user code + verification URL）→ 認証済み（expiry 表示）→ 失敗時固定文言 4 種
+## v0.4 codex subscription ログイン導線の実装確定（issue #102、PR #103、2026-09-08）- codex subscription 認証導線: Settings modal 内 Codex subscription セクション。状態遷移は未認証 guidance（device URL + 手順）→ 認証中（user code + verification URL）→ 認証済み（expiry 表示）→ 失敗時固定文言 4 種
 - トークン GUI 非接触規約: GUI 型は `CodexAuthSummary { expires_at_unix }` のみ。TokenBundle は provider adapter（`ProviderCodexAuthBackend`）内に限定、Debug も state 名のみ。`classify_provider_error` で provider/network エラー文字列（HTTP body 等）を GUI に流さず CodexAuthError（Network/StoreUnavailable/Rejected/Unavailable）に写像
 - credential store 再利用: `routing::CredentialStoreTokenStore` 経由で既存 `CodexTokenStore` 契約を共有。credential key = openai-codex profile keyring account（default "codex"）、実体は `sandbox::open_default(<user-config-dir>/credentials)`
 - adapter 構成: `DeviceAuthClient::with_default_http` + `CredentialStoreTokenStore`（`login_and_store` 合成）。GUI は CodexAuthModel（mpsc + named thread `evorch-codex-login` + per-frame poll）経由の CodexAuthBackend trait 越しで状態のみ受領
 - 副作用の信頼性: `FileCredentialStore::set` を persist-first 化（保存失敗後の誤 Authenticated を排除、failed_set_preserves_memory_and_disk テスト）
 - conductor 到達性: composer に Configured 状態用の Settings compact ボタン追加
 - 検証: workspace 1866/0、clippy/fmt/diff-check clean。headless capture は kittest `Harness::step()` polling（継続 repaint 状態で run() による max_steps 超過 flake を回避）で 3 状態 PNG 証跡を CI lavapipe headless-capture ジョブで exact 名実行して必須化（codex-auth-authenticating/authenticated 等）
+
+## v0.5 GUI UX 修正パックの実装確定（2026-09-09、本セッションで main 直接マージ）
+
+ユーザーの具体的な UX 不満 9 件への修正。5 workstream（W-A プロジェクト追加 / W-B Settings タブ化 / W-C Codex 認証 / W-D composer / W-EF Goal・Merge 撤去）に分解し、git worktree 並列実装のうえ main に逐次統合。
+
+- **プロジェクト追加**: `~`/`~/path` 展開（`~user` は型付きエラー）。`Browse…` ボタンで xdg-desktop-portal フォルダ選択（ashpd、std::thread + mpsc + frame poll で UI ノンブロッキング）。プロジェクト行の下に muted な `repo_root` パスを表示（hover でフルパス）
+- **Allowed directories**: 非空時のみ表示、`CollapsingHeader` で既定折りたたみ＋件数表示。パス行はクリックでコピー
+- **Settings modal**: 上部セグメント切替（OpenAI-compatible | Codex subscription）で同時表示を解消。「Refresh models」を base URL / credential 直下、Models 一覧の直上に再配置。Codex タブでは Save を無効化
+- **API key 保存**: `sandbox::CredentialStore`（keychain feature 有効化、OS keyring 優先・不可時は 0600 ファイルフォールバック）に保存。TOML は `credential = { type = "keyring", ... }` のみで秘密値を含めない（strict.rs 平文拒否を維持）。Keyring 既定・Env 切替ラジオ。follow-up: `routing/factory.rs:170`・`routing/compose.rs:189` の keyring コンシューム接続（GUI runtime は現状 ModelSource::Fixed で未配線）
+- **Codex 認証**: device-code → browser PKCE + localhost callback（127.0.0.1:1455/1457）へ全面置換。egui `open_url` + 「Open the sign-in page again」ハイパーリンク。device flow は providers に残置し交換 URI を `https://auth.openai.com/deviceauth/callback` に修正（旧 `codex/device` は stale）。GUI は 3 状態 PNG 証跡テスト（unauthenticated/authenticating/authenticated）
+- **Chat composer**: 会話ペイン下端に常時ドック（t3code 準拠、空状態での中央寄せを解消）。`TopBottomPanel::bottom` + `CentralPanel` 分割、empty state は残領域を占有。複数行、Enter=送信 / Shift+Enter=改行、IME変換中の Enter 抑止（Preedit 監視）。高さ 48-180px、角丸等は theme tokens（COMPOSER_MIN_HEIGHT/MAX_HEIGHT/R_2XL）に集約、ペインへ裸ピクセル値なし
+- **Goal / Merge pane 撤去**: `PanelKind::{Goal, MergeApproval}` を production から削除し、workspace schema を v3 に（`migrate_v2_to_v3` が nested split 折りたたみ・active clamp・floating/extra windows まで再帰的に prune）。`/goal` composer コマンドは保持（`submit_goal` 直接経路）。Merge 承認 runtime port（`ShellDeliveryAdapter` gh）と `decide_merge` 状態メソッドは保持し、GUI からは `MergeStateUpdated` の notice として surface。承認 UI 本来の居場所は Diff view へ一本化する方針をユーザーと確認済み（follow-up）
+- **CJK フォント**: `theme/fonts.rs` で fontconfig（`sans:lang=ja`）経由のシステム Noto Sans CJK / Takao を実行時解決し proportional/monospace 両 family へ prepend。egui 既定 Hack/Ubuntu は CJK 非対応で tofu になっていたのを解消（同梱は避け、バイナリサイズ増なし）
+- 検証: workspace 全テスト green / clippy（-D warnings）・fmt clean。visual-qa dual-oracle は実装 PASS 相当、初期キャプチャの staleness で REVISE→現行 HEAD から全枚再生成で解消。証跡 PNG は `/tmp/opencode/w-*.png` + `codex-auth-*.png`
 
 ## 受け入れ基準
 
