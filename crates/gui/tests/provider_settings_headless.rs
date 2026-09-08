@@ -86,7 +86,7 @@ fn settings_button_opens_modal_when_provider_is_configured() {
     harness.run();
     // Then: the modal still offers Codex login.
     assert!(harness.has_label("Provider settings"));
-    assert!(harness.has_label(CODEX_LOGIN_BUTTON));
+    assert!(harness.has_label("Codex subscription"));
 }
 
 fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
@@ -120,6 +120,7 @@ fn open_valid_settings(harness: &mut HeadlessWorkbench<DemoSource>) {
     model.name = "local".into();
     model.base_url = "https://api.example.invalid/v1".into();
     model.api_key_env = "LOCAL_API_KEY".into();
+    model.credential_mode = gui::model::provider_settings::CredentialMode::Env;
     model.models_text = "gpt-4.1\ngpt-4.1-mini".into();
     model.default_model = "gpt-4.1".into();
     harness.run();

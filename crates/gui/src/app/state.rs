@@ -55,6 +55,8 @@ pub struct WorkbenchState<S> {
     pub(super) provider_settings: ProviderSettingsModel,
     pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
+    pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
+    pub(super) provider_save_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) sink: Box<dyn CommandSink>,
@@ -94,6 +96,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             provider_settings: ProviderSettingsModel::default(),
             codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
+            credential_store: None,
+            provider_save_rx: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
                     pr: None,
@@ -198,6 +202,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub fn with_provider_settings(mut self, model: ProviderSettingsModel) -> Self {
         self.provider_settings = model;
+        self
+    }
+    pub fn with_credential_store(mut self, store: Arc<dyn sandbox::CredentialStore>) -> Self {
+        self.credential_store = Some(store);
         self
     }
     pub fn with_codex_auth(mut self, model: CodexAuthModel) -> Self {

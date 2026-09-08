@@ -517,22 +517,15 @@ fn credential_dir(demo_directory: Option<&tempfile::TempDir>) -> Option<PathBuf>
 
 fn codex_auth_model(
     loaded: Option<&Result<config::Config, config::ConfigError>>,
-    credential_dir: Option<PathBuf>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 ) -> CodexAuthModel {
     let account = loaded
         .and_then(|loaded| loaded.as_ref().ok())
         .and_then(codex_credential_account)
         .unwrap_or_else(|| DEFAULT_CODEX_CREDENTIAL_ACCOUNT.to_owned());
-    let Some(directory) = credential_dir else {
+    let Some(store) = credential_store else {
         tracing::warn!("credential directory unavailable; Codex login remains disabled");
         return CodexAuthModel::default();
-    };
-    let store = match sandbox::open_default(directory) {
-        Ok(store) => store,
-        Err(error) => {
-            tracing::warn!(%error, "credential store unavailable; Codex login remains disabled");
-            return CodexAuthModel::default();
-        }
     };
     match ProviderCodexAuthBackend::production(store, account.clone(), DEFAULT_AUTH_BASE_URL) {
         Ok(backend) => CodexAuthModel::with_backend(Arc::new(backend), account),
@@ -700,13 +693,15 @@ fn run() -> Result<(), GuiError> {
     let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
+    let settings_store = credential_dir(demo_directory.as_ref())
+        .and_then(|directory| sandbox::open_default(directory).ok());
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_provider_settings_path(provider_settings_path)
         .with_codex_auth(codex_auth_model(
             loaded_config.as_ref(),
-            credential_dir(demo_directory.as_ref()),
+            settings_store.clone(),
         ))
         .with_pump(pump)
         .with_pty(pty)
@@ -715,6 +710,9 @@ fn run() -> Result<(), GuiError> {
             handle.clone(),
             supervisor,
         )));
+    if let Some(store) = settings_store {
+        state = state.with_credential_store(store);
+    }
     let sidebar = match demo_directory.as_ref() {
         Some(directory) => demo_sidebar(&repo_root, directory.path())?,
         None => load_sidebar(state_path.as_ref())?,
@@ -826,8 +824,12 @@ mod tests {
         for (config, account) in [(config, "work"), (config::Config::default(), "codex")] {
             let directory = tempfile::tempdir().expect("credential directory");
             // When: the production backend is constructed without starting login.
-            let model =
-                super::codex_auth_model(Some(&Ok(config)), Some(directory.path().to_path_buf()));
+            let model = super::codex_auth_model(
+                Some(&Ok(config)),
+                Some(std::sync::Arc::new(
+                    sandbox::FileCredentialStore::open(directory.path()).unwrap(),
+                )),
+            );
             // Then: the backend uses the selected account.
             assert!(model.has_backend());
             assert_eq!(model.credential_account, account);

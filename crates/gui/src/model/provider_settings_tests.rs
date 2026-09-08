@@ -5,7 +5,13 @@ use config::{Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeCon
 fn seed_from_config_selects_codex_tab_when_only_codex_profile() {
     // Given
     let mut config = Config::default();
-    config.providers.insert("codex".into(), ProviderProfileConfig { provider_type: ProviderTypeConfig::OpenAiCodex, ..Default::default() });
+    config.providers.insert(
+        "codex".into(),
+        ProviderProfileConfig {
+            provider_type: ProviderTypeConfig::OpenAiCodex,
+            ..Default::default()
+        },
+    );
     // When
     let model = ProviderSettingsModel::seed_from_config(&config);
     // Then
@@ -19,7 +25,13 @@ fn to_input_maps_keyring_mode_to_service_evorch_account_name() {
     // When
     let input = model.to_input();
     // Then
-    assert_eq!(input.credential, config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: "openai-compat".into() });
+    assert_eq!(
+        input.credential,
+        config::ProviderCredentialInput::Keyring {
+            service: "evorch".into(),
+            account: "openai-compat".into()
+        }
+    );
 }
 
 fn compatible(credential: CredentialRefConfig) -> ProviderProfileConfig {
@@ -71,6 +83,8 @@ fn seed_from_config_picks_first_openai_compatible_env_provider() {
             models_fetch_state: ModelsFetchState::Idle,
             models_rx: None,
             models_fetch_base_url: None,
+            credential_mode: CredentialMode::Env,
+            ..Default::default()
         }
     );
 }
@@ -123,6 +137,7 @@ fn seed_from_config_without_openai_compatible_returns_default() {
             models_fetch_state: ModelsFetchState::Idle,
             models_rx: None,
             models_fetch_base_url: None,
+            ..Default::default()
         }
     );
 }
@@ -160,6 +175,7 @@ fn to_input_uses_parsed_models_and_raw_fields() {
         name: " raw-name ".into(),
         base_url: " https://example.com/v1 ".into(),
         api_key_env: " API_KEY ".into(),
+        credential_mode: CredentialMode::Env,
         default_model: " model-b ".into(),
         models_text: " model-b,model-a\nmodel-b ".into(),
         excluded_models_text: " ex-a, ex-b\nex-a ".into(),
@@ -170,7 +186,12 @@ fn to_input_uses_parsed_models_and_raw_fields() {
     // Then
     assert_eq!(input.name, " raw-name ");
     assert_eq!(input.base_url, " https://example.com/v1 ");
-    assert_eq!(input.api_key_env, " API_KEY ");
+    assert_eq!(
+        input.credential,
+        config::ProviderCredentialInput::Env {
+            var: " API_KEY ".into()
+        }
+    );
     assert_eq!(input.default_model, " model-b ");
     assert_eq!(input.models, ["model-b", "model-a"]);
     assert_eq!(input.excluded_models, ["ex-a", "ex-b"]);

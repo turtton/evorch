@@ -61,6 +61,7 @@ fn fetched_models_populate_modal_when_request_succeeds() {
             name: "local".into(),
             base_url: server.base_url(),
             api_key_env: "TEST_KEY".into(),
+            credential_mode: gui::model::provider_settings::CredentialMode::Env,
             models_text: "manual-model".into(),
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()
@@ -103,6 +104,7 @@ fn manual_models_remain_available_when_request_fails() {
         ProviderSettingsModel {
             base_url: "http://127.0.0.1:9".into(),
             api_key_env: "TEST_KEY".into(),
+            credential_mode: gui::model::provider_settings::CredentialMode::Env,
             models_text: "manual-model".into(),
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()
@@ -145,6 +147,7 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
             name: "local".into(),
             base_url: server.base_url(),
             api_key_env: "TEST_KEY".into(),
+            credential_mode: gui::model::provider_settings::CredentialMode::Env,
             models_text: "manual-model".into(),
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()

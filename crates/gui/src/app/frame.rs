@@ -18,6 +18,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.diff.poll();
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
+        self.poll_provider_save();
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }
@@ -32,6 +33,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.provider_settings.models_fetch_state,
             crate::model::provider_settings::ModelsFetchState::Loading
         ) || self.codex_auth.is_authenticating()
+            || self.provider_save_rx.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

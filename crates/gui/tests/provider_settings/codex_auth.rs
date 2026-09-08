@@ -19,6 +19,7 @@ fn workbench(backend: Arc<dyn CodexAuthBackend>) -> HeadlessWorkbench<DemoSource
         .expect("workbench")
         .with_provider_settings(ProviderSettingsModel {
             open: true,
+            tab: gui::model::provider_settings::ProviderSettingsTab::Codex,
             ..Default::default()
         })
         .with_codex_auth(CodexAuthModel::with_backend(backend, "codex"));
@@ -192,6 +193,7 @@ fn login_without_backend_fails_closed_in_ui() {
         .expect("workbench")
         .with_provider_settings(ProviderSettingsModel {
             open: true,
+            tab: gui::model::provider_settings::ProviderSettingsTab::Codex,
             ..Default::default()
         });
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);

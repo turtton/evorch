@@ -1,6 +1,11 @@
 //! egui に依存しないプロバイダ設定の編集モデル。
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::mpsc::Receiver;
+
+#[path = "provider_models_fetch.rs"]
+mod models_fetch;
+#[cfg(test)]
+use std::sync::mpsc::channel;
 
 use super::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 
@@ -139,7 +144,18 @@ impl ProviderSettingsModel {
         let Some((name, profile)) = config.providers.iter().find(|(_, profile)| {
             profile.provider_type == config::ProviderTypeConfig::OpenAiCompatible
         }) else {
-            return Self { tab: if config.providers.values().any(|p| p.provider_type == config::ProviderTypeConfig::OpenAiCodex) { ProviderSettingsTab::Codex } else { ProviderSettingsTab::OpenAi }, ..Self::default() };
+            return Self {
+                tab: if config
+                    .providers
+                    .values()
+                    .any(|p| p.provider_type == config::ProviderTypeConfig::OpenAiCodex)
+                {
+                    ProviderSettingsTab::Codex
+                } else {
+                    ProviderSettingsTab::OpenAi
+                },
+                ..Self::default()
+            };
         };
         let api_key_env = match &profile.credential {
             config::CredentialRefConfig::Env { var } => var.clone(),
@@ -147,8 +163,14 @@ impl ProviderSettingsModel {
         };
         Self {
             name: name.clone(),
-            credential_mode: match &profile.credential { config::CredentialRefConfig::Env { .. } => CredentialMode::Env, config::CredentialRefConfig::Keyring { .. } => CredentialMode::Keyring },
-            api_key_stored: matches!(&profile.credential, config::CredentialRefConfig::Keyring { .. }),
+            credential_mode: match &profile.credential {
+                config::CredentialRefConfig::Env { .. } => CredentialMode::Env,
+                config::CredentialRefConfig::Keyring { .. } => CredentialMode::Keyring,
+            },
+            api_key_stored: matches!(
+                &profile.credential,
+                config::CredentialRefConfig::Keyring { .. }
+            ),
             base_url: profile.base_url.clone(),
             api_key_env,
             models_text: profile.models.join("\n"),
@@ -205,94 +227,17 @@ impl ProviderSettingsModel {
             name: self.name.clone(),
             base_url: self.base_url.clone(),
             credential: match self.credential_mode {
-                CredentialMode::Env => config::ProviderCredentialInput::Env { var: self.api_key_env.clone() },
-                CredentialMode::Keyring => config::ProviderCredentialInput::Keyring { service: "evorch".into(), account: self.name.clone() },
+                CredentialMode::Env => config::ProviderCredentialInput::Env {
+                    var: self.api_key_env.clone(),
+                },
+                CredentialMode::Keyring => config::ProviderCredentialInput::Keyring {
+                    service: "evorch".into(),
+                    account: self.name.clone(),
+                },
             },
             models,
             excluded_models: self.parsed_excluded_models(),
             default_model: self.default_model.clone(),
-        }
-    }
-
-    /// /v1/models からモデル一覧を非同期に取得し、結果をチャネルへ送る。
-    pub fn start_models_fetch(&mut self) {
-        let api_key = std::env::var(&self.api_key_env)
-            .ok()
-            .filter(|key| !key.is_empty());
-        self.start_models_fetch_with_key(api_key);
-    }
-
-    /// Dependency-injected fetch entry point for tests that must not mutate environment variables.
-    pub fn start_models_fetch_with_key(&mut self, api_key: Option<String>) {
-        self.models_fetch_state = ModelsFetchState::Loading;
-        self.available_models = None;
-        let base_url = self.base_url.clone();
-        self.models_fetch_base_url = Some(base_url.clone());
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let api_key = match api_key {
-                Some(key) => key,
-                None => {
-                    let _ = tx.send(Err("API key env var is not set".into()));
-                    return;
-                }
-            };
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = tx.send(Err(error.to_string()));
-                    return;
-                }
-            };
-            let result = runtime.block_on(providers::list_models(
-                &base_url,
-                &providers::ProviderAuth::new(api_key),
-            ));
-            let _ = tx.send(result.map_err(|error| error.to_string()));
-        });
-        self.models_rx = Some(rx);
-    }
-
-    /// チャネルから取得結果を受け取り、状態を更新する。UI 再描画が必要なら true を返す。
-    pub fn poll_models(&mut self) -> bool {
-        let Some(rx) = self.models_rx.take() else {
-            return false;
-        };
-        match rx.try_recv() {
-            Ok(_) if Some(self.base_url.as_str()) != self.models_fetch_base_url.as_deref() => {
-                self.available_models = None;
-                self.models_fetch_state = ModelsFetchState::Failed(
-                    "Base URL changed during fetch; result discarded".into(),
-                );
-                self.models_fetch_base_url = None;
-                true
-            }
-            Ok(Ok(models)) => {
-                self.models_fetch_base_url = None;
-                self.available_models = Some(models);
-                self.models_fetch_state = ModelsFetchState::Loaded;
-                true
-            }
-            Ok(Err(error)) => {
-                self.models_fetch_base_url = None;
-                self.available_models = None;
-                self.models_fetch_state = ModelsFetchState::Failed(error);
-                true
-            }
-            Err(TryRecvError::Empty) => {
-                self.models_rx = Some(rx);
-                false
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.models_fetch_base_url = None;
-                self.available_models = None;
-                self.models_fetch_state =
-                    ModelsFetchState::Failed("Model fetch finished without result".into());
-                true
-            }
         }
     }
 }

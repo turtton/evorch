@@ -123,7 +123,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ProviderSettingsAction::Save => self.submit_provider_settings(),
                 ProviderSettingsAction::Cancel => self.close_provider_settings(),
                 ProviderSettingsAction::StartCodexLogin => self.start_codex_login(),
-                ProviderSettingsAction::RefreshModels => self.provider_settings.start_models_fetch(),
+                ProviderSettingsAction::RefreshModels => self
+                    .provider_settings
+                    .start_models_fetch_with_store(self.credential_store.clone()),
             }
         }
     }

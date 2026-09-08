@@ -22,7 +22,7 @@ portable-pty = { workspace = true }
 providers = { path = "../providers" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
-sandbox = { path = "../sandbox" }
+sandbox = { path = "../sandbox", features = ["keychain"] }
 serde = { workspace = true }
 storage = { path = "../storage" }
 serde_json = { workspace = true }
