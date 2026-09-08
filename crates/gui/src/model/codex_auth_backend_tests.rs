@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use config::{Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig};
-use providers::provider::codex::oauth::DeviceAuthClient;
+use providers::provider::codex::oauth::BrowserAuthClient;
 use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
 
 use super::{ProviderCodexAuthBackend, codex_credential_account};
@@ -40,7 +40,7 @@ fn failed_store_load_never_exposes_error_body() {
 
 fn backend(store: Arc<dyn CodexTokenStore>) -> ProviderCodexAuthBackend {
     ProviderCodexAuthBackend::new(
-        DeviceAuthClient::with_default_http("https://auth.invalid").expect("HTTP client"),
+        BrowserAuthClient::with_default_http("https://auth.invalid").expect("HTTP client"),
         store,
     )
 }
@@ -54,8 +54,6 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
     let url = format!("http://{}", listener.local_addr().expect("address"));
     let server = std::thread::spawn(move || {
         for body in [
-            r#"{"device_auth_id":"device","user_code":"ABCD-1234","interval":"0"}"#.to_owned(),
-            r#"{"authorization_code":"code","code_verifier":"verifier"}"#.to_owned(),
             serde_json::json!({"access_token":"sentinel-access-abc","refresh_token":"refresh-secret","id_token":DUMMY_JWT}).to_string(),
         ] {
             let (mut socket, _) = listener.accept().expect("request");
@@ -89,6 +87,9 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while model.is_authenticating() {
         model.poll();
+        if let Some(url) = model.take_url_to_open() {
+            std::thread::spawn(move || complete_callback(&url));
+        }
         assert!(std::time::Instant::now() < deadline, "login deadline");
         std::thread::yield_now();
     }
@@ -103,6 +104,62 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
     assert!(!format!("{:?}", model.state).contains("sentinel-access-abc"));
     model.refresh_from_store();
     assert_eq!(model.state, CodexAuthState::Unauthenticated);
+}
+
+fn complete_callback(authorize_url: &str) {
+    use std::io::{Read, Write};
+    let url = providers::provider::codex::oauth::AuthorizeUrl::parse(authorize_url).expect("URL");
+    let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    let callback = providers::provider::codex::oauth::AuthorizeUrl::parse(&params["redirect_uri"]).expect("callback");
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", callback.port().expect("port"))).expect("connect");
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("timeout");
+    write!(socket, "GET /auth/callback?code=code&state={} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", params["state"]).expect("callback request");
+    let mut response = String::new();
+    socket.read_to_string(&mut response).expect("callback response");
+    assert!(response.starts_with("HTTP/1.1 200"));
+}
+
+#[test]
+fn authenticate_forwards_authorize_url_then_saves_bundle() {
+    use std::io::{Read, Write};
+    // Given: a local token endpoint and the production credential-store adapter.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+    let issuer = format!("http://{}", listener.local_addr().expect("address"));
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("exchange");
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("timeout");
+        let mut headers = Vec::new();
+        let mut byte = [0];
+        while !headers.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).expect("header");
+            headers.push(byte[0]);
+        }
+        let headers = String::from_utf8(headers).expect("headers");
+        assert!(headers.starts_with("POST /oauth/token "));
+        let length: usize = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().expect("length"))
+        }).expect("content length");
+        socket.read_exact(&mut vec![0; length]).expect("body");
+        let body = serde_json::json!({"access_token":"access","refresh_token":"refresh","id_token":DUMMY_JWT}).to_string();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+    });
+    let dir = tempfile::tempdir().expect("credentials");
+    let credentials = Arc::new(sandbox::FileCredentialStore::open(dir.path()).expect("store"));
+    let store = Arc::new(routing::factory::CredentialStoreTokenStore::new(credentials, "codex".into()));
+    let mut backend = ProviderCodexAuthBackend::new(BrowserAuthClient::with_default_http(&issuer).expect("client"), store.clone());
+    backend.callback_ports = vec![0];
+    let mut browser = None;
+    // When
+    let summary = backend.authenticate(&mut |prompt| {
+        assert!(prompt.authorize_url.starts_with(&issuer));
+        browser = Some(std::thread::spawn(move || complete_callback(&prompt.authorize_url)));
+    }).expect("authenticate");
+    // Then
+    browser.expect("browser launched").join().expect("browser");
+    server.join().expect("issuer");
+    assert_eq!(summary.expires_at_unix, Some(1_893_456_000));
+    assert_eq!(store.load().expect("saved").expect("bundle").access_token, "access");
 }
 
 #[test]

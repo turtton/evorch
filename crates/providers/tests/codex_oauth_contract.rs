@@ -9,7 +9,7 @@ use oauth_support::{
 };
 use providers::ProviderError;
 use providers::provider::codex::oauth::{
-    CODEX_CLIENT_ID, DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL, DeviceAuthClient, PollOptions,
+    CODEX_CLIENT_ID, DEVICE_VERIFICATION_URL, DeviceAuthClient, PollOptions,
 };
 use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore};
 use serde_json::json;
@@ -124,7 +124,7 @@ async fn device_flow_issues_usercode_then_polls_to_token() {
     let id_token = make_dummy_jwt("acct-1");
     let exchange_body = format!(
         "grant_type=authorization_code&code=code-1&redirect_uri={}&client_id={CODEX_CLIENT_ID}&code_verifier=cv-srv",
-        DEVICE_REDIRECT_URI.replace(':', "%3A").replace('/', "%2F")
+        "https://auth.openai.com/deviceauth/callback".replace(':', "%3A").replace('/', "%2F")
     );
     Mock::given(method("POST"))
         .and(path("/oauth/token"))

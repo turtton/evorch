@@ -4,7 +4,7 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, ScriptedCodexAuthBackend};
 use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::{
-    CODEX_AUTHENTICATED_LABEL, CODEX_DEVICE_URL, CODEX_LOGIN_BUTTON,
+    CODEX_AUTHENTICATED_LABEL, CODEX_LOGIN_BUTTON,
     CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_WAITING_LABEL, CodexAuthBackend, CodexAuthError,
     CodexAuthModel, CodexAuthState, CodexAuthSummary,
 };
@@ -44,7 +44,7 @@ fn step_until(
 }
 
 #[test]
-fn unauthenticated_state_shows_guidance_and_device_url_without_calling_backend() {
+fn unauthenticated_state_shows_sign_in_button() {
     // Given
     let (backend, _gate) = ScriptedCodexAuthBackend::gated();
     let mut harness = workbench(backend.clone());
@@ -53,7 +53,6 @@ fn unauthenticated_state_shows_guidance_and_device_url_without_calling_backend()
     // Then
     for label in [
         CODEX_UNAUTHENTICATED_GUIDANCE,
-        CODEX_DEVICE_URL,
         CODEX_LOGIN_BUTTON,
         "Provider settings",
         "Save",
@@ -68,7 +67,7 @@ fn unauthenticated_state_shows_guidance_and_device_url_without_calling_backend()
 }
 
 #[test]
-fn clicking_log_in_shows_user_code_then_authenticated_after_approval() {
+fn authenticating_state_shows_waiting_and_reopen_link() {
     // Given
     let (backend, gate) = ScriptedCodexAuthBackend::gated();
     let mut harness = workbench(backend.clone());
@@ -77,12 +76,11 @@ fn clicking_log_in_shows_user_code_then_authenticated_after_approval() {
     harness.click_label(CODEX_LOGIN_BUTTON);
     step_until(
         &mut harness,
-        |state| matches!(state, CodexAuthState::Authenticating { prompt: Some(_) }),
+        |state| matches!(state, CodexAuthState::Authenticating { prompt: Some(_), .. }),
         "prompt",
     );
     // Then
-    assert!(harness.has_label("ABCD-1234"));
-    assert!(harness.has_label(CODEX_DEVICE_URL));
+    assert!(harness.has_label("Open the sign-in page again"));
     assert!(harness.has_label(CODEX_WAITING_LABEL));
     harness.state_mut().start_codex_login();
     assert_eq!(backend.authenticate_calls(), 1);
@@ -121,7 +119,6 @@ fn failed_login_shows_error_and_keeps_login_available() {
     assert!(harness.has_label(CODEX_LOGIN_FAILED_REJECTED));
     assert!(!harness.has_label("sentinel-access-abc"));
     assert!(harness.has_label(CODEX_LOGIN_BUTTON));
-    assert!(harness.has_label(CODEX_DEVICE_URL));
 }
 
 #[test]
@@ -201,4 +198,20 @@ fn login_without_backend_fails_closed_in_ui() {
     harness.step();
     // Then
     assert!(harness.has_label(CODEX_LOGIN_FAILED_UNAVAILABLE));
+}
+
+#[test]
+fn take_url_to_open_fires_exactly_once() {
+    // Given
+    let mut model = CodexAuthModel::default();
+    model.state = CodexAuthState::Authenticating {
+        prompt: Some(ScriptedCodexAuthBackend::prompt()),
+        opened_browser: false,
+    };
+    // When
+    let first = model.take_url_to_open();
+    let second = model.take_url_to_open();
+    // Then
+    assert_eq!(first, Some(ScriptedCodexAuthBackend::prompt().authorize_url));
+    assert_eq!(second, None);
 }
