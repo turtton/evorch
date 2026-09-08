@@ -230,7 +230,11 @@ fn merge_view_updates_from_loop_event() {
     // Then: the PR info, badges, diff summary, binding head/token, and gate
     // checklist are visible
     assert_eq!(harness.state().merge().view, pending_merge_view());
-    assert!(harness.has_label("Merge approval requested for PR #65 (approval UI is moving to the Diff view)"));
+    assert!(
+        harness.has_label(
+            "Merge approval requested for PR #65 (approval UI is moving to the Diff view)"
+        )
+    );
 }
 
 #[test]
@@ -255,7 +259,10 @@ fn approve_click_issues_exactly_one_command_even_if_clicked_twice() {
     assert_eq!(decisions[0].decision, MergeDecision::Approve);
     assert_eq!(decisions[0].thread_id, "thread-1");
     assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
-    assert_eq!(harness.state().merge().view.resolution, Some(MergeDecision::Approve));
+    assert_eq!(
+        harness.state().merge().view.resolution,
+        Some(MergeDecision::Approve)
+    );
 }
 
 #[test]
@@ -269,7 +276,9 @@ fn reject_without_reason_is_blocked() {
     harness.run();
 
     // When: the disabled Reject button is clicked anyway
-    harness.state_mut().decide_merge(MergeDecision::Reject { reason: String::new() });
+    harness.state_mut().decide_merge(MergeDecision::Reject {
+        reason: String::new(),
+    });
     harness.run();
 
     // Then: nothing is issued and the view stays unresolved

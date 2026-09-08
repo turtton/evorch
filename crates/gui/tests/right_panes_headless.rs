@@ -50,9 +50,8 @@ fn right_panes_expose_landmarks_without_headings() {
     harness.run();
 
     // Then: each right pane title resolves to exactly one Pane landmark when active.
-    for (tab_id, title) in [
-        ("agents-main", "Agents"),
-    ] {
+    {
+        let (tab_id, title) = ("agents-main", "Agents");
         activate_tab(&mut harness, tab_id);
         harness.run();
         harness.get_by_label(title);
@@ -72,7 +71,13 @@ fn merge_state_without_pr_stays_empty_without_a_pane() {
     let mut harness = build_harness(state);
     harness.run();
     assert!(harness.state().merge().view.pr.is_none());
-    assert!(harness.state().dock().find_tab(&PanelId::new("merge-main")).is_none());
+    assert!(
+        harness
+            .state()
+            .dock()
+            .find_tab(&PanelId::new("merge-main"))
+            .is_none()
+    );
 }
 
 #[test]
