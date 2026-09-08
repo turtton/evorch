@@ -47,14 +47,35 @@ pub fn agent_pane(
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
-        if model.visible_entries().is_empty() {
-            empty_state_body(ui, &ctx, &mut action);
-        } else {
-            transcript_body(ui, model);
-        }
-        if let Some(composer_action) = composer_strip(ui, composer, provider) {
-            action = Some(AgentPaneAction::Composer(composer_action));
-        }
+        let composer_id = ui.id().with("composer-height");
+        let composer_height = ui
+            .data(|data| data.get_temp::<f32>(composer_id))
+            .unwrap_or(COMPOSER_MIN_HEIGHT);
+        egui::Panel::bottom(ui.id().with("composer"))
+            .exact_size(composer_height)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                let strip = ui.scope(|ui| composer_strip(ui, composer, provider));
+                let height = strip.response.rect.height();
+                if height != composer_height {
+                    ui.data_mut(|data| data.insert_temp(composer_id, height));
+                    ui.ctx().request_repaint();
+                }
+                if let Some(composer_action) = strip.inner {
+                    action = Some(AgentPaneAction::Composer(composer_action));
+                }
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                if model.visible_entries().is_empty() {
+                    empty_state_body(ui, &ctx, &mut action);
+                } else {
+                    transcript_body(ui, model);
+                }
+            });
         action
     })
 }
@@ -134,6 +155,7 @@ fn empty_state_body(
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in model.visible_entries() {
                 let accent = entry_accent(entry);
