@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+
+#[path = "sidebar/project_add.rs"]
+mod project_add;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
