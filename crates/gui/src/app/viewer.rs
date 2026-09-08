@@ -116,11 +116,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.decide_merge(decision);
         }
         if self.provider_settings.open
-            && let Some(action) = provider_settings_modal(ui.ctx(), &mut self.provider_settings)
+            && let Some(action) =
+                provider_settings_modal(ui.ctx(), &mut self.provider_settings, &self.codex_auth)
         {
             match action {
                 ProviderSettingsAction::Save => self.submit_provider_settings(),
                 ProviderSettingsAction::Cancel => self.close_provider_settings(),
+                ProviderSettingsAction::StartCodexLogin => self.start_codex_login(),
             }
         }
     }

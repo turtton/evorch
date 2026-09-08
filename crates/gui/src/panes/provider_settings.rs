@@ -1,3 +1,4 @@
+use crate::model::codex_auth::CodexAuthModel;
 use crate::model::provider_settings::{ModelsFetchState, ProviderSettingsModel};
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::{
@@ -10,11 +11,13 @@ use crate::theme::widgets::{primary_button, surface_frame};
 pub enum ProviderSettingsAction {
     Save,
     Cancel,
+    StartCodexLogin,
 }
 
 pub fn provider_settings_modal(
     ctx: &egui::Context,
     model: &mut ProviderSettingsModel,
+    codex: &CodexAuthModel,
 ) -> Option<ProviderSettingsAction> {
     let mut action = None;
     let viewport_width = ctx.viewport_rect().width();
@@ -145,6 +148,9 @@ pub fn provider_settings_modal(
             });
             if let Some(error) = &model.error {
                 ui.label(egui::RichText::new(error).color(ERROR_FG));
+            }
+            if crate::panes::codex_auth::codex_auth_section(ui, codex) {
+                action = Some(ProviderSettingsAction::StartCodexLogin);
             }
             ui.horizontal(|ui| {
                 if primary_button(ui, "Save").clicked() {

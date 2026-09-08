@@ -14,6 +14,9 @@ mod fetch;
 #[path = "provider_settings/capture.rs"]
 mod capture;
 
+#[path = "provider_settings/codex_auth.rs"]
+mod codex_auth;
+
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("demo");

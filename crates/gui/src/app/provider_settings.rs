@@ -4,6 +4,7 @@ use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn open_provider_settings(&mut self) {
+        self.codex_auth.refresh_from_store();
         self.provider_settings.error = None;
         self.provider_settings.open = true;
         self.provider_settings.start_models_fetch();
@@ -11,6 +12,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub const fn close_provider_settings(&mut self) {
         self.provider_settings.open = false;
+    }
+
+    pub fn start_codex_login(&mut self) {
+        self.codex_auth.start();
     }
 
     pub fn submit_provider_settings(&mut self) {

@@ -10,6 +10,7 @@ use crate::diff::{DiffModel, DiffSource, GitCliDiffSource};
 use crate::dock::to_dock_state;
 use crate::events::EventPump;
 use crate::keymap::Keymap;
+use crate::model::codex_auth::CodexAuthModel;
 use crate::model::commands::{
     CiStatus, CommandSink, FixtureLoopAdapter, GoalFormModel, LoopStatusView, MergeApprovalModel,
     MergeApprovalView, ReviewerStatus, WorkbenchCommand,
@@ -52,6 +53,7 @@ pub struct WorkbenchState<S> {
     pub(super) composer: ComposerModel,
     pub(super) provider_status: ProviderStatus,
     pub(super) provider_settings: ProviderSettingsModel,
+    pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
@@ -90,6 +92,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             composer: ComposerModel::default(),
             provider_status: ProviderStatus::default(),
             provider_settings: ProviderSettingsModel::default(),
+            codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
@@ -196,6 +199,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn with_provider_settings(mut self, model: ProviderSettingsModel) -> Self {
         self.provider_settings = model;
         self
+    }
+    pub fn with_codex_auth(mut self, model: CodexAuthModel) -> Self {
+        self.codex_auth = model;
+        self
+    }
+    pub const fn codex_auth(&self) -> &CodexAuthModel {
+        &self.codex_auth
+    }
+    pub const fn codex_auth_mut(&mut self) -> &mut CodexAuthModel {
+        &mut self.codex_auth
     }
     pub fn with_provider_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.provider_settings_path = Some(path.into());
