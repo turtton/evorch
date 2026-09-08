@@ -244,7 +244,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.push_notice(format!("accepted: {goal_id}"));
                 self.goal_form.last_accepted = Some(goal_id);
             }
-            LoopEvent::MergeStateUpdated(view) => self.merge.view = *view,
+            LoopEvent::MergeStateUpdated(view) => {
+                if let Some(pr) = &view.pr
+                    && view.resolution.is_none()
+                {
+                    self.push_notice(format!(
+                        "Merge approval requested for PR #{} (approval UI is moving to the Diff view)",
+                        pr.number
+                    ));
+                }
+                self.merge.view = *view;
+            }
             LoopEvent::MergeResolved { decision, .. } => {
                 self.merge.view.resolution = Some(decision)
             }

@@ -34,14 +34,12 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::Sidebar, None)
             | (PanelKind::Agents, None)
             | (PanelKind::Diff, None)
-            | (PanelKind::MergeApproval, None)
             | (PanelKind::Terminal, None)
             | (PanelKind::Tasks, None) => {}
             (PanelKind::Agent, Some(_))
             | (PanelKind::Sidebar, Some(_))
             | (PanelKind::Agents, Some(_))
             | (PanelKind::Diff, Some(_))
-            | (PanelKind::MergeApproval, Some(_))
             | (PanelKind::Terminal, Some(_))
             | (PanelKind::Tasks, Some(_)) => {
                 return Err(LayoutError::UnexpectedTarget {

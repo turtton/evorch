@@ -35,7 +35,6 @@ pub enum PanelKind {
     Agents,
     AgentTranscript,
     Diff,
-    MergeApproval,
     Terminal,
     Tasks,
 }
@@ -49,7 +48,6 @@ impl PanelKind {
             Self::Agents => "Agents",
             Self::AgentTranscript => "Transcript",
             Self::Diff => "Diff",
-            Self::MergeApproval => "Merge",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
         }
@@ -97,7 +95,6 @@ pub fn default_panels_v02() -> BTreeMap<PanelId, Panel> {
         ("agents-main", PanelKind::Agents, "Agents"),
         ("diff-main", PanelKind::Diff, "Diff"),
         ("terminal-main", PanelKind::Terminal, "Terminal"),
-        ("merge-main", PanelKind::MergeApproval, "Merge"),
     ]
     .into_iter()
     .map(|(id, kind, title)| {

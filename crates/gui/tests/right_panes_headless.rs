@@ -52,8 +52,6 @@ fn right_panes_expose_landmarks_without_headings() {
     // Then: each right pane title resolves to exactly one Pane landmark when active.
     for (tab_id, title) in [
         ("agents-main", "Agents"),
-        ("goal-main", "Goal"),
-        ("merge-main", "Merge"),
     ] {
         activate_tab(&mut harness, tab_id);
         harness.run();
@@ -68,17 +66,13 @@ fn right_panes_expose_landmarks_without_headings() {
 }
 
 #[test]
-fn merge_pane_without_pr_shows_single_placeholder() {
-    // Given: a default workbench state with the Merge tab active
+fn merge_state_without_pr_stays_empty_without_a_pane() {
     let state = gui::app::WorkbenchState::new(MockSource(Vec::new()), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
     harness.run();
-    activate_tab(&mut harness, "merge-main");
-    harness.run();
-
-    // Then: the "no pull request" placeholder appears exactly once.
-    assert_eq!(harness.query_all_by_label("no pull request").count(), 1);
+    assert!(harness.state().merge().view.pr.is_none());
+    assert!(harness.state().dock().find_tab(&PanelId::new("merge-main")).is_none());
 }
 
 #[test]

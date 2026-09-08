@@ -6,7 +6,6 @@ use workspace_ui::{Panel, PanelId, PanelKind, SidebarState};
 use super::ConversationFocus;
 use super::attention::{AttentionInputs, PaneAttention, attention_for};
 use crate::diff::{DiffMode, DiffModel};
-use crate::model::commands::MergeApprovalModel;
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
@@ -18,7 +17,6 @@ use crate::panes::{
     agents::{AgentsAction, agents_pane},
     composer::ComposerAction,
     diff::diff_pane,
-    merge::{MergeAction, merge_pane},
     sidebar::{SidebarAction, sidebar_pane},
     tasks::tasks_pane,
     terminal::terminal_pane,
@@ -43,8 +41,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) composer: &'a mut ComposerModel,
     pub(super) provider_status: &'a ProviderStatus,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
-    pub(super) merge: &'a MergeApprovalModel,
-    pub(super) merge_action: &'a mut Option<MergeAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
     pub(super) dock_tab_style: &'a egui_dock::TabStyle,
 }
@@ -58,7 +54,6 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             panel.kind,
             panel.target.as_deref(),
             &AttentionInputs {
-                merge: &self.merge.view,
                 phases: self.phases,
                 tasks_rows: self.tasks.rows(),
             },
@@ -182,9 +177,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 if let Some(mode) = diff_pane(ui, self.diff) {
                     *self.diff_request = Some(mode);
                 }
-            }
-            PanelKind::MergeApproval => {
-                *self.merge_action = merge_pane(ui, self.merge);
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
             PanelKind::Tasks => tasks_pane(ui, self.tasks),

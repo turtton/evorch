@@ -7,7 +7,6 @@ mod agents_columns;
 pub mod codex_auth;
 pub mod composer;
 pub mod diff;
-pub mod merge;
 pub mod provider_settings;
 pub mod sidebar;
 pub mod tasks;

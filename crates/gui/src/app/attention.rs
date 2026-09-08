@@ -5,7 +5,6 @@ use event_bus::AgentRunPhase;
 use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
 
 use super::WorkbenchState;
-use crate::model::commands::MergeApprovalView;
 use crate::model::tasks::{AgentRunSource, TaskRow};
 use crate::theme::tokens::{ERROR_FG, INFO, WARNING_FG};
 
@@ -29,7 +28,6 @@ impl PaneAttention {
 }
 
 pub(super) struct AttentionInputs<'a> {
-    pub merge: &'a MergeApprovalView,
     pub phases: &'a BTreeMap<String, ThreadRunPhase>,
     pub tasks_rows: &'a [TaskRow],
 }
@@ -40,15 +38,6 @@ pub(super) fn attention_for(
     inputs: &AttentionInputs,
 ) -> PaneAttention {
     match kind {
-        PanelKind::MergeApproval => {
-            if inputs.merge.blocked.is_some() {
-                PaneAttention::Error
-            } else if inputs.merge.pr.is_some() && inputs.merge.resolution.is_none() {
-                PaneAttention::Warning
-            } else {
-                PaneAttention::None
-            }
-        }
         PanelKind::Agents | PanelKind::Tasks => inputs
             .tasks_rows
             .iter()
@@ -88,7 +77,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             panel.kind,
             panel.target.as_deref(),
             &AttentionInputs {
-                merge: &self.merge.view,
                 phases: &self.phases,
                 tasks_rows: self.tasks.rows(),
             },
@@ -100,32 +88,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::commands::{CiStatus, PrRef, ReviewerStatus};
-
-    fn merge_view(
-        pr: Option<PrRef>,
-        resolution: Option<crate::model::commands::MergeDecision>,
-        blocked: Option<String>,
-    ) -> MergeApprovalView {
-        MergeApprovalView {
-            pr,
-            ci: CiStatus::Unknown,
-            reviewer: ReviewerStatus::Unknown,
-            diff_summary: None,
-            resolution,
-            binding: None,
-            gate: Vec::new(),
-            blocked,
-        }
-    }
-
-    fn demo_pr() -> PrRef {
-        PrRef {
-            number: 65,
-            title: "Workbench restructure".to_owned(),
-            url: "https://github.com/turtton/evorch/pull/65".to_owned(),
-        }
-    }
 
     fn task_row(status: AgentRunPhase) -> TaskRow {
         TaskRow {
@@ -138,36 +100,30 @@ mod tests {
     }
 
     #[test]
-    fn merge_pending_review_is_warning() {
-        // Given: a bound, unresolved PR with no blocker
-        let merge = merge_view(Some(demo_pr()), None, None);
+    fn waiting_transcript_is_warning() {
+        let phases = BTreeMap::from([("run-1".to_owned(), ThreadRunPhase::Waiting)]);
         let inputs = AttentionInputs {
-            merge: &merge,
-            phases: &BTreeMap::new(),
+            phases: &phases,
             tasks_rows: &[],
         };
 
-        // Then: the merge tab requests attention as a warning
         assert_eq!(
-            attention_for(PanelKind::MergeApproval, None, &inputs),
+            attention_for(PanelKind::AgentTranscript, Some("run-1"), &inputs),
             PaneAttention::Warning
         );
         assert_eq!(PaneAttention::Warning.color(), Some(WARNING_FG));
     }
 
     #[test]
-    fn merge_blocked_is_error_even_with_pending_pr() {
-        // Given: a pending PR whose goal is blocked
-        let merge = merge_view(Some(demo_pr()), None, Some("goal blocked".to_owned()));
+    fn failed_transcript_is_error() {
+        let phases = BTreeMap::from([("run-1".to_owned(), ThreadRunPhase::Error)]);
         let inputs = AttentionInputs {
-            merge: &merge,
-            phases: &BTreeMap::new(),
+            phases: &phases,
             tasks_rows: &[],
         };
 
-        // Then: the blocker outranks the pending review
         assert_eq!(
-            attention_for(PanelKind::MergeApproval, None, &inputs),
+            attention_for(PanelKind::AgentTranscript, Some("run-1"), &inputs),
             PaneAttention::Error
         );
         assert_eq!(PaneAttention::Error.color(), Some(ERROR_FG));
@@ -180,9 +136,7 @@ mod tests {
             task_row(AgentRunPhase::Running),
             task_row(AgentRunPhase::Done),
         ];
-        let merge = merge_view(None, None, None);
         let inputs = AttentionInputs {
-            merge: &merge,
             phases: &BTreeMap::new(),
             tasks_rows: &rows,
         };
@@ -201,10 +155,8 @@ mod tests {
     #[test]
     fn sidebar_tab_has_no_attention() {
         // Given: inputs that would flag every other tab
-        let merge = merge_view(Some(demo_pr()), None, Some("goal blocked".to_owned()));
         let rows = [task_row(AgentRunPhase::Error)];
         let inputs = AttentionInputs {
-            merge: &merge,
             phases: &BTreeMap::new(),
             tasks_rows: &rows,
         };

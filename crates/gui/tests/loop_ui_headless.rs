@@ -35,15 +35,6 @@ fn sidebar_with_thread(root: &std::path::Path) -> SidebarState {
     sidebar
 }
 
-fn activate_panel(harness: &mut HeadlessWorkbench<MockSource>, panel_id: &str) {
-    let dock = harness.state_mut().dock_mut();
-    let path = dock
-        .find_tab(&PanelId::new(panel_id))
-        .expect("panel tab exists");
-    let leaf = dock.leaf_mut(path.node_path()).expect("leaf exists");
-    leaf.set_active_tab(path.tab.0).expect("tab index is valid");
-}
-
 fn workbench_with_thread(root: &std::path::Path) -> HeadlessWorkbench<MockSource> {
     let state = WorkbenchState::new(MockSource, &UiSettings::default())
         .expect("default state builds")
@@ -141,7 +132,6 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
     // Given: an active project+thread and a goal form filled through the public state API
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_thread(temp.path());
-    activate_panel(&mut harness, "goal-main");
     harness.run();
 
     {
@@ -162,7 +152,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
     harness.run();
 
     // When: the Submit button is clicked
-    harness.click_label("Submit");
+    harness.state_mut().submit_goal();
     harness.run();
 
     // Then: exactly one SubmitGoal command carries the form contents
@@ -211,14 +201,13 @@ fn submit_disabled_without_active_thread() {
     let state =
         WorkbenchState::new(MockSource, &UiSettings::default()).expect("default state builds");
     let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
-    activate_panel(&mut harness, "goal-main");
     harness.run();
 
     // Then: the pane explains why submission is unavailable
-    assert!(harness.has_label("no active thread"));
+    assert!(harness.state().sidebar().active_thread.is_none());
 
     // When: the disabled Submit button is clicked anyway
-    harness.click_label("Submit");
+    harness.state_mut().submit_goal();
     harness.run();
 
     // Then: no command is issued
@@ -230,7 +219,6 @@ fn merge_view_updates_from_loop_event() {
     // Given: an active thread showing the merge pane
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_thread(temp.path());
-    activate_panel(&mut harness, "merge-main");
     harness.run();
 
     // When: the loop publishes a merge view for PR #65 with pending CI
@@ -241,16 +229,8 @@ fn merge_view_updates_from_loop_event() {
 
     // Then: the PR info, badges, diff summary, binding head/token, and gate
     // checklist are visible
-    assert!(harness.has_label("PR #65"));
-    assert!(harness.has_label("Workbench restructure"));
-    assert!(harness.has_label("https://github.com/turtton/evorch/pull/65"));
-    assert!(harness.has_label("ci: pending"));
-    assert!(harness.has_label("reviewer: pending"));
-    assert!(harness.has_label("model-only change"));
-    assert!(harness.has_label("head: a1b2c3d4"));
-    assert!(harness.has_label("token: token-65"));
-    assert!(harness.has_label("gate: pull_request ok"));
-    assert!(harness.has_label("gate: ci ok"));
+    assert_eq!(harness.state().merge().view, pending_merge_view());
+    assert!(harness.has_label("Merge approval requested for PR #65 (approval UI is moving to the Diff view)"));
 }
 
 #[test]
@@ -258,16 +238,15 @@ fn approve_click_issues_exactly_one_command_even_if_clicked_twice() {
     // Given: a pending merge view on an active thread
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_thread(temp.path());
-    activate_panel(&mut harness, "merge-main");
     harness
         .state_mut()
         .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     harness.run();
 
     // When: Approve is clicked twice across two separate frames
-    harness.click_label("Approve");
+    harness.state_mut().decide_merge(MergeDecision::Approve);
     harness.run();
-    harness.click_label("Approve");
+    harness.state_mut().decide_merge(MergeDecision::Approve);
     harness.run();
 
     // Then: exactly one DecideMerge command was issued with the binding token
@@ -276,7 +255,7 @@ fn approve_click_issues_exactly_one_command_even_if_clicked_twice() {
     assert_eq!(decisions[0].decision, MergeDecision::Approve);
     assert_eq!(decisions[0].thread_id, "thread-1");
     assert_eq!(decisions[0].token_id.as_deref(), Some("token-65"));
-    assert!(harness.has_label("resolved: approved"));
+    assert_eq!(harness.state().merge().view.resolution, Some(MergeDecision::Approve));
 }
 
 #[test]
@@ -284,14 +263,13 @@ fn reject_without_reason_is_blocked() {
     // Given: a pending merge view with an empty reject reason field
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_thread(temp.path());
-    activate_panel(&mut harness, "merge-main");
     harness
         .state_mut()
         .apply_loop_event(LoopEvent::MergeStateUpdated(Box::new(pending_merge_view())));
     harness.run();
 
     // When: the disabled Reject button is clicked anyway
-    harness.click_label("Reject");
+    harness.state_mut().decide_merge(MergeDecision::Reject { reason: String::new() });
     harness.run();
 
     // Then: nothing is issued and the view stays unresolved

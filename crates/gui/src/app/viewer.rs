@@ -6,7 +6,6 @@ use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
     composer::ComposerAction,
-    merge::MergeAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
     sidebar::{SidebarAction, set_sidebar_error},
 };
@@ -21,7 +20,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut agents_action = None;
         let mut diff_request = None;
         let mut composer_action = None;
-        let mut merge_action = None;
         let mut focus_request = None;
         let dock_style = crate::theme::dock::dock_style(ui.style());
         let tab_style = dock_style.tab.clone();
@@ -44,8 +42,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 composer: &mut self.composer,
                 provider_status: &self.provider_status,
                 composer_action: &mut composer_action,
-                merge: &self.merge,
-                merge_action: &mut merge_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,
             };
@@ -87,9 +83,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.composer_mut().input = format!("/{name} ");
                 }
             }
-        }
-        if let Some(MergeAction::Decide(decision)) = merge_action {
-            self.decide_merge(decision);
         }
         if self.provider_settings.open
             && let Some(action) =
