@@ -8,6 +8,7 @@ pub mod codex_auth;
 pub mod composer;
 pub mod diff;
 pub mod model_picker;
+pub mod phase_indicator;
 pub mod provider_settings;
 pub mod sidebar;
 pub mod tasks;
