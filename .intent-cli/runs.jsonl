@@ -240,3 +240,4 @@
 {"ts":"2026-09-07T05:43:42.7747643+00:00","execution_unit":"v04-codex-login-ux","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#102","reason":"https://github.com/turtton/evorch/issues/102"}
 {"ts":"2026-09-08T07:25:18.075376+00:00","execution_unit":"v04-codex-login-ux","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":103}
 {"ts":"2026-09-08T07:25:18.075376+00:00","execution_unit":"v04-codex-login-ux","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":103}
+{"ts":"2026-09-09T15:15:42.3706619+00:00","execution_unit":"v05-image-attachment-ui","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v05-image-attachment-ui/"}

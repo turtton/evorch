@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-08T07:25:18.0842672+00:00",
+  "updated_at": "2026-09-09T15:15:42.3522136+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1246,6 +1246,25 @@
         "url": "https://github.com/turtton/evorch/issues/102"
       },
       "linked_pr": "https://github.com/turtton/evorch/pull/103",
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v05-image-attachment-ui",
+      "title": "v05 GUI: \u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u753B\u50CF\u6DFB\u4ED8\u3068\u30D7\u30EC\u30D3\u30E5\u30FC (ChatGPT \u98A8)",
+      "state": "queued",
+      "dependencies": [
+        "v0.7 \u3067\u5C0E\u5165\u3057\u305F provider OpenAI-compatible (\u753B\u50CF\u3092\u30B5\u30DD\u30FC\u30C8\u3059\u308B\u30E2\u30C7\u30EB: gpt-4o-vision, gpt-5-vision \u7B49\u3092 provider \u5074\u3067 enable \u53EF\u80FD\u306B\u3059\u308B) \u2014 \u305F\u3060\u3057 v0.7 \u306E\u30E2\u30C7\u30EB enable/disable \u6A5F\u80FD\u306F\u65E2\u306B\u5B9F\u88C5\u6E08\u307F\u3002\u4F9D\u5B58\u306A\u3057"
+      ],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v05-image-attachment-ui/implementation.md",
+        "review_context": ".intent-cli/issues/v05-image-attachment-ui/review-context.md",
+        "yaml": ".intent-cli/issues/v05-image-attachment-ui/packet.yaml"
+      },
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",

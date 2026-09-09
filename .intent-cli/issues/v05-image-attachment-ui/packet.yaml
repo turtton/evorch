@@ -1,0 +1,63 @@
+implementation_issue_packet:
+  issue_title: "v05 GUI: クリップボード画像添付とプレビュー (ChatGPT 風)"
+  issue_kind: feature
+  source_execution_unit: v05-image-attachment-ui
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/src/panes/composer.rs crates/gui/src/model/composer.rs crates/gui/src/panes/composer_attachment.rs (新規) crates/gui/tests/composer_attachment.rs (新規) crates/providers/src/message.rs (必要に応じ ContentBlock::Image)"
+  target_part: "チャット composer での画像添付・プレビュー・拡大表示。ChatGPT Web UI を参考にした UX。"
+  dependencies:
+    - "v0.7 で導入した provider OpenAI-compatible (画像をサポートするモデル: gpt-4o-vision, gpt-5-vision 等を provider 側で enable 可能にする) — ただし v0.7 のモデル enable/disable 機能は既に実装済み。依存なし"
+  technical_baseline:
+    - "egui 0.36 / egui_commonmark 0.25 のコードベース"
+    - "egui_extras の画像ローダー機能 (PngLoader 等) は現在有効化されていないため WARN (`install_image_loaders was called, but no loaders are enabled`) が繰り返し出ている"
+    - "composer は Enter=送信、Shift+Enter=改行、IME Preedit 対応済み (W-D/S-FOCUS)"
+    - "ContentBlock::Text だけが provider (providers/src/message.rs) に存在。画像は `ContentBlock::Image { source: ImageSource, ... }` 相当の新規追加を検討 (Anthropic/OpenAI Vision 形式を想定)"
+  intent_references:
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/features/provider-routing/overview.md"
+  acceptance_criteria:
+    - "ユーザーが Ctrl+V でクリップボード画像を貼り付けると composer 上部にサムネイル (高さ 64px 程度) が表示される"
+    - "複数画像を連続してペーストした場合、横に並ぶ (スクロール可能)"
+    - "サムネイルをクリックするとモーダルまたは別ペインで原寸大プレビューが表示される (ズーム可能である必要はない)"
+    - "サムネイル右上の × ボタンで削除可能"
+    - "ペーストした画像は Enter=Send で agent 入力に含まれる (ChatMessage::User の ContentBlock::Image を通してモデル API へ到達)"
+    - "`PngLoader` 等の image loader を feature 有効化し、WARN ログ (`no loaders are enabled`) が出ない"
+    - "ペーストせずに Enter 送信する既存フロー (テキストのみ) は変化しない"
+    - "テスト: composer_attachment 系 kittest で「クリップボード画像入力 → サムネイル出現 → Send で ContentBlock が画像を含む」を検証。offscreen PNG で視覚確認"
+    - "provider が画像をサポートしない場合 (現状の openai-completions では text のみ)の fallback 動作 (例えば画像を添付しても無視 or 警告) を UI で明示"
+
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench
+  supporting_intents:
+    - intents/evorch/features/provider-routing
+  new_intent_needed: false
+  placement_rationale: |
+    画像添付は GUI の chat composer (gui-workbench) が主体。provider routing で画像対応モデル
+    を選択する動作が必要になる場合は provider-routing の intent をサポートとして参照する。
+    既存 intent に新しい sub-intent は不要で、chat composer の UX 拡張として既存 feature の
+    延長とみなす。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    画像添付 UX の実装で、クリップボード連携・thumbnail 配置・modal 拡大表示のベストプラクティスを
+    蓄積。provider Vision API との統合 (Anthropic image / OpenAI vision フォーマットの差異) も記録。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
