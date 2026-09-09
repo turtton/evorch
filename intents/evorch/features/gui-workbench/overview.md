@@ -160,6 +160,18 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 
 検証: workspace 全テスト green / clippy(-D warnings)・fmt clean。PNG 証跡あり。`headless_run_completes_with_single_mock_response` の flake は本変更不要の pre-existing 問題(MapEnv 使用で keyring 非依存)で、単体では常に成功。known follow-up として記録するのみ。
 
+## v0.7 実運用パッチの実装確定（2026-09-09、main 直接マージ）
+
+v0.6 の実稼働検証で判明した 5 件を 5 workstream (A〜E) に分解して再修正。CLIProxyAPI WebUI (router-for-me/Cli-Proxy-API-Management-Center) のモデル管理パターンを UX 参考に採用。
+
+- **A モデルリスト管理の overhaul (A1〜A5)**: Config `ProviderProfileConfig.models` を `Vec<ModelEntryConfig>`(`id`+`enabled`)に昇格 (config b3f8edc)。`visit_str`/`visit_map` で TOML 後方互換 (旧形式 `models = ["a","b"]` は enabled=true に正規化)。JsonSchema transform で schema artifact は anyOf を明示。`strict.rs` で MODEL_ENTRY_KEYS の未知キー/key 型を `providers.<n>.models[i]` パスで reject (3e6e6ee)。`save.rs` は enabled→文字列 / disabled→inline table で書き戻し、enabled 0 個・default disabled を拒否 (3e6e6ee)。`routing/profile.rs` (5536642) で enabled フィルタ・default ∈ enabled を検証。GUI editor (10e49d3) で add/remove/enable/rename/default 自動再選択 (enabled 0 なら validation state)。pane UI (42aabe9) で CLIProxyAPI パターン: Configured リスト行 (enable チェック + Edit/Done + Remove) + Add 入力 + Fetch 後選択パネル (Already added / Apply selected (n))。
+- **B chat で provider error 表示 (ef96cec)**: 既存の Lifecycle 経路のままでは request failure が chat 側に可視化されない問題を、transcript_registry/transcript で `ProviderEvent::RequestFailed` と `FaultEvent` を transcript entry 化。run_id を持つ RequestFailed を Thread+Run 両方へ route、run_id なしを Thread、SkillDiagnostic は Thread Error、SubscriberLagged は Notice。retry 可な failure_kind (RateLimited/Server 5xx/Transport)は Notice、確定失敗 (Auth/Timeout/InvalidResponse/Quota)は Error。
+- **C usage WARN flood 解消 (71c0c44)**: `evorch-gui.rs:317-357` の全量転送を整理。`storage_bridge.rs` で `handle_event` が Usage を `UsageAggregator` へ、非 Usage を `storage.append_event` へ振り分け。60 秒間隔で `flush_into(&StorageHandle as &dyn UsageSink)` を呼ぶ (ADR0012 準拠)。同期 storage は `spawn_blocking` に隔離、bus drop 時に最終 flush。metrics 保存の 1 分バケット (provider/model)が機能。
+- **D 動作中インジケータ (0cd1c56/a5a0708)**: theme tokens RUNNING (cyan 0x22d3ee) / WAITING (yellow 0xfbbf24) 追加 + phase_color 共有。新規 `panes/phase_indicator.rs` で Running→spinner+``running`` pill、Waiting→``waiting (input)`` pill (スピナーなし)、Done/Error/Pending は静 pill。chat header 右上の旧 mute label を置き換え。
+- **E composer Esc でキャンセル (f5fe78d/3fc2071/592d1ed)**: slash completion が開いていれば Esc で dismiss (focus 維持)、閉じていれば `WorkbenchCommand::CancelChat` → sink が chat_runs[thread_id] から run_id を引き `AgentRuntime::cancel(run_id)` 既存 API (runtime.rs:663-668) に接続、成功後は chat_runs から削除 (次 Send が新 run spawn)。composer の Send ボタンは Running 時は danger Cancel に差し替わる (Waiting 時は Send のまま)。cancelled reason は Error ではなく Notice ``Run cancelled`` で表示。
+
+検証: workspace 全テスト green (唯一残るが pre-existing flake の `headless_run_completes_with_single_mock_response`)、clippy(-D warnings)・fmt clean。各 wave で RED→GREEN 同一コミット、PNG 証跡は `/tmp/opencode/models-{fetched,selected,applied-default}.png` / `/tmp/opencode/e-cancel-{completion,running,waiting}.png`。
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
