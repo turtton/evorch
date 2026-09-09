@@ -37,6 +37,7 @@ impl SpanMapper {
             tool_name,
             call_id,
             run_id,
+            ..
         } = event
         else {
             return Vec::new();

@@ -24,6 +24,7 @@ fn chat_and_tool_spans_parent_to_known_agent() {
     ));
     let tool = mapper.ingest(&event(
         ToolEvent::ToolStarted {
+            input: None,
             tool_name: "search".to_owned(),
             call_id: "call-1".to_owned(),
             run_id: Some("run-1".to_owned()),
@@ -96,6 +97,7 @@ fn missing_run_id_and_unknown_parent_are_typed_drops() {
     ));
     let missing_tool = mapper.ingest(&event(
         ToolEvent::ToolStarted {
+            input: None,
             tool_name: "tool".to_owned(),
             call_id: "missing-tool-run".to_owned(),
             run_id: None,

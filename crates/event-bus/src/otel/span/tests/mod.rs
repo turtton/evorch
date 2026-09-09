@@ -118,6 +118,7 @@ fn request_completed(request_id: &str, seconds: u64) -> Event {
 fn tool_started(call_id: &str, run_id: &str, seconds: u64) -> Event {
     event(
         ToolEvent::ToolStarted {
+            input: None,
             tool_name: "search".to_owned(),
             call_id: call_id.to_owned(),
             run_id: Some(run_id.to_owned()),

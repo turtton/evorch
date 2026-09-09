@@ -80,11 +80,13 @@ async fn main() {
         run_id: None,
     });
     emit!(ToolEvent::ToolStarted {
+        input: None,
         tool_name: "search_docs".into(),
         call_id: "call-42".into(),
         run_id: None,
     });
     emit!(ToolEvent::ToolCompleted {
+        output: None,
         tool_name: "search_docs".into(),
         call_id: "call-42".into(),
         is_error: false,

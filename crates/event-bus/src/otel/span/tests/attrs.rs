@@ -236,6 +236,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
         tool_started("call-1", "run-1", 9),
         event(
             ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "search".to_owned(),
                 call_id: "call-1".to_owned(),
                 is_error: true,

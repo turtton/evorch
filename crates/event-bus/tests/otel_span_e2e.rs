@@ -195,6 +195,7 @@ fn event_sequence() -> Vec<Event> {
         event(
             4,
             ToolEvent::ToolStarted {
+                input: None,
                 tool_name: "read".to_owned(),
                 call_id: "call-1".to_owned(),
                 run_id: Some("run-1".to_owned()),
@@ -203,6 +204,7 @@ fn event_sequence() -> Vec<Event> {
         event(
             5,
             ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "read".to_owned(),
                 call_id: "call-1".to_owned(),
                 is_error: false,

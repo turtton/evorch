@@ -94,6 +94,7 @@ async fn executor_emits_started_then_completed_with_payload() {
     assert_eq!(
         tool_event(&first),
         &ToolEvent::ToolStarted {
+            input: Some(serde_json::json!({ "path": path.display().to_string() })),
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             run_id: Some("run-7".to_string()),
@@ -103,6 +104,7 @@ async fn executor_emits_started_then_completed_with_payload() {
     assert_eq!(
         tool_event(&second),
         &ToolEvent::ToolCompleted {
+            output: Some(result.content.clone()),
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             is_error: false,
@@ -136,6 +138,7 @@ async fn executor_unknown_tool_is_error_without_events() {
 
     // センチネルを送信し、受信の先頭がそれであることで実行中の発行がなかったことを証明する。
     bus.emit(Event::new(ToolEvent::ToolStarted {
+        input: None,
         tool_name: "sentinel".to_string(),
         call_id: "sentinel".to_string(),
         run_id: None,
@@ -146,6 +149,7 @@ async fn executor_unknown_tool_is_error_without_events() {
         tool_event(&first),
         &ToolEvent::ToolStarted {
             tool_name: "sentinel".to_string(),
+            input: None,
             call_id: "sentinel".to_string(),
             run_id: None,
         }
@@ -181,6 +185,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
+            input: Some(serde_json::json!({})),
             run_id: Some("run-9".to_string()),
         }
     );
@@ -190,6 +195,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolCompleted {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
+            output: None,
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
@@ -217,6 +223,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
+            input: Some(serde_json::json!({ "path": path.display().to_string(), "extra": 1 })),
             run_id: Some("run-9".to_string()),
         }
     );
@@ -226,6 +233,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolCompleted {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
+            output: None,
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
@@ -264,6 +272,7 @@ async fn executor_tool_error_emits_completed_error() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             run_id: Some("run-11".to_string()),
+            input: Some(serde_json::json!({ "path": missing.display().to_string() })),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -275,6 +284,7 @@ async fn executor_tool_error_emits_completed_error() {
             is_error: true,
             detail: None,
             run_id: Some("run-11".to_string()),
+            output: None,
         }
     );
 }
@@ -308,6 +318,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             run_id: Some("run-42".to_string()),
+            input: Some(serde_json::json!({ "path": path.display().to_string() })),
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -319,6 +330,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
             is_error: false,
             detail: None,
             run_id: Some("run-42".to_string()),
+            output: Some(result.content.clone()),
         }
     );
 }
@@ -382,6 +394,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
         tool_event(&started),
         &ToolEvent::ToolStarted {
             tool_name: "shell".to_string(),
+            input: Some(serde_json::json!({ "command": "sh", "args": ["-c", "exit 3"] })),
             call_id: "call-1".to_string(),
             run_id: Some("run-13".to_string()),
         }
@@ -391,6 +404,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
         tool_event(&completed),
         &ToolEvent::ToolCompleted {
             tool_name: "shell".to_string(),
+            output: Some(result.content.clone()),
             call_id: "call-1".to_string(),
             is_error: true,
             detail: None,
@@ -478,6 +492,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
         assert_eq!(
             tool_event(&started),
             &ToolEvent::ToolStarted {
+                input: Some(serde_json::json!({})),
                 tool_name: name.to_string(),
                 call_id: "call-web".to_string(),
                 run_id: Some("run-20".to_string()),
@@ -487,6 +502,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
         assert_eq!(
             tool_event(&completed),
             &ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: name.to_string(),
                 call_id: "call-web".to_string(),
                 is_error: true,
@@ -516,6 +532,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
         &ToolEvent::ToolStarted {
             tool_name: "read".to_string(),
             call_id: "call-read".to_string(),
+            input: Some(serde_json::json!({ "path": path.display().to_string() })),
             run_id: Some("run-20".to_string()),
         }
     );
@@ -525,6 +542,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
         &ToolEvent::ToolCompleted {
             tool_name: "read".to_string(),
             call_id: "call-read".to_string(),
+            output: Some(result.content.clone()),
             is_error: false,
             detail: None,
             run_id: Some("run-20".to_string()),
@@ -678,6 +696,7 @@ async fn executor_emits_tool_completed_with_detail() {
         tool_event(&started),
         &ToolEvent::ToolStarted {
             tool_name: "detail_tool".to_string(),
+            input: Some(serde_json::json!({})),
             call_id: "call-1".to_string(),
             run_id: Some("run-15".to_string()),
         }
@@ -687,6 +706,7 @@ async fn executor_emits_tool_completed_with_detail() {
         tool_event(&completed),
         &ToolEvent::ToolCompleted {
             tool_name: "detail_tool".to_string(),
+            output: Some("本文".to_string()),
             call_id: "call-1".to_string(),
             is_error: false,
             detail: Some(serde_json::json!({

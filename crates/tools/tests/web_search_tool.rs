@@ -152,6 +152,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() {
     assert_eq!(
         tool_event(&started),
         &ToolEvent::ToolStarted {
+            input: Some(json!({ "query": "evorch" })),
             tool_name: "web_search".to_string(),
             call_id: "call-1".to_string(),
             run_id: Some("run-21".to_string()),

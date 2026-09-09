@@ -225,6 +225,7 @@ impl ToolExecutor {
         let started = ToolEvent::ToolStarted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
+            input: Some(args.clone()),
             run_id: Some(ctx.run_id.clone()),
         };
         debug_assert!(
@@ -240,7 +241,7 @@ impl ToolExecutor {
         self.event_bus.emit(Event::new(started));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
-            self.emit_completed(ctx, tool_name, call_id, true, None);
+            self.emit_completed(ctx, tool_name, call_id, None);
             return Err(error);
         }
 
@@ -300,16 +301,17 @@ impl ToolExecutor {
                 result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
-                self.emit_completed(ctx, tool_name, call_id, result.is_error, detail.clone());
-                Ok(ToolResult {
+                let result = ToolResult {
                     content,
                     is_error: result.is_error,
                     detail,
                     origin: result.origin,
-                })
+                };
+                self.emit_completed(ctx, tool_name, call_id, Some(&result));
+                Ok(result)
             }
             Err(error) => {
-                self.emit_completed(ctx, tool_name, call_id, true, None);
+                self.emit_completed(ctx, tool_name, call_id, None);
                 Err(error)
             }
         }
@@ -321,14 +323,14 @@ impl ToolExecutor {
         ctx: &ToolExecutionContext,
         tool_name: &str,
         call_id: &str,
-        is_error: bool,
-        detail: Option<serde_json::Value>,
+        result: Option<&ToolResult>,
     ) {
         let completed = ToolEvent::ToolCompleted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
-            is_error,
-            detail,
+            is_error: result.is_none_or(|result| result.is_error),
+            output: result.map(|result| result.content.clone()),
+            detail: result.and_then(|result| result.detail.clone()),
             run_id: Some(ctx.run_id.clone()),
         };
         debug_assert!(
@@ -356,7 +358,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             reason: reason.to_string(),
         }));
-        self.emit_completed(ctx, tool_name, call_id, true, None);
+        self.emit_completed(ctx, tool_name, call_id, None);
         Err(ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
@@ -385,6 +387,38 @@ mod tests {
     use super::*;
     use crate::Permissions;
     use crate::origin::ContentOrigin;
+
+    #[tokio::test]
+    async fn executor_emits_input_and_output_for_read() {
+        // Given: a real read tool, file, and subscribed event bus.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.txt");
+        std::fs::write(&path, "本文\n").unwrap();
+        let input = serde_json::json!({"path": path});
+        let bus = Arc::new(EventBus::new(16));
+        let mut receiver = bus.subscribe();
+        let mut executor = ToolExecutor::new(bus);
+        executor.register(Arc::new(Read)).unwrap();
+        let ctx = ToolExecutionContext {
+            run_id: "r1".into(),
+        };
+
+        // When: the executor reads the file.
+        let result = executor
+            .execute(&ctx, "read", "c1", input.clone())
+            .await
+            .unwrap();
+
+        // Then: subscribers receive the input and returned file content separately.
+        let started = serde_json::to_value(receiver.recv().await.unwrap()).unwrap();
+        let completed = serde_json::to_value(receiver.recv().await.unwrap()).unwrap();
+        assert_eq!(started["kind"]["payload"]["payload"]["input"], input);
+        assert_eq!(
+            completed["kind"]["payload"]["payload"]["output"],
+            result.content
+        );
+        assert!(result.content.contains("本文"));
+    }
 
     /// 権限と矛盾する origin を申告して返すテスト用ツール。
     struct OriginTamperTool;

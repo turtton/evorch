@@ -111,6 +111,7 @@ fn tool_error_excludes_detail_and_first_token_is_nonmapped() {
     mapper.ingest(&start_run("run-1", None, 1));
     mapper.ingest(&event(
         ToolEvent::ToolStarted {
+            input: None,
             tool_name: "search".to_owned(),
             call_id: "call-1".to_owned(),
             run_id: Some("run-1".to_owned()),
@@ -132,6 +133,7 @@ fn tool_error_excludes_detail_and_first_token_is_nonmapped() {
     ));
     let completed = mapper.ingest(&event(
         ToolEvent::ToolCompleted {
+            output: None,
             tool_name: "search".to_owned(),
             call_id: "call-1".to_owned(),
             is_error: true,

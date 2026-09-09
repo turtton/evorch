@@ -344,6 +344,9 @@ pub enum ToolEvent {
         tool_name: String,
         /// ツール呼び出しの ID。
         call_id: String,
+        /// ツール呼び出しに渡した引数。旧イベントでは欠落する。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<serde_json::Value>,
         /// 観測相関用の実行 ID。
         ///
         /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
@@ -359,6 +362,9 @@ pub enum ToolEvent {
         call_id: String,
         /// ツールがエラーで終了したかどうか。
         is_error: bool,
+        /// ツールの返却本文。本文のない失敗と旧イベントでは欠落する。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
         /// ツールが添えたメタデータ (request_id や取得 URL 等の補助情報)。
         ///
         /// v0.1 で保存された旧形式ペイロードはこのフィールドを持たないため、
@@ -955,6 +961,7 @@ mod tests {
             (
                 "Tool",
                 ToolEvent::ToolStarted {
+                    input: None,
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
                     run_id: None,
@@ -964,6 +971,7 @@ mod tests {
             (
                 "Tool",
                 ToolEvent::ToolCompleted {
+                    output: None,
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
                     is_error: true,
@@ -1244,6 +1252,7 @@ mod tests {
     fn tool_completed_round_trips_with_and_without_detail() {
         let cases = [
             Event::new(ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 is_error: false,
@@ -1251,6 +1260,7 @@ mod tests {
                 run_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 is_error: true,
@@ -1263,6 +1273,53 @@ mod tests {
             let json = serde_json::to_string(&event).expect("JSONへ変換できる");
             let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
             assert_eq!(event, restored, "round-trip mismatch: {json}");
+        }
+    }
+
+    #[test]
+    fn tool_payload_round_trip_preserves_input_and_output() {
+        // Given: persisted tool payloads containing input or output.
+        let cases = [
+            serde_json::json!({"kind": "ToolStarted", "payload": {
+                "tool_name": "read", "call_id": "c1", "run_id": "r1",
+                "input": {"path": "sample.txt"}
+            }}),
+            serde_json::json!({"kind": "ToolCompleted", "payload": {
+                "tool_name": "read", "call_id": "c1", "run_id": "r1",
+                "is_error": false, "output": "本文\n", "detail": {"bytes": 7}
+            }}),
+        ];
+        for expected in cases {
+            // When: the persisted payload is decoded and encoded again.
+            let event: ToolEvent = serde_json::from_value(expected.clone()).unwrap();
+            let restored = serde_json::to_value(event).unwrap();
+            // Then: input/output and existing metadata survive unchanged.
+            assert_eq!(restored, expected);
+        }
+    }
+
+    #[test]
+    fn legacy_tool_payload_defaults_and_omits_input_and_output() {
+        // Given: old payloads with run attribution but no input/output.
+        let cases = [
+            serde_json::json!({"kind": "ToolStarted", "payload": {
+                "tool_name": "read", "call_id": "c1", "run_id": "r1"
+            }}),
+            serde_json::json!({"kind": "ToolCompleted", "payload": {
+                "tool_name": "read", "call_id": "c1", "run_id": "r1",
+                "is_error": false, "detail": {"bytes": 7}
+            }}),
+        ];
+        for legacy in cases {
+            // When: decoding the persisted payload.
+            let restored: ToolEvent = serde_json::from_value(legacy.clone()).unwrap();
+            // Then: missing content defaults to None and is omitted on write.
+            match &restored {
+                ToolEvent::ToolStarted { input, .. } => assert_eq!(input, &None),
+                ToolEvent::ToolCompleted { output, .. } => assert_eq!(output, &None),
+                other => panic!("unexpected tool event: {other:?}"),
+            }
+            assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
         }
     }
 
@@ -1295,6 +1352,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Tool(ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 is_error: false,
@@ -1974,6 +2032,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Tool(ToolEvent::ToolStarted {
+                input: None,
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 run_id: None,
@@ -2014,6 +2073,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Tool(ToolEvent::ToolCompleted {
+                output: None,
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 is_error: false,
