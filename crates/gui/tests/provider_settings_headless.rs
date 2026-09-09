@@ -130,7 +130,10 @@ fn open_valid_settings(harness: &mut HeadlessWorkbench<DemoSource>) {
     model.base_url = "https://api.example.invalid/v1".into();
     model.api_key_env = "LOCAL_API_KEY".into();
     model.credential_mode = gui::model::provider_settings::CredentialMode::Env;
-    model.models_text = "gpt-4.1\ngpt-4.1-mini".into();
+    model.models = vec![
+        config::types::provider::ModelEntryConfig::enabled("gpt-4.1"),
+        config::types::provider::ModelEntryConfig::enabled("gpt-4.1-mini"),
+    ];
     model.default_model = "gpt-4.1".into();
     harness.run();
 }
@@ -333,7 +336,7 @@ fn workbench_with_seeded_settings(
             credential: CredentialRefConfig::Env {
                 var: model.api_key_env.clone(),
             },
-            models: model.parsed_models(),
+            models: model.models.clone(),
             default_model: model.default_model.clone(),
             ..Default::default()
         },
@@ -381,7 +384,7 @@ fn modal_width_scales_with_viewport_and_respects_cap() {
         name: "local".into(),
         base_url: "https://api.example.invalid/v1/chat/completions/very/long/path/that/should/not/clip/in/the/provider/settings/modal".into(),
         api_key_env: "LOCAL_API_KEY_WITH_A_VERY_LONG_NAME".into(),
-        models_text: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
+        models: vec![config::types::provider::ModelEntryConfig::enabled("org/example/model-name-that-is-very-long-and-should-not-clip")],
         default_model: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
         ..OpenAiEditorModel::default()
     };

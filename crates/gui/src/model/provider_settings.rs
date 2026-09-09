@@ -60,7 +60,11 @@ impl ProviderSettingsModel {
                         _ => ProviderKind::OpenAiCompatible,
                     },
                     default_model: profile.default_model.clone(),
-                    models: profile.models.clone(),
+                    models: profile
+                        .models
+                        .iter()
+                        .map(|model| model.id.clone())
+                        .collect(),
                     provider_type: profile.provider_type,
                 })
                 .collect(),
@@ -121,7 +125,11 @@ impl ProviderSettingsModel {
                     name: name.into(),
                     auth: CodexAuthModel::for_account(account.clone()),
                     account,
-                    models: profile.models.clone(),
+                    models: profile
+                        .models
+                        .iter()
+                        .map(|model| model.id.clone())
+                        .collect(),
                     default_model: profile.default_model.clone(),
                 })
             }

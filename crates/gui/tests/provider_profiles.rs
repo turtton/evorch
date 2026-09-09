@@ -47,7 +47,7 @@ fn edit_existing_openai_profile_prefills_form() {
         ProviderProfileConfig {
             provider_type: ProviderTypeConfig::OpenAiCompatible,
             base_url: "https://example.com/v1".into(),
-            models: vec!["model".into()],
+            models: vec![config::types::provider::ModelEntryConfig::enabled("model")],
             default_model: "model".into(),
             ..Default::default()
         },

@@ -89,7 +89,9 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
     let model = model.openai_mut().unwrap();
     model.base_url = "https://example.com/v1".into();
     model.api_key_input = "sk-test".into();
-    model.models_text = "model-a".into();
+    model.models = vec![config::types::provider::ModelEntryConfig::enabled(
+        "model-a",
+    )];
     model.default_model = "model-a".into();
     harness.run();
     assert!(!harness.has_label("sk-test"));

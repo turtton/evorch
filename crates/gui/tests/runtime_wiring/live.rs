@@ -119,7 +119,9 @@ fn provider_save_recomposes_live_model() {
     settings.base_url = "https://example.test/v1".into();
     settings.credential_mode = gui::model::provider_settings::CredentialMode::Keyring;
     settings.api_key_input = "new-secret".into();
-    settings.models_text = "new-model".into();
+    settings.models = vec![config::types::provider::ModelEntryConfig::enabled(
+        "new-model",
+    )];
     settings.default_model = "new-model".into();
     assert_eq!(model.selected_model(Role::Worker), "unresolved:worker");
     // When
