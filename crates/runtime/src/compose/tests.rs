@@ -193,8 +193,11 @@ async fn complete_redacts_provider_error_detail() {
         None,
     );
 
-    model.providers.get_mut("local").expect("local profile").auth =
-        ProviderAuth::new("sk-secret-value");
+    model
+        .providers
+        .get_mut("local")
+        .expect("local profile")
+        .auth = ProviderAuth::new("sk-secret-value");
     let error = complete(&model, "run-8")
         .await
         .expect_err("provider failure");

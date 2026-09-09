@@ -260,11 +260,11 @@ impl TranscriptModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::{AgentRunPhase, LifecycleEvent};
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
         DeliveryDisposition, EventKind, MessageEvent, ToolEvent,
     };
+    use event_bus::{AgentRunPhase, LifecycleEvent};
 
     #[test]
     fn run_error_lifecycle_becomes_error_entry() {
@@ -278,9 +278,12 @@ mod tests {
             reason: Some("profile=x http error 401".into()),
         }));
         // Then: the failure becomes a distinct visible entry.
-        assert_eq!(model.entries(), &[TranscriptEntry::Error {
-            text: "Run failed: profile=x http error 401".into(),
-        }]);
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Error {
+                text: "Run failed: profile=x http error 401".into(),
+            }]
+        );
     }
 
     #[test]
@@ -288,17 +291,29 @@ mod tests {
         // Given: an error follows earlier assistant text.
         let mut model = TranscriptModel::new();
         model.push_message("before");
-        model.push(TranscriptEntry::Error { text: "Run failed: timeout".into() });
+        model.push(TranscriptEntry::Error {
+            text: "Run failed: timeout".into(),
+        });
         // When: the assistant streams another delta.
         model.apply(&Event::new(MessageEvent::MessageDelta {
-            delta: "after".into(), run_id: Some("run-error".into()),
+            delta: "after".into(),
+            run_id: Some("run-error".into()),
         }));
         // Then: the error separates the two messages.
-        assert_eq!(model.entries(), &[
-            TranscriptEntry::Message { text: "before".into() },
-            TranscriptEntry::Error { text: "Run failed: timeout".into() },
-            TranscriptEntry::Message { text: "after".into() },
-        ]);
+        assert_eq!(
+            model.entries(),
+            &[
+                TranscriptEntry::Message {
+                    text: "before".into()
+                },
+                TranscriptEntry::Error {
+                    text: "Run failed: timeout".into()
+                },
+                TranscriptEntry::Message {
+                    text: "after".into()
+                },
+            ]
+        );
     }
 
     #[test]

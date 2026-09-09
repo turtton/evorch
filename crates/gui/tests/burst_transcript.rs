@@ -110,7 +110,8 @@ fn transcript_text(model: &TranscriptModel) -> String {
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Tool { .. }
-            | TranscriptEntry::AgentMessage { .. } => panic!("unexpected transcript entry"),
+            | TranscriptEntry::AgentMessage { .. }
+            | TranscriptEntry::Error { .. } => panic!("unexpected transcript entry"),
         })
         .collect()
 }

@@ -177,12 +177,12 @@ impl TranscriptRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::{AgentRunPhase, LifecycleEvent};
     use crate::model::transcript::{MessageDirection, ToolStatus, TranscriptEntry};
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, Event,
         MessageEvent, ToolEvent,
     };
+    use event_bus::{AgentRunPhase, LifecycleEvent};
 
     #[test]
     fn run_error_routes_to_owning_thread() {
@@ -198,9 +198,18 @@ mod tests {
         let destinations = registry.route(&event);
         registry.apply(&event);
         // Then: the owning thread and run both receive the failure.
-        assert_eq!(destinations, vec![TranscriptKey::Thread, TranscriptKey::Run("run-error".into())]);
+        assert_eq!(
+            destinations,
+            vec![
+                TranscriptKey::Thread,
+                TranscriptKey::Run("run-error".into())
+            ]
+        );
         assert_eq!(registry.thread().entries().len(), 1);
-        assert_eq!(registry.run("run-error").expect("run transcript").entries(), registry.thread().entries());
+        assert_eq!(
+            registry.run("run-error").expect("run transcript").entries(),
+            registry.thread().entries()
+        );
     }
 
     fn delivered(sender: &str, recipient: &str) -> Event {
