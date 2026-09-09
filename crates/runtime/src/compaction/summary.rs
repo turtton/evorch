@@ -106,6 +106,7 @@ impl Summarizer for ModelSummarizer {
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
+            model_preference: None,
             run_id: self.run_id.clone(),
         };
         let response = self
