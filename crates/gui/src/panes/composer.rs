@@ -192,6 +192,63 @@ mod tests {
     }
 
     #[test]
+    fn typing_slash_prefix_keeps_focus() {
+        // Given: the composer has focus and no input
+        let mut harness = harness("", ProviderStatus::Configured);
+        harness
+            .get_by_label("Message or /command")
+            .focus();
+        harness.run();
+
+        // When: a slash-command prefix is typed one character at a time
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text("/".into()));
+        harness.run();
+        // Then: focus and input survive the first completion row
+        assert!(harness.ctx.memory(|memory| memory.focused()).is_some());
+        assert_eq!(harness.state().model.input, "/");
+
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text("g".into()));
+        harness.run();
+        assert!(harness.ctx.memory(|memory| memory.focused()).is_some());
+        assert_eq!(harness.state().model.input, "/g");
+        harness.get_by_label("/goal <text>");
+
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text("o".into()));
+        harness.run();
+        assert!(harness.ctx.memory(|memory| memory.focused()).is_some());
+        assert_eq!(harness.state().model.input, "/go");
+    }
+
+    #[test]
+    fn completion_disappearance_keeps_focus() {
+        // Given: a focused composer with slash completions visible
+        let mut harness = harness("/g", ProviderStatus::Configured);
+        harness
+            .get_by_label("Message or /command")
+            .focus();
+        harness.run();
+
+        // When: a space makes the completion candidates disappear
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::Text(" ".into()));
+        harness.run();
+
+        // Then: the composer remains focused
+        assert!(harness.ctx.memory(|memory| memory.focused()).is_some());
+    }
+
+    #[test]
     fn guidance_label_shown_when_provider_missing() {
         // Given
         let mut harness = harness("", ProviderStatus::default());
