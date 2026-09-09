@@ -28,7 +28,7 @@ htmd = "0.5.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ipnet = "2"
 jsonschema = { version = "0.52", default-features = false }
-keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }
+keyring = { version = "4", features = ["v1"] }
 # OTel metrics / span exporter (event-bus / otel-exporter feature)。
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["metrics", "trace", "http-proto", "reqwest-blocking-client"] }
