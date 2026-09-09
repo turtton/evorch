@@ -181,25 +181,41 @@ async fn complete_builds_request_from_binding_and_route() {
 
 // Given: secret を含む provider error を返す stub client
 // When: RoutedModel.complete が失敗する
-// Then: RuntimeError::Model は安全な固定理由だけを返す
+// Then: status and route identity survive while the authentication secret is scrubbed.
 #[tokio::test]
 async fn complete_redacts_provider_error_detail() {
-    let (model, _) = routed_model(
-        Err(ProviderError::Request("secret-never-rendered".to_string())),
+    let (mut model, _) = routed_model(
+        Err(ProviderError::Http {
+            status: 401,
+            body: "bad key sk-secret-value".into(),
+        }),
         "local-model",
         None,
     );
 
+    model.providers.get_mut("local").expect("local profile").auth =
+        ProviderAuth::new("sk-secret-value");
     let error = complete(&model, "run-8")
         .await
         .expect_err("provider failure");
 
-    assert_eq!(
-        error,
-        RuntimeError::Model {
-            reason: "provider request failed".to_string()
-        }
-    );
+    let RuntimeError::Model { reason } = error else {
+        panic!("expected model error");
+    };
+    assert!(reason.contains("401"), "{reason}");
+    assert!(reason.contains("profile=local"), "{reason}");
+    assert!(reason.contains("bad key ***"), "{reason}");
+    assert!(!reason.contains("sk-secret-value"));
+}
+
+#[tokio::test]
+async fn complete_reports_timeout_reason() {
+    // Given: a provider that times out.
+    let (model, _) = routed_model(Err(ProviderError::Timeout), "local-model", None);
+    // When: completing a request.
+    let error = complete(&model, "run-timeout").await.expect_err("timeout");
+    // Then: the timeout kind remains visible.
+    assert!(error.to_string().contains("timed out"), "{error}");
 }
 
 // Given: worker logical model が local profile の default model に解決される adapter
