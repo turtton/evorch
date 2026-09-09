@@ -36,6 +36,26 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn send_chat_carries_thread_model_preference() {
+    // Given
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().set_thread_model_preference(Some(workspace_ui::ModelPreference {
+        profile: "local".into(),
+        model: Some("model-b".into()),
+    }));
+    // When
+    submit(&mut harness, "selected model");
+    // Then
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("expected chat");
+    };
+    assert_eq!(chat.model_preference, Some(runtime::ModelPreference {
+        profile: "local".into(), model: Some("model-b".into()),
+    }));
+}
+
+#[test]
 fn chat_send_issues_send_chat_and_shows_user_line() {
     // Given: an active thread with a configured provider.
     let temp = tempfile::tempdir().expect("temp dir");

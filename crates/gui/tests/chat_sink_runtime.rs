@@ -15,18 +15,22 @@ use runtime::{
 };
 use tools::ToolExecutor;
 
-struct ScriptedModel(Mutex<VecDeque<ChatResponse>>);
+struct ScriptedModel {
+    responses: Mutex<VecDeque<ChatResponse>>,
+    preferences: Arc<Mutex<Vec<Option<runtime::ModelPreference>>>>,
+}
 
 #[async_trait]
 impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
-        _invocation: &AgentInvocationContext,
+        invocation: &AgentInvocationContext,
         _role: Role,
         _messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.0
+        self.preferences.lock().unwrap().push(invocation.model_preference.clone());
+        self.responses
             .lock()
             .expect("script lock")
             .pop_front()
@@ -45,6 +49,7 @@ struct Fixture {
     sink: RuntimeCommandSink,
     runtime: AgentRuntime,
     events: EventReceiver,
+    preferences: Arc<Mutex<Vec<Option<runtime::ModelPreference>>>>,
 }
 
 impl Fixture {
@@ -68,10 +73,11 @@ impl Fixture {
                 finish_reason: FinishReason::Stop,
             })
             .collect();
+        let preferences = Arc::new(Mutex::new(Vec::new()));
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus.clone())),
-            Arc::new(ScriptedModel(Mutex::new(responses))),
+            Arc::new(ScriptedModel { responses: Mutex::new(responses), preferences: preferences.clone() }),
         );
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
@@ -87,13 +93,19 @@ impl Fixture {
             sink,
             runtime,
             events,
+            preferences,
         }
     }
 
     fn send(&mut self, thread: &str, text: &str) -> String {
+        self.send_preference(thread, text, None)
+    }
+
+    fn send_preference(&mut self, thread: &str, text: &str, model_preference: Option<runtime::ModelPreference>) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
             thread_id: thread.into(),
             text: text.into(),
+            model_preference,
         }));
         match events.as_slice() {
             [LoopEvent::ChatAccepted { thread_id, run_id }] => {
@@ -148,6 +160,22 @@ impl Fixture {
             .expect("accepted run exists")
             .run_id
     }
+}
+
+#[test]
+fn sink_sets_preference_on_existing_run_before_send() {
+    // Given: the real runtime with a recording model, not a mocked send path.
+    let mut fixture = Fixture::new();
+    let first = Some(runtime::ModelPreference { profile: "local".into(), model: Some("a".into()) });
+    let second = Some(runtime::ModelPreference { profile: "remote".into(), model: Some("b".into()) });
+    let id = fixture.send_preference("thread-1", "first", first.clone());
+    fixture.wait_for_reply(&id, "reply-1");
+    // When: another turn changes the preference on the keep-alive run.
+    let reused = fixture.send_preference("thread-1", "second", second.clone());
+    fixture.wait_for_reply(&reused, "reply-2");
+    // Then: the first RunConfig and the update both reach the completion boundary.
+    assert_eq!(reused, id);
+    assert_eq!(*fixture.preferences.lock().unwrap(), vec![first, second]);
 }
 
 #[test]
