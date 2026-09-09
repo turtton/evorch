@@ -56,7 +56,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 credential: config::CredentialRefConfig::Env {
                     var: "EXAMPLE_API_KEY".into(),
                 },
-                models: vec!["gpt-4.1".into(), "gpt-4.1-mini".into()],
+                models: vec![
+                    config::types::provider::ModelEntryConfig::enabled("gpt-4.1"),
+                    config::types::provider::ModelEntryConfig::enabled("gpt-4.1-mini"),
+                ],
                 default_model: "gpt-4.1".into(),
                 ..Default::default()
             },

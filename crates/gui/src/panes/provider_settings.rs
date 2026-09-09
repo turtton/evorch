@@ -203,8 +203,15 @@ fn openai_body(ui: &mut egui::Ui, model: &mut OpenAiEditorModel) -> Option<Provi
         }
     });
     let models = ui.label("Models");
+    let mut models_text = model
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     ui.add(
-        egui::TextEdit::multiline(&mut model.models_text)
+        egui::TextEdit::multiline(&mut models_text)
+            .interactive(false)
             .hint_text("one per line")
             .desired_rows(3)
             .desired_width(width)

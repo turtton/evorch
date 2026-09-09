@@ -1,6 +1,11 @@
 //! egui に依存しないプロバイダ設定の編集モデル。
 
+use config::types::provider::ModelEntryConfig;
+use std::collections::BTreeSet;
 use std::sync::mpsc::Receiver;
+
+#[path = "provider_model_entries.rs"]
+mod entries;
 
 #[path = "provider_models_fetch.rs"]
 mod models_fetch;
@@ -42,7 +47,9 @@ pub struct ProviderSettingsModel {
     pub name: String,
     pub base_url: String,
     pub api_key_env: String,
-    pub models_text: String,
+    pub models: Vec<ModelEntryConfig>,
+    pub validation_error: Option<String>,
+    pub fetch_selected: BTreeSet<String>,
     pub default_model: String,
     pub error: Option<String>,
     pub excluded_models_text: String,
@@ -63,7 +70,9 @@ impl Default for ProviderSettingsModel {
             name: "openai-compat".into(),
             base_url: String::new(),
             api_key_env: String::new(),
-            models_text: String::new(),
+            models: Vec::new(),
+            validation_error: None,
+            fetch_selected: BTreeSet::new(),
             default_model: String::new(),
             error: None,
             excluded_models_text: String::new(),
@@ -82,7 +91,9 @@ impl std::fmt::Debug for ProviderSettingsModel {
             .field("name", &self.name)
             .field("base_url", &self.base_url)
             .field("api_key_env", &self.api_key_env)
-            .field("models_text", &self.models_text)
+            .field("models", &self.models)
+            .field("validation_error", &self.validation_error)
+            .field("fetch_selected", &self.fetch_selected)
             .field("default_model", &self.default_model)
             .field("error", &self.error)
             .field("excluded_models_text", &self.excluded_models_text)
@@ -105,7 +116,9 @@ impl Clone for ProviderSettingsModel {
             name: self.name.clone(),
             base_url: self.base_url.clone(),
             api_key_env: self.api_key_env.clone(),
-            models_text: self.models_text.clone(),
+            models: self.models.clone(),
+            validation_error: self.validation_error.clone(),
+            fetch_selected: self.fetch_selected.clone(),
             default_model: self.default_model.clone(),
             error: self.error.clone(),
             excluded_models_text: self.excluded_models_text.clone(),
@@ -126,7 +139,9 @@ impl PartialEq for ProviderSettingsModel {
             && self.name == other.name
             && self.base_url == other.base_url
             && self.api_key_env == other.api_key_env
-            && self.models_text == other.models_text
+            && self.models == other.models
+            && self.validation_error == other.validation_error
+            && self.fetch_selected == other.fetch_selected
             && self.default_model == other.default_model
             && self.error == other.error
             && self.excluded_models_text == other.excluded_models_text
@@ -173,22 +188,15 @@ impl ProviderSettingsModel {
             ),
             base_url: profile.base_url.clone(),
             api_key_env,
-            models_text: profile.models.join("\n"),
+            models: Self::models_from_config(profile),
             default_model: profile.default_model.clone(),
             excluded_models_text: profile.excluded_models.join("\n"),
             ..Self::default()
         }
     }
 
-    /// 改行・カンマ区切りのモデル ID を初出順に正規化する。
-    pub fn parsed_models(&self) -> Vec<String> {
-        let mut models = Vec::new();
-        for model in self.models_text.split(['\n', ',']).map(str::trim) {
-            if !model.is_empty() && !models.iter().any(|existing| existing == model) {
-                models.push(model.to_owned());
-            }
-        }
-        models
+    pub fn models_from_config(profile: &config::ProviderProfileConfig) -> Vec<ModelEntryConfig> {
+        profile.models.clone()
     }
 
     /// 改行・カンマ区切りの除外モデル ID を初出順に正規化する。
@@ -202,27 +210,24 @@ impl ProviderSettingsModel {
         models
     }
 
-    /// 除外フィルタを適用し、選択中のモデルは末尾に補う。
+    /// 設定済みの有効なモデルだけを初出順に返す。
     pub fn candidate_models(&self) -> Vec<String> {
-        let mut choices = self
-            .available_models
-            .clone()
-            .unwrap_or_else(|| self.parsed_models());
-        let excluded = self.parsed_excluded_models();
-        choices.retain(|id| !excluded.contains(id));
-        if !self.default_model.is_empty() && !choices.contains(&self.default_model) {
-            choices.push(self.default_model.clone());
+        let mut choices = Vec::new();
+        for model in &self.models {
+            if !choices.contains(&model.id)
+                && self
+                    .models
+                    .iter()
+                    .any(|entry| entry.id == model.id && entry.enabled)
+            {
+                choices.push(model.id.clone());
+            }
         }
         choices
     }
 
     /// モデル一覧以外は入力をそのまま渡し、検証は config に委ねる。
     pub fn to_input(&self) -> config::OpenAiCompatibleProviderInput {
-        let mut models = self.parsed_models();
-        let default_model = self.default_model.trim();
-        if !default_model.is_empty() && !models.iter().any(|id| id == default_model) {
-            models.push(default_model.to_owned());
-        }
         config::OpenAiCompatibleProviderInput {
             name: self.name.clone(),
             base_url: self.base_url.clone(),
@@ -235,7 +240,7 @@ impl ProviderSettingsModel {
                     account: self.name.clone(),
                 },
             },
-            models,
+            models: self.models.clone(),
             excluded_models: self.parsed_excluded_models(),
             default_model: self.default_model.clone(),
         }

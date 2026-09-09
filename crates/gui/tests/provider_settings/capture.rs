@@ -155,7 +155,7 @@ fn capture_modal_png_evidence() {
             name: "local".into(),
             base_url: "https://api.example.invalid/v1/chat/completions/very/long/path/that/should/not/clip/in/the/provider/settings/modal".into(),
             api_key_env: "LOCAL_API_KEY_WITH_A_VERY_LONG_NAME".into(),
-            models_text: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
+        models: vec![config::types::provider::ModelEntryConfig::enabled("org/example/model-name-that-is-very-long-and-should-not-clip")],
             default_model: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
             ..Default::default()
         };

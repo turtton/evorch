@@ -53,6 +53,7 @@ impl ProviderSettingsModel {
     ) {
         self.models_fetch_state = ModelsFetchState::Loading;
         self.available_models = None;
+        self.fetch_selected.clear();
         let base_url = self.base_url.clone();
         self.models_fetch_base_url = Some(base_url.clone());
         let (tx, rx) = channel();

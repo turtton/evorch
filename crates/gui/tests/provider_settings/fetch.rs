@@ -73,7 +73,9 @@ fn fetched_models_populate_modal_when_request_succeeds() {
             base_url: server.base_url(),
             api_key_env: "TEST_KEY".into(),
             credential_mode: gui::model::provider_settings::CredentialMode::Env,
-            models_text: "manual-model".into(),
+            models: vec![config::types::provider::ModelEntryConfig::enabled(
+                "manual-model",
+            )],
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()
         },
@@ -104,6 +106,14 @@ fn fetched_models_populate_modal_when_request_succeeds() {
             && request.path == "/v1/models"
             && request.authorization.as_deref() == Some("Bearer sk-test")
     }));
+    let editor = harness
+        .state_mut()
+        .provider_settings_mut()
+        .openai_mut()
+        .unwrap();
+    editor.selection_toggle("mock-model-b");
+    editor.selection_toggle("mock-model-a");
+    editor.apply_fetched_selection();
     harness.click_label("Default model");
     harness.run();
     assert!(harness.has_label("mock-model-b"));
@@ -120,7 +130,9 @@ fn manual_models_remain_available_when_request_fails() {
             base_url: "http://127.0.0.1:9".into(),
             api_key_env: "TEST_KEY".into(),
             credential_mode: gui::model::provider_settings::CredentialMode::Env,
-            models_text: "manual-model".into(),
+            models: vec![config::types::provider::ModelEntryConfig::enabled(
+                "manual-model",
+            )],
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()
         },
@@ -144,7 +156,7 @@ fn manual_models_remain_available_when_request_fails() {
         panic!("expected failed fetch, got {:?}", model.models_fetch_state);
     };
     assert_eq!(model.available_models, None);
-    assert_eq!(model.parsed_models(), ["manual-model"]);
+    assert_eq!(model.models, ["manual-model"]);
     assert!(harness.has_label(&format!("Auto-fetch failed ({error}); manual entry below")));
     harness.click_label("Default model");
     harness.run();
@@ -167,7 +179,9 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
             base_url: server.base_url(),
             api_key_env: "TEST_KEY".into(),
             credential_mode: gui::model::provider_settings::CredentialMode::Env,
-            models_text: "manual-model".into(),
+            models: vec![config::types::provider::ModelEntryConfig::enabled(
+                "manual-model",
+            )],
             default_model: "manual-model".into(),
             ..ProviderSettingsModel::default()
         },
@@ -193,12 +207,14 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
             .models_fetch_state,
         ModelsFetchState::Loaded
     );
-    harness
+    let editor = harness
         .state_mut()
         .provider_settings_mut()
         .openai_mut()
-        .unwrap()
-        .default_model = "mock-model-a".into();
+        .unwrap();
+    editor.selection_toggle("mock-model-a");
+    editor.apply_fetched_selection();
+    editor.default_model = "mock-model-a".into();
     harness.run();
     // When: the fetched selection is saved through the modal.
     harness.click_label("Save");

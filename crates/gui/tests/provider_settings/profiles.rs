@@ -64,7 +64,7 @@ fn save_new_profile_appends_to_list_and_config() {
     editor.base_url = "https://example.com/v1".into();
     editor.credential_mode = gui::model::provider_settings::CredentialMode::Env;
     editor.api_key_env = "API_KEY".into();
-    editor.models_text = "model".into();
+    editor.models = vec![config::types::provider::ModelEntryConfig::enabled("model")];
     editor.default_model = "model".into();
     harness.run();
     // When

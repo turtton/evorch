@@ -40,7 +40,10 @@ fn compatible(credential: CredentialRefConfig) -> ProviderProfileConfig {
         api_protocol: config::ApiProtocolConfig::OpenAiCompletions,
         base_url: "https://example.com/v1".into(),
         credential,
-        models: vec!["model-b".into(), "model-a".into()],
+        models: vec![
+            ModelEntryConfig::enabled("model-b"),
+            ModelEntryConfig::enabled("model-a"),
+        ],
         default_model: "model-a".into(),
         excluded_models: vec!["excluded-b".into(), "excluded-a".into()],
     }
@@ -75,7 +78,10 @@ fn seed_from_config_picks_first_openai_compatible_env_provider() {
             name: "b-compatible".into(),
             base_url: "https://example.com/v1".into(),
             api_key_env: "FIRST_KEY".into(),
-            models_text: "model-b\nmodel-a".into(),
+            models: vec![
+                ModelEntryConfig::enabled("model-b"),
+                ModelEntryConfig::enabled("model-a")
+            ],
             default_model: "model-a".into(),
             error: None,
             excluded_models_text: "excluded-b\nexcluded-a".into(),
@@ -106,7 +112,7 @@ fn seed_from_config_with_keyring_credential_leaves_api_key_env_empty() {
     assert_eq!(model.name, "keyring");
     assert_eq!(model.api_key_env, "");
     assert_eq!(model.base_url, "https://example.com/v1");
-    assert_eq!(model.models_text, "model-b\nmodel-a");
+    assert_eq!(model.models, ["model-b", "model-a"]);
     assert_eq!(model.default_model, "model-a");
     assert_eq!(model.excluded_models_text, "excluded-b\nexcluded-a");
 }
@@ -129,7 +135,7 @@ fn seed_from_config_without_openai_compatible_returns_default() {
             name: "openai-compat".into(),
             base_url: String::new(),
             api_key_env: String::new(),
-            models_text: String::new(),
+            models: Vec::new(),
             default_model: String::new(),
             error: None,
             excluded_models_text: String::new(),
@@ -143,16 +149,15 @@ fn seed_from_config_without_openai_compatible_returns_default() {
 }
 
 #[test]
-fn parsed_models_splits_trims_and_dedupes() {
+fn add_model_preserves_first_added_order() {
     // Given
-    let model = ProviderSettingsModel {
-        models_text: " model-b, model-a\n\nmodel-b, , model-c\r\n model-a,\n".into(),
-        ..ProviderSettingsModel::default()
-    };
+    let mut model = ProviderSettingsModel::default();
     // When
-    let models = model.parsed_models();
+    for id in [" model-b ", "model-a", "model-c"] {
+        model.add_model(id).unwrap();
+    }
     // Then
-    assert_eq!(models, ["model-b", "model-a", "model-c"]);
+    assert_eq!(model.models, ["model-b", "model-a", "model-c"]);
 }
 
 #[test]
@@ -169,7 +174,7 @@ fn parsed_excluded_models_splits_trims_and_dedupes() {
 }
 
 #[test]
-fn to_input_uses_parsed_models_and_raw_fields() {
+fn to_input_uses_model_entries_and_raw_fields() {
     // Given
     let model = ProviderSettingsModel {
         name: " raw-name ".into(),
@@ -177,7 +182,10 @@ fn to_input_uses_parsed_models_and_raw_fields() {
         api_key_env: " API_KEY ".into(),
         credential_mode: CredentialMode::Env,
         default_model: " model-b ".into(),
-        models_text: " model-b,model-a\nmodel-b ".into(),
+        models: vec![
+            ModelEntryConfig::enabled("model-b"),
+            ModelEntryConfig::enabled("model-a"),
+        ],
         excluded_models_text: " ex-a, ex-b\nex-a ".into(),
         ..ProviderSettingsModel::default()
     };
