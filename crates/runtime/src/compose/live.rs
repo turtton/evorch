@@ -9,6 +9,10 @@ use crate::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 pub struct SwitchableModel(Arc<RwLock<Arc<dyn AgentModel>>>);
 
 impl SwitchableModel {
+    pub fn available_profiles(&self) -> Vec<super::ProfileSummary> {
+        self.current().available_profiles()
+    }
+
     pub fn new(model: Arc<dyn AgentModel>) -> Self {
         Self(Arc::new(RwLock::new(model)))
     }
@@ -50,6 +54,10 @@ impl AgentModel for SwitchableModel {
 
     fn selected_model(&self, role: Role) -> String {
         self.current().selected_model(role)
+    }
+
+    fn available_profiles(&self) -> Vec<super::ProfileSummary> {
+        SwitchableModel::available_profiles(self)
     }
 }
 

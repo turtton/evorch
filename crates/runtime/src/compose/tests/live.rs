@@ -12,6 +12,7 @@ async fn switchable_model_delegates_to_replaced_model() {
         .complete(
             &AgentInvocationContext {
                 run_id: "switch".into(),
+                model_preference: None,
             },
             Role::Worker,
             &[],
@@ -34,6 +35,7 @@ async fn unconfigured_model_reports_settings_guidance() {
         .complete(
             &AgentInvocationContext {
                 run_id: "empty".into(),
+                model_preference: None,
             },
             Role::Worker,
             &[],

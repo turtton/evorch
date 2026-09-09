@@ -141,6 +141,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
         .complete(
             &AgentInvocationContext {
                 run_id: run_id.to_string(),
+                model_preference: None,
             },
             Role::Worker,
             &[Message {
