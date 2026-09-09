@@ -247,10 +247,46 @@ impl TranscriptModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use event_bus::{AgentRunPhase, LifecycleEvent};
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,
         DeliveryDisposition, EventKind, MessageEvent, ToolEvent,
     };
+
+    #[test]
+    fn run_error_lifecycle_becomes_error_entry() {
+        // Given: an empty transcript.
+        let mut model = TranscriptModel::new();
+        // When: a run fails with diagnostic detail.
+        model.apply(&Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-error".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Error,
+            reason: Some("profile=x http error 401".into()),
+        }));
+        // Then: the failure becomes a distinct visible entry.
+        assert_eq!(model.entries(), &[TranscriptEntry::Error {
+            text: "Run failed: profile=x http error 401".into(),
+        }]);
+    }
+
+    #[test]
+    fn append_text_does_not_merge_into_error_entry() {
+        // Given: an error follows earlier assistant text.
+        let mut model = TranscriptModel::new();
+        model.push_message("before");
+        model.push(TranscriptEntry::Error { text: "Run failed: timeout".into() });
+        // When: the assistant streams another delta.
+        model.apply(&Event::new(MessageEvent::MessageDelta {
+            delta: "after".into(), run_id: Some("run-error".into()),
+        }));
+        // Then: the error separates the two messages.
+        assert_eq!(model.entries(), &[
+            TranscriptEntry::Message { text: "before".into() },
+            TranscriptEntry::Error { text: "Run failed: timeout".into() },
+            TranscriptEntry::Message { text: "after".into() },
+        ]);
+    }
 
     #[test]
     fn message_delta_after_user_message_starts_new_entry() {
