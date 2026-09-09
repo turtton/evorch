@@ -14,7 +14,9 @@ fn profile(name: &str, default_model: &str) -> ProviderProfile {
         credential: config::CredentialRefConfig::Env {
             var: "API_KEY".to_string(),
         },
-        models: vec![default_model.to_string()],
+        models: vec![config::types::provider::ModelEntryConfig::enabled(
+            default_model,
+        )],
         excluded_models: Vec::new(),
         default_model: default_model.to_string(),
     };

@@ -35,7 +35,9 @@ fn config() -> Config {
                     service: "evorch".into(),
                     account: "x".into(),
                 },
-                models: vec!["test-model".into()],
+                models: vec![config::types::provider::ModelEntryConfig::enabled(
+                    "test-model",
+                )],
                 excluded_models: vec![],
                 default_model: "test-model".into(),
             },
