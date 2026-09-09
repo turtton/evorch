@@ -101,8 +101,14 @@ impl ProviderSettingsModel {
         let Some(profile) = self.entries.get(name) else {
             return;
         };
-        if !matches!(profile.provider_type, config::ProviderTypeConfig::OpenAiCompatible | config::ProviderTypeConfig::OpenAiCodex) {
-            self.error = Some("This provider type must be edited in evorch.toml; its configuration is preserved.".into());
+        if !matches!(
+            profile.provider_type,
+            config::ProviderTypeConfig::OpenAiCompatible | config::ProviderTypeConfig::OpenAiCodex
+        ) {
+            self.error = Some(
+                "This provider type must be edited in evorch.toml; its configuration is preserved."
+                    .into(),
+            );
             return;
         }
         self.editor = Some(match profile.provider_type {

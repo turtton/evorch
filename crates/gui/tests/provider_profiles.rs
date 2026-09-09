@@ -95,3 +95,30 @@ fn delete_removes_profile_and_refreshes_list() {
             .is_empty()
     );
 }
+
+#[test]
+fn codex_editors_keep_distinct_credential_accounts() {
+    // Given
+    let mut config = Config::default();
+    for name in ["personal", "work"] {
+        config.providers.insert(
+            name.into(),
+            ProviderProfileConfig {
+                provider_type: ProviderTypeConfig::OpenAiCodex,
+                credential: config::CredentialRefConfig::Keyring {
+                    service: "evorch".into(),
+                    account: name.into(),
+                },
+                ..Default::default()
+            },
+        );
+    }
+    let mut model = ProviderSettingsModel::seed_from_config(&config);
+    // When
+    model.edit("personal");
+    let personal = model.codex_mut().unwrap().auth.credential_account.clone();
+    model.edit("work");
+    // Then
+    assert_eq!(personal, "personal");
+    assert_eq!(model.codex_mut().unwrap().auth.credential_account, "work");
+}

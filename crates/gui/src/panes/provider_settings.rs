@@ -59,10 +59,14 @@ pub fn provider_settings_modal(
                             crate::theme::widgets::compact_row(ui, false, |ui| {
                                 ui.label(&profile.name);
                                 let label = match profile.provider_type {
-                                    config::ProviderTypeConfig::OpenAiCompatible => "OpenAI-compatible",
+                                    config::ProviderTypeConfig::OpenAiCompatible => {
+                                        "OpenAI-compatible"
+                                    }
                                     config::ProviderTypeConfig::OpenAiCodex => "Codex subscription",
                                     config::ProviderTypeConfig::Anthropic => "Anthropic",
-                                    config::ProviderTypeConfig::AnthropicSubscription => "Anthropic subscription",
+                                    config::ProviderTypeConfig::AnthropicSubscription => {
+                                        "Anthropic subscription"
+                                    }
                                     config::ProviderTypeConfig::OpenAi => "OpenAI",
                                     config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
                                     config::ProviderTypeConfig::Openrouter => "OpenRouter",
