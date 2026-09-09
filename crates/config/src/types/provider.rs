@@ -125,6 +125,99 @@ impl Default for CredentialRefConfig {
     }
 }
 
+/// モデル ID と利用可否の設定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(transform = model_entry_accepts_string)]
+pub struct ModelEntryConfig {
+    /// モデル ID。
+    pub id: String,
+    /// 利用可能かどうか。省略時は有効。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl ModelEntryConfig {
+    /// 有効なモデルエントリを作成する。
+    pub fn enabled(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            enabled: true,
+        }
+    }
+}
+
+// 旧文字列表現は enabled=true のエントリとだけ等価とする。
+impl PartialEq<&str> for ModelEntryConfig {
+    fn eq(&self, other: &&str) -> bool {
+        self.enabled && self.id == *other
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelEntryDe {
+    id: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+impl<'de> Deserialize<'de> for ModelEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ModelEntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
+            type Value = ModelEntryConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a non-empty model ID string or a model entry table")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let id = value.trim();
+                if id.is_empty() {
+                    return Err(E::custom("model ID must not be empty"));
+                }
+                Ok(ModelEntryConfig::enabled(id))
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let entry =
+                    ModelEntryDe::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(ModelEntryConfig {
+                    id: entry.id,
+                    enabled: entry.enabled,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ModelEntryVisitor)
+    }
+}
+
+fn model_entry_accepts_string(schema: &mut schemars::Schema) {
+    let object = std::mem::take(schema);
+    *schema = schemars::json_schema!({
+        "anyOf": [
+            { "type": "string", "minLength": 1, "pattern": "\\S" },
+            object
+        ]
+    });
+}
+
 /// プロバイダプロファイル 1 件分の設定。
 ///
 /// [`super::Config`] の `providers` マップのキーがプロファイル名になります。
@@ -140,12 +233,28 @@ pub struct ProviderProfileConfig {
     pub base_url: String,
     /// 認証情報の参照。
     pub credential: CredentialRefConfig,
-    /// 利用可能なモデル ID の一覧。
-    pub models: Vec<String>,
+    /// モデル ID と利用可否の一覧。
+    pub models: Vec<ModelEntryConfig>,
     /// 除外するモデル ID の一覧。
     pub excluded_models: Vec<String>,
     /// 既定で使用するモデル ID。
     pub default_model: String,
+}
+
+impl ProviderProfileConfig {
+    /// 有効なモデル ID を設定順で返す。
+    pub fn enabled_model_ids(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// 利用可否によらずすべてのモデル ID を設定順で返す。
+    pub fn model_ids(&self) -> impl Iterator<Item = &str> {
+        self.models.iter().map(|entry| entry.id.as_str())
+    }
 }
 
 impl Default for ProviderProfileConfig {
@@ -155,7 +264,7 @@ impl Default for ProviderProfileConfig {
             api_protocol: ApiProtocolConfig::default(),
             base_url: "https://api.anthropic.com".to_string(),
             credential: CredentialRefConfig::default(),
-            models: vec!["claude-sonnet-4-5".to_string()],
+            models: vec![ModelEntryConfig::enabled("claude-sonnet-4-5")],
             excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
         }
@@ -174,7 +283,7 @@ struct ProviderProfileDe {
     base_url: String,
     credential: Option<CredentialRefConfig>,
     api_key_env: Option<String>,
-    models: Vec<String>,
+    models: Vec<ModelEntryConfig>,
     excluded_models: Vec<String>,
     default_model: String,
 }
@@ -189,7 +298,7 @@ impl Default for ProviderProfileDe {
             base_url: "https://api.anthropic.com".to_string(),
             credential: None,
             api_key_env: None,
-            models: vec!["claude-sonnet-4-5".to_string()],
+            models: vec![ModelEntryConfig::enabled("claude-sonnet-4-5")],
             excluded_models: Vec::new(),
             default_model: "claude-sonnet-4-5".to_string(),
         }
@@ -276,6 +385,112 @@ fn add_sugar_properties(schema: &mut schemars::Schema) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_legacy_string_list_parses_as_enabled_entries() {
+        let profile: ProviderProfileConfig =
+            toml::from_str(r#"models = [" a ", "b"]"#).expect("legacy models parse");
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["models"],
+            serde_json::json!([{"id": "a", "enabled": true}, {"id": "b", "enabled": true}])
+        );
+    }
+
+    #[test]
+    fn models_table_form_parses_enabled_flag() {
+        let profile: ProviderProfileConfig =
+            toml::from_str(r#"models = ["a", { id = "b", enabled = false }]"#)
+                .expect("mixed models parse");
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["models"],
+            serde_json::json!([{"id": "a", "enabled": true}, {"id": "b", "enabled": false}])
+        );
+    }
+
+    #[test]
+    fn models_table_unknown_key_rejected() {
+        let error =
+            toml::from_str::<ProviderProfileConfig>(r#"models = [{ id = "a", enabld = false }]"#)
+                .expect_err("unknown model key is rejected")
+                .to_string();
+        assert!(error.contains("enabld"), "{error}");
+        assert!(error.contains("models"), "{error}");
+        assert!(!error.contains("did not match any variant of untagged enum"));
+    }
+
+    #[test]
+    fn models_empty_string_rejected() {
+        for id in ["", "   ", "\t"] {
+            let doc = format!("models = [{}]", serde_json::json!(id));
+            assert!(toml::from_str::<ProviderProfileConfig>(&doc).is_err());
+        }
+    }
+
+    #[test]
+    fn models_table_defaults_enabled_true() {
+        let profile: ProviderProfileConfig =
+            toml::from_str(r#"models = [{ id = "a" }]"#).expect("model table parses");
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["models"],
+            serde_json::json!([{"id": "a", "enabled": true}])
+        );
+    }
+
+    #[test]
+    fn provider_profile_roundtrip_preserves_disabled_flag() {
+        let profile: ProviderProfileConfig =
+            toml::from_str(r#"models = ["a", { id = "b", enabled = false }]"#)
+                .expect("mixed models parse");
+        let toml = toml::to_string(&profile).expect("profile serializes to TOML");
+        let json = serde_json::to_string(&profile).expect("profile serializes to JSON");
+        assert_eq!(
+            toml::from_str::<ProviderProfileConfig>(&toml).expect("TOML roundtrip"),
+            profile
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderProfileConfig>(&json).expect("JSON roundtrip"),
+            profile
+        );
+        assert_eq!(
+            serde_json::to_value(&profile).expect("profile serializes")["models"][1]["enabled"],
+            false
+        );
+    }
+
+    #[test]
+    fn enabled_model_ids_filters_disabled() {
+        let profile: ProviderProfileConfig =
+            toml::from_str(r#"models = ["a", { id = "b", enabled = false }, "c"]"#)
+                .expect("mixed models parse");
+        assert_eq!(profile.enabled_model_ids(), ["a", "c"]);
+        assert_eq!(profile.model_ids().collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn model_entry_accepts_string() {
+        let schema = schemars::schema_for!(ProviderProfileConfig);
+        let json = serde_json::to_value(schema).expect("schema serializes");
+        let entry = &json["$defs"]["ModelEntryConfig"];
+        let branches = entry["anyOf"].as_array().expect("model entry has anyOf");
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().any(|branch| branch["type"] == "string"));
+        let object = branches
+            .iter()
+            .find(|branch| branch["type"] == "object")
+            .expect("model entry accepts object");
+        assert_eq!(object["additionalProperties"], false);
+        assert_eq!(object["required"], serde_json::json!(["id"]));
+        assert_eq!(object["properties"]["enabled"]["default"], true);
+        let validator = jsonschema::validator_for(entry).expect("entry schema compiles");
+        for value in [
+            serde_json::json!("a"),
+            serde_json::json!({"id": "b", "enabled": false}),
+            serde_json::json!({"id": "c"}),
+        ] {
+            assert!(validator.is_valid(&value), "{value}");
+        }
+        assert!(!validator.is_valid(&serde_json::json!({"id": "a", "enabld": false})));
+    }
 
     // Given: keyring 参照と env 参照の 2 変異 / When: TOML に直列化して読み戻す
     // Then: type タグを保ったまま往復する

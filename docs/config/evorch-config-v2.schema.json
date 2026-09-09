@@ -405,6 +405,34 @@
       },
       "additionalProperties": false
     },
+    "ModelEntryConfig": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        {
+          "description": "モデル ID と利用可否の設定。",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "利用可能かどうか。省略時は有効。",
+              "type": "boolean",
+              "default": true
+            },
+            "id": {
+              "description": "モデル ID。",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "id"
+          ]
+        }
+      ]
+    },
     "OrchestrationConfig": {
       "description": "オーケストレーションループの境界設定。\n\nすべての上限は正の値でなければならず、既定値は issue #73 の\nbounded 契約 (AC5) で固定される。",
       "type": "object",
@@ -548,13 +576,16 @@
           }
         },
         "models": {
-          "description": "利用可能なモデル ID の一覧。",
+          "description": "モデル ID と利用可否の一覧。",
           "type": "array",
           "default": [
-            "claude-sonnet-4-5"
+            {
+              "enabled": true,
+              "id": "claude-sonnet-4-5"
+            }
           ],
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ModelEntryConfig"
           }
         },
         "provider_type": {
