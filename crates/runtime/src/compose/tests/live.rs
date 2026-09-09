@@ -85,11 +85,31 @@ fn compose_routed_model_matches_compose_runtime_output() {
     };
     // When
     let model = compose_routed_model(&config, deps).unwrap();
+    let runtime = compose_runtime(RuntimeComposition {
+        config: &config,
+        executor: Arc::new(ToolExecutor::new(bus.clone())),
+        bus,
+        credential_store: store,
+        env,
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap();
     // Then: the same role identities used by runtime composition are preserved.
     assert_eq!(model.selected_model(Role::Worker), "local/live");
     assert_eq!(model.selected_model(Role::Orchestrator), "local/live");
     assert_eq!(
         model.providers.keys().cloned().collect::<Vec<_>>(),
         ["local"]
+    );
+    assert_eq!(
+        runtime.model_identity,
+        ModelIdentity::Routed {
+            profiles: vec!["local".into()],
+            selected: routed_roles()
+                .into_iter()
+                .map(|role| (role_key(role).into(), model.selected_model(role)))
+                .collect(),
+        }
     );
 }

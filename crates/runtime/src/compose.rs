@@ -113,7 +113,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             model_identity: ModelIdentity::Fixed,
         }),
         ModelSource::Configured => {
-            let composed = routing::compose_providers(
+            let model = compose_routed_model(
                 input.config,
                 ComposeDeps {
                     credential_store: input.credential_store,
@@ -122,12 +122,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                     catalog: ModelCatalog::builtin(),
                     factory: FactoryOptions::default(),
                 },
-            )
-            .map_err(|error| match error {
-                RoutingError::NoProviders => CompositionError::NoProvidersConfigured,
-                other => CompositionError::Routing(other),
-            })?;
-            let model = Arc::new(RoutedModel::new(composed, input.config.agents.clone()));
+            )?;
             let profiles = model.providers.keys().cloned().collect();
             let selected = routed_roles()
                 .into_iter()
@@ -272,3 +267,17 @@ const fn role_key(role: Role) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+mod live;
+pub use live::{SwitchableModel, UnconfiguredModel};
+
+pub fn compose_routed_model(
+    config: &config::Config,
+    deps: ComposeDeps,
+) -> Result<Arc<RoutedModel>, CompositionError> {
+    let composed = routing::compose_providers(config, deps).map_err(|error| match error {
+        RoutingError::NoProviders => CompositionError::NoProvidersConfigured,
+        other => CompositionError::Routing(other),
+    })?;
+    Ok(Arc::new(RoutedModel::new(composed, config.agents.clone())))
+}
