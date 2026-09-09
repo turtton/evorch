@@ -182,6 +182,18 @@ v0.7 の実稼働検証で判明した 3 件を追加でカバー。
 
 検証: workspace 全テスト green (21 group、flake のみ)、clippy(-D warnings)・fmt clean。RED→GREEN 同一コミット。PNG 証跡は transcript_tool の collapsed/expanded/エラー状態で4画像。
 
+## v0.9 shell tool 実用性 + tool transcript 可読性の実装確定（2026-09-10、main 直接マージ）
+
+v0.8 の実稼働検証で判明した shell tool 実行不能、tool 入出力の可読性不足、ログ/レイアウト噪音を修正。
+
+- **shell tool を `sh -c` 経由に修正 (ad83290)**: これまで `command` を直接 `execvp` 相当で起動していたため、`find . -name "*.rs" | head` や `git status && git diff` のような pipe/redirect/glob/chain が sandbox 内で失敗していた。`ShellTool` は command を `sh -c` に渡す方式へ変更し、通常の POSIX shell 構文を利用可能にした。`args` は後方互換のため optional/deprecated として残し、command 末尾へ結合して shell 解釈する。contract 判定も結合後コマンドに対して実施。stdout/stderr は単一 output に統合し、PTY 実行時のセクション見出しも除去。
+- **tool transcript を CLI 風に整形 (f5fd196)**: tool header は bash/shell なら `$ command`、read/write/edit なら対象 path を表示。Input は bash/read 系で生 JSON ではなく command/path を優先表示し、その他 tool は JSON pretty print を維持。Output は stdout/stderr を統合表示し、collapsed 時は先頭5行、expanded 時は全文を表示する。共通 transcript card は左余白を増やし、entry accent 線が本文文字と重ならないように調整。
+- **egui_extras loader WARN 抑制 (474aa2a)**: image attachment 未実装の間、`egui_extras::loaders` の画像 loader WARN が GUI 起動時に毎回出ていたため、log filter で `error` まで抑制。v05 実装時に再有効化する。
+- **v05 image attachment intent の queue seed (9fb10e7)**: `.intent-cli/issues/v05-image-attachment-ui/` に packet/github-body/implementation/review-context を作成し、画像添付 UI intent を queue-state に登録。v0.9 では実装せず、依存関係付きで後続 issue 化する方針を記録。
+- **style 修正 (71ad6e4)**: `logging.rs` の rustfmt 差分のみ解消。
+
+検証: workspace 全テスト 21 group green（既知 flake `headless_run_completes_with_single_mock_response` のみ）、`cargo clippy --workspace --all-targets -- -D warnings` clean、`cargo fmt --all -- --check` clean。shell tool 回帰テスト10件、実 bwrap テスト3件、transcript tool 対象テスト17件が成功。tool failure の最終 Error、retryable failure の Notice、markdown/tool card 描画の既存回帰も維持。
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
