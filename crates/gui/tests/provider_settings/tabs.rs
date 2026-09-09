@@ -56,7 +56,7 @@ fn codex_tab_hides_openai_grid_and_shows_login() {
 }
 
 #[test]
-fn refresh_models_sits_below_base_url_and_above_models_list() {
+fn refresh_models_sits_below_configured_models() {
     // Given
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench_with_config_path(temp.path());
@@ -65,9 +65,9 @@ fn refresh_models_sits_below_base_url_and_above_models_list() {
     // Then
     let base = harness.label_rects("Base URL")[0];
     let refresh = harness.label_rects("Refresh models")[0];
-    let models = harness.label_rects("Models")[0];
+    let models = harness.label_rects("Configured models")[0];
     assert!(base.max.y < refresh.min.y);
-    assert!(refresh.min.y < models.min.y);
+    assert!(models.max.y < refresh.min.y);
 }
 
 #[test]

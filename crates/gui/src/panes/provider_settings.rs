@@ -1,7 +1,6 @@
 use crate::model::codex_auth::CodexAuthModel;
 use crate::model::provider_settings::{
-    CredentialMode, ModelsFetchState, OpenAiEditorModel, ProfileEditor, ProviderKind,
-    ProviderSettingsModel,
+    CredentialMode, OpenAiEditorModel, ProfileEditor, ProviderKind, ProviderSettingsModel,
 };
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
@@ -32,7 +31,17 @@ pub fn provider_settings_modal(
             ui.label(h3("Provider settings"));
             match &mut model.editor {
                 Some(ProfileEditor::OpenAiCompatible(editor)) => {
-                    action = openai_body(ui, editor);
+                    if ctx.viewport_rect().height() < 800.0 {
+                        egui::ScrollArea::vertical()
+                            .id_salt("openai-editor")
+                            .auto_shrink([false, false])
+                            .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                            .show(ui, |ui| {
+                                action = openai_body(ui, editor);
+                            });
+                    } else {
+                        action = openai_body(ui, editor);
+                    }
                 }
                 Some(ProfileEditor::Codex(editor)) => {
                     let busy = editor.auth.is_authenticating();
@@ -178,46 +187,9 @@ fn openai_body(ui: &mut egui::Ui, model: &mut OpenAiEditorModel) -> Option<Provi
             .labelled_by(label.id);
         }
     }
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("Refresh models").clicked() {
-            action = Some(ProviderSettingsAction::RefreshModels);
-        }
-        match &model.models_fetch_state {
-            ModelsFetchState::Idle => {}
-            ModelsFetchState::Loading => {
-                ui.label(muted("Loading models…"));
-            }
-            ModelsFetchState::Loaded => {
-                ui.label(muted(format!(
-                    "Loaded {} models from /v1/models",
-                    model.available_models.as_ref().map_or(0, Vec::len)
-                )));
-            }
-            ModelsFetchState::Failed(error) => {
-                ui.label(
-                    egui::RichText::new(format!("Auto-fetch failed ({error}); manual entry below"))
-                        .color(ERROR_FG)
-                        .size(FONT_SMALL),
-                );
-            }
-        }
-    });
-    let models = ui.label("Models");
-    let mut models_text = model
-        .models
-        .iter()
-        .map(|model| model.id.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    ui.add(
-        egui::TextEdit::multiline(&mut models_text)
-            .interactive(false)
-            .hint_text("one per line")
-            .desired_rows(3)
-            .desired_width(width)
-            .background_color(INPUT),
-    )
-    .labelled_by(models.id);
+    if super::provider_models::provider_models(ui, model) {
+        action = Some(ProviderSettingsAction::RefreshModels);
+    }
     let excluded = ui.label("Excluded models");
     ui.add(
         egui::TextEdit::multiline(&mut model.excluded_models_text)

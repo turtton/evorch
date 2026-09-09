@@ -106,18 +106,17 @@ fn fetched_models_populate_modal_when_request_succeeds() {
             && request.path == "/v1/models"
             && request.authorization.as_deref() == Some("Bearer sk-test")
     }));
-    let editor = harness
-        .state_mut()
-        .provider_settings_mut()
-        .openai_mut()
-        .unwrap();
-    editor.selection_toggle("mock-model-b");
-    editor.selection_toggle("mock-model-a");
-    editor.apply_fetched_selection();
+    harness.run();
+    harness.click_label("mock-model-b");
+    harness.run();
+    harness.click_label("mock-model-a");
+    harness.run();
+    harness.click_label("Apply selected (2)");
+    harness.run();
     harness.click_label("Default model");
     harness.run();
-    assert!(harness.has_label("mock-model-b"));
-    assert!(harness.has_label("mock-model-a"));
+    assert!(harness.count_labels("mock-model-b") >= 1);
+    assert!(harness.count_labels("mock-model-a") >= 1);
 }
 
 #[test]
@@ -160,7 +159,7 @@ fn manual_models_remain_available_when_request_fails() {
     assert!(harness.has_label(&format!("Auto-fetch failed ({error}); manual entry below")));
     harness.click_label("Default model");
     harness.run();
-    assert!(harness.has_label("manual-model"));
+    assert!(harness.count_labels("manual-model") >= 1);
 }
 
 #[test]
