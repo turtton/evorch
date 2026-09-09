@@ -9,6 +9,7 @@ pub mod events;
 pub mod fixture;
 pub mod headless;
 pub mod keymap;
+pub mod logging;
 pub mod model;
 pub mod panes;
 pub mod pty;
