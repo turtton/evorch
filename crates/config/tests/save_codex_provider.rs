@@ -42,6 +42,7 @@ fn save_codex_provider_round_trips() {
     let cfg = load(tmp.path());
     let profile = &cfg.providers["work"];
     assert_eq!(profile.provider_type, ProviderTypeConfig::OpenAiCodex);
+    assert_eq!(profile.api_protocol, config::ApiProtocolConfig::OpenAiCodexResponses);
     assert_eq!(
         profile.credential,
         CredentialRefConfig::Keyring {
@@ -105,7 +106,7 @@ fn switching_credential_modes_drops_stale_env_key_on_save() {
     // Then
     let doc: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert!(doc["providers"]["work"].get("api_key_env").is_none());
-    assert!(doc["providers"]["work"].get("base_url").is_none());
+    assert_eq!(doc["providers"]["work"]["base_url"].as_str(), Some("https://chatgpt.com/backend-api/codex"));
     assert_eq!(
         load(tmp.path()).providers["work"].provider_type,
         ProviderTypeConfig::OpenAiCodex

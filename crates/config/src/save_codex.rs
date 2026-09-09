@@ -46,6 +46,8 @@ pub fn save_codex_provider(path: &Path, input: &CodexProviderInput) -> Result<()
     let mut doc = read_document(path)?;
     let mut profile = Table::new();
     profile.insert("type", value("openai-codex"));
+    profile.insert("api_protocol", value("openai-codex-responses"));
+    profile.insert("base_url", value("https://chatgpt.com/backend-api/codex"));
     let mut credential = InlineTable::new();
     credential.insert("type", "keyring".into());
     credential.insert("service", "evorch".into());
