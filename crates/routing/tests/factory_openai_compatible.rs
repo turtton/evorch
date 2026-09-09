@@ -110,9 +110,9 @@ fn factory_rejects_wrong_protocol_for_openai_compatible() {
     assert!(matches!(error, RoutingError::InvalidProfile { .. }));
 }
 
-// Given: OpenAI互換typeとkeyring認証 / When: factoryで構築 / Then: fail-closedでInvalidProfileを返す
+// Given: OpenAI互換typeとkeyring認証 / When: factoryで構築 / Then: clientを構築できる
 #[test]
-fn factory_rejects_keyring_for_openai_compatible() {
+fn factory_builds_openai_compatible_client_from_keyring_profile() {
     let (_directory, store) = credential_store();
     let profile = profile(
         model::ProviderType::OpenAiCompatible,
@@ -123,11 +123,7 @@ fn factory_rejects_keyring_for_openai_compatible() {
         },
     );
 
-    let error = build_provider_client(&profile, store, None, &FactoryOptions::default())
-        .err()
-        .expect("keyring認証を拒否する");
-
-    assert!(matches!(error, RoutingError::InvalidProfile { .. }));
+    assert!(build_provider_client(&profile, store, None, &FactoryOptions::default()).is_ok());
 }
 
 // Given: anthropic type / When: factoryで構築 / Then: UnsupportedProviderTypeを維持する
