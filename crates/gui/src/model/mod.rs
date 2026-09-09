@@ -6,6 +6,7 @@ pub mod commands;
 pub mod composer;
 pub mod demo;
 pub mod folder_picker;
+pub mod production;
 pub mod project_bridge;
 pub mod project_path;
 pub mod provider_settings;

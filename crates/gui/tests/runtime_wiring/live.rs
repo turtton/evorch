@@ -47,7 +47,7 @@ base_url = "{}"
 models = ["live-model"]
 default_model = "live-model"
 [providers.live.credential]
-kind = "keyring"
+type = "keyring"
 service = "evorch"
 account = "live"
 "#,

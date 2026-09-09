@@ -2081,6 +2081,7 @@ dependencies = [
  "event-bus",
  "image",
  "mock-openai",
+ "model",
  "portable-pty",
  "providers",
  "routing",
