@@ -160,6 +160,19 @@ pub struct RoutedModel {
 }
 
 impl RoutedModel {
+    /// Returns credential-free profiles in name order.
+    pub fn available_profiles(&self) -> Vec<ProfileSummary> {
+        self.providers
+            .iter()
+            .map(|(name, provider)| ProfileSummary {
+                name: name.clone(),
+                provider_type: provider.profile.provider_type,
+                models: provider.profile.models.clone(),
+                default_model: Some(provider.profile.default_model.clone()),
+            })
+            .collect()
+    }
+
     pub fn new(composed: ComposedProviders, agents: config::AgentsConfig) -> Self {
         Self {
             router: composed.router,
@@ -196,14 +209,52 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        let binding = self
-            .agents
-            .binding_for(role_key(role), None)
-            .map_err(model_error)?;
-        let route = self.resolve(
-            &invocation.run_id,
-            &LogicalModelId::from(binding.logical_model),
-        )?;
+        let (route, generation) = match &invocation.model_preference {
+            Some(preference) => {
+                // Explicit user selection is authoritative: never apply ADR 0004 fallback.
+                let provider =
+                    self.providers
+                        .get(&preference.profile)
+                        .ok_or_else(|| RuntimeError::Model {
+                            reason: format!(
+                                "selected provider profile `{}` is not configured",
+                                preference.profile
+                            ),
+                        })?;
+                let model_id = preference
+                    .model
+                    .as_ref()
+                    .unwrap_or(&provider.profile.default_model);
+                if !provider.profile.models.is_empty()
+                    && !provider.profile.models.contains(model_id)
+                {
+                    return Err(RuntimeError::Model {
+                        reason: format!(
+                            "model `{model_id}` is not listed for profile `{}`",
+                            preference.profile
+                        ),
+                    });
+                }
+                (
+                    routing::ResolvedRoute {
+                        profile: preference.profile.clone(),
+                        model_id: model_id.clone(),
+                    },
+                    config::GenerationOverridesConfig::default(),
+                )
+            }
+            None => {
+                let binding = self
+                    .agents
+                    .binding_for(role_key(role), None)
+                    .map_err(model_error)?;
+                let route = self.resolve(
+                    &invocation.run_id,
+                    &LogicalModelId::from(binding.logical_model),
+                )?;
+                (route, binding.generation)
+            }
+        };
         let provider = self
             .providers
             .get(&route.profile)
@@ -214,8 +265,8 @@ impl AgentModel for RoutedModel {
             model: route.model_id,
             messages: messages.to_vec(),
             tools: tools.to_vec(),
-            temperature: binding.generation.temperature,
-            max_tokens: binding.generation.max_tokens.map(u64::from),
+            temperature: generation.temperature,
+            max_tokens: generation.max_tokens.map(u64::from),
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),
@@ -252,6 +303,19 @@ impl AgentModel for RoutedModel {
             .map(|route| format!("{}/{}", route.profile, route.model_id))
             .unwrap_or_else(|_| format!("unresolved:{}", logical.as_str()))
     }
+
+    fn available_profiles(&self) -> Vec<ProfileSummary> {
+        RoutedModel::available_profiles(self)
+    }
+}
+
+/// Public, credential-free provider metadata for model pickers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub provider_type: model::ProviderType,
+    pub models: Vec<String>,
+    pub default_model: Option<String>,
 }
 
 fn model_error(error: impl std::fmt::Display) -> RuntimeError {

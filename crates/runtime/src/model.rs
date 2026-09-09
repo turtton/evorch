@@ -9,6 +9,13 @@ use providers::{ChatResponse, Message, ToolSpec};
 
 use crate::error::RuntimeError;
 
+/// Explicit per-run provider selection; `None` model uses the profile default.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelPreference {
+    pub profile: String,
+    pub model: Option<String>,
+}
+
 /// 1 回のモデル呼び出し (agent-loop の complete) の相関文脈。
 ///
 /// agent-loop は実行中 run の [`RunId`](crate::RunId) をここへ載せて
@@ -16,10 +23,11 @@ use crate::error::RuntimeError;
 /// の観測相関 (`ChatRequest.observation`) へ写し、provider attempt 観測イベント
 /// へ run 相関を stamp する。テスト・demo 実装は受け取って無視してよい
 /// (`_invocation`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentInvocationContext {
     /// モデル呼び出しを行う run の ID (`run-{n}` 形式)。
     pub run_id: String,
+    pub model_preference: Option<ModelPreference>,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -52,6 +60,11 @@ pub trait AgentModel: Send + Sync {
     /// runtime はそれをそのまま記録する。runtime は解決を行わない
     /// (lib.rs の「ルーティングの委譲」契約と一貫)。
     fn selected_model(&self, role: Role) -> String;
+
+    /// Configured picker entries; fixed models expose no provider profiles.
+    fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +124,7 @@ mod tests {
 
         let invocation = AgentInvocationContext {
             run_id: "run-1".to_string(),
+            model_preference: None,
         };
         let response = model
             .complete(&invocation, Role::Worker, &history, &[])

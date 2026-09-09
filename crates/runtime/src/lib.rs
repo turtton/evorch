@@ -50,7 +50,7 @@ pub use event_bus::{AgentRunPhase, RoutingSource};
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
-pub use model::{AgentInvocationContext, AgentModel};
+pub use model::{AgentInvocationContext, AgentModel, ModelPreference};
 // オーケストレーション契約型は後続ウェーブ (T1.2–T3.1) がこの経路で参照する。
 pub use network::{
     NetworkAccessDecision, SandboxNetworkMode, build_sandbox, judge_web_network_access,
