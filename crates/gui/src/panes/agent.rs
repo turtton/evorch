@@ -173,11 +173,16 @@ fn empty_state_body(
 }
 
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
+    let pane_id = ui.id();
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (entry_idx, entry) in model.visible_entries().iter().enumerate() {
+                if matches!(entry, TranscriptEntry::Tool { .. }) {
+                    crate::panes::transcript_tool::tool_card(ui, entry, pane_id);
+                    continue;
+                }
                 let accent = entry_accent(entry);
                 card(ui, accent, |ui| {
                     if let TranscriptEntry::Message { text } = entry {

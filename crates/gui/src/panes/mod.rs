@@ -15,3 +15,4 @@ pub mod provider_settings;
 pub mod sidebar;
 pub mod tasks;
 pub mod terminal;
+pub mod transcript_tool;
