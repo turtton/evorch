@@ -17,6 +17,7 @@ struct CaptureArgs {
     error_thread: bool,
     provider_configured: bool,
     open_settings: bool,
+    edit_profile: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
 }
@@ -46,13 +47,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         state = state.with_provider_status(ProviderStatus::Configured);
     }
     if capture.open_settings {
-        let settings = state.provider_settings_mut();
-        settings.name = "local".into();
-        settings.base_url = "https://api.example.invalid/v1".into();
-        settings.api_key_env = "EXAMPLE_API_KEY".into();
-        settings.models_text = "gpt-4.1\ngpt-4.1-mini".into();
-        settings.default_model = "gpt-4.1".into();
-        settings.open = true;
+        let mut config = config::Config::default();
+        config.providers.insert(
+            "local".into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAiCompatible,
+                base_url: "https://api.example.invalid/v1".into(),
+                credential: config::CredentialRefConfig::Env {
+                    var: "EXAMPLE_API_KEY".into(),
+                },
+                models: vec!["gpt-4.1".into(), "gpt-4.1-mini".into()],
+                default_model: "gpt-4.1".into(),
+                ..Default::default()
+            },
+        );
+        config.providers.insert(
+            "work-codex".into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAiCodex,
+                default_model: "gpt-5-codex".into(),
+                ..Default::default()
+            },
+        );
+        *state.provider_settings_mut() =
+            gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&config);
+        state.provider_settings_mut().open = true;
+        if capture.edit_profile {
+            state.provider_settings_mut().edit("local");
+        }
     }
     if let Some(dir) = demo_dir.as_ref() {
         state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
@@ -91,6 +113,7 @@ fn parse_args(
     let mut error_thread = false;
     let mut provider_configured = false;
     let mut open_settings = false;
+    let mut edit_profile = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
     while let Some(argument) = arguments.next() {
@@ -140,6 +163,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--open-settings") => open_settings = true,
+            Some("--edit-profile") => {
+                open_settings = true;
+                edit_profile = true;
+            }
             Some(flag) if flag.starts_with('-') => {
                 return Err("unexpected additional arguments".into());
             }
@@ -160,6 +187,7 @@ fn parse_args(
         error_thread,
         provider_configured,
         open_settings,
+        edit_profile,
         activate,
         pointer,
     })
@@ -176,7 +204,8 @@ Modes:
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --provider-configured  enable the composer without provider setup guidance (capture only)
-   --open-settings  open the provider settings modal with demo values pre-filled
+   --open-settings  show the registered demo profile list
+   --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
 
