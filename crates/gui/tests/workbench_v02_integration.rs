@@ -550,6 +550,7 @@ fn v02_end_to_end_chained_scenario() {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
             WorkbenchCommand::DecideMerge(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,
@@ -590,6 +591,7 @@ fn v02_end_to_end_chained_scenario() {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,

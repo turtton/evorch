@@ -5,6 +5,15 @@ use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn cancel_chat(&mut self) {
+        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
+            return;
+        };
+        self.submit_command(WorkbenchCommand::CancelChat {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     pub fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
         self.production_model
             .as_ref()

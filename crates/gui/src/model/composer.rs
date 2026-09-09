@@ -96,6 +96,18 @@ impl Default for ProviderStatus {
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
     pub input: String,
+    pub completions_dismissed_for: Option<String>,
+}
+
+impl ComposerModel {
+    pub fn completions_visible(&self) -> bool {
+        self.completions_dismissed_for.as_ref() != Some(&self.input)
+            && !completions(&self.input).is_empty()
+    }
+
+    pub fn dismiss_completions(&mut self) {
+        self.completions_dismissed_for = Some(self.input.clone());
+    }
 }
 
 #[cfg(test)]

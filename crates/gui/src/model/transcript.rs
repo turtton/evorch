@@ -133,6 +133,15 @@ impl TranscriptModel {
                     to: event_bus::AgentRunPhase::Error,
                     reason: Some(reason),
                     ..
+                },
+            ) if reason == "cancelled" => self.push(TranscriptEntry::Notice {
+                text: "Run cancelled".into(),
+            }),
+            event_bus::EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStateChanged {
+                    to: event_bus::AgentRunPhase::Error,
+                    reason: Some(reason),
+                    ..
                 } | event_bus::LifecycleEvent::Failed { reason, .. },
             ) => self.push(TranscriptEntry::Error {
                 text: format!("Run failed: {reason}"),
@@ -265,6 +274,21 @@ impl TranscriptModel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancelled_reason_becomes_notice_not_error() {
+        let mut model = super::TranscriptModel::default();
+        model.apply(&event_bus::Event::new(
+            event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id: "chat-1".into(),
+                from: event_bus::AgentRunPhase::Running,
+                to: event_bus::AgentRunPhase::Error,
+                reason: Some("cancelled".into()),
+            },
+        ));
+        assert!(
+            matches!(model.entries(), [super::TranscriptEntry::Notice { text }] if text == "Run cancelled")
+        );
+    }
     use super::*;
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, CompactionEvent, CompactionReason,

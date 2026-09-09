@@ -91,6 +91,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::Send => self.submit_composer(),
+                ComposerAction::Cancel => self.cancel_chat(),
                 ComposerAction::OpenSettings => self.open_provider_settings(),
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
