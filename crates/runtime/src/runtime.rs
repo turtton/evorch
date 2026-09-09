@@ -108,6 +108,7 @@ struct RunEntry {
     inbox_tx: mpsc::Sender<String>,
     cancel_tx: watch::Sender<bool>,
     compact_tx: watch::Sender<u64>,
+    model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
     /// run の最終 assistant テキスト (loop 側 result_tx と対になる観測口)。
     result_rx: watch::Receiver<Option<String>>,
     /// 実行中の圧縮を loop 側と共有するフラグ (compact() の in-flight 拒否判定用)。
@@ -497,6 +498,8 @@ impl AgentRuntime {
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
+        let (model_preference_tx, model_preference_rx) =
+            watch::channel(config.model_preference.clone());
         let (result_tx, result_rx) = watch::channel(None::<String>);
         let compaction_busy = Arc::new(AtomicBool::new(false));
         let phase_tx_entry = phase_tx.clone();
@@ -518,6 +521,7 @@ impl AgentRuntime {
             cancel_rx,
             mailbox_version_rx,
             compact_rx,
+            model_preference_rx,
             compaction_busy: compaction_busy.clone(),
             result_tx,
         };
@@ -536,6 +540,7 @@ impl AgentRuntime {
                 inbox_tx,
                 cancel_tx,
                 compact_tx,
+                model_preference_tx,
                 result_rx,
                 compaction_busy: Arc::clone(&compaction_busy),
                 mailbox: Arc::clone(&mailbox),
@@ -659,6 +664,22 @@ impl AgentRuntime {
     pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
         let sender = self.entry(run_id)?.cancel_tx.clone();
         sender.send_replace(true);
+        Ok(())
+    }
+
+    /// Changes the next completion's selection without interrupting an in-flight request.
+    /// `None` restores normal routing and its existing session affinity.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::UnknownRun`] if the run is not registered.
+    pub fn set_model_preference(
+        &self,
+        run_id: RunId,
+        preference: Option<crate::ModelPreference>,
+    ) -> Result<(), RuntimeError> {
+        self.entry(run_id)?
+            .model_preference_tx
+            .send_replace(preference);
         Ok(())
     }
 

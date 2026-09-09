@@ -59,6 +59,7 @@ pub(crate) struct LoopChannels {
     pub(crate) cancel_rx: watch::Receiver<bool>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
     pub(crate) compact_rx: watch::Receiver<u64>,
+    pub(crate) model_preference_rx: watch::Receiver<Option<crate::ModelPreference>>,
     /// 実行中の圧縮を runtime 側 (AgentRuntime::compact) と共有するフラグ。
     pub(crate) compaction_busy: Arc<AtomicBool>,
     /// run の最終 assistant テキストを runtime 表層 (AgentRuntime::run_result)
@@ -539,6 +540,7 @@ impl LoopState {
             }
             let invocation = AgentInvocationContext {
                 run_id: self.task.run_id.to_string(),
+                model_preference: self.channels.model_preference_rx.borrow().clone(),
             };
             let visible_messages = self.context.visible_messages();
             let completion = tokio::select! {
