@@ -16,6 +16,114 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sandbox::DirectSandbox;
+    use serde_json::json;
+
+    async fn execute(args: serde_json::Value) -> ToolResult {
+        Shell::new(Arc::new(DirectSandbox::new_unchecked()))
+            .execute(args)
+            .await
+            .expect("shell execution returns a result")
+    }
+
+    // Given: pipe and redirect / When: execute in cwd / Then: transformed file is readable.
+    #[tokio::test]
+    async fn sh_c_executes_pipe_and_redirect() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let result = execute(
+            json!({"command": "echo hello | tr a-z A-Z > output; cat output", "cwd": dir.path()}),
+        )
+        .await;
+        assert_eq!(result.content, "exit_code: 0\nHELLO\n");
+    }
+
+    // Given: chained commands / When: execute / Then: both commands run.
+    #[tokio::test]
+    async fn sh_c_executes_command_chaining() {
+        let result = execute(json!({"command": "echo a && echo b"})).await;
+        assert_eq!(result.content, "exit_code: 0\na\nb\n");
+    }
+
+    // Given: matching and nonmatching files / When: expand glob / Then: only Rust files appear.
+    #[tokio::test]
+    async fn sh_c_executes_wildcard() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        std::fs::write(dir.path().join("one.rs"), "").expect("Rust fixture");
+        std::fs::write(dir.path().join("other.txt"), "").expect("other fixture");
+        let result = execute(json!({"command": "printf '%s\\n' *.rs", "cwd": dir.path()})).await;
+        assert_eq!(result.content, "exit_code: 0\none.rs\n");
+    }
+
+    // Given: deprecated args / When: execute / Then: args are appended.
+    #[tokio::test]
+    async fn args_field_appends_to_command() {
+        let result = execute(json!({"command": "echo", "args": ["hello"]})).await;
+        assert_eq!(result.content, "exit_code: 0\nhello\n");
+    }
+
+    // Given: shell syntax in args / When: execute / Then: the pipe is interpreted.
+    #[tokio::test]
+    async fn args_field_with_shell_syntax_is_interpreted() {
+        let result = execute(json!({"command": "echo hello", "args": ["|", "cat"]})).await;
+        assert_eq!(result.content, "exit_code: 0\nhello\n");
+    }
+
+    // Given: unterminated stdout and stderr / When: execute / Then: one newline separates them.
+    #[tokio::test]
+    async fn stdout_and_stderr_are_combined() {
+        let result = execute(json!({"command": "printf out; printf err >&2"})).await;
+        assert_eq!(result.content, "exit_code: 0\nout\nerr");
+    }
+
+    // Given: failed command / When: execute / Then: error result preserves exit code and output.
+    #[tokio::test]
+    async fn command_failing_shows_exit_code_in_output() {
+        let result = execute(json!({"command": "echo failed >&2; exit 7"})).await;
+        assert!(result.is_error);
+        assert_eq!(result.content, "exit_code: 7\nfailed\n");
+    }
+
+    // Given: PTY stdout and stderr / When: execute / Then: output has no section headers.
+    #[tokio::test]
+    async fn interactive_output_is_combined() {
+        let result = execute(
+            json!({"command": "echo out; echo err >&2", "interactive": true, "timeout_ms": 1000}),
+        )
+        .await;
+        let normalized = result.content.replace("\r\n", "\n");
+        let output = normalized
+            .strip_prefix("exit_code: 0\n")
+            .expect("exit code");
+        assert_eq!(output.trim(), "out\nerr");
+    }
+
+    // Given: denied command split over command and args / When: execute / Then: contract rejects it.
+    #[tokio::test]
+    async fn contract_checks_combined_command() {
+        let result = execute(json!({"command": "gh pr", "args": ["merge", "123"]})).await;
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .starts_with("shell command denied by contract:")
+        );
+    }
+
+    // Given: command-only issue mutation / When: execute / Then: the existing denial is retained.
+    #[tokio::test]
+    async fn contract_denies_command_only_issue_mutation() {
+        let result = execute(json!({"command": "gh issue create --help"})).await;
+        assert!(
+            result
+                .content
+                .starts_with("shell command denied by contract:")
+        );
+    }
+}
+
 /// コマンドを実行するツール。
 #[derive(Clone)]
 pub struct Shell {
@@ -64,9 +172,9 @@ impl Shell {
 /// 復元に失敗した場合のみ [`ToolError::InvalidArgs`] を返す。
 #[derive(Debug, Deserialize)]
 struct ShellArgs {
-    /// 実行するコマンド。
+    /// 実行する POSIX シェルコマンド（pipe、redirect、&&、glob をサポート）。
     command: String,
-    /// コマンドへ渡す引数。
+    /// [deprecated] command に空白区切りで追記するシェル構文。command 内への記述を推奨。
     #[serde(default)]
     args: Vec<String>,
     /// 擬似端末（PTY）上で実行するかどうか。
@@ -88,10 +196,12 @@ impl Tool for Shell {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string" },
+                "command": { "type": "string", "description": "POSIX shell command supporting pipes, redirects, && and glob expansion." },
                 "args": {
                     "type": "array",
-                    "items": { "type": "string" }
+                    "items": { "type": "string" },
+                    "deprecated": true,
+                    "description": "Deprecated: put arguments in command instead. Joined with spaces without quoting and interpreted as shell syntax."
                 },
                 "interactive": { "type": "boolean", "default": false },
                 "cwd": { "type": "string" },
@@ -114,16 +224,34 @@ impl Tool for Shell {
         // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを
         // 起動しない。拒否は Err ではなく is_error 付きの結果として返し、
         // モデルへツールエラーとして見せる（計画 S9）。
-        if let CommandVerdict::Deny { reason } = self.contract.evaluate(&args.command, &args.args) {
-            return Ok(ToolResult::error(format!(
-                "shell command denied by contract: {reason}"
-            )));
+        let command = build_shell_command(&args.command, &args.args);
+        for segment in command.split([';', '|', '&', '\n']) {
+            let mut tokens = segment.split_whitespace();
+            if let Some(program) = tokens.next() {
+                let tokens: Vec<String> = tokens.map(str::to_string).collect();
+                if let CommandVerdict::Deny { reason } = self.contract.evaluate(program, &tokens) {
+                    return Ok(ToolResult::error(format!(
+                        "shell command denied by contract: {reason}"
+                    )));
+                }
+            }
+        }
+        let shell_args = vec!["-c".to_string(), command];
+        for verdict in [
+            self.contract.evaluate(&args.command, &args.args),
+            self.contract.evaluate("sh", &shell_args),
+        ] {
+            if let CommandVerdict::Deny { reason } = verdict {
+                return Ok(ToolResult::error(format!(
+                    "shell command denied by contract: {reason}"
+                )));
+            }
         }
         let wrapped = self
             .sandbox
             .wrap(CommandSpec {
-                program: args.command.clone(),
-                args: args.args.clone(),
+                program: "sh".to_string(),
+                args: shell_args,
                 cwd: args.cwd.as_ref().map(PathBuf::from),
                 extra_env: self.extra_env.clone(),
             })
@@ -136,6 +264,15 @@ impl Tool for Shell {
             run_process(&wrapped, args.timeout_ms).await
         }
     }
+}
+
+fn build_shell_command(command: &str, args: &[String]) -> String {
+    let mut combined = command.to_string();
+    for arg in args {
+        combined.push(' ');
+        combined.push_str(arg);
+    }
+    combined
 }
 
 /// 起動系の失敗を [`ToolError::SpawnFailed`] へ変換する。
@@ -178,11 +315,16 @@ async fn run_process(
     };
     let output = spawned.map_err(|error| spawn_failed(&wrapped.program, error))?;
 
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.stderr.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
     let content = format!(
-        "exit_code: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        "exit_code: {}\n{combined}",
+        output.status.code().unwrap_or(-1)
     );
     Ok(if output.status.success() {
         ToolResult::success(content)
@@ -266,7 +408,7 @@ async fn run_interactive(
 
     let (exit_code, output) = waited?;
     let content = format!(
-        "exit_code: {exit_code}\n--- output ---\n{}",
+        "exit_code: {exit_code}\n{}",
         String::from_utf8_lossy(&output)
     );
     Ok(if exit_code == 0 {

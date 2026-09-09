@@ -38,13 +38,17 @@ async fn production_executor_runs_shell_inside_bwrap() {
             },
             "shell",
             "call-production-pwd",
-            serde_json::json!({ "command": "sh", "args": ["-c", "pwd"] }),
+            serde_json::json!({ "command": "pwd && echo hello | tr a-z A-Z > output.rs && cat *.rs && echo err >&2" }),
         )
         .await
         .expect("承認なしの Shell 実行は成功するはずです");
 
     let expected = workspace.path().display().to_string();
     assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        format!("exit_code: 0\n{expected}\nHELLO\nerr\n")
+    );
     assert!(
         result.content.contains(&expected),
         "pwd の出力に作業パス {expected} が含まれない: {}",

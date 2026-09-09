@@ -290,8 +290,7 @@ async fn with_contract_and_env_forwards_extra_env_to_child() {
 
     let result = shell
         .execute(json!({
-            "command": "sh",
-            "args": ["-c", "printf %s \"$CONTRACT_ENV_PROBE\""]
+            "command": "printf %s \"$CONTRACT_ENV_PROBE\""
         }))
         .await
         .expect("実行に成功するはずです");

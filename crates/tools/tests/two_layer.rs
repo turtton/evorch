@@ -69,7 +69,7 @@ async fn approved_execution_still_routes_through_sandbox() {
             },
             "shell",
             "call-record",
-            serde_json::json!({"command": "sh", "args": ["-c", "echo ok"]}),
+            serde_json::json!({"command": "echo ok"}),
         )
         .await
         .expect("承認後の Shell は成功するはずです");
@@ -78,6 +78,7 @@ async fn approved_execution_still_routes_through_sandbox() {
     let recorded = specs.lock().expect("記録ロックを取得できるはずです");
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].program, "sh");
+    assert_eq!(recorded[0].args, ["-c", "echo ok"]);
 }
 
 // Given: 一時ワークスペースを bind した bwrap / When: 外側と内側へ書き込み / Then: 外側は失敗しホストに現れず内側だけ成功する
@@ -101,8 +102,7 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
             "shell",
             "call-outside",
             serde_json::json!({
-                "command": "sh",
-                "args": ["-c", format!("printf blocked > {}", outside_file.display())]
+                "command": format!("printf blocked > '{}'", outside_file.display())
             }),
         )
         .await
@@ -123,8 +123,7 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
             "shell",
             "call-inside",
             serde_json::json!({
-                "command": "sh",
-                "args": ["-c", format!("printf allowed > {}", inside_file.display())]
+                "command": format!("printf allowed > '{}'", inside_file.display())
             }),
         )
         .await
@@ -162,8 +161,7 @@ async fn interactive_shell_runs_inside_bwrap() {
             "shell",
             "call-pty",
             serde_json::json!({
-                "command": "sh",
-                "args": ["-c", "echo ok"],
+                "command": "echo ok",
                 "interactive": true
             }),
         )

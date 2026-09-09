@@ -377,7 +377,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             &test_ctx("run-13"),
             "shell",
             "call-1",
-            serde_json::json!({ "command": "sh", "args": ["-c", "exit 3"] }),
+            serde_json::json!({ "command": "exit 3" }),
         )
         .await
         .expect("非ゼロ終了はエラー値ではなく結果として返る");
@@ -394,7 +394,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
         tool_event(&started),
         &ToolEvent::ToolStarted {
             tool_name: "shell".to_string(),
-            input: Some(serde_json::json!({ "command": "sh", "args": ["-c", "exit 3"] })),
+            input: Some(serde_json::json!({ "command": "exit 3" })),
             call_id: "call-1".to_string(),
             run_id: Some("run-13".to_string()),
         }

@@ -27,21 +27,19 @@ async fn with_pty_deadline<F: Future>(future: F) -> F::Output {
         })
 }
 
-// Given: stdout と stderr の両方に出力する sh コマンド / When: 非対話モードで実行 / Then: 終了コード 0 と両方の出力がセクション見出し付きで返る
+// Given: stdout と stderr / When: 非対話モードで実行 / Then: 統合出力が返る
 #[tokio::test]
 async fn shell_captures_stdout_stderr_and_exit_code() {
     let result = shell()
         .execute(json!({
-            "command": "sh",
-            "args": ["-c", "echo out; echo err >&2"]
+            "command": "echo out; echo err >&2"
         }))
         .await
         .expect("実行に成功するはずです");
 
     assert!(!result.is_error);
     assert!(result.content.contains("exit_code: 0"));
-    assert!(result.content.contains("--- stdout ---"));
-    assert!(result.content.contains("--- stderr ---"));
+    assert_eq!(result.content, "exit_code: 0\nout\nerr\n");
     assert!(result.content.contains("out"));
     assert!(result.content.contains("err"));
 }
@@ -51,8 +49,7 @@ async fn shell_captures_stdout_stderr_and_exit_code() {
 async fn shell_nonzero_exit_is_error_result_not_tool_error() {
     let result = shell()
         .execute(json!({
-            "command": "sh",
-            "args": ["-c", "exit 3"]
+            "command": "exit 3"
         }))
         .await
         .expect("ツール自体は成功するはずです");
@@ -61,23 +58,17 @@ async fn shell_nonzero_exit_is_error_result_not_tool_error() {
     assert!(result.content.contains("exit_code: 3"));
 }
 
-// Given: 存在しないバイナリ名 / When: 非対話モードで実行 / Then: 起動失敗として SpawnFailed が返る
+// Given: 存在しないバイナリ名 / When: 非対話モードで実行 / Then: shell の終了コード127が返る
 #[tokio::test]
-async fn shell_missing_binary_is_spawn_failed() {
-    let error = shell()
+async fn shell_missing_binary_returns_exit_code_127() {
+    let result = shell()
         .execute(json!({
             "command": "definitely-not-a-real-binary-xyz"
         }))
         .await
-        .expect_err("SpawnFailed が返るはずです");
-
-    match error {
-        ToolError::SpawnFailed { command, detail } => {
-            assert_eq!(command, "definitely-not-a-real-binary-xyz");
-            assert!(!detail.is_empty());
-        }
-        other => panic!("SpawnFailed を期待しましたが {other:?} が返りました"),
-    }
+        .expect("shell は起動するはずです");
+    assert!(result.is_error);
+    assert!(result.content.starts_with("exit_code: 127\n"));
 }
 
 // Given: 5 秒かかる sleep と 100ms の制限時間 / When: 非対話モードで実行 / Then: 子プロセスが殺されて Timeout エラーが返る
@@ -137,8 +128,7 @@ async fn shell_interactive_reports_exit_code() {
     with_pty_deadline(async {
         let result = shell()
             .execute(json!({
-                "command": "sh",
-                "args": ["-c", "exit 7"],
+                "command": "exit 7",
                 "interactive": true
             }))
             .await
@@ -180,11 +170,10 @@ fn shell_direct_sandbox_scrubs_parent_secret_and_keeps_path() {
             .expect("テスト用ランタイムを構築できるはずです");
         let result = runtime
             .block_on(shell().execute(json!({
-                "command": "sh",
-                "args": ["-c", "printf %s \"$FAKE_SECRET\""]
+                "command": "printf %s \"$FAKE_SECRET\""
             })))
             .expect("PATH 経由で sh を起動できるはずです");
-        assert!(result.content.contains("--- stdout ---\n\n--- stderr ---"));
+        assert_eq!(result.content, "exit_code: 0\n");
         return;
     }
 
