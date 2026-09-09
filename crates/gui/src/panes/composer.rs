@@ -77,12 +77,14 @@ pub fn composer_strip(
                     }
                 });
                 let input = egui::ScrollArea::vertical()
+                    .id_salt("composer-scroll")
                     .min_scrolled_height(COMPOSER_MIN_HEIGHT - 2.0 * SP_2)
                     .max_height(COMPOSER_MAX_HEIGHT)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                         ui.add(egui::TextEdit::multiline(&mut model.input)
+                            .id_salt("composer-input")
                             .hint_text("Message or /command  (Enter to send, Shift+Enter for newline)")
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
@@ -195,9 +197,7 @@ mod tests {
     fn typing_slash_prefix_keeps_focus() {
         // Given: the composer has focus and no input
         let mut harness = harness("", ProviderStatus::Configured);
-        harness
-            .get_by_label("Message or /command")
-            .focus();
+        harness.get_by_label("Message or /command").focus();
         harness.run();
 
         // When: a slash-command prefix is typed one character at a time
@@ -232,9 +232,7 @@ mod tests {
     fn completion_disappearance_keeps_focus() {
         // Given: a focused composer with slash completions visible
         let mut harness = harness("/g", ProviderStatus::Configured);
-        harness
-            .get_by_label("Message or /command")
-            .focus();
+        harness.get_by_label("Message or /command").focus();
         harness.run();
 
         // When: a space makes the completion candidates disappear
