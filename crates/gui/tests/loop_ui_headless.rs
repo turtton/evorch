@@ -96,6 +96,7 @@ fn issued_decisions(
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,
@@ -164,6 +165,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
             WorkbenchCommand::DecideMerge(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => None,

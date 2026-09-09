@@ -57,6 +57,7 @@ pub struct ChatSubmission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkbenchCommand {
     SendChat(ChatSubmission),
+    CancelChat { thread_id: String },
     SubmitGoal(GoalSubmission),
     DecideMerge(MergeCommand),
     PauseGoal { goal_id: String },
@@ -185,6 +186,7 @@ impl FixtureLoopAdapter {
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
+            WorkbenchCommand::CancelChat { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);
                 vec![LoopEvent::ChatAccepted {

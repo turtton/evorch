@@ -95,6 +95,24 @@ impl RuntimeCommandSink {
 impl CommandSink for RuntimeCommandSink {
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
         match command {
+            WorkbenchCommand::CancelChat { thread_id } => {
+                let Some(&run_id) = self.chat_runs.get(&thread_id) else {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: "No chat run to cancel".into(),
+                    }];
+                };
+                match self.runtime.cancel(run_id) {
+                    Ok(()) => {
+                        self.chat_runs.remove(&thread_id);
+                        Vec::new()
+                    }
+                    Err(error) => vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: error.to_string(),
+                    }],
+                }
+            }
             WorkbenchCommand::SubmitGoal(submission) => {
                 self.accepted_goals = self.accepted_goals.saturating_add(1);
                 let goal_id = format!("goal-{}", self.accepted_goals);
@@ -421,6 +439,50 @@ mod tests {
         let sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
         (rt, sink, runtime, supervisor)
+    }
+
+    #[test]
+    fn cancel_chat_cancels_running_run_and_forgets_it() {
+        // Given: a model that holds the run until cancellation.
+        let (rt, mut sink, runtime, _) = build_sink();
+        let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            thread_id: "chat-thread".into(),
+            text: "hello".into(),
+            model_preference: None,
+        });
+        sink.submit(chat.clone());
+        let first = sink.chat_runs["chat-thread"];
+        // When: cancel and immediately submit again, before waiting for termination.
+        assert!(
+            sink.submit(WorkbenchCommand::CancelChat {
+                thread_id: "chat-thread".into(),
+            })
+            .is_empty()
+        );
+        sink.submit(chat);
+        // Then: the old run terminates and the next message uses a fresh run.
+        assert_ne!(sink.chat_runs["chat-thread"], first);
+        let phase = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(first))
+                .await
+                .expect("cancel completes")
+                .expect("run exists")
+        });
+        assert_eq!(phase, event_bus::AgentRunPhase::Error);
+    }
+
+    #[test]
+    fn cancel_chat_without_run_is_rejected() {
+        // Given
+        let (_rt, mut sink, _, _) = build_sink();
+        // When
+        let events = sink.submit(WorkbenchCommand::CancelChat {
+            thread_id: "missing".into(),
+        });
+        // Then
+        assert!(
+            matches!(events.as_slice(), [LoopEvent::ChatRejected { thread_id, .. }] if thread_id == "missing")
+        );
     }
 
     /// storage bridge をテスト用に起動する (本番と同一の session ID で永続化する)。
