@@ -8,3 +8,5 @@
 !.opencode/*-contract.md
 
 /target
+# Local user config with provider credentials
+/evorch.toml
