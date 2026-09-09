@@ -529,6 +529,7 @@ fn codex_auth_model(
 }
 
 fn run() -> Result<(), GuiError> {
+    gui::logging::init();
     let arguments = parse_arguments()?;
     let settings = load_settings(&arguments)?;
     let repo_root = std::fs::canonicalize(std::env::current_dir()?)?;
