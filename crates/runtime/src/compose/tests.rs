@@ -12,6 +12,8 @@ use routing::{ComposedProvider, ComposedProviders, CredentialRef, ProviderProfil
 
 use super::*;
 
+mod live;
+
 #[derive(Clone)]
 struct StubClient {
     result: Result<ChatResponse, ProviderError>,
