@@ -95,6 +95,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             match action {
                 ProviderSettingsAction::Save => self.submit_provider_settings(),
+                ProviderSettingsAction::Delete(name) => self.delete_provider_settings(name),
                 ProviderSettingsAction::Cancel => self.close_provider_settings(),
                 ProviderSettingsAction::StartCodexLogin => self.start_codex_login(),
                 ProviderSettingsAction::RefreshModels => self

@@ -5,7 +5,7 @@ use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::CODEX_LOGIN_BUTTON;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
-use gui::model::provider_settings::ProviderSettingsModel;
+use gui::model::provider_settings::{OpenAiEditorModel, ProviderSettingsModel};
 use gui::theme::tokens::PROVIDER_MODAL_MAX_WIDTH;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
@@ -20,6 +20,9 @@ mod capture;
 
 #[path = "provider_settings/codex_auth.rs"]
 mod codex_auth;
+
+#[path = "provider_settings/profiles.rs"]
+mod profiles;
 
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
@@ -69,7 +72,7 @@ fn clicking_open_settings_shows_modal_fields() {
     harness.run();
     // Then: the settings modal offers save and cancel.
     assert!(harness.has_label("Provider settings"));
-    assert!(harness.has_label("Save"));
+    assert!(harness.has_label("+ Add OpenAI-compatible"));
     assert!(harness.has_label("Cancel"));
 }
 
@@ -86,7 +89,7 @@ fn settings_button_opens_modal_when_provider_is_configured() {
     harness.run();
     // Then: the modal still offers Codex login.
     assert!(harness.has_label("Provider settings"));
-    assert!(harness.has_label("Codex subscription"));
+    assert!(harness.has_label("+ Add Codex subscription"));
 }
 
 fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
@@ -116,7 +119,13 @@ fn open_valid_settings(harness: &mut HeadlessWorkbench<DemoSource>) {
     harness.run();
     harness.click_label("Open Settings");
     harness.run();
-    let model = harness.state_mut().provider_settings_mut();
+    harness.click_label("+ Add OpenAI-compatible");
+    harness.run();
+    let model = harness
+        .state_mut()
+        .provider_settings_mut()
+        .openai_mut()
+        .unwrap();
     model.name = "local".into();
     model.base_url = "https://api.example.invalid/v1".into();
     model.api_key_env = "LOCAL_API_KEY".into();
@@ -136,6 +145,20 @@ fn load_config(root: &std::path::Path) -> config::Config {
     .expect("saved config loads")
 }
 
+fn finish_save(harness: &mut HeadlessWorkbench<DemoSource>) {
+    for _ in 0..1000 {
+        harness.step();
+        if harness.state().provider_settings().editor.is_none()
+            || harness.state().provider_settings().error.is_some()
+        {
+            harness.run();
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("save did not finish");
+}
+
 #[test]
 fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     // Given: an unconfigured conversation and valid settings with a project path.
@@ -144,7 +167,7 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     open_valid_settings(&mut harness);
     // When: settings are saved through the modal.
     harness.click_label("Save");
-    harness.run();
+    finish_save(&mut harness);
     // Then: disk configuration and the conversation both become configured.
     let path = temp.path().join("evorch.toml");
     assert!(path.exists());
@@ -169,6 +192,10 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
         &ProviderStatus::Configured
     );
     assert!(!harness.has_label(PROVIDER_MISSING_GUIDANCE));
+    harness.click_label("Cancel");
+    harness.run();
+    assert!(!harness.state().provider_settings().open);
+    harness.step();
     harness.state_mut().composer_mut().input = "hello".into();
     harness.run();
     harness.click_label("Send");
@@ -188,7 +215,12 @@ fn save_with_plaintext_api_key_is_rejected_and_file_untouched() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
-    harness.state_mut().provider_settings_mut().api_key_env = "sk-live-abc".into();
+    harness
+        .state_mut()
+        .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
+        .api_key_env = "sk-live-abc".into();
     harness.run();
     // When: saving is attempted.
     harness.click_label("Save");
@@ -223,7 +255,7 @@ fn save_preserves_existing_tables_in_evorch_toml() {
     open_valid_settings(&mut harness);
     // When: a different provider is added through Settings.
     harness.click_label("Save");
-    harness.run();
+    finish_save(&mut harness);
     // Then: the existing table values and comment survive alongside the new provider.
     let raw = std::fs::read_to_string(path).expect("saved file readable");
     for line in existing.lines() {
@@ -249,7 +281,7 @@ fn cancel_closes_modal_without_writing() {
     harness.run();
     // Then: the modal closes without configuring the provider or writing a file.
     assert!(!harness.has_label("Save"));
-    assert!(!harness.state().provider_settings().open);
+    assert!(harness.state().provider_settings().editor.is_none());
     assert!(!temp.path().join("evorch.toml").exists());
     assert_eq!(
         harness.state().provider_status(),
@@ -268,12 +300,12 @@ fn open_settings_from_composer_when_not_configured() {
     harness.run();
     // Then: the same provider Settings modal opens.
     assert!(harness.has_label("Provider settings"));
-    assert!(harness.has_label("Save"));
+    assert!(harness.has_label("+ Add OpenAI-compatible"));
 }
 
 fn workbench_with_seeded_settings(
     root: &std::path::Path,
-    model: ProviderSettingsModel,
+    model: OpenAiEditorModel,
     size: [f32; 2],
 ) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
@@ -290,12 +322,28 @@ fn workbench_with_seeded_settings(
     sidebar
         .switch_thread(&ThreadId::new("thread-1"))
         .expect("thread selected");
+    let name = model.name.clone();
+    let mut config = config::Config::default();
+    config.providers.insert(
+        name.clone(),
+        config::ProviderProfileConfig {
+            provider_type: ProviderTypeConfig::OpenAiCompatible,
+            base_url: model.base_url.clone(),
+            credential: CredentialRefConfig::Env {
+                var: model.api_key_env.clone(),
+            },
+            models: model.parsed_models(),
+            default_model: model.default_model.clone(),
+            ..Default::default()
+        },
+    );
+    let settings = ProviderSettingsModel::seed_from_config(&config);
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("default state builds")
         .with_sidebar(sidebar)
         .with_provider_status(ProviderStatus::default())
         .with_provider_settings_path(root.join("evorch.toml"))
-        .with_provider_settings(model);
+        .with_provider_settings(settings);
     HeadlessWorkbench::new(state, size)
 }
 
@@ -328,19 +376,21 @@ fn save_without_config_path_shows_inline_error() {
 fn modal_width_scales_with_viewport_and_respects_cap() {
     // Given: a provider with a very long base URL and model name.
     let temp = tempfile::tempdir().expect("temp dir");
-    let model = ProviderSettingsModel {
+    let model = OpenAiEditorModel {
         name: "local".into(),
         base_url: "https://api.example.invalid/v1/chat/completions/very/long/path/that/should/not/clip/in/the/provider/settings/modal".into(),
         api_key_env: "LOCAL_API_KEY_WITH_A_VERY_LONG_NAME".into(),
         models_text: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
         default_model: "org/example/model-name-that-is-very-long-and-should-not-clip".into(),
-        ..ProviderSettingsModel::default()
+        ..OpenAiEditorModel::default()
     };
     for (viewport_width, expect_capped) in [(1200.0, true), (800.0, false)] {
         let mut harness =
             workbench_with_seeded_settings(temp.path(), model.clone(), [viewport_width, 600.0]);
         // When: settings are opened at the given viewport width.
         harness.click_label("Open Settings");
+        harness.run();
+        harness.click_label("Edit");
         harness.run();
         // Then: controls are visible and the modal fits within the viewport.
         let caption =

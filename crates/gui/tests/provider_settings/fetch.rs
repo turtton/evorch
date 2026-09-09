@@ -1,21 +1,32 @@
 use super::workbench_with_seeded_settings;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
-use gui::model::provider_settings::{ModelsFetchState, ProviderSettingsModel};
+use gui::model::provider_settings::{ModelsFetchState, OpenAiEditorModel as ProviderSettingsModel};
 use mock_openai::{StreamingMockOpenAi, WriteMode};
 
 fn run_until_fetch_finishes(harness: &mut HeadlessWorkbench<DemoSource>) {
     // run() は Loading 中の repaint 要求を消化し続け max_steps を超過し得るため、確定的に 1 フレームずつ進める。
     for _ in 0..200 {
         harness.step();
-        match &harness.state().provider_settings().models_fetch_state {
+        match &harness
+            .state()
+            .provider_settings()
+            .openai()
+            .unwrap()
+            .models_fetch_state
+        {
             ModelsFetchState::Loaded | ModelsFetchState::Failed(_) => return,
             ModelsFetchState::Idle | ModelsFetchState::Loading => std::thread::yield_now(),
         }
     }
     panic!(
         "model fetch did not finish within 200 frame runs: {:?}",
-        harness.state().provider_settings().models_fetch_state
+        harness
+            .state()
+            .provider_settings()
+            .openai()
+            .unwrap()
+            .models_fetch_state
     );
 }
 
@@ -70,14 +81,18 @@ fn fetched_models_populate_modal_when_request_succeeds() {
     );
     harness.click_label("Open Settings");
     harness.run();
+    harness.click_label("Edit");
+    harness.run();
     // When: the modal fetches using an injected key without mutating the environment.
     harness
         .state_mut()
         .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
         .start_models_fetch_with_key(Some("sk-test".into()));
     run_until_fetch_finishes(&mut harness);
     // Then: the ordered models and loaded status reach the rendered modal.
-    let model = harness.state().provider_settings();
+    let model = harness.state().provider_settings().openai().unwrap();
     assert_eq!(model.models_fetch_state, ModelsFetchState::Loaded);
     assert_eq!(
         model.available_models,
@@ -113,14 +128,18 @@ fn manual_models_remain_available_when_request_fails() {
     );
     harness.click_label("Open Settings");
     harness.run();
+    harness.click_label("Edit");
+    harness.run();
     // When: an authenticated request fails and the UI polls the result.
     harness
         .state_mut()
         .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
         .start_models_fetch_with_key(Some("k".into()));
     run_until_fetch_finishes(&mut harness);
     // Then: the failure leaves manual entry and the selected model intact.
-    let model = harness.state().provider_settings();
+    let model = harness.state().provider_settings().openai().unwrap();
     let ModelsFetchState::Failed(error) = &model.models_fetch_state else {
         panic!("expected failed fetch, got {:?}", model.models_fetch_state);
     };
@@ -156,22 +175,36 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
     );
     harness.click_label("Open Settings");
     harness.run();
+    harness.click_label("Edit");
+    harness.run();
     harness
         .state_mut()
         .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
         .start_models_fetch_with_key(Some("sk-test".into()));
     run_until_fetch_finishes(&mut harness);
     assert_eq!(
-        harness.state().provider_settings().models_fetch_state,
+        harness
+            .state()
+            .provider_settings()
+            .openai()
+            .unwrap()
+            .models_fetch_state,
         ModelsFetchState::Loaded
     );
-    harness.state_mut().provider_settings_mut().default_model = "mock-model-a".into();
+    harness
+        .state_mut()
+        .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
+        .default_model = "mock-model-a".into();
     harness.run();
     // When: the fetched selection is saved through the modal.
     harness.click_label("Save");
-    harness.run();
+    super::finish_save(&mut harness);
     // Then: the modal closes and the selected model is persisted as a member.
-    assert!(!harness.state().provider_settings().open);
+    assert!(harness.state().provider_settings().editor.is_none());
     assert!(!harness.has_label("Save"));
     let raw = std::fs::read_to_string(temp.path().join("evorch.toml")).expect("saved config");
     assert!(raw.contains("default_model = \"mock-model-a\""));

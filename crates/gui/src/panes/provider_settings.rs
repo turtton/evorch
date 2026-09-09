@@ -1,23 +1,25 @@
 use crate::model::codex_auth::CodexAuthModel;
 use crate::model::provider_settings::{
-    CredentialMode, ModelsFetchState, ProviderSettingsModel, ProviderSettingsTab,
+    CredentialMode, ModelsFetchState, OpenAiEditorModel, ProfileEditor, ProviderKind,
+    ProviderSettingsModel,
 };
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::{primary_button, surface_frame};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderSettingsAction {
     Save,
     Cancel,
     StartCodexLogin,
     RefreshModels,
+    Delete(String),
 }
 
 pub fn provider_settings_modal(
     ctx: &egui::Context,
     model: &mut ProviderSettingsModel,
-    codex: &CodexAuthModel,
+    _codex: &CodexAuthModel,
 ) -> Option<ProviderSettingsAction> {
     let mut action = None;
     let width = (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0;
@@ -28,27 +30,75 @@ pub fn provider_settings_modal(
             ui.set_width(width);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Provider settings"));
-            surface_frame(SURFACE).corner_radius(R_PILL).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut model.tab,
-                        ProviderSettingsTab::OpenAi,
-                        egui::RichText::new("OpenAI-compatible").color(TEXT),
-                    );
-                    ui.selectable_value(
-                        &mut model.tab,
-                        ProviderSettingsTab::Codex,
-                        egui::RichText::new("Codex subscription").color(TEXT),
-                    );
-                });
-            });
-            match model.tab {
-                ProviderSettingsTab::OpenAi => {
-                    action = openai_body(ui, model);
+            match &mut model.editor {
+                Some(ProfileEditor::OpenAiCompatible(editor)) => {
+                    action = openai_body(ui, editor);
                 }
-                ProviderSettingsTab::Codex => {
-                    if crate::panes::codex_auth::codex_auth_section(ui, codex) {
+                Some(ProfileEditor::Codex(editor)) => {
+                    let busy = editor.auth.is_authenticating();
+                    ui.add_enabled_ui(!busy, |ui| {
+                        let previous = editor.name.clone();
+                        let name = ui.label("Name");
+                        ui.text_edit_singleline(&mut editor.name)
+                            .labelled_by(name.id);
+                        if editor.account == previous {
+                            editor.account.clone_from(&editor.name);
+                        }
+                        let account = ui.label("Account");
+                        ui.text_edit_singleline(&mut editor.account)
+                            .labelled_by(account.id);
+                    });
+                    if crate::panes::codex_auth::codex_auth_section(ui, &editor.auth) {
                         action = Some(ProviderSettingsAction::StartCodexLogin);
+                    }
+                }
+                None => {
+                    let mut edit = None;
+                    for profile in &model.profiles {
+                        ui.push_id(&profile.name, |ui| {
+                            crate::theme::widgets::compact_row(ui, false, |ui| {
+                                ui.label(&profile.name);
+                                let label = match profile.provider_type {
+                                    config::ProviderTypeConfig::OpenAiCompatible => "OpenAI-compatible",
+                                    config::ProviderTypeConfig::OpenAiCodex => "Codex subscription",
+                                    config::ProviderTypeConfig::Anthropic => "Anthropic",
+                                    config::ProviderTypeConfig::AnthropicSubscription => "Anthropic subscription",
+                                    config::ProviderTypeConfig::OpenAi => "OpenAI",
+                                    config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
+                                    config::ProviderTypeConfig::Openrouter => "OpenRouter",
+                                };
+                                crate::theme::widgets::badge(ui, label, ACCENT, SURFACE);
+                                ui.label(muted(&profile.default_model));
+                                if ui.button("Edit").clicked() {
+                                    edit = Some(profile.name.clone());
+                                }
+                                if ui.button("Delete").clicked() {
+                                    model.confirm_delete = Some(profile.name.clone());
+                                }
+                            });
+                            if model.confirm_delete.as_deref() == Some(&profile.name) {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Delete {}?", profile.name));
+                                    if ui.button("Confirm delete").clicked() {
+                                        action = Some(ProviderSettingsAction::Delete(
+                                            profile.name.clone(),
+                                        ));
+                                    }
+                                    if ui.button("Keep profile").clicked() {
+                                        model.confirm_delete = None;
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    if let Some(name) = edit {
+                        model.edit(&name);
+                    }
+                    if ui.button("+ Add OpenAI-compatible").clicked() {
+                        model.add(ProviderKind::OpenAiCompatible);
+                    }
+                    if ui.button("+ Add Codex subscription").clicked() {
+                        model.add(ProviderKind::CodexSubscription);
                     }
                 }
             }
@@ -56,11 +106,9 @@ pub fn provider_settings_modal(
                 ui.label(egui::RichText::new(error).color(ERROR_FG));
             }
             ui.horizontal(|ui| {
-                ui.add_enabled_ui(model.tab == ProviderSettingsTab::OpenAi, |ui| {
-                    if primary_button(ui, "Save").clicked() {
-                        action = Some(ProviderSettingsAction::Save);
-                    }
-                });
+                if model.editor.is_some() && primary_button(ui, "Save").clicked() {
+                    action = Some(ProviderSettingsAction::Save);
+                }
                 if ui.button("Cancel").clicked() {
                     action = Some(ProviderSettingsAction::Cancel);
                 }
@@ -69,10 +117,7 @@ pub fn provider_settings_modal(
     action
 }
 
-fn openai_body(
-    ui: &mut egui::Ui,
-    model: &mut ProviderSettingsModel,
-) -> Option<ProviderSettingsAction> {
+fn openai_body(ui: &mut egui::Ui, model: &mut OpenAiEditorModel) -> Option<ProviderSettingsAction> {
     let mut action = None;
     let width = ui.available_width();
     let name = ui.label("Name");

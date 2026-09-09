@@ -1,5 +1,5 @@
 use super::WorkbenchState;
-use crate::model::composer::ProviderStatus;
+use crate::model::provider_settings::{CredentialMode, ProfileEditor, ProviderSettingsModel};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -13,130 +13,157 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn open_provider_settings(&mut self) {
-        self.codex_auth.refresh_from_store();
         self.provider_settings.error = None;
+        self.provider_settings.editor = None;
         self.provider_settings.open = true;
-        self.provider_settings
-            .start_models_fetch_with_store(self.credential_store.clone());
     }
 
-    pub const fn close_provider_settings(&mut self) {
-        self.provider_settings.open = false;
+    pub fn close_provider_settings(&mut self) {
+        if self.provider_settings.editor.take().is_none() {
+            self.provider_settings.open = false;
+        }
+        self.provider_settings.error = None;
     }
 
     pub fn start_codex_login(&mut self) {
-        self.codex_auth.start();
+        self.prepare_codex_editor();
+        if let Some(editor) = self.provider_settings.codex_mut() {
+            editor.auth.start();
+        }
+    }
+
+    pub fn prepare_codex_editor(&mut self) {
+        let Some(editor) = self.provider_settings.codex_mut() else {
+            return;
+        };
+        if editor.auth.has_backend() && editor.auth.credential_account == editor.account {
+            return;
+        }
+        if let Some(store) = self.credential_store.clone() {
+            match crate::model::codex_auth_backend::ProviderCodexAuthBackend::production(
+                store,
+                editor.account.clone(),
+                "https://auth.openai.com",
+            ) {
+                Ok(backend) => {
+                    editor.auth = crate::model::codex_auth::CodexAuthModel::with_backend(
+                        std::sync::Arc::new(backend),
+                        editor.account.clone(),
+                    )
+                }
+                Err(failure) => {
+                    editor.auth.state = crate::model::codex_auth::CodexAuthState::Failed { failure }
+                }
+            }
+        } else if self.codex_auth.has_backend()
+            && self.codex_auth.credential_account == editor.account
+        {
+            std::mem::swap(&mut editor.auth, &mut self.codex_auth);
+        }
     }
 
     pub fn submit_provider_settings(&mut self) {
-        if self.provider_save_rx.is_some()
-            || self.provider_settings.tab
-                == crate::model::provider_settings::ProviderSettingsTab::Codex
-        {
+        if self.provider_save_rx.is_some() {
             return;
         }
-        let input = self.provider_settings.to_input();
-        if let Err(error) = config::validate_openai_compatible_provider_input(&input) {
-            self.provider_settings.error = Some(error.to_string());
+        let Some(path) = self.provider_settings_path.clone() else {
+            self.provider_settings.error = Some("No project config path is configured".into());
             return;
-        }
-        if let Some((context, model)) = self.production_model.clone() {
-            let Some(path) = self.provider_settings_path.clone() else {
-                self.provider_settings.error = Some("No project config path is configured".into());
-                return;
-            };
-            let secret = sandbox::Secret::from(self.provider_settings.api_key_input.clone());
-            let mode = self.provider_settings.credential_mode;
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.provider_save_rx = Some(rx);
-            std::thread::spawn(move || {
-                let result = (|| {
+        };
+        let store = self.credential_store.clone();
+        match &self.provider_settings.editor {
+            None => {}
+            Some(ProfileEditor::OpenAiCompatible(editor)) => {
+                let input = editor.to_input();
+                if let Err(error) = config::validate_openai_compatible_provider_input(&input) {
+                    self.provider_settings.error = Some(error.to_string());
+                    return;
+                }
+                let mode = editor.credential_mode;
+                let secret = sandbox::Secret::from(editor.api_key_input.clone());
+                self.provider_operation(move || {
                     match mode {
-                        crate::model::provider_settings::CredentialMode::Env => {}
-                        crate::model::provider_settings::CredentialMode::Keyring => {
+                        CredentialMode::Env => {}
+                        CredentialMode::Keyring => {
+                            let store = store.ok_or_else(|| {
+                                "Credential store unavailable; use environment-variable mode"
+                                    .to_owned()
+                            })?;
                             if secret.expose().is_empty() {
-                                let existing = context
-                                    .credential_store
+                                if store
                                     .get(&input.name)
-                                    .map_err(|error| error.to_string())?;
-                                if existing.is_none_or(|value| value.expose().trim().is_empty()) {
-                                    return Err("Enter an API key before saving".to_owned());
+                                    .map_err(|e| e.to_string())?
+                                    .is_none_or(|value| value.expose().trim().is_empty())
+                                {
+                                    return Err("Enter an API key before saving".into());
                                 }
                             } else {
-                                context
-                                    .credential_store
-                                    .set(&input.name, &secret)
-                                    .map_err(|error| error.to_string())?;
+                                store.set(&input.name, &secret).map_err(|e| e.to_string())?;
                             }
                         }
                     }
                     config::save_openai_compatible_provider(&path, &input)
-                        .map_err(|error| error.to_string())?;
-                    let replacement = context.reload()?;
-                    model.replace(replacement);
-                    Ok(())
-                })();
-                if let Err(error) = &result {
-                    tracing::error!(%error, "provider save or recomposition failed");
-                }
-                let _ = tx.send(result);
-            });
+                        .map_err(|e| e.to_string())
+                });
+            }
+            Some(ProfileEditor::Codex(editor)) => {
+                let input = config::CodexProviderInput {
+                    name: editor.name.clone(),
+                    account: editor.account.clone(),
+                    models: editor.models.clone(),
+                    default_model: editor.default_model.clone(),
+                };
+                self.provider_operation(move || {
+                    config::save_codex_provider(&path, &input).map_err(|e| e.to_string())
+                });
+            }
+        }
+    }
+
+    pub fn delete_provider_settings(&mut self, name: String) {
+        if self.provider_save_rx.is_some() {
             return;
         }
-        match self.provider_settings.credential_mode {
-            crate::model::provider_settings::CredentialMode::Env => {}
-            crate::model::provider_settings::CredentialMode::Keyring => {
-                let Some(store) = self.credential_store.clone() else {
-                    self.provider_settings.error =
-                        Some("Credential store unavailable; use environment-variable mode".into());
-                    return;
-                };
-                let Some(path) = self.provider_settings_path.clone() else {
-                    self.provider_settings.error =
-                        Some("No project config path is configured".into());
-                    return;
-                };
-                let secret = sandbox::Secret::from(self.provider_settings.api_key_input.clone());
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.provider_save_rx = Some(rx);
-                std::thread::spawn(move || {
-                    let result = if secret.expose().is_empty() {
-                        store
-                            .get(&input.name)
-                            .map_err(|_| "Could not read credential store".to_owned())
-                            .and_then(|value| {
-                                value
-                                    .map(|_| ())
-                                    .ok_or_else(|| "Enter an API key before saving".into())
-                            })
-                    } else {
-                        store
-                            .set(&input.name, &secret)
-                            .map_err(|_| "Could not save API key to credential store".to_owned())
+        let Some(path) = self.provider_settings_path.clone() else {
+            self.provider_settings.error = Some("No project config path is configured".into());
+            return;
+        };
+        let credential = self.provider_settings.credential(&name).cloned();
+        let store = self.credential_store.clone();
+        self.provider_operation(move || {
+            config::delete_provider(&path, &name).map_err(|e| e.to_string())?;
+            if let Some(config::CredentialRefConfig::Keyring { account, .. }) = credential {
+                if let Some(store) = store {
+                    if let Err(error) = store.delete(&account) {
+                        tracing::warn!(%error, "provider credential deletion failed");
                     }
-                    .and_then(|()| {
-                        config::save_openai_compatible_provider(&path, &input)
-                            .map_err(|error| error.to_string())
-                    });
-                    let _ = tx.send(result);
-                });
-                return;
-            }
-        }
-        match self.provider_settings_path.as_deref() {
-            None => {
-                self.provider_settings.error = Some("No project config path is configured".into());
-            }
-            Some(path) => match config::save_openai_compatible_provider(path, &input) {
-                Ok(()) => {
-                    let notice = format!("Provider '{}' saved to {}", input.name, path.display());
-                    self.provider_status = ProviderStatus::Configured;
-                    self.close_provider_settings();
-                    self.push_notice(notice);
+                } else {
+                    tracing::warn!("provider credential deletion skipped: store unavailable");
                 }
-                Err(error) => self.provider_settings.error = Some(error.to_string()),
-            },
-        }
+            }
+            Ok(())
+        });
+    }
+
+    fn provider_operation(
+        &mut self,
+        operation: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) {
+        let production = self.production_model.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.provider_save_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = operation().and_then(|()| {
+                if let Some((context, model)) = production {
+                    model.replace(context.reload()?);
+                }
+                Ok(())
+            });
+            if let Err(error) = &result {
+                tracing::error!(%error, "provider update or recomposition failed");
+            }
+            let _ = tx.send(result);
+        });
     }
 
     pub fn poll_provider_save(&mut self) {
@@ -144,16 +171,33 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         match rx.try_recv() {
-            Ok(Ok(())) => {
-                self.provider_settings.api_key_input.clear();
-                self.provider_settings.api_key_stored = self.provider_settings.credential_mode
-                    == crate::model::provider_settings::CredentialMode::Keyring;
-                self.provider_settings.error = None;
-                self.provider_status = ProviderStatus::Configured;
-                self.close_provider_settings();
-                self.push_notice("Provider saved");
+            Ok(result) => {
+                if let Err(error) = result {
+                    self.provider_settings.error = Some(error);
+                    return;
+                }
+                if let Some(path) = &self.provider_settings_path {
+                    let options = config::LoadOptions {
+                        project_dir: path.parent().map(std::path::Path::to_path_buf),
+                        read_env: false,
+                        ..Default::default()
+                    };
+                    match config::Config::load(&options) {
+                        Ok(config) => {
+                            self.provider_status =
+                                crate::model::provider_settings::provider_status_of(&config);
+                            self.provider_settings =
+                                ProviderSettingsModel::seed_from_config(&config);
+                            self.provider_settings.open = true;
+                        }
+                        Err(error) => {
+                            self.provider_settings.error = Some(error.to_string());
+                            return;
+                        }
+                    }
+                }
+                self.push_notice("Provider settings updated");
             }
-            Ok(Err(error)) => self.provider_settings.error = Some(error),
             Err(std::sync::mpsc::TryRecvError::Empty) => self.provider_save_rx = Some(rx),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.provider_settings.error =

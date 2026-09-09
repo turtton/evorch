@@ -13,7 +13,9 @@ fn capture_both_settings_tabs() {
         .unwrap()
         .save_png(std::path::Path::new("/tmp/opencode/w-b-openai.png"))
         .unwrap();
-    harness.click_label("Codex subscription");
+    harness.click_label("Cancel");
+    harness.run();
+    harness.click_label("+ Add Codex subscription");
     harness.run();
     // Then
     assert!(harness.has_label(CODEX_LOGIN_BUTTON));
@@ -25,15 +27,14 @@ fn capture_both_settings_tabs() {
 }
 
 #[test]
-fn modal_shows_segmented_switcher_with_openai_tab_default() {
+fn openai_editor_shows_form_without_codex_login() {
     // Given
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench_with_config_path(temp.path());
     // When
     open_valid_settings(&mut harness);
     // Then
-    assert!(harness.has_label("OpenAI-compatible"));
-    assert!(harness.has_label("Codex subscription"));
+    assert!(harness.has_label("Name"));
     assert!(harness.has_label("Base URL"));
     assert!(!harness.has_label(CODEX_LOGIN_BUTTON));
 }
@@ -45,7 +46,9 @@ fn codex_tab_hides_openai_grid_and_shows_login() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When
-    harness.click_label("Codex subscription");
+    harness.click_label("Cancel");
+    harness.run();
+    harness.click_label("+ Add Codex subscription");
     harness.run();
     // Then
     assert!(!harness.has_label("Base URL"));
@@ -82,6 +85,8 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     let model = harness.state_mut().provider_settings_mut();
     model.open = true;
+    model.add(gui::model::provider_settings::ProviderKind::OpenAiCompatible);
+    let model = model.openai_mut().unwrap();
     model.base_url = "https://example.com/v1".into();
     model.api_key_input = "sk-test".into();
     model.models_text = "model-a".into();
@@ -92,7 +97,7 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
     harness.click_label("Save");
     for _ in 0..500 {
         harness.step();
-        if !harness.state().provider_settings().open {
+        if harness.state().provider_settings().editor.is_none() {
             break;
         }
         std::thread::yield_now();
@@ -102,7 +107,7 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
         store.get("openai-compat").unwrap().unwrap().expose(),
         "sk-test"
     );
-    assert!(harness.state().provider_settings().api_key_input.is_empty());
+    assert!(harness.state().provider_settings().editor.is_none());
     let text = std::fs::read_to_string(temp.path().join("evorch.toml")).unwrap();
     assert!(text.contains("type = \"keyring\""));
     assert!(!text.contains("sk-test"));
@@ -114,11 +119,15 @@ fn save_in_keyring_mode_without_store_shows_error_and_writes_nothing() {
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
-    harness.state_mut().provider_settings_mut().credential_mode =
-        gui::model::provider_settings::CredentialMode::Keyring;
+    harness
+        .state_mut()
+        .provider_settings_mut()
+        .openai_mut()
+        .unwrap()
+        .credential_mode = gui::model::provider_settings::CredentialMode::Keyring;
     // When
     harness.click_label("Save");
-    harness.run();
+    finish_save(&mut harness);
     // Then
     assert_eq!(
         harness.state().provider_settings().error.as_deref(),
@@ -145,7 +154,7 @@ fn models_fetch_uses_stored_secret_in_keyring_mode() {
             &sandbox::Secret::from("sk-test".to_owned()),
         )
         .unwrap();
-    let mut model = ProviderSettingsModel {
+    let mut model = OpenAiEditorModel {
         base_url: server.base_url(),
         ..Default::default()
     };

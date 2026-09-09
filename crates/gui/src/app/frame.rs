@@ -38,17 +38,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }
-        if self.codex_auth.poll() {
+        self.prepare_codex_editor();
+        if self.codex_auth_mut().poll() {
             ctx.request_repaint();
         }
-        if let Some(url) = self.codex_auth.take_url_to_open() {
+        if let Some(url) = self.codex_auth_mut().take_url_to_open() {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
         self.render(ui);
-        if matches!(
-            self.provider_settings.models_fetch_state,
-            crate::model::provider_settings::ModelsFetchState::Loading
-        ) || self.codex_auth.is_authenticating()
+        if self.provider_settings.openai_mut().is_some_and(|editor| {
+            matches!(
+                editor.models_fetch_state,
+                crate::model::provider_settings::ModelsFetchState::Loading
+            )
+        }) || self.codex_auth().is_authenticating()
             || self.provider_save_rx.is_some()
             || self.folder_picker.is_busy()
         {

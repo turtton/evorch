@@ -113,6 +113,8 @@ fn provider_save_recomposes_live_model() {
         .with_production_model(context, model.clone());
     let settings = state.provider_settings_mut();
     settings.open = true;
+    settings.add(gui::model::provider_settings::ProviderKind::OpenAiCompatible);
+    let settings = settings.openai_mut().unwrap();
     settings.name = "live".into();
     settings.base_url = "https://example.test/v1".into();
     settings.credential_mode = gui::model::provider_settings::CredentialMode::Keyring;
@@ -123,7 +125,7 @@ fn provider_save_recomposes_live_model() {
     // When
     state.submit_provider_settings();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while state.provider_settings().open && state.provider_settings().error.is_none() {
+    while state.provider_settings().editor.is_some() && state.provider_settings().error.is_none() {
         assert!(Instant::now() < deadline, "save worker timed out");
         state.poll_provider_save();
         std::thread::yield_now();

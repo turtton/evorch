@@ -234,11 +234,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.codex_auth = model;
         self
     }
-    pub const fn codex_auth(&self) -> &CodexAuthModel {
-        &self.codex_auth
+    pub fn codex_auth(&self) -> &CodexAuthModel {
+        match &self.provider_settings.editor {
+            Some(crate::model::provider_settings::ProfileEditor::Codex(editor)) => &editor.auth,
+            _ => &self.codex_auth,
+        }
     }
-    pub const fn codex_auth_mut(&mut self) -> &mut CodexAuthModel {
-        &mut self.codex_auth
+    pub fn codex_auth_mut(&mut self) -> &mut CodexAuthModel {
+        match &mut self.provider_settings.editor {
+            Some(crate::model::provider_settings::ProfileEditor::Codex(editor)) => &mut editor.auth,
+            _ => &mut self.codex_auth,
+        }
     }
     pub fn with_provider_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.provider_settings_path = Some(path.into());
