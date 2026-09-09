@@ -23,7 +23,8 @@ pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
 pub use orchestration::OrchestrationConfig;
 pub use panel::PanelConfig;
 pub use provider::{
-    ApiProtocolConfig, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig,
+    ApiProtocolConfig, CredentialRefConfig, ModelEntryConfig, ProviderProfileConfig,
+    ProviderTypeConfig,
 };
 pub use routing::{RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;

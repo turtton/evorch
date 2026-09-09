@@ -62,7 +62,7 @@ fn configured() -> Config {
                 credential: CredentialRefConfig::Env {
                     var: KEY_ENV.to_string(),
                 },
-                models: vec![MODEL.to_string()],
+                models: vec![config::ModelEntryConfig::enabled(MODEL)],
                 excluded_models: Vec::new(),
                 default_model: MODEL.to_string(),
             },

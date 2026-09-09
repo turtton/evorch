@@ -65,7 +65,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
                 credential: config::CredentialRefConfig::Env {
                     var: "TEST_KEY".into(),
                 },
-                models: vec!["live".into()],
+                models: vec![config::ModelEntryConfig::enabled("live")],
                 excluded_models: vec![],
                 default_model: "live".into(),
             },

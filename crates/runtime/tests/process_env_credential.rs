@@ -55,7 +55,7 @@ fn config() -> Config {
                 credential: CredentialRefConfig::Env {
                     var: KEY_ENV.to_string(),
                 },
-                models: vec!["local-model".to_string()],
+                models: vec![config::ModelEntryConfig::enabled("local-model")],
                 excluded_models: Vec::new(),
                 default_model: "local-model".to_string(),
             },

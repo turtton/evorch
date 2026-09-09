@@ -31,7 +31,7 @@ pub use schema::json_schema;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
     Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig,
-    PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
+    ModelEntryConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
     ReasoningEffortConfig, ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig,
     RoutingConfig, RulesConfig, SummarizerKind,
 };
