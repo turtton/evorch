@@ -25,19 +25,20 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
     /// 設定プロファイルをルーティング用の検証済みプロファイルへ変換します。
     ///
     /// # Errors
-    /// `models` が空、`default_model` が `models` に含まれない、または `base_url` が空の場合に
+    /// 有効なモデルがない、`default_model` が無効または不在、または `base_url` が空の場合に
     /// [`RoutingError::InvalidProfile`] を返します。
     fn try_from(
         (name, config): (&str, &config::ProviderProfileConfig),
     ) -> Result<Self, Self::Error> {
-        if config.models.is_empty() {
+        let models = config.enabled_model_ids();
+        if models.is_empty() {
             return Err(RoutingError::InvalidProfile {
-                reason: "models must not be empty".to_string(),
+                reason: "models must contain at least one enabled model".to_string(),
             });
         }
-        if !config.models.contains(&config.default_model) {
+        if !models.contains(&config.default_model) {
             return Err(RoutingError::InvalidProfile {
-                reason: "default_model must be included in models".to_string(),
+                reason: "default_model must be an enabled model".to_string(),
             });
         }
         if config.base_url.is_empty() {
@@ -72,7 +73,7 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
             api_protocol,
             base_url: config.base_url.clone(),
             credential: CredentialRef::from(&config.credential),
-            models: config.models.clone(),
+            models,
             default_model: config.default_model.clone(),
         })
     }
@@ -91,7 +92,10 @@ mod tests {
             credential: config::CredentialRefConfig::Env {
                 var: "API_KEY".to_string(),
             },
-            models: vec!["model-a".to_string(), "model-b".to_string()],
+            models: vec![
+                config::types::provider::ModelEntryConfig::enabled("model-a"),
+                config::types::provider::ModelEntryConfig::enabled("model-b"),
+            ],
             excluded_models: Vec::new(),
             default_model: "model-b".to_string(),
         }
@@ -139,6 +143,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn disabled_models_are_excluded_from_profile() {
+        let mut config = valid_config();
+        config.models[0].enabled = false;
+
+        let profile = ProviderProfile::try_from(("primary", &config)).expect("enabled default");
+
+        assert_eq!(profile.models, ["model-b"]);
+    }
+
+    #[test]
+    fn default_model_disabled_errors() {
+        let mut config = valid_config();
+        config.models[1].enabled = false;
+
+        let error = ProviderProfile::try_from(("primary", &config)).expect_err("disabled default");
+
+        assert_eq!(
+            error,
+            RoutingError::InvalidProfile {
+                reason: "default_model must be an enabled model".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn all_models_disabled_errors() {
+        let mut config = valid_config();
+        for entry in &mut config.models {
+            entry.enabled = false;
+        }
+
+        let error = ProviderProfile::try_from(("primary", &config)).expect_err("no enabled models");
+
+        assert_eq!(
+            error,
+            RoutingError::InvalidProfile {
+                reason: "models must contain at least one enabled model".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn enabled_models_are_preserved_in_declaration_order() {
+        let mut config = valid_config();
+        config.models = vec![
+            config::types::provider::ModelEntryConfig::enabled("model-z"),
+            config::types::provider::ModelEntryConfig {
+                id: "model-disabled".to_string(),
+                enabled: false,
+            },
+            config::types::provider::ModelEntryConfig::enabled("model-b"),
+            config::types::provider::ModelEntryConfig::enabled("model-a"),
+        ];
+
+        let profile = ProviderProfile::try_from(("primary", &config)).expect("enabled models");
+
+        assert_eq!(profile.models, ["model-z", "model-b", "model-a"]);
+    }
+
     // Given: モデル一覧が空の設定 / When: ProviderProfile に変換する / Then: InvalidProfile を返す
     #[test]
     fn provider_profile_rejects_empty_models() {
@@ -151,7 +215,7 @@ mod tests {
         assert_eq!(
             error,
             RoutingError::InvalidProfile {
-                reason: "models must not be empty".to_string()
+                reason: "models must contain at least one enabled model".to_string()
             }
         );
     }
@@ -168,7 +232,7 @@ mod tests {
         assert_eq!(
             error,
             RoutingError::InvalidProfile {
-                reason: "default_model must be included in models".to_string()
+                reason: "default_model must be an enabled model".to_string()
             }
         );
     }
