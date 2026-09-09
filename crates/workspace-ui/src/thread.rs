@@ -46,6 +46,12 @@ pub enum ThreadRunPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelPreference {
+    pub profile: String,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: ThreadId,
     pub project_id: ProjectId,
@@ -55,6 +61,8 @@ pub struct ThreadRecord {
     pub run_ids: Vec<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub model_preference: Option<ModelPreference>,
 }
 
 impl ThreadRecord {
@@ -68,6 +76,7 @@ impl ThreadRecord {
             run_ids: Vec::new(),
             branch: None,
             worktree_path: None,
+            model_preference: None,
         }
     }
 
