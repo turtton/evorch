@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use event_bus::{Event, EventBus, EventKind, LifecycleEvent, RecvError};
+use event_bus::{Event, EventBus, EventKind, LifecycleEvent};
 use gui::app::{WorkbenchApp, WorkbenchState};
 use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
@@ -16,6 +17,7 @@ use gui::pty::PtySession;
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
+use gui::storage_bridge::{self, StorageBridge};
 use portable_pty::CommandBuilder;
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
@@ -314,11 +316,7 @@ fn credential_ro_binds() -> Vec<PathBuf> {
         .collect()
 }
 
-/// bus 上の全イベントを storage へ永続化する bridge を専用スレッドで起動する。
-///
-/// `append_event` は writer スレッドの応答を同期待ちするため、event pump と
-/// 同じ runtime で動かすと他 task を block する。専用スレッド + current-thread
-/// runtime に隔離する。
+/// 通常イベントと分単位の usage 集計を保存する bridge を専用 runtime で起動する。
 fn spawn_storage_bridge(
     bus: Arc<EventBus>,
     storage: StorageHandle,
@@ -337,22 +335,8 @@ fn spawn_storage_bridge(
                     return;
                 }
             };
-            runtime.block_on(async move {
-                let mut subscriber = bus.subscribe();
-                loop {
-                    match subscriber.recv().await {
-                        Ok(event) => {
-                            if let Err(error) = storage.append_event(Some(session_id), &event) {
-                                tracing::warn!(%error, "failed to persist event");
-                            }
-                        }
-                        Err(RecvError::Lagged(skipped)) => {
-                            tracing::warn!(skipped, "storage bridge lagged");
-                        }
-                        Err(RecvError::Closed) => return,
-                    }
-                }
-            });
+            let bridge = StorageBridge::new(storage, session_id);
+            runtime.block_on(storage_bridge::run(bus, bridge, Duration::from_secs(60)));
         })
         .map_err(|error| GuiError::Arguments(format!("storage bridge thread failed: {error}")))?;
     Ok(())
