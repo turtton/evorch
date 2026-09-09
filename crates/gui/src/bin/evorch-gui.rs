@@ -550,9 +550,9 @@ fn run() -> Result<(), GuiError> {
 
     let settings_store: Option<Arc<dyn CredentialStore>> = credential_dir(demo_directory.as_ref())
         .and_then(
-            |directory| match sandbox::credential::FileCredentialStore::open(directory) {
+            |directory| match sandbox::credential::open_default(directory) {
                 Ok(store) => {
-                    let store: Arc<dyn CredentialStore> = Arc::new(store);
+                    let store: Arc<dyn CredentialStore> = store;
                     Some(store)
                 }
                 Err(error) => {
