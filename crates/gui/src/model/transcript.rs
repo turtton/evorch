@@ -1,5 +1,7 @@
 use event_bus::{AgentMessageKind, Event};
 
+mod diagnostics;
+
 const DEFAULT_CAPACITY: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +123,10 @@ impl TranscriptModel {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        if let Some(entry) = diagnostics::entry(&event.kind) {
+            self.push(entry);
+            return;
+        }
         match &event.kind {
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {

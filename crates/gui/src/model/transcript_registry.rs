@@ -45,8 +45,15 @@ impl TranscriptRegistry {
                 to: event_bus::AgentRunPhase::Error,
                 ..
             }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
-            EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. }) => {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. })
+            | EventKind::Fault(_) => {
                 vec![TranscriptKey::Thread]
+            }
+            EventKind::Provider(event_bus::ProviderEvent::RequestFailed { run_id, .. }) => {
+                match run_id {
+                    Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                    None => vec![TranscriptKey::Thread],
+                }
             }
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
@@ -75,7 +82,6 @@ impl TranscriptRegistry {
             EventKind::Lifecycle(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)
-            | EventKind::Fault(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_) => Vec::new(),
         }
