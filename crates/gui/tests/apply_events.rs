@@ -21,6 +21,36 @@ impl AgentRunSource for MockSource {
 }
 
 #[test]
+fn apply_events_surfaces_run_error_in_owning_thread() {
+    // Given: a submitted chat in the active thread.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default())
+        .expect("state")
+        .with_provider_status(gui::model::composer::ProviderStatus::Configured);
+    state.add_project(dir.path()).expect("project");
+    state.create_thread("error-thread").expect("thread");
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.state_mut().composer_mut().input = "hello".into();
+    harness.run();
+    harness.click_label("Send");
+    harness.run();
+    assert!(harness.has_label("You: hello"));
+    // When: the submitted run fails.
+    harness.state_mut().apply_events([
+        run_started("run-error", "orchestrator", "orchestrator"),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-error".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Error,
+            reason: Some("profile=x http error 401".into()),
+        }),
+    ]);
+    harness.run();
+    // Then: the user sees the diagnostic in the conversation.
+    assert!(harness.has_label("Run failed: profile=x http error 401"));
+}
+
+#[test]
 fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
     // Given: a workbench state with a project and an active thread.
     let dir = tempfile::tempdir().expect("temp dir");
