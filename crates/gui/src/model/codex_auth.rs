@@ -110,6 +110,13 @@ impl std::fmt::Debug for CodexAuthModel {
 }
 
 impl CodexAuthModel {
+    pub fn for_account(credential_account: String) -> Self {
+        Self {
+            credential_account,
+            ..Self::default()
+        }
+    }
+
     pub fn with_backend(
         backend: Arc<dyn CodexAuthBackend>,
         credential_account: impl Into<String>,
