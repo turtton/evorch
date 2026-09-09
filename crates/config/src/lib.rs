@@ -13,6 +13,7 @@ mod migrate;
 pub mod presets;
 pub mod prompt_sources;
 pub mod save;
+mod save_codex;
 mod schema;
 mod strict;
 pub mod types;
@@ -25,6 +26,7 @@ pub use save::{
     OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
     validate_openai_compatible_provider_input,
 };
+pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use schema::json_schema;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,

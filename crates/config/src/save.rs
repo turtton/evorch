@@ -113,35 +113,7 @@ pub fn save_openai_compatible_provider(
     input: &OpenAiCompatibleProviderInput,
 ) -> Result<(), ConfigError> {
     validate_openai_compatible_provider_input(input)?;
-    let mut doc = match std::fs::read_to_string(path) {
-        Ok(text) => text.parse::<DocumentMut>().map_err(|_| {
-            invalid_field(
-                &path.display().to_string(),
-                "file is not valid TOML; fix it before saving",
-            )
-        })?,
-        Err(error) if error.kind() == ErrorKind::NotFound => DocumentMut::new(),
-        Err(error) => return Err(error.into()),
-    };
-    match doc.get("version") {
-        Some(raw) => {
-            let found = raw
-                .as_integer()
-                .and_then(|number| u32::try_from(number).ok())
-                .ok_or_else(|| {
-                    invalid_field("version", "version must be a non-negative u32 integer")
-                })?;
-            if found != CURRENT_VERSION {
-                return Err(ConfigError::UnsupportedVersion {
-                    found,
-                    current: CURRENT_VERSION,
-                });
-            }
-        }
-        None => {
-            doc.insert("version", value(i64::from(CURRENT_VERSION)));
-        }
-    }
+    let mut doc = read_document(path)?;
 
     let mut profile = Table::new();
     profile.insert("type", value("openai-compatible"));
@@ -174,6 +146,49 @@ pub fn save_openai_compatible_provider(
         );
     }
     profile.insert("default_model", value(input.default_model.as_str()));
+    insert_profile(&mut doc, &input.name, profile)?;
+    write_document(path, &doc)
+}
+
+pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
+    let mut doc = match std::fs::read_to_string(path) {
+        Ok(text) => text.parse::<DocumentMut>().map_err(|_| {
+            invalid_field(
+                &path.display().to_string(),
+                "file is not valid TOML; fix it before saving",
+            )
+        })?,
+        Err(error) if error.kind() == ErrorKind::NotFound => DocumentMut::new(),
+        Err(error) => return Err(error.into()),
+    };
+    match doc.get("version") {
+        Some(raw) => {
+            let found = raw
+                .as_integer()
+                .and_then(|number| u32::try_from(number).ok())
+                .ok_or_else(|| {
+                    invalid_field("version", "version must be a non-negative u32 integer")
+                })?;
+            if found != CURRENT_VERSION {
+                return Err(ConfigError::UnsupportedVersion {
+                    found,
+                    current: CURRENT_VERSION,
+                });
+            }
+        }
+        None => {
+            doc.insert("version", value(i64::from(CURRENT_VERSION)));
+        }
+    }
+
+    Ok(doc)
+}
+
+pub(crate) fn insert_profile(
+    doc: &mut DocumentMut,
+    name: &str,
+    profile: Table,
+) -> Result<(), ConfigError> {
     let providers = doc.entry("providers").or_insert_with(|| {
         let mut table = Table::new();
         table.set_implicit(true);
@@ -182,8 +197,11 @@ pub fn save_openai_compatible_provider(
     let providers = providers
         .as_table_like_mut()
         .ok_or_else(|| invalid_field("providers", "providers must be a table"))?;
-    providers.insert(&input.name, Item::Table(profile));
+    providers.insert(name, Item::Table(profile));
+    Ok(())
+}
 
+pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), ConfigError> {
     let text = doc.to_string();
     let table = toml::from_str::<toml::value::Table>(&text).map_err(|error| {
         ConfigError::Migration(format!("failed to parse config before saving: {error}"))
@@ -212,14 +230,14 @@ pub fn save_openai_compatible_provider(
     Ok(())
 }
 
-fn invalid_field(path: &str, message: &str) -> ConfigError {
+pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {
     ConfigError::InvalidField {
         path: path.to_owned(),
         message: message.to_owned(),
     }
 }
 
-fn normalized_models(input: &[String]) -> Vec<&str> {
+pub(crate) fn normalized_models(input: &[String]) -> Vec<&str> {
     let mut models = Vec::new();
     for model in input {
         let model = model.trim();
