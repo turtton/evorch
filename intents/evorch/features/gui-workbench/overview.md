@@ -146,6 +146,20 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - **CJK フォント**: `theme/fonts.rs` で fontconfig（`sans:lang=ja`）経由のシステム Noto Sans CJK / Takao を実行時解決し proportional/monospace 両 family へ prepend。egui 既定 Hack/Ubuntu は CJK 非対応で tofu になっていたのを解消（同梱は避け、バイナリサイズ増なし）
 - 検証: workspace 全テスト green / clippy（-D warnings）・fmt clean。visual-qa dual-oracle は実装 PASS 相当、初期キャプチャの staleness で REVISE→現行 HEAD から全枚再生成で解消。証跡 PNG は `/tmp/opencode/w-*.png` + `codex-auth-*.png`
 
+## v0.6 実運用修正パックの実装確定（2026-09-09、main 直接マージ）
+
+第1波 UX 修正(上記)の実稼働検証で判明した 4 件を 5 workstream に分けて再修正。
+
+- **S-FOCUS composer フォーカス喪失**: `TextEdit` が auto-id を採用していたため、`/` 入力で補完 row が現れると auto-id がずれて focus が消失。`id_salt("composer-input")`/`id_salt("composer-scroll")` で固定。単体テストで `/g` 段階的な文字追加中にも `memory.focused().is_some()` が永続することを RED→GREEN で検証。
+- **W-WIRE live model 接続**: これまで GUI 本番は `ModelSource::Fixed(DemoScriptModel)` で、保存された provider / credential が runtime に接続されていなかった。`routing/src/factory.rs` で OpenAI-compatible の Keyring 拒否を除去、`routing/src/compose.rs:169-190` `resolve_auth` で Keyring → `store.get(account)` 経由で解決、missing/empty 時は `RoutingError::MissingKeyringCredential`。`runtime/compose.rs` に `SwitchableModel`(`RwLock<Arc<dyn AgentModel>>` delegate、`replace` で入れ替え可能)と `compose_routed_model`(`RoutedModel` だけ合成)を追加。GUI 本番は `Config` load → `FileCredentialStore` → `SwitchableModel` seeded (fallback `UnconfiguredModel` は「no provider configured—open Settings」)、保存成功で hot recompose。
+- **W-ERR エラー可視化**: `compose.rs:228-244` で `ProviderError` を profile/model 付きで保持(secret は `provider.auth` 値で置換)。`agent_loop` で run 失敗を tracing::error。`model/transcript.rs` に `TranscriptEntry::Error`、transcript registry で Lifecycle に run_id があれば Thread+Run 双方へ delivery。pane 側で danger color 描画。GUI binary 冒頭で tracing-subscriber を RUST_LOG EnvFilter で初期化(dev-dep → runtime dep 昇格)。
+- **W-PROFILES multi-profile 管理**: `config` に `save_codex_provider`・`delete_provider` を追加。GUI Settings modal を profile 一覧+Add/Edit/Delete に置き換え(segmented 切替は廃止)。Codex profile は profile ごとに専用エディタ、`credential account` は既定で `codex/<profile-name>`。
+- **W-ROUTE-SEAM runtime ModelPreference**: `RunConfig.model_preference`(watch 経由 mid-run 更新可)・`AgentInvocationContext.model_preference` 追加。`RoutedModel::complete` で `Some(pref)` 時は binding/Router スキップして profile を強制指定、model は pref.model or profile.default。選択中 profile/model は `SwitchableModel::available_profiles` 経由で GUI カタログに surface。
+- **W-PICKER スレッド単位モデルピッカー**: workspace-ui `ThreadRecord.model_preference` (`#[serde(default)]`)。GUI モデルピッカーを composer 直上に配置(id_salt 固定で auto-id 問題を再発させない)。ChatSubmission で経路を伝搬、new run には RunConfig、existing run には `set_model_preference(run_id, pref)` を送信。未選択時の「Select model」表示と disabled + Settings 導線。
+- **keyring v4 移行(nix 環境)**: `keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }` が nix 環境(dbus-1 pkg-config なし)で libdbus-sys ビルド不能、かつ gnome-keyring で NoEntry を返していたため、`keyring = { version = "4", features = ["v1"] }`(zbus-secret-service バックエンド、libdbus 不要)に移行。実機 debug ログで `creating entry with service evorch, user Crof`→`get password` 完走を確認。秘密値は一切ログ出力していない。ユーザー資産 `evorch.toml`(provider 接続設定)は認証情報パターンのため `.gitignore` に追加し git 管理外。
+
+検証: workspace 全テスト green / clippy(-D warnings)・fmt clean。PNG 証跡あり。`headless_run_completes_with_single_mock_response` の flake は本変更不要の pre-existing 問題(MapEnv 使用で keyring 非依存)で、単体では常に成功。known follow-up として記録するのみ。
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
