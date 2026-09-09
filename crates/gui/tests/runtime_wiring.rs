@@ -19,6 +19,9 @@ use gui::app::WorkbenchState;
 use gui::events::EventPump;
 use gui::model::tasks::TaskRow;
 
+#[path = "runtime_wiring/live.rs"]
+mod live;
+
 fn build_harness(
     state: WorkbenchState<AgentRuntime>,
 ) -> Harness<'static, WorkbenchState<AgentRuntime>> {
