@@ -29,7 +29,10 @@ impl AgentModel for ScriptedModel {
         _messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.preferences.lock().unwrap().push(invocation.model_preference.clone());
+        self.preferences
+            .lock()
+            .unwrap()
+            .push(invocation.model_preference.clone());
         self.responses
             .lock()
             .expect("script lock")
@@ -77,7 +80,10 @@ impl Fixture {
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus.clone())),
-            Arc::new(ScriptedModel { responses: Mutex::new(responses), preferences: preferences.clone() }),
+            Arc::new(ScriptedModel {
+                responses: Mutex::new(responses),
+                preferences: preferences.clone(),
+            }),
         );
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
@@ -101,7 +107,12 @@ impl Fixture {
         self.send_preference(thread, text, None)
     }
 
-    fn send_preference(&mut self, thread: &str, text: &str, model_preference: Option<runtime::ModelPreference>) -> String {
+    fn send_preference(
+        &mut self,
+        thread: &str,
+        text: &str,
+        model_preference: Option<runtime::ModelPreference>,
+    ) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
             thread_id: thread.into(),
             text: text.into(),
@@ -166,8 +177,14 @@ impl Fixture {
 fn sink_sets_preference_on_existing_run_before_send() {
     // Given: the real runtime with a recording model, not a mocked send path.
     let mut fixture = Fixture::new();
-    let first = Some(runtime::ModelPreference { profile: "local".into(), model: Some("a".into()) });
-    let second = Some(runtime::ModelPreference { profile: "remote".into(), model: Some("b".into()) });
+    let first = Some(runtime::ModelPreference {
+        profile: "local".into(),
+        model: Some("a".into()),
+    });
+    let second = Some(runtime::ModelPreference {
+        profile: "remote".into(),
+        model: Some("b".into()),
+    });
     let id = fixture.send_preference("thread-1", "first", first.clone());
     fixture.wait_for_reply(&id, "reply-1");
     // When: another turn changes the preference on the keep-alive run.

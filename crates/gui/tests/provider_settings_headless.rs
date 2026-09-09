@@ -205,6 +205,7 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
         &[WorkbenchCommand::SendChat(ChatSubmission {
             thread_id: "thread-1".into(),
             text: "hello".into(),
+            model_preference: None,
         })]
     );
 }

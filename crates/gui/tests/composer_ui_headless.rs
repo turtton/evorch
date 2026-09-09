@@ -43,6 +43,7 @@ fn send_button_round_trip_issues_send_chat() {
         &[WorkbenchCommand::SendChat(ChatSubmission {
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
+            model_preference: None,
         })]
     );
     assert!(harness.has_label("You: hello agent"));

@@ -5,6 +5,28 @@ use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn available_profiles(&self) -> Vec<runtime::compose::ProfileSummary> {
+        self.production_model
+            .as_ref()
+            .map(|(_, model)| model.available_profiles())
+            .unwrap_or_default()
+    }
+
+    pub fn set_thread_model_preference(
+        &mut self,
+        preference: Option<workspace_ui::ModelPreference>,
+    ) {
+        if let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+        {
+            thread.model_preference = preference;
+            self.save_sidebar();
+        }
+    }
+
     pub fn submit_composer(&mut self) {
         let raw = self.composer.input.clone();
         match parse_input(&raw) {
@@ -25,6 +47,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         let submission = ChatSubmission {
                             thread_id: thread_id.to_string(),
                             text: text.into(),
+                            model_preference: self
+                                .sidebar
+                                .threads
+                                .iter()
+                                .find(|thread| &thread.id == thread_id)
+                                .and_then(|thread| thread.model_preference.as_ref())
+                                .map(|preference| runtime::ModelPreference {
+                                    profile: preference.profile.clone(),
+                                    model: preference.model.clone(),
+                                }),
                         };
                         self.transcripts
                             .push_thread(TranscriptEntry::UserMessage { text: text.into() });

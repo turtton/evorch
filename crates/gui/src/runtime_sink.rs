@@ -170,6 +170,15 @@ impl CommandSink for RuntimeCommandSink {
             WorkbenchCommand::SendChat(submission) => {
                 let thread_id = submission.thread_id;
                 if let Some(&run_id) = self.chat_runs.get(&thread_id) {
+                    if let Err(error) = self
+                        .runtime
+                        .set_model_preference(run_id, submission.model_preference.clone())
+                    {
+                        return vec![LoopEvent::ChatRejected {
+                            thread_id,
+                            reason: error.to_string(),
+                        }];
+                    }
                     match self.runtime.send_message(run_id, submission.text.clone()) {
                         Ok(()) => {
                             return vec![LoopEvent::ChatAccepted {
@@ -190,6 +199,7 @@ impl CommandSink for RuntimeCommandSink {
                         name: Some(format!("chat:{thread_id}")),
                         interactive: true,
                         keep_alive: true,
+                        model_preference: submission.model_preference,
                         ..RunConfig::default()
                     },
                 );

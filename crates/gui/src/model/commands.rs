@@ -50,6 +50,8 @@ pub struct MergeCommand {
 pub struct ChatSubmission {
     pub thread_id: String,
     pub text: String,
+    #[serde(default)]
+    pub model_preference: Option<runtime::ModelPreference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +442,7 @@ mod tests {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
                 thread_id: thread_id.into(),
                 text: "hi".into(),
+                model_preference: None,
             }))
         });
         // Then: each acceptance retains its thread and receives a sequential ID.
