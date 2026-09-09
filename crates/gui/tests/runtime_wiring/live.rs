@@ -63,6 +63,7 @@ account = "live"
         .complete(
             &AgentInvocationContext {
                 run_id: "gui-chat".into(),
+                model_preference: None,
             },
             Role::Worker,
             &[Message {
