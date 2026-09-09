@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 config = { path = "../config" }
 eframe = { workspace = true }
 egui = { workspace = true }
+egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
 egui_dock = { workspace = true }
 egui_kittest = { workspace = true }
 event-bus = { path = "../event-bus" }

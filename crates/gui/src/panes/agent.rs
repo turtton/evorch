@@ -177,15 +177,23 @@ pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for entry in model.visible_entries() {
+            for (entry_idx, entry) in model.visible_entries().iter().enumerate() {
                 let accent = entry_accent(entry);
-                let text = entry_label(entry);
                 card(ui, accent, |ui| {
+                    if let TranscriptEntry::Message { text } = entry {
+                        crate::panes::markdown_render::render_markdown(
+                            ui,
+                            text,
+                            &format!("msg-{entry_idx}"),
+                        );
+                        return;
+                    }
                     let foreground = match entry {
                         TranscriptEntry::Error { .. } => ERROR_FG,
+                        TranscriptEntry::Reasoning { .. } => TEXT_MUTED,
                         _ => TEXT,
                     };
-                    ui.label(egui::RichText::new(text).color(foreground));
+                    ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
                 });
             }
         });
