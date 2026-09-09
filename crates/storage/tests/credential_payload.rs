@@ -49,6 +49,7 @@ fn event_kinds() -> [EventKind; 14] {
             tool_name: "read".into(),
             call_id: "c".into(),
             run_id: None,
+            input: None,
         }
         .into(),
         ToolEvent::ToolCompleted {
@@ -56,6 +57,7 @@ fn event_kinds() -> [EventKind; 14] {
             call_id: "c".into(),
             is_error: false,
             detail: None,
+            output: None,
             run_id: None,
         }
         .into(),

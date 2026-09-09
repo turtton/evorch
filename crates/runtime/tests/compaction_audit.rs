@@ -127,12 +127,14 @@ fn seed_audit_events(bus: &EventBus) -> Vec<String> {
         tool_name: "read".to_string(),
         call_id: "completed-call".to_string(),
         run_id: None,
+        input: None,
     }));
     bus.emit(Event::new(ToolEvent::ToolCompleted {
         tool_name: "read".to_string(),
         call_id: "completed-call".to_string(),
         is_error: false,
         detail: Some(serde_json::json!({ "result": "read complete" })),
+        output: None,
         run_id: None,
     }));
     bus.emit(Event::new(AgentMessageEvent::Delivered {
@@ -150,6 +152,7 @@ fn seed_audit_events(bus: &EventBus) -> Vec<String> {
         tool_name: "write".to_string(),
         call_id: "open-call".to_string(),
         run_id: None,
+        input: None,
     }));
     bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: transcript[1].clone(),

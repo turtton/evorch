@@ -220,6 +220,7 @@ async fn repeated_tool_errors_trigger_stall() {
             call_id: format!("c{index}"),
             is_error: true,
             detail: None,
+            output: None,
             run_id: Some(fixture.child.to_string()),
         }));
     }
