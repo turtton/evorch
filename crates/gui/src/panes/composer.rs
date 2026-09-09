@@ -36,7 +36,7 @@ pub fn composer_strip(
                             Some(hint) => format!("/{} {hint}", spec.name),
                             None => format!("/{}", spec.name),
                         };
-                        if ui.button(label).clicked() {
+                        if ui.push_id(("completion", spec.name), |ui| ui.button(label)).inner.clicked() {
                             action = Some(ComposerAction::Complete(spec.name));
                         }
                     }
