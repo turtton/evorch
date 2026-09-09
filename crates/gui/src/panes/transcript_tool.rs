@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use egui::{Color32, RichText, Ui};
 
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
@@ -32,16 +34,13 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     let color = if *is_error { ERROR_FG } else { status_color };
     let indicator = if *is_error { "ERROR" } else { indicator };
     let short_id: String = call_id.chars().take(8).collect();
-    let summary = input
-        .as_ref()
-        .and_then(|input| input.get("file_path").or_else(|| input.get("command")))
-        .and_then(serde_json::Value::as_str);
+    let summary = tool_display_summary(entry);
     surface_frame(SURFACE).show(ui, |ui| {
         let arrow = if expanded { "v" } else { ">" };
         let mut header = format!("{arrow} {indicator} {tool_name} ({short_id})");
-        if let Some(summary) = summary {
+        if summary != *tool_name {
             header.push_str(": ");
-            header.extend(summary.chars().take(120));
+            header.extend(summary.lines().next().unwrap_or_default().chars().take(120));
         }
         if ui
             .add(
@@ -61,11 +60,18 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
         if expanded {
             if let Some(input) = input {
                 ui.label("Input");
-                code(ui, &pretty_json(input), TEXT);
+                let content = focused_input(tool_name, input)
+                    .map(Cow::Borrowed)
+                    .unwrap_or_else(|| Cow::Owned(pretty_json(input)));
+                code(ui, &content, TEXT);
             }
             if let Some(output) = output {
                 ui.label(if *is_error { "Error" } else { "Output" });
-                code(ui, output, if *is_error { ERROR_FG } else { TEXT });
+                code(
+                    ui,
+                    &display_output(tool_name, output),
+                    if *is_error { ERROR_FG } else { TEXT },
+                );
             }
             if let Some(detail) = detail {
                 ui.label("Detail");
@@ -78,8 +84,70 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, ERROR_FG);
             }
+        } else if let Some(output) = output {
+            let output = display_output(tool_name, output);
+            let preview = output.lines().take(5).collect::<Vec<_>>().join("\n");
+            if !preview.is_empty() {
+                code(ui, &preview, if *is_error { ERROR_FG } else { TEXT });
+            }
+            if output.lines().nth(5).is_some() {
+                ui.label("... expand for full output");
+            }
         }
     });
+}
+
+pub fn tool_display_summary(entry: &TranscriptEntry) -> String {
+    let TranscriptEntry::Tool {
+        tool_name, input, ..
+    } = entry
+    else {
+        return String::new();
+    };
+    let Some(value) = input
+        .as_ref()
+        .and_then(|input| focused_input(tool_name, input))
+    else {
+        return tool_name.clone();
+    };
+    match tool_name.as_str() {
+        "bash" | "shell" => format!("$ {value}"),
+        "read" => format!("Read: {value}"),
+        "write" => format!("Write: {value}"),
+        "edit" => format!("Edit: {value}"),
+        _ => tool_name.clone(),
+    }
+}
+
+fn focused_input<'a>(tool_name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
+    match tool_name {
+        "bash" | "shell" => input.get("command").and_then(serde_json::Value::as_str),
+        "read" | "write" | "edit" => ["file_path", "path", "filePath"]
+            .iter()
+            .find_map(|key| input.get(key).and_then(serde_json::Value::as_str)),
+        _ => None,
+    }
+}
+
+fn display_output<'a>(tool_name: &str, output: &'a str) -> Cow<'a, str> {
+    if matches!(tool_name, "bash" | "shell")
+        && let Some((exit, streams)) = output.split_once("\n--- stdout ---\n")
+        && let Some(code) = exit.strip_prefix("exit_code: ")
+        && code.parse::<i32>().is_ok()
+        && let Some((stdout, stderr)) = streams.split_once("\n--- stderr ---\n")
+    {
+        let mut combined = exit.to_owned();
+        for stream in [stdout, stderr] {
+            if !stream.is_empty() {
+                if !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                combined.push_str(stream);
+            }
+        }
+        return Cow::Owned(combined);
+    }
+    Cow::Borrowed(output)
 }
 
 fn pretty_json(value: &serde_json::Value) -> String {

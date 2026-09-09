@@ -28,10 +28,16 @@ pub fn surface_frame(fill: Color32) -> Frame {
 
 pub fn card(ui: &mut Ui, accent: Color32, add: impl FnOnce(&mut Ui)) {
     surface_frame(SURFACE).show(ui, |ui| {
-        let rect = ui.available_rect_before_wrap();
-        let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height()));
+        let left_top = ui.available_rect_before_wrap().left_top();
+        let content = Frame::new()
+            .inner_margin(Margin {
+                left: SP_2 as i8,
+                ..Margin::ZERO
+            })
+            .show(ui, add);
+        let bar =
+            egui::Rect::from_min_size(left_top, egui::vec2(2.0, content.response.rect.height()));
         ui.painter().rect_filled(bar, CornerRadius::ZERO, accent);
-        add(ui);
     });
 }
 

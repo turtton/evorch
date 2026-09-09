@@ -50,7 +50,7 @@ fn output_shape(harness: &Harness<'_>) -> egui::epaint::TextShape {
 }
 
 #[test]
-fn tool_card_collapsed_shows_only_header() {
+fn tool_card_collapsed_hides_sections() {
     // Given / When
     let harness = harness(false);
     // Then
@@ -58,7 +58,7 @@ fn tool_card_collapsed_shows_only_header() {
     assert!(harness.query_by_label_contains("find missing").is_some());
     assert!(harness.query_by_label("Input").is_none());
     assert!(harness.query_by_label("Output").is_none());
-    assert!(harness.query_by_label_contains("**literal**").is_none());
+    assert!(harness.query_by_label_contains("**literal**").is_some());
 }
 
 #[test]
@@ -107,17 +107,14 @@ fn tool_card_toggle_click_changes_expanded_state() {
 }
 
 #[test]
-fn tool_card_input_pretty_prints_json() {
+fn tool_card_input_shows_command_only_for_bash() {
     // Given
     let mut harness = harness(false);
     // When
     expand(&mut harness);
     // Then
-    assert!(
-        harness
-            .query_by_label("{\n  \"command\": \"find missing\"\n}")
-            .is_some()
-    );
+    assert!(harness.query_by_label("find missing").is_some());
+    assert!(harness.query_by_label_contains("\"command\"").is_none());
 }
 
 #[test]
