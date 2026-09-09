@@ -177,6 +177,7 @@ mod tests {
     fn current_tool_set_and_cleared() {
         let mut overlay = TelemetryOverlay::new();
         overlay.apply_event(&Event::new(ToolEvent::ToolStarted {
+            input: None,
             tool_name: "read".into(),
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
@@ -191,6 +192,7 @@ mod tests {
         );
 
         overlay.apply_event(&Event::new(ToolEvent::ToolCompleted {
+            output: None,
             tool_name: "read".into(),
             call_id: "call-1".into(),
             is_error: false,

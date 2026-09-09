@@ -224,6 +224,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             tool_name,
             call_id,
             status,
+            ..
         } => format!("Tool {tool_name} ({call_id}): {status:?}"),
         TranscriptEntry::AgentMessage {
             direction,

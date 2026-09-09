@@ -295,12 +295,14 @@ mod tests {
     fn route_tool_events_by_run_id_and_index_call_id() {
         let mut registry = TranscriptRegistry::new();
         let started = Event::new(ToolEvent::ToolStarted {
+            input: None,
             tool_name: "read".into(),
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
         });
         registry.apply(&started);
         let completed = Event::new(ToolEvent::ToolCompleted {
+            output: None,
             tool_name: "read".into(),
             call_id: "call-1".into(),
             is_error: false,
@@ -318,6 +320,10 @@ mod tests {
             &[TranscriptEntry::Tool {
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
+                input: None,
+                output: None,
+                detail: None,
+                is_error: false,
                 status: ToolStatus::Succeeded,
             }]
         );
@@ -327,6 +333,7 @@ mod tests {
     fn approval_events_follow_call_index_else_thread() {
         let mut registry = TranscriptRegistry::new();
         registry.apply(&Event::new(ToolEvent::ToolStarted {
+            input: None,
             tool_name: "write".into(),
             call_id: "known".into(),
             run_id: Some("run-2".into()),
@@ -378,6 +385,7 @@ mod tests {
         let mut registry = TranscriptRegistry::new();
         for run_id in ["run-1", "run-2", "run-3"] {
             registry.apply(&Event::new(ToolEvent::ToolStarted {
+                input: None,
                 tool_name: format!("tool-{run_id}"),
                 call_id: format!("call-{run_id}"),
                 run_id: Some(run_id.into()),
@@ -394,6 +402,10 @@ mod tests {
                 &[TranscriptEntry::Tool {
                     tool_name: format!("tool-{run_id}"),
                     call_id: format!("call-{run_id}"),
+                    input: None,
+                    output: None,
+                    detail: None,
+                    is_error: false,
                     status: ToolStatus::Running,
                 }]
             );

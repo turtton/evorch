@@ -504,6 +504,7 @@ fn request_completed(run_id: &str, input_tokens: u64, output_tokens: u64) -> Eve
 
 fn tool_started(run_id: &str, tool_name: &str, call_id: &str) -> Event {
     Event::new(ToolEvent::ToolStarted {
+        input: None,
         tool_name: tool_name.into(),
         call_id: call_id.into(),
         run_id: Some(run_id.into()),

@@ -2,6 +2,9 @@ use event_bus::{AgentMessageKind, Event};
 
 mod diagnostics;
 
+#[cfg(test)]
+mod tool_tests;
+
 const DEFAULT_CAPACITY: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +43,10 @@ pub enum TranscriptEntry {
     Tool {
         tool_name: String,
         call_id: String,
+        input: Option<serde_json::Value>,
+        output: Option<String>,
+        detail: Option<serde_json::Value>,
+        is_error: bool,
         status: ToolStatus,
     },
     AgentMessage {
@@ -118,6 +125,10 @@ impl TranscriptModel {
         self.push(TranscriptEntry::Tool {
             tool_name: tool_name.into(),
             call_id: call_id.into(),
+            input: None,
+            output: None,
+            detail: None,
+            is_error: false,
             status,
         });
     }
@@ -155,14 +166,26 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
+                input,
                 ..
-            }) => self.push_tool(tool_name, call_id, ToolStatus::Running),
+            }) => self.push(TranscriptEntry::Tool {
+                tool_name: tool_name.clone(),
+                call_id: call_id.clone(),
+                input: input.clone(),
+                output: None,
+                detail: None,
+                is_error: false,
+                status: ToolStatus::Running,
+            }),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
                 call_id,
                 is_error,
+                output,
+                detail,
                 ..
-            }) => self.update_tool(
+            }) => {
+                self.update_tool(
                 call_id,
                 tool_name,
                 if *is_error {
@@ -170,7 +193,18 @@ impl TranscriptModel {
                 } else {
                     ToolStatus::Succeeded
                 },
-            ),
+                );
+                if let Some(TranscriptEntry::Tool {
+                    output: current_output,
+                    detail: current_detail,
+                    is_error: current_is_error,
+                    ..
+                }) = self.find_tool_mut(call_id) {
+                    current_output.clone_from(output);
+                    current_detail.clone_from(detail);
+                    *current_is_error = *is_error;
+                }
+            }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
                 tool_name,
                 call_id,
@@ -409,11 +443,13 @@ mod tests {
     fn tool_lifecycle_updates_status_by_call_id() {
         let mut model = TranscriptModel::new();
         model.apply(&Event::new(ToolEvent::ToolStarted {
+            input: None,
             tool_name: "read".into(),
             call_id: "c1".into(),
             run_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
+            output: None,
             tool_name: "read".into(),
             call_id: "c1".into(),
             is_error: false,
@@ -425,6 +461,10 @@ mod tests {
             TranscriptEntry::Tool {
                 tool_name: "read".into(),
                 call_id: "c1".into(),
+                input: None,
+                output: None,
+                detail: None,
+                is_error: false,
                 status: ToolStatus::Succeeded
             }
         );
