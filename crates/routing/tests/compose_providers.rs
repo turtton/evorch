@@ -25,7 +25,7 @@ fn provider_config(provider_type: ProviderTypeConfig) -> ProviderProfileConfig {
         credential: CredentialRefConfig::Env {
             var: API_KEY_ENV.to_string(),
         },
-        models: vec![MODEL.to_string()],
+        models: vec![config::types::provider::ModelEntryConfig::enabled(MODEL)],
         excluded_models: Vec::new(),
         default_model: MODEL.to_string(),
     }
