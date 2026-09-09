@@ -44,6 +44,70 @@ fn assert_error_contains(result: Result<Config, ConfigError>, fragments: &[&str]
     }
 }
 
+fn assert_invalid_model(entry: &str, field: &str) {
+    // Given: a malformed model entry in a real project config.
+    let tmp = tempfile::tempdir().unwrap();
+    let text = format!("[providers.foo]\nmodels = [{entry}]\n");
+    // When
+    let error = load_project(&tmp, &text).unwrap_err();
+    // Then: strict validation reports the exact entry field, not a serde error.
+    assert!(
+        matches!(&error, ConfigError::InvalidField { path, .. }
+        if path == &format!("providers.foo.models[0]{field}")),
+        "{error}"
+    );
+}
+
+#[test]
+fn models_table_unknown_key_rejected() {
+    assert_invalid_model("{ id = 'a', enabld = true }", ".enabld");
+}
+
+#[test]
+fn models_table_non_string_id_rejected() {
+    assert_invalid_model("{ id = 42, enabled = true }", ".id");
+}
+
+#[test]
+fn models_table_non_bool_enabled_rejected() {
+    assert_invalid_model("{ id = 'a', enabled = 'true' }", ".enabled");
+}
+
+#[test]
+fn models_invalid_entry_shapes_rejected() {
+    for (entry, field) in [
+        ("42", ""),
+        ("{ enabled = true }", ".id"),
+        ("{ id = ' ', enabled = true }", ".id"),
+        ("{ id = 'a' }", ".enabled"),
+    ] {
+        assert_invalid_model(entry, field);
+    }
+}
+
+#[test]
+fn models_mixed_form_accepted() {
+    // Given
+    let tmp = tempfile::tempdir().unwrap();
+    // When
+    let config = load_project(
+        &tmp,
+        "[providers.foo]\nmodels = ['a', { id = 'b', enabled = false }]\n",
+    )
+    .unwrap();
+    // Then
+    assert_eq!(
+        config.providers["foo"].models,
+        vec![
+            config::types::provider::ModelEntryConfig::enabled("a"),
+            config::types::provider::ModelEntryConfig {
+                id: "b".into(),
+                enabled: false
+            },
+        ]
+    );
+}
+
 // Given: providers.foo に秘密値そのものを含む設定 / When: 読み込む
 // Then: パスと安全な参照方法を含むエラーとして拒否される
 #[test]

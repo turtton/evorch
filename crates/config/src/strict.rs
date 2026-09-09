@@ -31,6 +31,7 @@ const PROVIDER_KEYS: &[&str] = &[
     "default_model",
 ];
 const KEYRING_KEYS: &[&str] = &["type", "service", "account"];
+const MODEL_ENTRY_KEYS: &[&str] = &["id", "enabled"];
 const ENV_KEYS: &[&str] = &["type", "var"];
 const ROUTING_KEYS: &[&str] = &["routes"];
 const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model"];
@@ -106,9 +107,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
                 continue;
             };
             let profile_path = format!("providers.{name}");
-            check_credential_scope_keys(profile, &profile_path, PROVIDER_KEYS)?;
-            validate_api_key_env(profile, &profile_path)?;
-            validate_credential(profile, &profile_path)?;
+            validate_provider(profile, &profile_path)?;
         }
     }
 
@@ -121,6 +120,59 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
+}
+
+fn validate_provider(profile: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
+    check_credential_scope_keys(profile, path, PROVIDER_KEYS)?;
+    validate_api_key_env(profile, path)?;
+    validate_credential(profile, path)?;
+    validate_models(profile, path)
+}
+
+fn validate_models(profile: &toml::value::Table, profile_path: &str) -> Result<(), ConfigError> {
+    let Some(value) = profile.get("models") else {
+        return Ok(());
+    };
+    let models = value.as_array().ok_or_else(|| ConfigError::InvalidField {
+        path: format!("{profile_path}.models"),
+        message: "models must be an array".into(),
+    })?;
+    for (index, model) in models.iter().enumerate() {
+        let path = format!("{profile_path}.models[{index}]");
+        match model {
+            toml::Value::String(_) => {}
+            toml::Value::Table(table) => {
+                check_keys(table, &path, MODEL_ENTRY_KEYS)?;
+                if !table
+                    .get("id")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                {
+                    return Err(ConfigError::InvalidField {
+                        path: format!("{path}.id"),
+                        message: "id must be a non-empty string".into(),
+                    });
+                }
+                if table
+                    .get("enabled")
+                    .and_then(toml::Value::as_bool)
+                    .is_none()
+                {
+                    return Err(ConfigError::InvalidField {
+                        path: format!("{path}.enabled"),
+                        message: "enabled must be a boolean".into(),
+                    });
+                }
+            }
+            _ => {
+                return Err(ConfigError::InvalidField {
+                    path,
+                    message: "model must be a string or a table".into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 // api_key_env は credential と併用できず、空でない文字列でなければならない。

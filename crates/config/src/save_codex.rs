@@ -4,6 +4,7 @@ use crate::ConfigError;
 use crate::save::{
     insert_profile, invalid_field, normalized_models, read_document, write_document,
 };
+use crate::types::provider::ModelEntryConfig;
 use std::path::Path;
 use toml_edit::{Array, InlineTable, Table, value};
 
@@ -36,8 +37,11 @@ pub fn save_codex_provider(path: &Path, input: &CodexProviderInput) -> Result<()
             "keyring account must not be empty",
         ));
     }
-    let models = normalized_models(&input.models);
-    if !input.default_model.is_empty() && !models.contains(&input.default_model.as_str()) {
+    let entries: Vec<_> = input.models.iter().map(ModelEntryConfig::enabled).collect();
+    let models = normalized_models(&entries);
+    if !input.default_model.is_empty()
+        && !models.iter().any(|model| model.id == input.default_model)
+    {
         return Err(invalid_field(
             "providers.default_model",
             "default_model must be a member of models",
@@ -54,7 +58,10 @@ pub fn save_codex_provider(path: &Path, input: &CodexProviderInput) -> Result<()
     credential.insert("account", input.account.as_str().into());
     profile.insert("credential", value(credential));
     if !models.is_empty() {
-        profile.insert("models", value(models.into_iter().collect::<Array>()));
+        profile.insert(
+            "models",
+            value(models.into_iter().map(|model| model.id).collect::<Array>()),
+        );
     }
     if !input.default_model.is_empty() {
         profile.insert("default_model", value(input.default_model.as_str()));

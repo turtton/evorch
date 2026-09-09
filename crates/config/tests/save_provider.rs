@@ -1,5 +1,6 @@
 //! プロバイダ書き戻しの fail-closed 契約。
 
+use config::types::provider::ModelEntryConfig;
 use std::path::Path;
 
 use config::{
@@ -16,10 +17,10 @@ fn input() -> OpenAiCompatibleProviderInput {
             var: "LOCAL_API_KEY".into(),
         },
         models: vec![
-            " model-a ".into(),
-            "".into(),
-            "model-b".into(),
-            "model-a".into(),
+            ModelEntryConfig::enabled(" model-a "),
+            ModelEntryConfig::enabled(""),
+            ModelEntryConfig::enabled("model-b"),
+            ModelEntryConfig::enabled("model-a"),
         ],
         default_model: "model-a".into(),
         excluded_models: vec![],
@@ -224,7 +225,7 @@ fn save_rejects_invalid_name_base_url_models_default_model() {
         match field {
             "name" => candidate.name = value.into(),
             "base_url" => candidate.base_url = value.into(),
-            "models" => candidate.models = vec![value.into()],
+            "models" => candidate.models = vec![ModelEntryConfig::enabled(value)],
             "default_model" => candidate.default_model = value.into(),
             _ => unreachable!(),
         }
@@ -323,7 +324,7 @@ fn validation_reports_first_invalid_field_in_order() {
                     var: "_KEY_1".into(),
                 }
             }
-            "models" => candidate.models = vec!["model-a".into()],
+            "models" => candidate.models = vec![ModelEntryConfig::enabled("model-a")],
             "default_model" => candidate.default_model = "model-a".into(),
             _ => unreachable!(),
         }

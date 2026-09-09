@@ -26,7 +26,7 @@ fn openai(name: &str) -> config::OpenAiCompatibleProviderInput {
         credential: config::ProviderCredentialInput::Env {
             var: "API_KEY".into(),
         },
-        models: vec!["model".into()],
+        models: vec![config::types::provider::ModelEntryConfig::enabled("model")],
         excluded_models: vec![],
         default_model: "model".into(),
     }

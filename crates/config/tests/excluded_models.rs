@@ -94,7 +94,7 @@ fn save_round_trips_exclusions_when_input_needs_normalization() {
         credential: config::ProviderCredentialInput::Env {
             var: "LOCAL_KEY".into(),
         },
-        models: vec!["manual".into()],
+        models: vec![config::types::provider::ModelEntryConfig::enabled("manual")],
         excluded_models: vec![" m1 ".into(), "".into(), "m2".into(), "m1".into()],
         default_model: "manual".into(),
     };
@@ -123,7 +123,7 @@ fn save_omits_exclusions_when_normalized_input_is_empty() {
             credential: config::ProviderCredentialInput::Env {
                 var: "LOCAL_KEY".into(),
             },
-            models: vec!["manual".into()],
+            models: vec![config::types::provider::ModelEntryConfig::enabled("manual")],
             excluded_models,
             default_model: "manual".into(),
         };
