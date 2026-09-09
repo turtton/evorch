@@ -5,6 +5,7 @@ use std::path::Path;
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
+use crate::types::provider::ModelEntryConfig;
 use crate::{CURRENT_VERSION, Config, ConfigError};
 
 /// 秘密値ではなく資格情報の参照先。
@@ -23,7 +24,7 @@ pub struct OpenAiCompatibleProviderInput {
     /// 秘密値ではなく、その参照先の環境変数名。
     pub credential: ProviderCredentialInput,
     /// モデル ID 一覧 (空白・空要素・重複は除去する)。
-    pub models: Vec<String>,
+    pub models: Vec<ModelEntryConfig>,
     /// 除外するモデル ID の一覧 (空白・空要素・重複は除去する)。
     pub excluded_models: Vec<String>,
     /// 正規化済みモデル一覧に含まれる既定モデル ID。
@@ -85,16 +86,19 @@ pub fn validate_openai_compatible_provider_input(
         }
     }
     let models = normalized_models(&input.models);
-    if models.is_empty() {
+    if !models.iter().any(|model| model.enabled) {
         return Err(invalid(
             "models",
-            "models must contain at least one non-empty model ID",
+            "models must contain at least one enabled non-empty model ID",
         ));
     }
-    if !models.contains(&input.default_model.as_str()) {
+    if !models
+        .iter()
+        .any(|model| model.enabled && model.id == input.default_model)
+    {
         return Err(invalid(
             "default_model",
-            "default_model must be a member of models",
+            "default_model must be a member of enabled models",
         ));
     }
     Ok(())
@@ -135,10 +139,20 @@ pub fn save_openai_compatible_provider(
         value(
             normalized_models(&input.models)
                 .into_iter()
+                .map(|model| {
+                    if model.enabled {
+                        toml_edit::Value::from(model.id)
+                    } else {
+                        let mut table = InlineTable::new();
+                        table.insert("id", model.id.into());
+                        table.insert("enabled", false.into());
+                        table.into()
+                    }
+                })
                 .collect::<Array>(),
         ),
     );
-    let excluded_models = normalized_models(&input.excluded_models);
+    let excluded_models = normalized_string_models(&input.excluded_models);
     if !excluded_models.is_empty() {
         profile.insert(
             "excluded_models",
@@ -237,7 +251,26 @@ pub(crate) fn invalid_field(path: &str, message: &str) -> ConfigError {
     }
 }
 
-pub(crate) fn normalized_models(input: &[String]) -> Vec<&str> {
+pub(crate) fn normalized_models(input: &[ModelEntryConfig]) -> Vec<ModelEntryConfig> {
+    let mut models: Vec<ModelEntryConfig> = Vec::new();
+    for model in input {
+        let id = model.id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(existing) = models.iter_mut().find(|entry| entry.id == id) {
+            existing.enabled |= model.enabled;
+        } else {
+            models.push(ModelEntryConfig {
+                id: id.into(),
+                enabled: model.enabled,
+            });
+        }
+    }
+    models
+}
+
+fn normalized_string_models(input: &[String]) -> Vec<&str> {
     let mut models = Vec::new();
     for model in input {
         let model = model.trim();
