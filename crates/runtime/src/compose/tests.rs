@@ -13,6 +13,7 @@ use routing::{ComposedProvider, ComposedProviders, CredentialRef, ProviderProfil
 use super::*;
 
 mod live;
+mod preference;
 
 #[derive(Clone)]
 struct StubClient {
