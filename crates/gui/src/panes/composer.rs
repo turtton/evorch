@@ -7,10 +7,12 @@ use crate::theme::tokens::{
     SURFACE_RAISED,
 };
 use crate::theme::widgets::{primary_button, surface_frame};
+use workspace_ui::ThreadRunPhase;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerAction {
     Send,
+    Cancel,
     Complete(&'static str),
     OpenSettings,
 }
@@ -19,6 +21,7 @@ pub fn composer_strip(
     ui: &mut egui::Ui,
     model: &mut ComposerModel,
     provider: &crate::model::composer::ProviderStatus,
+    phase: Option<ThreadRunPhase>,
 ) -> Option<ComposerAction> {
     let mut action = None;
     surface_frame(SURFACE_RAISED)
@@ -29,7 +32,7 @@ pub fn composer_strip(
             ui.set_min_height(ROW_COMPACT);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
             let candidates = completions(&model.input);
-            if !candidates.is_empty() {
+            if model.completions_visible() {
                 ui.horizontal(|ui| {
                     for spec in candidates {
                         let label = match spec.argument_hint {
@@ -57,7 +60,11 @@ pub fn composer_strip(
             }
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty();
-                let send = if can_send {
+                let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();
+                let send = if can_cancel {
+                    ui.add(egui::Button::new(egui::RichText::new("Cancel").color(crate::theme::tokens::ERROR_FG))
+                        .fill(crate::theme::tokens::ERROR_SURFACE))
+                } else if can_send {
                     primary_button(ui, "Send")
                 } else {
                     ui.add_enabled(false, egui::Button::new("Send"))
@@ -108,7 +115,17 @@ pub fn composer_strip(
                     }) && !ime_composing;
                 let focused = input.has_focus();
                 ui.data_mut(|data| data.insert_temp(ime_id, ime_composing && focused));
-                if !model.input.trim().is_empty() && (send.clicked() || enter) {
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if model.completions_visible() {
+                        model.dismiss_completions();
+                    } else if phase == Some(ThreadRunPhase::Running) {
+                        action = Some(ComposerAction::Cancel);
+                    }
+                    input.request_focus();
+                } else if can_cancel && send.clicked() {
+                    action = Some(ComposerAction::Cancel);
+                    input.request_focus();
+                } else if !model.input.trim().is_empty() && (send.clicked() || enter) {
                     action = Some(ComposerAction::Send);
                     input.request_focus();
                 }
@@ -130,6 +147,7 @@ mod tests {
     use crate::theme::tokens::SP_3;
 
     struct Fixture {
+        phase: Option<workspace_ui::ThreadRunPhase>,
         model: ComposerModel,
         provider: ProviderStatus,
         action: Option<ComposerAction>,
@@ -139,18 +157,137 @@ mod tests {
         Harness::builder().build_ui_state(
             |ui, state: &mut Fixture| {
                 crate::theme::install(ui.ctx());
-                if let Some(action) = composer_strip(ui, &mut state.model, &state.provider) {
+                if let Some(action) =
+                    composer_strip(ui, &mut state.model, &state.provider, state.phase)
+                {
                     state.action = Some(action);
                 }
             },
             Fixture {
+                phase: None,
                 model: ComposerModel {
                     input: input.into(),
+                    ..Default::default()
                 },
                 provider,
                 action: None,
             },
         )
+    }
+
+    #[test]
+    #[ignore = "requires offscreen rendering adapter"]
+    fn capture_cancel_states() {
+        for (name, phase, text) in [
+            ("running", Some(ThreadRunPhase::Running), "実行中の下書き"),
+            ("waiting", Some(ThreadRunPhase::Waiting), "入力待ち"),
+            ("completion", Some(ThreadRunPhase::Running), "/"),
+        ] {
+            let mut h = harness(text, ProviderStatus::Configured);
+            h.state_mut().phase = phase;
+            h.run();
+            h.render()
+                .expect("render composer")
+                .save(format!("/tmp/opencode/e-cancel-{name}.png"))
+                .expect("save evidence");
+        }
+    }
+
+    #[test]
+    fn esc_with_completions_visible_dismisses_them_and_emits_no_action() {
+        let mut h = harness("/", ProviderStatus::Configured);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        let focus = h.ctx.memory(|m| m.focused());
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_label("/help").is_none());
+        assert_eq!(h.state().action, None);
+        assert_eq!(h.ctx.memory(|m| m.focused()), focus);
+    }
+
+    #[test]
+    fn esc_without_completions_emits_cancel_when_running() {
+        let mut h = harness("draft", ProviderStatus::Configured);
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+        assert_eq!(h.state().model.input, "draft");
+    }
+
+    #[test]
+    fn esc_when_idle_emits_nothing() {
+        let mut h = harness("draft", ProviderStatus::Configured);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, None);
+    }
+
+    #[test]
+    fn esc_dismisses_completions_before_cancel_even_when_running() {
+        let mut h = harness("/", ProviderStatus::Configured);
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.get_by_label("Send");
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, None);
+        assert!(h.query_by_label("/help").is_none());
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+    }
+
+    #[test]
+    fn cancel_button_replaces_send_while_running() {
+        let mut h = harness("", ProviderStatus::Configured);
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
+        h.run();
+        assert!(h.query_by_label("Send").is_none());
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+    }
+
+    #[test]
+    fn send_button_shown_while_waiting() {
+        let mut h = harness("draft", ProviderStatus::Configured);
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Waiting);
+        h.run();
+        assert!(h.query_by_label("Cancel").is_none());
+        h.get_by_label("Send").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn typing_after_dismissal_reshows_completions() {
+        let mut h = harness("/", ProviderStatus::Configured);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        h.input_mut().events.push(egui::Event::Text("g".into()));
+        h.run();
+        h.get_by_label("/goal <text>");
+        assert_eq!(h.state().action, None);
+    }
+
+    #[test]
+    fn enter_still_sends_while_running() {
+        let mut h = harness("queued", ProviderStatus::Configured);
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Send));
     }
 
     #[test]

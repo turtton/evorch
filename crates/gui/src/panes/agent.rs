@@ -74,7 +74,7 @@ pub fn agent_pane(
                         action = Some(AgentPaneAction::ModelPreference(preference));
                     }
                     ui.push_id("composer-strip", |ui| {
-                        composer_strip(ui, composer, provider)
+                        composer_strip(ui, composer, provider, ctx.phase)
                     })
                     .inner
                 });

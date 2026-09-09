@@ -36,6 +36,39 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn cancel_chat_dispatches_active_thread_command() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    harness.state_mut().apply_events([
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "chat-1".into(),
+            parent_run_id: None,
+            agent_name: "chat:thread-1".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: "chat-1".into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+        }),
+    ]);
+    harness.step();
+    harness.step();
+    assert!(harness.has_label("Cancel"));
+    harness.click_label("Cancel");
+    harness.step();
+    harness.step();
+    assert_eq!(
+        harness.state().issued().last(),
+        Some(&WorkbenchCommand::CancelChat {
+            thread_id: "thread-1".into(),
+        })
+    );
+}
+
+#[test]
 fn send_chat_carries_thread_model_preference() {
     // Given
     let temp = tempfile::tempdir().unwrap();
