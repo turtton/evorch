@@ -6,8 +6,7 @@ const QUIET_MODULES: &str = ",egui_extras::loaders=error";
 pub fn log_filter_from_env(value: Option<&str>) -> EnvFilter {
     let base = value.unwrap_or("info");
     let composed = format!("{base}{QUIET_MODULES}");
-    EnvFilter::try_new(composed)
-        .unwrap_or_else(|_| EnvFilter::new(format!("info{QUIET_MODULES}")))
+    EnvFilter::try_new(composed).unwrap_or_else(|_| EnvFilter::new(format!("info{QUIET_MODULES}")))
 }
 
 pub fn env_filter() -> EnvFilter {
