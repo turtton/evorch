@@ -172,6 +172,16 @@ v0.6 の実稼働検証で判明した 5 件を 5 workstream (A〜E) に分解�
 
 検証: workspace 全テスト green (唯一残るが pre-existing flake の `headless_run_completes_with_single_mock_response`)、clippy(-D warnings)・fmt clean。各 wave で RED→GREEN 同一コミット、PNG 証跡は `/tmp/opencode/models-{fetched,selected,applied-default}.png` / `/tmp/opencode/e-cancel-{completion,running,waiting}.png`。
 
+## v0.8 ツール可視性 + Markdown の実装確定（2026-09-09、main 直接マージ）
+
+v0.7 の実稼働検証で判明した 3 件を追加でカバー。
+- **A1 tool event payload 拡張 (8fd168f)**: `ToolStarted.input` (Option<serde_json::Value>) と `ToolCompleted.output` (Option<String>) を event-bus に追加。serde default で旧 event JSON 互換、skip_serializing_if でシリアライズ時に省略。executor (tools/src/executor.rs) で payload を populate: ToolStarted で input (execute の入力 JSON)、ToolCompleted で ToolResult.content を output に入れる。`detail` (メタデータ) は A1 前から既存そのまま。下流 (storage/tools/event-bus) のテスト fixture を `input: None` / `output: None` で埋める compile fix を c051ddb で追加。
+- **A2 TranscriptEntry::Tool 拡張 (2f762db)**: GUI transcript model が tool call の input/output/detail/is_error を保持。ToolStarted で新規 entry (input 保持)、ToolCompleted で同 call_id 行を検索して output/detail/is_error を更新。call_id 不在でも entry 生成 (defensive)。approval 系は status 更新のみ。
+- **A3 tool 折りたたみ UI (597a754)**: 新規 `panes/transcript_tool.rs` で Tool 行を clickable にし、pane ID + 完全 call_id 単位で expand/collapse state を保持。header に `[🔨 bash] call_id + status (spinner/✓/✗) + file_path/command の概要`。展開時に Input (pretty JSON) / Output (等幅、is_error 時は Error セクション ERROR_FG 色) / Detail を表示。output 本文 (read file content / bash stdout) は markdown 解釈せず injection 防止として等幅プレーン表示。Chat / Agents 詳細の両 transcript で共通。Message markdown render は A4 で導入済みで併用。
+- **A4 markdown レンダリング (0ea5670)**: `panes/markdown_render.rs` 新規、`egui_commonmark 0.25` (egui 0.36 互換) を採用。`TranscriptEntry::Message` のみ markdown render (太字/斜体/取り消し線、code block/inline code、links、list、quote、H1/2/3)。UserMessage は plaintext、Reasoning は muted。tool の output/result は markdown として render しない (A5 で明示)。
+
+検証: workspace 全テスト green (21 group、flake のみ)、clippy(-D warnings)・fmt clean。RED→GREEN 同一コミット。PNG 証跡は transcript_tool の collapsed/expanded/エラー状態で4画像。
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）
