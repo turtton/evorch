@@ -7,8 +7,9 @@ use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
+use crate::panes::phase_indicator::phase_indicator;
 use crate::panes::sidebar::SidebarAction;
-use crate::theme::text::{h3, muted};
+use crate::theme::text::h3;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{card, empty_state, pane_root, surface_frame};
 
@@ -128,7 +129,7 @@ fn header_strip(
                 ui.label(h3(format!("Thread: {title}")));
                 if let Some(phase) = ctx.phase {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(muted(format!("{phase:?}").to_lowercase()));
+                        phase_indicator(ui, phase);
                     });
                 }
             }
@@ -227,6 +228,43 @@ fn entry_label(entry: &TranscriptEntry) -> String {
                 MessageDirection::Outgoing => "->",
             };
             format!("{prefix} {peer_run_id}: {content}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn thread_header_shows_phase_pill_without_clipping() {
+        for (phase, label) in [
+            (ThreadRunPhase::Running, "running"),
+            (ThreadRunPhase::Waiting, "waiting (input)"),
+            (ThreadRunPhase::Done, "done"),
+        ] {
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(400.0, 80.0))
+                .build_ui(move |ui| {
+                    crate::theme::install(ui.ctx());
+                    let ctx = ConversationContext {
+                        has_project: true,
+                        active_thread_title: Some("Chat"),
+                        phase: Some(phase),
+                        next_thread_title: String::new(),
+                        model_picker: crate::panes::model_picker::ModelPickerContext {
+                            profiles: &[],
+                            preference: None,
+                            enabled: false,
+                        },
+                    };
+                    header_strip(ui, &None, &ctx, &mut None);
+                });
+            harness.run_steps(2);
+            let pill = harness.get_by_label(label).rect();
+            assert!(pill.left() > harness.get_by_label("Thread: Chat").rect().right());
+            assert!(pill.right() < 400.0 && pill.bottom() < 80.0);
         }
     }
 }

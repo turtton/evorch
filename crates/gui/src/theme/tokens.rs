@@ -24,6 +24,8 @@ pub const WARNING_FG: Color32 = Color32::from_rgb(0xff, 0xb9, 0x00);
 pub const WARNING_SURFACE: Color32 = Color32::from_rgb(0x31, 0x21, 0x08);
 pub const SUCCESS: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
 pub const INFO: Color32 = Color32::from_rgb(0x60, 0xa5, 0xfa);
+pub const RUNNING: Color32 = Color32::from_rgb(0x22, 0xd3, 0xee);
+pub const WAITING: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24);
 
 pub const SP_1: f32 = 4.0;
 pub const SP_2: f32 = 8.0;
@@ -98,8 +100,8 @@ pub const fn state_color(state: ThreadState) -> Color32 {
 pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
     match phase {
         ThreadRunPhase::Pending => TEXT_MUTED,
-        ThreadRunPhase::Running => INFO,
-        ThreadRunPhase::Waiting => WARNING_FG,
+        ThreadRunPhase::Running => RUNNING,
+        ThreadRunPhase::Waiting => WAITING,
         ThreadRunPhase::Done => SUCCESS,
         ThreadRunPhase::Error => ERROR_FG,
     }
@@ -108,8 +110,8 @@ pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
 pub const fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
     match phase {
         AgentRunPhase::Pending => TEXT_MUTED,
-        AgentRunPhase::Running => INFO,
-        AgentRunPhase::Waiting => WARNING_FG,
+        AgentRunPhase::Running => RUNNING,
+        AgentRunPhase::Waiting => WAITING,
         AgentRunPhase::Done => SUCCESS,
         AgentRunPhase::Error => ERROR_FG,
     }
@@ -118,6 +120,19 @@ pub const fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_indicator_tokens_are_distinct() {
+        let colors = [
+            RUNNING, WAITING, ERROR_FG, TEXT_MUTED, SUCCESS, INFO, WARNING_FG,
+        ];
+        let distinct: std::collections::HashSet<_> = colors.into_iter().collect();
+        assert_eq!(distinct.len(), colors.len());
+        assert_eq!(phase_color(ThreadRunPhase::Running), RUNNING);
+        assert_eq!(phase_color(ThreadRunPhase::Waiting), WAITING);
+        assert_eq!(agent_phase_color(AgentRunPhase::Running), RUNNING);
+        assert_eq!(agent_phase_color(AgentRunPhase::Waiting), WAITING);
+    }
 
     #[test]
     fn state_color_is_exhaustive_and_distinct() {
