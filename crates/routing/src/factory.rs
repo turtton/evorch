@@ -165,14 +165,6 @@ fn build_openai_compatible(
             ),
         });
     }
-    match &profile.credential {
-        CredentialRef::Env { .. } => {}
-        CredentialRef::Keyring { .. } => {
-            return Err(RoutingError::InvalidProfile {
-                reason: "openai-compatible supports env credential only in this slice".to_string(),
-            });
-        }
-    }
     let timeout = options.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
     let client =
         OpenAiCompatibleClient::new(&profile.base_url, "openai-compatible", timeout, event_bus)

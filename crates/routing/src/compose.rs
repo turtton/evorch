@@ -129,7 +129,7 @@ pub fn compose_providers(
             deps.event_bus.clone(),
             &deps.factory,
         )?;
-        let auth = resolve_auth(&profile, deps.env.as_ref())?;
+        let auth = resolve_auth(&profile, deps.env.as_ref(), deps.credential_store.as_ref())?;
         catalog.merge_discovered(profile.models.clone());
         profiles.push(profile.clone());
         providers.insert(
@@ -169,6 +169,7 @@ pub fn compose_providers(
 fn resolve_auth(
     profile: &ProviderProfile,
     env: &dyn EnvLookup,
+    store: &dyn CredentialStore,
 ) -> Result<ProviderAuth, RoutingError> {
     match &profile.credential {
         CredentialRef::Env { var } => {
@@ -186,6 +187,24 @@ fn resolve_auth(
             }
             Ok(ProviderAuth::new(value))
         }
-        CredentialRef::Keyring { .. } => Ok(ProviderAuth::new("")),
+        CredentialRef::Keyring { .. }
+            if profile.provider_type == model::ProviderType::OpenAiCodex =>
+        {
+            Ok(ProviderAuth::new(""))
+        }
+        CredentialRef::Keyring { account, .. } => {
+            let secret = store
+                .get(account)
+                .map_err(|_| RoutingError::KeyringCredentialStore {
+                    profile: profile.name.clone(),
+                    account: account.clone(),
+                })?
+                .filter(|secret| !secret.expose().trim().is_empty())
+                .ok_or_else(|| RoutingError::MissingKeyringCredential {
+                    profile: profile.name.clone(),
+                    account: account.clone(),
+                })?;
+            Ok(ProviderAuth::new(secret.expose()))
+        }
     }
 }

@@ -1,6 +1,10 @@
 /// ルーティング設定または候補選択で発生するエラーです。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RoutingError {
+    #[error("keyring credential `{account}` for provider `{profile}` is missing or empty")]
+    MissingKeyringCredential { profile: String, account: String },
+    #[error("could not read keyring credential `{account}` for provider `{profile}`")]
+    KeyringCredentialStore { profile: String, account: String },
     /// 指定されたプロバイダプロファイルが存在しない。
     #[error("unknown profile: {0}")]
     UnknownProfile(String),
