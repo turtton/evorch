@@ -14,6 +14,55 @@ use workspace_ui::{ThreadRunPhase, UiSettings};
 #[derive(Clone)]
 struct MockSource(Vec<AgentSummary>);
 
+#[test]
+fn apply_events_surfaces_provider_failures_in_chat() {
+    // Given: an active conversation and attributed provider attempts.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
+    state.add_project(dir.path()).expect("project");
+    state.create_thread("provider-errors").expect("thread");
+    let failures = [
+        event_bus::ProviderFailureKind::RateLimited,
+        event_bus::ProviderFailureKind::Auth,
+    ];
+    state.apply_events([run_started("run-provider", "worker", "worker")]);
+    // When: transient and definite failures reach the real event fold.
+    state.apply_events(failures.map(|failure| {
+        Event::new(event_bus::ProviderEvent::RequestFailed {
+            request_id: format!("request-{failure:?}"),
+            provider: "provider-a".into(),
+            profile: None,
+            protocol: "openai-chat-completions".into(),
+            model: "model-a".into(),
+            streaming: true,
+            duration_ms: 42,
+            failure,
+            run_id: Some("run-provider".into()),
+        })
+    }));
+    // Then: the thread model and rendered chat both surface the failures.
+    let notice = "Provider request failed: provider-a/model-a — rate limited (42 ms, retrying)";
+    let error = "Provider request failed: provider-a/model-a — authentication failed (42 ms)";
+    assert!(
+        state
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Notice { text } if text == notice))
+    );
+    assert!(
+        state
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Error { text } if text == error))
+    );
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    assert!(harness.has_label(notice));
+    assert!(harness.has_label(error));
+}
+
 impl AgentRunSource for MockSource {
     fn list(&self) -> Vec<AgentSummary> {
         self.0.clone()
