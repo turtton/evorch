@@ -43,6 +43,9 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
     pub(super) dock_tab_style: &'a egui_dock::TabStyle,
+    pub(super) profiles: &'a [runtime::compose::ProfileSummary],
+    pub(super) picker_state: &'a mut crate::model::model_picker::ModelPickerState,
+    pub(super) preference_action: &'a mut Option<Option<workspace_ui::ModelPreference>>,
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
@@ -96,6 +99,11 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .and_then(|run_id| self.phases.get(run_id))
                 .copied(),
             next_thread_title: format!("thread-{}", self.sidebar.threads.len() + 1),
+            model_picker: crate::panes::model_picker::ModelPickerContext {
+                profiles: self.profiles,
+                preference: active_thread.and_then(|thread| thread.model_preference.as_ref()),
+                enabled: active_thread.is_some(),
+            },
         };
         if let Some(action) = agent_pane(
             ui,
@@ -104,12 +112,16 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             ctx,
             self.composer,
             self.provider_status,
+            self.picker_state,
         ) {
             match action {
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),
                 AgentPaneAction::Composer(a) => *self.composer_action = Some(a),
+                AgentPaneAction::ModelPreference(preference) => {
+                    *self.preference_action = Some(preference)
+                }
             }
         }
     }

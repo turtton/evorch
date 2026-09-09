@@ -21,6 +21,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut diff_request = None;
         let mut composer_action = None;
         let mut focus_request = None;
+        let mut preference_action = None;
+        let profiles = self.available_profiles();
         let dock_style = crate::theme::dock::dock_style(ui.style());
         let tab_style = dock_style.tab.clone();
         {
@@ -44,6 +46,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 composer_action: &mut composer_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,
+                profiles: &profiles,
+                picker_state: &mut self.model_picker,
+                preference_action: &mut preference_action,
             };
             DockArea::new(&mut self.dock)
                 .style(dock_style)
@@ -51,6 +56,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(id) = focus_request {
             self.focus_panel(id);
+        }
+        if let Some(preference) = preference_action {
+            self.set_thread_model_preference(preference);
         }
         if let Some(mode) = diff_request {
             self.request_diff(mode);

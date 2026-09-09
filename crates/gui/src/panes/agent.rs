@@ -25,6 +25,7 @@ pub struct ConversationContext<'a> {
     pub active_thread_title: Option<&'a str>,
     pub phase: Option<ThreadRunPhase>,
     pub next_thread_title: String,
+    pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -33,6 +34,7 @@ pub enum AgentPaneAction {
     Sidebar(SidebarAction),
     FocusPanel(&'static str),
     Composer(ComposerAction),
+    ModelPreference(Option<workspace_ui::ModelPreference>),
 }
 
 /// トランスクリプトモデルを egui 上に描画します。
@@ -43,6 +45,7 @@ pub fn agent_pane(
     ctx: ConversationContext<'_>,
     composer: &mut ComposerModel,
     provider: &ProviderStatus,
+    picker_state: &mut crate::model::model_picker::ModelPickerState,
 ) -> Option<AgentPaneAction> {
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
@@ -57,7 +60,23 @@ pub fn agent_pane(
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                let strip = ui.scope(|ui| composer_strip(ui, composer, provider));
+                let strip = ui.scope(|ui| {
+                    if let Some(preference) = crate::panes::model_picker::model_picker(
+                        ui,
+                        crate::panes::model_picker::ModelPickerContext {
+                            profiles: ctx.model_picker.profiles,
+                            preference: ctx.model_picker.preference,
+                            enabled: ctx.model_picker.enabled,
+                        },
+                        picker_state,
+                    ) {
+                        action = Some(AgentPaneAction::ModelPreference(preference));
+                    }
+                    ui.push_id("composer-strip", |ui| {
+                        composer_strip(ui, composer, provider)
+                    })
+                    .inner
+                });
                 let height = strip.response.rect.height();
                 if height != composer_height {
                     ui.data_mut(|data| data.insert_temp(composer_id, height));
