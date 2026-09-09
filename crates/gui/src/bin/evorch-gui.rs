@@ -547,12 +547,57 @@ fn run() -> Result<(), GuiError> {
     };
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
 
-    // runtime 構築は provider composition root (compose_runtime) 経由で行う
-    // (issue #79 T4.2)。ModelSource::Fixed は demo / 非 demo とも DemoScriptModel
-    // を model 境界に固定し続ける。Fixed 経路は credential / env を消費しないため、
-    // 構築副作用のない fail-closed store と ProcessEnv を渡す。
-    let composition_config = config::Config::default();
-    let credential_store = Arc::new(UnwiredCredentialStore);
+    let settings_store: Option<Arc<dyn CredentialStore>> = credential_dir(demo_directory.as_ref())
+        .and_then(
+            |directory| match sandbox::credential::FileCredentialStore::open(directory) {
+                Ok(store) => {
+                    let store: Arc<dyn CredentialStore> = Arc::new(store);
+                    Some(store)
+                }
+                Err(error) => {
+                    tracing::error!(%error, "credential store initialization failed");
+                    None
+                }
+            },
+        );
+    let composition_config = match loaded_config.as_ref() {
+        Some(Ok(config)) => config.clone(),
+        Some(Err(error)) => {
+            tracing::error!(%error, "provider configuration load failed");
+            config::Config::default()
+        }
+        None => config::Config::default(),
+    };
+    // Retain the fail-closed store when the credential directory cannot be opened.
+    let credential_store: Arc<dyn CredentialStore> = settings_store
+        .clone()
+        .unwrap_or_else(|| Arc::new(UnwiredCredentialStore));
+    let production_model = (!arguments.demo).then(|| {
+        let context = gui::model::production::ProductionModel {
+            load_options: config::LoadOptions {
+                project_dir: Some(repo_root.clone()),
+                ..Default::default()
+            },
+            credential_store: credential_store.clone(),
+            bus: bus.clone(),
+            env: Arc::new(ProcessEnv),
+        };
+        let initial: Arc<dyn AgentModel> = if settings_store.is_some() {
+            match gui::model::production::compose_production_model(&composition_config, &context) {
+                Ok(model) => model,
+                Err(error) => {
+                    tracing::error!(%error, "provider model composition failed");
+                    Arc::new(runtime::compose::UnconfiguredModel)
+                }
+            }
+        } else {
+            Arc::new(runtime::compose::UnconfiguredModel)
+        };
+        (
+            context,
+            Arc::new(runtime::compose::SwitchableModel::new(initial)),
+        )
+    });
     let runtime = match demo_directory.as_ref() {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
@@ -597,7 +642,10 @@ fn run() -> Result<(), GuiError> {
                 executor,
                 credential_store,
                 env: Arc::new(ProcessEnv),
-                model_source: ModelSource::Fixed(Arc::new(DemoScriptModel::new(Arc::clone(&bus)))),
+                model_source: ModelSource::Fixed(match &production_model {
+                    Some((_, model)) => model.clone(),
+                    None => Arc::new(runtime::compose::UnconfiguredModel),
+                }),
                 workspace: None,
             })?;
             tracing::debug!(
@@ -628,7 +676,7 @@ fn run() -> Result<(), GuiError> {
 
     // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる
     // (計画 Clarification C)。
-    let (orchestration, provider_status, provider_settings) = match loaded_config.as_ref() {
+    let (orchestration, mut provider_status, provider_settings) = match loaded_config.as_ref() {
         Some(loaded) => (
             orchestration_settings_or_default(loaded),
             detected_provider_status(loaded),
@@ -645,6 +693,15 @@ fn run() -> Result<(), GuiError> {
             ProviderSettingsModel::default(),
         ),
     };
+    if production_model.as_ref().is_some_and(|(_, model)| {
+        model
+            .selected_model(Role::Worker)
+            .starts_with("unresolved:")
+    }) {
+        provider_status = ProviderStatus::NotConfigured {
+            guidance: PROVIDER_MISSING_GUIDANCE.to_owned(),
+        };
+    }
     let provider_settings_path = match demo_directory.as_ref() {
         Some(directory) => directory.path().join("evorch.toml"),
         None => repo_root.join("evorch.toml"),
@@ -685,8 +742,6 @@ fn run() -> Result<(), GuiError> {
     let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
-    let settings_store = credential_dir(demo_directory.as_ref())
-        .and_then(|directory| sandbox::open_default(directory).ok());
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
         .with_provider_status(provider_status)
@@ -705,6 +760,9 @@ fn run() -> Result<(), GuiError> {
         )));
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);
+        if let Some((context, model)) = production_model {
+            state = state.with_production_model(context, model);
+        }
     }
     let sidebar = match demo_directory.as_ref() {
         Some(directory) => demo_sidebar(&repo_root, directory.path())?,

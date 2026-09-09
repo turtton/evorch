@@ -3,6 +3,15 @@ use crate::model::composer::ProviderStatus;
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn with_production_model(
+        mut self,
+        context: crate::model::production::ProductionModel,
+        model: std::sync::Arc<runtime::compose::SwitchableModel>,
+    ) -> Self {
+        self.production_model = Some((context, model));
+        self
+    }
+
     pub fn open_provider_settings(&mut self) {
         self.codex_auth.refresh_from_store();
         self.provider_settings.error = None;
@@ -29,6 +38,49 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let input = self.provider_settings.to_input();
         if let Err(error) = config::validate_openai_compatible_provider_input(&input) {
             self.provider_settings.error = Some(error.to_string());
+            return;
+        }
+        if let Some((context, model)) = self.production_model.clone() {
+            let Some(path) = self.provider_settings_path.clone() else {
+                self.provider_settings.error = Some("No project config path is configured".into());
+                return;
+            };
+            let secret = sandbox::Secret::from(self.provider_settings.api_key_input.clone());
+            let mode = self.provider_settings.credential_mode;
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.provider_save_rx = Some(rx);
+            std::thread::spawn(move || {
+                let result = (|| {
+                    match mode {
+                        crate::model::provider_settings::CredentialMode::Env => {}
+                        crate::model::provider_settings::CredentialMode::Keyring => {
+                            if secret.expose().is_empty() {
+                                let existing = context
+                                    .credential_store
+                                    .get(&input.name)
+                                    .map_err(|error| error.to_string())?;
+                                if existing.is_none_or(|value| value.expose().trim().is_empty()) {
+                                    return Err("Enter an API key before saving".to_owned());
+                                }
+                            } else {
+                                context
+                                    .credential_store
+                                    .set(&input.name, &secret)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                        }
+                    }
+                    config::save_openai_compatible_provider(&path, &input)
+                        .map_err(|error| error.to_string())?;
+                    let replacement = context.reload()?;
+                    model.replace(replacement);
+                    Ok(())
+                })();
+                if let Err(error) = &result {
+                    tracing::error!(%error, "provider save or recomposition failed");
+                }
+                let _ = tx.send(result);
+            });
             return;
         }
         match self.provider_settings.credential_mode {
@@ -94,7 +146,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match rx.try_recv() {
             Ok(Ok(())) => {
                 self.provider_settings.api_key_input.clear();
-                self.provider_settings.api_key_stored = true;
+                self.provider_settings.api_key_stored = self.provider_settings.credential_mode
+                    == crate::model::provider_settings::CredentialMode::Keyring;
                 self.provider_settings.error = None;
                 self.provider_status = ProviderStatus::Configured;
                 self.close_provider_settings();

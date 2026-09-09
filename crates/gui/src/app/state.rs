@@ -59,6 +59,10 @@ pub struct WorkbenchState<S> {
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
     pub(super) provider_save_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub(super) production_model: Option<(
+        crate::model::production::ProductionModel,
+        Arc<runtime::compose::SwitchableModel>,
+    )>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
     pub(super) sink: Box<dyn CommandSink>,
@@ -102,6 +106,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             provider_settings_path: None,
             credential_store: None,
             provider_save_rx: None,
+            production_model: None,
             merge: MergeApprovalModel {
                 view: MergeApprovalView {
                     pr: None,
