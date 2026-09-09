@@ -561,6 +561,7 @@ impl LoopState {
                 Ok(response) => response,
                 Err(error) => {
                     let reason = error.to_string();
+                    tracing::error!(run_id = ?self.task.run_id, reason = %reason, "agent run failed");
                     let _ = self.transition(AgentRunPhase::Error, Some(reason));
                     return;
                 }

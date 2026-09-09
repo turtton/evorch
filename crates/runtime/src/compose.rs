@@ -224,8 +224,22 @@ impl AgentModel for RoutedModel {
             .client
             .send(&provider.auth, &request)
             .await
-            .map_err(|_| RuntimeError::Model {
-                reason: "provider request failed".to_string(),
+            .map_err(|error| {
+                let detail = error.to_string();
+                let scrub = |text: &str| {
+                    if provider.auth.api_key.is_empty() {
+                        text.to_owned()
+                    } else {
+                        text.replace(&provider.auth.api_key, "***")
+                    }
+                };
+                let provider_error: String = scrub(&detail).chars().take(500).collect();
+                let profile_name = scrub(&route.profile);
+                let model_id = scrub(&request.model);
+                tracing::warn!(profile = %profile_name, model = %model_id, error = %provider_error, "provider request failed");
+                RuntimeError::Model {
+                    reason: format!("profile={profile_name} model={model_id}: {provider_error}"),
+                }
             })
     }
 
