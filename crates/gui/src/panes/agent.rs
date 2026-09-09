@@ -161,7 +161,11 @@ pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
                 let accent = entry_accent(entry);
                 let text = entry_label(entry);
                 card(ui, accent, |ui| {
-                    ui.label(egui::RichText::new(text).color(TEXT));
+                    let foreground = match entry {
+                        TranscriptEntry::Error { .. } => ERROR_FG,
+                        _ => TEXT,
+                    };
+                    ui.label(egui::RichText::new(text).color(foreground));
                 });
             }
         });
@@ -169,6 +173,7 @@ pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
 
 fn entry_accent(entry: &TranscriptEntry) -> Color32 {
     match entry {
+        TranscriptEntry::Error { .. } => ERROR_FG,
         TranscriptEntry::UserMessage { .. } => TEXT,
         TranscriptEntry::Notice { .. } => TEXT_MUTED,
         TranscriptEntry::Message { .. } => ACCENT,
@@ -184,7 +189,7 @@ fn entry_accent(entry: &TranscriptEntry) -> Color32 {
 fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
         TranscriptEntry::UserMessage { text } => format!("You: {text}"),
-        TranscriptEntry::Notice { text } => text.clone(),
+        TranscriptEntry::Notice { text } | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text } => format!("Message: {text}"),
         TranscriptEntry::Reasoning { text } => format!("Reasoning: {text}"),
         TranscriptEntry::Tool {

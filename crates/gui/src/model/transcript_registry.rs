@@ -40,6 +40,14 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: event_bus::AgentRunPhase::Error,
+                ..
+            }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+            EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. }) => {
+                vec![TranscriptKey::Thread]
+            }
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
                 Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],

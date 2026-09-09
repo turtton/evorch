@@ -20,6 +20,9 @@ pub enum MessageDirection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
+    Error {
+        text: String,
+    },
     UserMessage {
         text: String,
     },
@@ -119,6 +122,15 @@ impl TranscriptModel {
 
     pub fn apply(&mut self, event: &Event) {
         match &event.kind {
+            event_bus::EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStateChanged {
+                    to: event_bus::AgentRunPhase::Error,
+                    reason: Some(reason),
+                    ..
+                } | event_bus::LifecycleEvent::Failed { reason, .. },
+            ) => self.push(TranscriptEntry::Error {
+                text: format!("Run failed: {reason}"),
+            }),
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) => {
                 self.append_text(delta, false)
             }
@@ -201,6 +213,7 @@ impl TranscriptModel {
                         text.push_str(delta)
                     }
                     TranscriptEntry::UserMessage { .. }
+                    | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. } => {}
