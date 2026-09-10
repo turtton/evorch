@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use event_bus::EventBus;
-use sandbox::BwrapConfig;
+use sandbox::{BwrapConfig, BwrapSandbox, CommandSpec, Sandbox, SandboxError, WrappedCommand};
 use tools::{ToolExecutionContext, ToolExecutor};
 
 fn workspace_dir() -> tempfile::TempDir {
@@ -54,4 +54,74 @@ async fn production_executor_runs_shell_inside_bwrap() {
         "pwd の出力に作業パス {expected} が含まれない: {}",
         result.content
     );
+}
+
+struct ShellBoundarySandbox {
+    inner: BwrapSandbox,
+    command: &'static str,
+}
+
+impl Sandbox for ShellBoundarySandbox {
+    fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        assert_eq!(spec.program, "sh", "Shell must select the interpreter");
+        assert_eq!(spec.args, ["-c", self.command]);
+        let wrapped = self.inner.wrap(spec)?;
+        assert!(wrapped.args.ends_with(&[
+            "sh".to_string(),
+            "-c".to_string(),
+            self.command.to_string(),
+        ]));
+        Ok(wrapped)
+    }
+}
+
+async fn assert_shell_listing(command: &'static str) {
+    // Given: standard tool registration and a real bwrap workspace with a hidden file.
+    let workspace = workspace_dir();
+    std::fs::write(workspace.path().join(".shell-listing-marker"), "marker")
+        .expect("create listing fixture");
+    let sandbox = ShellBoundarySandbox {
+        inner: BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
+            .expect("bwrap execution environment required"),
+        command,
+    };
+    let executor =
+        ToolExecutor::with_standard_tools(Arc::new(EventBus::new(16)), Arc::new(sandbox));
+
+    // When: the reported command is dispatched by name through the standard executor.
+    let result = executor
+        .execute(
+            &ToolExecutionContext {
+                run_id: "shell-listing-regression".into(),
+            },
+            "shell",
+            "listing",
+            serde_json::json!({ "command": command, "timeout_ms": 5000 }),
+        )
+        .await
+        .expect("shell returns an execution result");
+
+    // Then: ls receives its flags, and shell operators are evaluated inside bwrap.
+    assert!(!result.is_error, "{command}: {}", result.content);
+    assert!(result.content.starts_with("exit_code: 0\n"));
+    assert!(result.content.contains(".shell-listing-marker"));
+    if command.starts_with("pwd") {
+        assert_eq!(
+            result.content.lines().nth(1),
+            workspace.path().to_str(),
+            "pwd must run in the sandbox workspace"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "bwrap 実行環境が必要"]
+async fn shell_runs_pwd_and_listing_when_command_contains_and_operator() {
+    assert_shell_listing("pwd && ls -la").await;
+}
+
+#[tokio::test]
+#[ignore = "bwrap 実行環境が必要"]
+async fn shell_runs_listing_when_command_contains_arguments() {
+    assert_shell_listing("ls -la").await;
 }
