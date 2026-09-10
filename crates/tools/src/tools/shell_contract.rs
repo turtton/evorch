@@ -72,7 +72,7 @@ impl ShellCommandContract {
     /// `gh {auth status, pr list/view/checks/create/edit/comment}`、
     /// `intent-cli {--help, worker --help/claim/result-summary/complete}` のみ
     /// を許可する。プログラムは `git`/`gh`/`intent-cli` のいずれかの完全一致で
-    /// なければならず、インタプリタ経由は一律で拒否する。
+    /// なければならない。単純な `sh -c` のみ内部コマンドを評価する。
     pub fn delivery() -> Self {
         let mut patterns = Vec::new();
         for sub in ["push", "rev-parse", "status", "log", "fetch", "ls-remote"] {
@@ -104,6 +104,27 @@ impl ShellCommandContract {
 
     /// コマンドラインを評価して実行可否を返す。
     pub fn evaluate(&self, program: &str, args: &[String]) -> CommandVerdict {
+        // Preserve interpreter deny-list over-matching before unwrapping.
+        if matches!(self.mode, Mode::Standard)
+            && let verdict @ CommandVerdict::Deny { .. } = evaluate_standard(program, args)
+        {
+            return verdict;
+        }
+        if program == "sh"
+            && let [flag, command] = args
+            && flag == "-c"
+            // Only literal words separated by shell whitespace; no syntax or expansion.
+            && command.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b' ' | b'\t' | b'_' | b'-' | b'.' | b'/' | b':' | b',' | b'=' | b'%' | b'+' | b'@')
+            })
+        {
+            let mut tokens = command.split_whitespace();
+            if let Some(inner_program) = tokens.next() {
+                let inner_args: Vec<String> = tokens.map(str::to_owned).collect();
+                return self.evaluate(inner_program, &inner_args);
+            }
+        }
         match &self.mode {
             Mode::Standard => evaluate_standard(program, args),
             Mode::Allowlist(patterns) => {
@@ -333,11 +354,11 @@ mod tests {
         );
     }
 
-    // Given: delivery 契約 / When: インタプリタ経由で許可対象を渡す / Then: プログラム完全一致のため拒否される
+    // Given: delivery 契約 / When: 対応外のインタプリタ経由 / Then: 拒否される
     #[test]
     fn delivery_denies_interpreter_programs() {
         let contract = ShellCommandContract::delivery();
-        assert_denied(&contract, "sh", &argv(&["-c", "git push origin main"]));
+        assert_denied(&contract, "sh", &argv(&["-lc", "git push origin main"]));
         assert_denied(&contract, "bash", &argv(&["-lc", "gh auth status"]));
         // 許可対象の前方一致でも tokens と完全一致しない先頭引数は拒否される
         assert_denied(&contract, "git", &argv(&["pushes"]));

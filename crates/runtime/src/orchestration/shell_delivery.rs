@@ -40,9 +40,14 @@ fn credential_env() -> Vec<(String, String)> {
 
 /// shell ツール結果本文から stdout セクションを抽出する。
 ///
-/// `Shell::execute` は `exit_code: N\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}`
-/// 形式で返す。形式が契約どおりでない場合は全文を返す。
+/// 現行の成功出力 `exit_code: 0\n{output}` と旧 stdout/stderr セクションに対応する。
+/// 現行形式では stdout と stderr は結合済み。未知の形式は全文を返す。
 fn stdout_section(content: &str) -> &str {
+    if let Some(output) = content.strip_prefix("exit_code: 0\n")
+        && !output.starts_with("--- stdout ---")
+    {
+        return output.trim_end_matches('\n');
+    }
     const STDOUT_MARK: &str = "--- stdout ---";
     const STDERR_MARK: &str = "--- stderr ---";
     let Some((_, rest)) = content.split_once(STDOUT_MARK) else {
