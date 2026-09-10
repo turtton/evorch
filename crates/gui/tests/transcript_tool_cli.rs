@@ -38,7 +38,7 @@ fn tool_card_bash_shows_dollar_command_in_header() {
 #[test]
 fn tool_card_read_shows_path_in_header() {
     // Given / When
-    for field in ["file_path", "path", "filePath"] {
+    for field in ["file_path", "path", "filePath", "file"] {
         let mut harness = harness("read", serde_json::json!({field: "src/main.rs"}), "");
         // Then
         assert!(
@@ -55,13 +55,15 @@ fn tool_card_read_shows_path_in_header() {
 fn tool_card_write_and_edit_show_path() {
     // Given / When
     for (tool, prefix) in [("write", "Write"), ("edit", "Edit")] {
-        let harness = harness(tool, serde_json::json!({"path": "test.txt"}), "");
+        let mut harness = harness(tool, serde_json::json!({"file": "test.txt"}), "");
         // Then
         assert!(
             harness
                 .query_by_label_contains(&format!("{prefix}: test.txt"))
                 .is_some()
         );
+        expand(&mut harness);
+        assert!(harness.query_by_label("test.txt").is_some());
     }
 }
 

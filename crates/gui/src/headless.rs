@@ -80,9 +80,9 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         Self { harness }
     }
 
-    /// UI が安定するまでフレームを実行します。
+    /// アニメーション中も停止を待たずに固定フレームを実行します。
     pub fn run(&mut self) {
-        self.harness.run();
+        self.harness.run_steps(4);
     }
 
     /// 1 フレームだけ実行します。

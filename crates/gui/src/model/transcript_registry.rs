@@ -64,7 +64,7 @@ impl TranscriptRegistry {
             | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
                 run_id.as_ref().map_or_else(
                     || vec![TranscriptKey::Thread],
-                    |run_id| vec![TranscriptKey::Run(run_id.clone())],
+                    |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
                 )
             }
             EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. })
@@ -72,7 +72,7 @@ impl TranscriptRegistry {
             | EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => {
                 self.call_index.get(call_id).map_or_else(
                     || vec![TranscriptKey::Thread],
-                    |run_id| vec![TranscriptKey::Run(run_id.clone())],
+                    |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
                 )
             }
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => vec![
@@ -312,7 +312,7 @@ mod tests {
 
         assert_eq!(
             registry.route(&completed),
-            vec![TranscriptKey::Run("run-1".into())]
+            vec![TranscriptKey::Thread, TranscriptKey::Run("run-1".into())]
         );
         registry.apply(&completed);
         assert_eq!(
@@ -349,7 +349,7 @@ mod tests {
 
         assert_eq!(
             registry.route(&known),
-            vec![TranscriptKey::Run("run-2".into())]
+            vec![TranscriptKey::Thread, TranscriptKey::Run("run-2".into())]
         );
         assert_eq!(registry.route(&unknown), vec![TranscriptKey::Thread]);
     }
@@ -410,6 +410,6 @@ mod tests {
                 }]
             );
         }
-        assert!(registry.thread().entries().is_empty());
+        assert_eq!(registry.thread().entries().len(), 3);
     }
 }

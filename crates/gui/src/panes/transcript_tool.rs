@@ -4,7 +4,8 @@ use egui::{Color32, RichText, Ui};
 
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
 use crate::theme::tokens::{
-    ERROR_FG, INFO, R_SM, SP_2, SUCCESS, SURFACE, SURFACE_RAISED, TEXT, WARNING_FG,
+    ERROR_FG, FONT_SMALL, INFO, R_SM, RUNNING, SP_2, SUCCESS, SURFACE, SURFACE_RAISED, TEXT,
+    WARNING_FG,
 };
 use crate::theme::widgets::surface_frame;
 
@@ -22,6 +23,7 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
         return;
     };
     let id = pane_id.with(("tool-expanded", call_id));
+    let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let (indicator, status_color) = match status {
         ToolStatus::Running => ("Running", INFO),
@@ -36,26 +38,36 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     let short_id: String = call_id.chars().take(8).collect();
     let summary = tool_display_summary(entry);
     surface_frame(SURFACE).show(ui, |ui| {
-        let arrow = if expanded { "v" } else { ">" };
+        let arrow = if running {
+            ""
+        } else if expanded {
+            "v"
+        } else {
+            ">"
+        };
         let mut header = format!("{arrow} {indicator} {tool_name} ({short_id})");
         if summary != *tool_name {
             header.push_str(": ");
             header.extend(summary.lines().next().unwrap_or_default().chars().take(120));
         }
-        if ui
-            .add(
+        let response = ui.horizontal(|ui| {
+            if running {
+                ui.add(egui::Spinner::new().size(FONT_SMALL).color(RUNNING));
+            }
+            ui.add_enabled(
+                !running,
                 egui::Button::new(RichText::new(header).color(color))
                     .frame(false)
                     .wrap(),
             )
             .on_hover_text(call_id)
-            .clicked()
-        {
+        });
+        if running {
+            return;
+        }
+        if response.inner.clicked() {
             expanded = !expanded;
             ui.data_mut(|data| data.insert_temp(id, expanded));
-        }
-        if matches!(status, ToolStatus::Running) {
-            ui.spinner();
         }
         if expanded {
             if let Some(input) = input {
@@ -122,7 +134,7 @@ pub fn tool_display_summary(entry: &TranscriptEntry) -> String {
 fn focused_input<'a>(tool_name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
     match tool_name {
         "bash" | "shell" => input.get("command").and_then(serde_json::Value::as_str),
-        "read" | "write" | "edit" => ["file_path", "path", "filePath"]
+        "read" | "write" | "edit" => ["file_path", "path", "filePath", "file"]
             .iter()
             .find_map(|key| input.get(key).and_then(serde_json::Value::as_str)),
         _ => None,
