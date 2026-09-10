@@ -70,6 +70,8 @@ enum GuiError {
     Sandbox(String),
     #[error("supervisor startup failed: {0}")]
     Supervisor(String),
+    #[error("ownership initialization failed: {0}")]
+    Ownership(#[from] runtime::ownership::RegistryError),
 }
 
 #[derive(Debug, Default)]
@@ -731,6 +733,16 @@ fn run() -> Result<(), GuiError> {
     restore_goals(&storage_config, &supervisor);
 
     let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
+    let ownership_root = match demo_directory.as_ref() {
+        Some(directory) => directory.path().join("threads"),
+        None => std::env::var_os("XDG_STATE_HOME").map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
+            .ok_or_else(|| GuiError::Arguments("No state directory for ownership".into()))?
+            .join("evorch/threads"),
+    };
+    let ownership_settings = loaded_config.as_ref().and_then(|loaded| loaded.as_ref().ok())
+        .map(|config| config.ownership.clone()).unwrap_or_default();
+    let ownership = Arc::new(runtime::ownership::OwnerHost::open(&ownership_root, ownership_settings, Arc::clone(&bus))?);
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
@@ -744,11 +756,12 @@ fn run() -> Result<(), GuiError> {
         ))
         .with_pump(pump)
         .with_pty(pty)
+        .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(RuntimeCommandSink::new(
             runtime.clone(),
             handle.clone(),
             supervisor,
-        )));
+        ).with_ownership(ownership)));
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);
         if let Some((context, model)) = production_model {

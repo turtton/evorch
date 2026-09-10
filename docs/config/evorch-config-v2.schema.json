@@ -78,6 +78,14 @@
         "stall_check_secs": 30
       }
     },
+    "ownership": {
+      "$ref": "#/$defs/OwnershipConfig",
+      "default": {
+        "grace_ms": 10000,
+        "heartbeat_ms": 1000,
+        "lease_ms": 5000
+      }
+    },
     "panel": {
       "description": "パネル UI 設定。",
       "$ref": "#/$defs/PanelConfig",
@@ -580,6 +588,30 @@
           "format": "uint64",
           "default": 30,
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "OwnershipConfig": {
+      "type": "object",
+      "properties": {
+        "grace_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10000,
+          "minimum": 1
+        },
+        "heartbeat_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000,
+          "minimum": 1
+        },
+        "lease_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 1
         }
       },
       "additionalProperties": false

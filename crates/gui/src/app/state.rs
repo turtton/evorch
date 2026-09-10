@@ -32,6 +32,11 @@ pub enum ConversationFocus {
 
 /// フレームごとにイベント・レイアウト・描画を統合する状態です。
 pub struct WorkbenchState<S> {
+    pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
+    pub(super) ownership_error: Option<String>,
+    pub(super) shutdown_requested: bool,
+    pub(super) shutdown_confirmed: bool,
+    pub(super) readonly_threads: std::collections::BTreeSet<String>,
     pub(super) pump: Option<EventPump>,
     pub(super) transcripts: TranscriptRegistry,
     pub(super) telemetry: TelemetryOverlay,
@@ -81,6 +86,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut dock = to_dock_state(&workspace)?;
         crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
         let mut state = Self {
+            ownership: None,
+            ownership_error: None,
+            shutdown_requested: false,
+            shutdown_confirmed: false,
+            readonly_threads: std::collections::BTreeSet::new(),
             pump: None,
             transcripts: TranscriptRegistry::new(),
             telemetry: TelemetryOverlay::new(),

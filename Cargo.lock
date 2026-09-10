@@ -4719,6 +4719,7 @@ dependencies = [
  "providers",
  "regex",
  "routing",
+ "rusqlite",
  "sandbox",
  "serde",
  "serde_json",

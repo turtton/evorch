@@ -35,7 +35,8 @@ impl StorageBridge {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_) => self.storage.append_event(Some(self.session_id), event),
+            | EventKind::Diagnostic(_)
+            | EventKind::Ownership(_) => self.storage.append_event(Some(self.session_id), event),
         }
     }
 
@@ -127,7 +128,7 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::{LifecycleEvent, UsageEvent};
+    use event_bus::{LifecycleEvent, OwnershipAction, OwnershipEvent, UsageEvent};
     use std::time::{Duration, UNIX_EPOCH};
     use storage::{Database, Storage, StorageConfig};
 
@@ -181,6 +182,27 @@ mod tests {
         let events = db.events_all_ordered().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, event);
+    }
+
+    #[test]
+    fn ownership_event_is_persisted() {
+        let (_dir, storage, db) = fixture();
+        let mut bridge = StorageBridge::new(storage.handle(), "session");
+        let event = Event::new(OwnershipEvent {
+            thread_id: "thread-1".into(),
+            owner_id: "owner-1".into(),
+            generation: 2,
+            action: OwnershipAction::Quiescing,
+        });
+
+        bridge.handle_event(&event).unwrap();
+
+        let events = db.events_all_ordered().unwrap();
+        assert_eq!(events, vec![storage::StoredEvent {
+            id: events[0].id,
+            session_id: Some("session".into()),
+            event,
+        }]);
     }
 
     #[test]

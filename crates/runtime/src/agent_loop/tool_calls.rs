@@ -39,6 +39,12 @@ impl LoopState {
         };
         let mut rule_targets = Vec::new();
         for (id, name, input) in tool_uses {
+            if let Some(permit) = &self.task.config.ownership
+                && let Err(error) = permit.validate_mutation()
+            {
+                self.finish_error(error.to_string());
+                return false;
+            }
             if self.cancelled() {
                 self.finish_cancelled();
                 return false;
@@ -120,6 +126,12 @@ impl LoopState {
                 }
                 result
             };
+            if let Some(permit) = &self.task.config.ownership
+                && let Err(error) = permit.validate_mutation()
+            {
+                self.finish_error(error.to_string());
+                return false;
+            }
             self.context.push_tool_result(id, result);
             self.publish_message_count();
         }

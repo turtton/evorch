@@ -49,6 +49,7 @@ pub struct RuntimeCommandSink {
     accepted_goals: u64,
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
+    ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
 }
 
 impl RuntimeCommandSink {
@@ -65,7 +66,13 @@ impl RuntimeCommandSink {
             accepted_goals: 0,
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
+            ownership: None,
         }
+    }
+
+    pub fn with_ownership(mut self, ownership: std::sync::Arc<runtime::ownership::OwnerHost>) -> Self {
+        self.ownership = Some(ownership);
+        self
     }
 
     /// goal の配送先リポジトリ識別子を初回提出時に 1 度だけ解決する。
@@ -94,6 +101,19 @@ impl RuntimeCommandSink {
 
 impl CommandSink for RuntimeCommandSink {
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        let permit = if let Some(host) = &self.ownership {
+            let thread = match &command {
+                WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
+                WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
+                WorkbenchCommand::CancelChat { thread_id } => Some(thread_id.as_str()),
+                WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
+                WorkbenchCommand::PauseGoal { .. } | WorkbenchCommand::ResumeGoal { .. } | WorkbenchCommand::CancelGoal { .. } => None,
+            };
+            match thread.map(|thread| host.owned_permit(thread)).transpose() {
+                Ok(permit) => permit,
+                Err(error) => return vec![LoopEvent::CommandRejected { reason: error.to_string() }],
+            }
+        } else { None };
         match command {
             WorkbenchCommand::CancelChat { thread_id } => {
                 let Some(&run_id) = self.chat_runs.get(&thread_id) else {
@@ -153,6 +173,7 @@ impl CommandSink for RuntimeCommandSink {
                         prompt,
                         RunConfig {
                             name: Some(goal_id_for_run),
+                            ownership: permit,
                             ..RunConfig::default()
                         },
                     );
@@ -215,6 +236,7 @@ impl CommandSink for RuntimeCommandSink {
                     submission.text,
                     RunConfig {
                         name: Some(format!("chat:{thread_id}")),
+                        ownership: permit,
                         interactive: true,
                         keep_alive: true,
                         model_preference: submission.model_preference,

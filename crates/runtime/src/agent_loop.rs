@@ -193,6 +193,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         return;
     }
     state.execute().await;
+    if let Some(permit) = &state.task.config.ownership
+        && let Err(error) = permit.checkpoint(&state.context.visible_messages())
+    {
+        state.finish_error(error.to_string());
+    }
     // cancel() は cooperative で task abort しない契約への依存。JoinHandle::abort 導入は禁止。
     match state.take_pending_escalation() {
         Some(memo) => {
@@ -501,6 +506,12 @@ impl LoopState {
                 self.finish_cancelled();
                 return;
             }
+            if let Some(permit) = &self.task.config.ownership
+                && let Err(error) = permit.begin_turn()
+            {
+                self.finish_error(error.to_string());
+                return;
+            }
             self.inject_parent_messages();
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
@@ -615,12 +626,24 @@ impl LoopState {
                     | ContentBlock::ToolResult { .. } => None,
                 })
                 .collect::<Vec<_>>();
+            if let Some(permit) = &self.task.config.ownership
+                && let Err(error) = permit.validate_mutation()
+            {
+                self.finish_error(error.to_string());
+                return;
+            }
             self.context.push_assistant(response.message);
             self.publish_message_count();
             for event in message_events {
                 self.shared.bus.emit(Event::new(event));
             }
             if !self.execute_tools(tool_uses).await {
+                return;
+            }
+            if let Some(permit) = &self.task.config.ownership
+                && let Err(error) = permit.checkpoint(&self.context.visible_messages())
+            {
+                self.finish_error(error.to_string());
                 return;
             }
             if has_tool_uses {
