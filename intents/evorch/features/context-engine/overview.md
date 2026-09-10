@@ -59,3 +59,30 @@ deepseek-v4-flash-0731 で 413 Payload Too Large が発生。 compaction の `co
 - models.dev provider ID ↔ evorch provider 名 (Crof 等) のマッピング方法
 - models.dev に存在しないマイナーモデルの fallback (preset 必須?)
 - cache 更新時の preset 整合性チェック
+
+## v0.12 (UX 改善バッチ): catalog 自動フォールバック + read エイリアス + モデル編集 UI 高さ緩和
+
+### 背景
+
+v06 実装後の実機試用で3点の体験問題が発覚: (1) metadata_source 未設定時に catalog 自動解決されずユーザー手動入力が前提だった、(2) モデル編集エリアが狭く設定困難、(3) thread-2 の read ツールが理由不明のままエラー連発。
+
+### 実装内容
+
+- c468ccb (UX-A): metadata_source が未設定/Manual/ProviderDefault でも catalog を自動探索。`deepseek-v4-flash` → `deepseek/deepseek-v4-flash` の `/` 境界 suffix 一致で一意候補のみ解決 (曖昧性は拒否)。優先順位 manual→preset→catalog→default を維持。GUI の価格/制限値も共通検索に統一し、未解決時 `Unknown ctx (default)` 案内表示
+- b224c3e (UX-C): read tool が `file`/`file_path`/`filename`/`target` エイリアスを許容 (path 優先)。Executor の全失敗経路 (検証/実行/承認拒否) で `ToolCompleted.output` にエラー文を記録 — 従来は `detail: null` で output 欠落し、GUI/ログに理由が残らなかった
+- 81775d6 (UX-B): provider 設定の設定済みモデル一覧で内側 ScrollArea を除去し自然高に (外側スクロールに集約)。取得済み一覧の上限 100→200px
+
+### thread-2 エラーの真因 (実機 DB 調査)
+
+`~/.config/evorch/evorch-events.db` の ToolStarted で、LLM が read に `{"file": "..."}` を送信 → `path` required で InvalidArgs 連発。途中で `path` に気づき成功に至っていた。UX-C でエイリアス + エラー可視化の両方を修正。
+
+### 検証
+
+- workspace 23 group green (既知 flake `headless_run_completes_with_single_mock_response` のみ、単体 pass)
+- agents_headless 2 件等の既存失敗は変更前 HEAD でも再現確認済み (切り分け済み)
+- clippy / fmt clean
+
+### 残課題
+
+- `provider_settings_headless` 11 件の失敗は既存問題として未解決 (今回の変更とは独立と切り分け済み、別 intent で対応検討)
+- models.dev provider ID ↔ evorch provider 名マッピングの open question は継続
