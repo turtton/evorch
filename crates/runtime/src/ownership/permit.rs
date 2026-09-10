@@ -28,7 +28,11 @@ impl OwnerPermit {
         if !owner.active_turn || owner.lease.expires_at <= now_ms() {
             return Err(OwnershipError::NotClaimable.into());
         }
-        if self.run_id.as_ref().is_some_and(|run| !owner.active_runs.contains(run)) {
+        if self
+            .run_id
+            .as_ref()
+            .is_some_and(|run| !owner.active_runs.contains(run))
+        {
             return Err(OwnershipError::Active.into());
         }
         match owner.state {
@@ -43,7 +47,12 @@ impl OwnerPermit {
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
         let owner = Registry::open(&self.registry_path)?.attach(&self.thread_id)?;
         owner.validate(&self.lease)?;
-        if !owner.active_turn || self.run_id.as_ref().is_some_and(|run| !owner.active_runs.contains(run)) {
+        if !owner.active_turn
+            || self
+                .run_id
+                .as_ref()
+                .is_some_and(|run| !owner.active_runs.contains(run))
+        {
             return Ok(());
         }
         Registry::open(&self.registry_path)?.checkpoint_permit(self, messages)?;

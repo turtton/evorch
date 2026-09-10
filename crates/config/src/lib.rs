@@ -19,7 +19,6 @@ mod strict;
 pub mod types;
 
 pub use error::ConfigError;
-pub use types::OwnershipConfig;
 pub use load::{LoadOptions, user_config_dir};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
@@ -29,6 +28,7 @@ pub use save::{
 };
 pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use schema::json_schema;
+pub use types::OwnershipConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
     Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetadataSource,

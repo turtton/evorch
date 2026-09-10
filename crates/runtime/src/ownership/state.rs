@@ -81,7 +81,12 @@ impl ThreadOwner {
         Ok(())
     }
 
-    pub fn begin_run(&mut self, token: &Lease, run: &str, now_ms: u64) -> Result<(), OwnershipError> {
+    pub fn begin_run(
+        &mut self,
+        token: &Lease,
+        run: &str,
+        now_ms: u64,
+    ) -> Result<(), OwnershipError> {
         self.validate(token)?;
         if self.state != OwnerState::Running || now_ms >= self.lease.expires_at {
             return Err(OwnershipError::Quiescing);

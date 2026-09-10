@@ -20,6 +20,20 @@
           "categories": {},
           "generation": {}
         },
+        "roles": {
+          "multimodal_looker": {
+            "categories": {},
+            "generation": {}
+          },
+          "oracle": {
+            "categories": {},
+            "generation": {}
+          },
+          "planner": {
+            "categories": {},
+            "generation": {}
+          }
+        },
         "worker": {
           "categories": {},
           "generation": {}
@@ -125,6 +139,13 @@
         "response_headroom_tokens": 16384
       }
     },
+    "team": {
+      "$ref": "#/$defs/TeamConfig",
+      "default": {
+        "enabled": false,
+        "max_workers": 3
+      }
+    },
     "version": {
       "description": "設定スキーマのバージョン。",
       "type": "integer",
@@ -135,6 +156,33 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "AdditionalRoleBindings": {
+      "type": "object",
+      "properties": {
+        "multimodal_looker": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "oracle": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
+        "planner": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "AgentsConfig": {
       "description": "ロール別のエージェントバインディング設定。",
       "type": "object",
@@ -161,6 +209,23 @@
           "default": {
             "categories": {},
             "generation": {}
+          }
+        },
+        "roles": {
+          "$ref": "#/$defs/AdditionalRoleBindings",
+          "default": {
+            "multimodal_looker": {
+              "categories": {},
+              "generation": {}
+            },
+            "oracle": {
+              "categories": {},
+              "generation": {}
+            },
+            "planner": {
+              "categories": {},
+              "generation": {}
+            }
           }
         },
         "worker": {
@@ -886,6 +951,23 @@
           "const": "structural"
         }
       ]
+    },
+    "TeamConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_workers": {
+          "type": "integer",
+          "format": "uint8",
+          "default": 3,
+          "maximum": 3,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

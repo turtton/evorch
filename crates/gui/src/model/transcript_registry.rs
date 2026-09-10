@@ -172,7 +172,8 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) | EventKind::Snapshot(_) => None,
+            | EventKind::Orchestrator(_)
+            | EventKind::Snapshot(_) => None,
         };
         let owner = explicit_thread.or_else(|| {
             route.iter().find_map(|key| match key {

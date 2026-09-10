@@ -179,12 +179,7 @@ fn serve(
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let _ = ipc::serve_connection_with_bus(
-                    &mut stream,
-                    &mut registry,
-                    now_ms(),
-                    bus,
-                );
+                let _ = ipc::serve_connection_with_bus(&mut stream, &mut registry, now_ms(), bus);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,

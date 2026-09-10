@@ -5,13 +5,25 @@ use super::*;
 fn host_release_allows_explicit_claim_and_fences_old_permit() {
     let directory = tempfile::tempdir().expect("directory");
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
-    let first = OwnerHost::open(directory.path(), config::OwnershipConfig::default(), bus.clone()).expect("first");
+    let first = OwnerHost::open(
+        directory.path(),
+        config::OwnershipConfig::default(),
+        bus.clone(),
+    )
+    .expect("first");
     let old = first.start("thread").expect("start");
-    let second = OwnerHost::open(directory.path(), config::OwnershipConfig::default(), bus).expect("second");
+    let second =
+        OwnerHost::open(directory.path(), config::OwnershipConfig::default(), bus).expect("second");
     assert!(second.owned_permit("thread").is_err());
-    assert!(second.claim(&second.attach("thread").expect("attach")).is_err());
+    assert!(
+        second
+            .claim(&second.attach("thread").expect("attach"))
+            .is_err()
+    );
     assert!(!first.quiesce().expect("release"));
-    let permit = second.claim(&second.attach("thread").expect("released")).expect("claim");
+    let permit = second
+        .claim(&second.attach("thread").expect("released"))
+        .expect("claim");
     assert_eq!(permit.lease.generation, old.lease.generation + 1);
     assert!(old.begin_turn().is_err());
     permit.begin_turn().expect("new owner");
@@ -25,9 +37,13 @@ fn quiesce_waits_for_every_child_run_checkpoint() {
     owner.begin_run(&lease, "parent", 1).expect("parent");
     owner.begin_run(&lease, "child", 1).expect("child");
     owner.quiesce(&lease).expect("quiesce");
-    owner.checkpoint_run(&lease, "parent").expect("parent checkpoint");
+    owner
+        .checkpoint_run(&lease, "parent")
+        .expect("parent checkpoint");
     assert!(owner.release(&lease).is_err());
-    owner.checkpoint_run(&lease, "child").expect("child checkpoint");
+    owner
+        .checkpoint_run(&lease, "child")
+        .expect("child checkpoint");
     owner.release(&lease).expect("release");
     assert_eq!(owner.state, OwnerState::Released);
 }

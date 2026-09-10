@@ -6,8 +6,8 @@
 pub mod agent_run;
 pub mod catalog;
 pub mod event;
-pub mod message;
 pub(crate) mod memory;
+pub mod message;
 pub mod metrics;
 pub mod session;
 pub mod task;

@@ -199,11 +199,14 @@ mod tests {
         bridge.handle_event(&event).unwrap();
 
         let events = db.events_all_ordered().unwrap();
-        assert_eq!(events, vec![storage::StoredEvent {
-            id: events[0].id,
-            session_id: Some("session".into()),
-            event,
-        }]);
+        assert_eq!(
+            events,
+            vec![storage::StoredEvent {
+                id: events[0].id,
+                session_id: Some("session".into()),
+                event,
+            }]
+        );
     }
 
     #[test]

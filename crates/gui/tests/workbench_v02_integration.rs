@@ -554,7 +554,8 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. } | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");
@@ -595,7 +596,8 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. } | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");

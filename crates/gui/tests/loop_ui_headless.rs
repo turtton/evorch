@@ -99,7 +99,8 @@ fn issued_decisions(
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. } | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect()
 }
@@ -168,7 +169,8 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. } | WorkbenchCommand::RestoreSnapshot { .. } => None,
+            | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");

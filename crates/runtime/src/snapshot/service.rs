@@ -25,20 +25,35 @@ impl SnapshotService {
         if directory.starts_with(&root) || root.starts_with(&directory) {
             return Err(SnapshotError::InvalidStore);
         }
-        Ok(Self { root, directory, workspaces: Mutex::new(BTreeMap::new()) })
+        Ok(Self {
+            root,
+            directory,
+            workspaces: Mutex::new(BTreeMap::new()),
+        })
     }
 
-    pub async fn lock(&self, root: Option<&Path>) -> Result<OwnedMutexGuard<WorkspaceSnapshots>, SnapshotError> {
+    pub async fn lock(
+        &self,
+        root: Option<&Path>,
+    ) -> Result<OwnedMutexGuard<WorkspaceSnapshots>, SnapshotError> {
         let root = root.unwrap_or(&self.root).to_path_buf();
         let mut workspaces = self.workspaces.lock().await;
         let workspace = match workspaces.get(&root) {
             Some(workspace) => Arc::clone(workspace),
             None => {
-                let directory = self.directory.join(format!("workspace-{}", workspaces.len()));
+                let directory = self
+                    .directory
+                    .join(format!("workspace-{}", workspaces.len()));
                 let open_root = root.clone();
-                let store = tokio::task::spawn_blocking(move || SnapshotStore::open(&open_root, &directory))
-                    .await.map_err(|error| SnapshotError::Git(error.to_string()))??;
-                let workspace = Arc::new(Mutex::new(WorkspaceSnapshots { store, history: SnapshotHistory::default() }));
+                let store = tokio::task::spawn_blocking(move || {
+                    SnapshotStore::open(&open_root, &directory)
+                })
+                .await
+                .map_err(|error| SnapshotError::Git(error.to_string()))??;
+                let workspace = Arc::new(Mutex::new(WorkspaceSnapshots {
+                    store,
+                    history: SnapshotHistory::default(),
+                }));
                 workspaces.insert(root, Arc::clone(&workspace));
                 workspace
             }
@@ -60,7 +75,9 @@ impl WorkspaceSnapshots {
         } else {
             self.history.undo(owner, &mut self.store)?
         };
-        if !changed { return Ok(None); }
+        if !changed {
+            return Ok(None);
+        }
         let after = self.store.capture()?;
         self.store.diff(&before, &after).map(Some)
     }

@@ -120,7 +120,10 @@ pub struct LoopStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopEvent {
-    SnapshotRestored { thread_id: String, diff: Option<String> },
+    SnapshotRestored {
+        thread_id: String,
+        diff: Option<String>,
+    },
     ChatAccepted {
         thread_id: String,
         run_id: String,
@@ -146,7 +149,9 @@ pub enum LoopEvent {
 
 pub trait CommandSink: Send {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent>;
-    fn poll(&mut self) -> Vec<LoopEvent> { Vec::new() }
+    fn poll(&mut self) -> Vec<LoopEvent> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -189,7 +194,12 @@ impl FixtureLoopAdapter {
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
-            WorkbenchCommand::RestoreSnapshot { thread_id, .. } => vec![LoopEvent::SnapshotRestored { thread_id, diff: None }],
+            WorkbenchCommand::RestoreSnapshot { thread_id, .. } => {
+                vec![LoopEvent::SnapshotRestored {
+                    thread_id,
+                    diff: None,
+                }]
+            }
             WorkbenchCommand::CancelChat { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);

@@ -3,8 +3,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use event_bus::{Event, EventBus, OwnershipAction, OwnershipEvent};
+use serde::{Deserialize, Serialize};
 
 use super::{Lease, Registry, RegistryError, ThreadOwner};
 

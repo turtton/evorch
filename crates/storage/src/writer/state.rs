@@ -61,7 +61,9 @@ pub(super) fn run_writer(
             }
             Ok(Command::Memory(mutation, reply)) => {
                 let result = if state.writes_suspended {
-                    Err(StorageError::Serialization("memory writes suspended by storage limit".into()))
+                    Err(StorageError::Serialization(
+                        "memory writes suspended by storage limit".into(),
+                    ))
                 } else {
                     crate::repo::memory::append(&state.conn, &mutation)
                 };
@@ -69,7 +71,9 @@ pub(super) fn run_writer(
             }
             Ok(Command::TaskQueue(mutation, reply)) => {
                 let result = if state.writes_suspended {
-                    Err(StorageError::Serialization("queue writes suspended by storage limit".into()))
+                    Err(StorageError::Serialization(
+                        "queue writes suspended by storage limit".into(),
+                    ))
                 } else {
                     crate::task_queue::apply(&state.conn, &mutation)
                 };
