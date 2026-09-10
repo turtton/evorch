@@ -4,6 +4,21 @@ use super::TranscriptEntry;
 
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
+        EventKind::Diagnostic(event) => {
+            let text = format!(
+                "[{}] {} ({}): {}",
+                event.severity.as_str(),
+                event.source,
+                event.code,
+                event.detail
+            );
+            Some(match event.severity {
+                event_bus::DiagnosticSeverity::Error => TranscriptEntry::Error { text },
+                event_bus::DiagnosticSeverity::Info | event_bus::DiagnosticSeverity::Warning => {
+                    TranscriptEntry::Notice { text }
+                }
+            })
+        }
         EventKind::Provider(ProviderEvent::RequestFailed {
             provider,
             model,

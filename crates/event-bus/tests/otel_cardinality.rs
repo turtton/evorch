@@ -217,10 +217,14 @@ fn span_whitelist_evorch_keys_match_ac3_expected_set() {
         "evorch.agent_run.id",
         "evorch.delegation.depth",
         "evorch.delegation.role",
+        "evorch.diagnostic.code",
+        "evorch.diagnostic.severity",
+        "evorch.diagnostic.source",
         "evorch.parent_agent_run.id",
         "evorch.request.id",
         "evorch.session.id",
         "evorch.task.id",
+        "evorch.thread.id",
     ];
     let actual: Vec<&str> = SPAN_ATTRIBUTE_WHITELIST
         .into_iter()

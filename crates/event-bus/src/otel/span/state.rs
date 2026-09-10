@@ -28,12 +28,13 @@ impl SpanMapper {
         }
         let run_id = match &spec.key {
             SpanKey::Run { run_id } | SpanKey::Agent { run_id } => Some(run_id.clone()),
-            SpanKey::Request { .. } | SpanKey::Tool { .. } => {
+            SpanKey::Request { .. } | SpanKey::Tool { .. } | SpanKey::Diagnostic { .. } => {
                 spec.parent.as_ref().and_then(|parent| match parent {
                     SpanKey::Agent { run_id } => Some(run_id.clone()),
                     SpanKey::Run { .. }
                     | SpanKey::Request { .. }
                     | SpanKey::Tool { .. }
+                    | SpanKey::Diagnostic { .. }
                     | SpanKey::Session { .. } => None,
                 })
             }

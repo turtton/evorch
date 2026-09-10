@@ -616,7 +616,8 @@ impl SupervisorActor {
             EventKind::Lifecycle(_)
             | EventKind::Message(_)
             | EventKind::Usage(_)
-            | EventKind::Fault(_) => {}
+            | EventKind::Fault(_)
+            | EventKind::Diagnostic(_) => {}
         }
     }
 

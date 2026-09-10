@@ -49,6 +49,7 @@ fn key_string(key: &SpanKey) -> String {
         SpanKey::Request { request_id } => format!("request:{request_id}"),
         SpanKey::Tool { call_id } => format!("tool:{call_id}"),
         SpanKey::Session { session_id } => format!("session:{session_id}"),
+        SpanKey::Diagnostic { sequence } => format!("diagnostic:{sequence}"),
     }
 }
 

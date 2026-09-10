@@ -646,7 +646,8 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
             | EventKind::Provider(_)
             | EventKind::Fault(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) => None,
+            | EventKind::Orchestrator(_)
+            | EventKind::Diagnostic(_) => None,
         })
         .collect();
     assert_eq!(delivered.len(), 2);

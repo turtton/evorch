@@ -13,6 +13,8 @@ use std::time::SystemTime;
 /// 同一 `run_id` 空間に同居するため variant で区別する。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SpanKey {
+    /// Unique occurrence within this mapper, including identical diagnostics.
+    Diagnostic { sequence: u64 },
     /// agent run の寿命 span (`run:{run_id}`)。
     Run {
         /// run の ID。

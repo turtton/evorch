@@ -10,9 +10,10 @@ pub mod usage;
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
-    CompactionReason, DeliveryDisposition, EscalationMemoSummary, EscalationTrigger, Event,
-    EventKind, EventMeta, FallbackAxis, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent,
-    ProviderFailureKind, RoutingSource, SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
+    CompactionReason, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
+    EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
+    FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, RoutingSource,
+    SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

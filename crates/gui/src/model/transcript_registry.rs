@@ -46,6 +46,10 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
+            EventKind::Diagnostic(event) => event.run_id.as_ref().map_or_else(
+                || vec![TranscriptKey::Thread],
+                |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+            ),
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
                 to: event_bus::AgentRunPhase::Error,
@@ -117,7 +121,8 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) => {}
+            | EventKind::Orchestrator(_)
+            | EventKind::Diagnostic(_) => {}
         }
 
         if let EventKind::Tool(ToolEvent::ToolStarted {
@@ -152,9 +157,23 @@ impl TranscriptRegistry {
         }
 
         let route = self.route(event);
-        let owner = route.iter().find_map(|key| match key {
-            TranscriptKey::Run(id) => self.run_threads.get(id).cloned(),
-            TranscriptKey::Thread => None,
+        let explicit_thread = match &event.kind {
+            EventKind::Diagnostic(event) => event.thread_id.clone(),
+            EventKind::Lifecycle(_)
+            | EventKind::Message(_)
+            | EventKind::Tool(_)
+            | EventKind::Usage(_)
+            | EventKind::Provider(_)
+            | EventKind::Fault(_)
+            | EventKind::AgentMessage(_)
+            | EventKind::Compaction(_)
+            | EventKind::Orchestrator(_) => None,
+        };
+        let owner = explicit_thread.or_else(|| {
+            route.iter().find_map(|key| match key {
+                TranscriptKey::Run(id) => self.run_threads.get(id).cloned(),
+                TranscriptKey::Thread => None,
+            })
         });
         let attributed = route.iter().any(|key| matches!(key, TranscriptKey::Run(_)));
         for key in route {

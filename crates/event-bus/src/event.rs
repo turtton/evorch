@@ -82,6 +82,44 @@ pub enum EventKind {
     Compaction(CompactionEvent),
     /// オーケストレーションループ関連のイベント。
     Orchestrator(OrchestratorEvent),
+    /// Structured diagnostics persisted in the event ledger.
+    Diagnostic(DiagnosticEvent),
+}
+
+/// Severity shared by diagnostic producers and transcript consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl DiagnosticSeverity {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// A diagnostic occurrence; correlation identifiers may be unavailable at startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticEvent {
+    pub source: String,
+    pub severity: DiagnosticSeverity,
+    pub code: String,
+    pub detail: String,
+    pub run_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+impl From<DiagnosticEvent> for EventKind {
+    fn from(event: DiagnosticEvent) -> Self {
+        Self::Diagnostic(event)
+    }
 }
 
 impl From<LifecycleEvent> for EventKind {

@@ -287,6 +287,11 @@ impl SecretGuard {
         // reason / delta 系の自由文字列 field を明示列挙する。新しい text field を持つ
         // variant が event-bus へ追加されたらここへも検査を追加すること。
         match kind {
+            EventKind::Diagnostic(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "Diagnostic.payload", &payload)
+            }
             EventKind::Lifecycle(LifecycleEvent::Failed { reason, .. }) => {
                 self.check_text("event", "Failed.reason", reason)
             }

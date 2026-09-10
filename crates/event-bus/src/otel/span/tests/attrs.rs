@@ -44,10 +44,14 @@ fn span_whitelist_is_the_sorted_closed_key_set() {
         "evorch.agent_run.id",
         "evorch.delegation.depth",
         "evorch.delegation.role",
+        "evorch.diagnostic.code",
+        "evorch.diagnostic.severity",
+        "evorch.diagnostic.source",
         "evorch.parent_agent_run.id",
         "evorch.request.id",
         "evorch.session.id",
         "evorch.task.id",
+        "evorch.thread.id",
         "gen_ai.agent.name",
         "gen_ai.operation.name",
         "gen_ai.provider.name",
@@ -272,6 +276,17 @@ fn every_mapper_emitted_key_is_whitelisted() {
         ),
         session_started("session-2", 14),
         session_completed("session-2", 15),
+        event(
+            crate::DiagnosticEvent {
+                source: "process_owner".into(),
+                severity: crate::DiagnosticSeverity::Warning,
+                code: "claim_conflict".into(),
+                detail: "claim held".into(),
+                run_id: None,
+                thread_id: Some("thread-1".into()),
+            },
+            16,
+        ),
     ];
     // When: the corpus flows through the mapper.
     let mut observed = BTreeSet::new();

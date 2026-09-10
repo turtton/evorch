@@ -133,7 +133,8 @@ impl Database {
                 | EventKind::Provider(_)
                 | EventKind::Fault(_)
                 | EventKind::Compaction(_)
-                | EventKind::Orchestrator(_) => {
+                | EventKind::Orchestrator(_)
+                | EventKind::Diagnostic(_) => {
                     return Err(StorageError::Serialization(format!(
                         "event id {id} kind {kind}: payload event kind does not match kind column"
                     )));

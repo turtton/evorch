@@ -3,16 +3,20 @@ use std::fmt;
 use super::{SpanAttribute, SpanAttributeValue};
 
 /// span attribute キーの closed whitelist (辞書順)。
-pub const SPAN_ATTRIBUTE_WHITELIST: [&str; 18] = [
+pub const SPAN_ATTRIBUTE_WHITELIST: [&str; 22] = [
     "error.type",
     "evorch.agent.name",
     "evorch.agent_run.id",
     "evorch.delegation.depth",
     "evorch.delegation.role",
+    "evorch.diagnostic.code",
+    "evorch.diagnostic.severity",
+    "evorch.diagnostic.source",
     "evorch.parent_agent_run.id",
     "evorch.request.id",
     "evorch.session.id",
     "evorch.task.id",
+    "evorch.thread.id",
     "gen_ai.agent.name",
     "gen_ai.operation.name",
     "gen_ai.provider.name",
@@ -117,6 +121,7 @@ pub(super) fn validate_attribute(attribute: &SpanAttribute) -> Result<(), SpanAt
         }
         "gen_ai.provider.name" => string_in(&attribute.value, &PROVIDER_NAMES),
         "error.type" => string_in(&attribute.value, &ERROR_TYPES),
+        "evorch.diagnostic.severity" => string_in(&attribute.value, &["info", "warning", "error"]),
         _ => true,
     };
     if valid {

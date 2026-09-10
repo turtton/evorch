@@ -582,7 +582,8 @@ async fn raw_transcript_reconstructs_in_order() {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) => None,
+            | EventKind::Orchestrator(_)
+            | EventKind::Diagnostic(_) => None,
         })
         .collect::<Vec<_>>();
 
