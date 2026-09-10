@@ -45,6 +45,7 @@ pub struct WorkbenchState<S> {
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
+    pub(super) history: Vec<super::history::UserMessage>,
     pub(super) home_dir: Option<PathBuf>,
     pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
     pub(super) focus: ConversationFocus,
@@ -93,6 +94,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             save_path: None,
             sidebar: SidebarState::default(),
             sidebar_path: None,
+            history: Vec::new(),
             home_dir: std::env::home_dir(),
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
             focus: ConversationFocus::Thread,
@@ -146,6 +148,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn with_sidebar(mut self, sidebar: SidebarState) -> Self {
+        self.transcripts
+            .select_thread(sidebar.active_thread.as_ref().map(ToString::to_string));
+        for thread in &sidebar.threads {
+            for run in &thread.run_ids {
+                self.transcripts.bind_run(run, &thread.id.to_string());
+            }
+        }
         self.sidebar = sidebar;
         self
     }

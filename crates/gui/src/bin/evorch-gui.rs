@@ -760,6 +760,7 @@ fn run() -> Result<(), GuiError> {
     if let Some(path) = arguments.save_layout {
         state = state.with_save_path(path);
     }
+    state.restore_history(&storage::Database::open(&storage_config)?)?;
 
     if arguments.demo {
         state = state.with_diff_source(Arc::new(demo_diff_source()));

@@ -66,13 +66,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(ProjectError::UnknownProject)?;
         let id = ThreadId::new(format!("thread-{}", self.sidebar.threads.len() + 1));
         self.sidebar.create_thread(id.clone(), project_id, title)?;
-        self.sidebar.switch_thread(&id)?;
+        self.switch_thread(id.clone())?;
         Ok(id)
     }
 
     pub fn switch_thread(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
         self.sidebar.switch_thread(&thread_id)?;
+        self.transcripts.select_thread(Some(thread_id.to_string()));
         self.focus = ConversationFocus::Thread;
+        self.save_sidebar();
         Ok(())
     }
 
@@ -210,7 +212,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(path) = self.sidebar_path.as_ref() else {
             return;
         };
-        if let Err(error) = workspace_ui::save_sidebar(&self.sidebar, path) {
+        if let Err(error) = self.write_history_sidebar(path) {
             tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
         }
     }
@@ -236,7 +238,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
-            LoopEvent::ChatAccepted { .. } => {}
+            LoopEvent::ChatAccepted { thread_id, run_id } => {
+                self.bind_thread_run(&thread_id, &run_id);
+            }
             LoopEvent::ChatRejected { reason, .. } => {
                 tracing::warn!(%reason, "chat command rejected");
                 self.push_notice(format!("chat failed: {reason}"));

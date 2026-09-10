@@ -67,8 +67,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                     model: preference.model.clone(),
                                 }),
                         };
+                        self.history.push(super::history::UserMessage {
+                            thread_id: submission.thread_id.clone(),
+                            text: text.into(),
+                            at: std::time::SystemTime::now(),
+                        });
                         self.transcripts
                             .push_thread(TranscriptEntry::UserMessage { text: text.into() });
+                        self.save_sidebar();
                         self.submit_command(WorkbenchCommand::SendChat(submission));
                         self.composer.input.clear();
                     }

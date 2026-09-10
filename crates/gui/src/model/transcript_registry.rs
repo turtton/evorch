@@ -19,6 +19,9 @@ pub enum TranscriptKey {
 #[derive(Debug, Clone)]
 pub struct TranscriptRegistry {
     thread: TranscriptModel,
+    threads: BTreeMap<String, TranscriptModel>,
+    active_thread: Option<String>,
+    run_threads: BTreeMap<String, String>,
     runs: BTreeMap<String, TranscriptModel>,
     call_index: BTreeMap<String, String>,
 }
@@ -33,6 +36,9 @@ impl TranscriptRegistry {
     pub fn new() -> Self {
         Self {
             thread: TranscriptModel::new(),
+            threads: BTreeMap::new(),
+            active_thread: None,
+            run_threads: BTreeMap::new(),
             runs: BTreeMap::new(),
             call_index: BTreeMap::new(),
         }
@@ -145,9 +151,24 @@ impl TranscriptRegistry {
             return;
         }
 
-        for key in self.route(event) {
+        let route = self.route(event);
+        let owner = route.iter().find_map(|key| match key {
+            TranscriptKey::Run(id) => self.run_threads.get(id).cloned(),
+            TranscriptKey::Thread => None,
+        });
+        let attributed = route.iter().any(|key| matches!(key, TranscriptKey::Run(_)));
+        for key in route {
             match key {
-                TranscriptKey::Thread => self.thread.apply(event),
+                TranscriptKey::Thread => match owner.as_ref().or({
+                    if attributed {
+                        None
+                    } else {
+                        self.active_thread.as_ref()
+                    }
+                }) {
+                    Some(id) => self.threads.entry(id.clone()).or_default().apply(event),
+                    None => self.thread.apply(event),
+                },
                 TranscriptKey::Run(run_id) => {
                     self.runs.entry(run_id).or_default().apply(event);
                 }
@@ -157,17 +178,34 @@ impl TranscriptRegistry {
 
     pub fn get(&self, key: &TranscriptKey) -> Option<&TranscriptModel> {
         match key {
-            TranscriptKey::Thread => Some(&self.thread),
+            TranscriptKey::Thread => Some(self.thread()),
             TranscriptKey::Run(run_id) => self.runs.get(run_id),
         }
     }
 
     pub fn thread(&self) -> &TranscriptModel {
-        &self.thread
+        self.active_thread
+            .as_ref()
+            .and_then(|id| self.threads.get(id))
+            .unwrap_or(&self.thread)
     }
 
     pub fn push_thread(&mut self, entry: TranscriptEntry) {
-        self.thread.push(entry);
+        match &self.active_thread {
+            Some(id) => self.threads.entry(id.clone()).or_default().push(entry),
+            None => self.thread.push(entry),
+        }
+    }
+
+    pub fn select_thread(&mut self, id: Option<String>) {
+        if let Some(id) = &id {
+            self.threads.entry(id.clone()).or_default();
+        }
+        self.active_thread = id;
+    }
+
+    pub fn bind_run(&mut self, run: &str, thread: &str) {
+        self.run_threads.insert(run.into(), thread.into());
     }
 
     pub fn run(&self, run_id: &str) -> Option<&TranscriptModel> {

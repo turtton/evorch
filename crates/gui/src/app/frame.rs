@@ -91,9 +91,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                 run_id,
                 parent_run_id,
+                agent_name,
                 ..
             }) => {
-                self.attach_run(run_id, parent_run_id.as_deref());
+                if let Some(thread) = agent_name.strip_prefix("chat:") {
+                    self.bind_thread_run(thread, run_id);
+                } else {
+                    self.attach_run(run_id, parent_run_id.as_deref());
+                }
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));
@@ -114,6 +119,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn attach_run(&mut self, run_id: &str, parent_run_id: Option<&str>) {
+        if self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| thread.run_ids.iter().any(|run| run == run_id))
+        {
+            return;
+        }
         let parent = parent_run_id.and_then(|parent| {
             self.sidebar
                 .threads
@@ -134,6 +147,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .any(|existing| existing == run_id)
         {
             self.sidebar.threads[index].run_ids.push(run_id.to_owned());
+            self.transcripts
+                .bind_run(run_id, &self.sidebar.threads[index].id.to_string());
+            self.save_sidebar();
         }
     }
 
