@@ -89,6 +89,26 @@ remove an entry only after verifying against a newer binary.
   not a blocker. WIP cap G288: one `intent-target` issue/PR per domain.
   Claims store is not configured (`claim verify` → not-configured), so no
   G717 handoff is needed in this environment.
+- **issue draft** (verified 0.26.0, 2026-09-10): the binary uses a
+  restricted line-based "projection packet" parser that rejects YAML block
+  scalars (`description: |`, `placement_rationale: |`) AND requires a root
+  `execution_unit:` key. The `intent-cli packet` scaffold emits
+  `implementation_issue_packet:` at root and never that shape, so
+  `issue draft` fails on EVERY packet in this repo, including
+  already-published ones (error text varies: `"field line is missing ':'"`
+  for block scalars, `"must contain root field 'execution_unit'"`
+  otherwise). The packets are valid YAML (`yq` parses them); packet.yaml is
+  NOT the projection packet. Do not "fix" packet.yaml for this — the
+  read-only preflight is `intent-cli issue publish-flow <unit> --repo <r>
+  --domain <d>` WITHOUT `--write`. `issue draft` / `issue create` /
+  `enqueue` all expect the publish.yaml projection shape (root
+  `execution_unit`).
+- **queue transition has no dry-run** (verified 0.26.0, 2026-09-10):
+  `queue transition <unit> <state>` applies IMMEDIATELY and appends to
+  runs.jsonl; there is no `--write` gate, `--reason`, or preview mode
+  (unlike `reprioritize` / `queue-seed-from-packet`). Never run it as an
+  argument probe; inspect with `queue show <unit>` first and `git diff`
+  after.
 
 ## Wrong-host detection (G301)
 
