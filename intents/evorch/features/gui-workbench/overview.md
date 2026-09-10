@@ -213,3 +213,47 @@ v0.8 の実稼働検証で判明した shell tool 実行不能、tool 入出力�
 
 - Floem 評価用 prototype の実施タイミング（v0.2 並行で十分か）
 - 大量 transcript の描画性能要件の具体値（目標フレームレート・行数の定量値）
+
+## v0.10 (multi-fix batch): shell tool ガード + grep ripgrep化 + tool 表示改善 + thread 復元
+
+### L-A: shell tool command dispatch 保護 (d8f91a0)
+
+- 根本原因: `ad83290` の `sh -c` 化は既に有効だった。別の bash ツール経路や wrapper は存在しない。
+- ユーザーが見た `bwrap: execvp pwd && ls -la` は **旧バイナリ／再起動前のプロセス** が最有力。
+- `Shell → production_executor → ToolExecutor → BwrapSandbox::wrap` の経路を固定する回帰テストを追加。
+  - `pwd && ls -la`
+  - `ls -la`
+  - Shell→sandbox の CommandSpec および bwrap argv (tail が `sh -c <command>` ) を検査。
+  - 旧実装へ一時復帰で RED、現行 `sh -c` で GREEN を確認。
+- `cargo test -p tools` 212 件成功、実 bwrap 3件成功。
+
+### L-B: grep tool ripgrep 化 + 出力制限 (c9a80f8)
+
+- 原因: 同期で全ファイル読み込み + 全一致行を無制限に蓄積。LLM context が肥大化して provider が 413。
+- 変更: 検索バックエンドを **非同期 ripgrep (rg )** に移行。PATH 上の rg を使用。
+- 出力を **注記込みで最大 200 行・8KiB** に制限。超過分は `[truncated: N more lines]` で要約。
+- ファイル順に `path:行番号:内容` 形式を維持。有界バッファでメモリ蓄積を廃止。60秒 timeout。
+- runtime の `push_tool_result` は本文をそのまま履歴へ格納するため、grep 側でサイズを強制。
+- `cargo test -p tools` 212 件成功、clippy clean。
+
+### L-C: tool 表示の OpenCode/pi 準拠化 (966a98b)
+
+- `read/write/edit` の Input が JSON 残っていたのは `file` キー未認識が原因 → **`Read: .`** 形式に統一。
+- run ID 付き tool event が thread transcript に未配送だった → **起動直後から表示** (pending)。
+- 実行中は **ヘッダー内 spinner＋Running のみ**。展開を抑止し、完了後に結果を表示。
+- headless harness を固定フレーム進行に修正 (spinner の停止を待たない)。
+- 指定 3 テスト RED→GREEN、関連 22 件成功。全体テストは基準 `2282a63` 由来の表示ラベル差異が残る。
+
+### L-D: thread 履歴復元 + 切替 chat 更新 (9e32b7a)
+
+- 原因: chat が全 thread 共通の transcript を参照していた。起動時に保存イベントを再生する経路がなかった。
+- transcript を thread ごとに分離し、sidebar 選択に追随。
+- バックグラウンドの応答を所属 thread へ配送。起動時に SQLite 保存イベントを再生。
+- ユーザー入力を既存 sidebar JSON に追加保存し、thread 一覧・選択状態とともに復元。
+- 指定 3 テスト RED→GREEN、関連 33/33 成功。
+- 全体テスト失敗は既存の Markdown ラベル不一致を維持 (本変更とは独立)。
+
+### 残課題
+
+- ユーザー実機で shell tool が効いていない原因は、現在の GUI プロセスが旧バイナリ／未再起動の可能性。再ビルド済みバイナリで `cargo run -p gui --bin evorch-gui` から起動して shell tool で `pwd && ls -la` を実行して確認する必要がある。
+- 413 Payload Too Large は grep の制限で緩和したが、会話履歴全体の蓄積は runtime/compose 側のコンテキスト管理で別途対象とする必要がある。
