@@ -97,9 +97,14 @@ pub(crate) struct LoopState {
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
-    let Some(loop_shared) = loop_shared(&shared) else {
+    let Some(mut loop_shared) = loop_shared(&shared) else {
         return;
     };
+    if let Some(runtime) = shared.upgrade()
+        && let Some(resolution) = runtime.model_resolution.get()
+    {
+        resolution.apply(&mut loop_shared.compaction).await;
+    }
     let policy = ExecutionPolicy::for_role(task.role);
     let context = AgentContext::new(task.run_id, task.role);
     let mut state = LoopState {

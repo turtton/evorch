@@ -52,6 +52,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
+    pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
@@ -142,6 +143,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
@@ -165,6 +167,18 @@ impl AgentRuntime {
         self.shared
             .compaction_configured
             .store(true, Ordering::Release);
+        self
+    }
+
+    pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
+        let _ = self
+            .shared
+            .model_resolution
+            .set(crate::model_resolve::ModelResolution::new(config));
+        let _ = self
+            .shared
+            .compaction
+            .set(CompactionSettings::from(&config.compaction));
         self
     }
 
@@ -327,6 +341,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),

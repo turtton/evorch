@@ -107,11 +107,11 @@ pub struct ComposedRuntime {
 /// # Errors
 /// configured source の provider 構成が失敗した場合に返す。
 pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime, CompositionError> {
-    match input.model_source {
-        ModelSource::Fixed(model) => Ok(ComposedRuntime {
+    let composed = match input.model_source {
+        ModelSource::Fixed(model) => ComposedRuntime {
             runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
             model_identity: ModelIdentity::Fixed,
-        }),
+        },
         ModelSource::Configured => {
             let model = compose_routed_model(
                 input.config,
@@ -128,12 +128,16 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
                 .into_iter()
                 .map(|role| (role_key(role).to_string(), model.selected_model(role)))
                 .collect();
-            Ok(ComposedRuntime {
+            ComposedRuntime {
                 runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
                 model_identity: ModelIdentity::Routed { profiles, selected },
-            })
+            }
         }
-    }
+    };
+    Ok(ComposedRuntime {
+        runtime: composed.runtime.with_model_resolution(input.config),
+        model_identity: composed.model_identity,
+    })
 }
 
 fn compose_agent_runtime(

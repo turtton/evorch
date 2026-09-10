@@ -4708,6 +4708,7 @@ version = "0.1.0"
 dependencies = [
  "agents",
  "async-trait",
+ "catalog",
  "config",
  "event-bus",
  "getrandom 0.3.4",

@@ -24,6 +24,7 @@ pub mod escalation;
 pub mod mailbox;
 mod meta;
 pub mod model;
+pub mod model_resolve;
 pub mod network;
 pub mod orchestration;
 pub mod policy;
