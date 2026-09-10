@@ -32,6 +32,7 @@ pub enum ConversationFocus {
 
 /// フレームごとにイベント・レイアウト・描画を統合する状態です。
 pub struct WorkbenchState<S> {
+    pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) memory: crate::panes::memory::MemoryPane,
     pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     pub(super) ownership_error: Option<String>,
@@ -88,6 +89,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut dock = to_dock_state(&workspace)?;
         crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
         let mut state = Self {
+            arena: crate::panes::arena::ArenaPane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
             ownership: None,
             ownership_error: None,
@@ -153,10 +155,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
         self.memory.config = Some(config);
-        for (id, kind) in [("memory-main", PanelKind::Memory), ("tasks-main", PanelKind::Tasks)] {
+        for (id, kind) in [
+            ("memory-main", PanelKind::Memory),
+            ("tasks-main", PanelKind::Tasks),
+            ("arena-main", PanelKind::Arena),
+        ] {
             let id = PanelId::new(id);
             if self.dock.find_tab(&id).is_none() {
-                self.panels.insert(id.clone(), Panel { id: id.clone(), kind, title: kind.default_title().into(), target: None });
+                self.panels.insert(
+                    id.clone(),
+                    Panel {
+                        id: id.clone(),
+                        kind,
+                        title: kind.default_title().into(),
+                        target: None,
+                    },
+                );
                 self.dock.push_to_focused_leaf(id);
             }
         }

@@ -46,9 +46,12 @@ pub(super) fn attention_for(
         PanelKind::AgentTranscript => target
             .and_then(|run_id| inputs.phases.get(run_id))
             .map_or(PaneAttention::None, |phase| thread_phase_attention(*phase)),
-        PanelKind::Sidebar | PanelKind::Agent | PanelKind::Diff | PanelKind::Terminal | PanelKind::Memory => {
-            PaneAttention::None
-        }
+        PanelKind::Sidebar
+        | PanelKind::Agent
+        | PanelKind::Diff
+        | PanelKind::Terminal
+        | PanelKind::Memory
+        | PanelKind::Arena => PaneAttention::None,
     }
 }
 

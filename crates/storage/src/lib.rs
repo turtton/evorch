@@ -57,12 +57,13 @@ pub mod config;
 mod db;
 pub mod entity;
 pub mod error;
+pub mod eval;
 pub mod memory;
-pub mod task_queue;
 mod migrations;
 mod projection;
 mod read;
 mod repo;
+pub mod task_queue;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};

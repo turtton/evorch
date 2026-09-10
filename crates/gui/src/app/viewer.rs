@@ -29,6 +29,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             let mut viewer = WorkbenchTabViewer {
                 memory: &mut self.memory,
+                arena: &mut self.arena,
                 transcripts: &self.transcripts,
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,

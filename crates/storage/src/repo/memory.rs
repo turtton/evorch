@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Clone)]
 pub(crate) enum Mutation {
+    EvalTrace(crate::eval::EvalTrace),
     Candidate(Lesson),
     Validate { id: String, evidence: String },
     Promote(String),
@@ -11,6 +12,9 @@ pub(crate) enum Mutation {
 }
 
 pub(crate) fn append(conn: &Connection, mutation: &Mutation) -> Result<(), StorageError> {
+    if let Mutation::EvalTrace(trace) = mutation {
+        return crate::eval::append(conn, trace);
+    }
     let transaction = conn.unchecked_transaction()?;
     let (lesson, status) = match mutation {
         Mutation::Candidate(lesson) => {
@@ -72,10 +76,13 @@ pub(crate) fn append(conn: &Connection, mutation: &Mutation) -> Result<(), Stora
                     }
                     MemoryStatus::Rejected
                 }
-                Mutation::Candidate(_) => return Err(invalid("invalid transition")),
+                Mutation::Candidate(_) | Mutation::EvalTrace(_) => {
+                    return Err(invalid("invalid transition"));
+                }
             };
             (entry.lesson, status)
         }
+        Mutation::EvalTrace(_) => return Err(invalid("invalid transition")),
     };
     transaction.execute("INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status) VALUES(?1,?2,?3,?4,?5,?6)", params![lesson.id,lesson.project,lesson.task_id,lesson.content,lesson.evidence,status.as_str()])?;
     let seq = transaction.last_insert_rowid();

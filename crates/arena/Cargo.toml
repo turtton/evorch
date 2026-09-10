@@ -1,0 +1,22 @@
+[package]
+name = "arena"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+storage = { path = "../storage" }
+config = { path = "../config" }
+providers = { path = "../providers" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+proptest = "1"
+mock-openai = { path = "../mock-openai" }
+tempfile.workspace = true

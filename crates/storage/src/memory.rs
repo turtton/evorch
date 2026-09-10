@@ -72,7 +72,7 @@ impl Database {
     }
 
     pub fn memory_history(&self, id: &str) -> Result<Vec<MemoryEntry>, StorageError> {
-        let mut statement = self.conn.prepare("SELECT entry_id, project, task_id, content, evidence, status FROM memory_ledger WHERE entry_id = ?1 ORDER BY seq")?;
+        let mut statement = self.conn.prepare("SELECT entry_id, project, task_id, content, evidence, status FROM memory_ledger WHERE entry_id = ?1 AND kind='lesson' ORDER BY seq")?;
         statement
             .query_map([id], entry_row)?
             .map(|row| decode(row?))
