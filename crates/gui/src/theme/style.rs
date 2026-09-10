@@ -6,7 +6,17 @@ use egui::{
 
 use super::tokens::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreset {
+    Graphite,
+    HighContrast,
+}
+
 pub fn visuals() -> Visuals {
+    visuals_for(ThemePreset::Graphite)
+}
+
+pub fn visuals_for(preset: ThemePreset) -> Visuals {
     let mut visuals = Visuals::dark();
     visuals.dark_mode = true;
     visuals.panel_fill = CANVAS;
@@ -18,7 +28,10 @@ pub fn visuals() -> Visuals {
     visuals.faint_bg_color = SURFACE;
     visuals.code_bg_color = SURFACE_RAISED;
     visuals.text_edit_bg_color = Some(INPUT);
-    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.bg_fill = match preset {
+        ThemePreset::Graphite => ACCENT,
+        ThemePreset::HighContrast => Color32::from_rgb(255, 190, 0),
+    };
     visuals.selection.stroke = Stroke::new(1.0, ACCENT);
     visuals.hyperlink_color = ACCENT;
     visuals.error_fg_color = ERROR_FG;
@@ -61,8 +74,12 @@ pub fn visuals() -> Visuals {
 }
 
 pub fn style() -> Style {
+    style_for(ThemePreset::Graphite)
+}
+
+pub fn style_for(preset: ThemePreset) -> Style {
     let mut style = Style {
-        visuals: visuals(),
+        visuals: visuals_for(preset),
         ..Default::default()
     };
     style.text_styles.insert(
@@ -114,9 +131,13 @@ pub fn style() -> Style {
 }
 
 pub fn install(ctx: &egui::Context) {
+    install_preset(ctx, ThemePreset::Graphite);
+}
+
+pub fn install_preset(ctx: &egui::Context, preset: ThemePreset) {
     ctx.set_theme(ThemePreference::Dark);
-    ctx.set_style_of(Theme::Dark, style());
+    ctx.set_style_of(Theme::Dark, style_for(preset));
     // A stray light preference should still render the dark design.
-    ctx.set_style_of(Theme::Light, style());
+    ctx.set_style_of(Theme::Light, style_for(preset));
     super::fonts::install(ctx);
 }

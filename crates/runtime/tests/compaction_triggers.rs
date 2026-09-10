@@ -89,7 +89,8 @@ fn request_texts(messages: &[Message]) -> Vec<&str> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -117,7 +118,8 @@ fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {
             } if tool_call_id == call_id => content.first().map(|item| match item {
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
             }),
-            ContentBlock::Text { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

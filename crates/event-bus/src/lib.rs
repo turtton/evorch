@@ -13,7 +13,7 @@ pub use event::{
     CompactionReason, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, RoutingSource,
-    SCHEMA_VERSION, SkillDiagnosticKind, ToolEvent, UsageEvent,
+    SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

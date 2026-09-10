@@ -4,7 +4,73 @@ pub struct SlashCommandSpec {
     pub argument_hint: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalSlashCommand {
+    pub name: String,
+    pub description: String,
+    pub argument_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SlashCommandRegistry {
+    pub external: Vec<ExternalSlashCommand>,
+}
+
+impl SlashCommandRegistry {
+    pub fn builtin() -> &'static [SlashCommandSpec] {
+        SLASH_COMMANDS
+    }
+
+    pub fn load_external(&mut self, stdout: &str) {
+        self.external = stdout
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let name = fields.next()?.trim();
+                let description = fields.next()?.trim();
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return None;
+                }
+                Some(ExternalSlashCommand {
+                    name: name.to_owned(),
+                    description: description.to_owned(),
+                    argument_hint: fields
+                        .next()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned),
+                })
+            })
+            .collect();
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        SLASH_COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .chain(self.external.iter().map(|command| command.name.as_str()))
+    }
+}
+
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
+    SlashCommandSpec {
+        name: "undo",
+        description: "Restore the previous workspace snapshot",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
+        name: "redo",
+        description: "Restore the next workspace snapshot",
+        argument_hint: None,
+    },
     SlashCommandSpec {
         name: "goal",
         description: "Submit a goal to the orchestrator loop",
@@ -16,6 +82,30 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         argument_hint: None,
     },
 ];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ImageAttachment {
+    pub fn from_data_url(value: &str) -> Option<Self> {
+        let (header, data) = value.strip_prefix("data:")?.split_once(',')?;
+        let (media_type, encoding) = header.split_once(';').unwrap_or((header, ""));
+        if !media_type.starts_with("image/") || encoding != "base64" || data.is_empty() {
+            return None;
+        }
+        Some(Self {
+            media_type: media_type.to_owned(),
+            data: data.to_owned(),
+        })
+    }
+
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
 
 pub enum ComposerInput<'a> {
     Empty,
@@ -97,6 +187,8 @@ impl Default for ProviderStatus {
 pub struct ComposerModel {
     pub input: String,
     pub completions_dismissed_for: Option<String>,
+    pub attachments: Vec<ImageAttachment>,
+    pub image_input_supported: bool,
 }
 
 impl ComposerModel {
@@ -107,6 +199,27 @@ impl ComposerModel {
 
     pub fn dismiss_completions(&mut self) {
         self.completions_dismissed_for = Some(self.input.clone());
+    }
+
+    pub fn add_pasted_image(&mut self, value: &str) -> bool {
+        let Some(image) = ImageAttachment::from_data_url(value) else {
+            return false;
+        };
+        self.attachments.push(image);
+        true
+    }
+
+    pub fn remove_attachment(&mut self, index: usize) -> bool {
+        if index >= self.attachments.len() {
+            return false;
+        }
+        self.attachments.remove(index);
+        true
+    }
+
+    pub fn image_warning(&self) -> Option<&'static str> {
+        (!self.attachments.is_empty() && !self.image_input_supported)
+            .then_some("このモデルは画像入力に対応していないため、画像は送信できません")
     }
 }
 
@@ -202,7 +315,7 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            ("/", &["goal", "help"]),
+            ("/", &["undo", "redo", "goal", "help"]),
             ("/g", &["goal"]),
             ("/goal", &["goal"]),
             ("/h", &["help"]),
@@ -229,6 +342,8 @@ mod tests {
     fn help_text_lists_every_command() {
         // Given
         let expected = [
+            "/undo — Restore the previous workspace snapshot",
+            "/redo — Restore the next workspace snapshot",
             "/goal <text> — Submit a goal to the orchestrator loop",
             "/help — Show available commands",
         ];
@@ -257,5 +372,26 @@ mod tests {
         let model = ComposerModel::default();
         // Then
         assert_eq!(model.input, "");
+    }
+
+    #[test]
+    fn pasted_image_can_be_added_and_removed() {
+        let mut model = ComposerModel::default();
+        assert!(model.add_pasted_image("data:image/png;base64,aGVsbG8="));
+        assert_eq!(
+            model.attachments[0].data_url(),
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert!(model.image_warning().is_some());
+        assert!(model.remove_attachment(0));
+        assert!(!model.remove_attachment(0));
+    }
+
+    #[test]
+    fn external_slash_registry_accepts_only_safe_tabular_entries() {
+        let mut registry = SlashCommandRegistry::default();
+        registry.load_external("review\tRun review\t<path>\n-bad\tignored\n");
+        assert_eq!(registry.external.len(), 1);
+        assert_eq!(registry.names().collect::<Vec<_>>().last(), Some(&"review"));
     }
 }

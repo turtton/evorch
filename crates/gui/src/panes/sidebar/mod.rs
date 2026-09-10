@@ -24,6 +24,7 @@ pub enum SidebarAction {
     AddProject(PathBuf),
     BrowseForProject,
     CreateThread(String),
+    ForkThread(ThreadId),
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
     TogglePause(ThreadId),

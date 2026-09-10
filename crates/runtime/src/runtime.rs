@@ -47,6 +47,7 @@ pub struct AgentRuntime {
 pub(crate) struct Shared {
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
+    pub(crate) snapshots: OnceLock<Arc<crate::snapshot::SnapshotService>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
@@ -124,6 +125,27 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
+    pub fn with_snapshots(self, service: Arc<crate::snapshot::SnapshotService>) -> Self {
+        let _ = self.shared.snapshots.set(service);
+        self
+    }
+
+    pub async fn restore_snapshot(&self, run_id: RunId, redo: bool) -> Result<Option<String>, String> {
+        let (owner, phase) = {
+            let entry = self.entry(run_id).map_err(|error| error.to_string())?;
+            (entry.config.name.clone().unwrap_or_else(|| run_id.to_string()), *entry.phase_rx.borrow())
+        };
+        if phase == AgentRunPhase::Running || phase == AgentRunPhase::Pending {
+            return Err("Wait for the run to become idle before restoring files".into());
+        }
+        let service = self.shared.snapshots.get().ok_or("Snapshots are not configured")?;
+        let root = self.shared.workspaces.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id).and_then(|workspace| workspace.worktree_path.clone());
+        let mut workspace = service.lock(root.as_deref()).await.map_err(|error| error.to_string())?;
+        tokio::task::spawn_blocking(move || workspace.restore(&owner, redo))
+            .await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
+    }
+
     pub(crate) fn from_weak(shared: &Weak<Shared>) -> Option<Self> {
         shared.upgrade().map(|shared| Self { shared })
     }
@@ -138,6 +160,7 @@ impl AgentRuntime {
             shared: Arc::new(Shared {
                 bus,
                 executor,
+                snapshots: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
@@ -347,6 +370,7 @@ impl AgentRuntime {
                 escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
+                snapshots: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
                 next_message_id: AtomicU64::new(1),

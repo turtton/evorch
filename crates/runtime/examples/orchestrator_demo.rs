@@ -144,7 +144,8 @@ impl AgentModel for ScriptedModel {
             .and_then(|message| {
                 message.content.iter().find_map(|block| match block {
                     ContentBlock::Text { text } => Some(text.as_str()),
-                    ContentBlock::Reasoning { .. }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
@@ -255,6 +256,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     EventKind::Diagnostic(event) => {
                         println!("[event] kind=Diagnostic payload={event:?}")
+                    }
+                    EventKind::Snapshot(event) => {
+                        println!("[event] kind=Snapshot payload={event:?}")
                     }
                 },
                 Err(RecvError::Lagged(skipped)) => {

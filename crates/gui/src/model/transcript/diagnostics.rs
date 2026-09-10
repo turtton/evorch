@@ -79,6 +79,6 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::Provider(_)
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
-        | EventKind::Orchestrator(_) => None,
+        | EventKind::Orchestrator(_) | EventKind::Snapshot(_) => None,
     }
 }

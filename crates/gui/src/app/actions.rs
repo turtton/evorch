@@ -70,6 +70,33 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
+    pub fn fork_thread(&mut self, source: ThreadId) -> Result<ThreadId, WorkbenchError> {
+        let original = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id == source)
+            .cloned()
+            .ok_or(ThreadError::UnknownThread)?;
+        let id = ThreadId::new(format!(
+            "{}-fork-{}",
+            source,
+            self.sidebar.threads.len() + 1
+        ));
+        let mut fork = original;
+        fork.id = id.clone();
+        fork.title = format!("{} (fork)", fork.title);
+        fork.parent_thread_id = Some(source);
+        fork.fork_event_id = None;
+        fork.run_ids.clear();
+        fork.branch = None;
+        fork.worktree_path = None;
+        self.sidebar.threads.push(fork);
+        self.switch_thread(id.clone())?;
+        self.save_sidebar();
+        Ok(id)
+    }
+
     pub fn switch_thread(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
         self.sidebar.switch_thread(&thread_id)?;
         self.transcripts.select_thread(Some(thread_id.to_string()));
@@ -238,6 +265,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
+            LoopEvent::SnapshotRestored { thread_id, diff } => {
+                if self
+                    .sidebar
+                    .active_thread
+                    .as_ref()
+                    .is_some_and(|id| id.to_string() == thread_id)
+                {
+                    match diff {
+                        Some(diff) => {
+                            self.diff.show_snapshot(diff);
+                            self.focus_panel("diff-main");
+                        }
+                        None => self.push_notice("No snapshot to restore"),
+                    }
+                }
+            }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
                 self.bind_thread_run(&thread_id, &run_id);
             }

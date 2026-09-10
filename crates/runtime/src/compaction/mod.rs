@@ -205,7 +205,8 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
         .flat_map(|message| &message.content)
         .find_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })

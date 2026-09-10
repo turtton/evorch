@@ -70,6 +70,19 @@ pub enum WireContent {
     Text(String),
     /// 複数の text part。
     Parts(Vec<WireTextPart>),
+    Multimodal(Vec<WireImagePart>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireImagePart {
+    Text { text: String },
+    ImageUrl { image_url: WireImageUrl },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireImageUrl {
+    pub url: String,
 }
 
 /// 配列形式 content の text part。

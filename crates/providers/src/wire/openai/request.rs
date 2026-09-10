@@ -116,7 +116,8 @@ fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -133,7 +134,8 @@ fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
                     arguments: input.to_string(),
                 },
             }),
-            ContentBlock::Text { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -147,7 +149,8 @@ fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
             content: result_wire_content(content),
             tool_call_id: tool_call_id.clone(),
         }),
-        ContentBlock::Text { .. }
+        ContentBlock::Image { .. }
+        | ContentBlock::Text { .. }
         | ContentBlock::Reasoning { .. }
         | ContentBlock::ToolUse { .. } => None,
     });
@@ -155,9 +158,41 @@ fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
         Role::System => (!text.is_empty()).then_some(WireMessage::System {
             content: WireContent::Text(text),
         }),
-        Role::User => (!text.is_empty()).then_some(WireMessage::User {
-            content: WireContent::Text(text),
-        }),
+        Role::User => {
+            if message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+            {
+                Some(WireMessage::User {
+                    content: WireContent::Multimodal(
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => {
+                                    Some(super::types::WireImagePart::Text { text: text.clone() })
+                                }
+                                ContentBlock::Image { media_type, data } => {
+                                    Some(super::types::WireImagePart::ImageUrl {
+                                        image_url: super::types::WireImageUrl {
+                                            url: format!("data:{media_type};base64,{data}"),
+                                        },
+                                    })
+                                }
+                                ContentBlock::Reasoning { .. }
+                                | ContentBlock::ToolUse { .. }
+                                | ContentBlock::ToolResult { .. } => None,
+                            })
+                            .collect(),
+                    ),
+                })
+            } else {
+                (!text.is_empty()).then_some(WireMessage::User {
+                    content: WireContent::Text(text),
+                })
+            }
+        }
         Role::Assistant => {
             (!text.is_empty() || !tool_calls.is_empty()).then(|| WireMessage::Assistant {
                 content: (!text.is_empty()).then_some(WireContent::Text(text)),
@@ -212,6 +247,9 @@ fn tool_result_content(content: &WireContent) -> Result<Vec<ToolResultContent>, 
 
 fn wire_texts(content: &WireContent) -> Result<Vec<String>, ProviderError> {
     match content {
+        WireContent::Multimodal(_) => Err(ProviderError::InvalidJson {
+            detail: "image content cannot be decoded as text".into(),
+        }),
         WireContent::Text(text) => Ok(vec![text.clone()]),
         WireContent::Parts(parts) => parts
             .iter()

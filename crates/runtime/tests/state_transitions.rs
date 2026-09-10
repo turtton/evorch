@@ -51,7 +51,7 @@ async fn run_emits_pending_running_done_in_order() {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_) => None,
+            | EventKind::Diagnostic(_) | EventKind::Snapshot(_) => None,
         })
         .collect();
     assert!(matches!(

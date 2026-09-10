@@ -69,7 +69,7 @@ impl AgentModel for NoPullRequestModel {
                     ContentBlock::Text { text } => Some(text.as_str()),
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
+                    | ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => None,
                 })
             })
             .unwrap_or_default();

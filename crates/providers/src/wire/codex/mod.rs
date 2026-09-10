@@ -110,7 +110,8 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -172,7 +173,8 @@ fn to_input_message(
                 kind: text_type,
                 text: text.clone(),
             }),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })

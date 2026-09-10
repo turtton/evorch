@@ -58,8 +58,33 @@ pub fn composer_strip(
                     }
                 }
             }
+            ui.input(|input| {
+                for event in &input.events {
+                    if let egui::Event::Paste(value) = event {
+                        model.add_pasted_image(value);
+                    }
+                }
+            });
+            if let Some(warning) = model.image_warning() {
+                ui.colored_label(crate::theme::tokens::WARNING_FG, warning);
+            }
+            if !model.attachments.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    let mut remove = None;
+                    for (index, image) in model.attachments.iter().enumerate() {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(format!("🖼 {}", image.media_type));
+                                ui.label("thumbnail");
+                                if ui.small_button("Remove").clicked() { remove = Some(index); }
+                            });
+                        });
+                    }
+                    if let Some(index) = remove { model.remove_attachment(index); }
+                });
+            }
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
-                let can_send = !model.input.trim().is_empty();
+                let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
                 let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();
                 let send = if can_cancel {
                     ui.add(egui::Button::new(egui::RichText::new("Cancel").color(crate::theme::tokens::ERROR_FG))

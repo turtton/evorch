@@ -5,6 +5,7 @@
 
 mod messages;
 mod tool_calls;
+mod snapshots;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
@@ -586,7 +587,8 @@ impl LoopState {
                     ContentBlock::ToolUse { id, name, input } => {
                         Some((id.clone(), name.clone(), input.clone()))
                     }
-                    ContentBlock::Text { .. }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
@@ -609,7 +611,8 @@ impl LoopState {
                             run_id: Some(self.task.run_id.to_string()),
                         })
                     }
-                    ContentBlock::Text { .. }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => None,
@@ -808,7 +811,8 @@ impl LoopState {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
+                ContentBlock::Image { .. }
+                | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })

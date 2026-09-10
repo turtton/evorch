@@ -202,6 +202,7 @@ const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Compaction(_) => "compaction",
         EventKind::Orchestrator(_) => "Orchestrator",
         EventKind::Diagnostic(_) => "Diagnostic",
+        EventKind::Snapshot(_) => "Snapshot",
     }
 }
 

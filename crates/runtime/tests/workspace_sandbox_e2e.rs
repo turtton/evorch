@@ -59,7 +59,8 @@ fn tool_result(messages: &[Vec<Message>], call_id: &str) -> (String, bool) {
             } if tool_call_id == call_id => content.first().map(|content| match content {
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
             }),
-            ContentBlock::Text { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

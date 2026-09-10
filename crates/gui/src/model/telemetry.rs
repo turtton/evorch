@@ -87,7 +87,7 @@ impl TelemetryOverlay {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_) => {}
+            | EventKind::Diagnostic(_) | EventKind::Snapshot(_) => {}
         }
     }
 

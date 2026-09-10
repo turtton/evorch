@@ -186,7 +186,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
                 | EventKind::AgentMessage(_)
                 | EventKind::Compaction(_)
                 | EventKind::Orchestrator(_)
-                | EventKind::Diagnostic(_) => {}
+            | EventKind::Diagnostic(_) | EventKind::Snapshot(_) => {}
             }
             let all_required = provider_started == 2
                 && provider_completed == 2

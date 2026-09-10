@@ -86,7 +86,7 @@ impl AgentModel for ScriptedModel {
                     ContentBlock::Text { text } => Some(text.clone()),
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
+                    | ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => None,
                 })
             });
         let mut scripts = self.scripts.lock().expect("script lock must not poison");

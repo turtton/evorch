@@ -40,6 +40,8 @@ enum GuiError {
     Arguments(String),
     #[error("settings load failed: {0}")]
     Settings(#[from] workspace_ui::SettingsError),
+    #[error("panel keybindings failed: {0}")]
+    PanelKeybinds(#[from] gui::keymap::PanelKeybindError),
     #[error("layout load failed: {0}")]
     Layout(#[from] workspace_ui::PersistError),
     #[error("workbench initialization failed: {0}")]
@@ -515,7 +517,7 @@ fn codex_auth_model(
 fn run() -> Result<(), GuiError> {
     gui::logging::init();
     let arguments = parse_arguments()?;
-    let settings = load_settings(&arguments)?;
+    let mut settings = load_settings(&arguments)?;
     let repo_root = std::fs::canonicalize(std::env::current_dir()?)?;
     let state_path = sidebar_path(&arguments);
     if let Some(parent) = state_path.as_deref().and_then(std::path::Path::parent) {
@@ -553,6 +555,7 @@ fn run() -> Result<(), GuiError> {
         }
         None => config::Config::default(),
     };
+    settings.keybinds = gui::keymap::panel_keybinds(&settings.keybinds, &composition_config.panel)?;
     // Retain the fail-closed store when the credential directory cannot be opened.
     let credential_store: Arc<dyn CredentialStore> = settings_store
         .clone()
@@ -642,6 +645,15 @@ fn run() -> Result<(), GuiError> {
     };
 
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
+    let snapshot_directory = tempfile::tempdir()?;
+    let snapshot_root = match demo_directory.as_ref() {
+        Some(directory) => directory.path().join("repo"),
+        None => repo_root.clone(),
+    };
+    let runtime = runtime.with_snapshots(Arc::new(
+        runtime::snapshot::SnapshotService::new(&snapshot_root, snapshot_directory.path())
+            .map_err(|error| GuiError::Arguments(error.to_string()))?,
+    ));
     let storage_config = StorageConfig {
         db_path: storage_db_path,
         ..StorageConfig::default()

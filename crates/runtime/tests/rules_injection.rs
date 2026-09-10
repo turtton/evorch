@@ -57,7 +57,8 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Text { text } if text.starts_with("[project-rules]") => {
                 Some(text.as_str())
             }
-            ContentBlock::Text { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -359,7 +360,8 @@ async fn run_read_fixture(
                 content,
                 is_error: false,
             } if tool_call_id == "call-1" => Some(content.clone()),
-            ContentBlock::Text { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

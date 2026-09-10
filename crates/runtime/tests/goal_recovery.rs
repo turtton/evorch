@@ -82,7 +82,8 @@ async fn recover_starts_new_run_with_snapshot_and_transcript_context() {
         .iter()
         .find_map(|block| match block {
             providers::ContentBlock::Text { text } => Some(text.as_str()),
-            providers::ContentBlock::Reasoning { .. }
+            providers::ContentBlock::Image { .. }
+            | providers::ContentBlock::Reasoning { .. }
             | providers::ContentBlock::ToolUse { .. }
             | providers::ContentBlock::ToolResult { .. } => None,
         })

@@ -82,7 +82,7 @@ fn usage_events(events: &[Event]) -> Vec<&UsageEvent> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_) => None,
+            | EventKind::Diagnostic(_) | EventKind::Snapshot(_) => None,
         })
         .collect()
 }

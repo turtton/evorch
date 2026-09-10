@@ -35,7 +35,7 @@ impl StorageBridge {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_) => self.storage.append_event(Some(self.session_id), event),
+            | EventKind::Diagnostic(_) | EventKind::Snapshot(_) => self.storage.append_event(Some(self.session_id), event),
         }
     }
 
