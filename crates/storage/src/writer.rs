@@ -92,6 +92,14 @@ impl Drop for Storage {
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    pub fn append_eval_trace(&self, trace: &crate::eval::EvalTrace) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(
+                crate::repo::memory::Mutation::EvalTrace(trace.clone()),
+                reply,
+            )
+        })
+    }
     pub(crate) fn queue_mutation(
         &self,
         mutation: crate::task_queue::Mutation,

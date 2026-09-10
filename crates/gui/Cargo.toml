@@ -10,6 +10,7 @@ publish = false
 name = "gui"
 
 [dependencies]
+arena = { path = "../arena" }
 ashpd = { workspace = true }
 async-trait = { workspace = true }
 catalog = { path = "../catalog" }

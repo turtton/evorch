@@ -38,6 +38,7 @@ pub enum PanelKind {
     Terminal,
     Tasks,
     Memory,
+    Arena,
 }
 
 impl PanelKind {
@@ -52,6 +53,7 @@ impl PanelKind {
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
             Self::Memory => "Memory",
+            Self::Arena => "Arena",
         }
     }
 }
