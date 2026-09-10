@@ -47,13 +47,13 @@ fn right_panes_expose_landmarks_without_headings() {
     let state = gui::app::WorkbenchState::new(MockSource(Vec::new()), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     // Then: each right pane title resolves to exactly one Pane landmark when active.
     {
         let (tab_id, title) = ("agents-main", "Agents");
         activate_tab(&mut harness, tab_id);
-        harness.run();
+        harness.run_steps(4);
         harness.get_by_label(title);
         assert_eq!(harness.query_all_by_label(title).count(), 1);
         assert!(
@@ -69,7 +69,7 @@ fn merge_state_without_pr_stays_empty_without_a_pane() {
     let state = gui::app::WorkbenchState::new(MockSource(Vec::new()), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
     assert!(harness.state().merge().view.pr.is_none());
     assert!(
         harness

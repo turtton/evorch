@@ -145,14 +145,10 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
     assert!(
         fixture
             .workbench
-            .has_label("Tool review-two (call-two): Running")
+            .has_label(" Running review-two (call-two)")
     );
     assert!(fixture.workbench.has_label("-> run-1: run-two handoff"));
-    assert!(
-        !fixture
-            .workbench
-            .has_label("Tool read-one (call-one): Running")
-    );
+    assert!(!fixture.workbench.has_label(" Running read-one (call-one)"));
 
     // When: the operator returns to the thread conversation.
     fixture.workbench.click_label("← Thread");
@@ -163,7 +159,7 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
         fixture.workbench.state().focus(),
         &ConversationFocus::Thread
     );
-    assert!(fixture.workbench.has_label("Message: thread-only text"));
+    assert!(fixture.workbench.has_label("thread-only text"));
 }
 
 #[test]
@@ -291,7 +287,7 @@ fn runless_delta_never_reaches_sole_running_run_pane() {
 
     // Then: the run pane stays empty and neither transcript retains the delta.
     assert!(pane.query_by_label("no events for run-1").is_some());
-    assert!(pane.query_by_label("Message: sole run response").is_none());
+    assert!(pane.query_by_label("sole run response").is_none());
     assert!(
         fixture
             .workbench
@@ -383,8 +379,7 @@ fn attributed_stream_delta_renders_in_its_run_pane() {
         });
         pane.run();
         assert_eq!(
-            pane.query_by_label("Message: attributed response")
-                .is_some(),
+            pane.query_by_label("attributed response").is_some(),
             visible,
             "{run_id}"
         );

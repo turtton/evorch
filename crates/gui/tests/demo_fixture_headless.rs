@@ -19,9 +19,9 @@ fn demo_fixture_populates_sidebar_conversation_and_agents() {
     // Then: the selected project's threads, thread transcript, and merge state render.
     assert!(workbench.has_label("Thread: Refine GUI design system"));
     assert!(!workbench.has_label("Queue seed CLI"));
-    assert!(workbench.has_label(
-        "Message: Analysing t3code design language and mapping tokens to egui Visuals…"
-    ));
+    assert!(
+        workbench.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
+    );
     assert_eq!(
         workbench
             .state()

@@ -169,6 +169,14 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When: settings are saved through the modal.
+    let save_rects = harness.label_rects("Save");
+    harness.step();
+    assert_eq!(
+        save_rects,
+        harness.label_rects("Save"),
+        "Save must settle before clicking"
+    );
+    assert!(save_rects[0].max.y <= 900.0);
     harness.click_label("Save");
     finish_save(&mut harness);
     // Then: disk configuration and the conversation both become configured.

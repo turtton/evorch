@@ -74,9 +74,9 @@ fn conversation_with_messages_hides_placeholders() {
     assert!(!harness.has_label("No project selected"));
     assert!(!harness.has_label("No thread selected"));
     assert!(!harness.has_label("No messages yet"));
-    assert!(harness.has_label(
-        "Message: Analysing t3code design language and mapping tokens to egui Visuals…"
-    ));
+    assert!(
+        harness.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
+    );
 }
 
 #[test]

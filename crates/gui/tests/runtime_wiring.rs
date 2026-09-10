@@ -195,7 +195,7 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
             );
         }
         let _ = repaint_rx.recv_timeout(Duration::from_millis(200));
-        harness.run();
+        harness.run_steps(4);
     }
     assert_eq!(harness.state().tasks().rows(), expected.as_slice());
 }

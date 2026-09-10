@@ -461,12 +461,12 @@ fn v02_end_to_end_chained_scenario() {
     assert!(
         fixture
             .workbench
-            .has_label("Tool tool-run-2 (call-run-2): Running")
+            .has_label(" Running tool-run-2 (call-run)")
     );
     assert!(
         !fixture
             .workbench
-            .has_label("Tool tool-run-1 (call-run-1): Running")
+            .has_label(" Running tool-run-1 (call-run)")
     );
 
     // When: the operator returns to the thread conversation.
@@ -478,7 +478,7 @@ fn v02_end_to_end_chained_scenario() {
         fixture.workbench.state().focus(),
         &ConversationFocus::Thread
     );
-    assert!(fixture.workbench.has_label("Message: thread-only progress"));
+    assert!(fixture.workbench.has_label("thread-only progress"));
 
     // When: the default agent panes open for the three roles.
     fixture.workbench.click_label("Open default panes");

@@ -82,7 +82,8 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
 
     /// アニメーション中も停止を待たずに固定フレームを実行します。
     pub fn run(&mut self) {
-        self.harness.run_steps(4);
+        // Nested modal and scroll-area sizing needs multiple passes before click coordinates settle.
+        self.harness.run_steps(16);
     }
 
     /// 1 フレームだけ実行します。

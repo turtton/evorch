@@ -35,13 +35,13 @@ fn add_project_expands_tilde_before_dispatch() {
         );
     // When: the operator types a tilde path and presses Add project.
     harness.get_by_label("Project path (~ allowed)").click();
-    harness.run();
+    harness.run_steps(4);
     harness
         .get_by_label("Project path (~ allowed)")
         .type_text("~/repo");
-    harness.run();
+    harness.run_steps(4);
     harness.get_by_label("Add project").click();
-    harness.run();
+    harness.run_steps(4);
     // Then: the registered root is the canonical home-relative path.
     assert_eq!(
         harness.state().sidebar().projects[0].repo_root,

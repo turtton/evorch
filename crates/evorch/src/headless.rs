@@ -58,6 +58,8 @@ pub enum HeadlessError {
     Runtime(#[from] runtime::RuntimeError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
+    #[error("credential initialization task failed: {0}")]
+    CredentialTask(#[from] tokio::task::JoinError),
 }
 
 /// コマンドライン引数を手でパースする (clap 不使用)。
@@ -150,7 +152,9 @@ pub async fn run_headless(
             Arc::new(DirectSandbox::new_unchecked()),
         )),
     };
-    let credential_store = open_credential_store(&args)?;
+    let credential_args = args.clone();
+    let credential_store =
+        tokio::task::spawn_blocking(move || open_credential_store(&credential_args)).await??;
 
     let composed = compose_runtime(RuntimeComposition {
         config: &config,

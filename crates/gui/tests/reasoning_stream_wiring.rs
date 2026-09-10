@@ -118,7 +118,7 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let _ = repaint_rx.recv_timeout(Duration::from_millis(200));
-        harness.run();
+        harness.run_steps(4);
         if harness
             .state()
             .transcripts()
@@ -148,5 +148,5 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     });
     pane.run();
     assert!(pane.query_by_label("Reasoning: weighing options").is_some());
-    assert!(pane.query_by_label("Message: final answer").is_some());
+    assert!(pane.query_by_label("final answer").is_some());
 }

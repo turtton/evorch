@@ -74,7 +74,7 @@ fn three_panes_render_with_titles() {
     let mut harness = build_harness(state);
 
     // When: the UI is rendered
-    harness.run();
+    harness.run_steps(4);
 
     // Then: the v0.2 region titles are present
     harness.get_by_label("Projects");
@@ -88,7 +88,7 @@ fn focus_switching_via_keybind_changes_active_tab() {
     let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     let agent_id = PanelId::new("agent-main");
     let terminal_id = PanelId::new("terminal-main");
@@ -109,11 +109,11 @@ fn focus_switching_via_keybind_changes_active_tab() {
             TabInsert::Append,
         ),
     );
-    harness.run();
+    harness.run_steps(4);
 
     // When: Ctrl+1 is pressed to focus the agent pane
     harness.key_press_modifiers(Modifiers::COMMAND, Key::Num1);
-    harness.run();
+    harness.run_steps(4);
 
     // Then: the agent tab becomes active within the shared group
     assert!(is_active_tab(harness.state().dock(), &agent_id));
@@ -125,7 +125,7 @@ fn dock_undock_and_tab_move_operations_update_state() {
     let state = WorkbenchState::new(MockSource::empty(), &UiSettings::default())
         .expect("default state builds");
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     // When: the terminal tab is moved into the agents tab group
     let terminal_id = PanelId::new("terminal-main");
@@ -148,7 +148,7 @@ fn dock_undock_and_tab_move_operations_update_state() {
             TabInsert::Append,
         ),
     );
-    harness.run();
+    harness.run_steps(4);
 
     // Then: terminal now shares a tab group with agents
     let agents_path = harness
@@ -166,7 +166,7 @@ fn dock_undock_and_tab_move_operations_update_state() {
     // When: the agent pane is undocked into a floating window
     let agent_id = PanelId::new("agent-main");
     harness.state_mut().dock_mut().add_window(vec![agent_id]);
-    harness.run();
+    harness.run_steps(4);
 
     // Then: a window surface exists and the agent tab is still findable
     let has_window = harness
@@ -194,7 +194,7 @@ fn transcript_text_appears_after_bus_event() {
         .expect("default state builds")
         .with_pump(pump);
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     // When: a message delta is emitted and forwarded
     bus.emit(Event::new(MessageEvent::MessageDelta {
@@ -202,7 +202,7 @@ fn transcript_text_appears_after_bus_event() {
         run_id: Some("run-1".into()),
     }));
     assert!(repaint_rx.recv_timeout(Duration::from_secs(1)).is_ok());
-    harness.run();
+    harness.run_steps(4);
 
     // Then: the transcript contains the message
     let entries = harness.state().transcript().entries();
@@ -236,7 +236,7 @@ fn tasks_row_updates_after_state_change_event() {
         .expect("default state builds")
         .with_pump(pump);
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     // When: an AgentRunStateChanged event is emitted
     bus.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
@@ -246,7 +246,7 @@ fn tasks_row_updates_after_state_change_event() {
         reason: None,
     }));
     assert!(repaint_rx.recv_timeout(Duration::from_secs(1)).is_ok());
-    harness.run();
+    harness.run_steps(4);
 
     // Then: the row status is updated in place
     assert_eq!(
@@ -269,11 +269,11 @@ fn save_layout_keybind_persists_workspace_json() {
         .expect("default state builds")
         .with_save_path(&path);
     let mut harness = build_harness(state);
-    harness.run();
+    harness.run_steps(4);
 
     // When: Ctrl+S is pressed
     harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
-    harness.run();
+    harness.run_steps(4);
 
     // Then: a workspace JSON file is written and round-trips correctly
     assert!(path.exists());
