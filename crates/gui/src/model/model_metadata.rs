@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use catalog::ModelCatalog;
-use config::{MetadataSource, ModelEntryConfig, ModelPresetConfig};
-use runtime::model_resolve::{MetadataOrigin, resolve_model_metadata};
+use config::{ModelEntryConfig, ModelPresetConfig};
+use runtime::model_resolve::{MetadataOrigin, resolve_catalog_entry, resolve_model_metadata};
 
 pub struct MetadataSources<'a> {
     pub presets: &'a BTreeMap<String, ModelPresetConfig>,
@@ -23,17 +23,12 @@ impl MetadataSources<'_> {
             MetadataOrigin::Catalog => "models.dev",
             MetadataOrigin::Default => "default",
         };
-        let model = match entry.metadata_source {
-            Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
-            None | Some(MetadataSource::ModelsDev) => self.catalog.and_then(|catalog| {
-                let reference = entry.metadata_ref.as_deref().unwrap_or(&entry.id);
-                let (provider, model) = entry
-                    .metadata_ref
-                    .as_deref()
-                    .and_then(|value| value.split_once('/'))
-                    .unwrap_or((provider, reference));
-                catalog.find(provider, model)
-            }),
+        let model = self
+            .catalog
+            .and_then(|catalog| resolve_catalog_entry(entry, catalog, Some(provider)));
+        let context_hint = match resolved.origin {
+            MetadataOrigin::Default => " - set preset or metadata_ref",
+            MetadataOrigin::Manual | MetadataOrigin::Preset | MetadataOrigin::Catalog => "",
         };
         let output_origin = if preset.and_then(|p| p.max_output_tokens).is_some() {
             preset_origin.as_str()
@@ -55,7 +50,7 @@ impl MetadataSources<'_> {
         };
         [
             format!(
-                "{} ctx ({context_origin})",
+                "{} ctx ({context_origin}){context_hint}",
                 resolved
                     .context_window
                     .map_or_else(|| "Unknown".into(), |v| v.to_string())

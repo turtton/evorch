@@ -130,7 +130,7 @@ async fn catalog_fetch_failure_keeps_existing_behavior() {
 }
 
 #[tokio::test]
-async fn explicit_sources_disable_catalog_lookup() {
+async fn explicit_sources_auto_resolve_catalog() {
     let catalog = catalog_fixture().await;
     for source in [MetadataSource::Manual, MetadataSource::ProviderDefault] {
         let mut entry = ModelEntryConfig::enabled(MODEL);
@@ -138,10 +138,13 @@ async fn explicit_sources_disable_catalog_lookup() {
 
         let resolved = resolve_model_metadata(&entry, &presets(), Some(&catalog), None);
 
-        assert_eq!(resolved.context_window, None);
-        assert_eq!(resolved.origin, MetadataOrigin::Default);
+        assert_eq!(resolved.context_window, Some(64000));
+        assert_eq!(resolved.origin, MetadataOrigin::Catalog);
     }
 }
+
+#[path = "auto_catalog_tests.rs"]
+mod auto_catalog_tests;
 
 #[tokio::test]
 async fn metadata_ref_selects_catalog_model_without_changing_entry_id() {

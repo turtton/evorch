@@ -72,8 +72,38 @@ fn model_row_shows_catalog_origin() {
     );
     assert_eq!(
         sources.labels(&entry(), "wrong-provider")[0],
-        "Unknown ctx (default)"
+        "64000 ctx (models.dev)"
     );
+}
+
+#[test]
+fn model_row_auto_catalog_and_unknown_guidance() {
+    // Given: a provider-returned model with no metadata configuration.
+    let presets = presets();
+    let catalog = catalog();
+    let sources = MetadataSources {
+        presets: &presets,
+        catalog: Some(&catalog),
+    };
+    let mut entry = entry();
+    entry.metadata_source = None;
+    // When: rendering metadata through the existing GUI surface.
+    let mut harness = Harness::new_ui_state(
+        |ui, entry| {
+            for label in sources.labels(entry, "Crof") {
+                ui.label(label);
+            }
+        },
+        entry,
+    );
+    // Then: all catalog fields agree, and a miss offers a next action.
+    harness.get_by_label("64000 ctx (models.dev)");
+    harness.get_by_label("4000 max output (models.dev)");
+    harness.get_by_label("$1/M input (models.dev)");
+    harness.get_by_label("$3/M output (models.dev)");
+    harness.state_mut().id = "missing-model".into();
+    harness.run();
+    harness.get_by_label("Unknown ctx (default) - set preset or metadata_ref");
 }
 
 #[test]

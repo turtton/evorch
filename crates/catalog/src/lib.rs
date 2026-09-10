@@ -55,6 +55,32 @@ impl ModelCatalog {
             .find_map(|provider| provider.models.get(model))
     }
 
+    /// Matches exact IDs first, then slash-delimited suffixes; rejects ambiguous candidates.
+    pub fn find_unique_model(&self, model: &str) -> Option<&ModelMetadata> {
+        if model.is_empty() {
+            return None;
+        }
+        if self.find_by_model_id(model).is_some() {
+            let mut matches = self
+                .api
+                .values()
+                .filter_map(|provider| provider.models.get(model));
+            let first = matches.next()?;
+            return matches.next().is_none().then_some(first);
+        }
+        let mut matches = self
+            .api
+            .values()
+            .flat_map(|provider| &provider.models)
+            .filter(|(id, _)| {
+                id.strip_suffix(model)
+                    .is_some_and(|prefix| prefix.ends_with('/'))
+            })
+            .map(|(_, metadata)| metadata);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     /// Takes the scheduled refresh handle; dropping it does not cancel the refresh.
     pub fn take_refresh(&mut self) -> Option<JoinHandle<Result<Self, CatalogError>>> {
         self.refresh.take()

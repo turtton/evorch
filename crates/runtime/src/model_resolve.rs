@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use catalog::ModelCatalog;
+use catalog::{ModelCatalog, ModelMetadata};
 use config::{Config, MetadataSource, ModelEntryConfig, ModelPresetConfig};
 
 use crate::compaction::policy::CompactionSettings;
@@ -23,6 +23,33 @@ pub struct ResolvedModelMetadata {
     pub origin: MetadataOrigin,
 }
 
+/// Shared catalog selection for runtime limits and GUI prices, without modifying configuration.
+pub fn resolve_catalog_entry<'a>(
+    entry: &ModelEntryConfig,
+    catalog: &'a ModelCatalog,
+    provider_id: Option<&str>,
+) -> Option<&'a ModelMetadata> {
+    let reference = match entry.metadata_source {
+        Some(MetadataSource::ModelsDev) | None => entry.metadata_ref.as_deref(),
+        Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
+    };
+    let explicit = reference.and_then(|reference| {
+        reference
+            .split_once('/')
+            .and_then(|(provider, model)| {
+                catalog
+                    .find(provider, model)
+                    .or_else(|| catalog.find(provider, reference))
+            })
+            .or_else(|| catalog.find_unique_model(reference))
+    });
+    explicit.or_else(|| {
+        provider_id
+            .and_then(|provider| catalog.find(provider, &entry.id))
+            .or_else(|| catalog.find_unique_model(&entry.id))
+    })
+}
+
 /// Resolves each limit from manual overrides, presets, then the optional catalog.
 pub fn resolve_model_metadata(
     entry: &ModelEntryConfig,
@@ -31,24 +58,8 @@ pub fn resolve_model_metadata(
     provider_id: Option<&str>,
 ) -> ResolvedModelMetadata {
     let preset = entry.preset.as_ref().and_then(|name| presets.get(name));
-    let catalog_entry = match entry.metadata_source {
-        Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
-        Some(MetadataSource::ModelsDev) | None => catalog.and_then(|catalog| {
-            let model = entry.metadata_ref.as_deref().unwrap_or(&entry.id);
-            if let Some((provider, model)) = entry
-                .metadata_ref
-                .as_deref()
-                .and_then(|id| id.split_once('/'))
-            {
-                catalog.find(provider, model)
-            } else {
-                match provider_id {
-                    Some(provider) => catalog.find(provider, model),
-                    None => catalog.find_by_model_id(model),
-                }
-            }
-        }),
-    };
+    let catalog_entry =
+        catalog.and_then(|catalog| resolve_catalog_entry(entry, catalog, provider_id));
     let (context_window, origin) = if let Some(window) = entry.context_window {
         (Some(window), MetadataOrigin::Manual)
     } else if let Some(window) = preset.and_then(|preset| preset.context_window) {
@@ -76,7 +87,7 @@ pub(crate) fn apply_model_windows(
     for (name, profile) in &config.providers {
         for entry in profile.models.iter().filter(|entry| entry.enabled) {
             if let Some(window) =
-                resolve_model_metadata(entry, &config.model_presets, catalog, None)
+                resolve_model_metadata(entry, &config.model_presets, catalog, Some(name))
                     .context_window
                     .filter(|window| *window > 0)
             {
@@ -112,15 +123,11 @@ impl ModelResolution {
     }
 
     pub(crate) async fn apply(&self, settings: &mut CompactionSettings) {
-        let needs_catalog = self.config.providers.values().any(|profile| {
-            profile.models.iter().any(|entry| {
-                entry.enabled
-                    && matches!(
-                        entry.metadata_source,
-                        None | Some(MetadataSource::ModelsDev)
-                    )
-            })
-        });
+        let needs_catalog = self
+            .config
+            .providers
+            .values()
+            .any(|profile| profile.models.iter().any(|entry| entry.enabled));
         let catalog = self
             .catalog
             .get_or_init(|| async {
