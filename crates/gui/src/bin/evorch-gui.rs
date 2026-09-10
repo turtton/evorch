@@ -821,6 +821,8 @@ fn run() -> Result<(), GuiError> {
             let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
+                #[cfg(feature = "browser")]
+                browser: gui::browser::BrowserWindow::new(bus.clone(), handle.clone()),
                 _demo_directory: demo_directory,
                 _storage: storage,
                 _storage_fallback: storage_fallback,
@@ -832,6 +834,8 @@ fn run() -> Result<(), GuiError> {
 
 struct GuiApp {
     workbench: WorkbenchApp<AgentRuntime>,
+    #[cfg(feature = "browser")]
+    browser: gui::browser::BrowserWindow,
     _demo_directory: Option<tempfile::TempDir>,
     _storage: Storage,
     _storage_fallback: Option<tempfile::TempDir>,
@@ -839,6 +843,8 @@ struct GuiApp {
 
 impl eframe::App for GuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(feature = "browser")]
+        self.browser.render(ui);
         self.workbench.0.ui(ui, frame);
     }
 }
