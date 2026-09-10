@@ -59,6 +59,7 @@ pub enum MergeMode {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
     pub ownership: Option<crate::ownership::OwnerPermit>,
+    pub images: Vec<DelegateImage>,
     /// Explicit model selection for this run; absent means normal routing.
     pub model_preference: Option<crate::ModelPreference>,
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。
@@ -83,6 +84,13 @@ pub struct RunConfig {
     /// branch (`evorch/task/run-N`) を作成する。既定は `None`。worktree path は
     /// この値からは導出されず、常に run 名 (`run-N`) から決まる (issue #73 D2)。
     pub workspace_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateImage {
+    pub media_type: String,
+    pub data: String,
 }
 
 /// AgentRun に割り当てられた workspace の検査用 DTO。

@@ -58,6 +58,7 @@ fn tool_result(messages: &[providers::Message], call_id: &str) -> Option<(String
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
             }),
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

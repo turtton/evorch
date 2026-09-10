@@ -47,9 +47,41 @@ pub enum Role {
     Reviewer,
     /// 調査役 (v0.2)。read / grep と web_search / web_fetch を持ち、ネットワークは常時許可。
     Librarian,
+    Planner,
+    Oracle,
+    MultimodalLooker,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownRole {
+    pub name: String,
+}
+
+impl std::fmt::Display for UnknownRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown role: {}", self.name)
+    }
+}
+
+impl std::error::Error for UnknownRole {}
+
 impl Role {
+    pub fn from_name(name: &str) -> Result<Self, UnknownRole> {
+        match name {
+            "Orchestrator" => Ok(Self::Orchestrator),
+            "Explorer" => Ok(Self::Explorer),
+            "Worker" => Ok(Self::Worker),
+            "Reviewer" => Ok(Self::Reviewer),
+            "Librarian" => Ok(Self::Librarian),
+            "Planner" => Ok(Self::Planner),
+            "Oracle" => Ok(Self::Oracle),
+            "MultimodalLooker" => Ok(Self::MultimodalLooker),
+            _ => Err(UnknownRole {
+                name: name.to_owned(),
+            }),
+        }
+    }
+
     /// ロール名識別子。
     pub const fn name(&self) -> &'static str {
         match self {
@@ -58,6 +90,9 @@ impl Role {
             Role::Worker => "Worker",
             Role::Reviewer => "Reviewer",
             Role::Librarian => "Librarian",
+            Role::Planner => "Planner",
+            Role::Oracle => "Oracle",
+            Role::MultimodalLooker => "MultimodalLooker",
         }
     }
 
@@ -112,6 +147,15 @@ impl Role {
                 NetworkAccess::Allowed,
                 false,
             ),
+            Role::Planner => RoleCapabilities::new(
+                ["read", "grep", "git_diff", "skill_load", "web_fetch"],
+                NetworkAccess::OptIn,
+                false,
+            ),
+            Role::Oracle => {
+                RoleCapabilities::new(["read", "grep", "git_diff"], NetworkAccess::Denied, false)
+            }
+            Role::MultimodalLooker => RoleCapabilities::new(["read"], NetworkAccess::Denied, false),
         }
     }
 }

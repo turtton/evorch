@@ -40,12 +40,18 @@ pub enum PromptCompositionError {
 }
 
 /// 固定 4 ロールと agents 設定フィールドの対応表。
-fn role_bindings(config: &Config) -> [(Role, &RoleBindingConfig); 4] {
+fn role_bindings(config: &Config) -> [(Role, &RoleBindingConfig); 7] {
     [
         (Role::Orchestrator, &config.agents.orchestrator),
         (Role::Explorer, &config.agents.explorer),
         (Role::Worker, &config.agents.worker),
         (Role::Reviewer, &config.agents.reviewer),
+        (Role::Planner, &config.agents.roles.planner),
+        (Role::Oracle, &config.agents.roles.oracle),
+        (
+            Role::MultimodalLooker,
+            &config.agents.roles.multimodal_looker,
+        ),
     ]
 }
 

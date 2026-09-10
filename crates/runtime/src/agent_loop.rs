@@ -187,6 +187,19 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         return;
     }
     state.context.push_user(&state.task.prompt);
+    if let Some(message) = state.context.messages.last_mut() {
+        message.content.extend(
+            state
+                .task
+                .config
+                .images
+                .iter()
+                .map(|image| ContentBlock::Image {
+                    media_type: image.media_type.clone(),
+                    data: image.data.clone(),
+                }),
+        );
+    }
     state.publish_message_count();
     if state.transition(AgentRunPhase::Running, None).is_err() {
         cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
@@ -597,7 +610,8 @@ impl LoopState {
                     ContentBlock::ToolUse { id, name, input } => {
                         Some((id.clone(), name.clone(), input.clone()))
                     }
-                    ContentBlock::Text { .. }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolResult { .. } => None,
                 })
@@ -620,7 +634,8 @@ impl LoopState {
                             run_id: Some(self.task.run_id.to_string()),
                         })
                     }
-                    ContentBlock::Text { .. }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => None,
@@ -831,7 +846,8 @@ impl LoopState {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
+                ContentBlock::Image { .. }
+                | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })

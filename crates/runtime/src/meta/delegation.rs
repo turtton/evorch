@@ -9,6 +9,8 @@ use crate::{AgentRuntime, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
 struct DelegateBackgroundArgs {
+    #[serde(default)]
+    images: Vec<crate::run::DelegateImage>,
     role: String,
     prompt: String,
     #[serde(default)]
@@ -27,6 +29,8 @@ struct DelegateBackgroundArgs {
 
 #[derive(Deserialize)]
 struct DelegateArgs {
+    #[serde(default)]
+    images: Vec<crate::run::DelegateImage>,
     role: String,
     prompt: String,
     #[serde(default)]
@@ -85,6 +89,9 @@ pub(super) fn delegate_background(
         Ok(role) => role,
         Err(message) => return error(message),
     };
+    if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
+        return error("image payload requires MultimodalLooker");
+    }
     let category = match parse_args_category(args.category) {
         Ok(category) => category,
         Err(message) => return error(message),
@@ -99,6 +106,7 @@ pub(super) fn delegate_background(
         args.prompt,
         RunConfig {
             interactive: args.interactive,
+            images: args.images,
             name: args.name,
             category,
             load_skills,
@@ -128,6 +136,9 @@ pub(super) async fn delegate(
         Ok(role) => role,
         Err(message) => return error(message),
     };
+    if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
+        return error("image payload requires MultimodalLooker");
+    }
     let category = match parse_args_category(args.category) {
         Ok(category) => category,
         Err(message) => return error(message),
@@ -142,6 +153,7 @@ pub(super) async fn delegate(
         args.prompt,
         RunConfig {
             name: args.name,
+            images: args.images,
             category,
             load_skills,
             workspace_mode: args.workspace_mode.unwrap_or_default(),

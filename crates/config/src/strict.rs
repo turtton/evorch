@@ -54,7 +54,8 @@ const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
-const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer"];
+const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer", "roles"];
+const ADDITIONAL_ROLE_KEYS: &[&str] = &["planner", "oracle", "multimodal_looker"];
 const RULES_KEYS: &[&str] = &[
     "context_window_tokens",
     "response_headroom_tokens",
@@ -275,11 +276,20 @@ fn validate_agents(root: &toml::value::Table) -> Result<(), ConfigError> {
         return Ok(());
     };
     check_keys(agents, "agents", AGENTS_KEYS)?;
+    validate_role_bindings(agents, "agents")
+}
+
+fn validate_role_bindings(agents: &toml::value::Table, prefix: &str) -> Result<(), ConfigError> {
     for (role, value) in agents {
         let Some(binding) = value.as_table() else {
             continue;
         };
-        let role_path = format!("agents.{role}");
+        let role_path = format!("{prefix}.{role}");
+        if prefix == "agents" && role == "roles" {
+            check_keys(binding, &role_path, ADDITIONAL_ROLE_KEYS)?;
+            validate_role_bindings(binding, &role_path)?;
+            continue;
+        }
         check_keys(binding, &role_path, ROLE_BINDING_KEYS)?;
         if let Some(generation) = binding.get("generation").and_then(toml::Value::as_table) {
             check_keys(

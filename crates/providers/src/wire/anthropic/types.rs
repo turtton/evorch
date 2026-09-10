@@ -45,6 +45,9 @@ pub enum WireRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireContentBlock {
+    Image {
+        source: WireImageSource,
+    },
     /// 平文テキスト。
     Text {
         /// 本文。
@@ -75,6 +78,12 @@ pub enum WireContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireImageSource {
+    Base64 { media_type: String, data: String },
 }
 
 /// Anthropic のツール実行結果要素。

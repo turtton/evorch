@@ -8,6 +8,8 @@ mod compaction;
 mod delegation;
 mod escalation;
 mod messaging;
+#[cfg(test)]
+mod role_tests;
 mod runs;
 mod skills;
 
@@ -113,7 +115,15 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
         "explorer" => Ok(Role::Explorer),
         "worker" => Ok(Role::Worker),
         "reviewer" => Ok(Role::Reviewer),
-        _ => Err(format!("unknown role: {name}")),
+        "planner" => Ok(Role::Planner),
+        "oracle" => Ok(Role::Oracle),
+        "multimodallooker" | "multimodal_looker" => Ok(Role::MultimodalLooker),
+        _ => Err(serde_json::json!({
+            "code": "unknown_role",
+            "role": name,
+            "message": format!("unknown role: {name}")
+        })
+        .to_string()),
     }
 }
 

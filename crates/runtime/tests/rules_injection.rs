@@ -58,6 +58,7 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
                 Some(text.as_str())
             }
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
@@ -360,6 +361,7 @@ async fn run_read_fixture(
                 is_error: false,
             } if tool_call_id == "call-1" => Some(content.clone()),
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

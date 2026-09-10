@@ -12,6 +12,7 @@ use routing::{ComposedProvider, ComposedProviders, CredentialRef, ProviderProfil
 
 use super::*;
 
+mod additional_roles;
 mod live;
 mod preference;
 

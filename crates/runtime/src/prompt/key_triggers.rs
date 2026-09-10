@@ -53,11 +53,14 @@ pub fn render_key_triggers(sources: &[TriggerSource]) -> String {
 ///
 /// 各エントリはロール名とその [`agents::RoleCapabilities`] の要約からなる。
 pub fn default_role_triggers() -> Vec<TriggerSource> {
-    const ROLES: [agents::Role; 4] = [
+    const ROLES: [agents::Role; 7] = [
         agents::Role::Orchestrator,
         agents::Role::Explorer,
         agents::Role::Worker,
         agents::Role::Reviewer,
+        agents::Role::Planner,
+        agents::Role::Oracle,
+        agents::Role::MultimodalLooker,
     ];
     ROLES
         .iter()
@@ -203,13 +206,21 @@ mod tests {
     // When: default_role_triggers を構築する
     // Then: 4 ロール分のエントリがケイパビリティ要約付きで固定順に並ぶ
     #[test]
-    fn default_role_triggers_lists_all_four_roles_with_capability_summary() {
+    fn default_role_triggers_lists_fixed_roles_with_capability_summary() {
         let triggers = default_role_triggers();
 
         let names: Vec<&str> = triggers.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["Orchestrator", "Explorer", "Worker", "Reviewer"]
+            vec![
+                "Orchestrator",
+                "Explorer",
+                "Worker",
+                "Reviewer",
+                "Planner",
+                "Oracle",
+                "MultimodalLooker"
+            ]
         );
         for trigger in &triggers {
             assert!(
