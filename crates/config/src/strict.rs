@@ -9,6 +9,7 @@ use crate::types::agents::CATEGORY_NAMES;
 const ROOT_KEYS: &[&str] = &[
     "version",
     "providers",
+    "model_presets",
     "routing",
     "panel",
     "diagnostics",
@@ -31,7 +32,20 @@ const PROVIDER_KEYS: &[&str] = &[
     "default_model",
 ];
 const KEYRING_KEYS: &[&str] = &["type", "service", "account"];
-const MODEL_ENTRY_KEYS: &[&str] = &["id", "enabled"];
+const MODEL_ENTRY_KEYS: &[&str] = &[
+    "id",
+    "enabled",
+    "metadata_source",
+    "metadata_ref",
+    "preset",
+    "context_window",
+];
+const MODEL_PRESET_KEYS: &[&str] = &[
+    "context_window",
+    "max_output_tokens",
+    "input_price_per_million_usd",
+    "output_price_per_million_usd",
+];
 const ENV_KEYS: &[&str] = &["type", "var"];
 const ROUTING_KEYS: &[&str] = &["routes"];
 const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model"];
@@ -100,6 +114,14 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         return Ok(());
     };
     check_keys(root, "", ROOT_KEYS)?;
+
+    if let Some(presets) = root.get("model_presets").and_then(toml::Value::as_table) {
+        for (name, value) in presets {
+            if let Some(preset) = value.as_table() {
+                check_keys(preset, &format!("model_presets.{name}"), MODEL_PRESET_KEYS)?;
+            }
+        }
+    }
 
     if let Some(providers) = root.get("providers").and_then(toml::Value::as_table) {
         for (name, value) in providers {

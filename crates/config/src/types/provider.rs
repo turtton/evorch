@@ -135,6 +135,22 @@ pub struct ModelEntryConfig {
     /// 利用可能かどうか。省略時は有効。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetadataSource {
+    Manual,
+    ModelsDev,
+    ProviderDefault,
 }
 
 const fn default_true() -> bool {
@@ -147,6 +163,10 @@ impl ModelEntryConfig {
         Self {
             id: id.into(),
             enabled: true,
+            metadata_source: None,
+            metadata_ref: None,
+            preset: None,
+            context_window: None,
         }
     }
 }
@@ -164,6 +184,14 @@ struct ModelEntryDe {
     id: String,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    metadata_source: Option<MetadataSource>,
+    #[serde(default)]
+    metadata_ref: Option<String>,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    context_window: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for ModelEntryConfig {
@@ -200,6 +228,10 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                 Ok(ModelEntryConfig {
                     id: entry.id,
                     enabled: entry.enabled,
+                    metadata_source: entry.metadata_source,
+                    metadata_ref: entry.metadata_ref,
+                    preset: entry.preset,
+                    context_window: entry.context_window,
                 })
             }
         }
@@ -481,11 +513,14 @@ mod tests {
         assert_eq!(object["additionalProperties"], false);
         assert_eq!(object["required"], serde_json::json!(["id"]));
         assert_eq!(object["properties"]["enabled"]["default"], true);
-        let validator = jsonschema::validator_for(entry).expect("entry schema compiles");
+        let standalone = serde_json::to_value(schemars::schema_for!(ModelEntryConfig))
+            .expect("standalone entry schema serializes");
+        let validator = jsonschema::validator_for(&standalone).expect("entry schema compiles");
         for value in [
             serde_json::json!("a"),
             serde_json::json!({"id": "b", "enabled": false}),
             serde_json::json!({"id": "c"}),
+            serde_json::json!({"id": "d", "metadata_source": "models-dev", "metadata_ref": "deepseek/d", "preset": "deepseek-v4", "context_window": 128000}),
         ] {
             assert!(validator.is_valid(&value), "{value}");
         }

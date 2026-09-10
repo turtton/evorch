@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod compaction;
 pub mod misc;
+pub mod model_preset;
 pub mod orchestration;
 pub mod panel;
 pub mod provider;
@@ -20,11 +21,12 @@ pub use agents::{
 };
 pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
+pub use model_preset::ModelPresetConfig;
 pub use orchestration::OrchestrationConfig;
 pub use panel::PanelConfig;
 pub use provider::{
-    ApiProtocolConfig, CredentialRefConfig, ModelEntryConfig, ProviderProfileConfig,
-    ProviderTypeConfig,
+    ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig,
+    ProviderProfileConfig, ProviderTypeConfig,
 };
 pub use routing::{RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
@@ -44,6 +46,8 @@ pub struct Config {
     pub version: u32,
     /// プロバイダプロファイル (マップキーがプロファイル名)。
     pub providers: BTreeMap<String, ProviderProfileConfig>,
+    #[serde(default)]
+    pub model_presets: BTreeMap<String, ModelPresetConfig>,
     /// ロール別エージェントバインディング。
     pub agents: AgentsConfig,
     /// ルーティング設定。
@@ -69,6 +73,7 @@ impl Default for Config {
         Self {
             version: CURRENT_VERSION,
             providers: BTreeMap::new(),
+            model_presets: BTreeMap::new(),
             agents: AgentsConfig::default(),
             routing: RoutingConfig::default(),
             panel: PanelConfig::default(),

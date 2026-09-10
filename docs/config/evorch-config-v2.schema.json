@@ -56,6 +56,13 @@
         "retention_days": 30
       }
     },
+    "model_presets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelPresetConfig"
+      },
+      "default": {}
+    },
     "orchestration": {
       "description": "オーケストレーションループ設定。",
       "$ref": "#/$defs/OrchestrationConfig",
@@ -386,6 +393,14 @@
       },
       "additionalProperties": false
     },
+    "MetadataSource": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "models-dev",
+        "provider-default"
+      ]
+    },
     "MetricsConfig": {
       "description": "メトリクス収集の設定。",
       "type": "object",
@@ -416,6 +431,14 @@
           "description": "モデル ID と利用可否の設定。",
           "type": "object",
           "properties": {
+            "context_window": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "enabled": {
               "description": "利用可能かどうか。省略時は有効。",
               "type": "boolean",
@@ -424,6 +447,28 @@
             "id": {
               "description": "モデル ID。",
               "type": "string"
+            },
+            "metadata_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metadata_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MetadataSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "additionalProperties": false,
@@ -432,6 +477,42 @@
           ]
         }
       ]
+    },
+    "ModelPresetConfig": {
+      "type": "object",
+      "properties": {
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_price_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_price_per_million_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "OrchestrationConfig": {
       "description": "オーケストレーションループの境界設定。\n\nすべての上限は正の値でなければならず、既定値は issue #73 の\nbounded 契約 (AC5) で固定される。",

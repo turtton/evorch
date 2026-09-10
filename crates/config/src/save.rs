@@ -263,7 +263,7 @@ pub(crate) fn normalized_models(input: &[ModelEntryConfig]) -> Vec<ModelEntryCon
         } else {
             models.push(ModelEntryConfig {
                 id: id.into(),
-                enabled: model.enabled,
+                ..model.clone()
             });
         }
     }

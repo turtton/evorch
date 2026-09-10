@@ -19,8 +19,8 @@ fn input() -> OpenAiCompatibleProviderInput {
 
 fn disabled(id: &str) -> ModelEntryConfig {
     ModelEntryConfig {
-        id: id.into(),
         enabled: false,
+        ..ModelEntryConfig::enabled(id)
     }
 }
 

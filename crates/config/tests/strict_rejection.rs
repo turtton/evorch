@@ -101,8 +101,8 @@ fn models_mixed_form_accepted() {
         vec![
             config::types::provider::ModelEntryConfig::enabled("a"),
             config::types::provider::ModelEntryConfig {
-                id: "b".into(),
-                enabled: false
+                enabled: false,
+                ..config::types::provider::ModelEntryConfig::enabled("b")
             },
         ]
     );

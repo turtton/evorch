@@ -30,8 +30,8 @@ pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use schema::json_schema;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
-    Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetricsConfig,
-    ModelEntryConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
-    ReasoningEffortConfig, ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig,
-    RoutingConfig, RulesConfig, SummarizerKind,
+    Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetadataSource,
+    MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig, PermissionConfig,
+    ProviderProfileConfig, ProviderTypeConfig, ReasoningEffortConfig, ResolvedAgentBinding,
+    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SummarizerKind,
 };
