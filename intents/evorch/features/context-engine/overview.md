@@ -30,3 +30,32 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 
 - cache TTL の各 provider 差異の抽象化方法
 - compaction の要否を agent が判断する基準の初期実装
+
+## v0.11 (v06-model-catalog-preset): models.dev カタログ + ModelPreset + compaction window 正確化
+
+### 背景
+
+deepseek-v4-flash-0731 で 413 Payload Too Large が発生。 compaction の `context_window_tokens` が DEFAULT 200k 固定で、モデルごとの実際の limit を参照する仕組みがなかったため。また provider 別に同一モデルを個別設定する構造的な不便があった。
+
+### 実装内容 (P1-P4)
+
+- P1 config (3b670b3): `[model_presets.<name>]` (context_window/max_output_tokens/pricing) と `ModelEntryConfig` 拡張 (metadata_source/metadata_ref/preset/context_window、全 optional)。legacy 文字列/id+enabled 互換維持。schema artifact regen 済み
+- P2 catalog (14fe463): 新規 `crates/catalog`。models.dev `/api.json` fetch、24h TTL cache (atomic write+file lock)、stale 利用+バックグラウンド refresh、fetch timeout 10s。13 テスト全ネットワーク非依存。実 API 動作も確認 (GPT-4o context=128000)
+- P3 runtime (5a408a2): 解決レイヤ (manual → preset → catalog → None)。catalog は初回 run 時に非同期ロード。方式 A で解決 window を `model_overrides` に注入し compaction に反映。`model` / `profile/model` 両形式対応
+- P4 GUI (0da9773): provider 設定で preset 選択・metadata_source・models.dev 参照・context_window override、解決値表示 (解決元付き)、Refresh ボタン + 最終更新時刻。config serializer のメタデータ欠落修正 (内部実装のみ)
+
+### 副次修正
+
+- 387d801: shell contract allowlist の `sh -c` unwrap (ad83290 以降 shell_delivery の `gh pr merge` が deny されていた既存 regression)。delivery adapter の出力抽出も新形式 `exit_code: 0` に対応
+- 1adccb6: routing の ModelEntryConfig テスト initializer を struct update syntax に統一
+
+### 検証
+
+- workspace テスト 23 group green (残は既知 flake `headless_run_completes_with_single_mock_response` のみ、単体実行で pass)
+- clippy / fmt clean
+
+### 残課題 (open questions)
+
+- models.dev provider ID ↔ evorch provider 名 (Crof 等) のマッピング方法
+- models.dev に存在しないマイナーモデルの fallback (preset 必須?)
+- cache 更新時の preset 整合性チェック
