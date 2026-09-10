@@ -63,6 +63,10 @@ pub struct ThreadRecord {
     pub worktree_path: Option<PathBuf>,
     #[serde(default)]
     pub model_preference: Option<ModelPreference>,
+    #[serde(default)]
+    pub parent_thread_id: Option<ThreadId>,
+    #[serde(default)]
+    pub fork_event_id: Option<i64>,
 }
 
 impl ThreadRecord {
@@ -77,6 +81,8 @@ impl ThreadRecord {
             branch: None,
             worktree_path: None,
             model_preference: None,
+            parent_thread_id: None,
+            fork_event_id: None,
         }
     }
 
