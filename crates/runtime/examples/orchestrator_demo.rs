@@ -260,6 +260,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     EventKind::Diagnostic(event) => {
                         println!("[event] kind=Diagnostic payload={event:?}")
                     }
+                    EventKind::Snapshot(event) => {
+                        println!("[event] kind=Snapshot payload={event:?}")
+                    }
                 },
                 Err(RecvError::Lagged(skipped)) => {
                     println!("[event] kind=Lagged payload=skipped:{skipped}")

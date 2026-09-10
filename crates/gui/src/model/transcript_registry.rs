@@ -47,6 +47,7 @@ impl TranscriptRegistry {
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
+            EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
             EventKind::Diagnostic(event) => event.run_id.as_ref().map_or_else(
                 || vec![TranscriptKey::Thread],
                 |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
@@ -124,7 +125,8 @@ impl TranscriptRegistry {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_) => {}
+            | EventKind::Ownership(_)
+            | EventKind::Snapshot(_) => {}
         }
 
         if let EventKind::Tool(ToolEvent::ToolStarted {
@@ -170,7 +172,7 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_) => None,
+            | EventKind::Orchestrator(_) | EventKind::Snapshot(_) => None,
         };
         let owner = explicit_thread.or_else(|| {
             route.iter().find_map(|key| match key {

@@ -292,6 +292,11 @@ impl SecretGuard {
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;
                 self.check_text("event", "Ownership.payload", &payload)
             }
+            EventKind::Snapshot(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "Snapshot.payload", &payload)
+            }
             EventKind::Diagnostic(event) => {
                 let payload = serde_json::to_string(event)
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;

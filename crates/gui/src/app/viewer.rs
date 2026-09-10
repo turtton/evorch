@@ -82,6 +82,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),
                 SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
+                SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::TogglePause(thread_id) => self.toggle_pause(thread_id),

@@ -136,7 +136,7 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::CancelChat { .. }
-            | WorkbenchCommand::DecideMerge(_) => {}
+            | WorkbenchCommand::DecideMerge(_) | WorkbenchCommand::RestoreSnapshot { .. } => {}
         }
     }
     (pauses, resumes, cancels)
@@ -241,7 +241,7 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
-            | WorkbenchCommand::CancelGoal { .. } => None,
+            | WorkbenchCommand::CancelGoal { .. } | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
     assert_eq!(decisions.len(), 1, "expected exactly one DecideMerge");

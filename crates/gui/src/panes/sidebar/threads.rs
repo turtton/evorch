@@ -62,13 +62,24 @@ pub fn render(
                 if ui.button(pause).clicked() {
                     *action = Some(SidebarAction::TogglePause(thread.id.clone()));
                 }
+                if ui.small_button("Fork").clicked() {
+                    *action = Some(SidebarAction::ForkThread(thread.id.clone()));
+                }
                 ui.label(thread_state_label(state));
                 let title_response = ui.add_sized(
                     egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
-                    egui::Label::new(&thread.title)
-                        .truncate()
-                        .halign(Align::LEFT)
-                        .sense(Sense::click()),
+                    egui::Label::new(format!(
+                        "{}{}",
+                        if thread.parent_thread_id.is_some() {
+                            "↳ "
+                        } else {
+                            ""
+                        },
+                        thread.title
+                    ))
+                    .truncate()
+                    .halign(Align::LEFT)
+                    .sense(Sense::click()),
                 );
                 if title_response.clicked() {
                     *action = Some(SidebarAction::SwitchThread(thread.id.clone()));

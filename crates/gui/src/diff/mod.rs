@@ -90,6 +90,9 @@ pub struct DiffModel {
 }
 
 impl DiffModel {
+    pub fn show_snapshot(&mut self, text: String) {
+        self.working_tree = state_from_result(Ok(text));
+    }
     /// 全 mode が未取得のモデルを生成する。
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();

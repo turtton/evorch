@@ -55,6 +55,7 @@ pub struct WorkbenchState<S> {
     pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
+    pub(super) theme_preset: crate::theme::style::ThemePreset,
     pub(super) diff: DiffModel,
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
@@ -109,6 +110,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
+            theme_preset: crate::theme::style::ThemePreset::Graphite,
             diff: DiffModel::new(),
             diff_source: Arc::new(GitCliDiffSource),
             goal_form: GoalFormModel::default(),
@@ -195,6 +197,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn with_command_sink(mut self, sink: Box<dyn CommandSink>) -> Self {
         self.sink = sink;
         self
+    }
+
+    pub fn reload_theme(&mut self, ctx: &egui::Context, preset: crate::theme::style::ThemePreset) {
+        self.theme_preset = preset;
+        crate::theme::style::install_preset(ctx, preset);
+        self.theme_installed = true;
     }
 
     pub const fn dock(&self) -> &DockState<PanelId> {

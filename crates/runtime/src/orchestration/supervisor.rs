@@ -618,7 +618,8 @@ impl SupervisorActor {
             | EventKind::Usage(_)
             | EventKind::Fault(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_) => {}
+            | EventKind::Ownership(_)
+            | EventKind::Snapshot(_) => {}
         }
     }
 

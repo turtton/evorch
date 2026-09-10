@@ -82,6 +82,14 @@ impl LoopState {
                 let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
                     .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                     .flatten();
+                let _snapshot_guard = match self.snapshot_before_tool(&name, &id).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        self.context.push_tool_result(id, ToolResult::error(error));
+                        self.publish_message_count();
+                        continue;
+                    }
+                };
                 let execution = tokio::select! {
                     biased;
                     changed = self.channels.cancel_rx.changed() => {

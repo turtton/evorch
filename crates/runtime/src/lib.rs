@@ -34,6 +34,7 @@ pub mod rules;
 pub mod run;
 pub mod runtime;
 pub mod skill;
+pub mod snapshot;
 pub mod state;
 pub mod workspace;
 

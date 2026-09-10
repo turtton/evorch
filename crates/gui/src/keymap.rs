@@ -4,6 +4,39 @@ use std::collections::BTreeMap;
 
 use workspace_ui::{KeyAction, KeybindSettings};
 
+#[derive(Debug, thiserror::Error)]
+pub enum PanelKeybindError {
+    #[error("unknown panel key action: {0}")]
+    Action(String),
+    #[error("invalid panel key chord: {0}")]
+    Chord(String),
+}
+
+pub fn panel_keybinds(
+    base: &KeybindSettings,
+    panel: &config::PanelConfig,
+) -> Result<KeybindSettings, PanelKeybindError> {
+    let mut settings = base.clone();
+    for (name, value) in &panel.keybinds {
+        let action = match name.as_str() {
+            "focus_agent_pane" => KeyAction::FocusAgentPane,
+            "focus_terminal_pane" => KeyAction::FocusTerminalPane,
+            "focus_tasks_pane" => KeyAction::FocusTasksPane,
+            "save_layout" => KeyAction::SaveLayout,
+            "reset_layout" => KeyAction::ResetLayout,
+            _ => return Err(PanelKeybindError::Action(name.clone())),
+        };
+        let chord: workspace_ui::KeyChord = value
+            .parse()
+            .map_err(|_| PanelKeybindError::Chord(value.clone()))?;
+        if egui::Key::from_name(&chord.key).is_none() {
+            return Err(PanelKeybindError::Chord(value.clone()));
+        }
+        settings.bindings.insert(action, chord);
+    }
+    Ok(settings)
+}
+
 /// 設定されたキーバインドを egui 入力に解決するマッパーです。
 #[derive(Debug, Clone)]
 pub struct Keymap {
@@ -61,6 +94,39 @@ mod tests {
     use workspace_ui::{KeyAction, KeybindSettings};
 
     use super::Keymap;
+
+    #[test]
+    fn panel_overrides_preserve_unconfigured_bindings() {
+        // Given: a panel override and saved UI defaults.
+        let panel = config::PanelConfig {
+            keybinds: [("save_layout".into(), "Alt+S".into())].into(),
+            ..Default::default()
+        };
+        // When: resolve the panel map.
+        let resolved = super::panel_keybinds(&KeybindSettings::default(), &panel).expect("keys");
+        // Then: configured actions override while other bindings survive.
+        assert_eq!(
+            resolved.bindings[&KeyAction::SaveLayout].to_string(),
+            "Alt+S"
+        );
+        assert_eq!(
+            resolved.bindings[&KeyAction::FocusAgentPane].to_string(),
+            "Ctrl+1"
+        );
+    }
+
+    #[test]
+    fn panel_rejects_unknown_actions_and_keys() {
+        // Given: invalid action or key names.
+        for (action, key) in [("unknown", "Ctrl+S"), ("save_layout", "Ctrl+Unknown")] {
+            let panel = config::PanelConfig {
+                keybinds: [(action.into(), key.into())].into(),
+                ..Default::default()
+            };
+            // When / Then: no silently ignored binding is accepted.
+            assert!(super::panel_keybinds(&KeybindSettings::default(), &panel).is_err());
+        }
+    }
 
     fn run_with_key(key: Key, modifiers: Modifiers) -> egui::Context {
         let ctx = egui::Context::default();

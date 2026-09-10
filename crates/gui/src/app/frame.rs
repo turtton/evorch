@@ -11,10 +11,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.theme_installed {
-            crate::theme::install(&ctx);
+            crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
         }
         self.drain_pump();
+        for event in self.sink.poll() {
+            self.apply_loop_event(event);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.diff.poll();
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
@@ -116,7 +120,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
                 | EventKind::Diagnostic(_)
-                | EventKind::Ownership(_) => {}
+                | EventKind::Ownership(_)
+                | EventKind::Snapshot(_) => {}
             // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
             EventKind::Orchestrator(ev) => {
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);

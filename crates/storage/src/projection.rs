@@ -180,7 +180,10 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         EventKind::Compaction(_) => {}
         // goal ループの状態は runtime 側の GoalLedger で畳み込むため、
         // セッション射影は変更しない。
-            EventKind::Orchestrator(_) | EventKind::Diagnostic(_) | EventKind::Ownership(_) => {}
+        EventKind::Orchestrator(_)
+        | EventKind::Diagnostic(_)
+        | EventKind::Ownership(_)
+        | EventKind::Snapshot(_) => {}
     }
 }
 

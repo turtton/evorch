@@ -80,6 +80,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
         | EventKind::Ownership(_)
-        | EventKind::Orchestrator(_) => None,
+        | EventKind::Orchestrator(_)
+        | EventKind::Snapshot(_) => None,
     }
 }

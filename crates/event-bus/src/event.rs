@@ -85,6 +85,15 @@ pub enum EventKind {
     /// Structured diagnostics persisted in the event ledger.
     Diagnostic(DiagnosticEvent),
     Ownership(crate::OwnershipEvent),
+    Snapshot(SnapshotEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotEvent {
+    pub run_id: String,
+    pub call_id: String,
+    pub snapshot_id: String,
+    pub workspace_root: std::path::PathBuf,
 }
 
 /// Severity shared by diagnostic producers and transcript consumers.

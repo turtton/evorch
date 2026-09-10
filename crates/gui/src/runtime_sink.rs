@@ -50,6 +50,8 @@ pub struct RuntimeCommandSink {
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
+    events_tx: std::sync::mpsc::Sender<LoopEvent>,
+    events_rx: std::sync::mpsc::Receiver<LoopEvent>,
 }
 
 impl RuntimeCommandSink {
@@ -59,6 +61,7 @@ impl RuntimeCommandSink {
         handle: tokio::runtime::Handle,
         supervisor: SupervisorHandle,
     ) -> Self {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
         Self {
             runtime,
             handle,
@@ -67,6 +70,8 @@ impl RuntimeCommandSink {
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
             ownership: None,
+            events_tx,
+            events_rx,
         }
     }
 
@@ -100,6 +105,8 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn poll(&mut self) -> Vec<LoopEvent> { self.events_rx.try_iter().collect() }
+
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
         let permit = if let Some(host) = &self.ownership {
             let thread = match &command {
@@ -107,6 +114,7 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::CancelChat { thread_id } => Some(thread_id.as_str()),
                 WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
+                WorkbenchCommand::RestoreSnapshot { .. } => None,
                 WorkbenchCommand::PauseGoal { .. } | WorkbenchCommand::ResumeGoal { .. } | WorkbenchCommand::CancelGoal { .. } => None,
             };
             match thread.map(|thread| host.owned_permit(thread)).transpose() {
@@ -115,6 +123,21 @@ impl CommandSink for RuntimeCommandSink {
             }
         } else { None };
         match command {
+            WorkbenchCommand::RestoreSnapshot { thread_id, redo } => {
+                let Some(&run) = self.chat_runs.get(&thread_id) else {
+                    return vec![LoopEvent::ChatRejected { thread_id, reason: "No chat snapshot available".into() }];
+                };
+                let runtime = self.runtime.clone();
+                let tx = self.events_tx.clone();
+                self.handle.spawn(async move {
+                    let event = match runtime.restore_snapshot(run, redo).await {
+                        Ok(diff) => LoopEvent::SnapshotRestored { thread_id, diff },
+                        Err(reason) => LoopEvent::ChatRejected { thread_id, reason },
+                    };
+                    let _ = tx.send(event);
+                });
+                Vec::new()
+            }
             WorkbenchCommand::CancelChat { thread_id } => {
                 let Some(&run_id) = self.chat_runs.get(&thread_id) else {
                     return vec![LoopEvent::ChatRejected {

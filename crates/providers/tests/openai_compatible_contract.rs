@@ -83,7 +83,8 @@ fn usage_events(events: &[Event]) -> Vec<&UsageEvent> {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
         | EventKind::Diagnostic(_)
-        | EventKind::Ownership(_) => None,
+        | EventKind::Ownership(_)
+        | EventKind::Snapshot(_) => None,
         })
         .collect()
 }

@@ -269,7 +269,7 @@ fn tool_result_content(content: &WireContent) -> Result<Vec<ToolResultContent>, 
 fn wire_texts(content: &WireContent) -> Result<Vec<String>, ProviderError> {
     match content {
         WireContent::Multimodal(_) => Err(ProviderError::InvalidJson {
-            detail: "image content is not text".into(),
+            detail: "image content cannot be decoded as text".into(),
         }),
         WireContent::Text(text) => Ok(vec![text.clone()]),
         WireContent::Parts(parts) => parts

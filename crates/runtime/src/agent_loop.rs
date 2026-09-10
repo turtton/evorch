@@ -5,6 +5,7 @@
 
 mod messages;
 mod tool_calls;
+mod snapshots;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
