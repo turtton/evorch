@@ -19,6 +19,7 @@ mod strict;
 pub mod types;
 
 pub use error::ConfigError;
+pub use types::OwnershipConfig;
 pub use load::{LoadOptions, user_config_dir};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};

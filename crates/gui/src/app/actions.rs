@@ -271,6 +271,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn submit_command(&mut self, command: WorkbenchCommand) {
+        if !self.thread_writable() {
+            self.push_notice("Read-only attach: explicitly Start or Claim before mutating.");
+            return;
+        }
         self.issued.push(command.clone());
         for event in self.sink.submit(command) {
             self.apply_loop_event(event);

@@ -253,6 +253,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     EventKind::Orchestrator(event) => {
                         println!("[event] kind=Orchestrator payload={event:?}")
                     }
+                    EventKind::Ownership(event) => {
+                        println!("[event] kind=Ownership payload={event:?}")
+                    }
                     EventKind::Diagnostic(event) => {
                         println!("[event] kind=Diagnostic payload={event:?}")
                     }

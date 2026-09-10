@@ -37,6 +37,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_composer(&mut self) {
+        if !self.thread_writable() {
+            self.push_notice("Read-only attach: explicitly Start or Claim before sending.");
+            return;
+        }
         let raw = self.composer.input.clone();
         match parse_input(&raw) {
             ComposerInput::Empty => {}

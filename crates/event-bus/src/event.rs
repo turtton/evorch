@@ -84,6 +84,7 @@ pub enum EventKind {
     Orchestrator(OrchestratorEvent),
     /// Structured diagnostics persisted in the event ledger.
     Diagnostic(DiagnosticEvent),
+    Ownership(crate::OwnershipEvent),
 }
 
 /// Severity shared by diagnostic producers and transcript consumers.
@@ -851,6 +852,7 @@ pub enum CompactionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{OwnershipAction, OwnershipEvent};
 
     #[test]
     fn serde_round_trip_preserves_every_variant() {
@@ -1067,6 +1069,16 @@ mod tests {
                 }
                 .into(),
             ),
+            (
+                "Ownership",
+                OwnershipEvent {
+                    thread_id: "thread-1".into(),
+                    owner_id: "owner-1".into(),
+                    generation: 3,
+                    action: OwnershipAction::Claimed,
+                }
+                .into(),
+            ),
         ];
 
         for (category, kind) in cases {
@@ -1084,14 +1096,18 @@ mod tests {
                 "outer tag mismatch: category={category}"
             );
             // 内側 enum レベルの隣接タグ（{"kind", "payload"}）
-            assert!(
-                value["kind"]["payload"]["kind"].is_string(),
-                "inner tag missing: category={category}"
-            );
-            assert!(
-                value["kind"]["payload"]["payload"].is_object(),
-                "inner payload missing: category={category}"
-            );
+            if category != "Ownership" {
+                assert!(
+                    value["kind"]["payload"]["kind"].is_string(),
+                    "inner tag missing: category={category}"
+                );
+            }
+            if category != "Ownership" {
+                assert!(
+                    value["kind"]["payload"]["payload"].is_object(),
+                    "inner payload missing: category={category}"
+                );
+            }
         }
     }
 

@@ -5,6 +5,7 @@ pub mod compaction;
 pub mod misc;
 pub mod model_preset;
 pub mod orchestration;
+pub mod ownership;
 pub mod panel;
 pub mod provider;
 pub mod routing;
@@ -23,6 +24,7 @@ pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
 pub use model_preset::ModelPresetConfig;
 pub use orchestration::OrchestrationConfig;
+pub use ownership::OwnershipConfig;
 pub use panel::PanelConfig;
 pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig,
@@ -66,6 +68,7 @@ pub struct Config {
     pub compaction: CompactionConfig,
     /// オーケストレーションループ設定。
     pub orchestration: OrchestrationConfig,
+    pub ownership: OwnershipConfig,
 }
 
 impl Default for Config {
@@ -83,6 +86,7 @@ impl Default for Config {
             rules: RulesConfig::default(),
             compaction: CompactionConfig::default(),
             orchestration: OrchestrationConfig::default(),
+            ownership: OwnershipConfig::default(),
         }
     }
 }

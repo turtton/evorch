@@ -499,9 +499,16 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
-        config: RunConfig,
+        mut config: RunConfig,
         handoff: Option<RunHandoff>,
     ) -> RunId {
+        if let Some(parent) = parent {
+            config.ownership = lock_runs(&self.shared.runs).get(&parent)
+                .and_then(|entry| entry.config.ownership.clone()).or(config.ownership);
+        }
+        if let Some(permit) = &mut config.ownership {
+            permit.run_id = Some(run_id.to_string());
+        }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         let name = config
             .name

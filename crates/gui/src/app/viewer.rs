@@ -12,6 +12,7 @@ use crate::panes::{
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        self.ownership_ui(ui);
         self.panels.retain(|panel_id, _| {
             !panel_id.as_str().starts_with("agent-run-") || self.dock.find_tab(panel_id).is_some()
         });

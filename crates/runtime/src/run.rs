@@ -58,6 +58,7 @@ pub enum MergeMode {
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
+    pub ownership: Option<crate::ownership::OwnerPermit>,
     /// Explicit model selection for this run; absent means normal routing.
     pub model_preference: Option<crate::ModelPreference>,
     /// ユーザー入力を待ち受ける対話モードか。既定は `false` (非対話)。

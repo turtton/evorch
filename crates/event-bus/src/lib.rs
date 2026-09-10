@@ -3,6 +3,8 @@
 pub mod bus;
 pub mod event;
 pub mod orchestrator;
+pub mod ownership;
+pub use ownership::{OwnershipAction, OwnershipEvent};
 pub mod otel;
 pub mod ring;
 pub mod usage;
