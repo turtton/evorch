@@ -31,6 +31,7 @@ fn harness(loaded: bool) -> Harness<'static, ProviderSettingsModel> {
             settings,
         );
     harness.run();
+    harness.run_steps(30);
     harness
 }
 
@@ -205,4 +206,33 @@ fn capture_model_management() {
         .unwrap()
         .save("/tmp/opencode/models-applied-default.png")
         .unwrap();
+}
+
+#[test]
+fn configured_models_use_natural_height_when_content_exceeds_half_viewport() {
+    // Given: enough rows to exceed the former half-viewport inner scroll limit.
+    let mut editor = OpenAiEditorModel::default();
+    for index in 0..12 {
+        editor.add_model(&format!("model-{index}")).unwrap();
+    }
+    let presets = Default::default();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 1000.0))
+        .build_ui(move |ui| {
+            gui::theme::install(ui.ctx());
+            gui::panes::provider_models::provider_models(
+                ui,
+                &mut editor,
+                &gui::model::model_metadata::MetadataSources {
+                    presets: &presets,
+                    catalog: None,
+                },
+            );
+        });
+    // When: the model form lays out all rows.
+    h.run();
+    // Then: adding a model follows the complete list, not a nested scroll viewport.
+    let last = h.get_by_label("Enable model-11").rect();
+    let add = h.get_by_label("Add model").rect();
+    assert!(add.top() > last.bottom());
 }

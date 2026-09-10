@@ -36,17 +36,13 @@ pub fn provider_settings_modal(
             };
             match &mut model.editor {
                 Some(ProfileEditor::OpenAiCompatible(editor)) => {
-                    if ctx.viewport_rect().height() < 800.0 {
-                        egui::ScrollArea::vertical()
-                            .id_salt("openai-editor")
-                            .auto_shrink([false, false])
-                            .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
-                            .show(ui, |ui| {
-                                action = openai_body(ui, editor, &sources);
-                            });
-                    } else {
-                        action = openai_body(ui, editor, &sources);
-                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("openai-editor")
+                        .auto_shrink([false, false])
+                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .show(ui, |ui| {
+                            action = openai_body(ui, editor, &sources);
+                        });
                 }
                 Some(ProfileEditor::Codex(editor)) => {
                     let busy = editor.auth.is_authenticating();

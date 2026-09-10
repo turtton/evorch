@@ -20,114 +20,107 @@ pub fn provider_models(
     let state_id = ui.id().with("provider-model-inputs");
     let mut inputs = ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
     ui.label(h3("Configured models"));
-    egui::ScrollArea::vertical()
-        .id_salt("configured-models")
-        .max_height(120.0)
-        .show(ui, |ui| {
-            let mut remove = None;
-            for index in 0..editor.models.len() {
-                let id = editor.models[index].id.clone();
-                ui.push_id(&id, |ui| {
-                    ui.horizontal(|ui| {
-                        let mut enabled = editor.models[index].enabled;
-                        let toggle = ui.checkbox(&mut enabled, "");
-                        toggle.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::WidgetType::Checkbox,
-                                ui.is_enabled(),
-                                enabled,
-                                format!("Enable {id}"),
-                            )
-                        });
-                        if toggle.changed() {
-                            inputs.error = editor.set_model_enabled(index, enabled).err();
-                        }
-                        let editing = inputs
-                            .editing
-                            .as_ref()
-                            .is_some_and(|(original, _)| original == &id);
-                        if editing {
-                            if let Some((_, draft)) = &mut inputs.editing {
-                                let edit = ui.add(
-                                    egui::TextEdit::singleline(draft)
-                                        .desired_width((ui.available_width() - 130.0).max(40.0))
-                                        .background_color(INPUT),
-                                );
-                                edit.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::TextEdit,
-                                        ui.is_enabled(),
-                                        format!("Model ID {id}"),
-                                    )
-                                });
-                                let done = ui.button("Done");
-                                done.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Button,
-                                        ui.is_enabled(),
-                                        format!("Done {id}"),
-                                    )
-                                });
-                                if done.clicked()
-                                    || (edit.lost_focus()
-                                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                {
-                                    inputs.error = editor.rename_model(index, draft).err();
-                                    if inputs.error.is_none() {
-                                        inputs.editing = None;
-                                    }
-                                }
-                            }
-                        } else {
-                            ui.add_sized(
-                                [(ui.available_width() - 130.0).max(40.0), 20.0],
-                                egui::Label::new(&id).truncate(),
-                            )
-                            .on_hover_text(&id);
-                            let edit = ui.button("Edit");
+    ui.push_id("configured-models", |ui| {
+        let mut remove = None;
+        for index in 0..editor.models.len() {
+            let id = editor.models[index].id.clone();
+            ui.push_id(&id, |ui| {
+                ui.horizontal(|ui| {
+                    let mut enabled = editor.models[index].enabled;
+                    let toggle = ui.checkbox(&mut enabled, "");
+                    toggle.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            ui.is_enabled(),
+                            enabled,
+                            format!("Enable {id}"),
+                        )
+                    });
+                    if toggle.changed() {
+                        inputs.error = editor.set_model_enabled(index, enabled).err();
+                    }
+                    let editing = inputs
+                        .editing
+                        .as_ref()
+                        .is_some_and(|(original, _)| original == &id);
+                    if editing {
+                        if let Some((_, draft)) = &mut inputs.editing {
+                            let edit = ui.add(
+                                egui::TextEdit::singleline(draft)
+                                    .desired_width((ui.available_width() - 130.0).max(40.0))
+                                    .background_color(INPUT),
+                            );
                             edit.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::TextEdit,
+                                    ui.is_enabled(),
+                                    format!("Model ID {id}"),
+                                )
+                            });
+                            let done = ui.button("Done");
+                            done.widget_info(|| {
                                 egui::WidgetInfo::labeled(
                                     egui::WidgetType::Button,
                                     ui.is_enabled(),
-                                    format!("Edit {id}"),
+                                    format!("Done {id}"),
                                 )
                             });
-                            if edit.clicked() {
-                                inputs.editing = Some((id.clone(), id.clone()));
-                                inputs.error = None;
+                            if done.clicked()
+                                || (edit.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            {
+                                inputs.error = editor.rename_model(index, draft).err();
+                                if inputs.error.is_none() {
+                                    inputs.editing = None;
+                                }
                             }
                         }
-                        let button = ui.button("Remove");
-                        button.widget_info(|| {
+                    } else {
+                        ui.add_sized(
+                            [(ui.available_width() - 130.0).max(40.0), 20.0],
+                            egui::Label::new(&id).truncate(),
+                        )
+                        .on_hover_text(&id);
+                        let edit = ui.button("Edit");
+                        edit.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
                                 ui.is_enabled(),
-                                format!("Remove {id}"),
+                                format!("Edit {id}"),
                             )
                         });
-                        if button.clicked() {
-                            remove = Some(index);
+                        if edit.clicked() {
+                            inputs.editing = Some((id.clone(), id.clone()));
+                            inputs.error = None;
                         }
+                    }
+                    let button = ui.button("Remove");
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            format!("Remove {id}"),
+                        )
                     });
-                    ui.collapsing(format!("Metadata: {id}"), |ui| {
-                        super::model_metadata::model_metadata(
-                            ui,
-                            &mut editor.models[index],
-                            sources,
-                        );
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        for label in sources.labels(&editor.models[index], &editor.name) {
-                            ui.label(muted(label));
-                        }
-                    });
+                    if button.clicked() {
+                        remove = Some(index);
+                    }
                 });
-            }
-            if let Some(index) = remove {
-                inputs.error = editor.remove_model(index).err();
-                inputs.editing = None;
-            }
-        });
+                ui.collapsing(format!("Metadata: {id}"), |ui| {
+                    super::model_metadata::model_metadata(ui, &mut editor.models[index], sources);
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for label in sources.labels(&editor.models[index], &editor.name) {
+                        ui.label(muted(label));
+                    }
+                });
+            });
+        }
+        if let Some(index) = remove {
+            inputs.error = editor.remove_model(index).err();
+            inputs.editing = None;
+        }
+    });
     let label = ui.label("Add model");
     ui.horizontal(|ui| {
         let input = ui
@@ -194,7 +187,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
         let mut toggled = None;
         egui::ScrollArea::vertical()
             .id_salt("fetched-models")
-            .max_height(100.0)
+            .max_height(200.0)
             .show(ui, |ui| {
                 if let Some(models) = &editor.available_models {
                     for id in models {
