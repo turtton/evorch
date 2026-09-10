@@ -1,15 +1,14 @@
 use super::{ExternalSlashCommand, SLASH_COMMANDS, SlashCommandRegistry};
+#[path = "slash_process.rs"]
+mod process;
 
 impl SlashCommandRegistry {
-    pub fn discover(executable: std::path::PathBuf) -> Result<Self, String> {
-        let output = std::process::Command::new(&executable)
-            .arg("--list-commands")
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(format!("command discovery failed: {}", output.status));
-        }
-        let stdout = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    pub async fn discover(executable: std::path::PathBuf) -> Result<Self, String> {
+        let stdout = process::run(
+            tokio::process::Command::new(&executable).arg("--list-commands"),
+            std::time::Duration::from_secs(10),
+        )
+        .await?;
         let mut registry = Self {
             executable: Some(executable),
             ..Self::default()
@@ -66,25 +65,19 @@ impl SlashCommandRegistry {
         text
     }
 
-    pub fn execute(&self, raw: &str, root: &std::path::Path) -> Result<String, String> {
+    pub async fn execute(&self, raw: &str, root: &std::path::Path) -> Result<String, String> {
         let (command, args) = self.parse(raw).ok_or("unknown external command")?;
         let executable = self
             .executable
             .as_ref()
             .ok_or("external command executable is not configured")?;
-        let output = std::process::Command::new(executable)
-            .arg(&command.name)
-            .arg(args)
-            .current_dir(root)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(format!(
-                "external command failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        String::from_utf8(output.stdout).map_err(|error| error.to_string())
+        process::run(
+            tokio::process::Command::new(executable)
+                .arg(&command.name)
+                .arg(args)
+                .current_dir(root),
+            std::time::Duration::from_secs(30),
+        )
+        .await
     }
 }

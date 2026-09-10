@@ -14,10 +14,14 @@ pub struct Runner<'a> {
 
 pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, ArenaError> {
     spec.validate()?;
-    let task_spec = serde_json::to_string(&spec.task)
-        .map_err(|_| ArenaError::InvalidSpec("task serialization"))?;
+    // Persist the complete comparison manifest so a partial ledger cannot be promoted.
+    let task_spec =
+        serde_json::to_string(spec).map_err(|_| ArenaError::InvalidSpec("task serialization"))?;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.timeout_ms);
-    let mut remaining = spec.total_token_budget;
+    let count = u64::try_from(spec.configs.len())
+        .map_err(|_| ArenaError::InvalidSpec("configuration count"))?;
+    let candidate_budget = spec.total_token_budget / count;
+    let candidate_timeout = Duration::from_millis(spec.timeout_ms / count);
     let mut traces = Vec::with_capacity(spec.configs.len());
     // Reserve prompt bytes plus chat framing before dispatch; unknown usage consumes the reservation.
     let reservation = u64::try_from(spec.task.prompt.len())
@@ -45,7 +49,7 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
         };
         if tokio::time::Instant::now() >= deadline {
             trace.failure = Some(FailureAttribution::Timeout);
-        } else if remaining < reservation {
+        } else if candidate_budget < reservation {
             trace.failure = Some(FailureAttribution::BudgetExceeded);
         } else {
             let start = tokio::time::Instant::now();
@@ -62,8 +66,10 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
                 max_tokens: Some(spec.max_output_tokens),
                 observation: None,
             };
+            let candidate_deadline = (start + candidate_timeout).min(deadline);
             let result =
-                tokio::time::timeout_at(deadline, evaluate(runner, &request, &mut trace)).await;
+                tokio::time::timeout_at(candidate_deadline, evaluate(runner, &request, &mut trace))
+                    .await;
             trace.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             trace.failure = match result {
                 Err(_) => Some(FailureAttribution::Timeout),
@@ -71,11 +77,10 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
                 Ok(Ok(())) => None,
             };
             let used = trace.input_tokens.checked_add(trace.output_tokens);
-            if used.is_none_or(|n| n > remaining) || trace.output_tokens > spec.max_output_tokens {
+            if used.is_none_or(|n| n > candidate_budget)
+                || trace.output_tokens > spec.max_output_tokens
+            {
                 trace.failure = Some(FailureAttribution::BudgetExceeded);
-                remaining = 0;
-            } else {
-                remaining = remaining.saturating_sub(used.unwrap_or(0).max(reservation));
             }
             if trace.failure.is_none() && trace.output != spec.task.expected_output {
                 trace.failure = Some(FailureAttribution::OutputMismatch);

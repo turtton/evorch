@@ -62,6 +62,16 @@ async fn mock_comparison_persists_same_task_and_requires_confirmation() {
         .expect("candidate");
     assert_eq!(candidate.model.as_deref(), Some("a"));
     assert!(report.promote("b", arena::Confirmation::Approved).is_err());
+    let partial = arena::ArenaReport::from_traces(report.traces()[..1].to_vec()).expect("partial");
+    assert!(partial.promote("a", arena::Confirmation::Approved).is_err());
+    let mut interrupted = report.traces().to_vec();
+    interrupted[1].failure = Some(FailureAttribution::Timeout);
+    let interrupted = arena::ArenaReport::from_traces(interrupted).expect("interrupted");
+    assert!(
+        interrupted
+            .promote("a", arena::Confirmation::Approved)
+            .is_err()
+    );
     let requests = server.recorded_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body["messages"], requests[1].body["messages"]);
@@ -105,4 +115,55 @@ async fn exhausted_budget_prevents_http_requests() {
             .iter()
             .all(|t| t.failure == Some(FailureAttribution::BudgetExceeded))
     );
+}
+
+#[tokio::test]
+async fn candidate_budget_is_independent_of_order_and_other_usage() {
+    let server = StreamingMockOpenAi::spawn(vec![
+        ScriptedResponse::text_stream("a", "a", ["2"]).with_usage(120, 1),
+        ScriptedResponse::text_stream("b", "b", ["2"]).with_usage(3, 1),
+        ScriptedResponse::text_stream("b", "b", ["2"]).with_usage(3, 1),
+        ScriptedResponse::text_stream("a", "a", ["2"]).with_usage(120, 1),
+    ]);
+    let client =
+        OpenAiCompatibleClient::new(server.base_url(), "local", Duration::from_secs(2), None)
+            .expect("client");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: dir.path().join("order.db"),
+        ..Default::default()
+    })
+    .expect("storage");
+    let runner = arena::Runner {
+        client: &client,
+        auth: &ProviderAuth::new("test"),
+        storage: storage.handle(),
+    };
+    let mut spec = spec();
+    let first = run(&spec, &runner).await.expect("first");
+    spec.id = "reverse".into();
+    spec.configs.reverse();
+    let reversed = run(&spec, &runner).await.expect("reversed");
+    for report in [first, reversed] {
+        assert_eq!(
+            report
+                .traces()
+                .iter()
+                .find(|t| t.config_id == "a")
+                .expect("a")
+                .failure,
+            Some(FailureAttribution::BudgetExceeded)
+        );
+        assert_eq!(
+            report
+                .traces()
+                .iter()
+                .find(|t| t.config_id == "b")
+                .expect("b")
+                .failure,
+            None
+        );
+        assert!(report.promote("b", arena::Confirmation::Approved).is_err());
+    }
+    assert_eq!(server.recorded_requests().len(), 4);
 }

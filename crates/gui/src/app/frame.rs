@@ -15,6 +15,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.theme_installed = true;
         }
         self.drain_pump();
+        self.poll_external();
+        if self.external_command_running() && ui.button("Cancel external command").clicked() {
+            self.cancel_external_command();
+        }
         for event in self.sink.poll() {
             self.apply_loop_event(event);
         }

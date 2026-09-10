@@ -72,4 +72,5 @@ async fn deadline_cancels_pending_provider_and_records_every_config() {
             .all(|t| t.failure == Some(FailureAttribution::Timeout))
     );
     assert!(report.selected().is_empty());
+    assert!(report.traces().iter().all(|trace| trace.elapsed_ms >= 5));
 }

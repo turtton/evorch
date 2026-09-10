@@ -80,3 +80,35 @@ fn file_navigation_is_rejected_before_submission() {
     assert!(matches!(result, Err(gui::browser::BrowserError::UrlScheme)));
     assert!(source.actions.is_empty());
 }
+
+#[test]
+fn failed_action_keeps_dom_evidence_visible_across_frames() {
+    let source = FakeFrameSource {
+        reports: [gui::browser::BrowserReport {
+            action: "click #submit".into(),
+            error: Some("element detached".into()),
+            removed: "<button id=submit>Send</button>".into(),
+            inserted: "<p>retry</p>".into(),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut harness = egui_kittest::Harness::builder().build_ui_state(
+        |ui, pane: &mut BrowserPane<FakeFrameSource>| pane.render(ui),
+        BrowserPane::new(source),
+    );
+    harness.get_by_label("Click element").click();
+    harness.run();
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_label("click #submit: element detached")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("- <button id=submit>Send</button>")
+            .is_some()
+    );
+    assert!(harness.query_by_label("+ <p>retry</p>").is_some());
+}

@@ -17,7 +17,38 @@ impl ArenaReport {
     }
 
     pub fn selected(&self) -> Vec<String> {
-        select(&self.traces)
+        if self.comparison_complete() {
+            select(&self.traces)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn comparison_complete(&self) -> bool {
+        let Some(first) = self.traces.first() else {
+            return false;
+        };
+        let Ok(spec) = serde_json::from_str::<crate::ArenaSpec>(&first.task_spec) else {
+            // Legacy traces do not prove which configurations were requested.
+            return false;
+        };
+        spec.validate().is_ok()
+            && spec.id == first.arena_id
+            && spec.project == first.project
+            && spec.task.id == first.task_id
+            && spec.configs.len() == self.traces.len()
+            && spec.configs.iter().all(|config| {
+                self.traces.iter().any(|trace| {
+                    trace.config_id == config.id
+                        && trace.profile == config.profile
+                        && trace.model == config.model
+                        && trace.attribution == config.attribution
+                        && matches!(
+                            trace.failure,
+                            None | Some(crate::FailureAttribution::OutputMismatch)
+                        )
+                })
+            })
     }
 
     pub fn from_traces(traces: Vec<EvalTrace>) -> Result<Self, ArenaError> {

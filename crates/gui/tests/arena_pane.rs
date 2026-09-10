@@ -10,25 +10,48 @@ fn arena_promotion_requires_a_second_explicit_click() {
         ..Default::default()
     };
     let store = storage::Storage::open(config.clone()).expect("store");
-    store
-        .handle()
-        .append_eval_trace(&storage::eval::EvalTrace {
-            id: "run/a".into(),
-            arena_id: "run".into(),
-            project: "p".into(),
-            task_id: "task".into(),
-            task_spec: "spec".into(),
-            config_id: "a".into(),
-            profile: "local".into(),
-            model: "mock".into(),
-            attribution: storage::eval::Attribution::Worker,
-            output: "ok".into(),
-            input_tokens: 3,
-            output_tokens: 1,
-            elapsed_ms: 5,
-            failure: None,
-        })
-        .expect("trace");
+    let spec = arena::ArenaSpec {
+        id: "run".into(),
+        project: "p".into(),
+        task: arena::TaskSpec {
+            id: "task".into(),
+            prompt: "task".into(),
+            expected_output: "ok".into(),
+        },
+        configs: ["a", "b"]
+            .into_iter()
+            .map(|id| arena::ArenaConfig {
+                id: id.into(),
+                profile: "local".into(),
+                model: "mock".into(),
+                attribution: arena::Attribution::Worker,
+            })
+            .collect(),
+        max_output_tokens: 16,
+        total_token_budget: 200,
+        timeout_ms: 1000,
+    };
+    for id in ["a", "b"] {
+        store
+            .handle()
+            .append_eval_trace(&storage::eval::EvalTrace {
+                id: format!("run/{id}"),
+                arena_id: "run".into(),
+                project: "p".into(),
+                task_id: "task".into(),
+                task_spec: serde_json::to_string(&spec).expect("manifest"),
+                config_id: id.into(),
+                profile: "local".into(),
+                model: "mock".into(),
+                attribution: storage::eval::Attribution::Worker,
+                output: "ok".into(),
+                input_tokens: 3,
+                output_tokens: 1,
+                elapsed_ms: 5,
+                failure: None,
+            })
+            .expect("trace");
+    }
     let pane = ArenaPane::default();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))

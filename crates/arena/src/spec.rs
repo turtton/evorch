@@ -27,7 +27,9 @@ pub struct ArenaSpec {
     pub task: TaskSpec,
     pub configs: Vec<ArenaConfig>,
     pub max_output_tokens: u64,
+    /// Arena-wide ceiling, divided equally in advance; unused shares are never transferred.
     pub total_token_budget: u64,
+    /// Arena-wide deadline; each candidate gets an equal independent time allowance.
     pub timeout_ms: u64,
 }
 

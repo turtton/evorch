@@ -60,9 +60,39 @@ fn external_review_dispatches_from_gui() {
     registry.load_external("review\tReview files\t<path>");
     registry.executable = Some("printf".into());
     submit(&mut harness, "/review src");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while harness.state().external_command_running() {
+        assert!(std::time::Instant::now() < deadline);
+        harness.step();
+        std::thread::yield_now();
+    }
+    harness.run();
     assert!(harness.has_label("review"));
     assert!(harness.state().issued().is_empty());
     assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn pending_discovery_does_not_block_gui_and_can_be_cancelled() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let executable = temp.path().join("discovery");
+    std::fs::write(&executable, "#!/bin/sh\nexec sleep 60\n").expect("script");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("permissions");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().load_external_commands(executable);
+    assert!(harness.state().external_command_running());
+    harness.step();
+    harness.state_mut().cancel_external_command();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while harness.state().external_command_running() {
+        assert!(std::time::Instant::now() < deadline);
+        harness.step();
+        std::thread::yield_now();
+    }
+    assert!(harness.state().issued().is_empty());
 }
 
 #[test]

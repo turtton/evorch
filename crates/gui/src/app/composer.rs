@@ -6,10 +6,11 @@ use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn load_external_commands(&mut self, executable: std::path::PathBuf) {
-        match crate::model::composer::SlashCommandRegistry::discover(executable) {
-            Ok(registry) => self.composer.registry = registry,
-            Err(error) => self.push_notice(error),
-        }
+        self.start_external(async move {
+            crate::model::composer::SlashCommandRegistry::discover(executable)
+                .await
+                .map(super::external_commands::Outcome::Discovery)
+        });
     }
     pub fn cancel_chat(&mut self) {
         let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
@@ -144,13 +145,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .find(|project| Some(&project.id) == self.sidebar.selected_project.as_ref())
                         .map(|project| project.repo_root.clone());
                     match root {
-                        Some(root) => match self.composer.registry.execute(&raw, &root) {
-                            Ok(output) => {
-                                self.push_notice(output);
-                                self.composer.input.clear();
+                        Some(root) => {
+                            if self.external_command_running() {
+                                self.push_notice("An external command is already running");
+                                return;
                             }
-                            Err(error) => self.push_notice(error),
-                        },
+                            let registry = self.composer.registry.clone();
+                            self.start_external(async move {
+                                registry
+                                    .execute(&raw, &root)
+                                    .await
+                                    .map(super::external_commands::Outcome::Output)
+                            });
+                            self.composer.input.clear();
+                        }
                         None => self.push_notice("Select a project first"),
                     }
                 } else {

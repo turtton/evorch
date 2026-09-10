@@ -3,6 +3,7 @@
 mod actions;
 mod attention;
 mod composer;
+mod external_commands;
 mod frame;
 mod history;
 mod ownership;
