@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-09T15:15:42.3522136+00:00",
+  "updated_at": "2026-09-10T10:33:26.1176005+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1264,6 +1264,23 @@
         "implementation": ".intent-cli/issues/v05-image-attachment-ui/implementation.md",
         "review_context": ".intent-cli/issues/v05-image-attachment-ui/review-context.md",
         "yaml": ".intent-cli/issues/v05-image-attachment-ui/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v06-model-catalog-preset",
+      "title": "v0.6: models.dev \u30AB\u30BF\u30ED\u30B0\u53D6\u308A\u8FBC\u307F \u002B ModelPreset \u3067\u30E2\u30C7\u30EB\u30E1\u30BF\u30C7\u30FC\u30BF\u7BA1\u7406",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v06-model-catalog-preset/implementation.md",
+        "review_context": ".intent-cli/issues/v06-model-catalog-preset/review-context.md",
+        "yaml": ".intent-cli/issues/v06-model-catalog-preset/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",

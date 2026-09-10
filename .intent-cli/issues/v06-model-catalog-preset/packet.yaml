@@ -1,0 +1,110 @@
+implementation_issue_packet:
+  issue_title: "v0.6: models.dev カタログ取り込み + ModelPreset でモデルメタデータ管理"
+  issue_kind: feature
+  source_execution_unit: v06-model-catalog-preset
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/runtime/ crates/gui/"
+  target_part: "models.dev JSON catalog fetch + 24h cache、ModelPreset (手動共通設定)、モデル解決優先順位 (preset → models.dev → provider default)、GUI での preset 選択・override・Refresh"
+  dependencies: []
+
+  technical_baseline:
+    - "Rust 1.97 / edition 2024 + Tokio async runtime"
+    - "crates/config/src/types/provider.rs: ModelEntryConfig { id, enabled } (v0.7 で legacy 互換追加済み)。拡張して metadata_source / metadata_ref / preset / context_window 等 optional フィールドを追加可能"
+    - "crates/config/src/types/compaction.rs: CompactionConfig { context_window_tokens: 200_000, model_overrides, threshold } は既存。models.dev 取り込み後は per-model context window が正確になり、compaction の window 推定 precision が向上する"
+    - "crates/runtime/src/compaction/policy.rs: resolve_window で model_overrides を参照。ModelCatalog で取得した limit.context をここに反映可能"
+    - "GUI: crates/gui/src/panes/ で provider 設定 UI が存在 (v0.3/v0.4 で fetch→checkbox→Apply パターン確立済み)。モデル行で metadata_source/preset 選択や override 入力が可能"
+    - "models.dev: 公開 JSON API (GET https://models.dev/api.json | models.json | catalog.json)。認証不要、rate limit 非公開のため低頻度 + ローカルキャッシュ必須"
+    - "OpenCode 参考: cache/models.json、TTL 5分 freshness 判定 + 60分定期 refresh、atomic write (temp+rename)、file lock"
+
+  intent_references:
+    - intents/evorch/features/context-engine/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+
+  acceptance_criteria:
+    - "GET https://models.dev/api.json から provider→model 構造を fetch し、OS cache dir (例: ~/.cache/evorch/models-dev.json) に atomic write (temp+rename) + file lock で保存する"
+    - "cache TTL 24 時間。stale cache は利用しつつバックグラウンド refresh。手動 Refresh ボタンで強制 fetch"
+    - "config に [model_presets.<name>] セクション追加: context_window, max_output_tokens, pricing 等をモデル名で一括定義可能"
+    - "ModelEntryConfig に optional フィールド追加: metadata_source (manual|models-dev|provider-default)、metadata_ref (models.dev catalog 内の参照 ID)、preset (preset 名)"
+    - "モデル解決ロジック: 手動 preset/provider override > models.dev 自動割当 > provider default の順で優先順位を解決"
+    - "GUI でモデル行を選択した際に、解決された context window / pricing / capabilities を表示 (Preset / models.dev / default のどれかも表示)"
+    - "GUI で per-model override (context_window 等) が可能。provider override と global preset を区別"
+    - "compaction の context window 推定が ModelCatalog 由来の正確な limit.context を使う (deepseek-v4-flash 等で 200k 誤想定による 413 を防ぐ)"
+    - "全ての変更は後方互換: 既存の文字列モデルリスト、id+enabled のみのエントリはそのまま動作"
+    - "cargo test -p config / cargo test -p runtime / cargo test -p gui 全件 green、cargo clippy --workspace --all-targets -- -D warnings clean、cargo fmt --all -- --check clean"
+
+  intent_placement:
+    primary_intent: intents/evorch/features/context-engine/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+      - intents/evorch/decisions/0003-cache-first-context-engine.md
+    new_intent_needed: false
+    placement_rationale: "context-engine の cache-first 設計に models.dev カタログを補完データとして取り込む。provider-routing はモデル選択の consumer、compaction は limit.context の consumer"
+
+  knowledge_updates:
+    intent_tree:
+      - intents/evorch/features/context-engine/overview.md
+
+  phases:
+    - id: P1
+      name: config schema 拡張
+      scope: crates/config
+      description: |
+        ModelEntryConfig に optional フィールド追加 (metadata_source/metadata_ref/preset)。
+        [model_presets] セクションでグローバル preset を定義可能にする。
+      exit_criteria:
+        - "ModelEntryConfig が metadata_source/metadata_ref/preset を保持し、後方互換 (文字列/id+enabled のみ) が保たれる"
+        - "[model_presets.deepseek-v4] 形式で preset が定義可能"
+        - "cargo test -p config green"
+    - id: P2
+      name: ModelCatalog + models.dev fetch + cache
+      scope: crates/runtime (または新規 crates/catalog)
+      description: |
+        models.dev /api.json を fetch して OS cache dir に 24h TTL で保存。
+        serde 型定義、atomic write、file lock、バックグラウンド refresh。
+      exit_criteria:
+        - "curl models.dev 相当の fetch が成功"
+        - "cache ファイルが atomic write される"
+        - "stale cache は利用し refresh をスケジュール"
+    - id: P3
+      name: モデル解決ロジック
+      scope: crates/runtime / crates/config
+      description: |
+        preset → models.dev → provider default の優先順位でメタデータを解決。
+        compaction::policy::resolve_window にも正確な limit.context を反映。
+      exit_criteria:
+        - "preset を設定したモデルで models.dev より preset の context_window が優先される"
+        - "deepseek-v4-flash の実際の context limit が compaction に反映される"
+        - "cargo test -p runtime green"
+    - id: P4
+      name: GUI
+      scope: crates/gui
+      description: |
+        モデル行に preset 選択ドロップダウン、models.dev 参照表示、per-model override 入力、
+        最終解決値表示、Refresh ボタン。
+      exit_criteria:
+        - "GUI で preset が選択可能"
+        - "override 入力が config に反映"
+        - "cargo test -p gui green"
+
+  implementation_order: [P1, P2, P3, P4]
+  parallel_possibilities:
+    - "P1 と P2 は独立 (config schema と catalog fetch は別々に実装・テスト可能)"
+    - "P3 は P1 + P2 の完了後"
+    - "P4 は P3 完了後 (GUI は解決ロジックに依存)"
+
+  defaults:
+    cache_ttl_hours: 24
+    cache_location: "OS cache dir (Linux: ~/.cache/evorch/models-dev.json)"
+    fetch_timeout_seconds: 10
+    atomic_write: true
+    file_lock: true
+    metadata_source_enum: ["manual", "models-dev", "provider-default"]
+    default_metadata_source: "provider-default"
+
+  open_questions:
+    - "models.dev の provider ID と evorch の provider 名 (Crof 等) のマッピング方法？ (models.dev 側は 'openai', 'deepseek' 等)"
+    - "models.dev に存在しないマイナーモデルの場合の fallback: preset 必須？"
+    - "cache 更新時に既存 config の preset との整合性チェックは必要か？"
