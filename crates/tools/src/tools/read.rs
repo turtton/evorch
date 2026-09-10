@@ -23,9 +23,15 @@ impl Tool for Read {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string" }
+                "path": {
+                    "type": "string",
+                    "description": "Target file path (preferred). Aliases: file, file_path, filename, target."
+                },
+                "file": { "type": "string" },
+                "file_path": { "type": "string" },
+                "filename": { "type": "string" },
+                "target": { "type": "string" }
             },
-            "required": ["path"],
             "additionalProperties": false
         })
     }
@@ -35,11 +41,14 @@ impl Tool for Read {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
-        // スキーマ検証は ToolExecutor（wave 3）が担うため、ここでは生の引数から
-        // 必要フィールドを取り出す。欠落時の InvalidArgs は直接呼び出しの防御。
-        let Some(path) = args.get("path").and_then(serde_json::Value::as_str) else {
+        // キーの存在はここで検証し、スキーマの一般エラーではなく修正可能なヒントを返す。
+        let Some(path) = ["path", "file", "file_path", "filename", "target"]
+            .iter()
+            .find_map(|key| args.get(key))
+            .and_then(serde_json::Value::as_str)
+        else {
             return Err(ToolError::InvalidArgs {
-                detail: "引数 path は文字列である必要があります".to_string(),
+                detail: "引数 path は文字列である必要があります; expected keys: path (aliases: file, file_path); filename and target are also accepted".to_string(),
             });
         };
 

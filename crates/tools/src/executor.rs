@@ -241,7 +241,7 @@ impl ToolExecutor {
         self.event_bus.emit(Event::new(started));
 
         if let Err(error) = schema::validate_args(&registered.validator, &args) {
-            self.emit_completed(ctx, tool_name, call_id, None);
+            self.emit_completed(ctx, tool_name, call_id, Err(&error));
             return Err(error);
         }
 
@@ -307,11 +307,11 @@ impl ToolExecutor {
                     detail,
                     origin: result.origin,
                 };
-                self.emit_completed(ctx, tool_name, call_id, Some(&result));
+                self.emit_completed(ctx, tool_name, call_id, Ok(&result));
                 Ok(result)
             }
             Err(error) => {
-                self.emit_completed(ctx, tool_name, call_id, None);
+                self.emit_completed(ctx, tool_name, call_id, Err(&error));
                 Err(error)
             }
         }
@@ -323,14 +323,17 @@ impl ToolExecutor {
         ctx: &ToolExecutionContext,
         tool_name: &str,
         call_id: &str,
-        result: Option<&ToolResult>,
+        result: Result<&ToolResult, &ToolError>,
     ) {
         let completed = ToolEvent::ToolCompleted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
-            is_error: result.is_none_or(|result| result.is_error),
-            output: result.map(|result| result.content.clone()),
-            detail: result.and_then(|result| result.detail.clone()),
+            is_error: result.map_or(true, |result| result.is_error),
+            output: Some(match result {
+                Ok(result) => result.content.clone(),
+                Err(error) => escape_control_markers(&error.to_string()),
+            }),
+            detail: result.ok().and_then(|result| result.detail.clone()),
             run_id: Some(ctx.run_id.clone()),
         };
         debug_assert!(
@@ -358,11 +361,12 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             reason: reason.to_string(),
         }));
-        self.emit_completed(ctx, tool_name, call_id, None);
-        Err(ToolError::ExecutionDenied {
+        let error = ToolError::ExecutionDenied {
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
-        })
+        };
+        self.emit_completed(ctx, tool_name, call_id, Err(&error));
+        Err(error)
     }
 }
 

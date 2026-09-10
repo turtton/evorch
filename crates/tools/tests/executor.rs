@@ -174,7 +174,7 @@ async fn executor_invalid_args_emit_completed_error() {
         )
         .await
         .expect_err("path 欠落は InvalidArgs になる");
-    let ToolError::InvalidArgs { detail } = error else {
+    let ToolError::InvalidArgs { ref detail } = error else {
         panic!("InvalidArgs を期待しましたが {error:?} でした");
     };
     assert!(!detail.is_empty(), "違反の詳細が空: {detail}");
@@ -195,7 +195,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolCompleted {
             tool_name: "read".to_string(),
             call_id: "call-missing".to_string(),
-            output: None,
+            output: Some(error.to_string()),
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
@@ -233,7 +233,7 @@ async fn executor_invalid_args_emit_completed_error() {
         &ToolEvent::ToolCompleted {
             tool_name: "read".to_string(),
             call_id: "call-extra".to_string(),
-            output: None,
+            output: Some(error.to_string()),
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
@@ -284,7 +284,7 @@ async fn executor_tool_error_emits_completed_error() {
             is_error: true,
             detail: None,
             run_id: Some("run-11".to_string()),
-            output: None,
+            output: Some(error.to_string()),
         }
     );
 }
@@ -483,7 +483,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
             .execute(&test_ctx("run-20"), name, "call-web", serde_json::json!({}))
             .await
             .expect_err("空引数はスキーマ違反になる");
-        let ToolError::InvalidArgs { detail } = error else {
+        let ToolError::InvalidArgs { ref detail } = error else {
             panic!("InvalidArgs を期待しましたが {error:?} でした");
         };
         assert!(!detail.is_empty(), "{name} の違反の詳細が空: {detail}");
@@ -502,7 +502,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
         assert_eq!(
             tool_event(&completed),
             &ToolEvent::ToolCompleted {
-                output: None,
+                output: Some(error.to_string()),
                 tool_name: name.to_string(),
                 call_id: "call-web".to_string(),
                 is_error: true,
