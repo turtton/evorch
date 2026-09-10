@@ -10,6 +10,18 @@ const MAX_PRESET_BYTES: u64 = 64 * 1024;
 /// 同梱プリセット (名前 → 本文)。include_str! によりバイナリへ埋め込む。
 const BUNDLED: &[(&str, &str)] = &[
     (
+        "role-planner",
+        include_str!("../assets/presets/role-planner.md"),
+    ),
+    (
+        "role-oracle",
+        include_str!("../assets/presets/role-oracle.md"),
+    ),
+    (
+        "role-multimodallooker",
+        include_str!("../assets/presets/role-multimodallooker.md"),
+    ),
+    (
         "role-orchestrator",
         include_str!("../assets/presets/role-orchestrator.md"),
     ),

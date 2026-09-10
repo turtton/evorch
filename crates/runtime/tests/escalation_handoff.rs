@@ -123,7 +123,8 @@ fn user_text(messages: &[Message]) -> Option<&str> {
         (message.role == MessageRole::User).then(|| {
             message.content.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
+                ContentBlock::Image { .. }
+                | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })

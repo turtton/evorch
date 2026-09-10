@@ -22,7 +22,8 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.clone()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -115,6 +116,12 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
 
 fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
     match block {
+        ContentBlock::Image { media_type, data } => WireContentBlock::Image {
+            source: super::types::WireImageSource::Base64 {
+                media_type: media_type.clone(),
+                data: data.clone(),
+            },
+        },
         ContentBlock::Text { text } => WireContentBlock::Text { text: text.clone() },
         ContentBlock::Reasoning { text } => match role {
             WireRole::User => WireContentBlock::Text { text: text.clone() },
@@ -148,6 +155,9 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
 
 fn from_wire_block(block: WireContentBlock) -> ContentBlock {
     match block {
+        WireContentBlock::Image {
+            source: super::types::WireImageSource::Base64 { media_type, data },
+        } => ContentBlock::Image { media_type, data },
         WireContentBlock::Text { text } => ContentBlock::Text { text },
         WireContentBlock::Thinking { thinking } => ContentBlock::Reasoning { text: thinking },
         WireContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },

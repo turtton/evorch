@@ -61,7 +61,8 @@ fn text_of(message: &Message) -> String {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -76,6 +77,7 @@ fn tool_use_of(message: &Message) -> (&str, &str) {
         .find_map(|block| match block {
             ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -88,7 +90,8 @@ fn request_texts(messages: &[Message]) -> Vec<&str> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -102,6 +105,7 @@ fn tool_use_ids(messages: &[Message]) -> Vec<&str> {
         .filter_map(|block| match block {
             ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -115,6 +119,7 @@ fn tool_result_ids(messages: &[Message]) -> Vec<&str> {
         .filter_map(|block| match block {
             ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. } => None,
         })
@@ -611,6 +616,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
             for block in &message.content {
                 match block {
                     ContentBlock::Text { .. }
+                    | ContentBlock::Image { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. } => {}

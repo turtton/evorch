@@ -45,7 +45,8 @@ fn text_of_role(messages: &[Message], role: MessageRole) -> Option<&str> {
         .and_then(|message| {
             message.content.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
+                ContentBlock::Image { .. }
+                | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
@@ -62,6 +63,7 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
                 Some(text.as_str())
             }
             ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,

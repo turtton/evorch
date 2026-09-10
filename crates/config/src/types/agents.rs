@@ -29,6 +29,15 @@ pub struct AgentsConfig {
     pub worker: RoleBindingConfig,
     /// reviewer ロールのバインディング。
     pub reviewer: RoleBindingConfig,
+    pub roles: AdditionalRoleBindings,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdditionalRoleBindings {
+    pub planner: RoleBindingConfig,
+    pub oracle: RoleBindingConfig,
+    pub multimodal_looker: RoleBindingConfig,
 }
 
 impl AgentsConfig {
@@ -52,6 +61,9 @@ impl AgentsConfig {
             "explorer" => &self.explorer,
             "worker" => &self.worker,
             "reviewer" => &self.reviewer,
+            "planner" => &self.roles.planner,
+            "oracle" => &self.roles.oracle,
+            "multimodal_looker" => &self.roles.multimodal_looker,
             other => {
                 return Err(ConfigError::UnknownAgentRole {
                     role: other.to_string(),

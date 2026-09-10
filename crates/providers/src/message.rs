@@ -18,6 +18,10 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    Image {
+        media_type: String,
+        data: String,
+    },
     /// 平文テキスト。
     Text {
         /// ブロックの本文。

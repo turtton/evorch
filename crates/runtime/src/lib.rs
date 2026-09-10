@@ -70,7 +70,8 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, MergeMode, RunConfig, RunId, WorkspaceInspection, WorkspaceMode,
+    AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, WorkspaceInspection,
+    WorkspaceMode,
 };
 pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};
 pub use skill::{

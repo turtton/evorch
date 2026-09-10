@@ -31,7 +31,7 @@ struct InputMessage {
     #[serde(rename = "type")]
     kind: MessageType,
     role: InputRole,
-    content: Vec<InputText>,
+    content: Vec<InputContent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +52,16 @@ struct InputText {
     #[serde(rename = "type")]
     kind: TextType,
     text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum InputContent {
+    Text(InputText),
+    Image {
+        r#type: &'static str,
+        image_url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -110,7 +120,8 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Reasoning { .. }
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
@@ -168,10 +179,14 @@ fn to_input_message(
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(InputText {
+            ContentBlock::Image { media_type, data } => Some(InputContent::Image {
+                r#type: "input_image",
+                image_url: format!("data:{media_type};base64,{data}"),
+            }),
+            ContentBlock::Text { text } => Some(InputContent::Text(InputText {
                 kind: text_type,
                 text: text.clone(),
-            }),
+            })),
             ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
