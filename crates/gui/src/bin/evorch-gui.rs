@@ -793,6 +793,9 @@ fn run() -> Result<(), GuiError> {
         None => load_sidebar(state_path.as_ref())?,
     };
     state = state.with_sidebar(sidebar);
+    if let Some(executable) = std::env::var_os("EVORCH_SLASH_COMMAND_EXECUTABLE") {
+        state.load_external_commands(executable.into());
+    }
     if let Some(path) = state_path {
         state = state.with_sidebar_path(path);
     }

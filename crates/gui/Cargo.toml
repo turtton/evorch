@@ -11,11 +11,11 @@ name = "gui"
 
 [features]
 default = []
-browser = ["dep:chromiumoxide", "dep:base64", "dep:futures-util", "image/jpeg"]
+browser = ["dep:chromiumoxide", "dep:futures-util", "image/jpeg"]
 
 [dependencies]
 chromiumoxide = { version = "0.9", default-features = false, optional = true }
-base64 = { workspace = true, optional = true }
+base64 = { workspace = true }
 futures-util = { workspace = true, optional = true }
 arena = { path = "../arena" }
 ashpd = { workspace = true }

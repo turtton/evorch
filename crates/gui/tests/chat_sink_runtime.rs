@@ -16,6 +16,7 @@ use runtime::{
 use tools::ToolExecutor;
 
 struct ScriptedModel {
+    messages: Arc<Mutex<Vec<Vec<Message>>>>,
     responses: Mutex<VecDeque<ChatResponse>>,
     preferences: Arc<Mutex<Vec<Option<runtime::ModelPreference>>>>,
 }
@@ -26,9 +27,13 @@ impl AgentModel for ScriptedModel {
         &self,
         invocation: &AgentInvocationContext,
         _role: Role,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.messages
+            .lock()
+            .expect("messages")
+            .push(messages.to_vec());
         self.preferences
             .lock()
             .unwrap()
@@ -48,6 +53,7 @@ impl AgentModel for ScriptedModel {
 }
 
 struct Fixture {
+    messages: Arc<Mutex<Vec<Vec<Message>>>>,
     rt: tokio::runtime::Runtime,
     sink: RuntimeCommandSink,
     runtime: AgentRuntime,
@@ -77,10 +83,12 @@ impl Fixture {
             })
             .collect();
         let preferences = Arc::new(Mutex::new(Vec::new()));
+        let messages = Arc::new(Mutex::new(Vec::new()));
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus.clone())),
             Arc::new(ScriptedModel {
+                messages: messages.clone(),
                 responses: Mutex::new(responses),
                 preferences: preferences.clone(),
             }),
@@ -95,6 +103,7 @@ impl Fixture {
         });
         let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
         Self {
+            messages,
             rt,
             sink,
             runtime,
@@ -114,6 +123,7 @@ impl Fixture {
         model_preference: Option<runtime::ModelPreference>,
     ) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+            images: Vec::new(),
             thread_id: thread.into(),
             text: text.into(),
             model_preference,
@@ -171,6 +181,71 @@ impl Fixture {
             .expect("accepted run exists")
             .run_id
     }
+}
+
+#[test]
+fn gui_paste_send_reaches_model_on_first_and_followup_turns() {
+    use egui_kittest::kittest::Queryable;
+    let mut fixture = Fixture::new();
+    let temp = tempfile::tempdir().expect("project");
+    let mut sidebar = workspace_ui::SidebarState::default();
+    let project = workspace_ui::ProjectId::new("test");
+    let thread = workspace_ui::ThreadId::new("thread-1");
+    sidebar
+        .add_project(project.clone(), "test", temp.path())
+        .expect("project");
+    sidebar.select_project(&project).expect("select");
+    sidebar
+        .create_thread(thread.clone(), project, "chat")
+        .expect("thread");
+    sidebar.switch_thread(&thread).expect("switch");
+    let mut state = gui::app::WorkbenchState::new(
+        gui::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .expect("state")
+    .with_sidebar(sidebar)
+    .with_provider_status(gui::model::composer::ProviderStatus::Configured);
+    state.composer_mut().image_input_supported = true;
+    let mut harness = egui_kittest::Harness::builder().build_ui_state(
+        |ui, state: &mut gui::app::WorkbenchState<gui::fixture::DemoSource>| {
+            state.ui(ui, &mut eframe::Frame::_new_kittest());
+        },
+        state,
+    );
+    let mut ids = Vec::new();
+    for reply in ["reply-1", "reply-2"] {
+        harness.event(egui::Event::Paste("data:image/png;base64,aGVsbG8=".into()));
+        harness.run_steps(4);
+        harness.get_by_label("Send").click();
+        harness.run_steps(4);
+        let command = harness
+            .state()
+            .issued()
+            .last()
+            .expect("GUI command")
+            .clone();
+        let events = fixture.sink.submit(command);
+        let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+            panic!("accepted");
+        };
+        fixture.wait_for_reply(run_id, reply);
+        ids.push(run_id.clone());
+    }
+    assert_eq!(ids[0], ids[1]);
+    let requests = fixture.messages.lock().expect("messages");
+    for request in requests.iter() {
+        let user = request
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .expect("user");
+        assert!(user.content.iter().any(
+            |block| matches!(block, ContentBlock::Image { media_type, data }
+            if media_type == "image/png" && data == "aGVsbG8=")
+        ));
+    }
+    assert_eq!(requests.len(), 2);
 }
 
 #[test]

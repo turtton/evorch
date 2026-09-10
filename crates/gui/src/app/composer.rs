@@ -1,10 +1,16 @@
 use super::WorkbenchState;
 use crate::model::commands::{ChatSubmission, WorkbenchCommand};
-use crate::model::composer::{ComposerInput, ProviderStatus, help_text, parse_input};
+use crate::model::composer::{ComposerInput, ProviderStatus, parse_input};
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn load_external_commands(&mut self, executable: std::path::PathBuf) {
+        match crate::model::composer::SlashCommandRegistry::discover(executable) {
+            Ok(registry) => self.composer.registry = registry,
+            Err(error) => self.push_notice(error),
+        }
+    }
     pub fn cancel_chat(&mut self) {
         let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
             return;
@@ -37,6 +43,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_composer(&mut self) {
+        self.refresh_image_capability();
         if !self.thread_writable() {
             self.push_notice("Read-only attach: explicitly Start or Claim before sending.");
             return;
@@ -67,6 +74,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                     ProviderStatus::Configured => {
                         let submission = ChatSubmission {
+                            images: self
+                                .composer
+                                .attachments
+                                .iter()
+                                .map(|image| runtime::DelegateImage {
+                                    media_type: image.media_type.clone(),
+                                    data: image.data.clone(),
+                                })
+                                .collect(),
                             thread_id: thread_id.to_string(),
                             text: text.into(),
                             model_preference: self
@@ -114,13 +130,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                 }
                 "help" => {
-                    self.push_notice(help_text());
+                    self.push_notice(self.composer.registry.help_text());
                     self.composer.input.clear();
                 }
                 name => self.push_notice(format!("unknown command /{name} — type /help")),
             },
             ComposerInput::UnknownCommand { name } => {
-                self.push_notice(format!("unknown command /{name} — type /help"));
+                if self.composer.registry.parse(&raw).is_some() {
+                    let root = self
+                        .sidebar
+                        .projects
+                        .iter()
+                        .find(|project| Some(&project.id) == self.sidebar.selected_project.as_ref())
+                        .map(|project| project.repo_root.clone());
+                    match root {
+                        Some(root) => match self.composer.registry.execute(&raw, &root) {
+                            Ok(output) => {
+                                self.push_notice(output);
+                                self.composer.input.clear();
+                            }
+                            Err(error) => self.push_notice(error),
+                        },
+                        None => self.push_notice("Select a project first"),
+                    }
+                } else {
+                    self.push_notice(format!("unknown command /{name} — type /help"));
+                }
             }
         }
     }
@@ -128,5 +163,43 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {
         self.transcripts
             .push_thread(TranscriptEntry::Notice { text: text.into() });
+    }
+
+    pub(super) fn refresh_image_capability(&mut self) {
+        let Some((_, model)) = self.production_model.as_ref() else {
+            return;
+        };
+        let preference = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+            .and_then(|thread| thread.model_preference.as_ref());
+        let profiles = model.available_profiles();
+        let selected = preference
+            .and_then(|preference| {
+                preference.model.clone().or_else(|| {
+                    profiles
+                        .iter()
+                        .find(|profile| profile.name == preference.profile)
+                        .and_then(|profile| profile.default_model.clone())
+                })
+            })
+            .unwrap_or_else(|| {
+                runtime::AgentModel::selected_model(model.as_ref(), runtime::Role::Worker)
+            });
+        self.composer.image_input_supported = self
+            .provider_settings
+            .catalog
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.find_unique_model(&selected))
+            .is_some_and(|metadata| {
+                metadata
+                    .modalities
+                    .input
+                    .iter()
+                    .any(|value| value == "image")
+            });
     }
 }

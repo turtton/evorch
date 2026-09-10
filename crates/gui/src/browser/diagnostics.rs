@@ -4,7 +4,7 @@ use chromiumoxide::{
 };
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 
-use super::{BrowserAction, BrowserError};
+use super::{BrowserAction, BrowserError, BrowserReport};
 
 pub(super) fn emit(bus: &EventBus, code: &str, detail: &str, failed: bool) {
     bus.emit(Event::new(DiagnosticEvent {
@@ -25,7 +25,7 @@ pub(super) async fn perform(
     page: &Page,
     action: BrowserAction,
     bus: &EventBus,
-) -> Result<(), BrowserError> {
+) -> Result<BrowserReport, BrowserError> {
     let id = format!("{:?}", std::time::SystemTime::now());
     let action_name = match &action {
         BrowserAction::Navigate(_) => "navigate",
@@ -71,8 +71,13 @@ pub(super) async fn perform(
         .to_string(),
         false,
     );
-    result?;
-    Ok(())
+    let diff = dom_diff(&before, &after);
+    Ok(BrowserReport {
+        action: action_name.into(),
+        error: result.err().map(|error| error.to_string()),
+        removed: diff.removed,
+        inserted: diff.inserted,
+    })
 }
 
 async fn screenshot(

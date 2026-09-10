@@ -108,7 +108,7 @@ struct RunEntry {
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
-    inbox_tx: mpsc::Sender<String>,
+    inbox_tx: mpsc::Sender<(String, Vec<crate::DelegateImage>)>,
     cancel_tx: watch::Sender<bool>,
     compact_tx: watch::Sender<u64>,
     model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
@@ -771,6 +771,15 @@ impl AgentRuntime {
 
     /// 対話待機中の run へユーザーメッセージを送る。
     pub fn send_message(&self, run_id: RunId, text: String) -> Result<(), RuntimeError> {
+        self.send_message_with_images(run_id, text, Vec::new())
+    }
+
+    pub fn send_message_with_images(
+        &self,
+        run_id: RunId,
+        text: String,
+        images: Vec<crate::DelegateImage>,
+    ) -> Result<(), RuntimeError> {
         let phase = *self.entry(run_id)?.phase_rx.borrow();
         if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
             return Err(RuntimeError::RunTerminated {
@@ -779,7 +788,7 @@ impl AgentRuntime {
         }
         let sender = self.entry(run_id)?.inbox_tx.clone();
         sender
-            .try_send(text)
+            .try_send((text, images))
             .map_err(|_| RuntimeError::RunTerminated {
                 run_id: run_id.to_string(),
             })

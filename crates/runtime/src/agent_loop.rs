@@ -57,7 +57,7 @@ pub(crate) struct RunHandoff {
 pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
-    pub(crate) inbox_rx: mpsc::Receiver<String>,
+    pub(crate) inbox_rx: mpsc::Receiver<(String, Vec<crate::DelegateImage>)>,
     pub(crate) cancel_rx: watch::Receiver<bool>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
     pub(crate) compact_rx: watch::Receiver<u64>,
@@ -722,7 +722,13 @@ impl LoopState {
                         self.finish_error("interactive inbox closed".to_string());
                         return false;
                     };
-                    self.context.push_user(&message);
+                        self.context.push_user(&message.0);
+                        if let Some(user) = self.context.messages.last_mut() {
+                            user.content.extend(message.1.into_iter().map(|image| ContentBlock::Image {
+                                media_type: image.media_type,
+                                data: image.data,
+                            }));
+                        }
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();

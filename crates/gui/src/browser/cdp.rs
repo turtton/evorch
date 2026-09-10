@@ -20,6 +20,7 @@ pub(super) struct Channels {
     pub commands: mpsc::Receiver<BrowserAction>,
     pub frames: watch::Sender<Option<egui::ColorImage>>,
     pub shutdown: oneshot::Receiver<()>,
+    pub reports: mpsc::Sender<super::BrowserReport>,
 }
 
 pub(super) async fn run(
@@ -56,7 +57,7 @@ pub(super) async fn run(
     );
     let result = tokio::select! {
         _ = &mut channels.shutdown => Ok(()),
-        result = stream(&browser, headful, (&bus, &mut channels.commands, &channels.frames)) => result,
+        result = stream(&browser, headful, (&bus, &mut channels.commands, &channels.frames, &channels.reports)) => result,
     };
     let closed = browser.close().await;
     if let Err(error) = closed {
@@ -76,9 +77,10 @@ async fn stream(
         &event_bus::EventBus,
         &mut mpsc::Receiver<BrowserAction>,
         &watch::Sender<Option<egui::ColorImage>>,
+        &mpsc::Sender<super::BrowserReport>,
     ),
 ) -> Result<(), BrowserError> {
-    let (bus, commands, frames) = channels;
+    let (bus, commands, frames, reports) = channels;
     let mut target = CreateTargetParams::new("about:blank");
     target.background = Some(headful);
     target.new_window = Some(true);
@@ -102,9 +104,23 @@ async fn stream(
         tokio::select! {
             action = commands.recv() => match action {
                 Some(action) => {
-                    if let Err(error) = diagnostics::perform(&page, action, bus).await {
-                        diagnostics::emit(bus, "browser.action_error", &error.to_string(), true);
-                    }
+                    let action_name = match &action {
+                        BrowserAction::Navigate(_) => "navigate",
+                        BrowserAction::Click(_) => "click",
+                    };
+                    let report = match diagnostics::perform(&page, action, bus).await {
+                        Ok(report) => report,
+                        Err(error) => {
+                            diagnostics::emit(bus, "browser.action_error", &error.to_string(), true);
+                            super::BrowserReport {
+                                action: action_name.into(),
+                                error: Some(error.to_string()),
+                                removed: String::new(),
+                                inserted: String::new(),
+                            }
+                        }
+                    };
+                    if reports.send(report).await.is_err() { return Ok(()); }
                 }
                 None => return Ok(()),
             },

@@ -286,7 +286,11 @@ impl CommandSink for RuntimeCommandSink {
                             reason: error.to_string(),
                         }];
                     }
-                    match self.runtime.send_message(run_id, submission.text.clone()) {
+                    match self.runtime.send_message_with_images(
+                        run_id,
+                        submission.text.clone(),
+                        submission.images.clone(),
+                    ) {
                         Ok(()) => {
                             return vec![LoopEvent::ChatAccepted {
                                 thread_id,
@@ -304,6 +308,7 @@ impl CommandSink for RuntimeCommandSink {
                     submission.text,
                     RunConfig {
                         name: Some(format!("chat:{thread_id}")),
+                        images: submission.images,
                         ownership: permit,
                         interactive: true,
                         keep_alive: true,
@@ -536,6 +541,7 @@ mod tests {
         // Given: a model that holds the run until cancellation.
         let (rt, mut sink, runtime, _) = build_sink();
         let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            images: Vec::new(),
             thread_id: "chat-thread".into(),
             text: "hello".into(),
             model_preference: None,

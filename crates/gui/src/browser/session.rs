@@ -9,6 +9,7 @@ pub struct ChromiumSource {
     frames: watch::Receiver<Option<egui::ColorImage>>,
     error: watch::Receiver<Option<String>>,
     stop: Option<oneshot::Sender<()>>,
+    reports: mpsc::Receiver<super::BrowserReport>,
 }
 
 impl ChromiumSource {
@@ -21,6 +22,7 @@ impl ChromiumSource {
         let (frames_tx, frames) = watch::channel(None);
         let (error_tx, error) = watch::channel(None);
         let (stop, shutdown) = oneshot::channel();
+        let (reports_tx, reports) = mpsc::channel(32);
         runtime.spawn(async move {
             if let Err(error) = cdp::run(
                 bus.clone(),
@@ -29,6 +31,7 @@ impl ChromiumSource {
                     commands: rx,
                     frames: frames_tx,
                     shutdown,
+                    reports: reports_tx,
                 },
             )
             .await
@@ -42,6 +45,7 @@ impl ChromiumSource {
             frames,
             error,
             stop: Some(stop),
+            reports,
         }
     }
 }
@@ -63,6 +67,10 @@ impl FrameSource for ChromiumSource {
 
     fn error(&self) -> Option<String> {
         self.error.borrow().clone()
+    }
+
+    fn poll_report(&mut self) -> Option<super::BrowserReport> {
+        self.reports.try_recv().ok()
     }
 }
 

@@ -38,6 +38,15 @@ pub trait FrameSource {
     fn poll_frame(&mut self) -> Option<egui::ColorImage>;
     fn submit(&mut self, action: BrowserAction) -> Result<(), BrowserError>;
     fn error(&self) -> Option<String>;
+    fn poll_report(&mut self) -> Option<BrowserReport>;
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowserReport {
+    pub action: String,
+    pub error: Option<String>,
+    pub removed: String,
+    pub inserted: String,
 }
 
 #[derive(Default)]
@@ -45,6 +54,7 @@ pub struct FakeFrameSource {
     pub frames: VecDeque<egui::ColorImage>,
     pub actions: Vec<BrowserAction>,
     pub failure: Option<String>,
+    pub reports: VecDeque<BrowserReport>,
 }
 
 impl FrameSource for FakeFrameSource {
@@ -60,6 +70,14 @@ impl FrameSource for FakeFrameSource {
 
     fn error(&self) -> Option<String> {
         self.failure.clone()
+    }
+
+    fn poll_report(&mut self) -> Option<BrowserReport> {
+        if self.actions.is_empty() {
+            None
+        } else {
+            self.reports.pop_front()
+        }
     }
 }
 

@@ -1,3 +1,6 @@
+#[path = "external_slash.rs"]
+mod external_slash;
+
 pub struct SlashCommandSpec {
     pub name: &'static str,
     pub description: &'static str,
@@ -14,6 +17,7 @@ pub struct ExternalSlashCommand {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SlashCommandRegistry {
     pub external: Vec<ExternalSlashCommand>,
+    pub executable: Option<std::path::PathBuf>,
 }
 
 impl SlashCommandRegistry {
@@ -185,6 +189,7 @@ impl Default for ProviderStatus {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
+    pub registry: SlashCommandRegistry,
     pub input: String,
     pub completions_dismissed_for: Option<String>,
     pub attachments: Vec<ImageAttachment>,
@@ -194,7 +199,8 @@ pub struct ComposerModel {
 impl ComposerModel {
     pub fn completions_visible(&self) -> bool {
         self.completions_dismissed_for.as_ref() != Some(&self.input)
-            && !completions(&self.input).is_empty()
+            && (!completions(&self.input).is_empty()
+                || !self.registry.completions(&self.input).is_empty())
     }
 
     pub fn dismiss_completions(&mut self) {

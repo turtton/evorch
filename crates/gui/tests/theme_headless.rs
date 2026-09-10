@@ -144,7 +144,7 @@ fn workbench_installs_theme_on_first_frame() {
     let mut harness = build_harness(state);
 
     // When: the UI is rendered
-    harness.run();
+    harness.step();
 
     // Then: the dark design tokens are installed.
     assert_eq!(

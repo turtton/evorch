@@ -36,6 +36,71 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn image_only_send_button_carries_attachment() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    let composer = harness.state_mut().composer_mut();
+    composer.image_input_supported = true;
+    assert!(composer.add_pasted_image("data:image/png;base64,aGVsbG8="));
+    harness.run();
+    harness.click_label("Send");
+    harness.run();
+    let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
+        panic!("image-only chat must dispatch");
+    };
+    assert_eq!(chat.images[0].data, "aGVsbG8=");
+    assert!(chat.text.is_empty());
+}
+
+#[test]
+fn external_review_dispatches_from_gui() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    let registry = &mut harness.state_mut().composer_mut().registry;
+    registry.load_external("review\tReview files\t<path>");
+    registry.executable = Some("printf".into());
+    submit(&mut harness, "/review src");
+    assert!(harness.has_label("review"));
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
+fn external_review_completion_and_help_are_available() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness
+        .state_mut()
+        .composer_mut()
+        .registry
+        .load_external("review\tReview files\t<path>");
+    harness.state_mut().composer_mut().input = "/rev".into();
+    harness.run();
+    harness.click_label("/review");
+    harness.run();
+    assert_eq!(harness.state().composer().input, "/review ");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(|entry|
+        matches!(entry, TranscriptEntry::Notice { text } if text.lines().any(|line| line.starts_with("/review <path>")))));
+}
+
+#[test]
+fn unsupported_image_preserves_draft_and_does_not_dispatch() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    harness.run();
+    harness.click_label("Send");
+    harness.run();
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+    assert!(harness.state().composer().image_warning().is_some());
+}
+
+#[test]
 fn cancel_chat_dispatches_active_thread_command() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
@@ -109,6 +174,7 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            images: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
             model_preference: None,
@@ -133,7 +199,7 @@ fn chat_send_renders_agent_reply() {
         })]);
     harness.run();
     // Then: the reply is visible alongside the user message.
-    assert!(harness.has_label("Message: Hi there"));
+    assert!(harness.has_label("Hi there"));
     assert!(harness.has_label("You: hello agent"));
     assert!(harness.state().transcripts().run("chat-1").is_some());
 }
@@ -200,7 +266,7 @@ fn help_command_lists_goal_and_help() {
     submit(&mut harness, "/help");
     // Then: the command list is visible without issuing a command.
     assert!(harness.has_label(
-        "/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
+        "/undo — Restore the previous workspace snapshot\n/redo — Restore the next workspace snapshot\n/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
     ));
     assert!(harness.state().issued().is_empty());
 }
@@ -238,7 +304,7 @@ fn chat_without_provider_shows_guidance_and_issues_nothing() {
     submit(&mut harness, "/help");
     // Then: help is appended without an additional command.
     assert!(harness.has_label(
-        "/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
+        "/undo — Restore the previous workspace snapshot\n/redo — Restore the next workspace snapshot\n/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
     ));
     assert_eq!(harness.state().issued().len(), 1);
 }

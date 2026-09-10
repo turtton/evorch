@@ -9,11 +9,15 @@ use crate::theme::tokens::{
 use crate::theme::widgets::{primary_button, surface_frame};
 use workspace_ui::ThreadRunPhase;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[path = "composer_images.rs"]
+mod images;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {
     Send,
     Cancel,
     Complete(&'static str),
+    CompleteExternal(String),
     OpenSettings,
 }
 
@@ -43,6 +47,11 @@ pub fn composer_strip(
                             action = Some(ComposerAction::Complete(spec.name));
                         }
                     }
+                    for spec in model.registry.completions(&model.input) {
+                        if ui.button(format!("/{}", spec.name)).clicked() {
+                            action = Some(ComposerAction::CompleteExternal(spec.name.clone()));
+                        }
+                    }
                 });
             }
             match provider {
@@ -58,31 +67,7 @@ pub fn composer_strip(
                     }
                 }
             }
-            ui.input(|input| {
-                for event in &input.events {
-                    if let egui::Event::Paste(value) = event {
-                        model.add_pasted_image(value);
-                    }
-                }
-            });
-            if let Some(warning) = model.image_warning() {
-                ui.colored_label(crate::theme::tokens::WARNING_FG, warning);
-            }
-            if !model.attachments.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    let mut remove = None;
-                    for (index, image) in model.attachments.iter().enumerate() {
-                        ui.group(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(format!("🖼 {}", image.media_type));
-                                ui.label("thumbnail");
-                                if ui.small_button("Remove").clicked() { remove = Some(index); }
-                            });
-                        });
-                    }
-                    if let Some(index) = remove { model.remove_attachment(index); }
-                });
-            }
+            images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
                 let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();
@@ -150,7 +135,7 @@ pub fn composer_strip(
                 } else if can_cancel && send.clicked() {
                     action = Some(ComposerAction::Cancel);
                     input.request_focus();
-                } else if !model.input.trim().is_empty() && (send.clicked() || enter) {
+                } else if can_send && (send.clicked() || enter) {
                     action = Some(ComposerAction::Send);
                     input.request_focus();
                 }

@@ -9,6 +9,7 @@ pub struct BrowserPane<S> {
     url: String,
     selector: String,
     error: Option<String>,
+    reports: std::collections::VecDeque<super::BrowserReport>,
 }
 
 impl<S: FrameSource> BrowserPane<S> {
@@ -19,6 +20,7 @@ impl<S: FrameSource> BrowserPane<S> {
             url: String::new(),
             selector: String::new(),
             error: None,
+            reports: std::collections::VecDeque::new(),
         }
     }
 
@@ -68,6 +70,27 @@ impl<S: FrameSource> BrowserPane<S> {
             if let Some(error) = self.error.clone().or_else(|| self.source.error()) {
                 ui.colored_label(ERROR_FG, error);
             }
+            while let Some(report) = self.source.poll_report() {
+                if self.reports.len() == 32 {
+                    self.reports.pop_front();
+                }
+                self.reports.push_back(report);
+            }
+            ui.label("Action log / DOM diff");
+            egui::ScrollArea::vertical()
+                .id_salt("browser-action-log")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for report in &self.reports {
+                        ui.label(format!(
+                            "{}: {}",
+                            report.action,
+                            report.error.as_deref().unwrap_or("completed")
+                        ));
+                        ui.monospace(format!("- {}", report.removed));
+                        ui.monospace(format!("+ {}", report.inserted));
+                    }
+                });
             match &self.texture {
                 Some(texture) => {
                     ui.add(

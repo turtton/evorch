@@ -1,6 +1,30 @@
 #![cfg(feature = "browser")]
 
+use egui_kittest::kittest::Queryable;
 use gui::browser::{BrowserAction, BrowserPane, FakeFrameSource, FrameSource};
+
+#[test]
+fn click_displays_action_log_and_dom_diff() {
+    let source = FakeFrameSource {
+        reports: [gui::browser::BrowserReport {
+            action: "click".into(),
+            error: None,
+            removed: "before".into(),
+            inserted: "after".into(),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut harness = egui_kittest::Harness::builder().build_ui_state(
+        |ui, pane: &mut BrowserPane<FakeFrameSource>| pane.render(ui),
+        BrowserPane::new(source),
+    );
+    harness.get_by_label("Click element").click();
+    harness.run();
+    assert!(harness.query_by_label("click: completed").is_some());
+    assert!(harness.query_by_label("- before").is_some());
+    assert!(harness.query_by_label("+ after").is_some());
+}
 
 #[test]
 fn fake_delivers_each_frame_once() {

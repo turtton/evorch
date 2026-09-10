@@ -297,6 +297,15 @@ fn suspended_writer_restats_db_size_before_rejecting() {
     .expect("raw insert must succeed");
     raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .expect("raw checkpoint must truncate");
+    let expected_size = std::fs::metadata(&config.db_path)
+        .expect("database metadata")
+        .len()
+        + std::fs::metadata(format!("{}-wal", config.db_path.display()))
+            .expect("WAL metadata")
+            .len()
+        + std::fs::metadata(format!("{}-shm", config.db_path.display()))
+            .expect("shared-memory metadata")
+            .len();
 
     // When: 再び append_event する
     let second = handle
@@ -311,11 +320,9 @@ fn suspended_writer_restats_db_size_before_rejecting() {
         other => panic!("expected DbSize limit exceeded, got {other:?}"),
     };
 
-    // Then: 最新サイズを再取得して増加を検出する
-    assert!(
-        second_actual > first_actual,
-        "re-stat must see fresh size: {second_actual} > {first_actual}"
-    );
+    // Then: checkpoint can shrink DB + WAL; the reported size must be fresh.
+    assert_ne!(expected_size, first_actual);
+    assert_eq!(second_actual, expected_size);
     storage.close();
 }
 
