@@ -5,6 +5,51 @@ use std::fs;
 use tempfile::tempdir;
 use tools::{Grep, Tool, ToolError};
 
+// Given: 201 hits / When: searching / Then: the summary fits within 200 lines.
+#[tokio::test]
+async fn grep_output_truncates_over_max_lines() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("a");
+    fs::write(&path, "hit\n".repeat(201)).expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "hit", "path": path}))
+        .await
+        .expect("search");
+    assert_eq!(result.content.lines().count(), 200);
+    assert!(result.content.ends_with("[truncated: 2 more lines]"));
+}
+
+// Given: a huge Unicode line / When: searching / Then: even the summary fits in 8 KiB.
+#[tokio::test]
+async fn grep_output_truncates_over_max_chars() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("a");
+    fs::write(&path, "猫".repeat(100_000)).expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "猫", "path": path}))
+        .await
+        .expect("search");
+    assert!(result.content.len() <= 8192);
+    assert!(result.content.contains("[truncated:"));
+}
+
+// Given: interleaved creation of two files / When: searching / Then: each file forms one ordered group.
+#[tokio::test]
+async fn grep_output_is_grouped_by_file() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("b"), "hit\nhit\n").expect("fixture");
+    fs::write(dir.path().join("a"), "hit\nhit\n").expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
+        .await
+        .expect("search");
+    let root = dir.path().display();
+    assert_eq!(
+        result.content,
+        format!("{root}/a:1:hit\n{root}/a:2:hit\n{root}/b:1:hit\n{root}/b:2:hit")
+    );
+}
+
 // Given: 複数行ファイルと一致するパターン / When: grep を実行 / Then: 一致行が `path:行番号:行` 形式で行番号順に返る
 #[tokio::test]
 async fn grep_matches_lines_in_file_with_line_numbers() {

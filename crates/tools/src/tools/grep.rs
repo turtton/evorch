@@ -1,13 +1,15 @@
 //! grep ツールの実装。
 //!
-//! 引数スキーマと権限は最終契約。`execute` は正規表現に一致した行を
-//! `path:行番号:行` 形式で返す。ディレクトリ指定時は再帰的に走査し、
-//! `.git` と読み取り不能・非 UTF-8 のファイルは黙ってスキップする。
+//! rg の結果をファイル順の `path:行番号:行` で返す。
+//! 注記を含めて最大 200 行 / 8 KiB。検索は 60 秒で打ち切る。
 
 use std::io::ErrorKind;
-use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use regex::Regex;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
@@ -16,6 +18,10 @@ use crate::tool::{Permissions, Tool};
 /// 正規表現でファイル内容を検索するツール。
 #[derive(Debug, Clone, Copy)]
 pub struct Grep;
+
+const MAX_LINES: usize = 200;
+const MAX_BYTES: usize = 8192;
+const SUMMARY_RESERVE: usize = 64;
 
 #[async_trait::async_trait]
 impl Tool for Grep {
@@ -45,34 +51,49 @@ impl Tool for Grep {
         let pattern = string_arg(&args, "pattern")?;
         let path = string_arg(&args, "path")?;
 
-        let regex = Regex::new(pattern).map_err(|error| ToolError::InvalidPattern {
-            detail: error.to_string(),
+        Regex::new(pattern).map_err(|_| ToolError::InvalidPattern {
+            detail: "invalid regular expression".to_string(),
         })?;
 
-        let metadata = std::fs::metadata(path).map_err(|error| {
+        let metadata = tokio::fs::metadata(path).await.map_err(|error| {
             if error.kind() == ErrorKind::NotFound {
                 ToolError::PathNotFound {
-                    path: path.to_string(),
+                    path: path.chars().take(512).collect(),
                 }
             } else {
                 ToolError::Io {
-                    detail: format!("{path}: {error}"),
+                    detail: error.to_string(),
                 }
             }
         })?;
 
-        let mut matches = Vec::new();
-        if metadata.is_dir() {
-            walk_dir(Path::new(path), &regex, &mut matches);
-        } else {
-            // 明示的に指定された 1 ファイルの失敗はエラーにする（黙ってスキップするのは再帰時のみ）。
-            let content = std::fs::read_to_string(path).map_err(|error| ToolError::Io {
-                detail: format!("{path} の読み取りに失敗しました: {error}"),
+        let search = async {
+            if metadata.is_file() {
+                validate_utf8_file(path).await?;
+            }
+            let mut child =
+                grep_command(pattern, path)
+                    .spawn()
+                    .map_err(|error| ToolError::SpawnFailed {
+                        command: "rg (install ripgrep and make it available on PATH)".to_string(),
+                        detail: error.to_string(),
+                    })?;
+            let stdout = child.stdout.take().ok_or_else(|| ToolError::Io {
+                detail: "rg stdout is unavailable".to_string(),
             })?;
-            matches.extend(matching_lines(Path::new(path), &content, &regex));
-        }
-
-        Ok(ToolResult::success(matches.join("\n")))
+            let output = collect_output(stdout).await.map_err(io_error)?;
+            let status = child.wait().await.map_err(io_error)?;
+            match status.code() {
+                Some(0 | 1) => Ok(ToolResult::success(output)),
+                Some(2) if metadata.is_dir() => Ok(ToolResult::success(output)),
+                _ => Ok(ToolResult::error(
+                    "rg search failed (check path and permissions)",
+                )),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), search)
+            .await
+            .map_err(|_| ToolError::Timeout { timeout_ms: 60_000 })?
     }
 }
 
@@ -88,46 +109,123 @@ fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, Too
         })
 }
 
-/// 1 ファイル分の一致行を `path:行番号:行` 形式で生成する。
-fn matching_lines(path: &Path, content: &str, regex: &Regex) -> Vec<String> {
-    let path = path.display();
-    content
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| regex.is_match(line))
-        .map(|(index, line)| {
-            let line_no = index + 1;
-            format!("{path}:{line_no}:{line}")
-        })
-        .collect()
+fn grep_command(pattern: &str, path: &str) -> Command {
+    let mut command = Command::new("rg");
+    command
+        .args([
+            "--no-config",
+            "--no-ignore",
+            "--hidden",
+            "--glob",
+            "!.git",
+            "--sort",
+            "path",
+            "--color",
+            "never",
+            "--no-heading",
+            "--with-filename",
+            "--line-number",
+            "--no-messages",
+            "--encoding",
+            "none",
+            "--regexp",
+            pattern,
+            "--",
+            path,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command
 }
 
-/// ディレクトリを再帰的に走査し、一致行を `matches` へ収集する。
-///
-/// 仕様どおり、読み取り不能・非 UTF-8 のファイルとシンボリックリンクは黙って
-/// スキップし、`.git` エントリは必ず無視する。ディレクトリエントリはファイル名
-/// 順にソートして決定論的な出力順を保証する。
-fn walk_dir(dir: &Path, regex: &Regex, matches: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-    entries.sort_by_key(|entry| entry.file_name());
+async fn collect_output(mut reader: impl AsyncRead + Unpin) -> std::io::Result<String> {
+    let mut output = String::with_capacity(MAX_BYTES);
+    let mut line = Vec::with_capacity(MAX_BYTES);
+    let mut buffer = [0; MAX_BYTES];
+    let mut total = 0_usize;
+    let mut shown = 0;
+    let mut oversized = false;
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        for &byte in &buffer[..count] {
+            if byte == b'\n' {
+                total = total.saturating_add(1);
+                if total == shown + 1
+                    && shown < MAX_LINES
+                    && !oversized
+                    && let Ok(text) = std::str::from_utf8(&line)
+                    && output.len() + text.len() < MAX_BYTES - SUMMARY_RESERVE
+                {
+                    output.push_str(text.trim_end_matches('\r'));
+                    output.push('\n');
+                    shown += 1;
+                }
+                line.clear();
+                oversized = false;
+            } else if line.len() < MAX_BYTES {
+                line.push(byte);
+            } else {
+                oversized = true;
+            }
+        }
+    }
+    if !line.is_empty() || oversized {
+        total = total.saturating_add(1);
+    }
+    if total > shown {
+        if shown == MAX_LINES {
+            output.pop();
+            output.truncate(output.rfind('\n').map_or(0, |index| index + 1));
+            shown -= 1;
+        }
+        output.push_str(&format!("[truncated: {} more lines]", total - shown));
+    } else {
+        output.pop();
+    }
+    Ok(output)
+}
 
-    for entry in entries {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() || entry.file_name() == ".git" {
-            continue;
+async fn validate_utf8_file(path: &str) -> Result<(), ToolError> {
+    let mut file = tokio::fs::File::open(path).await.map_err(io_error)?;
+    let mut buffer = [0; MAX_BYTES];
+    let mut pending = 0;
+    loop {
+        let count = file.read(&mut buffer[pending..]).await.map_err(io_error)?;
+        let bytes = &buffer[..pending + count];
+        match std::str::from_utf8(bytes) {
+            Ok(_) if count == 0 => return Ok(()),
+            Ok(_) => pending = 0,
+            Err(error) if error.error_len().is_none() && count > 0 => {
+                let start = error.valid_up_to();
+                pending = bytes.len() - start;
+                buffer.copy_within(start..start + pending, 0);
+            }
+            Err(_) => {
+                return Err(ToolError::Io {
+                    detail: "file is not UTF-8".to_string(),
+                });
+            }
         }
-        let entry_path = entry.path();
-        if file_type.is_dir() {
-            walk_dir(&entry_path, regex, matches);
-        } else if file_type.is_file()
-            && let Ok(content) = std::fs::read_to_string(&entry_path)
-        {
-            matches.extend(matching_lines(&entry_path, &content, regex));
-        }
+    }
+}
+
+fn io_error(error: std::io::Error) -> ToolError {
+    ToolError::Io {
+        detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Given: a search / When: constructing its command / Then: rg is the only backend.
+    #[test]
+    fn grep_uses_rg_backend() {
+        let command = super::grep_command("needle", ".");
+        assert_eq!(command.as_std().get_program(), "rg");
     }
 }
