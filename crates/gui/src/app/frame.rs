@@ -19,6 +19,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
         self.poll_provider_save();
+        if self.provider_settings.catalog.poll() {
+            ctx.request_repaint();
+        }
         if let Some(result) = self.folder_picker.poll() {
             let error = match result {
                 Ok(Some(path)) => {
@@ -54,6 +57,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }) || self.codex_auth().is_authenticating()
             || self.provider_save_rx.is_some()
             || self.folder_picker.is_busy()
+            || self.provider_settings.catalog.is_busy()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

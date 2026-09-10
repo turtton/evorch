@@ -29,6 +29,11 @@ pub fn provider_settings_modal(
             ui.set_width(width);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Provider settings"));
+            super::model_metadata::catalog_toolbar(ui, &mut model.catalog);
+            let sources = crate::model::model_metadata::MetadataSources {
+                presets: &model.model_presets,
+                catalog: model.catalog.catalog.as_deref(),
+            };
             match &mut model.editor {
                 Some(ProfileEditor::OpenAiCompatible(editor)) => {
                     if ctx.viewport_rect().height() < 800.0 {
@@ -37,10 +42,10 @@ pub fn provider_settings_modal(
                             .auto_shrink([false, false])
                             .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
                             .show(ui, |ui| {
-                                action = openai_body(ui, editor);
+                                action = openai_body(ui, editor, &sources);
                             });
                     } else {
-                        action = openai_body(ui, editor);
+                        action = openai_body(ui, editor, &sources);
                     }
                 }
                 Some(ProfileEditor::Codex(editor)) => {
@@ -130,7 +135,11 @@ pub fn provider_settings_modal(
     action
 }
 
-fn openai_body(ui: &mut egui::Ui, model: &mut OpenAiEditorModel) -> Option<ProviderSettingsAction> {
+fn openai_body(
+    ui: &mut egui::Ui,
+    model: &mut OpenAiEditorModel,
+    sources: &crate::model::model_metadata::MetadataSources<'_>,
+) -> Option<ProviderSettingsAction> {
     let mut action = None;
     let width = ui.available_width();
     let name = ui.label("Name");
@@ -187,7 +196,7 @@ fn openai_body(ui: &mut egui::Ui, model: &mut OpenAiEditorModel) -> Option<Provi
             .labelled_by(label.id);
         }
     }
-    if super::provider_models::provider_models(ui, model) {
+    if super::provider_models::provider_models(ui, model, sources) {
         action = Some(ProviderSettingsAction::RefreshModels);
     }
     let excluded = ui.label("Excluded models");

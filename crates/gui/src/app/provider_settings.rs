@@ -186,8 +186,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         Ok(config) => {
                             self.provider_status =
                                 crate::model::provider_settings::provider_status_of(&config);
+                            let catalog = std::mem::take(&mut self.provider_settings.catalog);
                             self.provider_settings =
                                 ProviderSettingsModel::seed_from_config(&config);
+                            self.provider_settings.catalog = catalog;
                             self.provider_settings.open = true;
                         }
                         Err(error) => {

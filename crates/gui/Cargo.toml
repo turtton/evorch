@@ -12,6 +12,7 @@ name = "gui"
 [dependencies]
 ashpd = { workspace = true }
 async-trait = { workspace = true }
+catalog = { path = "../catalog" }
 config = { path = "../config" }
 eframe = { workspace = true }
 egui = { workspace = true }

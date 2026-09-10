@@ -6,6 +6,8 @@ pub mod commands;
 pub mod composer;
 pub mod demo;
 pub mod folder_picker;
+pub mod model_catalog;
+pub mod model_metadata;
 pub mod model_picker;
 pub mod production;
 pub mod project_bridge;

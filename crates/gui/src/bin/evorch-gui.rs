@@ -666,7 +666,13 @@ fn run() -> Result<(), GuiError> {
             orchestration_settings_or_default(loaded),
             detected_provider_status(loaded),
             match loaded {
-                Ok(config) => ProviderSettingsModel::seed_from_config(config),
+                Ok(config) => {
+                    let mut settings = ProviderSettingsModel::seed_from_config(config);
+                    settings
+                        .catalog
+                        .start(gui::model::model_catalog::CatalogRequest::Load);
+                    settings
+                }
                 Err(_) => ProviderSettingsModel::default(),
             },
         ),

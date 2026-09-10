@@ -11,7 +11,11 @@ struct ModelInputs {
     height: Option<f32>,
 }
 
-pub fn provider_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
+pub fn provider_models(
+    ui: &mut egui::Ui,
+    editor: &mut OpenAiEditorModel,
+    sources: &crate::model::model_metadata::MetadataSources<'_>,
+) -> bool {
     let top = ui.cursor().top();
     let state_id = ui.id().with("provider-model-inputs");
     let mut inputs = ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
@@ -103,6 +107,18 @@ pub fn provider_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> boo
                         });
                         if button.clicked() {
                             remove = Some(index);
+                        }
+                    });
+                    ui.collapsing(format!("Metadata: {id}"), |ui| {
+                        super::model_metadata::model_metadata(
+                            ui,
+                            &mut editor.models[index],
+                            sources,
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for label in sources.labels(&editor.models[index], &editor.name) {
+                            ui.label(muted(label));
                         }
                     });
                 });

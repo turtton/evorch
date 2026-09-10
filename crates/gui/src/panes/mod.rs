@@ -8,6 +8,7 @@ pub mod codex_auth;
 pub mod composer;
 pub mod diff;
 pub mod markdown_render;
+pub mod model_metadata;
 pub mod model_picker;
 pub mod phase_indicator;
 pub mod provider_models;

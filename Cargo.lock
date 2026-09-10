@@ -2229,6 +2229,7 @@ version = "0.1.0"
 dependencies = [
  "ashpd",
  "async-trait",
+ "catalog",
  "config",
  "eframe",
  "egui",

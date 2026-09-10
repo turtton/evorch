@@ -44,6 +44,8 @@ pub struct ProviderSettingsModel {
     pub editor: Option<ProfileEditor>,
     pub error: Option<String>,
     pub confirm_delete: Option<String>,
+    pub model_presets: BTreeMap<String, config::ModelPresetConfig>,
+    pub catalog: super::model_catalog::CatalogState,
     entries: BTreeMap<String, config::ProviderProfileConfig>,
 }
 
@@ -69,6 +71,7 @@ impl ProviderSettingsModel {
                 })
                 .collect(),
             entries: config.providers.clone(),
+            model_presets: config.model_presets.clone(),
             ..Self::default()
         }
     }

@@ -140,16 +140,50 @@ pub fn save_openai_compatible_provider(
             normalized_models(&input.models)
                 .into_iter()
                 .map(|model| {
-                    if model.enabled {
-                        toml_edit::Value::from(model.id)
-                    } else {
-                        let mut table = InlineTable::new();
-                        table.insert("id", model.id.into());
-                        table.insert("enabled", false.into());
-                        table.into()
-                    }
+                    Ok(
+                        if model.enabled
+                            && model.metadata_source.is_none()
+                            && model.metadata_ref.is_none()
+                            && model.preset.is_none()
+                            && model.context_window.is_none()
+                        {
+                            toml_edit::Value::from(model.id)
+                        } else {
+                            let mut table = InlineTable::new();
+                            table.insert("id", model.id.into());
+                            table.insert("enabled", model.enabled.into());
+                            if let Some(source) = model.metadata_source {
+                                let source = match source {
+                                    crate::MetadataSource::Manual => "manual",
+                                    crate::MetadataSource::ModelsDev => "models-dev",
+                                    crate::MetadataSource::ProviderDefault => "provider-default",
+                                };
+                                table.insert("metadata_source", source.into());
+                            }
+                            if let Some(reference) = model.metadata_ref {
+                                table.insert("metadata_ref", reference.into());
+                            }
+                            if let Some(preset) = model.preset {
+                                table.insert("preset", preset.into());
+                            }
+                            if let Some(window) = model.context_window {
+                                table.insert(
+                                    "context_window",
+                                    toml_edit::Value::from(i64::try_from(window).map_err(
+                                        |_| {
+                                            invalid_field(
+                                                "context_window",
+                                                "must fit in a TOML integer",
+                                            )
+                                        },
+                                    )?),
+                                );
+                            }
+                            table.into()
+                        },
+                    )
                 })
-                .collect::<Array>(),
+                .collect::<Result<Array, ConfigError>>()?,
         ),
     );
     let excluded_models = normalized_string_models(&input.excluded_models);
