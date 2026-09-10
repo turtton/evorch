@@ -29,6 +29,7 @@ async fn chromium_screencast_and_action_evidence() {
     let (commands, rx) = mpsc::channel(8);
     let (frames_tx, mut frames) = watch::channel(None);
     let (stop, shutdown) = oneshot::channel();
+    let (reports_tx, mut reports_rx) = mpsc::channel(8);
     let browser = tokio::spawn(cdp::run(
         bus,
         false,
@@ -36,6 +37,7 @@ async fn chromium_screencast_and_action_evidence() {
             commands: rx,
             frames: frames_tx,
             shutdown,
+            reports: reports_tx,
         },
     ));
     let outcome = tokio::time::timeout(Duration::from_secs(45), async {
@@ -83,6 +85,7 @@ async fn chromium_screencast_and_action_evidence() {
             }
         }
         assert_eq!(screenshots, 2);
+        let _ = reports_rx.recv().await;
     })
     .await;
     let _ = stop.send(());
