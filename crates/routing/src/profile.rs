@@ -191,8 +191,8 @@ mod tests {
         config.models = vec![
             config::types::provider::ModelEntryConfig::enabled("model-z"),
             config::types::provider::ModelEntryConfig {
-                id: "model-disabled".to_string(),
                 enabled: false,
+                ..config::types::provider::ModelEntryConfig::enabled("model-disabled")
             },
             config::types::provider::ModelEntryConfig::enabled("model-b"),
             config::types::provider::ModelEntryConfig::enabled("model-a"),
