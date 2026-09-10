@@ -22,6 +22,8 @@ pub mod entry_routing;
 pub mod error;
 pub mod escalation;
 pub mod mailbox;
+pub mod memory;
+pub mod memory_queue;
 mod meta;
 pub mod model;
 pub mod model_resolve;

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui_dock::DockState;
-use workspace_ui::{Panel, PanelId, SidebarState, UiSettings};
+use workspace_ui::{Panel, PanelId, PanelKind, SidebarState, UiSettings};
 
 use super::WorkbenchError;
 use crate::diff::{DiffModel, DiffSource, GitCliDiffSource};
@@ -32,6 +32,7 @@ pub enum ConversationFocus {
 
 /// フレームごとにイベント・レイアウト・描画を統合する状態です。
 pub struct WorkbenchState<S> {
+    pub(super) memory: crate::panes::memory::MemoryPane,
     pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     pub(super) ownership_error: Option<String>,
     pub(super) shutdown_requested: bool,
@@ -87,6 +88,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut dock = to_dock_state(&workspace)?;
         crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
         let mut state = Self {
+            memory: crate::panes::memory::MemoryPane::default(),
             ownership: None,
             ownership_error: None,
             shutdown_requested: false,
@@ -146,6 +148,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn with_pump(mut self, pump: EventPump) -> Self {
         self.pump = Some(pump);
+        self
+    }
+
+    pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
+        self.memory.config = Some(config);
+        for (id, kind) in [("memory-main", PanelKind::Memory), ("tasks-main", PanelKind::Tasks)] {
+            let id = PanelId::new(id);
+            if self.dock.find_tab(&id).is_none() {
+                self.panels.insert(id.clone(), Panel { id: id.clone(), kind, title: kind.default_title().into(), target: None });
+                self.dock.push_to_focused_leaf(id);
+            }
+        }
         self
     }
 

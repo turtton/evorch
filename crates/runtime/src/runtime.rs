@@ -534,6 +534,10 @@ impl AgentRuntime {
             permit.run_id = Some(run_id.to_string());
         }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
+        let prompt = match &config.memory {
+            Some(memory) if handoff.is_none() => memory.augment(prompt),
+            Some(_) | None => prompt,
+        };
         let name = config
             .name
             .clone()

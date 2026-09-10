@@ -58,6 +58,7 @@ pub enum MergeMode {
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
+    pub memory: Option<crate::memory::MemoryBoundary>,
     pub ownership: Option<crate::ownership::OwnerPermit>,
     pub images: Vec<DelegateImage>,
     /// Explicit model selection for this run; absent means normal routing.

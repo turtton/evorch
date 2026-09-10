@@ -59,6 +59,22 @@ pub(super) fn run_writer(
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }
+            Ok(Command::Memory(mutation, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization("memory writes suspended by storage limit".into()))
+                } else {
+                    crate::repo::memory::append(&state.conn, &mutation)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::TaskQueue(mutation, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization("queue writes suspended by storage limit".into()))
+                } else {
+                    crate::task_queue::apply(&state.conn, &mutation)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::Reconcile(reply)) => {
                 let _ = reply.send(projection::reconcile(&state.conn));
             }

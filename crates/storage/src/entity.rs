@@ -66,11 +66,11 @@ string_enum!(SessionStatus {
 
 /// タスクの永続化状態です。
 ///
-/// V1 マイグレーションの `tasks.status` CHECK 制約が
-/// `'running','completed','failed'` のみを許容するため `Cancelled` を持たず、
 /// キャンセルイベントは射影で [`TaskStatus::Failed`] へ写像されます。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
+    Pending,
+    Blocked,
     /// 実行中です。
     Running,
     /// 正常に完了しました。
@@ -80,6 +80,8 @@ pub enum TaskStatus {
 }
 
 string_enum!(TaskStatus {
+    Pending => "pending",
+    Blocked => "blocked",
     Running => "running",
     Completed => "completed",
     Failed => "failed",
@@ -362,7 +364,7 @@ impl SecretGuard {
         }
     }
 
-    fn check_text(
+    pub(crate) fn check_text(
         &self,
         entity: &'static str,
         field: &'static str,

@@ -43,6 +43,7 @@ struct RepoIdentity {
 /// その root run に紐付けて supervisor へ goal を登録する (issue #71, #73)。
 /// DecideMerge / PauseGoal / ResumeGoal / CancelGoal は supervisor へ転送する。
 pub struct RuntimeCommandSink {
+    memory_config: Option<storage::StorageConfig>,
     runtime: AgentRuntime,
     handle: tokio::runtime::Handle,
     supervisor: SupervisorHandle,
@@ -63,6 +64,7 @@ impl RuntimeCommandSink {
     ) -> Self {
         let (events_tx, events_rx) = std::sync::mpsc::channel();
         Self {
+            memory_config: None,
             runtime,
             handle,
             supervisor,
@@ -77,6 +79,11 @@ impl RuntimeCommandSink {
 
     pub fn with_ownership(mut self, ownership: std::sync::Arc<runtime::ownership::OwnerHost>) -> Self {
         self.ownership = Some(ownership);
+        self
+    }
+
+    pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
+        self.memory_config = Some(config);
         self
     }
 
@@ -157,6 +164,10 @@ impl CommandSink for RuntimeCommandSink {
                 }
             }
             WorkbenchCommand::SubmitGoal(submission) => {
+                let memory = match self.memory_config.as_ref().map(|config| runtime::memory::MemoryBoundary::capture(config, &submission.project_id)).transpose() {
+                    Ok(memory) => memory,
+                    Err(error) => return vec![LoopEvent::CommandRejected { reason: error.to_string() }],
+                };
                 self.accepted_goals = self.accepted_goals.saturating_add(1);
                 let goal_id = format!("goal-{}", self.accepted_goals);
                 let prompt = render_entry_prompt(&submission);
@@ -196,6 +207,7 @@ impl CommandSink for RuntimeCommandSink {
                         prompt,
                         RunConfig {
                             name: Some(goal_id_for_run),
+                            memory,
                             ownership: permit,
                             ..RunConfig::default()
                         },

@@ -773,7 +773,7 @@ fn run() -> Result<(), GuiError> {
             runtime.clone(),
             handle.clone(),
             supervisor,
-        ).with_ownership(ownership)));
+        ).with_ownership(ownership).with_memory_storage(storage_config.clone())));
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);
         if let Some((context, model)) = production_model {
@@ -791,6 +791,7 @@ fn run() -> Result<(), GuiError> {
     if let Some(path) = arguments.save_layout {
         state = state.with_save_path(path);
     }
+    state = state.with_memory_storage(storage_config.clone());
     state.restore_history(&storage::Database::open(&storage_config)?)?;
 
     if arguments.demo {

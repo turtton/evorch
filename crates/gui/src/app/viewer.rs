@@ -28,6 +28,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let tab_style = dock_style.tab.clone();
         {
             let mut viewer = WorkbenchTabViewer {
+                memory: &mut self.memory,
                 transcripts: &self.transcripts,
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,

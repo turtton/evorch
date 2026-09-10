@@ -8,13 +8,6 @@ use crate::entity::{TaskRecord, TaskStatus};
 type TaskRow = (String, Option<String>, String, i64, i64);
 
 /// タスクを作成します。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "exercised by in-crate contract tests; writer commands are the production path"
-    )
-)]
 pub fn create(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO tasks (id, session_id, status, created_at_ns, updated_at_ns) VALUES (?1, ?2, ?3, ?4, ?5)",

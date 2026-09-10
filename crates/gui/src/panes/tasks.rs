@@ -32,3 +32,41 @@ pub fn tasks_pane<S: AgentRunSource>(ui: &mut egui::Ui, model: &TasksModel<S>) {
             });
     });
 }
+
+pub fn dependencies_pane(ui: &mut egui::Ui, config: &storage::StorageConfig) {
+    let result = storage::Database::open(config).and_then(|db| {
+        db.queued_tasks()?
+            .into_iter()
+            .map(|task| {
+                let links = db.task_dependencies(&task.id)?;
+                Ok((task, links))
+            })
+            .collect::<Result<Vec<_>, storage::StorageError>>()
+    });
+    match result {
+        Ok(rows) => {
+            egui::ScrollArea::both()
+                .id_salt("task_dependencies")
+                .show(ui, |ui| {
+                    egui::Grid::new("dependency_grid")
+                        .spacing([SP_1, SP_1])
+                        .show(ui, |ui| {
+                            for title in ["Task", "Status", "Blocks", "Blocked by"] {
+                                ui.label(muted(title).strong());
+                            }
+                            ui.end_row();
+                            for (task, links) in rows {
+                                ui.monospace(task.id);
+                                ui.label(task.status.as_str());
+                                ui.label(links.blocks.join(", "));
+                                ui.label(links.blocked_by.join(", "));
+                                ui.end_row();
+                            }
+                        });
+                });
+        }
+        Err(error) => {
+            ui.colored_label(crate::theme::tokens::ERROR_FG, error.to_string());
+        }
+    }
+}

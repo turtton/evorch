@@ -37,6 +37,7 @@ pub enum PanelKind {
     Diff,
     Terminal,
     Tasks,
+    Memory,
 }
 
 impl PanelKind {
@@ -50,6 +51,7 @@ impl PanelKind {
             Self::Diff => "Diff",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
+            Self::Memory => "Memory",
         }
     }
 }

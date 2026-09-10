@@ -57,6 +57,8 @@ pub mod config;
 mod db;
 pub mod entity;
 pub mod error;
+pub mod memory;
+pub mod task_queue;
 mod migrations;
 mod projection;
 mod read;

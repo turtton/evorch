@@ -256,6 +256,7 @@ pub(crate) fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageEr
             params![id, value.session_id, value.status.as_str(), system_time_to_ns(value.first_seen)?, system_time_to_ns(value.last_seen)?],
         )?;
     }
+    crate::task_queue::resolve(&tx)?;
     tx.commit()?;
     Ok(summary)
 }

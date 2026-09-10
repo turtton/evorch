@@ -24,6 +24,7 @@ use crate::panes::{
 use crate::pty::PtySession;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
+    pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) transcripts: &'a TranscriptRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
     pub(super) tasks: &'a mut TasksModel<S>,
@@ -191,7 +192,17 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 }
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
-            PanelKind::Tasks => tasks_pane(ui, self.tasks),
+            PanelKind::Tasks => {
+                if let Some(config) = &self.memory.config {
+                    crate::panes::tasks::dependencies_pane(ui, config);
+                    ui.separator();
+                }
+                tasks_pane(ui, self.tasks);
+            }
+            PanelKind::Memory => {
+                let project = self.sidebar.selected_project.as_ref().map(ToString::to_string);
+                self.memory.render(ui, project.as_deref());
+            }
         }
     }
 }

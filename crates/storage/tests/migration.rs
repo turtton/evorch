@@ -7,7 +7,16 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 7] = [
+const EXPECTED_TABLES: [&str; 16] = [
+    "task_queue_ledger",
+    "memory_ledger",
+    "memory_entries",
+    "memory_fts",
+    "memory_fts_data",
+    "memory_fts_idx",
+    "memory_fts_docsize",
+    "memory_fts_config",
+    "task_links",
     "agent_runs",
     "catalog_updates",
     "downsampled_metrics",
@@ -17,7 +26,10 @@ const EXPECTED_TABLES: [&str; 7] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 6] = [
+const EXPECTED_INDICES: [&str; 9] = [
+    "idx_memory_ledger_entry",
+    "idx_memory_entries_project_status",
+    "idx_task_links_blocked",
     "idx_agent_runs_session_id",
     "idx_events_session_id",
     "idx_events_wall_clock",
@@ -57,13 +69,13 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
 
-    // Then: v2 と定義済みテーブル・インデックスだけが作成される
+    // Then: v3 と定義済みテーブル・インデックスだけが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        2
+        3
     );
     assert_eq!(
         schema_objects(&connection, "table"),
@@ -85,16 +97,22 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v2 のまま維持される
+    // Then: スキーマは重複せず v3 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        2
+        3
     );
-    assert_eq!(schema_objects(&connection, "table").len(), 7);
-    assert_eq!(schema_objects(&connection, "index").len(), 6);
+    assert_eq!(
+        schema_objects(&connection, "table").len(),
+        EXPECTED_TABLES.len()
+    );
+    assert_eq!(
+        schema_objects(&connection, "index").len(),
+        EXPECTED_INDICES.len()
+    );
 }
 
 #[test]
@@ -116,7 +134,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 2,
+            supported: 3,
         }
     );
 }
@@ -135,4 +153,31 @@ fn open_initializes_required_pragmas() {
     assert_eq!(database.pragma_i64("synchronous").unwrap(), 1);
     assert_eq!(database.pragma_i64("wal_autocheckpoint").unwrap(), 1_000);
     assert_eq!(database.pragma_i64("foreign_keys").unwrap(), 1);
+}
+
+#[test]
+fn v2_upgrade_preserves_existing_tasks_and_events() {
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    let connection = Connection::open(&path).unwrap();
+    let sql = include_str!("../src/migrations/sql.rs");
+    for migration in sql.split("r#\"").skip(1) {
+        connection
+            .execute_batch(migration.split("\"#;").next().unwrap())
+            .unwrap();
+    }
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks VALUES('existing',NULL,'running',10,20)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let database = Database::open(&config_for(&path)).unwrap();
+    assert_eq!(
+        database.task("existing").unwrap().unwrap().status,
+        storage::entity::TaskStatus::Running
+    );
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 3);
 }

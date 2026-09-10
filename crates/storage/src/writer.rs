@@ -23,6 +23,8 @@ enum Command {
     Usage(Vec<UsageBucket>),
     AppendEvent(Option<String>, Event, ReplyTx),
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
+    Memory(crate::repo::memory::Mutation, ReplyTx),
+    TaskQueue(crate::task_queue::Mutation, ReplyTx),
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
@@ -90,6 +92,44 @@ impl Drop for Storage {
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    pub(crate) fn queue_mutation(
+        &self,
+        mutation: crate::task_queue::Mutation,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::TaskQueue(mutation, reply))
+    }
+    pub fn append_lesson(&self, lesson: &crate::memory::Lesson) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(
+                crate::repo::memory::Mutation::Candidate(lesson.clone()),
+                reply,
+            )
+        })
+    }
+
+    pub fn validate_lesson(&self, id: &str, evidence: &str) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(
+                crate::repo::memory::Mutation::Validate {
+                    id: id.into(),
+                    evidence: evidence.into(),
+                },
+                reply,
+            )
+        })
+    }
+
+    pub fn promote_lesson(&self, id: &str) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(crate::repo::memory::Mutation::Promote(id.into()), reply)
+        })
+    }
+
+    pub fn reject_lesson(&self, id: &str) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(crate::repo::memory::Mutation::Reject(id.into()), reply)
+        })
+    }
     /// イベントを容量制限付きで追記します。
     ///
     /// # Errors
