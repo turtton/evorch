@@ -27,6 +27,7 @@ use reclassify::{ReclassifyOutcome, reclassify};
 /// entry pre-routing の判定結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingDecision {
+    pub topology: crate::CoordinationTopology,
     /// 判定された ExecutionShape。
     pub shape: ExecutionShape,
     /// 判定理由 (ユーザーメッセージ本文は含めない)。
@@ -48,6 +49,7 @@ impl RoutingDecision {
 /// entry pre-routing 判定器。ローカルキーワードルールを先に適用し、
 /// 判定不能な場合のみ Orchestrator と同じモデルで再分類する (2 段階方式)。
 pub struct EntryRouter {
+    topology: crate::CoordinationTopology,
     model: Arc<dyn AgentModel>,
     bus: Arc<EventBus>,
 }
@@ -55,13 +57,23 @@ pub struct EntryRouter {
 impl EntryRouter {
     /// モデルと event bus から判定器を生成する。
     pub fn new(model: Arc<dyn AgentModel>, bus: Arc<EventBus>) -> Self {
-        Self { model, bus }
+        Self {
+            model,
+            bus,
+            topology: crate::CoordinationTopology::Single,
+        }
+    }
+
+    pub const fn with_topology(mut self, topology: crate::CoordinationTopology) -> Self {
+        self.topology = topology;
+        self
     }
 
     /// ユーザーメッセージを分類し、RoutingDecision event を bus へ発行して判定を返す。
     pub async fn classify(&self, message: &str) -> RoutingDecision {
         let decision = match classify_local(message) {
             LocalVerdict::Direct { keyword } => RoutingDecision {
+                topology: crate::CoordinationTopology::Single,
                 shape: ExecutionShape::Direct,
                 reason: format!("明示的な direct キーワード「{keyword}」を検出した"),
                 source: RoutingSource::LocalRule {
@@ -69,6 +81,7 @@ impl EntryRouter {
                 },
             },
             LocalVerdict::Coordinated => RoutingDecision {
+                topology: self.topology,
                 shape: ExecutionShape::Coordinated,
                 reason: "direct キーワードが検出されなかった".into(),
                 source: RoutingSource::LocalRule {
@@ -126,6 +139,10 @@ impl EntryRouter {
             ),
         };
         RoutingDecision {
+            topology: match shape {
+                ExecutionShape::Direct => crate::CoordinationTopology::Single,
+                ExecutionShape::Coordinated => self.topology,
+            },
             shape,
             reason,
             source,

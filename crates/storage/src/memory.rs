@@ -52,6 +52,37 @@ pub struct MemoryEntry {
 }
 
 impl Database {
+    pub fn append_finding(&self, finding: &Lesson) -> Result<(), StorageError> {
+        let guard = crate::entity::SecretGuard::from_env();
+        for text in [
+            &finding.id,
+            &finding.project,
+            &finding.task_id,
+            &finding.content,
+            &finding.evidence,
+        ] {
+            guard.check_text("memory", "finding", text)?;
+            if text.trim().is_empty() {
+                return Err(StorageError::Serialization(
+                    "finding fields must be non-empty".into(),
+                ));
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO memory_ledger(entry_id,project,task_id,content,evidence,status,kind) VALUES(?1,?2,?3,?4,?5,'candidate','finding')",
+            params![finding.id, finding.project, finding.task_id, finding.content, finding.evidence],
+        )?;
+        Ok(())
+    }
+
+    pub fn findings(&self, project: &str) -> Result<Vec<Lesson>, StorageError> {
+        let mut statement = self.conn.prepare("SELECT entry_id,project,task_id,content,evidence,status FROM memory_ledger WHERE project=?1 AND kind='finding' ORDER BY seq")?;
+        Ok(statement
+            .query_map([project], entry_row)?
+            .map(|row| row.map(|(lesson, _)| lesson))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn search_memory(
         &self,
         project: &str,

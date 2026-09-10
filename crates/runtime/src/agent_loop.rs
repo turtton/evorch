@@ -4,8 +4,9 @@
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
 mod messages;
-mod tool_calls;
 mod snapshots;
+mod team;
+mod tool_calls;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
@@ -130,6 +131,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         &state.policy,
         state.skills().is_some(),
     );
+    state.add_team_tools();
     let mut owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {

@@ -194,6 +194,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
             PanelKind::Tasks => {
+                crate::panes::team::team_pane(ui, &self.tasks.teams());
+                ui.separator();
                 if let Some(config) = &self.memory.config {
                     crate::panes::tasks::dependencies_pane(ui, config);
                     ui.separator();

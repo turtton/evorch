@@ -77,7 +77,10 @@ impl RuntimeCommandSink {
         }
     }
 
-    pub fn with_ownership(mut self, ownership: std::sync::Arc<runtime::ownership::OwnerHost>) -> Self {
+    pub fn with_ownership(
+        mut self,
+        ownership: std::sync::Arc<runtime::ownership::OwnerHost>,
+    ) -> Self {
         self.ownership = Some(ownership);
         self
     }
@@ -112,7 +115,9 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
-    fn poll(&mut self) -> Vec<LoopEvent> { self.events_rx.try_iter().collect() }
+    fn poll(&mut self) -> Vec<LoopEvent> {
+        self.events_rx.try_iter().collect()
+    }
 
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
         let permit = if let Some(host) = &self.ownership {
@@ -122,17 +127,28 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::CancelChat { thread_id } => Some(thread_id.as_str()),
                 WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::RestoreSnapshot { .. } => None,
-                WorkbenchCommand::PauseGoal { .. } | WorkbenchCommand::ResumeGoal { .. } | WorkbenchCommand::CancelGoal { .. } => None,
+                WorkbenchCommand::PauseGoal { .. }
+                | WorkbenchCommand::ResumeGoal { .. }
+                | WorkbenchCommand::CancelGoal { .. } => None,
             };
             match thread.map(|thread| host.owned_permit(thread)).transpose() {
                 Ok(permit) => permit,
-                Err(error) => return vec![LoopEvent::CommandRejected { reason: error.to_string() }],
+                Err(error) => {
+                    return vec![LoopEvent::CommandRejected {
+                        reason: error.to_string(),
+                    }];
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         match command {
             WorkbenchCommand::RestoreSnapshot { thread_id, redo } => {
                 let Some(&run) = self.chat_runs.get(&thread_id) else {
-                    return vec![LoopEvent::ChatRejected { thread_id, reason: "No chat snapshot available".into() }];
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: "No chat snapshot available".into(),
+                    }];
                 };
                 let runtime = self.runtime.clone();
                 let tx = self.events_tx.clone();
@@ -164,9 +180,20 @@ impl CommandSink for RuntimeCommandSink {
                 }
             }
             WorkbenchCommand::SubmitGoal(submission) => {
-                let memory = match self.memory_config.as_ref().map(|config| runtime::memory::MemoryBoundary::capture(config, &submission.project_id)).transpose() {
+                let memory = match self
+                    .memory_config
+                    .as_ref()
+                    .map(|config| {
+                        runtime::memory::MemoryBoundary::capture(config, &submission.project_id)
+                    })
+                    .transpose()
+                {
                     Ok(memory) => memory,
-                    Err(error) => return vec![LoopEvent::CommandRejected { reason: error.to_string() }],
+                    Err(error) => {
+                        return vec![LoopEvent::CommandRejected {
+                            reason: error.to_string(),
+                        }];
+                    }
                 };
                 self.accepted_goals = self.accepted_goals.saturating_add(1);
                 let goal_id = format!("goal-{}", self.accepted_goals);
@@ -193,6 +220,10 @@ impl CommandSink for RuntimeCommandSink {
                     repo: self.repo_identity().repo.clone(),
                     base_ref: self.repo_identity().base_ref.clone(),
                 };
+                let finding_store = self
+                    .memory_config
+                    .as_ref()
+                    .map(|config| config.db_path.clone());
                 self.handle.spawn(async move {
                     let decision = runtime.entry_router().classify(&goal_for_log).await;
                     // issue #83: root run の起動より先に goal を登録する。
@@ -207,6 +238,8 @@ impl CommandSink for RuntimeCommandSink {
                         prompt,
                         RunConfig {
                             name: Some(goal_id_for_run),
+                            topology: decision.topology,
+                            finding_store,
                             memory,
                             ownership: permit,
                             ..RunConfig::default()

@@ -49,7 +49,14 @@ impl LoopState {
                 self.finish_cancelled();
                 return false;
             }
-            let result = if let Err(error) = self.policy.authorize(&name) {
+            let result = if matches!(
+                name.as_str(),
+                "task_claim" | "task_complete" | "finding_append"
+            ) {
+                self.team_tool(&name, input).await
+            } else if let Err(error) = self.guard_team_artifact(&name, &input) {
+                ToolResult::error(error)
+            } else if let Err(error) = self.policy.authorize(&name) {
                 ToolResult::error(error.to_string())
             } else if is_meta_op(&name) {
                 let dispatch = meta::dispatch(self, &name, input).await;

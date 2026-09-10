@@ -45,6 +45,7 @@ pub struct AgentRuntime {
 }
 
 pub(crate) struct Shared {
+    topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
     pub(crate) snapshots: OnceLock<Arc<crate::snapshot::SnapshotService>>,
@@ -125,25 +126,60 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
+    pub fn team_tasks(&self) -> Vec<(RunId, Vec<crate::team::TeamTask>)> {
+        lock_runs(&self.shared.runs)
+            .iter()
+            .filter_map(|(id, entry)| {
+                let team = entry.config.team.as_ref()?;
+                (*id == team.coordinator).then(|| (*id, team.board.snapshot().unwrap_or_default()))
+            })
+            .collect()
+    }
+
     pub fn with_snapshots(self, service: Arc<crate::snapshot::SnapshotService>) -> Self {
         let _ = self.shared.snapshots.set(service);
         self
     }
 
-    pub async fn restore_snapshot(&self, run_id: RunId, redo: bool) -> Result<Option<String>, String> {
+    pub async fn restore_snapshot(
+        &self,
+        run_id: RunId,
+        redo: bool,
+    ) -> Result<Option<String>, String> {
         let (owner, phase) = {
             let entry = self.entry(run_id).map_err(|error| error.to_string())?;
-            (entry.config.name.clone().unwrap_or_else(|| run_id.to_string()), *entry.phase_rx.borrow())
+            (
+                entry
+                    .config
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| run_id.to_string()),
+                *entry.phase_rx.borrow(),
+            )
         };
         if phase == AgentRunPhase::Running || phase == AgentRunPhase::Pending {
             return Err("Wait for the run to become idle before restoring files".into());
         }
-        let service = self.shared.snapshots.get().ok_or("Snapshots are not configured")?;
-        let root = self.shared.workspaces.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&run_id).and_then(|workspace| workspace.worktree_path.clone());
-        let mut workspace = service.lock(root.as_deref()).await.map_err(|error| error.to_string())?;
+        let service = self
+            .shared
+            .snapshots
+            .get()
+            .ok_or("Snapshots are not configured")?;
+        let root = self
+            .shared
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .and_then(|workspace| workspace.worktree_path.clone());
+        let mut workspace = service
+            .lock(root.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
         tokio::task::spawn_blocking(move || workspace.restore(&owner, redo))
-            .await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn from_weak(shared: &Weak<Shared>) -> Option<Self> {
@@ -158,6 +194,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                topology: OnceLock::new(),
                 bus,
                 executor,
                 snapshots: OnceLock::new(),
@@ -194,6 +231,10 @@ impl AgentRuntime {
     }
 
     pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
+        let _ = self
+            .shared
+            .topology
+            .set(crate::CoordinationTopology::from_config(&config.team));
         let _ = self
             .shared
             .model_resolution
@@ -360,6 +401,7 @@ impl AgentRuntime {
                 bus,
                 executor,
                 model,
+                topology: OnceLock::new(),
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
@@ -425,6 +467,7 @@ impl AgentRuntime {
     /// 構造的に使われる (issue #71 / AC3)。
     pub fn entry_router(&self) -> EntryRouter {
         EntryRouter::new(Arc::clone(&self.shared.model), Arc::clone(&self.shared.bus))
+            .with_topology(self.shared.topology.get().copied().unwrap_or_default())
     }
 
     /// run を登録してバックグラウンド実行を開始し、その ID を返す。
@@ -527,9 +570,34 @@ impl AgentRuntime {
         handoff: Option<RunHandoff>,
     ) -> RunId {
         if let Some(parent) = parent {
-            config.ownership = lock_runs(&self.shared.runs).get(&parent)
-                .and_then(|entry| entry.config.ownership.clone()).or(config.ownership);
+            if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
+                config.topology = entry.config.topology;
+                config.team = entry.config.team.clone();
+            }
+            config.ownership = lock_runs(&self.shared.runs)
+                .get(&parent)
+                .and_then(|entry| entry.config.ownership.clone())
+                .or(config.ownership);
         }
+        if role == Role::Orchestrator
+            && config.team.is_none()
+            && let Some(limit) = config.topology.worker_limit()
+        {
+            let mut team = crate::team_context::TeamContext::new(run_id, limit);
+            team.finding_store = config.finding_store.clone();
+            config.team = Some(team);
+        }
+        let worker_slot = match (&config.team, role) {
+            (Some(team), Role::Worker) => Some(team.reserve_worker().and_then(|slot| {
+                if let Some(spec) = &config.team_task {
+                    team.board
+                        .enqueue(spec.clone())
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(slot)
+            })),
+            _ => None,
+        };
         if let Some(permit) = &mut config.ownership {
             permit.run_id = Some(run_id.to_string());
         }
@@ -537,6 +605,13 @@ impl AgentRuntime {
         let prompt = match &config.memory {
             Some(memory) if handoff.is_none() => memory.augment(prompt),
             Some(_) | None => prompt,
+        };
+        let prompt = match (&config.team, &config.team_task) {
+            (Some(_), Some(task)) => format!(
+                "{prompt}\nTeam task id: {:?}. Claim it with task_claim before editing; pass its generation to task_complete. Owned paths: {:?}",
+                task.id, task.paths
+            ),
+            _ => prompt,
         };
         let name = config
             .name
@@ -619,7 +694,35 @@ impl AgentRuntime {
                 task_id: run_id.to_string(),
             }));
         let weak = Arc::downgrade(&self.shared);
-        let join = tokio::spawn(async move { run_agent(weak, task, channels).await });
+        let join = tokio::spawn(async move {
+            let _slot = match worker_slot {
+                Some(Ok(slot)) => Some(slot),
+                Some(Err(reason)) => {
+                    if let Some(shared) = weak.upgrade() {
+                        shared
+                            .bus
+                            .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+                                run_id: task.run_id.to_string(),
+                                from: AgentRunPhase::Pending,
+                                to: AgentRunPhase::Error,
+                                reason: Some(reason),
+                            }));
+                    }
+                    let _ = channels.phase_tx.send(AgentRunPhase::Error);
+                    return;
+                }
+                None => None,
+            };
+            let _monitor = task.config.team.clone().map(|team| {
+                crate::team_context::monitor(
+                    weak.clone(),
+                    team,
+                    task.run_id,
+                    channels.phase_tx.subscribe(),
+                )
+            });
+            run_agent(weak, task, channels).await;
+        });
         if let Some(entry) = lock_runs(&self.shared.runs).get_mut(&run_id) {
             entry._join = Some(join);
         }
