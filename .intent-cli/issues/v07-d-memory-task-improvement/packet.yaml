@@ -1,0 +1,75 @@
+implementation_issue_packet:
+  issue_title: "v0.7 D: memory backend + persistent task + self-improvement loop（interview 付き）"
+  issue_kind: feature
+  source_execution_unit: v07-d-memory-task-improvement
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/storage/src/memory/*.rs crates/storage/src/event_ledger.rs crates/storage/src/task_queue.rs crates/runtime/src/self_improvement/*.rs crates/runtime/src/interview.rs crates/gui/src/panes/memory.rs"
+  target_part: "memory backend（SQLite append-only ledger + projection）、persistent task queue、self-improvement loop、post-run interview を導入し、task boundary を跨いだ知識蓄積と改善を可能にする"
+  dependencies:
+    - "v0.5 diagnostics-self-improvement の DiagnosticBus / event ledger が存在する前提"
+  technical_baseline:
+    - "event sourcing / EventBus は実装済み（ADR 0018）"
+    - "storage は SQLite、metrics / usage も既存"
+    - "GUI の task 管理画面は既存の task pane を拡張"
+  intent_references:
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+  acceptance_criteria:
+    - "memory event ledger が task 終了時に append-only で残る"
+    - "memory projection が task context へ次回の task で注入される"
+    - "persistent task queue が blocks/blockedBy を解決できる"
+    - "post-run interview が candidate lesson を evidence 紐付きで保存する"
+    - "self-improvement loop が candidate → validation → promotion の流れを通す"
+
+intent_placement:
+  primary_intent: intents/evorch/features/storage-memory
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement
+    - intents/evorch/features/gui-workbench
+  new_intent_needed: false
+  placement_rationale: |
+    memory と task queue は storage/memory の領域であり、diagnostics/self-improvement は同じ ledger を使う。
+    GUI は task queue と memory の可視化を担当する。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    OMO Memory / pi-mnemopi / Letta / Continual Harness の調査結果を踏まえ、二層 memory（event ledger +
+    projection）と interview feedback を実装する。promotion gate は deterministic に運用する。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/storage-memory/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []

@@ -13,6 +13,9 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 - **Crash spool**: panic 等で session-end hook が実行できない場合は `~/.harness/crash-spool/` 等へ durable に保存し、次回起動時に処理
 - **Self-improvement introspection API**: harness.inspect_session / inspect_agents / inspect_cache / inspect_provider / inspect_ui / spawn_test_instance / capture_ui / replay_interaction / report_bug。不便を検出 → 改善案作成 → workspace config 変更または source 変更 → test instance → 検証 の自己改善 loop
 - **UI 自己改善との連携**: Level 3 の framework implementation 変更は worktree → source modification → build → test harness instance → semantic inspection → screenshot / interaction replay で自己検証
+- **Role/model evaluation との連携（v0.7 Bundle E4）**: evaluation trace / failure attribution / prompt variant の試行結果を memory backend に保存し、改善候補の promotion 判断へ利用する
+- **Browser diagnostics（v0.7 Bundle Browser）**: headless browser の action log / screenshot / DOM diff を diagnostic evidence として記録可能にする
+
 
 ## 受け入れ基準
 
@@ -33,3 +36,4 @@ Harness 自身の不具合を runtime が直接捕捉し、Issue 化し、dogfoo
 
 - 自動 Issue 化の抑制条件（誤検出の multi-fire 防止）
 - self-improvement agent の権限範囲（config 変更のみか source 変更まで許可するか）
+- ~~diagnostics の event 契約詳細~~ → 2026-09-10 確定。Bundle D の memory ledger と Bundle Browser の evidence を source に使う design が採択された

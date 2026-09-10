@@ -1,0 +1,56 @@
+implementation_issue_packet:
+  issue_title: "v0.6 B: role capability 追加（Planner / Librarian / Oracle / Multimodal Looker）"
+  issue_kind: feature
+  source_execution_unit: v06-b-role-capability-add
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/agents/src/roles/planner.rs crates/agents/src/roles/librarian.rs crates/agents/src/roles/oracle.rs crates/agents/src/roles/multimodal_looker.rs crates/agents/src/role_registry.rs crates/runtime/src/delegation_policy.rs crates/gui/src/panes/activity_log.rs"
+  target_part: "orchestrator が複雑な依頼を分解する際、専門性の高い sub-role を role capability として利用できるようにする。worker direct 置換ではなく Coordinated 実行時の専門分解に限定する"
+  dependencies: []
+  technical_baseline:
+    - "runtime は既に role と capability の分離を持つ（ADR 0002）"
+    - "DelegationValue / Execution Shape / Intent Gate は v0.2 で確立済み"
+    - "GUI の task / status pane は既存"
+  intent_references:
+    - "intents/evorch/features/orchestration/overview.md"
+    - "intents/evorch/features/agent-runtime-kernel/overview.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+  acceptance_criteria:
+    - "Planner / Librarian / Oracle / Multimodal Looker を role capability として登録できる"
+    - "delegate で role 指定時に capability 判定が働く"
+    - "GUI で role 利用が activity log に出る"
+    - "capability unknown の場合は明示的にエラーになる"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration
+  supporting_intents:
+    - intents/evorch/features/gui-workbench
+    - intents/evorch/features/agent-runtime-kernel
+  new_intent_needed: false
+  placement_rationale: |
+    role capability は orchestration の delegation policy に属し、GUI の可視化にも影響する。kernel 側は既存の
+    role/capability 分離を拡張する形で対応する。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    TeamBench の role capability 分離と capability boundary の設計を evorch の role registry へ落とし込む。
+    worker direct ではなく Coordinated 実行時の専門分解として価値を確認する。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md

@@ -11,6 +11,10 @@ SQLite を中心とした event-sourced runtime とする。Event Log を source
 - **主な entity**: sessions / tasks / agent_runs / messages / tool_calls / events / usage / diagnostics / artifacts / memory / provider_health
 - **Event sourcing**: event log → state projection → GUI。全履歴が残り、rewind / branch が可能
 - **Memory パイプライン**: task / session 終了時に quick agent が「今回の作業から将来も有用な知識は何か」を抽出し persistent memory へ保存。session 途中で stable prefix に挿入せず、次の task boundary から利用
+- **二層 memory 構成（採択、2026-09-10 調査反映）**: (1) SQLite append-only の event ledger（run / tool / review / success/failure / feedback を収集し監査可能）、(2) 派生 projection（decision / constraint / lesson / failure_pattern / workflow / handoff を FTS で検索可能な小さな memory entry）。LLM は extraction / 要約のみ担当し、昇格・promotion は deterministic gate で実施する。詳細は Bundle D（memory backend）の roadmap 節を参照
+- **Post-run interview**: run 終了時に worker / reviewer を quick model でヒアリングし、回答を candidate lesson として evidence 紐付きで保存する。次の task 開始時からのみ stable prefix へ反映し、現 task の prompt cache を不意に変えない
+- **Persistent task system**: `blocks` / `blockedBy` を持つ durable task queue を導入し、長期作業における依存関係を跨 session / owner で解決できるようにする
+
 - **Session / Task 構造**: Session より下に Task 境界。Task A（調査）→ compact → Task B（実装）→ compact → Task C（テスト改善）のように長寿命 workspace として使う
 
 ## 受け入れ基準
@@ -52,4 +56,4 @@ issue #37 で確定した実装値と挙動:
 ## Open questions
 
 - ~~event log のスキーマ詳細（messages と tool_calls の正規化方法）~~ → 2026-08-29 解決（ADR 0018-sqlite-storage-schema、PR #12）
-- memory の検索（Relevant Memory Retrieval）の実現方式
+- memory の検索（Relevant Memory Retrieval）の実現方式 → 2026-09-10 確定。FTS first / vector optional、structured lesson status を持つ projection。detailed schema は Bundle D packet で確定させる

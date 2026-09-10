@@ -10,7 +10,10 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 
 - **Intent Gate**: task type / required capabilities / mutation allowed? / scope / uncertainty / expected output / completion criteria / likely need for delegation を抽出する。workflow は決めない
 - **Execution Shape**: Direct（単純な質問・局所的修正）または Coordinated（複雑な調査・実装・並列探索）だけを決める
-- **Role 分離**: Orchestrator / Explorer / Librarian / Oracle / Planner / Reviewer / Worker / Multimodal を capability boundary として分離する。cognitive isolation（生成と独立レビューの分離）を徹底する
+- **Role 分離**: Orchestrator / Explorer / Librarian / Oracle / Planner / Reviewer / Worker / Multimodal Looker を capability boundary として分離する。cognitive isolation（生成と独立レビューの分離）を徹底する（Librarian / Oracle / Planner / Multimodal Looker は v0.6 Bundle B で追加）
+- **Team mode（opt-in、v0.7 Bundle E2）**: `ExecutionShape::Coordinated(DynamicTeam)` として実装する。root coordinator + 最大 3 worker、capability role、atomic task claim + lease / heartbeat、append-only finding log、artifact ownership、failure recovery、visibility。固定 leader/member workflow は採用しない（ADR 0001 遵守）。worker 同士の直接通信は許可するが必須ではない。単一 agent 代替ではなく、delegation value 明示時のみ有効
+- **役割別評価 / arena（v0.7 Bundle E4）**: role ごとに task type・model・prompt version・topology を測る評価系を導入する。同一 task / budget の arena、hard gate → Pareto → pairwise、train / validation / holdout / redteam 分割、failure attribution、promotion gate。結果は Router の model candidate へ段階的に反映する（観測のみ → 固定 arena → role matrix → optimizer → online feedback）
+
 - **Orchestrator の tool 制限**: delegate / delegate_background / send_message / wait / cancel / list_agents / inspect_agent / read / grep / git_diff / compact / finish のみ。write / edit / apply_patch / arbitrary shell / git commit は持たせない
 - **DelegationValue**: Expertise / Parallelism / ContextIsolation / IndependentReview / DifferentInformationSource / Scale。「複雑だから delegate」ではなく delegation に具体的価値を要求する
 - **Agent の5軸分解**: Agent Instance = Role + Category + Skills + Execution Policy + Route Policy
@@ -102,8 +105,9 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 
 ## Open questions
 
-- Explorer / Librarian / Reviewer の runtime レベル capability 制限の具体設定（network の role-dependent 扱いの細部）
+- ~~Explorer / Librarian / Reviewer の runtime レベル capability 制限の具体設定（network の role-dependent 扱いの細部）~~ → 2026-09-10 確定。Bundle B で Librarian / Oracle / Planner / Multimodal Looker を追加する。capability 行列は ADR 0002 の方針のまま詳細化する
 - Category（quick / deep / high-reasoning / visual / writing / research）のモデル routing との対応表
+- Team mode の実装時の claim / lease / heartbeat 詳細、shared finding log の schema
 
 
 ## v0.2 確定（PR #72、issue #71）: entry pre-routing

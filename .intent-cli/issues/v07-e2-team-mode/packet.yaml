@@ -1,0 +1,74 @@
+implementation_issue_packet:
+  issue_title: "v0.7 E2: team mode（opt-in、Coordinated(DynamicTeam) の最小実装）"
+  issue_kind: feature
+  source_execution_unit: v07-e2-team-mode
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/src/team/*.rs crates/runtime/src/claim.rs crates/runtime/src/registry.rs crates/runtime/src/team_task_queue.rs crates/runtime/src/artifact_ownership.rs crates/gui/src/panes/team.rs crates/gui/src/panes/claim_prompt.rs"
+  target_part: "複数エージェントでの並列実行・役割分担を有効化する。ただし固定 leader/member workflow ではなく、capability role と ownership/claim/lease の最小機構で実装する"
+  dependencies:
+    - "v0.6 Bundle B の role capability 追加がある前提"
+  technical_baseline:
+    - "role capability / DelegationValue / Execution Shape は既存"
+    - "ADR 0001 の no-fixed-workflow を維持"
+    - "runtime event sourcing / queue は既存"
+  intent_references:
+    - "intents/evorch/features/orchestration/overview.md"
+    - "intents/evorch/decisions/0001-no-fixed-workflow.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+  acceptance_criteria:
+    - "ExecutionShape::Coordinated(DynamicTeam) を選択できる"
+    - "capability role を用いて最小 3 worker までの team を構成できる"
+    - "atomic task claim と lease / heartbeat で同一 artifact の衝突を防げる"
+    - "failure recovery が GUI の team pane で可視化される"
+    - "単一 agent を超える並列価値があることを GUI で確認できる"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration
+  supporting_intents:
+    - intents/evorch/features/gui-workbench
+    - intents/evorch/features/agent-runtime-kernel
+  new_intent_needed: false
+  placement_rationale: |
+    team mode は orchestration の実行形状として実装する。GUI は task queue と agent status を可視化する。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    Anthropic / DeLM / AgentRoom / BenchAgent の調査結果を踏まえ、固定 workflow を避けた team mode の最小実装を
+    evorch に組み込む。capability role による専門分解と failure recovery を優先する。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []

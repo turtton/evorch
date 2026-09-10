@@ -1,0 +1,71 @@
+implementation_issue_packet:
+  issue_title: "v0.7: embedded browser（opt-in、CDP screencast / CEF OSR 将来対応）"
+  issue_kind: feature
+  source_execution_unit: v07-browser-embedded
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/src/browser/*.rs crates/gui/src/panes/browser.rs crates/gui/src/commands/browser_preview.rs crates/gui/src/features/browser/mod.rs"
+  target_part: "GUI に browser pane を追加し、agent の web 操作や検証結果を可視化する。既定は外部 Playwright/Chromium による CDP screencast で、将来 CEF OSR / browser-relay を opt-in で追加する"
+  dependencies:
+    - "v0.6 Bundle C' の thread owner / claim モデルで GUI 複数起動が前提"
+  technical_baseline:
+    - "GUI は egui/egui_dock で既に複数 pane を持つ"
+    - "Browser pane は diagnostics/verification と組み合わせることを想定"
+    - "feature flag で opt-in 配布できる構成にする"
+  intent_references:
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+  acceptance_criteria:
+    - "browser pane で page snapshot / action log / DOM diff が見える"
+    - "headless 既定、headful 切替は明示操作時のみ"
+    - "フォーカスを奪わない構成で実装される"
+    - "feature flag で opt-in できる"
+
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement
+  new_intent_needed: false
+  placement_rationale: |
+    browser は GUI ワークベンチに属し、diagnostics/self-improvement の検証に有効である。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    browser visibility の調査結果（agent-browser / browser-relay / CEF / servo）を踏まえ、evorch の GUI に
+    埋め込みの browser pane を opt-in で導入する。headless 可視化の仕組みを diagnostics と関連付ける。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []

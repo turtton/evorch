@@ -66,7 +66,7 @@ Loop 基盤（packet 9 本）:
 
 **成功基準**: evorch orchestrator が goal+contract 投入から worker 起動・実装・PR 作成・review 往復を経て人間 merge 承認まで GUI 起点で完走し（OpenCode / omo / herdr 非依存。GitHub / intent-cli 連携は shell tool 経由）、queue 済み v0.2 unit の後半 1-2 本を evorch 自身のループで消費できること（headless で再現可能）。
 
-**v0.3 以降へ送り**: Librarian / Oracle role 追加、Role / Category separation の role 拡張面、Tree-sitter / LSP、ContentOrigin の web tools 外 generalization、provider affinity、cache metrics 単独項目（compaction / OTel で部分カバー。v0.2 slice ① で cache_read/cache_write の `gen_ai.token.type` 拡張値は出力済み、`CacheStats` の hit/miss 集計はこちらに残す）、github-copilot / anthropic-subscription provider（v0.3 計画維持）、diff / file tree 完全版。Planner / Multimodal の導入時期は別途決定（v0.3 以降の候補）。
+**v0.3 以降へ送り**: Librarian / Oracle role 追加、Role / Category separation の role 拡張面、Tree-sitter / LSP、ContentOrigin の web tools 外 generalization、provider affinity、cache metrics 単独項目（compaction / OTel で部分カバー。v0.2 slice ① で cache_read/cache_write の `gen_ai.token.type` 拡張値は出力済み、`CacheStats` の hit/miss 集計はこちらに残す）、github-copilot / anthropic-subscription provider（v0.3 計画維持）、diff / file tree 完全版。Planner / Multimodal の導入は v0.6 で正式化（下記「v0.6 以降の拡張 wave」を参照）。
 
 ## v0.3 — プロバイダ拡張と cache 高度化
 
@@ -105,11 +105,60 @@ test harness instance
 
 **成功基準**: runtime fault が DiagnosticBus に流れ、harness bug が自動 Issue 化され、semantic UI API 経由で agent が UI を検査・改善できる。
 
+## v0.6 以降の拡張 wave（競合調査確定分）
+
+2026-09-10 の外部ハーネス調査（opencode / oh-my-openagent / oh-my-pi / t3code / orca）と実装裏取りに基づく、既存 intent に未収だった採択項目の配置。詳細な設計・受け入れ基準は該当 ADR / feature overview / packet に集約する。
+
+### Bundle A: コア GUI UX（v0.6）
+- undo/redo 用 git snapshot の可視化・操作（working state の巻き戻し。非破壊）
+- 画像添付 UI（composer にペースト/ドラッグ、thumbnail preview、送信）。`v05-image-attachment-ui` はこれに統合
+- session tree / fork UI（複数 thread の親子・分岐の可視化と切替。transcript registry / event sourcing の既存基盤上に構築）
+- keymap / theme のユーザー公開設定（runtime reload 可能な config、ADR 0014 準拠）
+- slash command 拡張の最小機構（registry へ外部コマンドを追加可能にする。既存 `composer` 構造を拡張）
+
+### Bundle B: 拡張基盤（v0.6）
+- MCP client registry + permission scope（外部 MCP server の tool を runtime tool として登録。信頼境界は ADR 0008 準拠）
+- LSP diagnostics feedback（compiler 診断を tool outcome / DiagnosticBus へ接続し、agent へ actionable に返す）
+- 追加 role capability: Planner / Librarian / Oracle / Multimodal Looker（ADR 0002 の capability 行列へ追加。worker direct 置換ではなく Coordinated 実行時の専門分解用）
+- compaction UX 可視化（cache transition / compaction reason / after-token を Diagnostics と transcript へ表示）
+- model capability normalization（provider 側の差分を canonical model capability へ正規化し、routing / prompt assembly が参照）
+- diagnostics v0.5 骨格（DiagnosticBus の event 契約と最小 collector。自動 Issue 化は後続）
+
+### Bundle C': thread process ownership / multi-GUI 連携（v0.6）
+- 新 ADR 0024: single-host の process-owner / claim モデル。GUI 複数起動時に thread ごとの owner を lease + generation で管理し、attach / handoff / shutdown warning を提供する。Raft 等の分散合意は採用しない
+
+### Bundle D: memory / task boundary / persistent task system（v0.7）
+- memory backend: SQLite append-only event ledger + projection（decision / constraint / lesson / failure_pattern）。LLM は提案のみ、promotion は deterministic gate
+- post-run interview: run 終了後に worker / reviewer を quick model がヒアリングし、candidate lesson を evidence 紐付きで保存
+- persistent task system: `blocks` / `blockedBy` を持つ durable task queue。同一 workspace を跨ぐ長期作業の依存関係を解決
+- self-improvement loop: 観測のみ → 固定 arena → role matrix → prompt optimizer → online feedback の 5 段階。Phase 1–3 を先に実装
+- 関連 ADR 0024: lease/generation による registry と handoff
+
+### Bundle E2: team mode（opt-in、v0.7）
+- `ExecutionShape::Coordinated(DynamicTeam)` として実装。root coordinator + 最大 3 worker、capability role、atomic task claim / lease / heartbeat、append-only finding log、artifact ownership、failure recovery、可視化。固定 pipeline / 常時 verifier / 全文 broadcast / 自動 merge は採用しない
+- 有効性は delegation value 明示時のみ。直接実行の代替にしない
+
+### Bundle E4: role / model 適正評価 + arena mode（v0.7）
+- 役割別評価（Orchestrator / Explorer / Worker / Reviewer / QA / tool use）
+- 構成別 arena（同一 task / budget / timeout で model・prompt・routing・topology を比較）
+- 評価 drive の prompt 自動最適化（hard gate → Pareto → pairwise。train/validation/holdout/redteam 分割、failure attribution、promotion gate）
+- 関連: Bundle D の memory に evaluation trace を保存
+
+### Bundle Browser: 埋め込みブラウザ（opt-in、v0.7）
+- 既定: 外部 Playwright/Chromium プロセス + CDP screencast を egui の Browser pane へ JPEG フレームとして stream
+- 将来: `cef-rs` OSR / `browser-relay` を feature flag で追加
+- headless 実行の可視化: action log + 前後 screenshot + DOM diff。フォーカスは明示操作時のみ
+
+### Bundle 却下（採用しない）
+- Bundle C の常駐 server / OpenAPI SDK / CLI 拡張分（evorch は GUI-first、external SDK は scope 外）
+- E1: 固定 leader/member team（ADR 0001 no-fixed-workflow に抵触）
+- E3: computer-use 完全版（GUI 操作を自動化する広範なデスクトップ制御。scope 外）
+
 ## Open questions
 
 - v0.1 の GUI は egui + egui_dock で基本 pane（agent / terminal / tasks）とする（ADR 0007 で確定）。Floem 評価用 prototype は必須ではなく任意の並行調査
 - ~~v0.1 で用意する provider は OpenAI / Anthropic / OpenAI-compatible の3種で確定か~~ → 2026-08-29 確定（PR #13 で `ProviderClient` 3 実装としてコード化、ADR 0020）
-- Planner / Multimodal role の導入 version
+- ~~Planner / Multimodal role の導入 version~~ → 2026-09-10 確定。v0.6 の Bundle B で Planner / Librarian / Oracle / Multimodal Looker を追加する
 - 各 version のリリース基準（tag / ブランチ戦略）
 
 （v0.2 追記・PR #74）orchestrator loop（goal→PR→review→merge 承認まで継続する durable loop）を crates/runtime/src/orchestration/ に内製化済み。self-dogfood（queued unit 1 本の実 loop 消費 evidence）は closeout 時義務として残存。

@@ -194,6 +194,29 @@ v0.8 の実稼働検証で判明した shell tool 実行不能、tool 入出力�
 
 検証: workspace 全テスト 21 group green（既知 flake `headless_run_completes_with_single_mock_response` のみ）、`cargo clippy --workspace --all-targets -- -D warnings` clean、`cargo fmt --all -- --check` clean。shell tool 回帰テスト10件、実 bwrap テスト3件、transcript tool 対象テスト17件が成功。tool failure の最終 Error、retryable failure の Notice、markdown/tool card 描画の既存回帰も維持。
 
+## Bundle A / Browser / Process-owner 連携の採択（2026-09-10 競合調査反映）
+
+### Bundle A: コア GUI UX（v0.6）
+
+- Git snapshot undo/redo（working state を破壊せず巻き戻し・再適用する UI）
+- 画像添付 UI（composer への画像ペースト/添付・thumbnail preview・削除・送信。`v05-image-attachment-ui` の内容を統合）
+- Session tree / fork UI（thread 間の親子・分岐を可視化し切替可能にする）
+- Keymap / theme の user-facing 設定（runtime reload 可能、既存 config 層へ接続）
+- Slash command 拡張機構（新規コマンドを registry へ追加可能、既存 composer 構造を拡張）
+
+### Bundle C': thread process owner / claim（v0.6）
+
+GUI 複数起動時の連携は ADR 0024 に従う。GUI は thread へ attach して read-only で監視し、必要時に claim / handoff を実行する。終了時に active な thread がある場合は警告する。
+
+### Bundle Browser: 埋め込みブラウザ（opt-in、v0.7）
+
+既定は外部 Playwright/Chromium プロセス + CDP screencast を `Browser` pane へ JPEG フレームとして流す構成。将来 `cef-rs` OSR / `browser-relay` を feature flag で追加。headless 実行の可視化は action log + 前後 screenshot + DOM diff で担保し、フォーカスは明示操作時のみ取得する。
+
+### Bundle B: GUI 補助要素（v0.6）
+
+- Compaction UX 可視化: cache transition / compaction reason / after-token を Diagnostics と transcript へ表示
+- Diagnostics v0.5 骨格: DiagnosticBus の event 契約と最小 collector
+
 ## 受け入れ基準
 
 - egui + egui_dock で基本 pane（agent / terminal / tasks 等）の dock / undock / floating ができること（landed）

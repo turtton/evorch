@@ -1,0 +1,60 @@
+implementation_issue_packet:
+  issue_title: "v0.6 C': thread process owner / claim モデル（GUI 複数起動・handoff）"
+  issue_kind: feature
+  source_execution_unit: v06-c-process-owner-claim
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/src/thread_owner.rs crates/runtime/src/registry.rs crates/runtime/src/claim.rs crates/runtime/src/quiesce.rs crates/gui/src/panes/thread_registry.rs crates/gui/src/panes/notify_claim.rs crates/gui/src/commands/claim_thread.rs"
+  target_part: "GUI 複数起動時に thread ごとの owner を lease + generation で管理し、attach/claim/handoff/shutdown warning を提供する。Raft 等の分散合意は使わず、single host 内の registry + Unix socket IPC + generation CAS で実現する"
+  dependencies:
+    - "v0.5 diagnostics-self-improvement の DiagnosticBus / event ledger が存在する前提（memory / self-improvement の基盤）"
+  technical_baseline:
+    - "runtime は既に thread 単位で独立している（crates/runtime/src/thread_runtime.rs）"
+    - "event sourcing / EventBus は実装済み（ADR 0018）"
+    - "registry は SQLite または atomic JSON で保持。Unix socket と heartbeat は新規"
+    - "GUI は既存 workspace state の read-only attach を基盤にする"
+  intent_references:
+    - "intents/evorch/decisions/0024-process-owner-claim.md"
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/features/storage-memory/overview.md"
+  acceptance_criteria:
+    - "2 つの GUI プロセスを起動したとき、同じ thread に対して 1 つの owner と複数の attached client が存在できる"
+    - "owner の heartbeat が途切れても grace period 内は claim されず、Stale 後のみ claim 可能になる"
+    - "active turn 中は claim が拒否され、shutdown 要求時は Quiescing → checkpoint → release の順で終了する"
+    - "claim / handoff / shutdown warning のイベントが Diagnostics / storage に記録される"
+    - "generation 検証により旧 owner の遅延 mutation を reject できる"
+
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench
+  supporting_intents:
+    - intents/evorch/features/storage-memory
+  new_intent_needed: false
+  placement_rationale: |
+    GUI 複数起動の連携は gui-workbench の thread 管理と runtime の ownership にまたがるため、feature としては両
+    方を参照するが、primary は thread 所有権の runtime 実装に置く。ADR 0024 は設計判断の根拠。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: true
+    target_paths:
+      - intents/evorch/decisions/0024-process-owner-claim.md
+    decision_title: "thread process owner / claim モデル（single host 複数 GUI 連携）"
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    tmux / Zellij / VS Code remote の調査結果を実装へ反映し、single-host の owner/claim モデルの運用ルールを
+    確立する。generation / lease / Quiescing の境界を runtime event として観測できるようにする。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0024-process-owner-claim.md

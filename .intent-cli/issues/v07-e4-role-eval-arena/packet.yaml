@@ -1,0 +1,75 @@
+implementation_issue_packet:
+  issue_title: "v0.7 E4: role / model 適正評価 + arena mode"
+  issue_kind: feature
+  source_execution_unit: v07-e4-role-eval-arena
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/src/eval/*.rs crates/runtime/src/arena/*.rs crates/gui/src/panes/arena.rs"
+  target_part: "role ごとの model / prompt / routing / topology の適正を測る評価系と arena mode を導入する。fixed pipeline や leader/member team は採用せず、capability role と評価結果を routing へ反映する"
+  dependencies:
+    - "v0.6 Bundle B の role capability 追加がある前提"
+  technical_baseline:
+    - "existing Router / Delegation / routing は実装済み"
+    - "event sourcing / metrics / diagnostics の基盤は v0.5 で確立"
+    - "GUI の status / activity / diagnostics pane は既存"
+  intent_references:
+    - "intents/evorch/features/orchestration/overview.md"
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+    - "intents/evorch/features/storage-memory/overview.md"
+  acceptance_criteria:
+    - "role 別の評価 trace を memory へ記録できる"
+    - "Arena で同一 task / budget 内の model・prompt・routing を比較できる"
+    - "hard gate → Pareto → pairwise の順で採否を決められる"
+    - "failure attribution が deterministic に記録される"
+    - "promotion gate が active prompt / routing に反映される"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement
+    - intents/evorch/features/storage-memory
+  new_intent_needed: false
+  placement_rationale: |
+    評価は orchestration の quality/効率を測るための基盤で、diagnostics/self-improvement と併せて用いる。
+    Router への反映は段階的に行う。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    MAS-PromptBench / MASPO / TeamBench / LoopArena / GEPA / Meta-Agent の調査結果を踏まえ、
+    役割別評価・arena・prompt 自動改善を evorch に導入する。観測→arena→role matrix→optimizer→online の順で段階化する。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/orchestration/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []

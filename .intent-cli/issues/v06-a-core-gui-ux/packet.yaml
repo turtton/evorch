@@ -1,0 +1,75 @@
+implementation_issue_packet:
+  issue_title: "v0.6 A: コア GUI UX（undo/redo snapshot、画像添付、session tree/fork、keymap/theme、slash 拡張）"
+  issue_kind: feature
+  source_execution_unit: v06-a-core-gui-ux
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/src/snapshot/mod.rs crates/gui/src/snapshot/undo_redo.rs crates/gui/src/image_attachment/mod.rs crates/gui/src/session_tree.rs crates/gui/src/settings.rs crates/gui/src/commands/slash_extend.rs"
+  target_part: "GUI のコア UX を拡張し、image attachment / undo-redo / session tree / slash command 拡張 / keymap/theme の公開設定を整える"
+  dependencies:
+    - "v05-image-attachment-ui の内容を統合（composer での画像添付・プレビュー）"
+  technical_baseline:
+    - "egui/egui_dock の既存 GUI 構造は v0.1 で確立"
+    - "composer / file tree / settings / diagnostics の既存実装を拡張"
+    - "undo/redo は git snapshot を用いた working state の non-destructive 復元"
+  intent_references:
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/features/storage-memory/overview.md"
+    - "intents/evorch/decisions/0001-no-fixed-workflow.md"
+  acceptance_criteria:
+    - "composer で画像をドラッグ/ペーストし、thumbnail preview と送信ができる"
+    - "working state の undo/redo が working tree を破壊せず使える"
+    - "session tree / fork で thread の親子関係と分岐を切替できる"
+    - "keymap/theme が user config で変更できる"
+    - "slash command registry が外部コマンドを追加可能"
+
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench
+  supporting_intents:
+    - intents/evorch/features/storage-memory
+    - intents/evorch/features/diagnostics-self-improvement
+  new_intent_needed: false
+  placement_rationale: |
+    GUI のコア UX 拡張は gui-workbench に属し、image attachment は v05-image-attachment-ui と統合する。
+    undo/redo と session tree は working state 管理として runtime/storage の既存基盤に乗せる。
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: |
+    Bundle A の GUI UX 拡張は t3code / opencode / orca の競合調査で把握した UX 要件と、v05-image-attachment-ui の
+    intent を統合したもの。実装は既存 GUI 構造への追加で済ます。
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []
