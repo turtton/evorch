@@ -1,0 +1,26 @@
+{
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "models": {
+      "gpt-4o": {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "tool_call": true,
+        "reasoning": false,
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+        "limit": {"context": 128000, "output": 16384},
+        "cost": {"input": 2.5, "output": 10, "cache_read": 1.25}
+      },
+      "gpt-4o-mini": {
+        "id": "gpt-4o-mini",
+        "name": "GPT-4o mini",
+        "tool_call": true,
+        "reasoning": false,
+        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+        "limit": {"context": 128000, "output": 16384},
+        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.075}
+      }
+    }
+  }
+}
