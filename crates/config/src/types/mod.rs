@@ -10,6 +10,7 @@ pub mod panel;
 pub mod provider;
 pub mod routing;
 pub mod rules;
+pub mod team;
 
 use std::collections::BTreeMap;
 
@@ -32,6 +33,7 @@ pub use provider::{
 };
 pub use routing::{RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
+pub use team::TeamConfig;
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
 pub const CURRENT_VERSION: u32 = 2;
@@ -69,6 +71,7 @@ pub struct Config {
     /// オーケストレーションループ設定。
     pub orchestration: OrchestrationConfig,
     pub ownership: OwnershipConfig,
+    pub team: TeamConfig,
 }
 
 impl Default for Config {
@@ -87,6 +90,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             orchestration: OrchestrationConfig::default(),
             ownership: OwnershipConfig::default(),
+            team: TeamConfig::default(),
         }
     }
 }

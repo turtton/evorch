@@ -75,7 +75,7 @@ fn fresh_open_applies_latest_schema() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        3
+        4
     );
     assert_eq!(
         schema_objects(&connection, "table"),
@@ -103,7 +103,7 @@ fn reopening_latest_database_is_idempotent() {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        3
+        4
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -134,7 +134,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 3,
+            supported: 4,
         }
     );
 }
@@ -179,5 +179,5 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 3);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 4);
 }

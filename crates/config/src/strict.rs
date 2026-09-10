@@ -20,6 +20,7 @@ const ROOT_KEYS: &[&str] = &[
     "compaction",
     "orchestration",
     "ownership",
+    "team",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -144,6 +145,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
     validate_section(root, "ownership", &["heartbeat_ms", "lease_ms", "grace_ms"])?;
+    validate_section(root, "team", &["enabled", "max_workers"])?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
 }
 

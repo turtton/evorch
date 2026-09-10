@@ -10,6 +10,8 @@ use crate::{AgentRuntime, RunConfig, WorkspaceMode};
 #[derive(Deserialize)]
 struct DelegateBackgroundArgs {
     #[serde(default)]
+    task: Option<crate::team::TaskSpec>,
+    #[serde(default)]
     images: Vec<crate::run::DelegateImage>,
     role: String,
     prompt: String,
@@ -29,6 +31,8 @@ struct DelegateBackgroundArgs {
 
 #[derive(Deserialize)]
 struct DelegateArgs {
+    #[serde(default)]
+    task: Option<crate::team::TaskSpec>,
     #[serde(default)]
     images: Vec<crate::run::DelegateImage>,
     role: String,
@@ -105,6 +109,7 @@ pub(super) fn delegate_background(
         role,
         args.prompt,
         RunConfig {
+            team_task: args.task,
             interactive: args.interactive,
             images: args.images,
             name: args.name,
@@ -152,6 +157,7 @@ pub(super) async fn delegate(
         role,
         args.prompt,
         RunConfig {
+            team_task: args.task,
             name: args.name,
             images: args.images,
             category,

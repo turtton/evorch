@@ -67,6 +67,9 @@ use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::{AgentInspection, AgentRuntime, AgentSummary, RunId};
 
 pub trait AgentRunSource: Send {
+    fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
+        Vec::new()
+    }
     fn list(&self) -> Vec<AgentSummary>;
 
     fn inspect(&self, _run_id: RunId) -> Option<AgentInspection> {
@@ -75,6 +78,9 @@ pub trait AgentRunSource: Send {
 }
 
 impl AgentRunSource for AgentRuntime {
+    fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
+        self.team_tasks()
+    }
     fn list(&self) -> Vec<AgentSummary> {
         self.list_agents()
     }
@@ -99,6 +105,9 @@ pub struct TasksModel<S> {
 }
 
 impl<S: AgentRunSource> TasksModel<S> {
+    pub fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
+        self.source.teams()
+    }
     pub fn new(source: S) -> Self {
         Self {
             source,

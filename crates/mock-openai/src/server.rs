@@ -84,6 +84,7 @@ impl StreamingMockOpenAi {
         let queued = Arc::clone(&scripts);
         let stopping = Arc::clone(&shutdown);
         let accept_thread = thread::spawn(move || {
+            let mut connections = Vec::new();
             while !stopping.load(Ordering::SeqCst) {
                 let accepted = listener.accept();
                 if stopping.load(Ordering::SeqCst) {
@@ -96,6 +97,10 @@ impl StreamingMockOpenAi {
                         break;
                     }
                 };
+                let recorded = Arc::clone(&recorded);
+                let queued = Arc::clone(&queued);
+                let models = models.clone();
+                connections.push(thread::spawn(move || {
                 let result = (|| -> io::Result<()> {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
@@ -111,6 +116,7 @@ impl StreamingMockOpenAi {
                         return write_json(&mut stream, "200 OK", &models);
                     }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                    if let Some(response) = &response { thread::sleep(response.delay); }
                     match response {
                         Some(response) if streaming => write_sse(&mut stream, &response, mode),
                         Some(response) => {
@@ -128,6 +134,10 @@ impl StreamingMockOpenAi {
                 if let Err(error) = result {
                     eprintln!("mock_openai request failed: error={error}");
                 }
+                }));
+            }
+            for connection in connections {
+                let _ = connection.join();
             }
         });
         Self {

@@ -58,6 +58,10 @@ pub enum MergeMode {
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
+    pub topology: crate::CoordinationTopology,
+    pub team: Option<crate::team_context::TeamContext>,
+    pub team_task: Option<crate::team::TaskSpec>,
+    pub finding_store: Option<PathBuf>,
     pub memory: Option<crate::memory::MemoryBoundary>,
     pub ownership: Option<crate::ownership::OwnerPermit>,
     pub images: Vec<DelegateImage>,

@@ -17,6 +17,7 @@ enum ResponseKind {
 /// An owned, deterministic response script with no transport or clock dependency.
 #[derive(Debug, Clone)]
 pub struct ScriptedResponse {
+    pub(crate) delay: std::time::Duration,
     id: String,
     model: String,
     fragments: Vec<String>,
@@ -26,6 +27,10 @@ pub struct ScriptedResponse {
 }
 
 impl ScriptedResponse {
+    pub const fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = delay;
+        self
+    }
     /// Builds a text script. Usage defaults to zero; fragments are copied in order.
     pub fn text_stream(
         id: &str,
@@ -34,6 +39,7 @@ impl ScriptedResponse {
     ) -> Self {
         Self {
             id: id.to_owned(),
+            delay: std::time::Duration::ZERO,
             model: model.to_owned(),
             fragments: fragments
                 .into_iter()

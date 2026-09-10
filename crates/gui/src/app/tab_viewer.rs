@@ -193,6 +193,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
             PanelKind::Tasks => {
+                crate::panes::team::team_pane(ui, &self.tasks.teams());
+                ui.separator();
                 if let Some(config) = &self.memory.config {
                     crate::panes::tasks::dependencies_pane(ui, config);
                     ui.separator();
@@ -200,7 +202,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 tasks_pane(ui, self.tasks);
             }
             PanelKind::Memory => {
-                let project = self.sidebar.selected_project.as_ref().map(ToString::to_string);
+                let project = self
+                    .sidebar
+                    .selected_project
+                    .as_ref()
+                    .map(ToString::to_string);
                 self.memory.render(ui, project.as_deref());
             }
         }
