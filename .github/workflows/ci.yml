@@ -7,8 +7,16 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # workspace 全体 + browser feature + otel-exporter feature のビルドで
+    # runner のディスクが枯渇したため (2026-09-11 No space left on device)、
+    # docs/browser.md の低リソース指定を job 全体に適用し未使用ツールを削除する。
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.0
