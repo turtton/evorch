@@ -185,23 +185,7 @@ mod tests {
         )
     }
 
-    #[test]
-    #[ignore = "requires offscreen rendering adapter"]
-    fn capture_cancel_states() {
-        for (name, phase, text) in [
-            ("running", Some(ThreadRunPhase::Running), "実行中の下書き"),
-            ("waiting", Some(ThreadRunPhase::Waiting), "入力待ち"),
-            ("completion", Some(ThreadRunPhase::Running), "/"),
-        ] {
-            let mut h = harness(text, ProviderStatus::Configured);
-            h.state_mut().phase = phase;
-            h.run();
-            h.render()
-                .expect("render composer")
-                .save(format!("/tmp/opencode/e-cancel-{name}.png"))
-                .expect("save evidence");
-        }
-    }
+    include!("composer_capture_test.rs");
 
     #[test]
     fn esc_with_completions_visible_dismisses_them_and_emits_no_action() {

@@ -9,12 +9,15 @@ use gui::model::provider_settings::ProviderSettingsModel;
 use workspace_ui::UiSettings;
 
 #[test]
-#[should_panic(expected = "Codex PNG capture required")]
+#[should_panic(expected = "offscreen adapter is required")]
 fn codex_capture_panics_when_adapter_unavailable() {
     // Given: an unavailable adapter.
     let frame = Err(OffscreenError::AdapterUnavailable("test adapter".into()));
-    // When: mandatory evidence is saved.
-    save_codex_frame(frame, std::path::Path::new("unused.png"));
+    // When: CI requires an adapter for mandatory evidence.
+    match gui::evidence::decide(gui::evidence::AdapterPolicy::Require, &frame) {
+        gui::evidence::Decision::Fail(message) => panic!("{message}"),
+        decision => panic!("unexpected evidence decision: {decision:?}"),
+    }
     // Then: the evidence test must fail, not skip.
 }
 
@@ -29,7 +32,7 @@ fn codex_capture_panics_when_png_save_fails() {
         rgba: vec![0; 1200 * 900 * 4],
     };
     // When / Then: saving mandatory evidence must fail.
-    save_codex_frame(Ok(frame), directory.path());
+    save_codex_frame(frame, directory.path());
 }
 
 #[test]
@@ -59,7 +62,9 @@ fn capture_codex_auth_png_evidence() {
     for label in [CODEX_UNAUTHENTICATED_GUIDANCE, CODEX_LOGIN_BUTTON] {
         assert!(harness.has_label(label), "{label}");
     }
-    let unauthenticated = harness.capture();
+    let Some(unauthenticated) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
 
     // When: browser login starts and publishes its prompt.
     harness.click_label(CODEX_LOGIN_BUTTON);
@@ -75,7 +80,9 @@ fn capture_codex_auth_png_evidence() {
     // Then: the reopen link and waiting state are visible.
     assert!(harness.has_label("Open the sign-in page again"));
     assert!(harness.has_label(CODEX_WAITING_LABEL));
-    let authenticating = harness.capture();
+    let Some(authenticating) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
 
     // When: the scripted browser approval completes.
     let now = std::time::SystemTime::now()
@@ -91,7 +98,9 @@ fn capture_codex_auth_png_evidence() {
     });
     // Then: authentication is visible without exposing tokens.
     assert!(harness.has_label(CODEX_AUTHENTICATED_LABEL));
-    let authenticated = harness.capture();
+    let Some(authenticated) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
     for (frame, name) in [
         (unauthenticated, "codex-auth-unauthenticated.png"),
         (authenticating, "codex-auth-authenticating.png"),
@@ -118,23 +127,9 @@ fn step_until(
     );
 }
 
-fn save_codex_frame(
-    frame: Result<gui::headless::CapturedFrame, OffscreenError>,
-    path: &std::path::Path,
-) {
-    match frame {
-        Ok(frame) => {
-            assert_eq!((frame.width, frame.height), (1200, 900));
-            frame.save_png(path).expect("Codex PNG saved");
-        }
-        Err(OffscreenError::AdapterUnavailable(message)) => {
-            panic!(
-                "Codex PNG capture required at {}: AdapterUnavailable: {message}",
-                path.display()
-            );
-        }
-        Err(error) => panic!("unexpected Codex capture error: {error}"),
-    }
+fn save_codex_frame(frame: gui::headless::CapturedFrame, path: &std::path::Path) {
+    assert_eq!((frame.width, frame.height), (1200, 900));
+    frame.save_png(path).expect("Codex PNG saved");
 }
 
 #[test]
@@ -168,7 +163,9 @@ fn capture_modal_png_evidence() {
         let mut harness = HeadlessWorkbench::new(state, size);
         // When: the seeded modal renders directly, independent of ambient credentials.
         harness.run();
-        let frame = harness.capture().expect("modal capture");
+        let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+            return;
+        };
         // Then: each viewport produces a correctly sized PNG with visible modal controls.
         assert_eq!((frame.width, frame.height), dimensions);
         assert!(harness.has_label("Provider settings"));

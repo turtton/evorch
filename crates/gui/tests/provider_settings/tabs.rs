@@ -8,9 +8,10 @@ fn capture_both_settings_tabs() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When
-    harness
-        .capture()
-        .unwrap()
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
+    frame
         .save_png(std::path::Path::new("/tmp/opencode/w-b-openai.png"))
         .unwrap();
     harness.click_label("Cancel");
@@ -19,9 +20,10 @@ fn capture_both_settings_tabs() {
     harness.run();
     // Then
     assert!(harness.has_label(CODEX_LOGIN_BUTTON));
-    harness
-        .capture()
-        .unwrap()
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
+    frame
         .save_png(std::path::Path::new("/tmp/opencode/w-b-codex.png"))
         .unwrap();
 }

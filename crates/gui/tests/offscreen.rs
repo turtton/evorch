@@ -75,14 +75,16 @@ fn captured_frame_saves_a_decodable_png() {
 }
 
 #[test]
-#[ignore = "requires a working wgpu adapter; image generation is covered by Wave 5 CI"]
+#[ignore = "requires a working wgpu adapter; CI sets EVORCH_REQUIRE_ADAPTER=1"]
 fn capture_produces_a_frame_when_an_adapter_is_available() {
     // Given: a headless workbench on a machine with a working wgpu adapter
     let mut workbench = workbench();
     workbench.run();
 
     // When: a frame is captured
-    let frame = workbench.capture().expect("wgpu adapter must render");
+    let Some(frame) = gui::evidence::capture_or_skip(&mut workbench) else {
+        return;
+    };
 
     // Then: the requested dimensions and RGBA byte count are preserved
     assert_eq!((frame.width, frame.height), (640, 360));

@@ -131,7 +131,9 @@ fn capture_cjk_conversation_png_evidence() {
     // Then: the Japanese names render without tofu or clipping and the composer stays docked.
     assert!(harness.has_label("evorch-日本語"));
     assert!(harness.has_label("コンポーザー検証スレッド"));
-    let frame = harness.capture().expect("offscreen adapter");
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
     frame
         .save_png(std::path::Path::new("/tmp/opencode/w-cjk.png"))
         .expect("png saved");
@@ -182,9 +184,10 @@ fn capture_empty_composer_evidence() {
     harness.run();
     // Then
     assert!(harness.has_label("No messages yet"));
-    harness
-        .capture()
-        .expect("capture")
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
+    frame
         .save_png(std::path::Path::new("/tmp/opencode/w-d-empty.png"))
         .expect("PNG saved");
 }

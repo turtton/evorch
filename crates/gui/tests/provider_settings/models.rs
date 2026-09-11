@@ -182,29 +182,46 @@ fn rename_default_updates_row_and_default() {
 #[ignore = "writes offscreen model management PNG evidence"]
 fn capture_model_management() {
     // Given
-    let mut h = harness(true);
+    let mut fixture = harness(true);
+    fixture.state_mut().open = true;
+    let state = gui::app::WorkbenchState::new(
+        gui::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .unwrap()
+    .with_provider_settings(std::mem::take(fixture.state_mut()));
+    let mut h = gui::headless::HeadlessWorkbench::new(state, [1200.0, 1000.0]);
+    h.run();
     // When / Then
-    h.render()
-        .unwrap()
-        .save("/tmp/opencode/models-fetched.png")
+    let Some(frame) = gui::evidence::capture_or_skip(&mut h) else {
+        return;
+    };
+    frame
+        .save_png(std::path::Path::new("/tmp/opencode/models-fetched.png"))
         .unwrap();
-    h.get_by_label("fetched").click();
+    h.click_label("fetched");
     h.run();
-    h.render()
-        .unwrap()
-        .save("/tmp/opencode/models-selected.png")
+    let Some(frame) = gui::evidence::capture_or_skip(&mut h) else {
+        return;
+    };
+    frame
+        .save_png(std::path::Path::new("/tmp/opencode/models-selected.png"))
         .unwrap();
-    h.get_by_label("Apply selected (1)").click();
+    h.click_label("Apply selected (1)");
     h.run();
-    assert!(h.query_by_label("Enable fetched").is_some());
-    h.get_by_label("Enable first").click();
+    assert!(h.has_label("Enable fetched"));
+    h.click_label("Enable first");
     h.run();
-    h.get_by_label("Default model").click();
+    h.click_label("Default model");
     h.run();
-    assert_eq!(h.query_all_by_label("first").count(), 1);
-    h.render()
-        .unwrap()
-        .save("/tmp/opencode/models-applied-default.png")
+    assert_eq!(h.count_labels("first"), 1);
+    let Some(frame) = gui::evidence::capture_or_skip(&mut h) else {
+        return;
+    };
+    frame
+        .save_png(std::path::Path::new(
+            "/tmp/opencode/models-applied-default.png",
+        ))
         .unwrap();
 }
 

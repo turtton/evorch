@@ -145,18 +145,20 @@ fn capture_model_picker_evidence() {
         }));
     harness.run();
     // When
-    harness
-        .capture()
-        .unwrap()
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
+    frame
         .save_png(std::path::Path::new("/tmp/opencode/w-picker.png"))
         .unwrap();
     harness.click_label("local / model-a");
     harness.run();
     // Then
     assert!(harness.has_label("remote / model-c"));
-    harness
-        .capture()
-        .unwrap()
+    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
+        return;
+    };
+    frame
         .save_png(std::path::Path::new("/tmp/opencode/w-picker-open.png"))
         .unwrap();
 }
