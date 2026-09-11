@@ -69,8 +69,19 @@ pub struct HeadlessWorkbench<S: AgentRunSource + 'static> {
 impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
     /// 指定サイズの stateful harness を構築します。
     pub fn new(state: WorkbenchState<S>, size: [f32; 2]) -> Self {
+        Self::with_pixels_per_point(state, size, 1.0)
+    }
+
+    /// 論理ポイント単位のサイズと DPI スケールを指定して構築します。
+    pub fn with_pixels_per_point(
+        state: WorkbenchState<S>,
+        size: [f32; 2],
+        pixels_per_point: f32,
+    ) -> Self {
+        debug_assert!(pixels_per_point.is_finite() && pixels_per_point > 0.0);
         let harness = Harness::builder()
             .with_size(vec2(size[0], size[1]))
+            .with_pixels_per_point(pixels_per_point)
             .build_ui_state(
                 |ui, state: &mut WorkbenchState<S>| {
                     state.ui(ui, &mut eframe::Frame::_new_kittest());
@@ -78,6 +89,16 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
                 state,
             );
         Self { harness }
+    }
+
+    /// 現在の論理ポイントあたりのピクセル数を返します。
+    pub fn pixels_per_point(&self) -> f32 {
+        self.harness.ctx.pixels_per_point()
+    }
+
+    /// 画面全体の矩形を論理ポイント単位で返します。
+    pub fn screen_rect(&self) -> egui::Rect {
+        self.harness.ctx.viewport_rect()
     }
 
     /// アニメーション中も停止を待たずに固定フレームを実行します。
@@ -104,6 +125,11 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
     /// 指定ラベルの UI node をクリックします。
     pub fn click_label(&self, label: &str) {
         self.harness.get_by_label(label).click();
+    }
+
+    /// 指定ラベルを表示するスクロール要求を次フレームへ送ります。
+    pub fn scroll_label_into_view(&self, label: &str) {
+        self.harness.get_by_label(label).scroll_to_me();
     }
 
     /// 指定ラベルの UI node が存在するか返します。
