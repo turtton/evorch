@@ -20,6 +20,7 @@ implementation_issue_packet:
     - "delegate で role 指定時に capability 判定が働く"
     - "GUI で role 利用が activity log に出る"
     - "capability unknown の場合は明示的にエラーになる"
+    - "Bundle B の残件 (MCP client registry / LSP diagnostics feedback / compaction UX 可視化 / model capability normalization / diagnostics 骨格) は別 unit/backlog に分離して実施する"
 
 intent_placement:
   primary_intent: intents/evorch/features/orchestration

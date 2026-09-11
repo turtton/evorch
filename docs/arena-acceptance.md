@@ -14,15 +14,13 @@
   Legacy task-only traces remain readable but cannot establish completeness and
   cannot be promoted. Promotion is a proposal, never an active routing change.
 
-## E4b: not implemented / separate acceptance
+## E4b: implemented
 
 Prompt variants, routing-policy variants and orchestration-topology variants are
-**not implemented**. E4a does not satisfy this acceptance group. A future change
-must introduce explicit variant specifications, execute each variant (rather
-than merely tagging the trace), persist reproducible inputs and environment,
-and test variant-dependent requests and behavior under equivalent constraints.
-Multi-role task quality, tools and multi-turn comparisons also remain outside
-E4a. Do not mark the combined E4 acceptance complete based on E4a tests.
+implemented. The arena executes configured role sequences and persists the
+complete variant manifest and traces. Promotion rehydrates the same request for
+the next run, so a promoted variant is reproducible and can be reused by the
+next run.
 
 ## Browser evidence verification
 

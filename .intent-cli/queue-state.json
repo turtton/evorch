@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-10T13:55:04.9438839+00:00",
+  "updated_at": "2026-09-11T02:43:14.6024201+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1290,7 +1290,7 @@
     {
       "execution_unit": "v06-c-process-owner-claim",
       "title": "v0.6 C\u0027: thread process owner / claim \u30E2\u30C7\u30EB\uFF08GUI \u8907\u6570\u8D77\u52D5\u30FBhandoff\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v0.5 diagnostics-self-improvement \u306E DiagnosticBus / event ledger \u304C\u5B58\u5728\u3059\u308B\u524D\u63D0\uFF08memory / self-improvement \u306E\u57FA\u76E4\uFF09"
       ],
@@ -1309,7 +1309,7 @@
     {
       "execution_unit": "v06-b-role-capability-add",
       "title": "v0.6 B: role capability \u8FFD\u52A0\uFF08Planner / Librarian / Oracle / Multimodal Looker\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1326,7 +1326,7 @@
     {
       "execution_unit": "v07-d-memory-task-improvement",
       "title": "v0.7 D: memory backend \u002B persistent task \u002B self-improvement loop\uFF08interview \u4ED8\u304D\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v0.5 diagnostics-self-improvement \u306E DiagnosticBus / event ledger \u304C\u5B58\u5728\u3059\u308B\u524D\u63D0"
       ],
@@ -1345,7 +1345,7 @@
     {
       "execution_unit": "v07-e2-team-mode",
       "title": "v0.7 E2: team mode\uFF08opt-in\u3001Coordinated(DynamicTeam) \u306E\u6700\u5C0F\u5B9F\u88C5\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v0.6 Bundle B \u306E role capability \u8FFD\u52A0\u304C\u3042\u308B\u524D\u63D0"
       ],
@@ -1364,7 +1364,7 @@
     {
       "execution_unit": "v07-e4-role-eval-arena",
       "title": "v0.7 E4: role / model \u9069\u6B63\u8A55\u4FA1 \u002B arena mode",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v0.6 Bundle B \u306E role capability \u8FFD\u52A0\u304C\u3042\u308B\u524D\u63D0"
       ],
@@ -1383,7 +1383,7 @@
     {
       "execution_unit": "v07-browser-embedded",
       "title": "v0.7: embedded browser\uFF08opt-in\u3001CDP screencast / CEF OSR \u5C06\u6765\u5BFE\u5FDC\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v0.6 Bundle C\u0027 \u306E thread owner / claim \u30E2\u30C7\u30EB\u3067 GUI \u8907\u6570\u8D77\u52D5\u304C\u524D\u63D0"
       ],
@@ -1402,7 +1402,7 @@
     {
       "execution_unit": "v06-a-core-gui-ux",
       "title": "v0.6 A: \u30B3\u30A2 GUI UX\uFF08undo/redo snapshot\u3001\u753B\u50CF\u6DFB\u4ED8\u3001session tree/fork\u3001keymap/theme\u3001slash \u62E1\u5F35\uFF09",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [
         "v05-image-attachment-ui \u306E\u5185\u5BB9\u3092\u7D71\u5408\uFF08composer \u3067\u306E\u753B\u50CF\u6DFB\u4ED8\u30FB\u30D7\u30EC\u30D3\u30E5\u30FC\uFF09"
       ],
@@ -1412,6 +1412,23 @@
         "implementation": ".intent-cli/issues/v06-a-core-gui-ux/implementation.md",
         "review_context": ".intent-cli/issues/v06-a-core-gui-ux/review-context.md",
         "yaml": ".intent-cli/issues/v06-a-core-gui-ux/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v06-b2-mcp-lsp-compaction-capability",
+      "title": "v06-b2-mcp-lsp-compaction-capability TODO short title",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/implementation.md",
+        "review_context": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/review-context.md",
+        "yaml": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",
