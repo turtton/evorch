@@ -35,7 +35,7 @@ jobs:
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
-  headless-capture:
+  offscreen-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,25 +45,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install headless rendering deps (Vulkan lavapipe / GL)
         run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0
-      - name: Run offscreen capture tests (real render, was #[ignore])
-        run: cargo test -p gui --test offscreen -- --ignored --nocapture
+      - name: Prepare evidence directories
+        run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
+      - name: Run all ignored GUI tests (required real render)
+        run: cargo test -p gui --tests -- --ignored --nocapture
         env:
+          EVORCH_REQUIRE_ADAPTER: "1"
+          # Cargo runs tests from the crate directory, not the workspace root.
+          EVORCH_METADATA_EVIDENCE: ${{ github.workspace }}/target/gui-evidence/model-metadata
           WGPU_BACKEND: vulkan
-      - name: Capture frame via headless_capture bin
-        run: cargo run -p gui --bin headless_capture -- /tmp/headless-capture.png
-        env:
-          WGPU_BACKEND: vulkan
-      - name: Run Codex login capture evidence test
-        run: cargo test -p gui --test provider_settings_headless capture::capture_codex_auth_png_evidence -- --ignored --exact --test-threads=1 --show-output
+      - name: Capture size and DPI evidence matrix
+        run: scripts/gui-evidence-matrix.sh
         env:
           WGPU_BACKEND: vulkan
       - uses: actions/upload-artifact@v4
         with:
-          name: headless-capture
+          name: gui-evidence
           include-hidden-files: true
           path: |
-            /tmp/headless-capture.png
+            target/gui-evidence
             .opencode/v04-captures
+            /tmp/opencode/*.png
 
   browser-e2e:
     runs-on: ubuntu-latest
