@@ -20,6 +20,18 @@ struct CaptureArgs {
     edit_profile: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
+    size: (u32, u32),
+    dpi: f32,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum CaptureArgumentError {
+    #[error("--size requires WIDTHxHEIGHT")]
+    SizeFormat,
+    #[error("--size requires positive integer dimensions")]
+    SizeDimensions,
+    #[error("--dpi requires a positive number")]
+    Dpi,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -71,7 +83,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_active_tab(path)
             .map_err(|_| format!("--activate: failed to activate '{id}'"))?;
     }
-    let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
+    // egui uses f32 logical points; CLI dimensions remain integers until this boundary.
+    let mut workbench = HeadlessWorkbench::with_pixels_per_point(
+        state,
+        [capture.size.0 as f32, capture.size.1 as f32],
+        capture.dpi,
+    );
     workbench.run();
     if let Some((x, y)) = capture.pointer {
         workbench.pointer_move(egui::pos2(x, y));
@@ -95,6 +112,8 @@ fn parse_args(
     let mut edit_profile = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
+    let mut size: Option<(u32, u32)> = None;
+    let mut dpi: Option<f32> = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--out") => {
@@ -107,6 +126,40 @@ fn parse_args(
                 }
                 let id = arguments.next().ok_or("--activate requires a panel id")?;
                 activate = Some(id.to_string_lossy().into_owned());
+            }
+            Some("--size") => {
+                if size.is_some() {
+                    return Err("unexpected additional arguments".into());
+                }
+                let value = arguments.next().ok_or(CaptureArgumentError::SizeFormat)?;
+                let value = value.to_string_lossy();
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or(CaptureArgumentError::SizeFormat)?;
+                let width: u32 = width
+                    .parse()
+                    .map_err(|_| CaptureArgumentError::SizeDimensions)?;
+                let height: u32 = height
+                    .parse()
+                    .map_err(|_| CaptureArgumentError::SizeDimensions)?;
+                if width == 0 || height == 0 {
+                    return Err(CaptureArgumentError::SizeDimensions.into());
+                }
+                size = Some((width, height));
+            }
+            Some("--dpi") => {
+                if dpi.is_some() {
+                    return Err("unexpected additional arguments".into());
+                }
+                let value = arguments.next().ok_or(CaptureArgumentError::Dpi)?;
+                let value: f32 = value
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| CaptureArgumentError::Dpi)?;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(CaptureArgumentError::Dpi.into());
+                }
+                dpi = Some(value);
             }
             Some("--pointer") => {
                 if pointer.is_some() {
@@ -169,14 +222,16 @@ fn parse_args(
         edit_profile,
         activate,
         pointer,
+        size: size.unwrap_or((1280, 720)),
+        dpi: dpi.unwrap_or(1.0),
     })
 }
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--size WxH] [--dpi F] [--out PATH] [PATH]
 
-Captures a 1280x720 headless workbench frame as PNG.
+Captures a headless workbench frame as PNG.
 
 Modes:
    (default)      empty workbench state
@@ -187,6 +242,13 @@ Modes:
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
+
+Capture dimensions:
+   --size WxH     logical frame size in points (default: 1280x720)
+   --dpi F        pixels per point, finite and positive (default: 1.0)
+Suggested matrix sizes: 1280x720 / 1024x768 / 1920x720 / 960x600.
+Suggested matrix DPI values: 1.0 / 1.5 / 2.0.
+PNG pixel dimensions = size × dpi.
 
 The output path comes from --out PATH or a single positional PATH
 (default: {DEFAULT_OUTPUT}).
@@ -220,6 +282,115 @@ mod tests {
         assert!(!capture.demo);
         assert!(!capture.provider_configured);
         assert!(!capture.open_settings);
+        assert_eq!(capture.size, (1280, 720));
+        assert_eq!(capture.dpi, 1.0);
+    }
+
+    #[test]
+    fn parse_args_accepts_size() {
+        // Given: an explicit logical frame size
+        let arguments = args(["--size", "1024x768"]);
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("size must parse");
+        // Then: both integer dimensions are preserved
+        assert_eq!(capture.size, (1024, 768));
+    }
+
+    #[test]
+    fn parse_args_accepts_dpi() {
+        // Given: an explicit pixel density
+        let arguments = args(["--dpi", "1.5"]);
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("dpi must parse");
+        // Then: the pixel density is preserved
+        assert_eq!(capture.dpi, 1.5);
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_size() {
+        // Given: malformed, zero, or out-of-range dimensions
+        for value in ["0x720", "1280x0", "axb", "4294967296x720"] {
+            let arguments = args(["--size", value]);
+            // When: the arguments are parsed
+            let error = parse_args(arguments).expect_err("invalid size must fail");
+            // Then: the typed dimension error is reported
+            assert_eq!(
+                error.to_string(),
+                "--size requires positive integer dimensions"
+            );
+            assert_eq!(
+                error.downcast_ref::<super::CaptureArgumentError>(),
+                Some(&super::CaptureArgumentError::SizeDimensions)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_rejects_size_without_separator_or_value() {
+        // Given: a size without its separator or value
+        for values in [vec!["--size", "1280"], vec!["--size"]] {
+            let arguments = values.into_iter().map(std::ffi::OsString::from);
+            // When: the arguments are parsed
+            let error = parse_args(arguments).expect_err("missing size format must fail");
+            // Then: the typed format error is reported
+            assert_eq!(error.to_string(), "--size requires WIDTHxHEIGHT");
+            assert_eq!(
+                error.downcast_ref::<super::CaptureArgumentError>(),
+                Some(&super::CaptureArgumentError::SizeFormat)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_dpi() {
+        // Given: non-positive, non-finite, or non-numeric pixel densities
+        for value in ["-1", "0", "nan", "inf", "abc"] {
+            let arguments = args(["--dpi", value]);
+            // When: the arguments are parsed
+            let error = parse_args(arguments).expect_err("invalid dpi must fail");
+            // Then: the positive-number error is reported
+            assert_eq!(error.to_string(), "--dpi requires a positive number");
+        }
+    }
+
+    #[test]
+    fn parse_args_rejects_dpi_without_value() {
+        // Given: --dpi without a following value
+        let arguments = args(["--dpi"]);
+        // When: the arguments are parsed
+        let error = parse_args(arguments).expect_err("missing dpi must fail");
+        // Then: the positive-number error is reported
+        assert_eq!(error.to_string(), "--dpi requires a positive number");
+    }
+
+    #[test]
+    fn parse_args_rejects_duplicate_size_or_dpi() {
+        // Given: a capture dimension flag supplied twice
+        for values in [
+            ["--size", "1024x768", "--size", "960x600"],
+            ["--dpi", "1.5", "--dpi", "2.0"],
+        ] {
+            let arguments = args(values);
+            // When: the arguments are parsed
+            let error = parse_args(arguments).expect_err("duplicate dimension flag must fail");
+            // Then: the existing unexpected-arguments error is reported
+            assert_eq!(error.to_string(), "unexpected additional arguments");
+        }
+    }
+
+    #[test]
+    fn parse_args_accepts_size_and_dpi_with_demo_and_output() {
+        // Given: logical size and pixel density alongside demo and output flags
+        let arguments = args([
+            "--size", "960x600", "--dpi", "2.0", "--demo", "--out", "x.png",
+        ]);
+        // When: the arguments are parsed
+        let capture = parse_args(arguments).expect("combined capture flags must parse");
+        // Then: all requested capture options are preserved
+        assert_eq!(capture.size, (960, 600));
+        assert_eq!(capture.dpi, 2.0);
+        assert!(capture.demo);
+        assert_eq!(capture.output, std::path::PathBuf::from("x.png"));
     }
 
     #[test]
