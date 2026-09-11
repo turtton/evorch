@@ -2,6 +2,7 @@
 
 mod codex_auth;
 mod events;
+mod provider;
 mod sidebar;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::model::tasks::AgentRunSource;
 
 pub use codex_auth::ScriptedCodexAuthBackend;
 pub use events::{demo_error_events, demo_events};
+pub use provider::demo_provider_config;
 pub use sidebar::{FixtureError, demo_sidebar};
 
 /// demo 固定 run 一覧を返す [`AgentRunSource`]。
