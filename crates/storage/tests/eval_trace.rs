@@ -19,6 +19,7 @@ fn eval_trace_survives_reopen_without_becoming_a_lesson() {
         profile: "local".into(),
         model: "mock".into(),
         attribution: Attribution::Worker,
+        execution: None,
         output: "wrong".into(),
         input_tokens: 2,
         output_tokens: 1,
@@ -43,4 +44,19 @@ fn eval_trace_survives_reopen_without_becoming_a_lesson() {
         .expect("kind");
     assert_eq!(kind, "eval_trace");
     assert!(conn.execute("DELETE FROM memory_ledger", []).is_err());
+}
+
+#[test]
+fn legacy_trace_deserializes_without_execution() {
+    // Given: a persisted pre-variant trace.
+    let value = serde_json::json!({
+        "id": "a", "arena_id": "arena", "project": "p", "task_id": "t",
+        "task_spec": "legacy", "config_id": "c", "profile": "local",
+        "model": "m", "attribution": "worker", "output": "ok",
+        "input_tokens": 1, "output_tokens": 1, "elapsed_ms": 1, "failure": null
+    });
+    // When: the new storage schema reads it.
+    let trace: EvalTrace = serde_json::from_value(value).expect("legacy trace");
+    // Then: absent execution evidence remains explicitly unknown.
+    assert!(trace.execution.is_none());
 }

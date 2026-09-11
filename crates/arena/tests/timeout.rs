@@ -50,6 +50,7 @@ async fn deadline_cancels_pending_provider_and_records_every_config() {
                 profile: "local".into(),
                 model: id.into(),
                 attribution: Attribution::Worker,
+                variant: Default::default(),
             })
             .collect(),
         timeout_ms: 10,
@@ -73,4 +74,9 @@ async fn deadline_cancels_pending_provider_and_records_every_config() {
     );
     assert!(report.selected().is_empty());
     assert!(report.traces().iter().all(|trace| trace.elapsed_ms >= 5));
+    assert!(report.traces().iter().all(|trace| {
+        trace.execution.as_ref().is_some_and(|execution| {
+            execution.steps.len() == 1 && execution.steps[0].model == trace.model
+        })
+    }));
 }

@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 profile: "local".into(),
                 model: id.into(),
                 attribution: Attribution::Worker,
+                variant: Default::default(),
             })
             .collect(),
         max_output_tokens: 16,
@@ -44,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let report = arena::run(&spec, &runner).await?;
     println!("{}", serde_json::to_string_pretty(report.traces())?);
+    println!("{}", serde_json::to_string_pretty(&report.compare("a")?)?);
     println!(
         "Selected: {:?}; active routing unchanged",
         report.selected()

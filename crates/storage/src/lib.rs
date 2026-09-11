@@ -58,6 +58,7 @@ mod db;
 pub mod entity;
 pub mod error;
 pub mod eval;
+pub mod eval_variant;
 pub mod memory;
 mod migrations;
 mod projection;

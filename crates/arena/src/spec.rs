@@ -17,6 +17,8 @@ pub struct ArenaConfig {
     pub profile: String,
     pub model: String,
     pub attribution: Attribution,
+    #[serde(default)]
+    pub variant: crate::ArenaVariant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,7 @@ impl ArenaSpec {
         }
         let mut ids = BTreeSet::new();
         for config in &self.configs {
+            config.validate_variant()?;
             if [&config.id, &config.profile, &config.model]
                 .iter()
                 .any(|s| s.trim().is_empty())
@@ -83,6 +86,53 @@ impl ArenaSpec {
             return Err(ArenaError::InvalidSpec(
                 "runner requires configs on its single provider profile",
             ));
+        }
+        Ok(())
+    }
+}
+
+impl ArenaConfig {
+    pub fn roles(&self) -> &[Attribution] {
+        match &self.variant.topology {
+            crate::Topology::Single => std::slice::from_ref(&self.attribution),
+            crate::Topology::Sequence { roles } => roles,
+        }
+    }
+
+    pub fn model_for(&self, role: Attribution) -> &str {
+        self.variant
+            .routing
+            .iter()
+            .find(|route| route.role == role)
+            .map_or(&self.model, |route| &route.model)
+    }
+
+    fn validate_variant(&self) -> Result<(), ArenaError> {
+        let roles = self.roles();
+        if roles.is_empty() || roles.len() > 8 {
+            return Err(ArenaError::InvalidSpec("topology requires 1..=8 stages"));
+        }
+        if self
+            .variant
+            .prompt
+            .as_ref()
+            .is_some_and(|p| p.version.trim().is_empty() || p.system.trim().is_empty())
+        {
+            return Err(ArenaError::InvalidSpec(
+                "prompt version and system must be nonempty",
+            ));
+        }
+        for (index, route) in self.variant.routing.iter().enumerate() {
+            if route.model.trim().is_empty()
+                || !roles.contains(&route.role)
+                || self.variant.routing[..index]
+                    .iter()
+                    .any(|r| r.role == route.role)
+            {
+                return Err(ArenaError::InvalidSpec(
+                    "routing requires unique active roles and models",
+                ));
+            }
         }
         Ok(())
     }

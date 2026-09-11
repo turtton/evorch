@@ -19,6 +19,7 @@ fn spec() -> ArenaSpec {
                 profile: "local".into(),
                 model: id.into(),
                 attribution: Attribution::Worker,
+                variant: Default::default(),
             })
             .collect(),
         max_output_tokens: 16,

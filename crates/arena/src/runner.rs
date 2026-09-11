@@ -1,9 +1,6 @@
 use crate::{ArenaError, ArenaReport, ArenaSpec, EvalTrace, FailureAttribution};
 use futures_util::StreamExt;
-use providers::{
-    ChatRequest, ContentBlock, FinishReason, Message, ProviderAuth, ProviderClient, Role,
-    StreamEvent,
-};
+use providers::{ChatRequest, FinishReason, ProviderAuth, ProviderClient, StreamEvent};
 use std::time::Duration;
 
 pub struct Runner<'a> {
@@ -23,12 +20,6 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
     let candidate_budget = spec.total_token_budget / count;
     let candidate_timeout = Duration::from_millis(spec.timeout_ms / count);
     let mut traces = Vec::with_capacity(spec.configs.len());
-    // Reserve prompt bytes plus chat framing before dispatch; unknown usage consumes the reservation.
-    let reservation = u64::try_from(spec.task.prompt.len())
-        .ok()
-        .and_then(|n| n.checked_add(32))
-        .and_then(|n| n.checked_add(spec.max_output_tokens))
-        .ok_or(ArenaError::InvalidSpec("token reservation overflow"))?;
     for config in &spec.configs {
         let mut trace = EvalTrace {
             id: serde_json::to_string(&(&spec.id, &config.id))
@@ -41,6 +32,10 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
             profile: config.profile.clone(),
             model: config.model.clone(),
             attribution: config.attribution,
+            execution: Some(Box::new(crate::EvalExecution {
+                variant: config.variant.clone(),
+                steps: Vec::new(),
+            })),
             output: String::new(),
             input_tokens: 0,
             output_tokens: 0,
@@ -49,27 +44,14 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
         };
         if tokio::time::Instant::now() >= deadline {
             trace.failure = Some(FailureAttribution::Timeout);
-        } else if candidate_budget < reservation {
-            trace.failure = Some(FailureAttribution::BudgetExceeded);
         } else {
             let start = tokio::time::Instant::now();
-            let request = ChatRequest {
-                model: config.model.clone(),
-                messages: vec![Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: spec.task.prompt.clone(),
-                    }],
-                }],
-                tools: Vec::new(),
-                temperature: Some(0.0),
-                max_tokens: Some(spec.max_output_tokens),
-                observation: None,
-            };
             let candidate_deadline = (start + candidate_timeout).min(deadline);
-            let result =
-                tokio::time::timeout_at(candidate_deadline, evaluate(runner, &request, &mut trace))
-                    .await;
+            let result = tokio::time::timeout_at(
+                candidate_deadline,
+                crate::execution::execute(spec, (config, runner, candidate_budget), &mut trace),
+            )
+            .await;
             trace.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             trace.failure = match result {
                 Err(_) => Some(FailureAttribution::Timeout),
@@ -77,9 +59,7 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
                 Ok(Ok(())) => None,
             };
             let used = trace.input_tokens.checked_add(trace.output_tokens);
-            if used.is_none_or(|n| n > candidate_budget)
-                || trace.output_tokens > spec.max_output_tokens
-            {
+            if used.is_none_or(|n| n > candidate_budget) {
                 trace.failure = Some(FailureAttribution::BudgetExceeded);
             }
             if trace.failure.is_none() && trace.output != spec.task.expected_output {
@@ -94,10 +74,10 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
     ArenaReport::from_traces(traces)
 }
 
-async fn evaluate(
+pub(crate) async fn evaluate(
     runner: &Runner<'_>,
     request: &ChatRequest,
-    trace: &mut EvalTrace,
+    trace: &mut crate::EvalStep,
 ) -> Result<(), FailureAttribution> {
     let mut stream = runner
         .client

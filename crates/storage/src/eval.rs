@@ -34,6 +34,8 @@ pub struct EvalTrace {
     pub profile: String,
     pub model: String,
     pub attribution: Attribution,
+    #[serde(default)]
+    pub execution: Option<Box<crate::eval_variant::EvalExecution>>,
     pub output: String,
     pub input_tokens: u64,
     pub output_tokens: u64,

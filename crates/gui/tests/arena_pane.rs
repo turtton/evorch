@@ -25,6 +25,7 @@ fn arena_promotion_requires_a_second_explicit_click() {
                 profile: "local".into(),
                 model: "mock".into(),
                 attribution: arena::Attribution::Worker,
+                variant: Default::default(),
             })
             .collect(),
         max_output_tokens: 16,
@@ -44,6 +45,7 @@ fn arena_promotion_requires_a_second_explicit_click() {
                 profile: "local".into(),
                 model: "mock".into(),
                 attribution: storage::eval::Attribution::Worker,
+                execution: None,
                 output: "ok".into(),
                 input_tokens: 3,
                 output_tokens: 1,

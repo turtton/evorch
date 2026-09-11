@@ -43,6 +43,7 @@ impl ArenaReport {
                         && trace.profile == config.profile
                         && trace.model == config.model
                         && trace.attribution == config.attribution
+                        && execution_matches(config, trace)
                         && matches!(
                             trace.failure,
                             None | Some(crate::FailureAttribution::OutputMismatch)
@@ -76,6 +77,23 @@ impl ArenaReport {
         id: &str,
         confirmation: Confirmation,
     ) -> Result<config::RouteCandidateConfig, ArenaError> {
+        let config = self.promote_config(id, confirmation)?;
+        if config.variant != crate::ArenaVariant::default() {
+            return Err(ArenaError::InvalidSpec(
+                "variant promotion requires promote_config",
+            ));
+        }
+        Ok(config::RouteCandidateConfig {
+            profile: config.profile,
+            model: Some(config.model),
+        })
+    }
+
+    pub fn promote_config(
+        &self,
+        id: &str,
+        confirmation: Confirmation,
+    ) -> Result<crate::ArenaConfig, ArenaError> {
         match confirmation {
             Confirmation::Declined => return Err(ArenaError::ConfirmationRequired),
             Confirmation::Approved => {}
@@ -88,9 +106,43 @@ impl ArenaReport {
             .iter()
             .find(|t| t.config_id == id)
             .ok_or(ArenaError::Ineligible)?;
-        Ok(config::RouteCandidateConfig {
-            profile: trace.profile.clone(),
-            model: Some(trace.model.clone()),
-        })
+        let spec: crate::ArenaSpec =
+            serde_json::from_str(&trace.task_spec).map_err(|_| ArenaError::Ineligible)?;
+        spec.configs
+            .into_iter()
+            .find(|config| config.id == id)
+            .ok_or(ArenaError::Ineligible)
     }
+}
+
+fn execution_matches(config: &crate::ArenaConfig, trace: &EvalTrace) -> bool {
+    let Some(execution) = &trace.execution else {
+        return config.variant == crate::ArenaVariant::default();
+    };
+    execution.variant == config.variant
+        && execution.steps.len() == config.roles().len()
+        && execution
+            .steps
+            .iter()
+            .zip(config.roles())
+            .all(|(step, role)| {
+                step.role == *role
+                    && step.model == config.model_for(*role)
+                    && step.input_tokens > 0
+                    && step.output_tokens > 0
+            })
+        && execution
+            .steps
+            .last()
+            .is_some_and(|step| step.output == trace.output)
+        && execution
+            .steps
+            .iter()
+            .try_fold(0u64, |sum, step| sum.checked_add(step.input_tokens))
+            == Some(trace.input_tokens)
+        && execution
+            .steps
+            .iter()
+            .try_fold(0u64, |sum, step| sum.checked_add(step.output_tokens))
+            == Some(trace.output_tokens)
 }

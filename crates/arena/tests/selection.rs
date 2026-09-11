@@ -12,6 +12,7 @@ fn trace(id: usize, tokens: u64, latency: u64, passes: bool) -> EvalTrace {
         profile: "local".into(),
         model: "mock".into(),
         attribution: Attribution::Worker,
+        execution: None,
         output: String::new(),
         input_tokens: tokens,
         output_tokens: 0,
