@@ -109,6 +109,21 @@ remove an entry only after verifying against a newer binary.
   (unlike `reprioritize` / `queue-seed-from-packet`). Never run it as an
   argument probe; inspect with `queue show <unit>` first and `git diff`
   after.
+- **direct-to-main units show missing-publish-artifact** (verified 0.26.0,
+  2026-09-11): units implemented directly on `main` without the issue/PR
+  publish flow (v05-image-attachment-ui, v06-model-catalog-preset, and the
+  2026-09-11 wave units v06-a/v06-b/v06-c/v07-d/v07-e2/v07-e4/v07-browser)
+  permanently report `missing-publish-artifact` unsafe_stops in
+  `automation publish-recovery`. This is expected, not a blocker.
+  `metadata update` supports only `--mode completed-closeout` and REQUIRES
+  `--linked-pr`, so there is no CLI-supported way to mark a no-publish unit
+  as closed-out; do not hand-edit queue-state to silence it.
+- **queue enqueue is not a free-form entry** (verified 0.26.0, 2026-09-11):
+  `queue enqueue` expects an existing publish.yaml projection (errors
+  "Queue enqueue command requires an execution unit" for bare names). To
+  seed a new unit: `packet draft --execution-unit <id> --target-repo <r>`
+  → fill packet.yaml → `automation queue-seed-from-packet --execution-unit
+  <id> --domain <d> --target-repo <r> --write`.
 
 ## Wrong-host detection (G301)
 
