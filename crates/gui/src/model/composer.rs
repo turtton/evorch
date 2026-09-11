@@ -326,7 +326,7 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            ("/", &["undo", "redo", "goal", "help"]),
+            ("/", &["team", "undo", "redo", "goal", "help"]),
             ("/g", &["goal"]),
             ("/goal", &["goal"]),
             ("/h", &["help"]),
@@ -353,6 +353,7 @@ mod tests {
     fn help_text_lists_every_command() {
         // Given
         let expected = [
+            "/team <delegation value> | <goal> — Submit a team goal with explicit delegation value",
             "/undo — Restore the previous workspace snapshot",
             "/redo — Restore the next workspace snapshot",
             "/goal <text> — Submit a goal to the orchestrator loop",

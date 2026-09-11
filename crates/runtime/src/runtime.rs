@@ -44,9 +44,11 @@ pub struct AgentRuntime {
     pub(crate) shared: Arc<Shared>,
 }
 
+type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
+
 pub(crate) struct Shared {
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
-    pub(crate) learning_runs: Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>,
+    pub(crate) learning_runs: LearningRunReceivers,
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
