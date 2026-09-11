@@ -8,6 +8,7 @@ pub mod browser;
 pub mod diff;
 pub mod dock;
 pub mod events;
+pub mod evidence;
 pub mod fixture;
 pub mod headless;
 pub mod keymap;
