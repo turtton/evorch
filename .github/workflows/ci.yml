@@ -14,6 +14,10 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+      # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
+      # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
