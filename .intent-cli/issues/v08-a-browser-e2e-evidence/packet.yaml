@@ -1,0 +1,46 @@
+implementation_issue_packet:
+  issue_title: "browser-e2e: 証跡 artifact が空になる問題を修正し証跡を必ず出力する"
+  issue_kind: bug
+  source_execution_unit: v08-a-browser-e2e-evidence
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/gui/src/browser/tests.rs, .github/workflows/ci.yml
+  target_part: "browser-e2e ジョブの証跡出力経路"
+  dependencies: []
+  technical_baseline:
+    - "chromium_screencast_and_action_evidence は EVORCH_BROWSER_EVIDENCE_DIR を解釈する契約"
+    - "CI run 34605848371 (2026-09-11) で browser-e2e 成功・artifact 未アップロード (target/browser-evidence not found)"
+  intent_references:
+    - intents/evorch/decisions/0015-verification-two-layer.md
+  acceptance_criteria:
+    - "crates/gui/src/browser/tests.rs を読み、証跡の書き込み経路と出力されない条件を特定して記録する"
+    - "browser-e2e ジョブ成功時に証跡 (PNG 等) が必ず EVORCH_BROWSER_EVIDENCE_DIR 配下に生成される"
+    - "CI の browser-e2e artifact (browser-e2e-evidence) に証跡ファイルが含まれる"
+    - "upload-artifact の if-no-files-found 挙動を明示し、空 artifact が黙って成功しない"
+
+intent_placement:
+  primary_intent: intents/evorch/technology/architecture.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "v08 で導入した browser-e2e ゲートの証跡出力の不備修正。既存アーキテクチャ意図の範囲内"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "chromiumoxide の証跡出力条件と CI artifact 契約のずれの事例"
+  write_back_required: false
+  write_back_targets: []

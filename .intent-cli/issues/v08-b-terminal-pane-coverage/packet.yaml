@@ -1,0 +1,46 @@
+implementation_issue_packet:
+  issue_title: "Terminal pane のコンテンツ描画を検証マトリクスでカバーする"
+  issue_kind: feature
+  source_execution_unit: v08-b-terminal-pane-coverage
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/gui/tests/size_dpi_matrix, crates/gui/tests, crates/gui/src/panes
+  target_part: "Terminal pane の検証カバレッジ"
+  dependencies: []
+  technical_baseline:
+    - "size x DPI ジオメトリ行列 (tests/size_dpi_matrix) は 4 状態 x 4 サイズ x 3 DPI の 48 ケースで稼働中 (commit df4e66f)"
+    - "docs/gui-verification.md カバレッジ表に Terminal pane は layout-presence のみで内容描画テストが gap と記載 (commit e358b7e)"
+  intent_references:
+    - intents/evorch/decisions/0015-verification-two-layer.md
+  acceptance_criteria:
+    - "Terminal pane の内容描画を検証するテストを追加する (ジオメトリ行列への状態追加または headless kittest による必須要素検証)"
+    - "docs/gui-verification.md のカバレッジ表で Terminal pane 行の gap が解消される"
+    - "追加テストが cargo test --workspace (GPU 不要レイヤー) または offscreen-gate の ignored sweep で緑になる"
+
+intent_placement:
+  primary_intent: intents/evorch/technology/architecture.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "v08 検証マトリクスのカバレッジ gap 解消。既存の検証 2 層方針 (ADR 0015) の範囲内"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/gui-verification.md
+    summary: "カバレッジ表の Terminal pane 行を更新"
+closeout_learning:
+  expected: "Terminal pane の描画構造と安定ラベル選定の知見"
+  write_back_required: false
+  write_back_targets: []
