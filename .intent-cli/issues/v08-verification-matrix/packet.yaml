@@ -1,0 +1,78 @@
+implementation_issue_packet:
+  issue_title: "v0.8: 検証マトリクス整備 (headless/kittest/実 Chromium 主軸化)"
+  issue_kind: feature
+  source_execution_unit: v08-verification-matrix
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/src/bin/headless_capture.rs crates/gui/src/headless.rs crates/gui/tests/ .github/workflows/ docs/"
+  target_part: "実機 GUI の不安定さ (画面比偏り/DPI/OS差) を回避するため、機能検証を headless/kittest/offscreen/実 Chromium の再現可能な層に寄せ、実機は起動スモークのみに限定する検証基盤を整備する"
+  dependencies: []
+  technical_baseline:
+    - "HeadlessWorkbench / kittest / offscreen 描画テスト / headless_capture CLI は既存"
+    - "browser feature と実 Chromium ignored E2E (chromium_screencast_and_action_evidence) は実装済 (970c1af)"
+    - "headless_capture は現在 1280x720 固定でサイズ/DPI 指定不可"
+    - "通常 CI は browser feature と ignored 描画テストを実行していない"
+    - "2026-09-11 の 5-agent reviewer gate で QA lane は 119 件 PASS したが実機描画確定は blocked のまま"
+  intent_references:
+    - "intents/evorch/features/gui-workbench/overview.md"
+    - "intents/evorch/features/diagnostics-self-improvement/overview.md"
+    - "intents/evorch/technology/mvp-roadmap.md"
+  acceptance_criteria:
+    - "headless_capture CLI がウィンドウサイズ (1280x720 / 1024x768 / 1920x720) と DPI 倍率 (1.0/1.5/2.0) を指定できる"
+    - "サイズ×DPI のマトリクステストが追加され、狭い画面でもスクロール等で全操作領域に到達できることを geometry 判定で確認できる"
+    - "offscreen の実描画テスト (ignored) が CI の別ゲートとして実行される (adapter 不在で成功扱いにしない)"
+    - "CI で `cargo test -p gui --features browser` と実 Chromium ignored E2E が実行される"
+    - "主要状態 (demo 通常 / error-thread / edit-profile / empty) の証跡画像が CI artifact として保存される"
+    - "実機 GUI の最小スモーク手順 (起動・描画特定・終了) が docs に文書化され、ウィンドウタイトル等で新規プロセスを一意に特定できる"
+    - "機能×状態×検証層の一覧 (coverage 表) が docs にあり、全機能に担当テストが割り当てられている"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement
+  new_intent_needed: false
+  placement_rationale: "検証基盤は GUI workbench の品質保証手段であり、diagnostics/自己改善の証跡収集 (artifacts) にも寄与する。既存 intent の拡張で足りる。"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - docs/
+    summary: "検証層の役割分担 (headless/kittest/offscreen/実 Chromium/実機スモーク)、実行コマンド、機能×状態×検証層の coverage 表を docs に追加する"
+closeout_learning:
+  expected: "画面比・DPI・OS 差に左右されない検証設計の知見 (固定環境での画像比較、geometry 判定、機能/描画の分離ゲート) を蓄積する"
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+# Uncomment and complete EXACTLY ONE accepted form. Leaving this
+# commented is visibly undeclared; the scaffold never guesses that
+# a new slice has no role-facing surface.
+#
+# Route form:
+# guide_reachability:
+#   no_role_facing_surface: false
+#   routes:
+#     - guide_surface: guide workflow task implementation-loop
+#       role: implementation
+#       target_surface: <role-facing-surface>
+#
+# Explicit no-surface form:
+# guide_reachability:
+#   no_role_facing_surface: true
+#   routes: []

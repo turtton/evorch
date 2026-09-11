@@ -259,3 +259,4 @@
 {"ts":"2026-09-11T02:42:24.3753273+00:00","execution_unit":"v07-e4-role-eval-arena","event":"completed","by":"intent-cli"}
 {"ts":"2026-09-11T02:42:24.4876527+00:00","execution_unit":"v07-browser-embedded","event":"completed","by":"intent-cli"}
 {"ts":"2026-09-11T02:43:14.6200533+00:00","execution_unit":"v06-b2-mcp-lsp-compaction-capability","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/"}
+{"ts":"2026-09-11T11:07:12.2328828+00:00","execution_unit":"v08-verification-matrix","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v08-verification-matrix/"}

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-11T02:43:14.6024201+00:00",
+  "updated_at": "2026-09-11T11:07:12.2147649+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1429,6 +1429,23 @@
         "implementation": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/implementation.md",
         "review_context": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/review-context.md",
         "yaml": ".intent-cli/issues/v06-b2-mcp-lsp-compaction-capability/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v08-verification-matrix",
+      "title": "v0.8: \u691C\u8A3C\u30DE\u30C8\u30EA\u30AF\u30B9\u6574\u5099 (headless/kittest/\u5B9F Chromium \u4E3B\u8EF8\u5316)",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v08-verification-matrix/implementation.md",
+        "review_context": ".intent-cli/issues/v08-verification-matrix/review-context.md",
+        "yaml": ".intent-cli/issues/v08-verification-matrix/packet.yaml"
       },
       "worker_role": "implementation",
       "review_role": "review",
