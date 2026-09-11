@@ -73,3 +73,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/storage-memory/overview.md
+      role: Worker / Reviewer
+      target_surface: "post-run interview、evidence 付き candidate lesson、task boundary の memory snapshot と persistent task dependencies"

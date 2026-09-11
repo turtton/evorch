@@ -61,3 +61,9 @@ implementation_issue_packet:
       - guide_surface: "gui-workbench overview の workbench surface"
         role: "Operator"
         target_surface: "GUI 3 領域レイアウトの視覚状態（sidebar / conversation / tabs）"
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/gui-workbench/overview.md
+      role: Operator
+      target_surface: "GUI 3 領域レイアウトの視覚状態（sidebar / conversation / tabs）、theme と空状態 CTA"

@@ -59,3 +59,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/technology/mvp-roadmap.md
+      role: implementation
+      target_surface: "Bundle B の MCP permission scope、LSP diagnostics feedback、model capability normalization、Diagnostics / transcript の compaction 表示"

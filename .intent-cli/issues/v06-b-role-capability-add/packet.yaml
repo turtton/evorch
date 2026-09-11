@@ -55,3 +55,9 @@ closeout_learning:
   write_back_required: true
   write_back_targets:
     - intents/evorch/features/orchestration/overview.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/orchestration/overview.md
+      role: Orchestrator
+      target_surface: "Coordinated 実行時の Planner / Librarian / Oracle / Multimodal Looker への capability 別委譲"

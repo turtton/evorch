@@ -72,3 +72,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/orchestration/overview.md
+      role: Orchestrator / Worker
+      target_surface: "opt-in Coordinated(DynamicTeam)、task claim / lease / heartbeat、finding log と artifact ownership"

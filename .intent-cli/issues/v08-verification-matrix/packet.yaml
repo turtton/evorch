@@ -76,3 +76,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/gui-workbench/overview.md
+      role: implementation / Reviewer
+      target_surface: "GUI sidebar / Conversation / Settings / Browser pane の headless・kittest・offscreen 描画検証とサイズ/DPI マトリクス"

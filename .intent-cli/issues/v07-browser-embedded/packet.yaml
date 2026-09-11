@@ -69,3 +69,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/gui-workbench/overview.md
+      role: Operator
+      target_surface: "Browser pane の CDP screencast、action log、前後 screenshot と DOM diff の evidence 表示"

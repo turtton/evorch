@@ -58,3 +58,9 @@ closeout_learning:
   write_back_targets:
     - intents/evorch/features/gui-workbench/overview.md
     - intents/evorch/decisions/0024-process-owner-claim.md
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/gui-workbench/overview.md
+      role: Operator
+      target_surface: "thread の read-only attach、owner claim / handoff、active thread の終了警告"

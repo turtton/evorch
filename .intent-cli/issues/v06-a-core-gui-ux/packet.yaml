@@ -73,3 +73,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/features/gui-workbench/overview.md
+      role: Operator
+      target_surface: "Conversation composer の画像添付と slash 拡張、snapshot undo/redo、session tree/fork、keymap/theme 設定"

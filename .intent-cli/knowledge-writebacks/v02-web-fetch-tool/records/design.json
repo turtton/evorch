@@ -1,0 +1,11 @@
+{
+  "artifact_kind": "knowledge-writeback-record",
+  "execution_unit": "v02-web-fetch-tool",
+  "role": "design",
+  "host_commit": "09d227aa7b937f1a153056836581c1affa0e5b14",
+  "recorded_at": "2026-09-11T11:23:31.9110349+00:00",
+  "targets": [
+    "intents/evorch/features/tools-sandbox/overview.md"
+  ],
+  "note": "\u65E2\u5B58\u306E\u5BA3\u8A00\u5148\u5185\u5BB9\u3068\u95A2\u9023 git \u5C65\u6B74\u3092\u7167\u5408\u3057\u3066\u9061\u53CA\u8A18\u9332\u3002\u6210\u679C\u306E\u65B0\u898F\u4F5C\u6210\u3084\u5B9F\u88C5\u5B8C\u4E86\u306E\u63A8\u5B9A\u306F\u3057\u3066\u3044\u306A\u3044\u3002"
+}

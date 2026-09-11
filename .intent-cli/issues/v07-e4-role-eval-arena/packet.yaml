@@ -73,3 +73,9 @@ closeout_learning:
 # guide_reachability:
 #   no_role_facing_surface: true
 #   routes: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: intents/evorch/technology/mvp-roadmap.md
+      role: Operator
+      target_surface: "Bundle E4 の role / model / prompt / routing / topology arena 比較と promotion gate"

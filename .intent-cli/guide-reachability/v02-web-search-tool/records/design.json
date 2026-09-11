@@ -1,0 +1,14 @@
+{
+  "artifact_kind": "guide-reachability-record",
+  "execution_unit": "v02-web-search-tool",
+  "role": "design",
+  "host_commit": "e01ced4e4edb77b29c1f352c4b711acb7a970f53",
+  "recorded_at": "2026-09-11T11:23:56.4309741+00:00",
+  "guide_surfaces": [
+    "tools-sandbox overview \u3067\u5BA3\u8A00\u4E88\u5B9A\u306E tool \u5229\u7528 surface\uFF08web_search\uFF09"
+  ],
+  "roles": [
+    "Librarian"
+  ],
+  "note": "\u5BA3\u8A00\u3055\u308C\u305F guide surface \u306E\u8AAC\u660E\u304C intents/ \u306E\u8A72\u5F53 overview \u306B\u5B9F\u5728\u3059\u308B\u3053\u3068\u3068\u95A2\u9023 host commit \u3092\u7167\u5408\u3002guide \u8A18\u9332\u306E\u307F\u3067\u672A\u5B8C\u4E86 writeback \u3084\u5B9F\u88C5\u3092\u5B8C\u4E86\u6271\u3044\u306B\u3057\u306A\u3044\u3002"
+}
