@@ -83,11 +83,18 @@ struct Arguments {
     layout: Option<PathBuf>,
     save_layout: Option<PathBuf>,
     state: Option<PathBuf>,
+    window_title: String,
 }
 
 fn parse_arguments() -> Result<Arguments, GuiError> {
-    let mut arguments = Arguments::default();
-    let mut values = std::env::args().skip(1);
+    parse_arguments_from(std::env::args().skip(1))
+}
+
+fn parse_arguments_from(mut values: impl Iterator<Item = String>) -> Result<Arguments, GuiError> {
+    let mut arguments = Arguments {
+        window_title: String::from("evorch"),
+        ..Default::default()
+    };
     while let Some(argument) = values.next() {
         match argument.as_str() {
             "--demo" => arguments.demo = true,
@@ -97,6 +104,11 @@ fn parse_arguments() -> Result<Arguments, GuiError> {
                 arguments.save_layout = Some(next_path(&mut values, "--save-layout")?);
             }
             "--state" => arguments.state = Some(next_path(&mut values, "--state")?),
+            "--window-title" => {
+                arguments.window_title = values.next().ok_or_else(|| {
+                    GuiError::Arguments(String::from("--window-title requires a value"))
+                })?;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -109,7 +121,9 @@ fn parse_arguments() -> Result<Arguments, GuiError> {
 
 fn print_help() {
     println!(
-        r#"Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH]
+        r#"Usage: evorch-gui [--demo] [--settings PATH] [--layout PATH] [--save-layout PATH] [--state PATH] [--window-title <text>]
+
+--window-title <text>  Set the window title (default: evorch).
 
 Demo mode (--demo) runs a deterministic scripted session; no external AI
 provider is used or required.
@@ -851,9 +865,10 @@ fn run() -> Result<(), GuiError> {
         });
     }
 
-    let options = eframe::NativeOptions::default();
+    let title = arguments.window_title;
+    let options = gui::window::native_options(&title);
     eframe::run_native(
-        "evorch",
+        &title,
         options,
         Box::new(move |creation_context| {
             let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
@@ -905,6 +920,37 @@ mod tests {
     use super::orchestration_settings_or_default;
     use config::ConfigError;
     use runtime::OrchestrationSettings;
+
+    #[test]
+    fn window_title_is_selected_when_provided() {
+        // Given: a unique title for a smoke-test window.
+        let values = ["--window-title", "evorch-smoke-1"].map(String::from);
+        // When: the arguments are parsed without starting the GUI.
+        let arguments = super::parse_arguments_from(values.into_iter()).expect("valid arguments");
+        // Then: the requested title is retained.
+        assert_eq!(arguments.window_title, "evorch-smoke-1");
+    }
+
+    #[test]
+    fn window_title_requires_value_when_missing() {
+        // Given: the title option has no following value.
+        let values = [String::from("--window-title")];
+        // When: the arguments are parsed.
+        let error = super::parse_arguments_from(values.into_iter()).expect_err("missing value");
+        // Then: the existing argument-error variant explains the missing value.
+        assert!(matches!(error, super::GuiError::Arguments(message)
+            if message == "--window-title requires a value"));
+    }
+
+    #[test]
+    fn window_title_defaults_when_omitted() {
+        // Given: no command-line options.
+        let values = std::iter::empty();
+        // When: the arguments are parsed.
+        let arguments = super::parse_arguments_from(values).expect("default arguments");
+        // Then: normal launches retain the existing title.
+        assert_eq!(arguments.window_title, "evorch");
+    }
 
     #[test]
     fn codex_auth_model_has_no_backend_without_credential_dir() {
