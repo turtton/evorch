@@ -38,3 +38,5 @@ Use `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`.
 
 The Chromium integration test uses only an ephemeral localhost HTTP fixture.
 It is ignored by the normal test run to avoid launching Chromium implicitly.
+See [gui-verification.md](gui-verification.md) for the full GUI verification
+layer matrix, where this test is layer L6.
