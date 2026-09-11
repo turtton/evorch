@@ -23,6 +23,7 @@ pub mod error;
 pub mod escalation;
 pub mod mailbox;
 pub mod memory;
+mod memory_lifecycle;
 pub mod memory_queue;
 mod meta;
 pub mod model;

@@ -44,6 +44,7 @@ static IO_SOURCE: IoSource = IoSource;
 // `rusqlite::Error` が `Eq` を実装しないため、ワークスペースの慣例に反して `Eq` は導出しません。
 #[derive(Debug, PartialEq)]
 pub enum StorageError {
+    StaleMutation,
     /// SQLite 操作が失敗しました。
     Sqlite(rusqlite::Error),
     /// スキーマ移行が失敗しました。
@@ -98,6 +99,7 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StaleMutation => write!(formatter, "mutation owner generation is stale"),
             Self::Sqlite(error) => write!(formatter, "SQLite error: {error}"),
             Self::Migration { version, message } => {
                 write!(formatter, "migration {version} failed: {message}")
@@ -139,6 +141,7 @@ impl std::error::Error for StorageError {
             Self::Sqlite(error) => Some(error),
             Self::Io(_) => Some(&IO_SOURCE),
             Self::Migration { .. }
+            | Self::StaleMutation
             | Self::SchemaTooNew { .. }
             | Self::LimitExceeded { .. }
             | Self::WriterClosed

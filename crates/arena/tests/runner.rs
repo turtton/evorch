@@ -7,9 +7,10 @@ fn spec() -> ArenaSpec {
     ArenaSpec {
         id: "run".into(),
         project: "p".into(),
+        split: Default::default(),
         task: TaskSpec {
             id: "task".into(),
-            prompt: "1+1".into(),
+            prompt: "日本語で計算してください。".repeat(2),
             expected_output: "2".into(),
         },
         configs: ["a", "b"]

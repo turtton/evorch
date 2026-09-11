@@ -13,6 +13,7 @@ fn arena_promotion_requires_a_second_explicit_click() {
     let spec = arena::ArenaSpec {
         id: "run".into(),
         project: "p".into(),
+        split: Default::default(),
         task: arena::TaskSpec {
             id: "task".into(),
             prompt: "task".into(),

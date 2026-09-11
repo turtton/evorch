@@ -26,6 +26,15 @@ pub struct Registry {
 }
 
 impl Registry {
+    pub fn guard_generation(&self, permit: &super::OwnerPermit) -> Result<(), RegistryError> {
+        self.connection.execute_batch("BEGIN DEFERRED")?;
+        let owner = self.attach(&permit.thread_id)?;
+        owner.validate(&permit.lease)?;
+        if owner.state == super::OwnerState::Released {
+            return Err(OwnershipError::Fenced.into());
+        }
+        Ok(())
+    }
     pub fn list(&self) -> Result<Vec<ThreadOwner>, RegistryError> {
         let mut statement = self
             .connection
@@ -79,8 +88,17 @@ impl Registry {
                 |row| row.get(0),
             )
             .optional()?;
-        let mut owner = serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?;
+        let mut owner: ThreadOwner = serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?;
+        let previous_generation = owner.lease.generation;
         update(&mut owner)?;
+        if owner.state == super::OwnerState::Released
+            || owner.lease.generation != previous_generation
+        {
+            transaction.execute(
+                "INSERT OR IGNORE INTO owner_checkpoints VALUES (?1, ?2, '[]')",
+                params![thread_id, previous_generation.to_string()],
+            )?;
+        }
         transaction.execute(
             "UPDATE thread_owners SET state = ?2 WHERE thread_id = ?1",
             params![thread_id, serde_json::to_string(&owner)?],

@@ -24,7 +24,7 @@ impl ArenaReport {
         }
     }
 
-    fn comparison_complete(&self) -> bool {
+    pub(crate) fn comparison_complete(&self) -> bool {
         let Some(first) = self.traces.first() else {
             return false;
         };
@@ -108,6 +108,9 @@ impl ArenaReport {
             .ok_or(ArenaError::Ineligible)?;
         let spec: crate::ArenaSpec =
             serde_json::from_str(&trace.task_spec).map_err(|_| ArenaError::Ineligible)?;
+        if spec.split == crate::EvaluationSplit::Train {
+            return Err(ArenaError::Ineligible);
+        }
         spec.configs
             .into_iter()
             .find(|config| config.id == id)

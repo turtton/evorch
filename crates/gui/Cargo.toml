@@ -36,6 +36,7 @@ routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 sandbox = { path = "../sandbox", features = ["keychain"] }
 serde = { workspace = true }
+sha2 = { workspace = true }
 storage = { path = "../storage" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

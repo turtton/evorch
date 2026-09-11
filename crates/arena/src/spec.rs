@@ -27,12 +27,24 @@ pub struct ArenaSpec {
     pub id: String,
     pub project: String,
     pub task: TaskSpec,
+    #[serde(default)]
+    pub split: EvaluationSplit,
     pub configs: Vec<ArenaConfig>,
     pub max_output_tokens: u64,
     /// Arena-wide ceiling, divided equally in advance; unused shares are never transferred.
     pub total_token_budget: u64,
     /// Arena-wide deadline; each candidate gets an equal independent time allowance.
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationSplit {
+    Train,
+    #[default]
+    Validation,
+    Holdout,
+    Redteam,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +59,8 @@ pub enum ArenaError {
     ConfirmationRequired,
     #[error("configuration is not a selected routing candidate")]
     Ineligible,
+    #[error("promotion I/O: {0}")]
+    PromotionIo(#[from] std::io::Error),
 }
 
 impl ArenaSpec {

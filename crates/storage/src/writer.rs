@@ -22,6 +22,7 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 enum Command {
     Usage(Vec<UsageBucket>),
     AppendEvent(Option<String>, Event, ReplyTx),
+    AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
     Memory(crate::repo::memory::Mutation, ReplyTx),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
@@ -88,10 +89,39 @@ impl Drop for Storage {
 }
 
 /// single-writer へ同期要求または lossy usage を送る共有 handle です。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    pub fn append_fenced_event(
+        &self,
+        session_id: Option<&str>,
+        event: &Event,
+        validator: event_bus::MutationValidator,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AppendFencedEvent(
+                session_id.map(String::from),
+                event.clone(),
+                validator,
+                reply,
+            )
+        })
+    }
+    pub fn append_team_snapshot(
+        &self,
+        snapshot: crate::team::TeamSnapshot,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::Memory(crate::repo::memory::Mutation::Team(snapshot), reply))
+    }
+    pub fn append_finding(&self, finding: &crate::memory::Lesson) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(
+                crate::repo::memory::Mutation::Finding(finding.clone()),
+                reply,
+            )
+        })
+    }
     pub fn append_eval_trace(&self, trace: &crate::eval::EvalTrace) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::Memory(
@@ -107,9 +137,13 @@ impl StorageHandle {
         self.request(|reply| Command::TaskQueue(mutation, reply))
     }
     pub fn append_lesson(&self, lesson: &crate::memory::Lesson) -> Result<(), StorageError> {
+        self.append_lessons(std::slice::from_ref(lesson))
+    }
+
+    pub fn append_lessons(&self, lessons: &[crate::memory::Lesson]) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::Memory(
-                crate::repo::memory::Mutation::Candidate(lesson.clone()),
+                crate::repo::memory::Mutation::Candidates(lessons.to_vec()),
                 reply,
             )
         })

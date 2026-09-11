@@ -7,7 +7,8 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 16] = [
+const EXPECTED_TABLES: [&str; 17] = [
+    "team_ledger",
     "task_queue_ledger",
     "memory_ledger",
     "memory_entries",
@@ -71,13 +72,13 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
 
-    // Then: v4 と定義済みテーブル・インデックスだけが作成される
+    // Then: v5 と定義済みテーブル・インデックスだけが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        4
+        5
     );
     assert_eq!(
         schema_objects(&connection, "table"),
@@ -99,13 +100,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v4 のまま維持される
+    // Then: スキーマは重複せず v5 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        4
+        5
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -136,7 +137,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 4,
+            supported: 5,
         }
     );
 }
@@ -181,5 +182,5 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 4);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 5);
 }

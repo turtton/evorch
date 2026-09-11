@@ -6,6 +6,7 @@ use event_bus::{Event, EventReceiver, RecvError};
 
 /// tokio のイベント購読を GUI フレーム用の標準チャネルへ橋渡しする。
 pub struct EventPump {
+    validator: event_bus::MutationValidator,
     rx: mpsc::Receiver<Event>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -18,6 +19,7 @@ impl EventPump {
         repaint: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
+        let validator = receiver.mutation_validator();
         let task = handle.spawn(async move {
             loop {
                 let event = match receiver.recv().await {
@@ -34,12 +36,19 @@ impl EventPump {
                 }
             }
         });
-        Self { rx, task }
+        Self {
+            rx,
+            task,
+            validator,
+        }
     }
 
     /// 現在キューにあるイベントを非ブロッキングで全て取り出す。
     pub fn drain(&mut self) -> Vec<Event> {
-        self.rx.try_iter().collect()
+        self.rx
+            .try_iter()
+            .filter(|event| self.validator.accepts(event))
+            .collect()
     }
 }
 
@@ -61,6 +70,35 @@ mod tests {
     use event_bus::{Event, EventBus, LifecycleEvent};
 
     use super::EventPump;
+
+    #[test]
+    fn drain_rejects_event_when_generation_changes_after_delivery() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let bus = EventBus::new(8);
+        let generation = Arc::new(AtomicUsize::new(1));
+        let observed = Arc::clone(&generation);
+        assert!(bus.register_mutation_fence(
+            "run-1".into(),
+            Arc::new(move || observed.load(Ordering::SeqCst) == 1)
+        ));
+        let (sender, receiver) = mpsc::channel();
+        let mut pump = EventPump::spawn(
+            runtime.handle(),
+            bus.subscribe(),
+            Some(Arc::new(move || {
+                let _ = sender.send(());
+            })),
+        );
+        bus.emit(Event::new(event_bus::MessageEvent::MessageDelta {
+            run_id: Some("run-1".into()),
+            delta: "old".into(),
+        }));
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("queued");
+        generation.store(2, Ordering::SeqCst);
+        assert!(pump.drain().is_empty());
+    }
 
     #[test]
     fn pump_forwards_bus_events_to_frame_queue() {

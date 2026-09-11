@@ -77,12 +77,19 @@ fn quiesce_blocks_new_turns_until_checkpoint_releases_owner() {
 }
 
 #[test]
-fn claim_rejects_active_turn_even_after_lease_expiry() {
+fn claim_reclaims_abandoned_active_turn_after_grace() {
     // Given: an expired owner with unfinished work.
     let mut owner = owner();
     owner.begin_turn(&owner.lease.clone(), 10).expect("begin");
-    // When / Then: stale does not imply safe to claim.
-    assert!(owner.claim(&owner.lease.clone(), "b", 200, 50).is_err());
+    let old = owner.lease.clone();
+    // When: the lease is stale (the IPC layer checks owner liveness).
+    owner.claim(&old, "b", 200, 50).expect("reclaim");
+    // Then: abandoned work is fenced and a fresh turn can begin.
+    assert!(!owner.active_turn);
+    assert!(owner.validate(&old).is_err());
+    owner
+        .begin_turn(&owner.lease.clone(), 200)
+        .expect("new turn");
 }
 
 #[test]

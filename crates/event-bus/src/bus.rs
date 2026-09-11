@@ -19,6 +19,7 @@ use crate::event::{Event, FaultEvent};
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
     next_subscriber_id: AtomicU64,
+    fences: std::sync::Arc<crate::fencing::MutationFences>,
 }
 
 impl EventBus {
@@ -34,6 +35,7 @@ impl EventBus {
         Self {
             tx,
             next_subscriber_id: AtomicU64::new(0),
+            fences: std::sync::Arc::default(),
         }
     }
 
@@ -42,7 +44,22 @@ impl EventBus {
     /// 受信者がゼロの場合は [`broadcast::SendError`] となるが、これを受信者数
     /// 0 として扱い panic しない。
     pub fn emit(&self, event: Event) -> usize {
+        let Some(_guards) = self.fences.acquire(&event) else {
+            return 0;
+        };
         self.tx.send(event).unwrap_or(0)
+    }
+
+    pub fn register_mutation_fence(&self, run: String, check: crate::MutationCheck) -> bool {
+        self.fences.register(run, check)
+    }
+
+    pub fn register_mutation_guard(&self, run: String, check: crate::MutationGuardCheck) -> bool {
+        self.fences.register_guard(run, check)
+    }
+
+    pub fn mutation_validator(&self) -> crate::MutationValidator {
+        crate::MutationValidator::new(std::sync::Arc::clone(&self.fences))
     }
 
     /// 新しい受信者を登録し、単調増加する `subscriber_id` を割り当てる。
@@ -56,6 +73,7 @@ impl EventBus {
             tx: self.tx.clone(),
             subscriber_id,
             fault_suppressed: false,
+            fences: std::sync::Arc::clone(&self.fences),
         }
     }
 
@@ -81,6 +99,7 @@ pub enum RecvError {
 /// 内部に `Sender` のクローンを保持するため、[`EventBus`] が drop されても
 /// この受信者が生きている限りチャネルは閉じない。
 pub struct EventReceiver {
+    fences: std::sync::Arc<crate::fencing::MutationFences>,
     rx: broadcast::Receiver<Event>,
     /// fault 再 emit 用の送信者クローン。
     tx: broadcast::Sender<Event>,
@@ -91,6 +110,9 @@ pub struct EventReceiver {
 }
 
 impl EventReceiver {
+    pub fn mutation_validator(&self) -> crate::MutationValidator {
+        crate::MutationValidator::new(std::sync::Arc::clone(&self.fences))
+    }
     /// この受信者に割り当てられた `subscriber_id` を返す。
     pub fn subscriber_id(&self) -> u64 {
         self.subscriber_id
@@ -125,29 +147,33 @@ impl EventReceiver {
     /// は、`Ok` で正常に受信できるまで fault の再 emit を止めることで、この
     /// fault 再 emit が自らの lag を誘発するループを防ぐために存在する。
     pub async fn recv(&mut self) -> Result<Event, RecvError> {
-        match self.rx.recv().await {
-            Ok(event) => {
-                self.fault_suppressed = false;
-                Ok(event)
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(
-                    subscriber_id = self.subscriber_id,
-                    skipped = skipped,
-                    "event subscriber lagged; dropped events"
-                );
-                if !self.fault_suppressed {
-                    // 受信者がゼロの場合 fault は届かないが、それは観測者が
-                    // 存在しないことと同義であるため送信結果は無視してよい。
-                    let _ = self.tx.send(Event::new(FaultEvent::SubscriberLagged {
-                        subscriber_id: self.subscriber_id,
-                        skipped,
-                    }));
-                    self.fault_suppressed = true;
+        loop {
+            match self.rx.recv().await {
+                Ok(event) => {
+                    self.fault_suppressed = false;
+                    if self.fences.accepts(&event) {
+                        return Ok(event);
+                    }
                 }
-                Err(RecvError::Lagged(skipped))
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        subscriber_id = self.subscriber_id,
+                        skipped = skipped,
+                        "event subscriber lagged; dropped events"
+                    );
+                    if !self.fault_suppressed {
+                        // 受信者がゼロの場合 fault は届かないが、それは観測者が
+                        // 存在しないことと同義であるため送信結果は無視してよい。
+                        let _ = self.tx.send(Event::new(FaultEvent::SubscriberLagged {
+                            subscriber_id: self.subscriber_id,
+                            skipped,
+                        }));
+                        self.fault_suppressed = true;
+                    }
+                    return Err(RecvError::Lagged(skipped));
+                }
+                Err(broadcast::error::RecvError::Closed) => return Err(RecvError::Closed),
             }
-            Err(broadcast::error::RecvError::Closed) => Err(RecvError::Closed),
         }
     }
 }

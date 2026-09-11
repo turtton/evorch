@@ -12,6 +12,14 @@ pub struct OwnerPermit {
 }
 
 impl OwnerPermit {
+    pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
+        let registry = Registry::open(&self.registry_path)?;
+        registry.guard_generation(self)?;
+        Ok(registry)
+    }
+    pub fn validate_generation(&self) -> Result<(), RegistryError> {
+        self.mutation_guard().map(drop)
+    }
     pub fn begin_turn(&self) -> Result<(), RegistryError> {
         Registry::open(&self.registry_path)?.update(&self.thread_id, |owner| {
             match self.run_id.as_deref() {
@@ -47,11 +55,10 @@ impl OwnerPermit {
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
         let owner = Registry::open(&self.registry_path)?.attach(&self.thread_id)?;
         owner.validate(&self.lease)?;
-        if !owner.active_turn
-            || self
-                .run_id
-                .as_ref()
-                .is_some_and(|run| !owner.active_runs.contains(run))
+        if self
+            .run_id
+            .as_ref()
+            .is_some_and(|run| !owner.active_runs.contains(run))
         {
             return Ok(());
         }

@@ -38,6 +38,7 @@ async fn deadline_cancels_pending_provider_and_records_every_config() {
     let spec = ArenaSpec {
         id: "timeout".into(),
         project: "p".into(),
+        split: Default::default(),
         task: TaskSpec {
             id: "t".into(),
             prompt: "task".into(),

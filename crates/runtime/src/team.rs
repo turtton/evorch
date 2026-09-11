@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use crate::ownership::{Lease, OwnerState};
 use serde::{Deserialize, Serialize};
+mod persistence;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,14 +13,14 @@ pub struct TaskSpec {
     pub paths: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimState {
     Ready,
     Claimed(Lease),
     Complete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamTask {
     pub spec: TaskSpec,
     pub state: ClaimState,
@@ -29,10 +30,13 @@ pub struct TeamTask {
 #[derive(Debug, Default)]
 pub struct TeamBoard {
     tasks: Mutex<BTreeMap<String, TeamTask>>,
+    persistence: Option<persistence::Persistence>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum TeamError {
+    #[error("team persistence failed: {0}")]
+    Persistence(String),
     #[error("team state lock is poisoned")]
     Poisoned,
     #[error("task is missing, duplicated, or not ready")]
@@ -55,79 +59,84 @@ impl TeamBoard {
         for path in &spec.paths {
             validate_path(path)?;
         }
-        let mut tasks = self.tasks.lock().map_err(|_| TeamError::Poisoned)?;
-        if tasks.contains_key(&spec.id) {
-            return Err(TeamError::NotReady);
-        }
-        tasks.insert(
-            spec.id.clone(),
-            TeamTask {
-                spec,
-                state: ClaimState::Ready,
-                generation: 0,
-            },
-        );
-        Ok(())
+        self.update(|tasks| {
+            if tasks.contains_key(&spec.id) {
+                return Err(TeamError::NotReady);
+            }
+            tasks.insert(
+                spec.id.clone(),
+                TeamTask {
+                    spec,
+                    state: ClaimState::Ready,
+                    generation: 0,
+                },
+            );
+            Ok(())
+        })
     }
 
     pub fn claim(&self, id: &str, worker: &str, now: u64) -> Result<Lease, TeamError> {
-        let mut tasks = self.tasks.lock().map_err(|_| TeamError::Poisoned)?;
-        let task = tasks.get(id).ok_or(TeamError::NotReady)?;
-        if task.state != ClaimState::Ready {
-            return Err(TeamError::NotReady);
-        }
-        for other in tasks.values() {
-            if matches!(other.state, ClaimState::Claimed(_))
-                && task.spec.paths.iter().any(|path| {
-                    other
-                        .spec
-                        .paths
-                        .iter()
-                        .any(|owned| path.starts_with(owned) || owned.starts_with(path))
-                })
-            {
-                return Err(TeamError::Conflict);
+        self.update(|tasks| {
+            let task = tasks.get(id).ok_or(TeamError::NotReady)?;
+            if task.state != ClaimState::Ready {
+                return Err(TeamError::NotReady);
             }
-        }
-        let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
-        task.generation = task.generation.checked_add(1).ok_or(TeamError::Exhausted)?;
-        let lease = Lease {
-            owner_id: worker.into(),
-            generation: task.generation,
-            expires_at: now.saturating_add(5_000),
-        };
-        task.state = ClaimState::Claimed(lease.clone());
-        Ok(lease)
+            for other in tasks.values() {
+                if matches!(other.state, ClaimState::Claimed(_))
+                    && task.spec.paths.iter().any(|path| {
+                        other
+                            .spec
+                            .paths
+                            .iter()
+                            .any(|owned| path.starts_with(owned) || owned.starts_with(path))
+                    })
+                {
+                    return Err(TeamError::Conflict);
+                }
+            }
+            let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
+            task.generation = task.generation.checked_add(1).ok_or(TeamError::Exhausted)?;
+            let lease = Lease {
+                owner_id: worker.into(),
+                generation: task.generation,
+                expires_at: now.saturating_add(5_000),
+            };
+            task.state = ClaimState::Claimed(lease.clone());
+            Ok(lease)
+        })
     }
 
     pub fn heartbeat(&self, id: &str, token: &Lease, now: u64) -> Result<(), TeamError> {
-        let mut tasks = self.tasks.lock().map_err(|_| TeamError::Poisoned)?;
-        let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
-        let lease = live_lease(task, token, now)?;
-        lease.expires_at = now.saturating_add(5_000);
-        Ok(())
+        self.update(|tasks| {
+            let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
+            let lease = live_lease(task, token, now)?;
+            lease.expires_at = now.saturating_add(5_000);
+            Ok(())
+        })
     }
 
     pub fn complete(&self, id: &str, token: &Lease, now: u64) -> Result<(), TeamError> {
-        let mut tasks = self.tasks.lock().map_err(|_| TeamError::Poisoned)?;
-        let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
-        live_lease(task, token, now)?;
-        task.state = ClaimState::Complete;
-        Ok(())
+        self.update(|tasks| {
+            let task = tasks.get_mut(id).ok_or(TeamError::NotReady)?;
+            live_lease(task, token, now)?;
+            task.state = ClaimState::Complete;
+            Ok(())
+        })
     }
 
     pub fn expire(&self, now: u64) -> Result<Vec<String>, TeamError> {
-        let mut tasks = self.tasks.lock().map_err(|_| TeamError::Poisoned)?;
-        let mut expired = Vec::new();
-        for (id, task) in tasks.iter_mut() {
-            if let ClaimState::Claimed(lease) = &task.state
-                && lease.observe(now, 0) == OwnerState::Stale
-            {
-                task.state = ClaimState::Ready;
-                expired.push(id.clone());
+        self.update(|tasks| {
+            let mut expired = Vec::new();
+            for (id, task) in tasks.iter_mut() {
+                if let ClaimState::Claimed(lease) = &task.state
+                    && lease.observe(now, 0) == OwnerState::Stale
+                {
+                    task.state = ClaimState::Ready;
+                    expired.push(id.clone());
+                }
             }
-        }
-        Ok(expired)
+            Ok(expired)
+        })
     }
 
     pub fn snapshot(&self) -> Result<Vec<TeamTask>, TeamError> {

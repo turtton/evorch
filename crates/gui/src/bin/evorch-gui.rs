@@ -661,6 +661,32 @@ fn run() -> Result<(), GuiError> {
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;
+    let quick_route = composition_config
+        .agents
+        .binding_for("worker", Some("quick"))
+        .ok()
+        .and_then(|binding| {
+            composition_config
+                .routing
+                .routes
+                .get(&binding.logical_model)
+        })
+        .and_then(|routes| routes.first());
+    let runtime = match quick_route {
+        Some(route) => runtime.with_learning(runtime::memory_queue::LearningSettings {
+            writer: storage.handle(),
+            storage: storage_config.clone(),
+            project: derive_repo_slug(&repo_root),
+            quick: runtime::ModelPreference {
+                profile: route.profile.clone(),
+                model: route.model.clone(),
+            },
+        }),
+        None => {
+            tracing::warn!("post-run learning unavailable: configure a worker quick model route");
+            runtime
+        }
+    };
 
     let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
     let repaint_hook = {
@@ -780,7 +806,8 @@ fn run() -> Result<(), GuiError> {
         .with_command_sink(Box::new(
             RuntimeCommandSink::new(runtime.clone(), handle.clone(), supervisor)
                 .with_ownership(ownership)
-                .with_memory_storage(storage_config.clone()),
+                .with_memory_storage(storage_config.clone())
+                .with_team_writer(storage.handle()),
         ));
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);

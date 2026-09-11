@@ -43,6 +43,7 @@ struct RepoIdentity {
 /// その root run に紐付けて supervisor へ goal を登録する (issue #71, #73)。
 /// DecideMerge / PauseGoal / ResumeGoal / CancelGoal は supervisor へ転送する。
 pub struct RuntimeCommandSink {
+    team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
     runtime: AgentRuntime,
     handle: tokio::runtime::Handle,
@@ -64,6 +65,7 @@ impl RuntimeCommandSink {
     ) -> Self {
         let (events_tx, events_rx) = std::sync::mpsc::channel();
         Self {
+            team_writer: None,
             memory_config: None,
             runtime,
             handle,
@@ -87,6 +89,11 @@ impl RuntimeCommandSink {
 
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
         self.memory_config = Some(config);
+        self
+    }
+
+    pub fn with_team_writer(mut self, writer: storage::StorageHandle) -> Self {
+        self.team_writer = Some(writer);
         self
     }
 
@@ -180,6 +187,27 @@ impl CommandSink for RuntimeCommandSink {
                 }
             }
             WorkbenchCommand::SubmitGoal(submission) => {
+                let team_store = match submission.delegation_value.as_deref() {
+                    Some(value) if value.trim().is_empty() => {
+                        return vec![LoopEvent::CommandRejected {
+                            reason: "team mode requires explicit delegation value".into(),
+                        }];
+                    }
+                    Some(_) => match (&self.memory_config, &self.team_writer) {
+                        (Some(config), Some(writer)) => Some(runtime::team_context::TeamStore {
+                            config: config.clone(),
+                            writer: writer.clone(),
+                            id: format!("{}:{}", submission.project_id, submission.thread_id),
+                        }),
+                        _ => {
+                            return vec![LoopEvent::CommandRejected {
+                                reason: "team storage is unavailable".into(),
+                            }];
+                        }
+                    },
+                    None => None,
+                };
+                let delegation_value = submission.delegation_value.clone();
                 let memory = match self
                     .memory_config
                     .as_ref()
@@ -234,11 +262,21 @@ impl CommandSink for RuntimeCommandSink {
                     runtime.spawn_reserved(
                         root_run,
                         None,
-                        decision.role(),
+                        if team_store.is_some() {
+                            Role::Orchestrator
+                        } else {
+                            decision.role()
+                        },
                         prompt,
                         RunConfig {
                             name: Some(goal_id_for_run),
-                            topology: decision.topology,
+                            topology: if team_store.is_some() {
+                                runtime::CoordinationTopology::DynamicTeam { max_workers: 3 }
+                            } else {
+                                runtime::CoordinationTopology::Single
+                            },
+                            team_store,
+                            delegation_value,
                             finding_store,
                             memory,
                             ownership: permit,
@@ -487,6 +525,7 @@ mod tests {
         constraints: Vec<String>,
     ) -> GoalSubmission {
         GoalSubmission {
+            delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
             goal: goal.into(),
@@ -565,6 +604,36 @@ mod tests {
                 .expect("run exists")
         });
         assert_eq!(phase, event_bus::AgentRunPhase::Error);
+    }
+
+    #[test]
+    fn team_submission_reaches_runtime_with_shared_storage() {
+        let (rt, sink, runtime, _) = build_sink();
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("team.db"),
+            ..Default::default()
+        };
+        let writer = Storage::open(config.clone()).unwrap();
+        let mut sink = sink
+            .with_memory_storage(config)
+            .with_team_writer(writer.handle());
+        let mut goal = submission("implement independent tasks", vec![], vec![]);
+        goal.delegation_value = Some("independent paths".into());
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::SubmitGoal(goal))[0],
+            LoopEvent::GoalAccepted { .. }
+        ));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while runtime.team_tasks().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert_eq!(runtime.team_tasks().len(), 1);
     }
 
     #[test]

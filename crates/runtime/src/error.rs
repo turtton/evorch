@@ -7,6 +7,8 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("run ownership generation is stale: {run_id}")]
+    StaleOwnership { run_id: String },
     /// 存在しない AgentRun が参照された。
     #[error("未知の AgentRun が指定されました: {run_id}")]
     UnknownRun {

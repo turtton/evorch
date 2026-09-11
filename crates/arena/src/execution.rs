@@ -23,22 +23,32 @@ pub(crate) async fn execute(
         }],
     });
     for role in config.roles() {
-        let bytes = messages
+        // A shared, pinned BPE encoding makes reservations comparable across models.
+        // Actual provider usage remains authoritative after each completed stage.
+        let input_tokens = messages
             .iter()
             .try_fold(0u64, |total, message| {
-                message.content.iter().try_fold(
-                    total.saturating_add(32),
-                    |sum, block| match block {
-                        ContentBlock::Text { text } => u64::try_from(text.len())
-                            .ok()
-                            .and_then(|n| sum.checked_add(n)),
+                message
+                    .content
+                    .iter()
+                    .try_fold(total.saturating_add(4), |sum, block| match block {
+                        ContentBlock::Text { text } => u64::try_from(
+                            tiktoken_rs::cl100k_base_singleton()
+                                .encode_ordinary(text)
+                                .len(),
+                        )
+                        .ok()
+                        .and_then(|n| sum.checked_add(n)),
                         _ => None,
-                    },
-                )
+                    })
             })
             .ok_or(FailureAttribution::BudgetExceeded)?;
         let used = trace.input_tokens.saturating_add(trace.output_tokens);
-        if bytes.saturating_add(spec.max_output_tokens) > budget.saturating_sub(used) {
+        if input_tokens
+            .saturating_add(3)
+            .saturating_add(spec.max_output_tokens)
+            > budget.saturating_sub(used)
+        {
             return Err(FailureAttribution::BudgetExceeded);
         }
         let request = ChatRequest {

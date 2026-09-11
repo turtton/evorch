@@ -56,6 +56,17 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::AppendFencedEvent(session_id, event, validator, reply)) => {
+                let guards = validator.acquire(&event);
+                let result = if guards.is_none() {
+                    Err(StorageError::StaleMutation)
+                } else if state.writes_suspended {
+                    handle_suspended_append(&mut state, &session_id, &event)
+                } else {
+                    append_event_to_conn(&mut state, &session_id, &event)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }

@@ -112,27 +112,21 @@ impl LoopState {
                 if !owns_task {
                     return Err("finding requires a live task claim".into());
                 }
-                let path = team
-                    .finding_store
+                let writer = team
+                    .writer
                     .clone()
                     .ok_or("finding storage is not configured")?;
                 let finding = storage::memory::Lesson {
                     id: format!("{}:{}", worker, args.task_id),
-                    project: team.coordinator.to_string(),
+                    project: team.id.clone(),
                     task_id: args.task_id,
                     content: args.content,
                     evidence: args.evidence,
                 };
-                tokio::task::spawn_blocking(move || {
-                    let db = storage::Database::open(&storage::StorageConfig {
-                        db_path: path,
-                        ..Default::default()
-                    })?;
-                    db.append_finding(&finding)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                tokio::task::spawn_blocking(move || writer.append_finding(&finding))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
                 Ok("appended".into())
             }
             _ => Err("unknown team tool".into()),

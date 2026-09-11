@@ -125,9 +125,7 @@ impl Interviewer {
                 evidence: answer.evidence,
             });
         }
-        for lesson in &lessons {
-            self.storage.append_lesson(lesson)?;
-        }
+        self.storage.append_lessons(&lessons)?;
         Ok(lessons)
     }
 }

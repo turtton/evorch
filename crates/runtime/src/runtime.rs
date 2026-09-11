@@ -41,10 +41,12 @@ const INBOX_CAPACITY: usize = 32;
 /// または明示的な [`AgentRuntime::cancel`] まで継続する。
 #[derive(Clone)]
 pub struct AgentRuntime {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
 }
 
 pub(crate) struct Shared {
+    pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
+    pub(crate) learning_runs: Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>,
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
     pub(crate) executor: Arc<ToolExecutor>,
@@ -146,6 +148,8 @@ impl AgentRuntime {
         run_id: RunId,
         redo: bool,
     ) -> Result<Option<String>, String> {
+        self.validate_run_mutation(run_id)
+            .map_err(|error| error.to_string())?;
         let (owner, phase) = {
             let entry = self.entry(run_id).map_err(|error| error.to_string())?;
             (
@@ -195,6 +199,8 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 topology: OnceLock::new(),
+                learning: OnceLock::new(),
+                learning_runs: Mutex::new(HashMap::new()),
                 bus,
                 executor,
                 snapshots: OnceLock::new(),
@@ -412,6 +418,8 @@ impl AgentRuntime {
                 escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: Some(WorkspaceContext { manager, factory }),
+                learning: OnceLock::new(),
+                learning_runs: Mutex::new(HashMap::new()),
                 snapshots: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 next_run_id: AtomicU64::new(1),
@@ -573,22 +581,39 @@ impl AgentRuntime {
             if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
                 config.topology = entry.config.topology;
                 config.team = entry.config.team.clone();
+                config.delegation_value = entry.config.delegation_value.clone();
             }
             config.ownership = lock_runs(&self.shared.runs)
                 .get(&parent)
                 .and_then(|entry| entry.config.ownership.clone())
                 .or(config.ownership);
         }
-        if role == Role::Orchestrator
+        if parent.is_none() {
+            config.team = None;
+        }
+        let team_setup = if (config.topology.worker_limit().is_some() || config.team.is_some())
+            && config
+                .delegation_value
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            Err("team mode requires explicit delegation value".to_string())
+        } else if role == Role::Orchestrator
             && config.team.is_none()
             && let Some(limit) = config.topology.worker_limit()
         {
-            let mut team = crate::team_context::TeamContext::new(run_id, limit);
-            team.finding_store = config.finding_store.clone();
-            config.team = Some(team);
-        }
-        let worker_slot = match (&config.team, role) {
-            (Some(team), Role::Worker) => Some(team.reserve_worker().and_then(|slot| {
+            match config.team_store.as_ref() {
+                Some(store) => crate::team_context::TeamContext::persistent(run_id, store, limit)
+                    .map(|team| config.team = Some(team))
+                    .map_err(|error| error.to_string()),
+                None => Err("team mode requires shared durable storage".to_string()),
+            }
+        } else {
+            Ok(())
+        };
+        let worker_slot = match (team_setup, &config.team, role) {
+            (Err(error), _, _) => Some(Err(error)),
+            (Ok(()), Some(team), Role::Worker) => Some(team.reserve_worker().and_then(|slot| {
                 if let Some(spec) = &config.team_task {
                     team.board
                         .enqueue(spec.clone())
@@ -600,6 +625,16 @@ impl AgentRuntime {
         };
         if let Some(permit) = &mut config.ownership {
             permit.run_id = Some(run_id.to_string());
+            let token = permit.clone();
+            self.shared.bus.register_mutation_guard(
+                run_id.to_string(),
+                Arc::new(move || {
+                    token
+                        .mutation_guard()
+                        .ok()
+                        .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
+                }),
+            );
         }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
         let prompt = match &config.memory {
@@ -694,6 +729,7 @@ impl AgentRuntime {
                 task_id: run_id.to_string(),
             }));
         let weak = Arc::downgrade(&self.shared);
+        let learning = self.prepare_learning(&task);
         let join = tokio::spawn(async move {
             let _slot = match worker_slot {
                 Some(Ok(slot)) => Some(slot),
@@ -721,7 +757,10 @@ impl AgentRuntime {
                     channels.phase_tx.subscribe(),
                 )
             });
-            run_agent(weak, task, channels).await;
+            run_agent(weak.clone(), task, channels).await;
+            if let Some(learning) = learning {
+                learning.complete(weak, run_id).await;
+            }
         });
         if let Some(entry) = lock_runs(&self.shared.runs).get_mut(&run_id) {
             entry._join = Some(join);
@@ -780,6 +819,7 @@ impl AgentRuntime {
         text: String,
         images: Vec<crate::DelegateImage>,
     ) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
         if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
             return Err(RuntimeError::RunTerminated {
@@ -839,6 +879,7 @@ impl AgentRuntime {
         run_id: RunId,
         preference: Option<crate::ModelPreference>,
     ) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
         self.entry(run_id)?
             .model_preference_tx
             .send_replace(preference);
@@ -847,6 +888,7 @@ impl AgentRuntime {
 
     /// run の次のターン境界で手動コンテキスト圧縮を要求する。
     pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
         let entry = self.entry(run_id)?;
         if entry.compaction_busy.load(Ordering::Acquire) {
             return Err(RuntimeError::CompactionInFlight {
@@ -920,6 +962,18 @@ impl AgentRuntime {
         })
     }
 
+    fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        let permit = self.entry(run_id)?.config.ownership.clone();
+        if let Some(permit) = permit {
+            permit
+                .validate_generation()
+                .map_err(|_| RuntimeError::StaleOwnership {
+                    run_id: run_id.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+
     fn entry(&self, run_id: RunId) -> Result<RunEntryView<'_>, RuntimeError> {
         let runs = lock_runs(&self.shared.runs);
         if !runs.contains_key(&run_id) {
@@ -949,6 +1003,8 @@ impl AgentRuntime {
         content: impl Into<String>,
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
+        self.validate_run_mutation(sender)?;
+        self.validate_run_mutation(recipient)?;
         let (message_id, message, disposition) =
             self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?;
         self.shared.bus.emit(Event::new(EventKind::AgentMessage(

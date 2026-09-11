@@ -82,6 +82,18 @@ async fn interview_uses_quick_for_both_roles_and_only_persists_candidates() {
             .unwrap()
             .is_empty()
     );
+    interviewer
+        .interview(&InterviewInput {
+            project: "p",
+            task_id: "t",
+            worker_report: "worker evidence",
+            reviewer_report: "review evidence",
+        })
+        .await
+        .unwrap();
+    for entry in db.search_memory("p", "", None).unwrap() {
+        assert_eq!(db.memory_history(&entry.lesson.id).unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]

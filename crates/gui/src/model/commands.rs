@@ -18,6 +18,8 @@ pub struct PacketReference {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalSubmission {
+    #[serde(default)]
+    pub delegation_value: Option<String>,
     pub project_id: String,
     pub thread_id: String,
     pub goal: String,
@@ -235,6 +237,7 @@ impl CommandSink for FixtureLoopAdapter {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GoalFormModel {
+    pub delegation_value: Option<String>,
     pub goal: String,
     pub references: Vec<PacketReference>,
     pub constraints: Vec<String>,
@@ -244,6 +247,7 @@ pub struct GoalFormModel {
 impl GoalFormModel {
     pub fn build_command(&self, project_id: &str, thread_id: &str) -> WorkbenchCommand {
         WorkbenchCommand::SubmitGoal(GoalSubmission {
+            delegation_value: self.delegation_value.clone(),
             project_id: project_id.into(),
             thread_id: thread_id.into(),
             goal: self.goal.clone(),
@@ -500,6 +504,7 @@ mod tests {
     #[test]
     fn goal_submission_serializes_references_and_constraints() {
         let command = WorkbenchCommand::SubmitGoal(GoalSubmission {
+            delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
             goal: "implement issue".into(),
@@ -520,6 +525,7 @@ mod tests {
     fn fixture_adapter_accepts_goal_and_publishes_pending_merge_view() {
         let mut adapter = FixtureLoopAdapter::default();
         let events = adapter.submit(WorkbenchCommand::SubmitGoal(GoalSubmission {
+            delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
             goal: "implement issue".into(),
@@ -674,6 +680,7 @@ mod tests {
     fn recording_sink_records_in_order() {
         let mut sink = RecordingSink::default();
         let goal = WorkbenchCommand::SubmitGoal(GoalSubmission {
+            delegation_value: None,
             project_id: "evorch".into(),
             thread_id: "thread-1".into(),
             goal: "goal".into(),

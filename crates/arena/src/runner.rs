@@ -14,6 +14,8 @@ pub async fn run(spec: &ArenaSpec, runner: &Runner<'_>) -> Result<ArenaReport, A
     // Persist the complete comparison manifest so a partial ledger cannot be promoted.
     let task_spec =
         serde_json::to_string(spec).map_err(|_| ArenaError::InvalidSpec("task serialization"))?;
+    // Initialize the shared tokenizer before starting any candidate's time allowance.
+    tiktoken_rs::cl100k_base_singleton();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(spec.timeout_ms);
     let count = u64::try_from(spec.configs.len())
         .map_err(|_| ArenaError::InvalidSpec("configuration count"))?;

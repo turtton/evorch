@@ -65,6 +65,7 @@ mod projection;
 mod read;
 mod repo;
 pub mod task_queue;
+pub mod team;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};

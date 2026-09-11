@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = ArenaSpec {
         id: "demo".into(),
         project: "demo".into(),
+        split: Default::default(),
         task: TaskSpec {
             id: "arithmetic".into(),
             prompt: "1+1".into(),

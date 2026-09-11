@@ -121,11 +121,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.composer.input.clear();
                     }
                 }
+                "team" => {
+                    if let Some((value, goal)) = args.split_once('|')
+                        && !value.trim().is_empty()
+                        && !goal.trim().is_empty()
+                    {
+                        self.goal_form.delegation_value = Some(value.trim().into());
+                        self.goal_form.goal = goal.trim().into();
+                        self.submit_goal();
+                        self.goal_form.delegation_value = None;
+                        self.composer.input.clear();
+                    } else {
+                        self.push_notice("usage: /team <delegation value> | <goal>");
+                    }
+                }
                 "goal" => {
                     if args.is_empty() {
                         self.push_notice("usage: /goal <text>");
                     } else {
                         self.goal_form.goal = args.into();
+                        self.goal_form.delegation_value = None;
                         self.submit_goal();
                         self.composer.input.clear();
                     }

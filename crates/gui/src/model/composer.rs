@@ -66,6 +66,11 @@ impl SlashCommandRegistry {
 
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
+        name: "team",
+        description: "Submit a team goal with explicit delegation value",
+        argument_hint: Some("<delegation value> | <goal>"),
+    },
+    SlashCommandSpec {
         name: "undo",
         description: "Restore the previous workspace snapshot",
         argument_hint: None,

@@ -67,11 +67,14 @@ async fn execute(parallel: bool) -> Duration {
             .collect(),
     );
     let runtime = configured(&root, &mock);
+    let (writer, team_store) = team_storage(&root);
     let coordinator = runtime.delegate_background(
         Role::Orchestrator,
         "coordinate".into(),
         RunConfig {
             topology: CoordinationTopology::DynamicTeam { max_workers: 3 },
+            team_store: Some(team_store),
+            delegation_value: Some("independent owned tasks".into()),
             ..Default::default()
         },
     );
@@ -100,6 +103,7 @@ async fn execute(parallel: bool) -> Duration {
         assert_eq!(runtime.wait(worker).await.unwrap(), AgentRunPhase::Done);
     }
     let elapsed = start.elapsed();
+    drop(writer);
     let requests = mock.recorded_requests();
     assert_eq!(requests.len(), 4);
     assert!(
@@ -147,12 +151,15 @@ async fn worker_claims_appends_finding_and_completes_over_mock_openai() {
     ]);
     let runtime = configured(&root, &mock);
     let db_path = root.path().join("findings.db");
+    let (_writer, team_store) = team_storage(&root);
     let coordinator = runtime.delegate_background(
         Role::Orchestrator,
         "coordinate".into(),
         RunConfig {
             topology: CoordinationTopology::DynamicTeam { max_workers: 3 },
             finding_store: Some(db_path.clone()),
+            team_store: Some(team_store),
+            delegation_value: Some("independent owned tasks".into()),
             ..Default::default()
         },
     );
@@ -181,7 +188,7 @@ async fn worker_claims_appends_finding_and_completes_over_mock_openai() {
         ..Default::default()
     })
     .unwrap();
-    let findings = db.findings(&coordinator.to_string()).unwrap();
+    let findings = db.findings("team-test").unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].content, "verified finding");
 }
@@ -203,11 +210,14 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
         ScriptedResponse::text_stream("notified", "mock-model", ["recovery observed"]),
     ]);
     let runtime = configured(&root, &mock);
+    let (_writer, team_store) = team_storage(&root);
     let coordinator = runtime.delegate_background(
         Role::Orchestrator,
         "coordinate".into(),
         RunConfig {
             topology: CoordinationTopology::DynamicTeam { max_workers: 3 },
+            team_store: Some(team_store),
+            delegation_value: Some("independent owned tasks".into()),
             interactive: true,
             keep_alive: true,
             ..Default::default()
@@ -260,4 +270,40 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
         runtime::team::ClaimState::Ready
     );
     runtime.cancel(coordinator).unwrap();
+}
+
+fn team_storage(root: &tempfile::TempDir) -> (storage::Storage, runtime::team_context::TeamStore) {
+    let config = storage::StorageConfig {
+        db_path: root.path().join("findings.db"),
+        ..Default::default()
+    };
+    let writer = storage::Storage::open(config.clone()).unwrap();
+    let store = runtime::team_context::TeamStore {
+        config,
+        writer: writer.handle(),
+        id: "team-test".into(),
+    };
+    (writer, store)
+}
+
+#[tokio::test]
+async fn team_requires_explicit_delegation_value() {
+    let root = tempfile::tempdir().unwrap();
+    let mock = StreamingMockOpenAi::spawn(vec![]);
+    let runtime = configured(&root, &mock);
+    let (_writer, store) = team_storage(&root);
+    for value in [None, Some("  ".into())] {
+        let run = runtime.delegate_background(
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                topology: CoordinationTopology::DynamicTeam { max_workers: 3 },
+                team_store: Some(store.clone()),
+                delegation_value: value,
+                ..Default::default()
+            },
+        );
+        assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    }
+    assert!(mock.recorded_requests().is_empty());
 }

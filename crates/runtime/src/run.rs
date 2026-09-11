@@ -62,7 +62,10 @@ pub struct RunConfig {
     pub team: Option<crate::team_context::TeamContext>,
     pub team_task: Option<crate::team::TaskSpec>,
     pub finding_store: Option<PathBuf>,
+    pub team_store: Option<crate::team_context::TeamStore>,
+    pub delegation_value: Option<String>,
     pub memory: Option<crate::memory::MemoryBoundary>,
+    pub learning_internal: bool,
     pub ownership: Option<crate::ownership::OwnerPermit>,
     pub images: Vec<DelegateImage>,
     /// Explicit model selection for this run; absent means normal routing.

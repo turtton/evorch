@@ -1,6 +1,8 @@
 //! 型付きイベントストリームの内部配信基盤であり、tokio broadcast ベースで ADR 0012 の計測収集層の土台となります。
 
 pub mod bus;
+mod fencing;
+pub use fencing::{MutationCheck, MutationGuard, MutationGuardCheck, MutationValidator};
 pub mod event;
 pub mod orchestrator;
 pub mod ownership;

@@ -26,16 +26,19 @@ pub struct ThreadOwner {
     pub active_turn: bool,
     #[serde(default)]
     pub active_runs: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub settings: config::OwnershipConfig,
 }
 
 impl ThreadOwner {
-    pub const fn new(thread_id: String, lease: Lease) -> Self {
+    pub fn new(thread_id: String, lease: Lease) -> Self {
         Self {
             thread_id,
             lease,
             state: OwnerState::Running,
             active_turn: false,
             active_runs: std::collections::BTreeSet::new(),
+            settings: config::OwnershipConfig::default(),
         }
     }
 
@@ -74,6 +77,9 @@ impl ThreadOwner {
 
     pub fn checkpoint(&mut self, token: &Lease) -> Result<(), OwnershipError> {
         self.validate(token)?;
+        if self.state == OwnerState::Released {
+            return Err(OwnershipError::Fenced);
+        }
         if !self.active_runs.is_empty() {
             return Err(OwnershipError::Active);
         }
@@ -129,9 +135,6 @@ impl ThreadOwner {
         grace_ms: u64,
     ) -> Result<(), OwnershipError> {
         self.validate(expected)?;
-        if self.active_turn {
-            return Err(OwnershipError::Active);
-        }
         if self.state != OwnerState::Released
             && self.lease.observe(now_ms, grace_ms) != OwnerState::Stale
         {
@@ -145,9 +148,29 @@ impl ThreadOwner {
         self.lease = Lease {
             owner_id: owner_id.into(),
             generation,
-            expires_at: now_ms.saturating_add(5_000),
+            expires_at: now_ms.saturating_add(self.settings.lease_ms.get()),
         };
+        self.active_turn = false;
+        self.active_runs.clear();
         self.state = OwnerState::Running;
+        Ok(())
+    }
+
+    pub fn heartbeat(&mut self, token: &Lease, now_ms: u64) -> Result<(), OwnershipError> {
+        self.validate(token)?;
+        match self.state {
+            OwnerState::Running | OwnerState::Quiescing => {}
+            OwnerState::Suspect
+            | OwnerState::Stale
+            | OwnerState::Claimable
+            | OwnerState::Released => {
+                return Err(OwnershipError::NotClaimable);
+            }
+        }
+        if self.lease.observe(now_ms, self.settings.grace_ms.get()) == OwnerState::Stale {
+            return Err(OwnershipError::NotClaimable);
+        }
+        self.lease.expires_at = now_ms.saturating_add(self.settings.lease_ms.get());
         Ok(())
     }
 }

@@ -45,9 +45,11 @@ fn two_process_attach_and_quiesce_preserve_generation() {
         generation: 1,
         expires_at: 100,
     };
-    registry
-        .start(&ThreadOwner::new("thread-1".into(), lease.clone()))
-        .expect("start");
+    let mut owner = ThreadOwner::new("thread-1".into(), lease.clone());
+    owner
+        .begin_run(&lease, "abandoned-run", 1)
+        .expect("begin run");
+    registry.start(&owner).expect("start");
     let mut child = ChildGuard(
         Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", "child_owner_process", "--nocapture"])
@@ -110,4 +112,6 @@ fn two_process_attach_and_quiesce_preserve_generation() {
     .expect("claim after child exits");
     assert_eq!(claimed.lease.generation, 2);
     assert_eq!(claimed.lease.owner_id, "parent");
+    assert!(!claimed.active_turn);
+    assert!(claimed.active_runs.is_empty());
 }

@@ -256,6 +256,34 @@ fn goal_command_reuses_goal_flow() {
 }
 
 #[test]
+fn team_command_carries_explicit_value_without_enabling_later_goals() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(
+        &mut harness,
+        "/team independent files | implement issue #91",
+    );
+    let WorkbenchCommand::SubmitGoal(goal) = &harness.state().issued()[0] else {
+        panic!("expected team goal");
+    };
+    assert_eq!(goal.delegation_value.as_deref(), Some("independent files"));
+    assert_eq!(goal.goal, "implement issue #91");
+    submit(&mut harness, "/goal ordinary work");
+    let WorkbenchCommand::SubmitGoal(goal) = &harness.state().issued()[1] else {
+        panic!("expected ordinary goal");
+    };
+    assert_eq!(goal.delegation_value, None);
+}
+
+#[test]
+fn team_command_rejects_missing_delegation_value() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/team | implement issue #91");
+    assert!(harness.state().issued().is_empty());
+}
+
+#[test]
 fn goal_command_without_args_shows_usage_without_focusing_a_tab() {
     // Given: an active thread.
     let temp = tempfile::tempdir().expect("temp dir");
@@ -295,9 +323,7 @@ fn help_command_lists_goal_and_help() {
     // When: help is requested.
     submit(&mut harness, "/help");
     // Then: the command list is visible without issuing a command.
-    assert!(harness.has_label(
-        "/undo — Restore the previous workspace snapshot\n/redo — Restore the next workspace snapshot\n/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
-    ));
+    assert!(harness.has_label(&harness.state().composer().registry.help_text()));
     assert!(harness.state().issued().is_empty());
 }
 
@@ -333,9 +359,7 @@ fn chat_without_provider_shows_guidance_and_issues_nothing() {
     // When: help is requested.
     submit(&mut harness, "/help");
     // Then: help is appended without an additional command.
-    assert!(harness.has_label(
-        "/undo — Restore the previous workspace snapshot\n/redo — Restore the next workspace snapshot\n/goal <text> — Submit a goal to the orchestrator loop\n/help — Show available commands"
-    ));
+    assert!(harness.has_label(&harness.state().composer().registry.help_text()));
     assert_eq!(harness.state().issued().len(), 1);
 }
 

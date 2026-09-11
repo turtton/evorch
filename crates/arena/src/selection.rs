@@ -24,7 +24,11 @@ pub fn select(traces: &[EvalTrace]) -> Vec<String> {
     let mut frontier: Vec<_> = eligible
         .iter()
         .copied()
-        .filter(|b| !eligible.iter().any(|a| dominates(a, b)))
+        .filter(|b| {
+            !eligible
+                .iter()
+                .any(|a| a.attribution == b.attribution && dominates(a, b))
+        })
         .collect();
     frontier.sort_by(|a, b| pairwise_tiebreak(a, b));
     frontier.into_iter().map(|t| t.config_id.clone()).collect()

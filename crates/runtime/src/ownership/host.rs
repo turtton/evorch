@@ -66,7 +66,7 @@ impl OwnerHost {
     }
 
     pub fn start(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {
-        let owner = ThreadOwner::new(
+        let mut owner = ThreadOwner::new(
             thread_id.into(),
             Lease {
                 owner_id: self.owner_id.clone(),
@@ -74,6 +74,7 @@ impl OwnerHost {
                 expires_at: now_ms().saturating_add(self.settings.lease_ms.get()),
             },
         );
+        owner.settings = self.settings.clone();
         Registry::open(&self.root.join("owners.db"))?.start(&owner)?;
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
@@ -82,7 +83,7 @@ impl OwnerHost {
     pub fn claim(&self, expected: &ThreadOwner) -> Result<OwnerPermit, RegistryError> {
         let mut registry = Registry::open(&self.root.join("owners.db"))?;
         let socket = self.socket(&expected.lease.owner_id)?;
-        let owner = ipc::claim(
+        let owner = ipc::claim_configured(
             &mut registry,
             ipc::ClaimRequest {
                 thread_id: &expected.thread_id,
@@ -92,6 +93,7 @@ impl OwnerHost {
                 now_ms: now_ms(),
                 grace_ms: self.settings.grace_ms.get(),
             },
+            &self.settings,
         )?;
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
@@ -103,6 +105,25 @@ impl OwnerHost {
             return Err(super::OwnershipError::Fenced.into());
         }
         Ok(self.permit(&owner))
+    }
+
+    pub fn handoff(
+        &self,
+        permit: &OwnerPermit,
+        successor: &Self,
+    ) -> Result<OwnerPermit, RegistryError> {
+        if permit.lease.owner_id != self.owner_id || self.root != successor.root {
+            return Err(super::OwnershipError::Fenced.into());
+        }
+        let mut registry = Registry::open(&self.root.join("owners.db"))?;
+        let owner = registry.update(&permit.thread_id, |owner| {
+            owner.quiesce(&permit.lease)?;
+            owner.release(&permit.lease)?;
+            owner.settings = successor.settings.clone();
+            owner.claim(&permit.lease, &successor.owner_id, now_ms(), 0)
+        })?;
+        emit(&successor.bus, &owner, OwnershipAction::Handoff);
+        Ok(successor.permit(&owner))
     }
 
     pub fn quiesce(&self) -> Result<bool, RegistryError> {
@@ -194,8 +215,7 @@ fn serve(
                         if state.state == OwnerState::Quiescing && !state.active_turn {
                             state.release(&owner.lease)?;
                         } else {
-                            state.lease.expires_at =
-                                now_ms().saturating_add(settings.lease_ms.get());
+                            state.heartbeat(&owner.lease, now_ms())?;
                         }
                         Ok(())
                     });

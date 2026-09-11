@@ -1,15 +1,15 @@
 use crate::{RunId, team::TeamBoard};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone)]
 pub struct TeamContext {
     pub coordinator: RunId,
+    pub id: String,
     pub board: Arc<TeamBoard>,
     workers: Arc<Semaphore>,
-    clock: Instant,
-    pub finding_store: Option<std::path::PathBuf>,
+    pub writer: Option<storage::StorageHandle>,
 }
 
 pub(crate) fn monitor(
@@ -71,15 +71,40 @@ impl TeamContext {
     pub fn new(coordinator: RunId, limit: u8) -> Self {
         Self {
             coordinator,
+            id: coordinator.to_string(),
             board: Arc::new(TeamBoard::default()),
             workers: Arc::new(Semaphore::new(usize::from(limit.clamp(1, 3)))),
-            clock: Instant::now(),
-            finding_store: None,
+            writer: None,
         }
     }
 
     pub fn now(&self) -> u64 {
-        u64::try_from(self.clock.elapsed().as_millis()).unwrap_or(u64::MAX)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|value| u64::try_from(value.as_millis()).ok())
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn persistent(
+        coordinator: RunId,
+        store: &TeamStore,
+        limit: u8,
+    ) -> Result<Self, crate::team::TeamError> {
+        let snapshot = storage::Database::open(&store.config)
+            .and_then(|db| db.team_snapshot(&store.id))
+            .map_err(|error| crate::team::TeamError::Persistence(error.to_string()))?;
+        let board = match snapshot {
+            Some(snapshot) => TeamBoard::restore(store.writer.clone(), snapshot)?,
+            None => TeamBoard::durable(store.writer.clone(), store.id.clone()),
+        };
+        Ok(Self {
+            coordinator,
+            id: store.id.clone(),
+            board: Arc::new(board),
+            workers: Arc::new(Semaphore::new(usize::from(limit.clamp(1, 3)))),
+            writer: Some(store.writer.clone()),
+        })
     }
 
     pub(crate) fn reserve_worker(&self) -> Result<OwnedSemaphorePermit, String> {
@@ -89,3 +114,17 @@ impl TeamContext {
             .map_err(|_| "team worker limit reached".into())
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct TeamStore {
+    pub config: storage::StorageConfig,
+    pub writer: storage::StorageHandle,
+    pub id: String,
+}
+
+impl PartialEq for TeamStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.config.db_path == other.config.db_path && self.id == other.id
+    }
+}
+impl Eq for TeamStore {}

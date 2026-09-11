@@ -166,7 +166,7 @@ async fn variant_prompt_reservation_does_not_spend_another_candidates_budget() {
         .prompt
         .as_mut()
         .expect("prompt")
-        .system = "x".repeat(1000);
+        .system = " x".repeat(1000);
     // When: both candidates receive independent equal shares.
     let report = run(&spec, &runner).await.expect("run");
     // Then: only the affordable baseline is dispatched; incomplete comparisons cannot promote.

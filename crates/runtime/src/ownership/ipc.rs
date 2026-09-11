@@ -14,6 +14,22 @@ pub fn claim(
     registry: &mut Registry,
     request: ClaimRequest<'_>,
 ) -> Result<ThreadOwner, RegistryError> {
+    claim_inner(registry, request, None)
+}
+
+pub(super) fn claim_configured(
+    registry: &mut Registry,
+    request: ClaimRequest<'_>,
+    settings: &config::OwnershipConfig,
+) -> Result<ThreadOwner, RegistryError> {
+    claim_inner(registry, request, Some(settings))
+}
+
+fn claim_inner(
+    registry: &mut Registry,
+    request: ClaimRequest<'_>,
+    settings: Option<&config::OwnershipConfig>,
+) -> Result<ThreadOwner, RegistryError> {
     registry.update(request.thread_id, |owner| {
         owner.validate(request.expected)?;
         if owner.state != super::OwnerState::Released {
@@ -25,12 +41,11 @@ pub fn claim(
                 },
             }
         }
-        owner.claim(
-            request.expected,
-            request.owner_id,
-            request.now_ms,
-            request.grace_ms,
-        )
+        let grace_ms = settings.map_or(request.grace_ms, |_| owner.settings.grace_ms.get());
+        if let Some(settings) = settings {
+            owner.settings = settings.clone();
+        }
+        owner.claim(request.expected, request.owner_id, request.now_ms, grace_ms)
     })
 }
 
@@ -46,9 +61,23 @@ pub struct ClaimRequest<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Request {
-    Attach { thread_id: String },
-    Quiesce { thread_id: String, token: Lease },
-    Heartbeat { thread_id: String, token: Lease },
+    Attach {
+        thread_id: String,
+    },
+    Quiesce {
+        thread_id: String,
+        token: Lease,
+    },
+    Heartbeat {
+        thread_id: String,
+        token: Lease,
+    },
+    Handoff {
+        thread_id: String,
+        token: Lease,
+        successor_id: String,
+        settings: config::OwnershipConfig,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,27 +160,41 @@ fn serve_connection_inner(
     let action = match &request {
         Request::Quiesce { .. } => Some(OwnershipAction::Quiescing),
         Request::Heartbeat { .. } => Some(OwnershipAction::Heartbeat),
+        Request::Handoff { .. } => Some(OwnershipAction::Handoff),
         Request::Attach { .. } => None,
     };
     let result: Result<ThreadOwner, RegistryError> = match request {
         Request::Attach { thread_id } => registry.attach(&thread_id),
-        Request::Quiesce { thread_id, token } => {
-            registry.update(&thread_id, |owner| owner.quiesce(&token))
-        }
-        Request::Heartbeat { thread_id, token } => registry.update(&thread_id, |owner| {
-            owner.validate(&token)?;
-            if owner.state != super::OwnerState::Running
-                && owner.state != super::OwnerState::Quiescing
-            {
-                return Err(super::OwnershipError::NotClaimable);
+        Request::Quiesce { thread_id, token } => registry.update(&thread_id, |owner| {
+            owner.quiesce(&token)?;
+            if !owner.active_turn {
+                owner.release(&token)?;
             }
-            owner.lease.expires_at = now_ms.saturating_add(5_000);
             Ok(())
+        }),
+        Request::Heartbeat { thread_id, token } => {
+            registry.update(&thread_id, |owner| owner.heartbeat(&token, now_ms))
+        }
+        Request::Handoff {
+            thread_id,
+            token,
+            successor_id,
+            settings,
+        } => registry.update(&thread_id, |owner| {
+            owner.quiesce(&token)?;
+            owner.release(&token)?;
+            owner.settings = settings;
+            owner.claim(&token, &successor_id, now_ms, 0)
         }),
     };
     let response = match result {
         Ok(owner) => {
             if let (Some(bus), Some(action)) = (bus, action) {
+                let action = if owner.state == super::OwnerState::Released {
+                    OwnershipAction::Released
+                } else {
+                    action
+                };
                 bus.emit(Event::new(OwnershipEvent {
                     thread_id: owner.thread_id.clone(),
                     owner_id: owner.lease.owner_id.clone(),

@@ -5,9 +5,16 @@ use crate::{Database, StorageError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Attribution {
+    Orchestrator,
+    Explorer,
     Planner,
     Worker,
     Reviewer,
+    Qa,
+    ToolUse,
+    Librarian,
+    Oracle,
+    MultimodalLooker,
     Synthesizer,
 }
 

@@ -10,6 +10,7 @@ pub struct StorageBridge {
     storage: StorageHandle,
     session_id: &'static str,
     usage: UsageAggregator,
+    validator: Option<event_bus::MutationValidator>,
 }
 
 impl StorageBridge {
@@ -18,6 +19,7 @@ impl StorageBridge {
             storage,
             session_id,
             usage: UsageAggregator::new(),
+            validator: None,
         }
     }
 
@@ -37,7 +39,14 @@ impl StorageBridge {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => self.storage.append_event(Some(self.session_id), event),
+            | EventKind::Snapshot(_) => match &self.validator {
+                Some(validator) => self.storage.append_fenced_event(
+                    Some(self.session_id),
+                    event,
+                    validator.clone(),
+                ),
+                None => self.storage.append_event(Some(self.session_id), event),
+            },
         }
     }
 
@@ -54,6 +63,7 @@ impl StorageBridge {
 /// `flush_every` must be nonzero. Bus ownership is released after subscribing so
 /// dropping the last producer ends the bridge at the next tick, after draining.
 pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Duration) {
+    bridge.validator = Some(bus.mutation_validator());
     let mut subscriber = bus.subscribe();
     let bus_lifetime = Arc::downgrade(&bus);
     drop(bus);

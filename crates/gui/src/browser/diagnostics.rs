@@ -3,6 +3,7 @@ use chromiumoxide::{
     Page, cdp::browser_protocol::page::CaptureScreenshotFormat, page::ScreenshotParams,
 };
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
+use sha2::{Digest, Sha256};
 
 use super::{BrowserAction, BrowserError, BrowserReport};
 
@@ -94,18 +95,41 @@ async fn screenshot(
                 .build(),
         )
         .await?;
+    emit_screenshot(bus, &bytes, identity)
+}
+
+const MAX_INLINE_SCREENSHOT_BYTES: usize = 16 * 1024;
+
+fn emit_screenshot(
+    bus: &EventBus,
+    bytes: &[u8],
+    identity: (&str, &str),
+) -> Result<(), BrowserError> {
+    let (width, height) =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Jpeg)
+            .into_dimensions()?;
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let omitted = bytes.len() > MAX_INLINE_SCREENSHOT_BYTES;
     emit(
         bus,
         "browser.screenshot",
         &serde_json::json!({
             "id": identity.0, "phase": identity.1, "mime": "image/jpeg",
-            "base64": STANDARD.encode(bytes),
+            "sha256": hash, "width": width, "height": height,
+            "byte_length": bytes.len(),
+            "representation": if omitted { "omitted" } else { "inline" },
+            "omission_reason": omitted.then_some("inline_size_limit"),
+            "inline_limit_bytes": MAX_INLINE_SCREENSHOT_BYTES,
+            "base64": (!omitted).then(|| STANDARD.encode(bytes)),
         })
         .to_string(),
         false,
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod screenshot_tests;
 
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
 pub(super) struct DomDiff {
