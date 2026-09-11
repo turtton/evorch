@@ -6,6 +6,17 @@ use gui::model::provider_settings::{OpenAiEditorModel, ProfileEditor, ProviderSe
 #[test]
 #[ignore = "writes offscreen PNG evidence"]
 fn capture_model_metadata() {
+    let Some(dir) = std::env::var_os("EVORCH_METADATA_EVIDENCE") else {
+        match gui::evidence::AdapterPolicy::from_env() {
+            gui::evidence::AdapterPolicy::Require => {
+                panic!("EVORCH_METADATA_EVIDENCE must be set when EVORCH_REQUIRE_ADAPTER=1");
+            }
+            gui::evidence::AdapterPolicy::SkipIfMissing => {
+                eprintln!("skipping: EVORCH_METADATA_EVIDENCE is not set");
+                return;
+            }
+        }
+    };
     for size in [[1200.0, 900.0], [800.0, 600.0]] {
         let mut settings = ProviderSettingsModel::default();
         settings.open = true;
@@ -36,7 +47,6 @@ fn capture_model_metadata() {
         let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
             return;
         };
-        let dir = std::env::var_os("EVORCH_METADATA_EVIDENCE").expect("evidence directory");
         frame
             .save_png(
                 &std::path::Path::new(&dir).join(format!("metadata-{}-collapsed.png", size[0])),
