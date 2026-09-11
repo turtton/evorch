@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-11T11:07:12.2147649+00:00",
+  "updated_at": "2026-09-11T13:59:04.3888632+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1438,7 +1438,7 @@
     {
       "execution_unit": "v08-verification-matrix",
       "title": "v0.8: \u691C\u8A3C\u30DE\u30C8\u30EA\u30AF\u30B9\u6574\u5099 (headless/kittest/\u5B9F Chromium \u4E3B\u8EF8\u5316)",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
