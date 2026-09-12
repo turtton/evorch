@@ -4,8 +4,10 @@ use config::{Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeCon
 use providers::provider::codex::oauth::BrowserAuthClient;
 use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
 
-use super::{ProviderCodexAuthBackend, codex_credential_account};
-use crate::model::codex_auth::{CodexAuthBackend, CodexAuthModel, CodexAuthSummary};
+use super::{ProviderCodexAuthBackend, classify_provider_error, codex_credential_account};
+use crate::model::codex_auth::{
+    CodexAuthBackend, CodexAuthError, CodexAuthModel, CodexAuthSummary,
+};
 
 const DUMMY_JWT: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjE4OTM0NTYwMDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2MtMTIzIn19.sig";
 
@@ -298,4 +300,22 @@ fn production_builds_backend_over_file_credential_store() {
             .expect("production backend");
     // Then
     assert_eq!(backend.load_summary(), Ok(None));
+}
+
+// Given: 通信失敗と再試行枯渇エラー / When: Codex 認証エラーへ分類 / Then: どちらも Network になる
+#[test]
+fn classify_provider_error_maps_transport_and_retries_exhausted_to_network() {
+    let cases = [
+        providers::ProviderError::Transport {
+            message: "connection reset".to_string(),
+        },
+        providers::ProviderError::RetriesExhausted {
+            attempts: 3,
+            last: Box::new(providers::ProviderError::Timeout),
+        },
+    ];
+
+    for error in cases {
+        assert_eq!(classify_provider_error(error), CodexAuthError::Network);
+    }
 }

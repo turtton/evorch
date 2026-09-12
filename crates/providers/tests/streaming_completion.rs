@@ -99,7 +99,7 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
 }
 
 #[tokio::test]
-async fn streaming_completion_rejects_premature_eof() {
+async fn streaming_completion_retries_premature_eof_then_exhausts() {
     // Given: an OpenAI server that closes after a valid delta without DONE.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -110,6 +110,7 @@ async fn streaming_completion_rejects_premature_eof() {
                     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
                 ),
         )
+        .expect(3)
         .mount(&server)
         .await;
     let client =
@@ -123,6 +124,11 @@ async fn streaming_completion_rejects_premature_eof() {
     let result = client
         .send_streaming(&ProviderAuth::new("key"), &request(), &bus)
         .await;
-    // Then: partial content is not silently accepted as success.
-    assert!(matches!(result, Err(providers::ProviderError::Request(_))));
+    // Then: 三回で再試行を使い切り、早期 EOF の原因を保持する。
+    assert!(matches!(
+        result,
+        Err(providers::ProviderError::RetriesExhausted { attempts: 3, last })
+            if matches!(*last, providers::ProviderError::Request(ref message)
+                if message.contains("completion signal"))
+    ));
 }

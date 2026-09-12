@@ -1,5 +1,6 @@
 // allow: SIZE_OK — SSE pump の既存契約と指定された観測失敗経路表を同一テストモジュールに集約する。
 use super::*;
+mod truncated_tail;
 use crate::message::{ChatResponse, ContentBlock, Message, Role};
 use crate::observe::AttemptObserver;
 use event_bus::{EventBus, EventKind, ProviderEvent, ProviderFailureKind, UsageEvent};
@@ -425,7 +426,8 @@ async fn every_failure_path_emits_one_terminal_failure() {
         ),
         (FailurePath::Transport, ProviderFailureKind::Transport),
         (FailurePath::Interpret, ProviderFailureKind::InvalidResponse),
-        (FailurePath::FinishSse, ProviderFailureKind::InvalidResponse),
+        // issue #108: 未終端 tail の UTF-8 失敗は構造的 EOF として扱う。
+        (FailurePath::FinishSse, ProviderFailureKind::Transport),
         (
             FailurePath::FinishInterpret,
             ProviderFailureKind::InvalidResponse,

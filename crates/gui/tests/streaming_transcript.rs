@@ -166,3 +166,65 @@ fn failed_or_cancelled_stream_keeps_partial_display() {
         assert_eq!(registry.run("stream").expect("run").entries(), expected);
     }
 }
+
+#[test]
+fn retries_exhausted_keeps_partial_display_with_one_terminal_error() {
+    // Given: 再試行を使い切ったプロバイダエラーと部分表示がある。
+    let reason = providers::ProviderError::RetriesExhausted {
+        attempts: 3,
+        last: Box::new(providers::ProviderError::Transport {
+            message: "connection lost".into(),
+        }),
+    }
+    .to_string();
+    let mut registry = TranscriptRegistry::new();
+    registry.apply(&reasoning("partial thought"));
+    registry.apply(&message("partial answer"));
+
+    // When: 実際のDisplayによる理由を持つError終端を受信する。
+    registry.apply(&Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "stream".into(),
+        from: AgentRunPhase::Running,
+        to: AgentRunPhase::Error,
+        reason: Some(reason),
+    }));
+
+    // Then: 部分表示を保持し、終端エラーは1件だけで両transcriptが一致する。
+    let entries = registry.thread().entries();
+    assert!(matches!(entries, [
+        TranscriptEntry::Reasoning { text: thought },
+        TranscriptEntry::Message { text: answer },
+        TranscriptEntry::Error { text },
+    ] if thought == "partial thought" && answer == "partial answer"
+        && text.contains("Run failed") && text.contains("3 attempts")));
+    assert_eq!(registry.run("stream").expect("run").entries(), entries);
+}
+
+#[test]
+fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
+    // Given: ストリームの部分表示を持つrunがある。
+    let mut registry = TranscriptRegistry::new();
+    registry.apply(&message("partial"));
+
+    // When: 終端ではなく試行単位のTransport失敗を受信する。
+    registry.apply(&Event::new(event_bus::ProviderEvent::RequestFailed {
+        request_id: "request-1".into(),
+        provider: "openai".into(),
+        profile: None,
+        protocol: "openai-chat-completions".into(),
+        model: "test".into(),
+        streaming: true,
+        duration_ms: 42,
+        failure: event_bus::ProviderFailureKind::Transport,
+        run_id: Some("stream".into()),
+    }));
+
+    // Then: retrying Noticeが部分表示に続き、両transcriptが一致する。
+    let entries = registry.thread().entries();
+    assert!(matches!(entries, [
+        TranscriptEntry::Message { text: partial },
+        TranscriptEntry::Notice { text },
+    ] if partial == "partial" && text.contains("transport error")
+        && text.contains(", retrying")));
+    assert_eq!(registry.run("stream").expect("run").entries(), entries);
+}

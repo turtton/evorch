@@ -29,7 +29,9 @@ impl From<&providers::ProviderError> for FailureKind {
             providers::ProviderError::Timeout => Self::Timeout,
             providers::ProviderError::InvalidSse { .. }
             | providers::ProviderError::InvalidJson { .. }
-            | providers::ProviderError::Request(_) => Self::Other,
+            | providers::ProviderError::Request(_)
+            | providers::ProviderError::Transport { .. } => Self::Other,
+            providers::ProviderError::RetriesExhausted { last, .. } => Self::from(last.as_ref()),
         }
     }
 }
@@ -85,6 +87,19 @@ mod tests {
             (
                 providers::ProviderError::Request(String::new()),
                 FailureKind::Other,
+            ),
+            (
+                providers::ProviderError::Transport {
+                    message: String::new(),
+                },
+                FailureKind::Other,
+            ),
+            (
+                providers::ProviderError::RetriesExhausted {
+                    attempts: 3,
+                    last: Box::new(providers::ProviderError::Timeout),
+                },
+                FailureKind::Timeout,
             ),
         ];
 

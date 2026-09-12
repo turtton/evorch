@@ -2,12 +2,14 @@
 
 pub mod auth;
 pub mod client;
+pub(crate) mod dedup;
 pub mod error;
 pub mod http;
 pub mod message;
 mod models;
 pub(crate) mod observe;
 pub mod provider;
+pub mod retry;
 pub mod sse;
 pub mod stream;
 pub mod wire;
@@ -20,4 +22,5 @@ pub use message::{
     ProviderCapabilities, Role, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::list_models;
+pub use retry::RetryPolicy;
 pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};

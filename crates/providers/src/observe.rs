@@ -147,16 +147,7 @@ impl AttemptObserver {
         if self.terminal_emitted {
             return;
         }
-        let failure = match error {
-            ProviderError::RateLimited { .. } => ProviderFailureKind::RateLimited,
-            ProviderError::Http { status, .. } => ProviderFailureKind::Http { status: *status },
-            ProviderError::Timeout => ProviderFailureKind::Timeout,
-            ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => {
-                ProviderFailureKind::InvalidResponse
-            }
-            ProviderError::Request(_) => ProviderFailureKind::Transport,
-        };
-        self.emit_failed_kind(failure);
+        self.emit_failed_kind(failure_kind(error));
     }
 
     fn emit_failed_kind(&mut self, failure: ProviderFailureKind) {
@@ -198,6 +189,22 @@ impl AttemptObserver {
         if let Some(bus) = self.bus.as_ref() {
             bus.emit(Event::new(event));
         }
+    }
+}
+
+/// プロバイダエラーを観測イベント用の障害種別へ分類する。
+fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
+    match error {
+        ProviderError::RateLimited { .. } => ProviderFailureKind::RateLimited,
+        ProviderError::Http { status, .. } => ProviderFailureKind::Http { status: *status },
+        ProviderError::Timeout => ProviderFailureKind::Timeout,
+        ProviderError::InvalidSse { .. } | ProviderError::InvalidJson { .. } => {
+            ProviderFailureKind::InvalidResponse
+        }
+        ProviderError::Request(_) | ProviderError::Transport { .. } => {
+            ProviderFailureKind::Transport
+        }
+        ProviderError::RetriesExhausted { last, .. } => failure_kind(last),
     }
 }
 
@@ -285,6 +292,19 @@ mod tests {
             (
                 ProviderError::Request("reset".to_string()),
                 ProviderFailureKind::Transport,
+            ),
+            (
+                ProviderError::Transport {
+                    message: "reset".to_string(),
+                },
+                ProviderFailureKind::Transport,
+            ),
+            (
+                ProviderError::RetriesExhausted {
+                    attempts: 3,
+                    last: Box::new(ProviderError::Timeout),
+                },
+                ProviderFailureKind::Timeout,
             ),
         ];
 
