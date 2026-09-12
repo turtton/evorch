@@ -191,3 +191,32 @@ fn first_failure_shows_unavailable_without_fabricated_usage() {
     harness.get_by_label("Quota error: quota request timed out");
     assert!(harness.query_by_label("Codex quota · Plan: plus").is_none());
 }
+
+#[test]
+fn reauth_required_shows_relogin_message() {
+    for cached in [false, true] {
+        // Given: authentication is rejected, with or without cached usage.
+        let mut telemetry = TelemetryOverlay::new();
+        if cached {
+            telemetry.quota.accept(Ok(snapshot(false)));
+        }
+        telemetry
+            .quota
+            .accept(Err(QuotaError::ReauthenticationRequired));
+        let tasks = TasksModel::new(DemoSource(Vec::new()));
+        let mut harness = Harness::builder().build_ui(move |ui| {
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        });
+        // When: the real Agents pane renders the authentication failure.
+        harness.run();
+        // Then: re-login is actionable and cached usage is not discarded.
+        harness
+            .get_by_label("Quota error: quota authentication expired or rejected; re-login needed");
+        if cached {
+            harness.get_by_label("Stale · quota refresh failed");
+            harness.get_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC");
+        } else {
+            harness.get_by_label("Codex quota unavailable · refresh failed");
+        }
+    }
+}
