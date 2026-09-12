@@ -14,6 +14,10 @@ fn entry() -> ModelEntryConfig {
         preset: None,
         metadata_ref: None,
         context_window: None,
+        input_price: None,
+        output_price: None,
+        cache_read_price: None,
+        cache_write_price: None,
     }
 }
 
