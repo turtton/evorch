@@ -46,7 +46,7 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
     executor.set_approval_gate(ApprovalGate::new(bus.clone(), Duration::from_secs(2)));
     let executor = Arc::new(executor);
     let ctx = ToolExecutionContext {
-        run_id: "run".into(),
+        run_id: "run-2".into(),
     };
     assert!(
         executor
@@ -54,7 +54,12 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
             .is_err()
     );
     let prepared = executor
-        .validate_call(ctx, "counter".into(), "call".into(), json!({"valid":true}))
+        .validate_call(
+            ctx,
+            "counter".into(),
+            "call-1".into(),
+            json!({"valid":true}),
+        )
         .expect("validate")
         .authorize()
         .await
@@ -67,6 +72,7 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
                 events.recv().await.expect("event").kind
             {
                 assert_eq!(count.load(Ordering::SeqCst), 1);
+                assert_approval_id_format(&call_id);
                 bus.emit(Event::new(ToolEvent::ApprovalResolved {
                     call_id,
                     approved: true,
@@ -81,4 +87,56 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
     // Then: failure-time approval still enables the retry.
     assert!(!result.is_error);
     assert_eq!(result.content, "second attempt");
+}
+
+fn assert_approval_id_format(call_id: &str) {
+    let attempt = call_id
+        .strip_prefix("run-2:call-1:")
+        .expect("run and call scope");
+    assert!(!attempt.is_empty());
+    assert!(attempt.bytes().all(|byte| byte.is_ascii_digit()));
+    assert!(attempt.parse::<u64>().is_ok());
+}
+
+#[tokio::test]
+async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
+    // Given: an AskFirst call with the same run and call IDs used by GUI fixtures.
+    let bus = Arc::new(EventBus::new(64));
+    let mut events = bus.subscribe();
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(Counter(count.clone()))).unwrap();
+    executor.set_policy(
+        ApprovalPolicy::standard(ApprovalMode::OnRequest)
+            .with_override("counter", PolicyDecision::Ask),
+    );
+    executor.set_approval_gate(ApprovalGate::new(bus.clone(), Duration::from_secs(2)));
+    let validated = Arc::new(executor)
+        .validate_call(
+            ToolExecutionContext {
+                run_id: "run-2".into(),
+            },
+            "counter".into(),
+            "call-1".into(),
+            json!({"valid":true}),
+        )
+        .unwrap();
+    // When: authorization runs before any execution.
+    let task = tokio::spawn(validated.authorize());
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // Then: the first event is a scoped approval request and no tool has executed.
+    let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind else {
+        panic!("expected approval before ToolStarted");
+    };
+    assert_approval_id_format(&call_id);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    bus.emit(Event::new(ToolEvent::ApprovalResolved {
+        call_id,
+        approved: true,
+    }));
+    let _prepared = task.await.unwrap().unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
 }

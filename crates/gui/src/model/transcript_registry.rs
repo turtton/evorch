@@ -44,7 +44,14 @@ impl TranscriptRegistry {
         }
     }
 
-    pub fn run_for_call(&self, call_id: &str) -> Option<&str> {
+    pub fn run_for_call<'a>(&'a self, call_id: &'a str) -> Option<&'a str> {
+        if let Some((run_id, _)) = call_id.split_once(':')
+            && let Some(number) = run_id.strip_prefix("run-")
+            && !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(run_id);
+        }
         self.call_index.get(call_id).map(String::as_str)
     }
 
