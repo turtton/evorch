@@ -14,6 +14,7 @@ pub struct RunStore {
     database: Mutex<Database>,
     pub(crate) next_run_id: u64,
     failed_snapshots: Mutex<HashSet<RunId>>,
+    pub(crate) restore_gate: Mutex<()>,
 }
 
 impl RunStore {
@@ -24,7 +25,7 @@ impl RunStore {
     pub fn open(config: &StorageConfig, handle: StorageHandle) -> Result<Self, StorageError> {
         let database = Database::open(config)?;
         let next_run_id = database
-            .max_run_context_run_id()?
+            .max_persisted_run_id()?
             .checked_add(1)
             .ok_or_else(|| StorageError::Serialization("run ID overflow".into()))?;
         Ok(Self {
@@ -32,6 +33,7 @@ impl RunStore {
             database: Mutex::new(database),
             next_run_id,
             failed_snapshots: Mutex::new(HashSet::new()),
+            restore_gate: Mutex::new(()),
         })
     }
 

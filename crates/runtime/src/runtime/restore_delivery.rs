@@ -6,6 +6,8 @@ mod registration;
 #[cfg(test)]
 mod tests;
 
+mod authorization;
+
 impl AgentRuntime {
     pub(super) fn restore_and_deliver(
         &self,
@@ -17,6 +19,13 @@ impl AgentRuntime {
             run_id: recipient.to_string(),
             reason,
         };
+        // Serialize snapshot reads through registration; never acquire this gate under runs.
+        let _restore_guard = self.shared.run_store.get().map(|store| {
+            store
+                .restore_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let mut live_retry_available = true;
         loop {
             let previous = {
@@ -94,11 +103,11 @@ impl AgentRuntime {
                     "persist_failed".into(),
                 )));
             }
-            let record = store
+            let mut record = store
                 .restore_record(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
                 .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
-            let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
+            let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
             if !record.restorable || !descriptor.restorable {
                 return Err(fail(RunRestoreFailure::UnsupportedConfig(
@@ -133,6 +142,11 @@ impl AgentRuntime {
                     "run ID overflow".into(),
                 ))
             })?;
+            descriptor.restorable = false;
+            descriptor.non_restorable_reason = Some("snapshot_consumed".into());
+            record.restorable = false;
+            record.config_json = serde_json::to_string(&descriptor)
+                .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
             let config = RunConfig {
                 name: descriptor.name,
                 interactive: descriptor.interactive,
@@ -171,6 +185,10 @@ impl AgentRuntime {
             }
             let parent = runs.get(&recipient).map_or(parent, |entry| entry.parent);
             self.authorize_restore(&runs, sender, (recipient, parent), &message)?;
+            // The writer only upserts the already-read record; no storage read holds runs.
+            store.handle.upsert_run_context(&record).map_err(|error| {
+                fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
+            })?;
             self.shared
                 .next_run_id
                 .fetch_max(next_id, Ordering::Relaxed);
@@ -194,53 +212,6 @@ impl AgentRuntime {
                 DeliveryDisposition::Restored,
             ));
         }
-    }
-
-    fn authorize_restore(
-        &self,
-        runs: &HashMap<RunId, RunEntry>,
-        sender: RunId,
-        recipient: (RunId, Option<RunId>),
-        message: &AgentMessage,
-    ) -> Result<(), RuntimeError> {
-        let sender_entry = runs.get(&sender).ok_or_else(|| unknown_run(sender))?;
-        let (recipient, parent) = recipient;
-        let denied = |detail: &str| RuntimeError::MessageDenied {
-            sender,
-            recipient,
-            detail: detail.into(),
-        };
-        if sender == recipient {
-            return Err(denied("自己宛てのメッセージは許可されていません"));
-        }
-        if message.kind == AgentMessageKind::Steering && parent != Some(sender) {
-            return Err(denied("steering は親から子へのみ許可されています"));
-        }
-        if sender_entry.parent != Some(recipient) && parent != Some(sender) {
-            return Err(denied(
-                "親子関係のない run 間のメッセージは許可されていません",
-            ));
-        }
-        if message.kind == AgentMessageKind::Reply {
-            let id = message
-                .reply_to
-                .as_ref()
-                .ok_or_else(|| denied("Reply には reply_to が必要です"))?;
-            let sent = self
-                .shared
-                .sent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !sent
-                .get(id)
-                .is_some_and(|record| record.recipient == sender && record.sender == recipient)
-            {
-                return Err(RuntimeError::UnknownMessage {
-                    message_id: id.clone(),
-                });
-            }
-        }
-        Ok(())
     }
 }
 

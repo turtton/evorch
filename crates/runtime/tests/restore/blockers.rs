@@ -2,6 +2,9 @@ use super::*;
 use event_bus::AgentMessageKind;
 use runtime::{RunRestoreFailure, RuntimeError};
 
+#[path = "blockers/consumption.rs"]
+mod consumption;
+
 fn model() -> Arc<ScriptedModel> {
     Arc::new(ScriptedModel::new(
         (0..16).map(|_| Ok(text_response("answer", FinishReason::Stop))),
@@ -35,11 +38,38 @@ async fn fresh_run_after_restart_preserves_snapshot_and_ledger() {
 }
 
 #[tokio::test]
+async fn ledger_only_run_id_is_reserved_after_restart() {
+    // Given: a run persists its ledger, but its first terminal snapshot fails.
+    let (_dir, config, storage, database) = storage_fixture();
+    let (first, _) = runtime_with(model());
+    let first = first.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let old = first.delegate_background(Role::Worker, "old".into(), RunConfig::default());
+    storage
+        .handle()
+        .append_run_ledger(&old.to_string(), "decision")
+        .unwrap();
+    storage.close();
+    assert_eq!(terminal(&first, old).await, AgentRunPhase::Done);
+    assert!(database.run_context(&old.to_string()).unwrap().is_none());
+    let ledger = database.run_ledger(&old.to_string()).unwrap();
+    drop(first);
+    let storage = Storage::open(config.clone()).unwrap();
+    let (second, _) = runtime_with(model());
+    let second = second.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    // When: a new runtime allocates its first fresh run.
+    let fresh = second.delegate_background(Role::Worker, "new".into(), RunConfig::default());
+    terminal(&second, fresh).await;
+    // Then: the old ledger remains exclusively associated with the old ID.
+    assert!(fresh.get() > old.get());
+    assert_eq!(database.run_ledger(&old.to_string()).unwrap(), ledger);
+    assert!(database.run_ledger(&fresh.to_string()).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn failed_terminal_update_rejects_stale_restore() {
     for close_writer in [false, true] {
         // Given: a child with a snapshot that predates writer closure.
         let (_dir, config, storage, database) = storage_fixture();
-        let handle = storage.handle();
         let (runtime, _) = runtime_with(model());
         let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
         let parent =
@@ -49,15 +79,16 @@ async fn failed_terminal_update_rejects_stale_restore() {
             .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
             .unwrap();
         terminal(&runtime, child).await;
-        if close_writer {
-            storage.close();
-        } else {
+        if !close_writer {
             let conn = rusqlite::Connection::open(&config.db_path).unwrap();
             conn.execute_batch("CREATE TRIGGER reject_snapshot_update BEFORE UPDATE ON run_contexts WHEN NEW.restorable = 1 BEGIN SELECT RAISE(ABORT, 'snapshot failure'); END;").unwrap();
         }
         runtime
             .send_agent_message(parent, child, AgentMessageKind::Send, "lost turn", None)
             .unwrap();
+        if close_writer {
+            storage.close();
+        }
         terminal(&runtime, child).await;
         // When: the caller requests another turn after failed persistence.
         let result =
@@ -70,7 +101,7 @@ async fn failed_terminal_update_rejects_stale_restore() {
                 reason: RunRestoreFailure::UnsupportedConfig("persist_failed".into()),
             })
         );
-        if !close_writer {
+        {
             assert!(
                 !database
                     .run_context(&child.to_string())
@@ -79,8 +110,10 @@ async fn failed_terminal_update_rejects_stale_restore() {
                     .restorable
             );
             drop(runtime);
+            let reopened = Storage::open(config.clone()).unwrap();
             let (restarted, _) = runtime_with(model());
-            let restarted = restarted.with_run_store(RunStore::open(&config, handle).unwrap());
+            let restarted =
+                restarted.with_run_store(RunStore::open(&config, reopened.handle()).unwrap());
             restarted.spawn_reserved(
                 parent,
                 None,
@@ -93,7 +126,14 @@ async fn failed_terminal_update_rejects_stale_restore() {
                 restarted.send_agent_message(parent, child, AgentMessageKind::Send, "next", None),
                 Err(RuntimeError::RunRestoreFailed {
                     run_id: child.to_string(),
-                    reason: RunRestoreFailure::UnsupportedConfig("persist_failed".into())
+                    reason: RunRestoreFailure::UnsupportedConfig(
+                        if close_writer {
+                            "snapshot_consumed"
+                        } else {
+                            "persist_failed"
+                        }
+                        .into()
+                    )
                 })
             );
         }

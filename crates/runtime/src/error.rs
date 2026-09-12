@@ -115,6 +115,8 @@ pub enum RuntimeError {
 pub enum RunRestoreFailure {
     #[error("run storage が設定されていません")]
     StorageNotConfigured,
+    #[error("復元用コンテキストの消費を保存できません: {0}")]
+    SnapshotConsumeFailed(String),
     #[error("復元用コンテキストがありません")]
     MissingContext,
     #[error("復元用コンテキストが破損しています: {0}")]

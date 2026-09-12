@@ -35,12 +35,14 @@ impl Database {
             .optional()?)
     }
 
-    /// Highest numeric run ID reserved by a context snapshot.
+    /// Highest numeric run ID reserved by a context snapshot or ledger entry.
     ///
     /// # Errors
     /// Returns an error for unreadable rows or invalid run IDs.
-    pub fn max_run_context_run_id(&self) -> Result<u64, StorageError> {
-        let mut statement = self.conn.prepare("SELECT run_id FROM run_contexts")?;
+    pub fn max_persisted_run_id(&self) -> Result<u64, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut maximum = 0;
         for id in ids {
