@@ -43,6 +43,20 @@ pub enum ProviderError {
     /// その他のトランスポート層 (reqwest) 失敗。
     #[error("request failed: {0}")]
     Request(String),
+    /// reqwest による通信失敗。
+    #[error("transport error: {message}")]
+    Transport {
+        /// 通信失敗の詳細。
+        message: String,
+    },
+    /// ストリーム再試行を上限まで使い切った。
+    #[error("stream failed after {attempts} attempts: {last}")]
+    RetriesExhausted {
+        /// 実行した試行回数。
+        attempts: u32,
+        /// 最後に発生したエラー。
+        last: Box<ProviderError>,
+    },
 }
 
 impl ProviderError {
@@ -56,7 +70,9 @@ impl ProviderError {
             Self::Timeout
             | Self::InvalidSse { .. }
             | Self::InvalidJson { .. }
-            | Self::Request(_) => None,
+            | Self::Request(_)
+            | Self::Transport { .. }
+            | Self::RetriesExhausted { .. } => None,
         }
     }
 }
@@ -119,6 +135,28 @@ mod tests {
         );
     }
 
+    // Given: 通信失敗と再試行枯渇エラー / When: Display / Then: 契約どおりのメッセージになる
+    #[test]
+    fn transport_and_retries_exhausted_display_messages() {
+        assert_eq!(
+            ProviderError::Transport {
+                message: "connection reset".to_string(),
+            }
+            .to_string(),
+            "transport error: connection reset"
+        );
+        assert_eq!(
+            ProviderError::RetriesExhausted {
+                attempts: 3,
+                last: Box::new(ProviderError::Transport {
+                    message: "connection reset".to_string(),
+                }),
+            }
+            .to_string(),
+            "stream failed after 3 attempts: transport error: connection reset"
+        );
+    }
+
     // Given: 各エラー値 / When: status() / Then: RateLimited は 429、Http はステータス、他は None
     #[test]
     fn status_maps_rate_limited_to_429_and_http_to_its_status() {
@@ -150,6 +188,21 @@ mod tests {
             None
         );
         assert_eq!(ProviderError::Request("x".to_string()).status(), None);
+        assert_eq!(
+            ProviderError::Transport {
+                message: String::new(),
+            }
+            .status(),
+            None
+        );
+        assert_eq!(
+            ProviderError::RetriesExhausted {
+                attempts: 1,
+                last: Box::new(ProviderError::Timeout),
+            }
+            .status(),
+            None
+        );
     }
 
     // Given: ProviderError / When: trait 境界で確認 / Then: std::error::Error を実装する

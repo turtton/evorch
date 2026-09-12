@@ -57,7 +57,10 @@ fn summary_of(bundle: &TokenBundle) -> Result<CodexAuthSummary, CodexAuthError> 
 fn classify_provider_error(error: ProviderError) -> CodexAuthError {
     match error {
         ProviderError::Timeout => CodexAuthError::Timeout,
-        ProviderError::Request(_) | ProviderError::RateLimited { .. } => CodexAuthError::Network,
+        ProviderError::Request(_)
+        | ProviderError::Transport { .. }
+        | ProviderError::RetriesExhausted { .. }
+        | ProviderError::RateLimited { .. } => CodexAuthError::Network,
         ProviderError::Http { .. } => CodexAuthError::Rejected,
         ProviderError::InvalidJson { .. } => CodexAuthError::StoreUnavailable,
         ProviderError::InvalidSse { .. } => CodexAuthError::Unavailable,

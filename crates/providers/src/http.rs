@@ -31,7 +31,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 ///   無応答検出は読み込みタイムアウトに任せること。
 ///
 /// # Errors
-/// reqwest クライアントの構築に失敗した場合 [`ProviderError::Request`] を返す。
+/// reqwest クライアントの構築に失敗した場合 [`ProviderError::Transport`] を返す。
 pub(crate) fn build_http_client(
     timeout: Option<Duration>,
 ) -> Result<reqwest::Client, ProviderError> {
@@ -99,12 +99,14 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// reqwest の送信系エラーを [`ProviderError`] へ変換する。
 ///
 /// タイムアウトは [`ProviderError::Timeout`]、それ以外は
-/// [`ProviderError::Request`] へ変換する。
+/// [`ProviderError::Transport`] へ変換する。
 pub(crate) fn map_request_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Request(err.to_string())
+        ProviderError::Transport {
+            message: err.to_string(),
+        }
     }
 }
 
@@ -239,15 +241,18 @@ mod tests {
         );
     }
 
-    // Given: URL 不正による reqwest エラー (タイムアウト以外) / When: map_request_error / Then: Request に変換される
+    // Given: URL 不正による reqwest エラー (タイムアウト以外) / When: map_request_error / Then: Transport に変換される
     #[test]
-    fn non_timeout_request_error_maps_to_request_variant() {
+    fn non_timeout_request_error_maps_to_transport_variant() {
         let err = reqwest::Client::new()
             .get("not a url")
             .build()
             .expect_err("不正な URL はビルド時に失敗する");
 
-        assert!(matches!(map_request_error(err), ProviderError::Request(_)));
+        assert!(matches!(
+            map_request_error(err),
+            ProviderError::Transport { .. }
+        ));
     }
 
     // Given: タイムアウト有り / 無しの指定 / When: build_http_client / Then: いずれも構築に成功する

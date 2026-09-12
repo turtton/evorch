@@ -98,13 +98,13 @@ async fn returns_provider_errors_when_http_or_json_is_invalid() {
 }
 
 #[tokio::test]
-async fn returns_request_error_when_connection_is_refused() {
+async fn returns_transport_error_when_connection_is_refused() {
     // Given: a reserved port with no listening socket.
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let base_url = format!("http://{}", socket.local_addr().unwrap());
     // When: connecting to that port.
     let result = providers::list_models(&base_url, &ProviderAuth::new("key")).await;
-    // Then: the connection error uses the existing request variant.
-    assert!(matches!(result, Err(ProviderError::Request(_))));
+    // Then: the connection error uses the transport variant.
+    assert!(matches!(result, Err(ProviderError::Transport { .. })));
 }
