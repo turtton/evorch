@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod client;
+pub(crate) mod dedup;
 pub mod error;
 pub mod http;
 pub mod message;
