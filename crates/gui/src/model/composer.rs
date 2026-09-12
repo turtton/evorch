@@ -90,6 +90,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Show available commands",
         argument_hint: None,
     },
+    SlashCommandSpec {
+        name: "new",
+        description: "Start a new thread",
+        argument_hint: None,
+    },
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -298,6 +303,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_new_without_args() {
+        // Given
+        let raw = "/new";
+        // When
+        let parsed = parse_input(raw);
+        // Then
+        assert!(matches!(parsed, ComposerInput::Command { spec, args }
+            if spec.name == "new" && args.is_empty()));
+    }
+
+    #[test]
     fn parse_unknown_slash_is_unknown_not_chat() {
         // Given
         for (raw, expected) in [
@@ -326,7 +342,7 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            ("/", &["team", "undo", "redo", "goal", "help"]),
+            ("/", &["team", "undo", "redo", "goal", "help", "new"]),
             ("/g", &["goal"]),
             ("/goal", &["goal"]),
             ("/h", &["help"]),
@@ -358,6 +374,7 @@ mod tests {
             "/redo — Restore the next workspace snapshot",
             "/goal <text> — Submit a goal to the orchestrator loop",
             "/help — Show available commands",
+            "/new — Start a new thread",
         ];
         // When
         let text = help_text();

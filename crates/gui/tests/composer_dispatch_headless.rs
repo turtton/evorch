@@ -256,6 +256,22 @@ fn goal_command_reuses_goal_flow() {
 }
 
 #[test]
+fn new_command_creates_and_switches_thread() {
+    // Given: an active thread in a selected project.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    // When: the /new command is submitted.
+    submit(&mut harness, "/new");
+    // Then: a new thread is active and the composer is cleared.
+    assert_eq!(harness.state().sidebar().threads.len(), 2);
+    assert_eq!(
+        harness.state().sidebar().active_thread,
+        Some(ThreadId::new("thread-2"))
+    );
+    assert!(harness.state().composer().input.is_empty());
+}
+
+#[test]
 fn team_command_carries_explicit_value_without_enabling_later_goals() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
