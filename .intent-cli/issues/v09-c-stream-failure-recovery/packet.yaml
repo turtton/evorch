@@ -1,0 +1,55 @@
+implementation_issue_packet:
+  issue_title: "v09-c: ストリーム/プロバイダ障害の回復設計（bounded retry + escalation）を実装"
+  issue_kind: feature
+  source_execution_unit: v09-c-stream-failure-recovery
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/providers/ crates/runtime/ crates/gui/"
+  target_part: "provider ストリーム切断・transport 障害に対する回復方針 — 部分表示は保持して履歴にはコミットしない契約の維持、bounded retry（既定3回、指数 backoff）、連敗時は停止してユーザー/オーケストレータへ escalation"
+  dependencies: []
+  technical_baseline:
+    - "実証済みの動機（2026-09-12 wave）: 'stream disconnected before completion' が同一タスクで3連発し、無条件リトライでは回復しなかった。3連敗で停止して経路を変える（新規 session で完走）のが有効だった"
+    - "T10/T17（2026-09-12）で固定済みの契約: 部分表示と確定履歴は分離、final response の再 emit による補正はしない、キャンセル優先の biased select、RequestFailed(Other) 分類。本 unit はこの契約を壊さずに retry を追加する"
+    - "codex quota client（crates/providers/src/provider/codex/quota.rs）に poll backoff clamp（30s..10min）の実装例がある"
+    - "agent loop（crates/runtime/src/agent_loop.rs）は complete_streaming 経由で provider error を受け取る。retry は loop 層か provider 層か、責務配置を実装時に決める（部分 delta が既に配信済みの場合の再送との整合が論点）"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/decisions/0025-agent-experience-evaluation.md
+  acceptance_criteria:
+    - "transport 系の失敗（stream 切断・timeout）に対して既定で指数 backoff の bounded retry が効く"
+    - "retry 中も部分表示が保持され、retry 成功時に表示が破壊・重複しない"
+    - "連敗上限に達したら run を停止し、理由付きの型付きエラーで escalation（GUI に明示表示）する。silent retry loop にならない"
+    - "認証系エラー（ReauthenticationRequired 等）は retry せず即 escalation する"
+    - "回帰テスト: 断→retry→成功で表示が正しいこと、連敗で停止すること、認証エラーが retry されないこと"
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "runtime kernel の障害耐性の一環"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "retry 責務の層配置と部分 delta 再送の整合方針"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: retry policy + escalation 表示

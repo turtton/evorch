@@ -1,0 +1,54 @@
+implementation_issue_packet:
+  issue_title: "v09-d: 承認 UX の相関 ID 明示（run:call:attempt）を実装"
+  issue_kind: feature
+  source_execution_unit: v09-d-approval-correlation-ux
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ crates/sandbox/"
+  target_part: "承認リクエストの GUI 表示に run:call:attempt の相関情報と対象 tool・引数の要約を明示し、何の・どの試行の承認かをユーザーが判別できるようにする"
+  dependencies: []
+  technical_baseline:
+    - "2026-09-12 の Oracle レビューで runtime 側の confused-deputy 脆弱性を修正済み（commit d5342ce: AskOnFailure/AskFirst の承認相関を run_id:call_id:一意 attempt 番号に束縛）。本 unit はその GUI 側の仕上げ"
+    - "承認 event（crates/sandbox/src/approval.rs、ApprovalResolved 等）は相関 ID を持つ。GUI の承認プロンプトがこの ID と対象情報を表示するかは未整備"
+    - "並列 wave 実行（T9）で複数の承認要求が同時に上がり得るため、どれを承認しているかの判別が実用上の安全性に直結する"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0025-agent-experience-evaluation.md
+  acceptance_criteria:
+    - "承認プロンプトに対象 tool 名・引数要約・run/スレッド識別が表示される"
+    - "同時に複数の承認要求がある場合、一覧で個別に承認/拒否できる"
+    - "承認 UI の操作が対応する要求以外の call に効かないことが回帰テストで固定される"
+    - "L2 headless テスト + L4 PNG 証跡（docs/gui-verification.md 準拠）"
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench/overview.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "承認 UX の安全性仕上げ"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: ""
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: 承認プロンプト UI
