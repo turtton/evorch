@@ -18,6 +18,10 @@ pub struct ModelMetadata {
     pub input_price: Option<f64>,
     /// USD per million output tokens.
     pub output_price: Option<f64>,
+    /// USD per million cache-read tokens.
+    pub cache_read_price: Option<f64>,
+    /// USD per million cache-write tokens.
+    pub cache_write_price: Option<f64>,
     pub tool_call: Option<bool>,
     pub reasoning: Option<bool>,
     pub modalities: Modalities,
@@ -56,6 +60,8 @@ struct Limits {
 struct Cost {
     input: Option<f64>,
     output: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
 }
 
 impl From<WireModel> for ModelMetadata {
@@ -67,6 +73,8 @@ impl From<WireModel> for ModelMetadata {
             max_output_tokens: model.limit.output,
             input_price: model.cost.input,
             output_price: model.cost.output,
+            cache_read_price: model.cost.cache_read,
+            cache_write_price: model.cost.cache_write,
             tool_call: model.tool_call,
             reasoning: model.reasoning,
             modalities: model.modalities,
