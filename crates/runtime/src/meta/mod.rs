@@ -7,6 +7,7 @@
 mod compaction;
 mod delegation;
 mod escalation;
+mod ledger;
 mod messaging;
 #[cfg(test)]
 mod role_tests;
@@ -60,6 +61,8 @@ pub(crate) async fn dispatch(
         "send_message" => messaging::send_message(state, &runtime, input),
         "wait_reply" => messaging::wait_reply(state, &runtime, input).await,
         "inbox" => messaging::inbox(state, &runtime, input),
+        "ledger_append" => ledger::append(state, &runtime, input),
+        "ledger_read" => ledger::read(state, &runtime, input),
         "wait" => runs::wait(state, &runtime, input).await,
         "cancel" => runs::cancel(&runtime, input),
         "list_agents" => runs::list_agents(&runtime, input),

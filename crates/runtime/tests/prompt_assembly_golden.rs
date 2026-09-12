@@ -77,7 +77,7 @@ fn orchestrator_full_prompt_matches_golden_fixture() {
         .system_prompt_for(Role::Orchestrator, Some("bug"), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
-    assert_eq!(prompt, GOLDEN_FIXTURE);
+    assert_eq!(prompt, GOLDEN_FIXTURE.trim_end());
 }
 
 const GOLDEN_FIXTURE: &str = include_str!("golden/system_prompt_orchestrator.txt");

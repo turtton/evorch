@@ -39,13 +39,13 @@ Claude ファミリ向け規約: 応答は簡潔にし、ツール呼び出し�
 <!-- keyTriggers BEGIN -->
 ### keyTriggers
 
-- Explorer: 許可ツール: grep, read / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 不可
-- MultimodalLooker: 許可ツール: read / ネットワーク: 拒否 / 委譲: 不可
-- Oracle: 許可ツール: git_diff, grep, read / ネットワーク: 拒否 / 委譲: 不可
-- Orchestrator: 許可ツール: cancel, compact, delegate, delegate_background, finish, git_diff, grep, inbox, inspect_agent, list_agents, read, send, send_message, skill_load, wait, wait_reply, web_fetch / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 可
-- Planner: 許可ツール: git_diff, grep, read, skill_load, web_fetch / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 不可
-- Reviewer: 許可ツール: git_diff, grep, read / ネットワーク: 拒否 / 委譲: 不可
-- Worker: 許可ツール: edit, escalate, git_diff, grep, inbox, read, send, shell, skill_load, wait_reply / ネットワーク: 拒否 / 委譲: 不可
+- Explorer: 許可ツール: grep, ledger_append, ledger_read, read / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 不可
+- MultimodalLooker: 許可ツール: ledger_append, ledger_read, read / ネットワーク: 拒否 / 委譲: 不可
+- Oracle: 許可ツール: git_diff, grep, ledger_append, ledger_read, read / ネットワーク: 拒否 / 委譲: 不可
+- Orchestrator: 許可ツール: cancel, compact, delegate, delegate_background, finish, git_diff, grep, inbox, inspect_agent, ledger_append, ledger_read, list_agents, read, send, send_message, skill_load, wait, wait_reply, web_fetch / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 可
+- Planner: 許可ツール: git_diff, grep, ledger_append, ledger_read, read, skill_load, web_fetch / ネットワーク: 明示的オプトイン時のみ許可 / 委譲: 不可
+- Reviewer: 許可ツール: git_diff, grep, ledger_append, ledger_read, read / ネットワーク: 拒否 / 委譲: 不可
+- Worker: 許可ツール: edit, escalate, git_diff, grep, inbox, ledger_append, ledger_read, read, send, shell, skill_load, wait_reply / ネットワーク: 拒否 / 委譲: 不可
 
 
 該当するトリガーが存在する場合のみ、対応するセクションを参照すること。

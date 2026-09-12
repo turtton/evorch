@@ -119,6 +119,24 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 restored.messages,
                 restored.checkpoints,
             );
+            if let Some(runtime) = shared.upgrade()
+                && let Some(store) = runtime.run_store.get()
+            {
+                match store.ledger_entries(task.run_id) {
+                    Ok(entries) => {
+                        if !entries.is_empty() {
+                            let mut text = String::from("[run-ledger]");
+                            for entry in entries {
+                                text.push_str(&format!("\n- seq {}: {}", entry.seq, entry.body));
+                            }
+                            context.push_user(&text);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(run_id = %task.run_id, %error, "restored run ledger read failed")
+                    }
+                }
+            }
             context.push_user(&messages::format_agent_message(&restored.trigger));
             context
         }
