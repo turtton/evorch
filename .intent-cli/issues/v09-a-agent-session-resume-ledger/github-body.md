@@ -47,6 +47,9 @@ SQLite 永続化、compaction 非対象）+ GUI での続行表示
 - task 境界を跨ぐ知識蓄積（v07-d の memory backend の領域）
 - compaction engine 自体（v02-context-compaction の領域）
 - マルチプロセス間の run 移譲（ADR 0024 の handoff の領域）
+- 既存 AgentMessage send の拡張 — send は生存中 run（Pending/Running/Waiting）専用で、
+  Done/Error への配送は runtime.rs:1060-1065 が RunTerminated で明示拒否する設計。
+  本 slice はその拒否された領域（終了 run の復元）を担う**別プリミティブ**として実装する。
 
 ## Standalone Child Issue Contract
 

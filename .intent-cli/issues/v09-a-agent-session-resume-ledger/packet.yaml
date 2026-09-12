@@ -14,6 +14,7 @@ implementation_issue_packet:
     - "v02-context-compaction が model-visible window の narrowing と raw history 非破壊保持を設計済み。run 台帳は message history とは別の append-only surface として compaction の対象外にする（圧縮で作業上の決定・証拠が消えないことが目的）"
     - "v07-d-memory-task-improvement の memory event ledger は task 境界を跨ぐ知識蓄積が目的。本 unit の run 台帳は in-run/orchestrator 視点の作業記録で目的が異なるが、storage ledger 基盤は共有できる"
     - "GUI の thread/run 表示・transcript_registry（crates/gui/src/model/）は run 単位の routing が既存。再開された run の続行表示はこの経路に載る"
+    - "既存の AgentMessage send（v02、crates/runtime/src/runtime.rs:1060-1065）との境界: send は生存中 run（Pending/Running/Waiting）専用で、Done/Error への配送は RunTerminated で明示拒否される。本 unit はその拒否された領域（終了 run の復元）を担う。send の拡張ではなく別プリミティブとして実装すること"
   intent_references:
     - intents/evorch/features/orchestration/overview.md
     - intents/evorch/features/agent-runtime-kernel/overview.md
