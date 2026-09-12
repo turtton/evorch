@@ -120,6 +120,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_event(&mut self, event: &Event) {
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
+        self.ledger.apply(event);
         self.tasks.apply_event(event);
         self.telemetry.apply_event(event);
     }

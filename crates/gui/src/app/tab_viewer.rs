@@ -28,6 +28,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) transcripts: &'a TranscriptRegistry,
+    pub(super) ledger: &'a crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
     pub(super) tasks: &'a mut TasksModel<S>,
     pub(super) terminal: &'a mut TerminalBuffer,
@@ -75,6 +76,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                         run_id,
                         name: row.map(|row| row.name.as_str()),
                         role: row.map(|row| row.role.as_str()),
+                        ledger: self.ledger.entries(run_id),
                     }),
                 )
             }

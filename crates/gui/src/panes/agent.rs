@@ -17,6 +17,7 @@ pub struct AgentIdentity<'a> {
     pub run_id: &'a str,
     pub name: Option<&'a str>,
     pub role: Option<&'a str>,
+    pub ledger: &'a [storage::RunLedgerEntry],
 }
 
 /// 会話ペインが描画される文脈です。
@@ -90,10 +91,12 @@ pub fn agent_pane(
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                if model.visible_entries().is_empty() {
+                if model.visible_entries().is_empty()
+                    && identity.is_none_or(|identity| identity.ledger.is_empty())
+                {
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
-                    transcript_body(ui, model);
+                    run_detail_body(ui, model, identity);
                 }
             });
         action
@@ -177,6 +180,14 @@ fn empty_state_body(
 }
 
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
+    run_detail_body(ui, model, None);
+}
+
+fn run_detail_body(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    identity: Option<AgentIdentity<'_>>,
+) {
     let pane_id = ui.id();
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
@@ -204,6 +215,9 @@ pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
                     };
                     ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
                 });
+            }
+            if let Some(identity) = identity {
+                crate::panes::ledger::ledger_section(ui, identity.run_id, identity.ledger);
             }
         });
 }
@@ -254,6 +268,82 @@ fn entry_label(entry: &TranscriptEntry) -> String {
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn ledger_section_renders_entries_for_selected_run() {
+        // Given: a selected run with a transcript and ordered ledger entries.
+        let mut model = TranscriptModel::default();
+        model.push(TranscriptEntry::Message {
+            text: "Transcript content".into(),
+        });
+        let entries = [
+            storage::RunLedgerEntry {
+                seq: 1,
+                run_id: "selected".into(),
+                body: "First entry".into(),
+                created_at_ns: 0,
+            },
+            storage::RunLedgerEntry {
+                seq: 3,
+                run_id: "selected".into(),
+                body: "Last entry".into(),
+                created_at_ns: 0,
+            },
+        ];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(500.0, 300.0))
+            .build_ui(|ui| {
+                crate::theme::install(ui.ctx());
+                run_detail_body(
+                    ui,
+                    &model,
+                    Some(AgentIdentity {
+                        run_id: "selected",
+                        name: None,
+                        role: None,
+                        ledger: &entries,
+                    }),
+                );
+            });
+        harness.run_steps(2);
+        assert!(harness.query_by_label("- seq 1: First entry").is_none());
+        // When: the ledger header is expanded.
+        harness.get_by_label("> Ledger").click();
+        harness.run_steps(2);
+        // Then: rows follow the transcript in oldest-first order.
+        let first = harness.get_by_label("- seq 1: First entry").rect();
+        let last = harness.get_by_label("- seq 3: Last entry").rect();
+        assert!(first.top() > harness.get_by_label("Transcript content").rect().bottom());
+        assert!(last.top() > first.bottom());
+        if let Some(directory) = std::env::var_os("LEDGER_EVIDENCE_DIR") {
+            harness
+                .render()
+                .unwrap()
+                .save(std::path::PathBuf::from(directory).join("ledger-expanded.png"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn ledger_section_hidden_when_empty() {
+        // Given: a selected run without ledger entries.
+        let model = TranscriptModel::default();
+        // When: the run detail surface is rendered.
+        let harness = Harness::builder().build_ui(|ui| {
+            run_detail_body(
+                ui,
+                &model,
+                Some(AgentIdentity {
+                    run_id: "empty",
+                    name: None,
+                    role: None,
+                    ledger: &[],
+                }),
+            );
+        });
+        // Then: no ledger header is exposed.
+        assert!(harness.query_by_label("> Ledger").is_none());
+    }
 
     #[test]
     fn thread_header_shows_phase_pill_without_clipping() {

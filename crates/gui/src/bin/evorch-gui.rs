@@ -675,6 +675,13 @@ fn run() -> Result<(), GuiError> {
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;
+    let runtime = match runtime::RunStore::open(&storage_config, storage.handle()) {
+        Ok(store) => runtime.with_run_store(store),
+        Err(error) => {
+            tracing::warn!(%error, "run store unavailable; continuing without persistent run restore");
+            runtime
+        }
+    };
     let quick_route = composition_config
         .agents
         .binding_for("worker", Some("quick"))

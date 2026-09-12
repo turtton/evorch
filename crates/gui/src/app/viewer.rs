@@ -46,6 +46,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 memory: &mut self.memory,
                 arena: &mut self.arena,
                 transcripts: &self.transcripts,
+                ledger: &self.ledger,
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,
                 terminal: &mut self.terminal,
