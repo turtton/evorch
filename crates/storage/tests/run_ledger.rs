@@ -71,6 +71,72 @@ fn update_and_delete_are_rejected_by_triggers() {
 }
 
 #[test]
+fn replace_into_existing_seq_is_rejected() {
+    // Given: a public-API row and a connection with recursive triggers disabled.
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let storage = Storage::open(config.clone()).unwrap();
+    let seq = storage
+        .handle()
+        .append_run_ledger("a", "immutable")
+        .unwrap();
+    storage.close();
+    let before = Database::open(&config).unwrap().run_ledger_all().unwrap();
+    let conn = Connection::open(&config.db_path).unwrap();
+    conn.pragma_update(None, "recursive_triggers", 0).unwrap();
+    // When: either REPLACE spelling attempts to overwrite the existing sequence.
+    for sql in [
+        "INSERT OR REPLACE INTO run_ledger VALUES (?1, 'b', 'changed', 1)",
+        "REPLACE INTO run_ledger VALUES (?1, 'b', 'changed', 1)",
+    ] {
+        let result = conn.execute(sql, [i64::try_from(seq).unwrap()]);
+        // Then: the insert trigger aborts and every original field is preserved.
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER)
+        );
+        assert_eq!(
+            Database::open(&config).unwrap().run_ledger_all().unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn replace_into_new_seq_behaves_like_insert_or_is_rejected() {
+    // Given: an existing row; fresh sequences are allowed because no row is replaced.
+    let temp = TempDir::new().unwrap();
+    let config = config(&temp);
+    let storage = Storage::open(config.clone()).unwrap();
+    let seq = storage.handle().append_run_ledger("a", "original").unwrap();
+    storage.close();
+    let before = Database::open(&config).unwrap().run_ledger_all().unwrap();
+    let conn = Connection::open(&config.db_path).unwrap();
+    conn.pragma_update(None, "recursive_triggers", 0).unwrap();
+    // When: REPLACE targets a fresh explicit sequence.
+    let inserted = conn
+        .execute(
+            "INSERT OR REPLACE INTO run_ledger VALUES (?1, 'b', 'new', 1)",
+            [i64::try_from(seq + 1).unwrap()],
+        )
+        .unwrap();
+    // Then: it appends the new row without changing the original.
+    let entries = Database::open(&config).unwrap().run_ledger_all().unwrap();
+    assert_eq!(inserted, 1);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0], before[0]);
+    assert_eq!(
+        (
+            entries[1].seq,
+            entries[1].run_id.as_str(),
+            entries[1].body.as_str(),
+            entries[1].created_at_ns
+        ),
+        (seq + 1, "b", "new", 1)
+    );
+}
+
+#[test]
 fn entries_survive_writer_close_and_reopen() {
     // Given: an entry persisted by a closed writer.
     let temp = TempDir::new().unwrap();
