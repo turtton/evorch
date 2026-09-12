@@ -118,3 +118,78 @@ fn concurrent_approvals_resolve_each_calls_own_run() {
         .collect();
     assert_eq!(targets, [Some("run-b"), Some("run-a")]);
 }
+
+#[test]
+fn duplicate_plain_call_id_across_runs_resolves_to_none() {
+    // Given: two runs registered the same plain call ID.
+    let mut state = WorkbenchState::new(EmptySource, &UiSettings::default()).unwrap();
+    state.apply_events([started("call-1", "run-2"), started("call-1", "run-3")]);
+    // When: an approval arrives without explicit run scope.
+    state.apply_events([approval("call-1")]);
+    // Then: the notification is display-only, rather than targeting the latest run.
+    let item = state.notifications().items().next().unwrap();
+    assert_eq!(item.run_id, None);
+    assert!(state.notifications().is_unread(item.id));
+}
+
+#[test]
+fn same_run_repeated_tool_started_stays_unique() {
+    // Given: a run registers the same call again for a retry.
+    let mut state = WorkbenchState::new(EmptySource, &UiSettings::default()).unwrap();
+    state.apply_events([started("call-1", "run-2"), started("call-1", "run-2")]);
+    // When: approval is requested for that call.
+    state.apply_events([approval("call-1")]);
+    // Then: repeated registration within one run remains unambiguous.
+    assert_eq!(
+        state
+            .notifications()
+            .items()
+            .next()
+            .unwrap()
+            .run_id
+            .as_deref(),
+        Some("run-2")
+    );
+}
+
+#[test]
+fn ambiguous_fallback_stays_unresolved_while_route_keeps_latest_run() {
+    use gui::model::transcript_registry::TranscriptKey;
+    // Given: plain and malformed scoped IDs collide, then the latest run retries.
+    for call_id in ["call-1", "run-x:call-1"] {
+        let mut state = WorkbenchState::new(EmptySource, &UiSettings::default()).unwrap();
+        state.apply_events([started(call_id, "run-2"), started(call_id, "run-3")]);
+        state.apply_events([started(call_id, "run-3")]);
+        // When: approval is routed and converted to a notification.
+        let event = approval(call_id);
+        let route = state.transcripts().route(&event);
+        state.apply_events([event]);
+        // Then: only notification resolution fails closed; transcript routing is unchanged.
+        assert_eq!(state.notifications().items().next().unwrap().run_id, None);
+        assert_eq!(
+            route,
+            vec![TranscriptKey::Thread, TranscriptKey::Run("run-3".into())]
+        );
+    }
+}
+
+#[test]
+fn explicit_scope_resolves_even_when_call_index_is_ambiguous() {
+    // Given: an explicitly scoped call ID has conflicting index registrations.
+    let mut state = WorkbenchState::new(EmptySource, &UiSettings::default()).unwrap();
+    let call_id = "run-2:call-1:0";
+    state.apply_events([started(call_id, "run-3"), started(call_id, "run-4")]);
+    // When: the scoped approval arrives.
+    state.apply_events([approval(call_id)]);
+    // Then: the explicit prefix remains authoritative.
+    assert_eq!(
+        state
+            .notifications()
+            .items()
+            .next()
+            .unwrap()
+            .run_id
+            .as_deref(),
+        Some("run-2")
+    );
+}

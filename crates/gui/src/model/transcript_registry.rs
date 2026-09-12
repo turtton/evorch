@@ -4,7 +4,7 @@
 //! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
 //! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
@@ -24,6 +24,7 @@ pub struct TranscriptRegistry {
     run_threads: BTreeMap<String, String>,
     runs: BTreeMap<String, TranscriptModel>,
     call_index: BTreeMap<String, String>,
+    ambiguous_calls: BTreeSet<String>,
 }
 
 impl Default for TranscriptRegistry {
@@ -41,6 +42,7 @@ impl TranscriptRegistry {
             run_threads: BTreeMap::new(),
             runs: BTreeMap::new(),
             call_index: BTreeMap::new(),
+            ambiguous_calls: BTreeSet::new(),
         }
     }
 
@@ -51,6 +53,9 @@ impl TranscriptRegistry {
             && number.bytes().all(|byte| byte.is_ascii_digit())
         {
             return Some(run_id);
+        }
+        if self.ambiguous_calls.contains(call_id) {
+            return None;
         }
         self.call_index.get(call_id).map(String::as_str)
     }
@@ -149,8 +154,12 @@ impl TranscriptRegistry {
             run_id: Some(run_id),
             ..
         }) = &event.kind
+            && self
+                .call_index
+                .insert(call_id.clone(), run_id.clone())
+                .is_some_and(|previous_run| previous_run != *run_id)
         {
-            self.call_index.insert(call_id.clone(), run_id.clone());
+            self.ambiguous_calls.insert(call_id.clone());
         }
 
         if let EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) = &event.kind {
