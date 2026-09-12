@@ -8,6 +8,7 @@ mod migrate;
 mod panels;
 mod persist;
 mod project;
+mod reconcile;
 mod settings;
 mod sidebar;
 mod thread;
