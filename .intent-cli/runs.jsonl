@@ -274,3 +274,5 @@
 {"ts":"2026-09-12T14:00:44.122524+00:00","execution_unit":"v09-c-stream-failure-recovery","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v09-c-stream-failure-recovery/"}
 {"ts":"2026-09-12T14:00:44.7307317+00:00","execution_unit":"v09-d-approval-correlation-ux","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v09-d-approval-correlation-ux/"}
 {"ts":"2026-09-12T14:02:22.7952347+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#104","reason":"https://github.com/turtton/evorch/issues/104"}
+{"ts":"2026-09-12T18:12:06.4604424+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":105}
+{"ts":"2026-09-12T18:12:06.4604424+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":105}
