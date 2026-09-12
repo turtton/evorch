@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+#[path = "../model/ack.rs"]
+pub mod ack;
+
 use egui::Color32;
 use event_bus::AgentRunPhase;
 use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
@@ -74,6 +77,11 @@ const fn thread_phase_attention(phase: ThreadRunPhase) -> PaneAttention {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Creates state for one pane/thread lifetime; the renderer owns and retains it.
+    pub fn new_attention_ack() -> ack::AttentionAck {
+        ack::AttentionAck::default()
+    }
+
     pub fn pane_attention(&self, panel_id: &PanelId) -> Option<Color32> {
         let panel = self.panels.get(panel_id)?;
         attention_for(
