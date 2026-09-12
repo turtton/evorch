@@ -13,6 +13,7 @@ pub mod markdown_render;
 pub mod memory;
 pub mod model_metadata;
 pub mod model_picker;
+pub mod notifications;
 pub mod phase_indicator;
 pub mod provider_models;
 pub mod provider_settings;

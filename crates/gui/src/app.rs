@@ -14,6 +14,7 @@ mod state;
 mod tab_viewer;
 mod viewer;
 
+pub use attention::ack::{AttentionAck, DisplayRevision};
 pub use state::{ConversationFocus, WorkbenchState};
 
 use crate::dock::DockConvertError;

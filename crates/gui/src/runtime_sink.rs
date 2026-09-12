@@ -69,6 +69,19 @@ pub struct RuntimeCommandSink {
 }
 
 impl RuntimeCommandSink {
+    pub fn start_background_run(&self, text: String) -> RunId {
+        let _guard = self.handle.enter();
+        self.runtime.delegate_background(
+            Role::Worker,
+            text,
+            RunConfig {
+                interactive: false,
+                keep_alive: false,
+                ..RunConfig::default()
+            },
+        )
+    }
+
     /// runtime, tokio ハンドル, supervisor handle から sink を生成する。
     pub fn new(
         runtime: AgentRuntime,
@@ -135,6 +148,10 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn start_background_run(&self, text: String) -> Option<RunId> {
+        Some(RuntimeCommandSink::start_background_run(self, text))
+    }
+
     fn submit_chat_with_permit(
         &mut self,
         chat: crate::model::commands::ChatSubmission,

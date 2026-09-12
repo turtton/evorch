@@ -46,6 +46,7 @@ fn default_layout_is_sidebar_center_right_tabs() {
                 PanelId::new("agents-main"),
                 PanelId::new("diff-main"),
                 PanelId::new("terminal-main"),
+                PanelId::new("notifications-main"),
             ],
         ]
     );

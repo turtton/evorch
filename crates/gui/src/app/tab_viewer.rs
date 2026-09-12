@@ -7,6 +7,7 @@ use super::ConversationFocus;
 use super::attention::{PaneAttention, ack::AttentionAck, acknowledged_attention};
 use crate::diff::{DiffMode, DiffModel};
 use crate::model::composer::{ComposerModel, ProviderStatus};
+use crate::model::notifications::NotificationsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
@@ -17,6 +18,7 @@ use crate::panes::{
     agents::{AgentsAction, agents_pane},
     composer::ComposerAction,
     diff::diff_pane,
+    notifications::{NotificationsAction, notifications_pane},
     sidebar::{SidebarAction, sidebar_pane},
     tasks::tasks_pane,
     terminal::terminal_pane,
@@ -24,6 +26,8 @@ use crate::panes::{
 use crate::pty::PtySession;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
+    pub(super) notifications: &'a mut NotificationsModel,
+    pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
@@ -54,6 +58,13 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
     fn attention_for_tab(&self, tab: &PanelId) -> PaneAttention {
+        if tab.as_str() == "notifications-main" {
+            return if self.notifications.unread_count() > 0 {
+                PaneAttention::Info
+            } else {
+                PaneAttention::None
+            };
+        }
         acknowledged_attention(self.attention_acks, tab)
     }
 
@@ -186,6 +197,12 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::Agents => {
                 if let Some(action) = agents_pane(ui, self.tasks, self.telemetry) {
                     *self.agents_action = Some(action);
+                }
+            }
+            PanelKind::Notifications => {
+                let focused = ui.input(|input| input.viewport().focused);
+                if let Some(action) = notifications_pane(ui, self.notifications, focused) {
+                    *self.notifications_action = Some(action);
                 }
             }
             PanelKind::AgentTranscript => {

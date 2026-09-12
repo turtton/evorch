@@ -102,10 +102,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .pump
             .as_mut()
             .map_or_else(Vec::new, crate::events::EventPump::drain);
-        for event in events {
-            self.fold_event(&event);
-        }
-        self.refresh_active_thread_workspace();
+        self.apply_events(events);
     }
 
     /// Synchronous fold for fixtures/tests/headless capture; production uses
@@ -120,6 +117,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_event(&mut self, event: &Event) {
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
+        self.notifications.apply_event(event, |call_id| {
+            self.transcripts.run_for_call(call_id).map(str::to_owned)
+        });
         self.ledger.apply(event);
         self.tasks.apply_event(event);
         self.telemetry.apply_event(event);

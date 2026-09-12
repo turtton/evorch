@@ -140,6 +140,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             ComposerInput::Command { spec, args } => match spec.name {
+                "run" => {
+                    if args.is_empty() {
+                        self.push_notice("usage: /run <text>");
+                        return;
+                    }
+                    match &self.provider_status {
+                        ProviderStatus::NotConfigured { guidance } => {
+                            self.push_notice(guidance.clone());
+                        }
+                        ProviderStatus::Configured => {
+                            match self.sink.start_background_run(args.into()) {
+                                Some(run_id) => {
+                                    self.push_notice(format!("Started background run {run_id}"));
+                                    self.composer.input.clear();
+                                }
+                                None => self.push_notice("Background runs are unavailable"),
+                            }
+                        }
+                    }
+                }
                 "undo" | "redo" => {
                     if let Some(thread_id) = self.sidebar.active_thread.as_ref() {
                         self.submit_command(WorkbenchCommand::RestoreSnapshot {

@@ -171,7 +171,27 @@ fn recursive_layout_serialization_roundtrip_remains_a_tree() {
     let json = serde_json::to_string(&workspace).expect("workspace serialization must succeed");
     let restored = workspace_ui::from_json(&json).expect("workspace migration must succeed");
 
-    // Then: ownership recursion remains an equal tree after the schema version advances.
+    // Then: ownership recursion is preserved apart from the additive notification tab.
+    let mut workspace = workspace;
+    let LayoutNode::Split(root) = &mut workspace.main.root else {
+        panic!("root split");
+    };
+    let LayoutNode::Tabs(tabs) = root.first.as_mut() else {
+        panic!("tasks tabs");
+    };
+    let id = PanelId::new("notifications-main");
+    tabs.panels.push(id.clone());
+    workspace.panels.insert(
+        id.clone(),
+        workspace_ui::Panel {
+            id,
+            kind: workspace_ui::PanelKind::Notifications,
+            title: workspace_ui::PanelKind::Notifications
+                .default_title()
+                .into(),
+            target: None,
+        },
+    );
     assert_eq!(restored.main, workspace.main);
     assert_eq!(restored.panels, workspace.panels);
     assert_eq!(restored.version, WORKSPACE_SCHEMA_VERSION);

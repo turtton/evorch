@@ -24,9 +24,10 @@ pub fn from_json(json: &str) -> Result<Workspace, PersistError> {
     let value = serde_json::from_str(json)
         .map_err(|error| PersistError::Serialization(error.to_string()))?;
     let migrated = migrate::run(value)?;
-    let workspace = serde_json::from_value(migrated)
+    let mut workspace = serde_json::from_value(migrated)
         .map_err(|error| PersistError::Serialization(error.to_string()))?;
     validate(&workspace)?;
+    crate::reconcile::notifications(&mut workspace);
     Ok(workspace)
 }
 
@@ -79,9 +80,12 @@ pub fn load_settings(path: &Path) -> Result<UiSettings, SettingsError> {
     {
         *workspace = migrate::run(workspace.take())?;
     }
-    let settings = serde_json::from_value(value)
+    let mut settings: UiSettings = serde_json::from_value(value)
         .map_err(|error| SettingsError::Serialization(error.to_string()))?;
     validate_settings(&settings)?;
+    if let Some(workspace) = &mut settings.layout.workspace {
+        crate::reconcile::notifications(workspace);
+    }
     Ok(settings)
 }
 

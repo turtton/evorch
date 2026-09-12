@@ -4,7 +4,7 @@
 //! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
 //! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
@@ -24,6 +24,7 @@ pub struct TranscriptRegistry {
     run_threads: BTreeMap<String, String>,
     runs: BTreeMap<String, TranscriptModel>,
     call_index: BTreeMap<String, String>,
+    ambiguous_calls: BTreeSet<String>,
 }
 
 impl Default for TranscriptRegistry {
@@ -41,7 +42,22 @@ impl TranscriptRegistry {
             run_threads: BTreeMap::new(),
             runs: BTreeMap::new(),
             call_index: BTreeMap::new(),
+            ambiguous_calls: BTreeSet::new(),
         }
+    }
+
+    pub fn run_for_call<'a>(&'a self, call_id: &'a str) -> Option<&'a str> {
+        if let Some((run_id, _)) = call_id.split_once(':')
+            && let Some(number) = run_id.strip_prefix("run-")
+            && !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(run_id);
+        }
+        if self.ambiguous_calls.contains(call_id) {
+            return None;
+        }
+        self.call_index.get(call_id).map(String::as_str)
     }
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
@@ -138,8 +154,12 @@ impl TranscriptRegistry {
             run_id: Some(run_id),
             ..
         }) = &event.kind
+            && self
+                .call_index
+                .insert(call_id.clone(), run_id.clone())
+                .is_some_and(|previous_run| previous_run != *run_id)
         {
-            self.call_index.insert(call_id.clone(), run_id.clone());
+            self.ambiguous_calls.insert(call_id.clone());
         }
 
         if let EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) = &event.kind {
@@ -395,6 +415,24 @@ mod tests {
                 status: ToolStatus::Succeeded,
             }]
         );
+    }
+
+    #[test]
+    fn run_for_call_returns_indexed_run_or_none() {
+        // Given: one indexed call and one call without run attribution.
+        let mut registry = TranscriptRegistry::new();
+        for (call_id, run_id) in [("known", Some("run-2")), ("runless", None)] {
+            registry.apply(&Event::new(ToolEvent::ToolStarted {
+                input: None,
+                tool_name: "write".into(),
+                call_id: call_id.into(),
+                run_id: run_id.map(str::to_owned),
+            }));
+        }
+        // When: looking up known, unknown, and runless calls.
+        let targets = ["known", "unknown", "runless"].map(|id| registry.run_for_call(id));
+        // Then: only the explicitly attributed call has a target.
+        assert_eq!(targets, [Some("run-2"), None, None]);
     }
 
     #[test]
