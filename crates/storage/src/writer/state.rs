@@ -70,6 +70,26 @@ pub(super) fn run_writer(
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }
+            Ok(Command::AppendRunLedger(run_id, body, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "run ledger writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::run_ledger::append(&state.conn, &run_id, &body)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::UpsertRunContext(record, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "run context writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::run_context::upsert(&state.conn, &record)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::Memory(mutation, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

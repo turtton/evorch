@@ -4,8 +4,10 @@ use event_bus::{AgentMessage, AgentMessageEvent, DeliveryDisposition, EventKind,
 
 use crate::entity::{AgentRunRecord, MessageRecord, SessionRecord, TaskRecord};
 use crate::projection;
-use crate::repo::{agent_run, event, message, metrics, session, task};
-use crate::{Database, SessionSnapshot, StorageError, StoredEvent};
+use crate::repo::{agent_run, event, message, metrics, run_context, run_ledger, session, task};
+use crate::{
+    Database, RunContextRecord, RunLedgerEntry, SessionSnapshot, StorageError, StoredEvent,
+};
 
 /// 永続化済みの AgentMessage 配送です。
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +19,30 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
+    /// Return a run's ledger entries in global sequence order.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_ledger(&self, run_id: &str) -> Result<Vec<RunLedgerEntry>, StorageError> {
+        run_ledger::list_by_run(&self.conn, run_id)
+    }
+
+    /// Return all ledger entries in global sequence order.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_ledger_all(&self) -> Result<Vec<RunLedgerEntry>, StorageError> {
+        run_ledger::list_all(&self.conn)
+    }
+
+    /// Return the latest snapshot for a run, if present.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_context(&self, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
+        run_context::get(&self.conn, run_id)
+    }
+
     /// 識別子に一致するセッションを返します。
     ///
     /// # Errors
