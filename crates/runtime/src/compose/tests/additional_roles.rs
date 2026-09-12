@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn librarian_binding_resolves_when_profile_preference_is_absent() {
+    // Given: the runtime role and default config bindings.
+    let agents = config::AgentsConfig::default();
+    // When: using the same key resolution as RoutedModel without a preference.
+    let binding = agents.binding_for(role_key(Role::Librarian), None);
+    // Then: model resolution reaches the librarian logical model.
+    assert_eq!(
+        binding.expect("librarian binding").logical_model,
+        "librarian"
+    );
+}
+
 #[tokio::test]
 async fn additional_roles_keep_affinity_per_run() {
     let (mut model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
