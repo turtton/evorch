@@ -251,6 +251,9 @@ impl TranscriptModel {
     }
 
     fn append_text(&mut self, delta: &str, reasoning: bool) {
+        if delta.is_empty() {
+            return;
+        }
         let matching = self.entries.last().is_some_and(|entry| {
             matches!(
                 (reasoning, entry),
