@@ -152,6 +152,10 @@ pub enum LoopEvent {
 }
 
 pub trait CommandSink: Send {
+    fn start_background_run(&self, _text: String) -> Option<runtime::RunId> {
+        None
+    }
+
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent>;
     fn submit_chat_with_permit(
         &mut self,
