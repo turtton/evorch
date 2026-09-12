@@ -66,6 +66,9 @@ pub fn agents_pane<S: AgentRunSource>(
         } else if telemetry.quota.error.is_some() {
             ui.label(muted("Codex quota unavailable · refresh failed"));
         }
+        if let Some(error) = &telemetry.quota.error {
+            ui.label(muted(format!("Quota error: {error}")));
+        }
 
         egui::ScrollArea::horizontal().show(ui, |ui| {
             let available = ui.available_width().min(ui.clip_rect().width());

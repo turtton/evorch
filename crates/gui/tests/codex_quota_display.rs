@@ -19,12 +19,20 @@ struct FakeQuota {
 impl QuotaBackend for FakeQuota {
     async fn fetch(&mut self) -> Result<QuotaSnapshot, QuotaError> {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
-            1 => Err(QuotaError::Timeout),
+            1 => {
+                let mut cached = snapshot(true);
+                cached.last_error = Some(QuotaError::Timeout);
+                Ok(cached)
+            }
             _ => Ok(snapshot(false)),
         }
     }
     fn interval(&self) -> Duration {
-        Duration::from_secs(60)
+        Duration::from_secs(if self.calls.load(Ordering::SeqCst) == 2 {
+            120
+        } else {
+            60
+        })
     }
 }
 
@@ -51,7 +59,9 @@ fn polling_keeps_cache_on_failure_and_recovers_at_next_interval() {
         state.error.is_some()
     });
     assert!(state.snapshot.as_ref().expect("cached quota").stale);
-    poll_until(&mut state, now + Duration::from_secs(120), |state| {
+    state.poll(now + Duration::from_secs(179));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    poll_until(&mut state, now + Duration::from_secs(180), |state| {
         state.error.is_none()
     });
     assert!(!state.snapshot.as_ref().expect("fresh quota").stale);
@@ -59,11 +69,15 @@ fn polling_keeps_cache_on_failure_and_recovers_at_next_interval() {
 }
 
 fn workbench() -> gui::headless::HeadlessWorkbench<DemoSource> {
+    workbench_with_calls(0)
+}
+
+fn workbench_with_calls(calls: usize) -> gui::headless::HeadlessWorkbench<DemoSource> {
     let state =
         gui::app::WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
             .expect("workbench")
             .with_quota_backend(Box::new(FakeQuota {
-                calls: Arc::new(AtomicUsize::new(0)),
+                calls: Arc::new(AtomicUsize::new(calls)),
             }));
     let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 800.0]);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -86,15 +100,17 @@ fn frame_loop_polls_injected_source_and_displays_quota() {
 #[test]
 #[ignore = "writes PNG evidence using an offscreen GPU adapter"]
 fn capture_codex_quota_png_evidence() {
-    let mut harness = workbench();
-    assert!(harness.has_label("Codex quota · Plan: plus"));
-    if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
-        let directory =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence");
-        std::fs::create_dir_all(&directory).expect("evidence directory");
-        frame
-            .save_png(&directory.join("codex-quota.png"))
-            .expect("quota PNG");
+    for (name, calls) in [("codex-quota", 0), ("codex-quota-stale", 1)] {
+        let mut harness = workbench_with_calls(calls);
+        assert!(harness.has_label("Codex quota · Plan: plus"));
+        if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
+            let directory =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence");
+            std::fs::create_dir_all(&directory).expect("evidence directory");
+            frame
+                .save_png(&directory.join(format!("{name}.png")))
+                .expect("quota PNG");
+        }
     }
 }
 
@@ -147,10 +163,9 @@ fn quota_snapshot_renders_both_windows_and_plan() {
 fn stale_indicator_shown_when_refresh_failed() {
     // Given: successful quota followed by a failed refresh.
     let mut telemetry = TelemetryOverlay::new();
-    telemetry.quota.accept(Ok(snapshot(false)));
-    telemetry
-        .quota
-        .accept(Err(providers::provider::codex::quota::QuotaError::Timeout));
+    let mut cached = snapshot(true);
+    cached.last_error = Some(QuotaError::Timeout);
+    telemetry.quota.accept(Ok(cached));
     let tasks = TasksModel::new(DemoSource(Vec::new()));
     let mut harness = Harness::builder().build_ui(move |ui| {
         gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
@@ -159,5 +174,20 @@ fn stale_indicator_shown_when_refresh_failed() {
     harness.run();
     // Then: stale is explicit and the last successful usage remains visible.
     harness.get_by_label("Stale · quota refresh failed");
+    harness.get_by_label("Quota error: quota request timed out");
     harness.get_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC");
+}
+
+#[test]
+fn first_failure_shows_unavailable_without_fabricated_usage() {
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.quota.accept(Err(QuotaError::Timeout));
+    let tasks = TasksModel::new(DemoSource(Vec::new()));
+    let mut harness = Harness::builder().build_ui(move |ui| {
+        gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+    });
+    harness.run();
+    harness.get_by_label("Codex quota unavailable · refresh failed");
+    harness.get_by_label("Quota error: quota request timed out");
+    assert!(harness.query_by_label("Codex quota · Plan: plus").is_none());
 }

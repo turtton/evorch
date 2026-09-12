@@ -1,5 +1,9 @@
 use providers::provider::codex::quota::{CodexQuotaClient, QuotaConfig, QuotaError, QuotaSnapshot};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 
 #[async_trait::async_trait]
@@ -18,11 +22,13 @@ impl QuotaBackend for CodexQuotaClient {
     }
 }
 
-type Update = (Box<dyn QuotaBackend>, Result<QuotaSnapshot, QuotaError>);
+type Update = (Result<QuotaSnapshot, QuotaError>, Duration);
 
 struct Job {
-    thread: std::thread::JoinHandle<Option<Update>>,
-    cancel: tokio::sync::oneshot::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+    requests: mpsc::SyncSender<()>,
+    updates: mpsc::Receiver<Update>,
+    stopping: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -34,23 +40,21 @@ pub struct QuotaState {
     next_refresh: Option<Instant>,
     account: Option<String>,
     injected: bool,
+    in_flight: bool,
 }
 
 impl std::fmt::Debug for QuotaState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuotaState")
             .field("snapshot", &self.snapshot)
-            .field("busy", &self.job.is_some())
+            .field("in_flight", &self.in_flight)
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for QuotaState {
     fn drop(&mut self) {
-        if let Some(job) = self.job.take() {
-            let _ = job.cancel.send(());
-            let _ = job.thread.join();
-        }
+        self.stop();
     }
 }
 
@@ -64,6 +68,7 @@ impl QuotaState {
             job: None,
             next_refresh: None,
             account: None,
+            in_flight: false,
         }
     }
 
@@ -75,7 +80,10 @@ impl QuotaState {
         if self.injected || self.account.as_deref() == account {
             return;
         }
-        *self = Self::default();
+        self.stop();
+        self.snapshot = None;
+        self.error = None;
+        self.account = None;
         let (Some(account), Some(store)) = (account, store) else {
             return;
         };
@@ -107,48 +115,97 @@ impl QuotaState {
     }
 
     pub fn poll(&mut self, now: Instant) {
-        if self
-            .job
-            .as_ref()
-            .is_some_and(|job| job.thread.is_finished())
-            && let Some(job) = self.job.take()
-        {
-            match job.thread.join() {
-                Ok(Some((backend, result))) => {
-                    self.next_refresh = Some(
-                        now + backend
-                            .interval()
-                            .clamp(Duration::from_secs(30), Duration::from_secs(600)),
-                    );
-                    self.backend = Some(backend);
-                    self.accept(result);
+        if let Some(job) = &self.job {
+            if job.stopping.load(Ordering::Acquire) {
+                if !job.thread.is_finished() {
+                    return;
                 }
-                Ok(None) | Err(_) => self.accept(Err(QuotaError::Protocol("quota worker stopped"))),
+                if let Some(job) = self.job.take() {
+                    let _ = job.thread.join();
+                }
+                self.in_flight = false;
+                self.next_refresh = None;
+            } else {
+                match job.updates.try_recv() {
+                    Ok((result, interval)) => {
+                        self.in_flight = false;
+                        self.next_refresh = Some(now + interval);
+                        self.accept(result);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.in_flight = false;
+                        self.accept(Err(QuotaError::Protocol("quota worker stopped")));
+                        self.stop();
+                        return;
+                    }
+                }
             }
         }
-        if self.job.is_some() || self.next_refresh.is_some_and(|next| now < next) {
+        if self.job.is_none()
+            && let Some(backend) = self.backend.take()
+        {
+            self.job = Some(start_worker(backend));
+        }
+        if self.in_flight || self.next_refresh.is_some_and(|next| now < next) {
             return;
         }
-        let Some(mut backend) = self.backend.take() else {
-            return;
+        if let Some(job) = &self.job
+            && job.requests.try_send(()).is_ok()
+        {
+            self.in_flight = true;
+        }
+    }
+
+    pub const fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+
+    pub fn stop(&mut self) {
+        self.backend = None;
+        if let Some(job) = &self.job {
+            job.stopping.store(true, Ordering::Release);
+            let _ = job.requests.try_send(());
+        }
+    }
+}
+
+fn start_worker(mut backend: Box<dyn QuotaBackend>) -> Job {
+    let (requests, rx) = mpsc::sync_channel(1);
+    let (tx, updates) = mpsc::channel();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stopping);
+    let thread = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = tx.send((
+                    Err(QuotaError::Process(error.kind())),
+                    Duration::from_secs(60),
+                ));
+                return;
+            }
         };
-        let (cancel, cancelled) = tokio::sync::oneshot::channel();
-        // The state owns and cancels/joins this bounded worker; frames never await I/O.
-        let thread = std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => return Some((backend, Err(QuotaError::Process(error.kind())))),
-            };
-            runtime.block_on(async {
-                tokio::select! {
-                    _ = cancelled => None,
-                    result = backend.fetch() => Some((backend, result)),
-                }
-            })
-        });
-        self.job = Some(Job { thread, cancel });
+        while rx.recv().is_ok() {
+            if stopped.load(Ordering::Acquire) {
+                break;
+            }
+            // Never cancel the fetch future: both sources can take ~20s and need child cleanup.
+            let result = runtime.block_on(backend.fetch());
+            let interval = backend.interval();
+            if stopped.load(Ordering::Acquire) || tx.send((result, interval)).is_err() {
+                break;
+            }
+        }
+        drop(backend);
+    });
+    Job {
+        thread,
+        requests,
+        updates,
+        stopping,
     }
 }
