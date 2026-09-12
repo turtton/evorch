@@ -1,6 +1,6 @@
 /// 論理リクエスト内の部分表示リプレイをチャネルごとに除去する。
 ///
-/// 再生成が表示済み内容と分岐した場合、表示済み長に達してから保留内容を
+/// 再生成が前試行の全文と分岐した場合、その時点で保留内容を
 /// 全量転送し、その試行の残りは無加工で転送する。部分表示には矛盾した文章が
 /// 並び得るが、確定履歴には影響しない（T10）。表示の訂正再送は行わない（T17）。
 pub(crate) struct ReplayDeduper {
@@ -9,8 +9,9 @@ pub(crate) struct ReplayDeduper {
 }
 
 struct ChannelDedup {
-    emitted: String,
+    baseline: String,
     replay: String,
+    attempt: String,
     passthrough: bool,
 }
 
@@ -39,13 +40,18 @@ impl ReplayDeduper {
 impl ChannelDedup {
     const fn new() -> Self {
         Self {
-            emitted: String::new(),
+            baseline: String::new(),
             replay: String::new(),
+            attempt: String::new(),
             passthrough: false,
         }
     }
 
     fn on_new_attempt(&mut self) {
+        if !self.baseline.starts_with(&self.attempt) {
+            self.baseline = std::mem::take(&mut self.attempt);
+        }
+        self.attempt.clear();
         self.replay.clear();
         self.passthrough = false;
     }
@@ -54,22 +60,24 @@ impl ChannelDedup {
         if delta.is_empty() {
             return None;
         }
+        self.attempt.push_str(delta);
         if self.passthrough {
-            self.emitted.push_str(delta);
             return Some(delta.to_owned());
         }
 
         self.replay.push_str(delta);
-        if self.emitted.starts_with(&self.replay) || self.replay.len() < self.emitted.len() {
+        // 保留中の replay は必ず baseline の接頭辞。baseline の全文は初回の即時
+        // 転送と各試行の超過・分岐転送により帰納的に表示済みなので、Completed 時の
+        // 保留内容は既に可視であり flush は不要。短い接頭辞の試行では基準を保持する。
+        if self.baseline.starts_with(&self.replay) {
             return None;
         }
 
-        let forwarded = match self.replay.strip_prefix(self.emitted.as_str()) {
+        let forwarded = match self.replay.strip_prefix(self.baseline.as_str()) {
             Some(excess) => excess.to_owned(),
             None => std::mem::take(&mut self.replay),
         };
         self.replay.clear();
-        self.emitted.push_str(&forwarded);
         self.passthrough = true;
         Some(forwarded)
     }
@@ -123,13 +131,45 @@ mod tests {
         let mut dedup = ReplayDeduper::new();
         dedup.filter_text("Hello");
         dedup.on_new_attempt();
-        // When: 異なる接頭辞が表示済み長に達する。
+        // When: 表示済み長より短い位置で分岐する（issue #108）。
         let results = ["Hi", "!!!", "Hello"].map(|delta| dedup.filter_text(delta));
-        // Then: 長さ到達まで保留し、全バッファを返した後は吸収しない。
+        // Then: 分岐を即転送し、その後は吸収しない。
         assert_eq!(
             results,
-            [None, Some("Hi!!!".to_owned()), Some("Hello".to_owned())]
+            [
+                Some("Hi".to_owned()),
+                Some("!!!".to_owned()),
+                Some("Hello".to_owned())
+            ]
         );
+    }
+
+    #[test]
+    fn divergent_attempt_becomes_next_replay_baseline() {
+        // Given: 初回と異なる二回目の全文を表示済み。
+        let mut dedup = ReplayDeduper::new();
+        dedup.filter_text("Hello");
+        dedup.on_new_attempt();
+        dedup.filter_text("Hi!!!");
+        dedup.on_new_attempt();
+        // When: 三回目が二回目の全文を再生する。
+        let results = ["Hi!!!", " world"].map(|delta| dedup.filter_text(delta));
+        // Then: 二回目の内容を重複表示せず続きだけ返す。
+        assert_eq!(results, [None, Some(" world".to_owned())]);
+    }
+
+    #[test]
+    fn shorter_prefix_attempt_keeps_longer_baseline() {
+        // Given: 二回目は表示済み接頭辞の途中で中断する。
+        let mut dedup = ReplayDeduper::new();
+        dedup.filter_text("Hello wor");
+        dedup.on_new_attempt();
+        dedup.filter_text("Hello");
+        dedup.on_new_attempt();
+        // When: 三回目が元の長い接頭辞を越える。
+        let results = ["Hello wor", "ld!"].map(|delta| dedup.filter_text(delta));
+        // Then: 短い試行で基準を切り詰めない。
+        assert_eq!(results, [None, Some("ld!".to_owned())]);
     }
 
     #[test]

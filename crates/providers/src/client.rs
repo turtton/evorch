@@ -130,6 +130,8 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+    mod divergence;
+
     use super::*;
     use crate::message::{ContentBlock, FinishReason, Message, Role, Usage};
     use crate::stream::StreamEvent;
