@@ -23,11 +23,13 @@ pub struct RecordedRequest {
 }
 
 /// Controls SSE writes, not TCP packet or client read boundaries.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum WriteMode {
     WholeBody,
     #[default]
     FramePerWrite,
+    /// Pause after the first frame until the test releases the remaining response.
+    GatedAfterFirst(Arc<Mutex<std::sync::mpsc::Receiver<()>>>),
 }
 
 /// A local OpenAI-compatible fixture serving SSE or JSON from the same scripts.
@@ -100,6 +102,7 @@ impl StreamingMockOpenAi {
                 let recorded = Arc::clone(&recorded);
                 let queued = Arc::clone(&queued);
                 let models = models.clone();
+                let mode = mode.clone();
                 connections.push(thread::spawn(move || {
                 let result = (|| -> io::Result<()> {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -247,6 +250,19 @@ fn write_sse(
             for frame in response.frames() {
                 stream.write_all(frame.as_bytes())?;
                 stream.flush()?;
+            }
+        }
+        WriteMode::GatedAfterFirst(release) => {
+            for (index, frame) in response.frames().iter().enumerate() {
+                stream.write_all(frame.as_bytes())?;
+                stream.flush()?;
+                if index == 0 {
+                    release
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+                }
             }
         }
     }
