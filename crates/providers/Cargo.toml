@@ -11,6 +11,7 @@ name = "providers"
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 event-bus = { path = "../event-bus" }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
@@ -20,7 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "process", "io-util"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

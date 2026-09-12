@@ -2,6 +2,7 @@
 
 mod client;
 pub mod oauth;
+pub mod quota;
 pub mod session;
 pub mod tokens;
 
