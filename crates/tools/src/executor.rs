@@ -22,6 +22,9 @@ use crate::schema;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
 
+mod prepared;
+pub use prepared::{PreparedToolCall, ValidatedToolCall};
+
 /// ツール実行時の文脈情報。
 ///
 /// [`ToolExecutor::execute`] の必須引数であり、呼び出し元 (AgentRun) が
@@ -225,6 +228,18 @@ impl ToolExecutor {
         call_id: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
+        self.execute_inner(ctx, tool_name, call_id, args, None)
+            .await
+    }
+
+    async fn execute_inner(
+        &self,
+        ctx: &ToolExecutionContext,
+        tool_name: &str,
+        call_id: &str,
+        args: serde_json::Value,
+        authorized: Option<Action>,
+    ) -> Result<ToolResult, ToolError> {
         let Some(registered) = self.tools.get(tool_name) else {
             return Err(ToolError::UnknownTool {
                 name: tool_name.to_string(),
@@ -256,10 +271,12 @@ impl ToolExecutor {
 
         let permissions = registered.tool.permissions();
         let capabilities = capabilities_of(&permissions);
-        let action = resolve(
-            self.policy.classify(tool_name, &capabilities),
-            self.policy.mode(),
-        );
+        let action = authorized.unwrap_or_else(|| {
+            resolve(
+                self.policy.classify(tool_name, &capabilities),
+                self.policy.mode(),
+            )
+        });
         let outcome = match action {
             Action::Proceed => registered.tool.execute(args).await,
             Action::Deny => {

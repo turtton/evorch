@@ -9,7 +9,8 @@ use event_bus::{Event, LifecycleEvent};
 use providers::ToolSpec;
 use sandbox::{ApprovalGate, ApprovalOutcome, PolicyDecision};
 use serde_json::Value;
-use tools::{ToolExecutionContext, ToolResult};
+use tools::executor::PreparedToolCall;
+use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
 use super::LoopState;
 use crate::escalation::detector::ToolObservation;
@@ -29,6 +30,21 @@ enum NetworkGate {
     Cancelled,
 }
 
+enum ReadyCall {
+    Tool(PreparedToolCall),
+    Local,
+    Rejected(ToolResult),
+    Executed(ToolResult),
+    Invalid(tools::ToolError),
+}
+
+struct BatchCall {
+    id: String,
+    name: String,
+    input: Value,
+    ready: ReadyCall,
+}
+
 impl LoopState {
     pub(super) async fn execute_tools(
         &mut self,
@@ -38,6 +54,7 @@ impl LoopState {
             run_id: self.task.run_id.to_string(),
         };
         let mut rule_targets = Vec::new();
+        let mut validated = Vec::with_capacity(tool_uses.len());
         for (id, name, input) in tool_uses {
             if let Some(permit) = &self.task.config.ownership
                 && let Err(error) = permit.validate_mutation()
@@ -45,73 +62,225 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return false;
             }
+            let local = is_meta_op(&name)
+                || matches!(
+                    name.as_str(),
+                    "task_claim" | "task_complete" | "finding_append"
+                );
+            let mut permission = if matches!(
+                name.as_str(),
+                "task_claim" | "task_complete" | "finding_append"
+            ) {
+                Ok(())
+            } else {
+                self.guard_team_artifact(&name, &input)
+                    .and_then(|()| self.policy.authorize(&name).map_err(|e| e.to_string()))
+            };
+            if local && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name) {
+                permission = permission.and_then(|()| {
+                    tools::ToolExecutor::validate_schema(&name, &spec.input_schema, &input)
+                        .map_err(|error| error.to_string())
+                });
+            }
+            let validation = if local {
+                None
+            } else {
+                Some(self.shared.executor.validate_call(
+                    ctx.clone(),
+                    name.clone(),
+                    id.clone(),
+                    input.clone(),
+                ))
+            };
+            validated.push((id, name, input, permission, validation));
+        }
+        let mut calls = std::collections::VecDeque::new();
+        for (id, name, input, permission, validation) in validated {
             if self.cancelled() {
                 self.finish_cancelled();
                 return false;
             }
-            let result = if matches!(
-                name.as_str(),
-                "task_claim" | "task_complete" | "finding_append"
-            ) {
-                self.team_tool(&name, input).await
-            } else if let Err(error) = self.guard_team_artifact(&name, &input) {
-                ToolResult::error(error)
-            } else if let Err(error) = self.policy.authorize(&name) {
-                ToolResult::error(error.to_string())
-            } else if is_meta_op(&name) {
-                let dispatch = meta::dispatch(self, &name, input).await;
-                self.context.push_tool_result(id, dispatch.result);
-                self.publish_message_count();
-                match dispatch.terminal {
-                    meta::Terminal::Continue => continue,
-                    meta::Terminal::Finish(result) => {
-                        self.push_final_result(&result);
-                        self.finish_success();
-                        return false;
-                    }
-                    meta::Terminal::Escalate(memo) => {
-                        // 終端指示を返した時点で残りのバッチ tool call は
-                        // 実行しない (新規 tool call 受付の停止)。
-                        self.finish_escalated(*memo);
-                        return false;
+            let ready = match permission {
+                Err(error) => ReadyCall::Rejected(ToolResult::error(error)),
+                Ok(()) => match validation {
+                    None => ReadyCall::Local,
+                    Some(Err(error)) => match self.gate_network_tool(&name, &id).await {
+                        NetworkGate::Cancelled => return false,
+                        NetworkGate::Reject(result) => ReadyCall::Rejected(result),
+                        NetworkGate::Proceed => ReadyCall::Invalid(error),
+                    },
+                    Some(Ok(call)) => match self.gate_network_tool(&name, &id).await {
+                        NetworkGate::Cancelled => return false,
+                        NetworkGate::Reject(result) => ReadyCall::Rejected(result),
+                        NetworkGate::Proceed => {
+                            let mut cancel = self.channels.cancel_rx.clone();
+                            let authorized = tokio::select! {
+                                biased;
+                                _ = cancel.wait_for(|cancelled| *cancelled) => { self.finish_cancelled(); return false; }
+                                result = call.authorize() => result,
+                            };
+                            match authorized {
+                                Ok(call) => ReadyCall::Tool(call),
+                                Err(error) => {
+                                    ReadyCall::Rejected(ToolResult::error(error.to_string()))
+                                }
+                            }
+                        }
+                    },
+                },
+            };
+            calls.push_back(BatchCall {
+                id,
+                name,
+                input,
+                ready,
+            });
+        }
+        while let Some(first) = calls.pop_front() {
+            let mut wave = vec![first];
+            if self.shared_call(&wave[0]) {
+                while calls.front().is_some_and(|call| self.shared_call(call)) {
+                    if let Some(call) = calls.pop_front() {
+                        wave.push(call);
                     }
                 }
-            } else {
-                match self.gate_network_tool(&name, &id).await {
-                    NetworkGate::Proceed => {}
-                    NetworkGate::Reject(result) => {
-                        self.context.push_tool_result(id, result);
+            }
+            let mut completed = Vec::new();
+            let mut tasks = tokio::task::JoinSet::new();
+            for (index, call) in wave.into_iter().enumerate() {
+                if let Some(permit) = &self.task.config.ownership
+                    && let Err(error) = permit.validate_mutation()
+                {
+                    self.finish_error(error.to_string());
+                    return false;
+                }
+                if self.cancelled() {
+                    self.finish_cancelled();
+                    return false;
+                }
+                let BatchCall {
+                    id,
+                    name,
+                    input,
+                    ready,
+                } = call;
+                match ready {
+                    ReadyCall::Tool(call) => {
+                        let guard = match self.snapshot_before_tool(&name, &id).await {
+                            Ok(guard) => guard,
+                            Err(error) => {
+                                completed.push((
+                                    index,
+                                    id,
+                                    name,
+                                    input,
+                                    ReadyCall::Rejected(ToolResult::error(error)),
+                                ));
+                                continue;
+                            }
+                        };
+                        if let Some(permit) = &self.task.config.ownership
+                            && let Err(error) = permit.validate_mutation()
+                        {
+                            self.finish_error(error.to_string());
+                            return false;
+                        }
+                        let mut cancel = self.channels.cancel_rx.clone();
+                        let bus = Arc::clone(&self.shared.bus);
+                        let run_id = ctx.run_id.clone();
+                        tasks.spawn(async move {
+                            let _guard = guard;
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.wait_for(|cancelled| *cancelled) => {
+                                    bus.emit(Event::new(event_bus::ToolEvent::ToolCompleted {
+                                        tool_name: name.clone(), call_id: id.clone(), is_error: true,
+                                        output: Some("cancelled".into()), detail: None, run_id: Some(run_id),
+                                    }));
+                                    ToolResult::error("cancelled")
+                                },
+                                result = call.execute() => result.unwrap_or_else(|error| ToolResult::error(error.to_string())),
+                            };
+                            (index, id, name, input, ReadyCall::Executed(result))
+                        });
+                    }
+                    ReadyCall::Invalid(error) => {
+                        self.shared.executor.report_invalid_call(
+                            &ctx,
+                            &name,
+                            &id,
+                            input.clone(),
+                            &error,
+                        );
+                        completed.push((
+                            index,
+                            id,
+                            name,
+                            input,
+                            ReadyCall::Rejected(ToolResult::error(error.to_string())),
+                        ));
+                    }
+                    ready => completed.push((index, id, name, input, ready)),
+                }
+            }
+            let mut join_error = None;
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Ok(result) => completed.push(result),
+                    Err(error) => {
+                        join_error = Some(error.to_string());
+                    }
+                }
+            }
+            if let Some(error) = join_error {
+                self.finish_error(error);
+                return false;
+            }
+            completed.sort_by_key(|(index, ..)| *index);
+            for (_, id, name, input, ready) in completed {
+                if let Some(permit) = &self.task.config.ownership
+                    && let Err(error) = permit.validate_mutation()
+                {
+                    self.finish_error(error.to_string());
+                    return false;
+                }
+                let observed = matches!(&ready, ReadyCall::Executed(_));
+                let result =
+                    if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
+                        result
+                    } else if matches!(
+                        name.as_str(),
+                        "task_claim" | "task_complete" | "finding_append"
+                    ) {
+                        self.team_tool(&name, input.clone()).await
+                    } else if let Err(error) = self.guard_team_artifact(&name, &input) {
+                        ToolResult::error(error)
+                    } else if let Err(error) = self.policy.authorize(&name) {
+                        ToolResult::error(error.to_string())
+                    } else if is_meta_op(&name) {
+                        let dispatch = meta::dispatch(self, &name, input).await;
+                        self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
-                        continue;
-                    }
-                    NetworkGate::Cancelled => return false,
-                }
+                        match dispatch.terminal {
+                            meta::Terminal::Continue => continue,
+                            meta::Terminal::Finish(result) => {
+                                self.push_final_result(&result);
+                                self.finish_success();
+                                return false;
+                            }
+                            meta::Terminal::Escalate(memo) => {
+                                // 終端指示を返した時点で残りのバッチ tool call は
+                                // 実行しない (新規 tool call 受付の停止)。
+                                self.finish_escalated(*memo);
+                                return false;
+                            }
+                        }
+                    } else {
+                        ToolResult::error("invalid prepared local call")
+                    };
                 let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
                     .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                     .flatten();
-                let _snapshot_guard = match self.snapshot_before_tool(&name, &id).await {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        self.context.push_tool_result(id, ToolResult::error(error));
-                        self.publish_message_count();
-                        continue;
-                    }
-                };
-                let execution = tokio::select! {
-                    biased;
-                    changed = self.channels.cancel_rx.changed() => {
-                        if changed.is_ok() && self.cancelled() {
-                            self.finish_cancelled();
-                            return false;
-                        }
-                        continue;
-                    }
-                    result = self.shared.executor.execute(&ctx, &name, &id, input) => result,
-                };
-                let result = match execution {
-                    Ok(result) => result,
-                    Err(error) => ToolResult::error(error.to_string()),
-                };
                 // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
                 // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
                 let observation_path = if name == "edit" {
@@ -119,14 +288,16 @@ impl LoopState {
                 } else {
                     None
                 };
-                if let Some(trigger) = self.escalation_detector.observe(
-                    &ToolObservation {
-                        tool: name.as_str(),
-                        path: observation_path,
-                        is_error: result.is_error,
-                    },
-                    &self.shared.escalation,
-                ) {
+                if observed
+                    && let Some(trigger) = self.escalation_detector.observe(
+                        &ToolObservation {
+                            tool: name.as_str(),
+                            path: observation_path,
+                            is_error: result.is_error,
+                        },
+                        &self.shared.escalation,
+                    )
+                {
                     self.shared
                         .bus
                         .emit(Event::new(LifecycleEvent::EscalationProposed {
@@ -134,21 +305,25 @@ impl LoopState {
                             trigger,
                         }));
                 }
-                if !result.is_error
+                if observed
+                    && !result.is_error
                     && let Some(target) = rule_target
                 {
                     rule_targets.push(target);
                 }
-                result
-            };
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.validate_mutation()
-            {
-                self.finish_error(error.to_string());
+                if let Some(permit) = &self.task.config.ownership
+                    && let Err(error) = permit.validate_mutation()
+                {
+                    self.finish_error(error.to_string());
+                    return false;
+                }
+                self.context.push_tool_result(id, result);
+                self.publish_message_count();
+            }
+            if self.cancelled() {
+                self.finish_cancelled();
                 return false;
             }
-            self.context.push_tool_result(id, result);
-            self.publish_message_count();
         }
         if !rule_targets.is_empty()
             && let Some(session) = &mut self.rules_session
@@ -158,6 +333,20 @@ impl LoopState {
             self.publish_message_count();
         }
         true
+    }
+
+    fn shared_call(&self, call: &BatchCall) -> bool {
+        !is_meta_op(&call.name)
+            && !matches!(
+                call.name.as_str(),
+                "task_claim" | "task_complete" | "finding_append"
+            )
+            && !self
+                .shared
+                .executor
+                .tool_permissions(&call.name)
+                .is_some_and(|permissions| permissions.fs_write)
+            && self.shared.executor.tool_execution_mode(&call.name) == ToolExecutionMode::Shared
     }
 
     /// network 権限を持つツールに 3 層 AND 判定 (role / per-tool / session) を適用する。
