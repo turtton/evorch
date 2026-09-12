@@ -3,6 +3,8 @@ use crate::RunRestoreFailure;
 use crate::restore::{RestoredState, RunRestoreDescriptor};
 
 mod registration;
+#[cfg(test)]
+mod tests;
 
 impl AgentRuntime {
     pub(super) fn restore_and_deliver(
@@ -15,6 +17,7 @@ impl AgentRuntime {
             run_id: recipient.to_string(),
             reason,
         };
+        let mut live_retry_available = true;
         loop {
             let previous = {
                 let runs = lock_runs(&self.shared.runs);
@@ -22,13 +25,20 @@ impl AgentRuntime {
                     if is_live(entry) {
                         drop(runs);
                         self.validate_run_mutation(recipient)?;
-                        return self.prepare_delivery(
+                        let result = self.try_live_delivery(
                             sender,
                             recipient,
-                            message.kind,
-                            message.content,
-                            message.reply_to,
+                            message.kind.clone(),
+                            message.content.clone(),
+                            message.reply_to.clone(),
                         );
+                        match result {
+                            Err(RuntimeError::RunTerminated { .. }) if live_retry_available => {
+                                live_retry_available = false;
+                                continue;
+                            }
+                            result => return result,
+                        }
                     }
                     self.authorize_restore(&runs, sender, (recipient, entry.parent), &message)?;
                     Some(Arc::clone(&entry.mailbox))
@@ -43,10 +53,10 @@ impl AgentRuntime {
                     unknown_run(recipient)
                 }
             })?;
-            let record = store
-                .restore_record(recipient)
+            let identity = store
+                .restore_parent(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-            let Some(record) = record else {
+            let Some(parent_id) = identity else {
                 let known = previous.is_some()
                     || !store
                         .ledger_entries(recipient)
@@ -60,8 +70,7 @@ impl AgentRuntime {
                     unknown_run(recipient)
                 });
             };
-            let parent = record
-                .parent_run_id
+            let parent = parent_id
                 .as_deref()
                 .map(|id| {
                     id.strip_prefix("run-")
@@ -80,6 +89,15 @@ impl AgentRuntime {
                     &message,
                 )?;
             }
+            if store.snapshot_failed(recipient) {
+                return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                    "persist_failed".into(),
+                )));
+            }
+            let record = store
+                .restore_record(recipient)
+                .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
+                .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
             let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
             if !record.restorable || !descriptor.restorable {
@@ -132,13 +150,20 @@ impl AgentRuntime {
                 (_, Some(entry)) if is_live(entry) => {
                     drop(runs);
                     self.validate_run_mutation(recipient)?;
-                    return self.prepare_delivery(
+                    let result = self.try_live_delivery(
                         sender,
                         recipient,
-                        message.kind,
-                        message.content,
-                        message.reply_to,
+                        message.kind.clone(),
+                        message.content.clone(),
+                        message.reply_to.clone(),
                     );
+                    match result {
+                        Err(RuntimeError::RunTerminated { .. }) if live_retry_available => {
+                            live_retry_available = false;
+                            continue;
+                        }
+                        result => return result,
+                    }
                 }
                 (Some(old), Some(entry)) if Arc::ptr_eq(old, &entry.mailbox) => {}
                 (None, None) => {}
@@ -220,8 +245,9 @@ impl AgentRuntime {
 }
 
 fn is_live(entry: &RunEntry) -> bool {
-    matches!(
-        *entry.phase_rx.borrow(),
-        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
-    )
+    !entry.mailbox.is_closed()
+        && matches!(
+            *entry.phase_rx.borrow(),
+            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+        )
 }

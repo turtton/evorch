@@ -1,3 +1,5 @@
+#[path = "restore/blockers.rs"]
+mod blockers;
 #[path = "restore/concurrent.rs"]
 mod concurrent;
 #[path = "restore/send.rs"]

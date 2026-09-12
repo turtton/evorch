@@ -232,6 +232,9 @@ impl AgentRuntime {
 
     /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
     pub fn with_run_store(self, store: crate::RunStore) -> Self {
+        self.shared
+            .next_run_id
+            .fetch_max(store.next_run_id, Ordering::Relaxed);
         let _ = self.shared.run_store.set(store);
         self
     }
@@ -1060,6 +1063,37 @@ impl AgentRuntime {
         content: String,
         reply_to: Option<String>,
     ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        match self.try_live_delivery(
+            sender,
+            recipient,
+            kind.clone(),
+            content.clone(),
+            reply_to.clone(),
+        ) {
+            Err(RuntimeError::RunTerminated { .. }) => self.restore_and_deliver(
+                sender,
+                recipient,
+                AgentMessage {
+                    message_id: String::new(),
+                    sender_run_id: sender.to_string(),
+                    recipient_run_id: recipient.to_string(),
+                    kind,
+                    content,
+                    reply_to,
+                },
+            ),
+            result => result,
+        }
+    }
+
+    fn try_live_delivery(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        kind: AgentMessageKind,
+        content: String,
+        reply_to: Option<String>,
+    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
         let runs = lock_runs(&self.shared.runs);
         let sender_entry = runs.get(&sender).ok_or_else(|| unknown_run(sender))?;
         let recipient_entry = runs.get(&recipient).ok_or_else(|| unknown_run(recipient))?;
@@ -1092,6 +1126,11 @@ impl AgentRuntime {
         }
 
         let phase = *recipient_entry.phase_rx.borrow();
+        if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
+            return Err(RuntimeError::RunTerminated {
+                run_id: recipient.to_string(),
+            });
+        }
         let mut sent = self
             .shared
             .sent

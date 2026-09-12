@@ -19,6 +19,41 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
+    /// Read only the identity needed to authorize access to a run's context.
+    ///
+    /// # Errors
+    /// Returns an error if the identity column cannot be read.
+    pub fn run_context_parent(&self, run_id: &str) -> Result<Option<Option<String>>, StorageError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT parent_run_id FROM run_contexts WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Highest numeric run ID reserved by a context snapshot.
+    ///
+    /// # Errors
+    /// Returns an error for unreadable rows or invalid run IDs.
+    pub fn max_run_context_run_id(&self) -> Result<u64, StorageError> {
+        let mut statement = self.conn.prepare("SELECT run_id FROM run_contexts")?;
+        let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut maximum = 0;
+        for id in ids {
+            let id = id?;
+            let numeric = id
+                .strip_prefix("run-")
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| StorageError::Serialization(format!("invalid run ID: {id}")))?;
+            maximum = maximum.max(numeric);
+        }
+        Ok(maximum)
+    }
+
     /// Return a run's ledger entries in global sequence order.
     ///
     /// # Errors
