@@ -1,10 +1,17 @@
 use egui::Ui;
 use workspace_ui::ThreadRunPhase;
 
-use crate::theme::tokens::{FONT_SMALL, RUNNING, SURFACE_RAISED, phase_color};
+use crate::theme::tokens::{
+    CANVAS, FONT_BADGE, FONT_SMALL, INFO, R_SM, RUNNING, SP_1, STATUS_STROKE, SURFACE_RAISED,
+    phase_color,
+};
 use crate::theme::widgets::badge;
 
 pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
+    phase_indicator_with_ack(ui, phase, true);
+}
+
+pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool) {
     let label = match phase {
         ThreadRunPhase::Running => "running",
         ThreadRunPhase::Waiting => "waiting (input)",
@@ -12,11 +19,39 @@ pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
         ThreadRunPhase::Done => "done",
         ThreadRunPhase::Error => "error",
     };
-    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+    ui.horizontal(|ui| {
         if phase == ThreadRunPhase::Running {
             ui.add(egui::Spinner::new().size(FONT_SMALL).color(RUNNING));
         }
-        badge(ui, label, phase_color(phase), SURFACE_RAISED);
+        match phase {
+            ThreadRunPhase::Pending | ThreadRunPhase::Running => {
+                badge(ui, label, phase_color(phase), SURFACE_RAISED);
+            }
+            ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
+                let accent = match phase {
+                    ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
+                        phase_color(phase)
+                    }
+                    ThreadRunPhase::Waiting | ThreadRunPhase::Done => INFO,
+                };
+                egui::Frame::new()
+                    .fill(if unread {
+                        accent
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .stroke(egui::Stroke::new(STATUS_STROKE, accent))
+                    .corner_radius(egui::CornerRadius::same(R_SM))
+                    .inner_margin(egui::Margin::symmetric(SP_1 as i8, 0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(FONT_BADGE)
+                                .color(if unread { CANVAS } else { accent }),
+                        );
+                    });
+            }
+        }
     });
 }
 
@@ -57,7 +92,7 @@ mod tests {
             .iter()
             .filter(|shape| {
                 matches!(&shape.shape, Shape::Rect(rect)
-                if rect.fill == crate::theme::tokens::SURFACE_RAISED)
+                if rect.fill == crate::theme::tokens::SURFACE_RAISED || rect.fill == INFO)
             })
             .count()
     }

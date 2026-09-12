@@ -18,6 +18,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             !panel_id.as_str().starts_with("agent-run-") || self.dock.find_tab(panel_id).is_some()
         });
         let ctx = ui.ctx().clone();
+        self.observe_attention();
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut diff_request = None;
@@ -29,6 +30,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let tab_style = dock_style.tab.clone();
         {
             let mut viewer = WorkbenchTabViewer {
+                attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 arena: &mut self.arena,
                 transcripts: &self.transcripts,

@@ -4,7 +4,7 @@ use egui_dock::TabViewer;
 use workspace_ui::{Panel, PanelId, PanelKind, SidebarState};
 
 use super::ConversationFocus;
-use super::attention::{AttentionInputs, PaneAttention, attention_for};
+use super::attention::{PaneAttention, ack::AttentionAck, acknowledged_attention};
 use crate::diff::{DiffMode, DiffModel};
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::tasks::{AgentRunSource, TasksModel};
@@ -24,6 +24,7 @@ use crate::panes::{
 use crate::pty::PtySession;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
+    pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) transcripts: &'a TranscriptRegistry,
@@ -52,20 +53,10 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
     fn attention_for_tab(&self, tab: &PanelId) -> PaneAttention {
-        let Some(panel) = self.panels.get(tab) else {
-            return PaneAttention::None;
-        };
-        attention_for(
-            panel.kind,
-            panel.target.as_deref(),
-            &AttentionInputs {
-                phases: self.phases,
-                tasks_rows: self.tasks.rows(),
-            },
-        )
+        acknowledged_attention(self.attention_acks, tab)
     }
 
-    fn agent_tab_ui(&mut self, ui: &mut egui::Ui) {
+    fn agent_tab_ui(&mut self, ui: &mut egui::Ui, tab: &PanelId) {
         let (transcript, identity) = match self.focus {
             ConversationFocus::Thread => (self.transcripts.thread(), None),
             ConversationFocus::Agent(run_id) => {
@@ -94,12 +85,17 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .as_ref()
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
         let ctx = ConversationContext {
+            phase_unread: self
+                .attention_acks
+                .iter()
+                .any(|((id, _), ack)| id == tab && ack.is_unread()),
             has_project: self.sidebar.selected_project.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
-            phase: active_thread
-                .and_then(|thread| thread.run_ids.last())
-                .and_then(|run_id| self.phases.get(run_id))
-                .copied(),
+            phase: self
+                .attention_acks
+                .iter()
+                .find(|((id, _), _)| id == tab)
+                .map(|(_, ack)| ack.phase()),
             next_thread_title: format!("thread-{}", self.sidebar.threads.len() + 1),
             model_picker: crate::panes::model_picker::ModelPickerContext {
                 profiles: self.profiles,
@@ -171,8 +167,15 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
         let Some(panel) = self.panels.get(tab) else {
             return;
         };
+        let displayed: Vec<_> = self
+            .attention_acks
+            .iter()
+            .filter(|((id, _), _)| id == tab)
+            .map(|(key, ack)| (key.clone(), ack.revision()))
+            .collect();
+        let surface_visible = ui.is_visible() && ui.clip_rect().intersects(ui.max_rect());
         match panel.kind {
-            PanelKind::Agent => self.agent_tab_ui(ui),
+            PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {
                 if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases) {
                     *self.sidebar_action = Some(action);
@@ -185,6 +188,13 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::AgentTranscript => {
                 let run_id = panel.target.as_deref().unwrap_or_default();
+                if let Some(ack) = self.attention_acks.get(&(tab.clone(), run_id.to_owned())) {
+                    crate::panes::phase_indicator::phase_indicator_with_ack(
+                        ui,
+                        ack.phase(),
+                        ack.is_unread(),
+                    );
+                }
                 agent_transcript_pane(ui, run_id, self.transcripts.run(run_id));
             }
             PanelKind::Diff => {
@@ -218,6 +228,17 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .map(ToString::to_string);
                 self.arena
                     .render(ui, self.memory.config.as_ref().zip(project.as_deref()));
+            }
+        }
+        if surface_visible {
+            let focused = ui.input(|input| input.viewport().focused);
+            for (key, revision) in displayed {
+                if let Some(ack) = self.attention_acks.get_mut(&key) {
+                    let unread = ack.is_unread();
+                    if ack.acknowledge_surface(Some(&revision), focused) && unread {
+                        ui.ctx().request_repaint();
+                    }
+                }
             }
         }
     }

@@ -32,6 +32,7 @@ pub enum ConversationFocus {
 
 /// フレームごとにイベント・レイアウト・描画を統合する状態です。
 pub struct WorkbenchState<S> {
+    pub(super) attention_acks: BTreeMap<(PanelId, String), super::attention::ack::AttentionAck>,
     pub(super) external_job: Option<super::external_commands::Job>,
     pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) memory: crate::panes::memory::MemoryPane,
@@ -90,6 +91,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut dock = to_dock_state(&workspace)?;
         crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
         let mut state = Self {
+            attention_acks: BTreeMap::new(),
             external_job: None,
             arena: crate::panes::arena::ArenaPane::default(),
             memory: crate::panes::memory::MemoryPane::default(),

@@ -7,7 +7,6 @@ use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
-use crate::panes::phase_indicator::phase_indicator;
 use crate::panes::sidebar::SidebarAction;
 use crate::theme::text::h3;
 use crate::theme::tokens::*;
@@ -22,6 +21,7 @@ pub struct AgentIdentity<'a> {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
+    pub phase_unread: bool,
     pub has_project: bool,
     pub active_thread_title: Option<&'a str>,
     pub phase: Option<ThreadRunPhase>,
@@ -127,11 +127,15 @@ fn header_strip(
                 }
             } else if let Some(title) = ctx.active_thread_title {
                 ui.label(h3(format!("Thread: {title}")));
-                if let Some(phase) = ctx.phase {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        phase_indicator(ui, phase);
-                    });
-                }
+            }
+            if let Some(phase) = ctx.phase {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::panes::phase_indicator::phase_indicator_with_ack(
+                        ui,
+                        phase,
+                        ctx.phase_unread,
+                    );
+                });
             }
         });
     });
@@ -263,6 +267,7 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
+                        phase_unread: true,
                         has_project: true,
                         active_thread_title: Some("Chat"),
                         phase: Some(phase),

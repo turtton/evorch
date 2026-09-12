@@ -9,13 +9,12 @@ use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
 
 use super::WorkbenchState;
 use crate::model::tasks::{AgentRunSource, TaskRow};
-use crate::theme::tokens::{ERROR_FG, INFO, WARNING_FG};
+use crate::theme::tokens::{ERROR_FG, INFO};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PaneAttention {
     None,
     Info,
-    Warning,
     Error,
 }
 
@@ -24,7 +23,6 @@ impl PaneAttention {
         match self {
             PaneAttention::None => None,
             PaneAttention::Info => Some(INFO),
-            PaneAttention::Warning => Some(WARNING_FG),
             PaneAttention::Error => Some(ERROR_FG),
         }
     }
@@ -60,29 +58,99 @@ pub(super) fn attention_for(
 
 const fn agent_run_attention(phase: AgentRunPhase) -> PaneAttention {
     match phase {
-        AgentRunPhase::Pending | AgentRunPhase::Done => PaneAttention::None,
-        AgentRunPhase::Running => PaneAttention::Info,
-        AgentRunPhase::Waiting => PaneAttention::Warning,
+        AgentRunPhase::Pending | AgentRunPhase::Running => PaneAttention::None,
+        AgentRunPhase::Done | AgentRunPhase::Waiting => PaneAttention::Info,
         AgentRunPhase::Error => PaneAttention::Error,
     }
 }
 
 const fn thread_phase_attention(phase: ThreadRunPhase) -> PaneAttention {
     match phase {
-        ThreadRunPhase::Pending | ThreadRunPhase::Done => PaneAttention::None,
-        ThreadRunPhase::Running => PaneAttention::Info,
-        ThreadRunPhase::Waiting => PaneAttention::Warning,
+        ThreadRunPhase::Pending | ThreadRunPhase::Running => PaneAttention::None,
+        ThreadRunPhase::Done | ThreadRunPhase::Waiting => PaneAttention::Info,
         ThreadRunPhase::Error => PaneAttention::Error,
     }
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub(super) fn observe_attention(&mut self) {
+        let mut observed = BTreeMap::new();
+        for (id, panel) in &self.panels {
+            let runs: Vec<(String, ThreadRunPhase)> = match panel.kind {
+                PanelKind::Agent => match &self.focus {
+                    super::ConversationFocus::Thread => self
+                        .sidebar
+                        .active_thread
+                        .as_ref()
+                        .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id))
+                        .and_then(|thread| thread.run_ids.last())
+                        .and_then(|run| self.phases.get(run).map(|phase| (run.clone(), *phase)))
+                        .into_iter()
+                        .collect(),
+                    super::ConversationFocus::Agent(run) => self
+                        .phases
+                        .get(run)
+                        .map(|phase| (run.clone(), *phase))
+                        .into_iter()
+                        .collect(),
+                },
+                PanelKind::AgentTranscript => panel
+                    .target
+                    .as_ref()
+                    .and_then(|run| self.phases.get(run).map(|phase| (run.clone(), *phase)))
+                    .into_iter()
+                    .collect(),
+                PanelKind::Agents | PanelKind::Tasks => self
+                    .tasks
+                    .rows()
+                    .iter()
+                    .map(|row| {
+                        let phase = match row.status {
+                            AgentRunPhase::Pending => ThreadRunPhase::Pending,
+                            AgentRunPhase::Running => ThreadRunPhase::Running,
+                            AgentRunPhase::Waiting => ThreadRunPhase::Waiting,
+                            AgentRunPhase::Done => ThreadRunPhase::Done,
+                            AgentRunPhase::Error => ThreadRunPhase::Error,
+                        };
+                        (row.run_id.to_string(), phase)
+                    })
+                    .collect(),
+                PanelKind::Sidebar
+                | PanelKind::Diff
+                | PanelKind::Terminal
+                | PanelKind::Memory
+                | PanelKind::Arena => Vec::new(),
+            };
+            for (run, phase) in runs {
+                observed.insert((id.clone(), run), phase);
+            }
+        }
+        self.attention_acks
+            .retain(|key, _| observed.contains_key(key));
+        for (key, phase) in observed {
+            let ack = self
+                .attention_acks
+                .entry(key)
+                .or_insert_with(Self::new_attention_ack);
+            if ack.observe(phase).is_err() {
+                // A fresh lifetime invalidates outstanding tokens if the sequence is exhausted.
+                *ack = Self::new_attention_ack();
+                if ack.observe(phase).is_err() {
+                    continue;
+                }
+            }
+        }
+    }
+
     /// Creates state for one pane/thread lifetime; the renderer owns and retains it.
     pub fn new_attention_ack() -> ack::AttentionAck {
         ack::AttentionAck::default()
     }
 
     pub fn pane_attention(&self, panel_id: &PanelId) -> Option<Color32> {
+        if self.attention_acks.keys().any(|(id, _)| id == panel_id) {
+            return acknowledged_attention(&self.attention_acks, panel_id).color();
+        }
         let panel = self.panels.get(panel_id)?;
         attention_for(
             panel.kind,
@@ -94,6 +162,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         )
         .color()
     }
+}
+
+pub(super) fn acknowledged_attention(
+    acks: &BTreeMap<(PanelId, String), ack::AttentionAck>,
+    panel: &PanelId,
+) -> PaneAttention {
+    acks.iter()
+        .filter(|((id, _), ack)| id == panel && ack.is_unread())
+        .map(|(_, ack)| thread_phase_attention(ack.phase()))
+        .fold(PaneAttention::None, PaneAttention::max)
 }
 
 #[cfg(test)]
@@ -111,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_transcript_is_warning() {
+    fn waiting_transcript_is_info() {
         let phases = BTreeMap::from([("run-1".to_owned(), ThreadRunPhase::Waiting)]);
         let inputs = AttentionInputs {
             phases: &phases,
@@ -120,9 +198,9 @@ mod tests {
 
         assert_eq!(
             attention_for(PanelKind::AgentTranscript, Some("run-1"), &inputs),
-            PaneAttention::Warning
+            PaneAttention::Info
         );
-        assert_eq!(PaneAttention::Warning.color(), Some(WARNING_FG));
+        assert_eq!(PaneAttention::Info.color(), Some(INFO));
     }
 
     #[test]
@@ -141,11 +219,11 @@ mod tests {
     }
 
     #[test]
-    fn running_agents_mark_agents_tab_as_info() {
+    fn running_agents_do_not_request_unread_emphasis() {
         // Given: one running and one done run
         let rows = [
             task_row(AgentRunPhase::Running),
-            task_row(AgentRunPhase::Done),
+            task_row(AgentRunPhase::Pending),
         ];
         let inputs = AttentionInputs {
             phases: &BTreeMap::new(),
@@ -156,7 +234,7 @@ mod tests {
         for kind in [PanelKind::Agents, PanelKind::Tasks] {
             assert_eq!(
                 attention_for(kind, None, &inputs),
-                PaneAttention::Info,
+                PaneAttention::None,
                 "{kind:?}"
             );
         }
