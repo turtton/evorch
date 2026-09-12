@@ -48,14 +48,12 @@ pub(crate) enum SnapshotError {
 
 pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
     let result = write_terminal_snapshot(state);
-    if result.is_err() {
-        if let Some(runtime) = state.runtime() {
-            if let Some(store) = runtime.shared.run_store.get() {
-                if let Err(error) = store.invalidate_snapshot(state.caller_run_id()) {
-                    tracing::warn!(run_id = %state.caller_run_id(), %error, "terminal snapshot invalidation failed");
-                }
-            }
-        }
+    if result.is_err()
+        && let Some(runtime) = state.runtime()
+        && let Some(store) = runtime.shared.run_store.get()
+        && let Err(error) = store.invalidate_snapshot(state.caller_run_id())
+    {
+        tracing::warn!(run_id = %state.caller_run_id(), %error, "terminal snapshot invalidation failed");
     }
     result
 }
