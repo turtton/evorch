@@ -12,14 +12,14 @@ fn notifications_append_to_custom_agents_leaf_when_current_layout_lacks_panel() 
     let LayoutNode::Split(content) = root.second.as_mut() else {
         panic!("split")
     };
-    content.second = Box::new(LayoutNode::Tabs(Tabs {
+    *content.second = LayoutNode::Tabs(Tabs {
         panels: vec![
             PanelId::new("terminal-main"),
             PanelId::new("diff-main"),
             PanelId::new("agents-main"),
         ],
         active: 1,
-    }));
+    });
     let source = to_json(&legacy).unwrap();
     let mut expected = legacy.main.clone();
     let LayoutNode::Split(root) = &mut expected.root else {
