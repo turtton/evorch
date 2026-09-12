@@ -94,12 +94,13 @@ impl RoleSettingsModel {
     }
 }
 
-pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingConfig); 7] {
+pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingConfig); 8] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
         ("worker", &agents.worker),
         ("reviewer", &agents.reviewer),
+        ("roles.librarian", &agents.roles.librarian),
         ("roles.planner", &agents.roles.planner),
         ("roles.oracle", &agents.roles.oracle),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),

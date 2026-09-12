@@ -39,6 +39,7 @@ pub fn role_settings_modal(
                             ("Explorer", &mut agents.explorer),
                             ("Worker", &mut agents.worker),
                             ("Reviewer", &mut agents.reviewer),
+                            ("Librarian", &mut agents.roles.librarian),
                             ("Planner", &mut agents.roles.planner),
                             ("Oracle", &mut agents.roles.oracle),
                             ("Multimodal Looker", &mut agents.roles.multimodal_looker),
@@ -89,9 +90,6 @@ pub fn role_settings_modal(
                                 });
                             });
                         }
-                        ui.label(muted(
-                            "Librarian: not available in the current config schema",
-                        ));
                     });
             });
             if let Some(error) = &model.error {

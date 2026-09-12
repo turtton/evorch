@@ -121,6 +121,37 @@ fn category_override_editable_per_role() {
 }
 
 #[test]
+fn librarian_row_saves_when_model_selected() {
+    // Given: the real role settings modal with distinct routes.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, model) = fixture(temp.path());
+    harness.run();
+    // When: editing the librarian row and saving through its controls.
+    harness.click_label("Librarian");
+    harness.run();
+    harness.click_label("Role logical model");
+    harness.run();
+    harness.click_label("fast");
+    harness.run();
+    harness.click_label("Save role settings");
+    harness.step();
+    finish(&mut harness);
+    // Then: the saved binding is reseeded and used by the live runtime.
+    assert_eq!(harness.state().role_settings().error, None);
+    assert_eq!(
+        harness
+            .state()
+            .role_settings()
+            .agents
+            .binding_for("librarian", None)
+            .expect("saved librarian")
+            .logical_model,
+        "fast"
+    );
+    assert_eq!(model.selected_model(Role::Librarian), "accelerated/fast");
+}
+
+#[test]
 fn validation_error_blocks_save() {
     // Given: unknown and empty explicit model assignments.
     for name in ["unknown", ""] {
@@ -223,9 +254,9 @@ fn capture_role_settings_png_evidence() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     harness.run();
-    harness.click_label("Worker");
+    harness.click_label("Librarian");
     harness.run();
-    harness.click_label("quick");
+    harness.click_label("research");
     harness.run();
     // When: capturing the real egui surface offscreen.
     let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
