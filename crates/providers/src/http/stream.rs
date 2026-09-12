@@ -120,10 +120,33 @@ impl<I: WireStreamInterpreter> SsePump<I> {
     /// 入力終端を消化する。パーサーの残りを処理してから
     /// インタプリタの終端処理を行い、以降の入力読み込みを止める。
     fn finish_tail(&mut self) {
-        match self.parser.finish() {
-            Ok(frames) => self.absorb(frames),
-            Err(err) => {
-                self.fail_with_sse_error(err);
+        let tail = self
+            .parser
+            .finish()
+            .map_err(|err| ProviderError::InvalidSse { detail: err.detail })
+            .and_then(|frames| {
+                frames.into_iter().try_for_each(|frame| {
+                    if !self.done {
+                        let interpretation = self.interpreter.interpret(frame)?;
+                        self.absorb_interpretation(interpretation);
+                    }
+                    Ok(())
+                })
+            });
+        match tail {
+            Ok(()) => {}
+            Err(ProviderError::InvalidJson { .. } | ProviderError::InvalidSse { .. }) => {
+                // issue #108: 未終端 tail の解析失敗は切断として扱い、エラー項目や
+                // finish による完了を流さず、上位の中途 EOF リトライへ委ねる。
+                tracing::debug!("truncated SSE tail discarded at EOF");
+                self.observer.emit_failed(&ProviderError::Request(
+                    "stream ended without completion signal".to_string(),
+                ));
+                self.done = true;
+                return;
+            }
+            Err(error) => {
+                self.push_transport_error(error);
                 return;
             }
         }

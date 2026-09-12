@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use event_bus::{Event, EventBus, EventKind, MessageEvent};
+use futures_util::FutureExt;
 use providers::provider::openai::{OpenAiClient, OpenAiConfig};
 use providers::{
     ChatRequest, ChatResponse, ContentBlock, ProviderAuth, ProviderClient, ProviderError,
@@ -83,6 +84,35 @@ async fn mid_stream_disconnect_retries_and_preserves_display() {
     }
     assert_eq!(display, "partial tail");
     assert_eq!(server.connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn mid_frame_disconnect_retries_and_deduplicates_complete_prefix() {
+    // Given: 完全な接頭辞の次の JSON フレーム途中で切断し、次の接続で完了する。
+    let server = TcpMockServer::start(vec![
+        TcpBehavior::PartialThenDrop(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"choices\":",
+        )),
+        TcpBehavior::FullSse(FULL),
+    ]);
+    let bus = EventBus::new(32);
+    let mut receiver = bus.subscribe();
+    // When: 実 HTTP と send_streaming を通して完了を待つ。
+    let result = send(&server.base_url, &bus).await;
+    // Then: 2接続で成功し、完全な接頭辞は一度だけ表示する。
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(server.connections.load(Ordering::SeqCst), 2);
+    let mut display = String::new();
+    while let Some(event) = receiver.recv().now_or_never() {
+        match event.expect("表示イベント").kind {
+            EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
+                display.push_str(&delta);
+            }
+            other => panic!("予期しない表示イベント: {other:?}"),
+        }
+    }
+    assert_eq!(display, "partial tail");
 }
 
 #[tokio::test]
