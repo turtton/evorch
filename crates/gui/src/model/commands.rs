@@ -153,6 +153,25 @@ pub enum LoopEvent {
 
 pub trait CommandSink: Send {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent>;
+    fn submit_chat_with_permit(
+        &mut self,
+        chat: ChatSubmission,
+        permit: runtime::ownership::OwnerPermit,
+    ) -> Vec<LoopEvent> {
+        if permit.thread_id != chat.thread_id {
+            return vec![LoopEvent::ChatRejected {
+                thread_id: chat.thread_id,
+                reason: "write-mode permit belongs to another thread".into(),
+            }];
+        }
+        if let Err(error) = permit.validate_generation() {
+            return vec![LoopEvent::ChatRejected {
+                thread_id: chat.thread_id,
+                reason: error.to_string(),
+            }];
+        }
+        self.submit(WorkbenchCommand::SendChat(chat))
+    }
     fn poll(&mut self) -> Vec<LoopEvent> {
         Vec::new()
     }

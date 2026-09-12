@@ -29,6 +29,17 @@ const MISSING_TOKEN_REASON: &str =
 
 const CHAT_ROLE: Role = Role::Worker;
 
+pub fn finish_chat_start(
+    host: &runtime::ownership::OwnerHost,
+    thread: &str,
+    result: Result<runtime::ownership::OwnerPermit, runtime::ownership::RegistryError>,
+) -> Result<runtime::ownership::OwnerPermit, runtime::ownership::RegistryError> {
+    match result {
+        Err(runtime::ownership::RegistryError::Exists) => host.owned_permit(thread),
+        other => other,
+    }
+}
+
 /// goal の配送先リポジトリ識別子。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoIdentity {
@@ -51,6 +62,7 @@ pub struct RuntimeCommandSink {
     accepted_goals: u64,
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
+    chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     events_tx: std::sync::mpsc::Sender<LoopEvent>,
     events_rx: std::sync::mpsc::Receiver<LoopEvent>,
@@ -73,6 +85,7 @@ impl RuntimeCommandSink {
             accepted_goals: 0,
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
+            chat_permits: BTreeMap::new(),
             ownership: None,
             events_tx,
             events_rx,
@@ -122,6 +135,35 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn submit_chat_with_permit(
+        &mut self,
+        chat: crate::model::commands::ChatSubmission,
+        permit: runtime::ownership::OwnerPermit,
+    ) -> Vec<LoopEvent> {
+        let validation = (|| {
+            if permit.thread_id != chat.thread_id {
+                return Err(runtime::ownership::OwnershipError::Fenced.into());
+            }
+            if let Some(host) = &self.ownership {
+                let current = host.owned_permit(&chat.thread_id)?;
+                if current.registry_path != permit.registry_path
+                    || current.lease.owner_id != permit.lease.owner_id
+                    || current.lease.generation != permit.lease.generation
+                {
+                    return Err(runtime::ownership::OwnershipError::Fenced.into());
+                }
+            }
+            permit.validate_generation()
+        })();
+        match validation {
+            Ok(()) => self.submit_authorized(WorkbenchCommand::SendChat(chat), Some(permit)),
+            Err(error) => vec![LoopEvent::ChatRejected {
+                thread_id: chat.thread_id,
+                reason: error.to_string(),
+            }],
+        }
+    }
+
     fn poll(&mut self) -> Vec<LoopEvent> {
         self.events_rx.try_iter().collect()
     }
@@ -149,6 +191,16 @@ impl CommandSink for RuntimeCommandSink {
         } else {
             None
         };
+        self.submit_authorized(command, permit)
+    }
+}
+
+impl RuntimeCommandSink {
+    fn submit_authorized(
+        &mut self,
+        command: WorkbenchCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+    ) -> Vec<LoopEvent> {
         match command {
             WorkbenchCommand::RestoreSnapshot { thread_id, redo } => {
                 let Some(&run) = self.chat_runs.get(&thread_id) else {
@@ -314,6 +366,16 @@ impl CommandSink for RuntimeCommandSink {
             }
             WorkbenchCommand::SendChat(submission) => {
                 let thread_id = submission.thread_id;
+                if let Some(permit) = &permit {
+                    if self.chat_permits.get(&thread_id).is_some_and(|previous| {
+                        previous.registry_path != permit.registry_path
+                            || previous.lease.owner_id != permit.lease.owner_id
+                            || previous.lease.generation != permit.lease.generation
+                    }) {
+                        self.chat_runs.remove(&thread_id);
+                    }
+                    self.chat_permits.insert(thread_id.clone(), permit.clone());
+                }
                 if let Some(&run_id) = self.chat_runs.get(&thread_id) {
                     if let Err(error) = self
                         .runtime

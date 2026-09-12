@@ -1,9 +1,36 @@
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
-use runtime::ownership::{OwnerHost, RegistryError};
+use runtime::ownership::{OwnerHost, OwnerPermit, OwnershipError, RegistryError};
 use std::sync::Arc;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub(super) fn chat_permit(&mut self, thread: &str) -> Result<Option<OwnerPermit>, String> {
+        let Some(host) = &self.ownership else {
+            return Ok(None);
+        };
+        let result = match host.owned_permit(thread) {
+            Ok(permit) => Ok(permit),
+            Err(RegistryError::Absent) => {
+                crate::runtime_sink::finish_chat_start(host, thread, host.start(thread))
+            }
+            Err(RegistryError::Ownership(OwnershipError::Fenced)) => {
+                host.attach(thread).and_then(|owner| host.claim(&owner))
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(permit) => {
+                self.readonly_threads.remove(thread);
+                self.ownership_error = None;
+                Ok(Some(permit))
+            }
+            Err(RegistryError::Ownership(
+                OwnershipError::OwnerResponsive | OwnershipError::Fenced,
+            )) => Err("このスレッドは別ウィンドウが write mode で保持中です".into()),
+            Err(error) => Err(format!("write mode を取得できません: {error}")),
+        }
+    }
+
     pub fn with_ownership(mut self, host: Arc<OwnerHost>) -> Self {
         self.ownership = Some(host);
         self

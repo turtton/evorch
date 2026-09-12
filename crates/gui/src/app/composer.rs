@@ -45,16 +45,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn submit_composer(&mut self) {
         self.refresh_image_capability();
-        if !self.thread_writable() {
-            self.push_notice("Read-only attach: explicitly Start or Claim before sending.");
-            return;
-        }
         let raw = self.composer.input.clone();
         let parsed = if raw.trim().is_empty() && !self.composer.attachments.is_empty() {
             ComposerInput::Chat("")
         } else {
             parse_input(&raw)
         };
+        if !matches!(parsed, ComposerInput::Chat(_)) && !self.thread_writable() {
+            self.push_notice("Read-only attach: explicitly Start or Claim before sending.");
+            return;
+        }
         match parsed {
             ComposerInput::Empty => {}
             ComposerInput::Chat(text) => {
@@ -97,6 +97,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                     model: preference.model.clone(),
                                 }),
                         };
+                        let permit = match self.chat_permit(&submission.thread_id) {
+                            Ok(permit) => permit,
+                            Err(notice) => {
+                                self.push_notice(notice);
+                                return;
+                            }
+                        };
                         self.history.push(super::history::UserMessage {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
@@ -105,7 +112,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.transcripts
                             .push_thread(TranscriptEntry::UserMessage { text: text.into() });
                         self.save_sidebar();
-                        self.submit_command(WorkbenchCommand::SendChat(submission));
+                        self.issued
+                            .push(WorkbenchCommand::SendChat(submission.clone()));
+                        let events = match permit {
+                            Some(permit) => self.sink.submit_chat_with_permit(submission, permit),
+                            None => self.sink.submit(WorkbenchCommand::SendChat(submission)),
+                        };
+                        for event in events {
+                            self.apply_loop_event(event);
+                        }
                         self.composer.input.clear();
                         self.composer.attachments.clear();
                     }
