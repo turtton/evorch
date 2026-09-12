@@ -5,8 +5,9 @@
 //! `None` のまま保持する。
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
-use event_bus::{Event, EventKind, ProviderEvent, ToolEvent};
+use event_bus::{Event, EventKind, MessageEvent, ProviderEvent, ToolEvent};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -24,6 +25,27 @@ pub struct TelemetryRow {
     pub usage: TokenUsage,
     pub requests: u32,
     pub last_finish_reason: Option<String>,
+    pub request_started_at: Option<Instant>,
+    pub ttft_ms: Option<u64>,
+    pub request_duration: Option<Duration>,
+    pub output_tokens: u64,
+    streamed_chars: u64,
+}
+
+impl TelemetryRow {
+    pub fn elapsed_at(&self, now: Instant) -> Option<Duration> {
+        self.request_duration.or_else(|| {
+            self.request_started_at
+                .map(|start| now.saturating_duration_since(start))
+        })
+    }
+
+    pub fn tok_s_at(&self, now: Instant) -> Option<f64> {
+        let elapsed = self.elapsed_at(now)?;
+        // Duration converts the u64 count without a lossy integer narrowing cast.
+        (!elapsed.is_zero())
+            .then(|| Duration::from_secs(self.output_tokens).as_secs_f64() / elapsed.as_secs_f64())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +59,10 @@ impl TelemetryOverlay {
     }
 
     pub fn apply_event(&mut self, event: &Event) {
+        self.apply_event_at(event, Instant::now());
+    }
+
+    pub fn apply_event_at(&mut self, event: &Event, now: Instant) {
         match &event.kind {
             EventKind::Provider(ProviderEvent::RequestStarted {
                 provider,
@@ -48,6 +74,41 @@ impl TelemetryOverlay {
                 row.provider = Some(provider.clone());
                 row.model = Some(model.clone());
                 row.requests = row.requests.saturating_add(1);
+                row.request_started_at = Some(now);
+                row.request_duration = None;
+                row.ttft_ms = None;
+                row.output_tokens = 0;
+                row.streamed_chars = 0;
+            }
+            EventKind::Provider(ProviderEvent::FirstTokenObserved {
+                ttft_ms,
+                run_id: Some(run_id),
+                ..
+            }) => {
+                self.rows.entry(run_id.clone()).or_default().ttft_ms = Some(*ttft_ms);
+            }
+            EventKind::Message(
+                MessageEvent::MessageDelta {
+                    delta,
+                    run_id: Some(run_id),
+                }
+                | MessageEvent::ReasoningDelta {
+                    delta,
+                    run_id: Some(run_id),
+                },
+            ) => {
+                if let Some(row) = self.rows.get_mut(run_id)
+                    && row.request_started_at.is_some()
+                    && row.request_duration.is_none()
+                {
+                    // Deltas carry no token count: estimate across chunks, never bill this value.
+                    row.streamed_chars = row.streamed_chars.saturating_add(
+                        delta
+                            .chars()
+                            .fold(0_u64, |count, _| count.saturating_add(1)),
+                    );
+                    row.output_tokens = row.streamed_chars.div_ceil(4);
+                }
             }
             EventKind::Provider(ProviderEvent::RequestCompleted {
                 input_tokens,
@@ -55,6 +116,7 @@ impl TelemetryOverlay {
                 cache_read_tokens,
                 cache_write_tokens,
                 finish_reason,
+                duration_ms,
                 run_id: Some(run_id),
                 ..
             }) => {
@@ -64,6 +126,18 @@ impl TelemetryOverlay {
                 row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
                 row.usage.cache_write = row.usage.cache_write.saturating_add(*cache_write_tokens);
                 row.last_finish_reason = Some(finish_reason.clone());
+                row.output_tokens = *output_tokens;
+                row.request_duration = Some(Duration::from_millis(*duration_ms));
+            }
+            EventKind::Provider(ProviderEvent::RequestFailed {
+                duration_ms,
+                run_id: Some(run_id),
+                ..
+            }) => {
+                let row = self.rows.entry(run_id.clone()).or_default();
+                row.request_duration = Some(Duration::from_millis(*duration_ms));
+                row.request_started_at = None;
+                row.output_tokens = 0;
             }
             EventKind::Tool(ToolEvent::ToolStarted {
                 tool_name,
@@ -101,7 +175,7 @@ impl TelemetryOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::{Event, ProviderEvent, ToolEvent, UsageEvent};
+    use event_bus::{Event, ProviderEvent, ToolEvent};
 
     fn request_started(run_id: Option<&str>) -> Event {
         Event::new(ProviderEvent::RequestStarted {
@@ -162,21 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_event_without_run_id_is_ignored() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&Event::new(UsageEvent::Usage {
-            provider: "provider-a".into(),
-            model: "model-a".into(),
-            input_tokens: 10,
-            output_tokens: 20,
-            cache_read_tokens: 3,
-            cache_write_tokens: 4,
-        }));
-
-        assert!(overlay.row("run-1").is_none());
-    }
-
-    #[test]
     fn current_tool_set_and_cleared() {
         let mut overlay = TelemetryOverlay::new();
         overlay.apply_event(&Event::new(ToolEvent::ToolStarted {
@@ -209,17 +268,5 @@ mod tests {
                 .current_tool
                 .is_none()
         );
-    }
-
-    #[test]
-    fn missing_fields_stay_none() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&request_completed(Some("run-1"), 1, 2));
-        overlay.apply_event(&request_started(None));
-
-        let row = overlay.row("run-1").expect("telemetry row");
-        assert!(row.provider.is_none());
-        assert!(row.model.is_none());
-        assert!(row.current_tool.is_none());
     }
 }

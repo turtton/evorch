@@ -47,6 +47,32 @@ pub fn agents_pane<S: AgentRunSource>(
                 let run_id = row.run_id.to_string();
                 let row_telemetry = telemetry.row(&run_id);
                 render_data_row(ui, &widths, row, row_telemetry, &mut action);
+                if let Some(value) = row_telemetry {
+                    let now = std::time::Instant::now();
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(rate) = value.tok_s_at(now) {
+                            let prefix = if value.request_duration.is_none() {
+                                "≈ "
+                            } else {
+                                ""
+                            };
+                            ui.label(muted(format!("{prefix}{rate:.1} tok/s")));
+                        }
+                        if let Some(ttft) = value.ttft_ms {
+                            ui.label(muted(format!(
+                                "TTFT {:.1}s",
+                                std::time::Duration::from_millis(ttft).as_secs_f64()
+                            )));
+                        }
+                        if let Some(elapsed) = value.elapsed_at(now) {
+                            ui.label(muted(format!("Δ {:.1}s", elapsed.as_secs_f64())));
+                        }
+                    });
+                    if value.request_started_at.is_some() && value.request_duration.is_none() {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                }
             }
         });
         action
