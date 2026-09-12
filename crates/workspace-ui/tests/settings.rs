@@ -102,7 +102,10 @@ fn embedded_v2_workspace_prunes_removed_panels_before_deserialization() {
     // Then: the shared migration produces the current layout.
     assert_eq!(
         restored.layout.workspace,
-        Some(workspace_ui::Workspace::default_v02())
+        Some(
+            workspace_ui::from_json(include_str!("fixtures/workspace_v2.json"))
+                .expect("JSON migration")
+        )
     );
 }
 

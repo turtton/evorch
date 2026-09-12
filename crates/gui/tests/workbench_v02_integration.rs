@@ -244,6 +244,7 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
         "agents-main",
         "diff-main",
         "terminal-main",
+        "notifications-main",
     ] {
         let tab = workbench
             .state()
@@ -254,7 +255,7 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
     }
     assert_eq!(
         workbench.state().dock().iter_all_tabs().count(),
-        5,
+        6,
         "no dynamic panes before the scenario opens them"
     );
 }
@@ -639,6 +640,7 @@ fn v02_end_to_end_chained_scenario() {
                 "agents-main".to_string(),
                 "diff-main".to_string(),
                 "terminal-main".to_string(),
+                "notifications-main".to_string(),
                 "agent-run-1".to_string(),
                 "agent-run-2".to_string(),
                 "agent-run-3".to_string(),

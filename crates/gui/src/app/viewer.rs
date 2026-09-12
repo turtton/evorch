@@ -6,6 +6,7 @@ use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
     composer::ComposerAction,
+    notifications::NotificationsAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
     sidebar::{SidebarAction, set_sidebar_error},
 };
@@ -33,6 +34,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.observe_attention();
         let mut sidebar_action = None;
         let mut agents_action = None;
+        let mut notifications_action = None;
         let mut diff_request = None;
         let mut composer_action = None;
         let mut focus_request = None;
@@ -42,6 +44,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let tab_style = dock_style.tab.clone();
         {
             let mut viewer = WorkbenchTabViewer {
+                notifications: &mut self.notifications,
+                notifications_action: &mut notifications_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 arena: &mut self.arena,
@@ -89,6 +93,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 AgentsAction::OpenPane(run_id) => self.open_agent_pane(&run_id),
                 AgentsAction::OpenDefaultPanes => self.open_default_agent_panes(),
             }
+        }
+        if let Some(NotificationsAction::OpenRun(run_id)) = notifications_action {
+            self.open_agent_pane(&run_id);
         }
         if let Some(action) = sidebar_action {
             let result = match action {

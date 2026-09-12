@@ -11,7 +11,19 @@ fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
     // Then: only the surviving default panels remain.
     assert_eq!(ws.version, 3);
     assert_eq!(ws.panels.len(), 5);
-    assert_eq!(ws, Workspace::default_v02());
+    let mut expected = Workspace::default_v02();
+    expected.panels.remove(&PanelId::new("notifications-main"));
+    let workspace_ui::LayoutNode::Split(root) = &mut expected.main.root else {
+        panic!("root split");
+    };
+    let workspace_ui::LayoutNode::Split(content) = root.second.as_mut() else {
+        panic!("content split");
+    };
+    let workspace_ui::LayoutNode::Tabs(tabs) = content.second.as_mut() else {
+        panic!("workbench tabs");
+    };
+    tabs.panels.retain(|id| id.as_str() != "notifications-main");
+    assert_eq!(ws, expected);
 }
 
 #[test]

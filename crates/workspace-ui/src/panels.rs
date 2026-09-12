@@ -37,6 +37,7 @@ pub enum PanelKind {
     Diff,
     Terminal,
     Tasks,
+    Notifications,
     Memory,
     Arena,
 }
@@ -52,6 +53,7 @@ impl PanelKind {
             Self::Diff => "Diff",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
+            Self::Notifications => "Notifications",
             Self::Memory => "Memory",
             Self::Arena => "Arena",
         }
@@ -97,6 +99,11 @@ pub fn default_panels_v02() -> BTreeMap<PanelId, Panel> {
         ("sidebar-main", PanelKind::Sidebar, "Projects"),
         ("agent-main", PanelKind::Agent, "Conversation"),
         ("agents-main", PanelKind::Agents, "Agents"),
+        (
+            "notifications-main",
+            PanelKind::Notifications,
+            "Notifications",
+        ),
         ("diff-main", PanelKind::Diff, "Diff"),
         ("terminal-main", PanelKind::Terminal, "Terminal"),
     ]

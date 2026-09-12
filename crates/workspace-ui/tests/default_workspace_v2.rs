@@ -12,7 +12,7 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
     // Then: the exact three-region tree and panel registry are present.
     assert_eq!(workspace.version, WORKSPACE_SCHEMA_VERSION);
     assert_eq!(workspace.version, 3);
-    assert_eq!(workspace.panels.len(), 5);
+    assert_eq!(workspace.panels.len(), 6);
     let LayoutNode::Split(root) = &workspace.main.root else {
         panic!("default root must be a horizontal split");
     };
@@ -44,6 +44,7 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
                 PanelId::new("agents-main"),
                 PanelId::new("diff-main"),
                 PanelId::new("terminal-main"),
+                PanelId::new("notifications-main"),
             ],
             active: 0,
         })
@@ -61,6 +62,10 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
         PanelKind::Diff
     );
     assert_eq!(Workspace::default(), workspace);
+    assert_eq!(
+        workspace.panels[&PanelId::new("notifications-main")].kind,
+        PanelKind::Notifications
+    );
     assert_eq!(validate(&workspace), Ok(()));
 }
 
