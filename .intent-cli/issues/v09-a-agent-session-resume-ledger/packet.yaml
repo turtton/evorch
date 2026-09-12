@@ -11,6 +11,7 @@ implementation_issue_packet:
     - "実証済みの動機（2026-09-12 の 11 機能 wave、opencode+oh-my-openagent 環境での orchestration 実績）: サブエージェント session の再開（task_id continuation）が3度の stream 断で T13 を救い、逆に session 失効（Task not found）で T10 の文脈が全損した。再開可能性が長時間ランの生死を分ける"
     - "LoopState（crates/runtime/src/agent_loop.rs）は run 専有の AgentContext を保持する。現状、run 終了・エラー後に同一コンテキストで会話を継続する API はない"
     - "SessionSnapshot（crates/storage/src/projection.rs）は event-sourced projection で message/reasoning 差分を読み戻せる。session continuation はこの投影から AgentContext を再構成する経路になる"
+    - "2026-09-13 オペレータ確定（実装調査で判明した制約に基づく機構変更）: event log には user prompt / message 境界が存在せず event replay では完全なコンテキスト復元が不可能なため、復元機構は **新テーブル run_contexts への終了時スナップショット保存方式** とする（終了時に messages+checkpoints を verbatim 保存し send 時に読み戻す）。SessionSnapshot/projection 機構は無変更。受入基準の『storage projection からの再構成』はこの方式で代替し、判断理由を PR body に明記する"
     - "v02-context-compaction が model-visible window の narrowing と raw history 非破壊保持を設計済み。run 台帳は message history とは別の append-only surface として compaction の対象外にする（圧縮で作業上の決定・証拠が消えないことが目的）"
     - "v07-d-memory-task-improvement の memory event ledger は task 境界を跨ぐ知識蓄積が目的。本 unit の run 台帳は in-run/orchestrator 視点の作業記録で目的が異なるが、storage ledger 基盤は共有できる"
     - "GUI の thread/run 表示・transcript_registry（crates/gui/src/model/）は run 単位の routing が既存。再開された run の続行表示はこの経路に載る"
