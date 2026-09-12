@@ -152,6 +152,14 @@ impl ProviderSettingsModel {
         self.entries.get(name).map(|profile| &profile.credential)
     }
 
+    pub fn model_entry(&self, profile: &str, model: &str) -> Option<&config::ModelEntryConfig> {
+        self.entries
+            .get(profile)?
+            .models
+            .iter()
+            .find(|entry| entry.id == model)
+    }
+
     pub fn openai_mut(&mut self) -> Option<&mut OpenAiEditorModel> {
         match &mut self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => Some(editor),

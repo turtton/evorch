@@ -56,6 +56,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(url) = self.codex_auth_mut().take_url_to_open() {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
+        self.telemetry.refresh_costs(&self.provider_settings);
         self.render(ui);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(

@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use event_bus::{Event, EventKind, MessageEvent, ProviderEvent, ToolEvent};
 
+#[path = "pricing.rs"]
+pub mod pricing;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u64,
@@ -51,6 +54,8 @@ impl TelemetryRow {
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryOverlay {
     rows: BTreeMap<String, TelemetryRow>,
+    billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
+    costs: BTreeMap<String, f64>,
 }
 
 impl TelemetryOverlay {
@@ -111,6 +116,9 @@ impl TelemetryOverlay {
                 }
             }
             EventKind::Provider(ProviderEvent::RequestCompleted {
+                provider,
+                profile,
+                model,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
@@ -120,6 +128,20 @@ impl TelemetryOverlay {
                 run_id: Some(run_id),
                 ..
             }) => {
+                let usage = self
+                    .billed
+                    .entry(run_id.clone())
+                    .or_default()
+                    .entry(pricing::ModelKey {
+                        provider: provider.clone(),
+                        profile: profile.clone(),
+                        model: model.clone(),
+                    })
+                    .or_default();
+                usage.input = usage.input.saturating_add(*input_tokens);
+                usage.output = usage.output.saturating_add(*output_tokens);
+                usage.cache_read = usage.cache_read.saturating_add(*cache_read_tokens);
+                usage.cache_write = usage.cache_write.saturating_add(*cache_write_tokens);
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.usage.input = row.usage.input.saturating_add(*input_tokens);
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);

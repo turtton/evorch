@@ -25,7 +25,8 @@ pub const WARNING_SURFACE: Color32 = Color32::from_rgb(0x31, 0x21, 0x08);
 pub const SUCCESS: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
 pub const INFO: Color32 = Color32::from_rgb(0x60, 0xa5, 0xfa);
 pub const RUNNING: Color32 = Color32::from_rgb(0x22, 0xd3, 0xee);
-pub const WAITING: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24);
+pub const WAITING: Color32 = INFO;
+pub const STATUS_STROKE: f32 = 1.0;
 
 pub const SP_1: f32 = 4.0;
 pub const SP_2: f32 = 8.0;
@@ -91,13 +92,13 @@ pub const fn state_color(state: ThreadState) -> Color32 {
         ThreadState::Active => ACCENT,
         ThreadState::Paused => TEXT_MUTED,
         ThreadState::Running => INFO,
-        ThreadState::Waiting => WARNING_FG,
+        ThreadState::Waiting => WAITING,
         ThreadState::Done => SUCCESS,
         ThreadState::Error => ERROR_FG,
     }
 }
 
-pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
+pub const fn phase_color(phase: ThreadRunPhase) -> Color32 {
     match phase {
         ThreadRunPhase::Pending => TEXT_MUTED,
         ThreadRunPhase::Running => RUNNING,
@@ -123,11 +124,10 @@ mod tests {
 
     #[test]
     fn phase_indicator_tokens_are_distinct() {
-        let colors = [
-            RUNNING, WAITING, ERROR_FG, TEXT_MUTED, SUCCESS, INFO, WARNING_FG,
-        ];
+        let colors = [RUNNING, WAITING, ERROR_FG, TEXT_MUTED, SUCCESS, WARNING_FG];
         let distinct: std::collections::HashSet<_> = colors.into_iter().collect();
         assert_eq!(distinct.len(), colors.len());
+        assert_eq!(WAITING, INFO);
         assert_eq!(phase_color(ThreadRunPhase::Running), RUNNING);
         assert_eq!(phase_color(ThreadRunPhase::Waiting), WAITING);
         assert_eq!(agent_phase_color(AgentRunPhase::Running), RUNNING);
@@ -145,7 +145,7 @@ mod tests {
             state_color(ThreadState::Error),
         ];
         let distinct: std::collections::HashSet<_> = colors.iter().copied().collect();
-        assert_eq!(distinct.len(), colors.len());
+        assert_eq!(distinct.len(), colors.len() - 1);
     }
 
     #[test]

@@ -50,13 +50,15 @@ pub fn agents_pane<S: AgentRunSource>(
                 if let Some(value) = row_telemetry {
                     let now = std::time::Instant::now();
                     ui.horizontal_wrapped(|ui| {
-                        if let Some(rate) = value.tok_s_at(now) {
-                            let prefix = if value.request_duration.is_none() {
-                                "≈ "
-                            } else {
-                                ""
-                            };
-                            ui.label(muted(format!("{prefix}{rate:.1} tok/s")));
+                        for (index, segment) in value
+                            .compact_segments_at(now, telemetry.cost(&run_id))
+                            .iter()
+                            .enumerate()
+                        {
+                            if index > 0 {
+                                ui.label(muted("·"));
+                            }
+                            ui.label(muted(segment));
                         }
                         if let Some(ttft) = value.ttft_ms {
                             ui.label(muted(format!(
