@@ -8,6 +8,7 @@ mod frame;
 mod history;
 mod ownership;
 mod provider_settings;
+mod role_settings;
 mod state;
 mod tab_viewer;
 mod viewer;

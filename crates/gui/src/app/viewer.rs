@@ -12,6 +12,18 @@ use crate::panes::{
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        self.poll_role_save();
+        ui.menu_button("Workbench settings", |ui| {
+            if ui.button("Providers").clicked() {
+                self.role_settings.open = false;
+                self.open_provider_settings();
+                ui.close();
+            }
+            if ui.button("Agent roles").clicked() {
+                self.open_role_settings();
+                ui.close();
+            }
+        });
         self.refresh_image_capability();
         self.ownership_ui(ui);
         self.panels.retain(|panel_id, _| {
@@ -108,7 +120,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        if self.role_settings.open {
+            use crate::panes::role_settings::{RoleSettingsAction, role_settings_modal};
+            match role_settings_modal(ui.ctx(), &mut self.role_settings) {
+                Some(RoleSettingsAction::Save) => self.submit_role_settings(),
+                Some(RoleSettingsAction::Cancel) => self.role_settings.open = false,
+                None => {}
+            }
+        }
         if self.provider_settings.open
+            && !self.role_settings.open
             && let Some(action) =
                 provider_settings_modal(ui.ctx(), &mut self.provider_settings, &self.codex_auth)
         {
