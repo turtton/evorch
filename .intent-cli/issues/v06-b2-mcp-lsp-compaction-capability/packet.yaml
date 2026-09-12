@@ -1,26 +1,59 @@
 implementation_issue_packet:
-  issue_title: "v06-b2-mcp-lsp-compaction-capability TODO short title"
+  issue_title: "v0.6: MCP registry + LSP diagnostics + モデル能力正規化 + compaction UX 可視化を統合する"
   issue_kind: feature
   source_execution_unit: v06-b2-mcp-lsp-compaction-capability
   domain: evorch
   target_repo: turtton/evorch
-  target_path: <comma- or space-separated paths>
-  target_part: "<one-line target description>"
+  target_path: "crates/tools/ crates/sandbox/ crates/runtime/ crates/event-bus/ crates/providers/ crates/model/ crates/routing/ crates/gui/"
+  target_part: "外部 MCP tool registry と ADR 0008 準拠の permission scope、LSP diagnostics の ToolExecutor/DiagnosticEvent 接続、provider 差分を吸収する canonical model capability、CompactionEvent の Diagnostics/transcript 可視化を実装する"
   dependencies: []
-  technical_baseline: []
-  intent_references: []
+  technical_baseline:
+    - "統一 tool 境界は crates/tools/src/lib.rs の Tool trait、ToolExecutor、および crates/tools/src/search/mcp.rs の McpTransport/NetworkGuardMcpTransport。現状 MCP は search 用の単発 JSON-RPC transport のみで、汎用 client registry や server session 管理は存在しない"
+    - "tool 実行時の権限検査・承認は crates/runtime/src/policy.rs の role/per-tool gate、crates/agents/src/capability.rs の RoleCapabilities、crates/sandbox/src/approval.rs の ApprovalGate::request、および ToolEvent::ApprovalRequested/ApprovalResolved を基盤とする"
+    - "ADR 0008 の二層境界は crates/runtime/src/network.rs の NetworkAccess から SandboxNetworkMode への写像と、crates/sandbox/src/composition.rs の sandbox composition で実施される。MCP の credential、network、filesystem scope はこの fail-closed 経路を再利用する"
+    - "診断イベントの既存 schema は crates/event-bus/src/event.rs の DiagnosticEvent、DiagnosticSeverity、EventKind::Diagnostic。DiagnosticEvent は source/severity/code/detail/run_id/thread_id を持ち、crates/storage/src/entity.rs と crates/storage/src/projection.rs で保存経路がある"
+    - "既存の GUI 診断・transcript 経路は crates/gui/src/model/transcript/diagnostics.rs、crates/gui/src/model/transcript.rs の Transcript::apply、crates/gui/src/model/transcript_registry.rs、および crates/gui/tests/diagnostic_ledger.rs の replay/表示テストである"
+    - "v0.2 compaction は crates/runtime/src/compaction/ の policy/estimator/cut/summary と crates/event-bus/src/event.rs の CompactionReason/CompactionEvent::Compacted を使用し、estimated_tokens_before/after、reason、compacted range を event として発行する。runtime 側の監査・継続テストは crates/runtime/tests/compaction_engine.rs と compaction_audit.rs にある"
+    - "モデル情報の既存基盤は crates/model/src/catalog.rs の ModelCatalog/CatalogEntry/CatalogCapabilities、crates/providers/src/lib.rs の ProviderCapabilities、crates/routing/src/router.rs の routing 解決、および crates/routing/src/compose.rs の catalog 注入である。canonical capability への provider 差分正規化は未実装である"
+    - "LSP は intent 上 lsp-types と自前 session 管理を採用予定だが、crates/ 配下に LSP client、publishDiagnostics handler、compiler diagnostics の ToolResult/DiagnosticEvent 接続は存在しない"
+    - "2026-09-12 オペレータ確定: スコープはユニット名どおりの4要素（MCP permission scope / LSP diagnostics feedback / model capability normalization / compaction UX 可視化）に限定。追加 role capability（Planner/Librarian/Oracle/Multimodal Looker）と diagnostics v0.5 骨格は本 unit の scope 外"
+  intent_references:
+    - intents/evorch/features/tools-sandbox/overview.md
+    - intents/evorch/features/diagnostics-self-improvement/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/context-engine/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0008-threat-model-phased-adoption.md
+    - intents/evorch/decisions/0002-role-capability-boundaries.md
+    - intents/evorch/decisions/0004-provider-routing-separation.md
+    - intents/evorch/decisions/0006-self-improvement-and-diagnostics.md
+    - intents/evorch/decisions/0013-model-catalog.md
+    - intents/evorch/decisions/0020-canonical-message-normalization.md
+    - intents/evorch/decisions/0003-cache-first-context-engine.md
+    - intents/evorch/technology/mvp-roadmap.md
   acceptance_criteria:
-    - "TODO: at least one acceptance criterion"
+    - "MCP server 定義から tools/list 相当で取得した外部 tool が registry に登録され、ToolExecutor から通常の runtime tool として name/schema/execute 経路で呼び出せることを cargo test で検証できる"
+    - "MCP tool の network/filesystem/credential scope が RoleCapabilities・per-tool permission・session NetworkAccess の AND 条件で評価され、deny または未承認時には外部プロセス/通信を開始しないことを cargo test で検証できる"
+    - "MCP tool の登録・拒否・実行失敗が ToolEvent または DiagnosticEvent として run_id/call_id に相関し、credential や秘密値を detail に含めないことを cargo test で検証できる"
+    - "LSP client が workspace の compiler diagnostics を受信し、severity、file、range、message、code を canonical な tool outcome として返すことを cargo test で検証できる"
+    - "LSP diagnostics が DiagnosticEvent として EventBus に発行され、対応する run_id/thread_id を持ち、agent が次の turn で修正可能な actionable 内容を受け取ることを runtime 統合テストで検証できる"
+    - "異なる provider/model の capability 表現が canonical model capability に正規化され、routing と prompt assembly が同じ canonical 値を参照することを model/routing の cargo test で検証できる"
+    - "capability 未知・欠落・provider 非対応の場合は optimistic に有効化せず、明示的な unknown/unsupported として安全に degrade することを cargo test で検証できる"
+    - "CompactionEvent::Compacted の cache transition、CompactionReason、estimated_tokens_after が Diagnostics pane に表示され、automatic/manual/agent の理由を区別できることを GUI headless test または observable label で検証できる"
+    - "同じ compaction 情報が transcript に replay 後も表示され、storage からの再生で欠落・重複しないことを crates/gui/tests および storage/runtime の cargo test で検証できる"
 
 # G461: optional packet-time intent-maintenance metadata. OPTIONAL and
 # backward-compatible — packets that omit this whole block stay valid.
 # Fill it in or explicitly decline each part while the design context is
 # fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
 intent_placement:
-  primary_intent: <intents/evorch/intent-tree/...>
-  supporting_intents: []
+  primary_intent: intents/evorch/features/tools-sandbox/overview.md
+  supporting_intents:
+    - intents/evorch/features/diagnostics-self-improvement/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/context-engine/overview.md
   new_intent_needed: false
-  placement_rationale: ""
+  placement_rationale: "MCP registry と permission scope は tools-sandbox の拡張。LSP diagnostics・compaction 可視化は既存 event/transcript 基盤への接続、model capability normalization は routing 基盤の拡張であり、新規 intent は不要"
 knowledge_updates:
   intent_tree:
     required: false
@@ -39,7 +72,7 @@ knowledge_updates:
     target_paths: []
     summary: ""
 closeout_learning:
-  expected: ""
+  expected: "MCP/LSP を既存の ToolExecutor・ADR 0008 権限境界・EventBus・ModelCatalog・CompactionEvent に接続する際の安全な統合 seam と GUI 観測契約"
   write_back_required: false
   write_back_targets: []
 # G645/G661: guide reachability is explicit and checked at closeout.
