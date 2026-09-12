@@ -13,6 +13,7 @@ mod migrate;
 pub mod presets;
 pub mod prompt_sources;
 pub mod save;
+mod save_agents;
 mod save_codex;
 mod schema;
 mod strict;
@@ -26,6 +27,7 @@ pub use save::{
     OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
     validate_openai_compatible_provider_input,
 };
+pub use save_agents::save_agent_bindings;
 pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use schema::json_schema;
 pub use types::OwnershipConfig;
