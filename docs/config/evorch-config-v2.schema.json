@@ -21,6 +21,10 @@
           "generation": {}
         },
         "roles": {
+          "librarian": {
+            "categories": {},
+            "generation": {}
+          },
           "multimodal_looker": {
             "categories": {},
             "generation": {}
@@ -159,6 +163,13 @@
     "AdditionalRoleBindings": {
       "type": "object",
       "properties": {
+        "librarian": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "categories": {},
+            "generation": {}
+          }
+        },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
@@ -214,6 +225,10 @@
         "roles": {
           "$ref": "#/$defs/AdditionalRoleBindings",
           "default": {
+            "librarian": {
+              "categories": {},
+              "generation": {}
+            },
             "multimodal_looker": {
               "categories": {},
               "generation": {}

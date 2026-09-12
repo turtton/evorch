@@ -35,6 +35,7 @@ pub struct AgentsConfig {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdditionalRoleBindings {
+    pub librarian: RoleBindingConfig,
     pub planner: RoleBindingConfig,
     pub oracle: RoleBindingConfig,
     pub multimodal_looker: RoleBindingConfig,
@@ -49,7 +50,7 @@ impl AgentsConfig {
     /// 設定に含まれない。
     ///
     /// # Errors
-    /// ロール名が固定 4 ロール外なら [`ConfigError::UnknownAgentRole`]、
+    /// ロール名が固定 8 ロール外なら [`ConfigError::UnknownAgentRole`]、
     /// カテゴリ名が固定 6 カテゴリ外なら [`ConfigError::UnknownCategory`] を返す。
     pub fn binding_for(
         &self,
@@ -61,6 +62,7 @@ impl AgentsConfig {
             "explorer" => &self.explorer,
             "worker" => &self.worker,
             "reviewer" => &self.reviewer,
+            "librarian" => &self.roles.librarian,
             "planner" => &self.roles.planner,
             "oracle" => &self.roles.oracle,
             "multimodal_looker" => &self.roles.multimodal_looker,

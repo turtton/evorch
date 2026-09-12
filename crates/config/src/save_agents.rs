@@ -27,6 +27,7 @@ pub fn save_agent_bindings(path: &Path, agents: &AgentsConfig) -> Result<(), Con
 
     let mut roles = Table::new();
     for (name, binding) in [
+        ("librarian", &agents.roles.librarian),
         ("planner", &agents.roles.planner),
         ("oracle", &agents.roles.oracle),
         ("multimodal_looker", &agents.roles.multimodal_looker),
