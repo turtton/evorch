@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-12T14:00:44.7101378+00:00",
+  "updated_at": "2026-09-12T14:02:22.7952347+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1499,6 +1499,11 @@
         "implementation": ".intent-cli/issues/v09-a-agent-session-resume-ledger/implementation.md",
         "review_context": ".intent-cli/issues/v09-a-agent-session-resume-ledger/review-context.md",
         "yaml": ".intent-cli/issues/v09-a-agent-session-resume-ledger/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 104,
+        "url": "https://github.com/turtton/evorch/issues/104"
       },
       "worker_role": "implementation",
       "review_role": "review",
