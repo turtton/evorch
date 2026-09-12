@@ -8,5 +8,8 @@
 !.opencode/*-contract.md
 
 /target
+# nix build output symlinks
+/result
+/result-*
 # Local user config with provider credentials
 /evorch.toml
