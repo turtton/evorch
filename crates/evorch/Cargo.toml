@@ -22,6 +22,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tools = { path = "../tools" }
 
 [dev-dependencies]
+mock-openai = { path = "../mock-openai" }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 # E2E テストで run の hang 検出 (timeout) に使う。

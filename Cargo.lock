@@ -1845,6 +1845,7 @@ version = "0.1.0"
 dependencies = [
  "config",
  "event-bus",
+ "mock-openai",
  "routing",
  "runtime",
  "sandbox",
