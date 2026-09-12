@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use egui::{Color32, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{AgentRunPhase, Event, LifecycleEvent};
@@ -21,9 +19,7 @@ fn panel_harness(active: &str) -> Harness<'static, WorkbenchState<gui::fixture::
         &workspace_ui::UiSettings::default(),
     )
     .expect("workbench");
-    state
-        .notifications_mut()
-        .apply_event(&done(), &BTreeMap::new());
+    state.notifications_mut().apply_event(&done(), |_| None);
     let path = state.dock().find_tab(&PanelId::new(active)).expect("tab");
     state.dock_mut().set_active_tab(path).expect("activate");
     Harness::builder()
@@ -38,7 +34,7 @@ fn panel_harness(active: &str) -> Harness<'static, WorkbenchState<gui::fixture::
 fn unread_notification_badge_filled_read_outline() {
     // Given: an unread completed notification.
     let mut model = NotificationsModel::default();
-    model.apply_event(&done(), &BTreeMap::new());
+    model.apply_event(&done(), |_| None);
     let mut harness = Harness::builder().build_ui_state(
         |ui, model| {
             gui::panes::notifications::notifications_pane(ui, model, None);

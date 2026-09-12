@@ -31,7 +31,7 @@ pub struct NotificationsModel {
 }
 
 impl NotificationsModel {
-    pub fn apply_event(&mut self, event: &Event, phases: &BTreeMap<String, ThreadRunPhase>) {
+    pub fn apply_event(&mut self, event: &Event, resolve_run: impl Fn(&str) -> Option<String>) {
         let (kind, run_id, summary) = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                 run_id,
@@ -60,23 +60,14 @@ impl NotificationsModel {
                 };
                 (kind, Some(run_id.clone()), summary)
             }
-            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id }) => {
-                let mut waiting = phases
-                    .iter()
-                    .filter(|(_, phase)| **phase == ThreadRunPhase::Waiting);
-                let run_id = match (waiting.next(), waiting.next()) {
-                    (Some((run_id, _)), None) => Some(run_id.clone()),
-                    _ => None,
-                };
-                (
-                    NotificationKind::ApprovalPending {
-                        tool_name: tool_name.clone(),
-                        call_id: call_id.clone(),
-                    },
-                    run_id,
-                    format!("Approval requested: {tool_name}"),
-                )
-            }
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id }) => (
+                NotificationKind::ApprovalPending {
+                    tool_name: tool_name.clone(),
+                    call_id: call_id.clone(),
+                },
+                resolve_run(call_id),
+                format!("Approval requested: {tool_name}"),
+            ),
             EventKind::Orchestrator(OrchestratorEvent::MergeApprovalRequested {
                 goal_id, ..
             }) => (
@@ -160,8 +151,6 @@ impl NotificationsModel {
 mod tests {
     use super::*;
     use event_bus::{AgentRunPhase, Event, LifecycleEvent, ToolEvent};
-    use std::collections::BTreeMap;
-    use workspace_ui::ThreadRunPhase;
 
     fn transition(to: AgentRunPhase, reason: Option<&str>) -> Event {
         Event::new(LifecycleEvent::AgentRunStateChanged {
@@ -179,7 +168,7 @@ mod tests {
     }
     fn completed() -> NotificationsModel {
         let mut model = NotificationsModel::default();
-        model.apply_event(&transition(AgentRunPhase::Done, None), &BTreeMap::new());
+        model.apply_event(&transition(AgentRunPhase::Done, None), |_| None);
         model
     }
 
@@ -201,7 +190,7 @@ mod tests {
             // Given: an empty model.
             let mut model = NotificationsModel::default();
             // When: the run fails, with or without a reason.
-            model.apply_event(&transition(AgentRunPhase::Error, reason), &BTreeMap::new());
+            model.apply_event(&transition(AgentRunPhase::Error, reason), |_| None);
             // Then: the failure retains its reason and target.
             let item = model.items().next().unwrap();
             assert_eq!(
@@ -220,10 +209,9 @@ mod tests {
         // Given: an empty model.
         let mut model = NotificationsModel::default();
         // When: cancellation terminates the run.
-        model.apply_event(
-            &transition(AgentRunPhase::Error, Some("cancelled")),
-            &BTreeMap::new(),
-        );
+        model.apply_event(&transition(AgentRunPhase::Error, Some("cancelled")), |_| {
+            None
+        });
         // Then: cancellation remains a failure with a visible cancellation summary.
         let item = model.items().next().unwrap();
         assert_eq!(
@@ -245,7 +233,7 @@ mod tests {
             // Given: an empty model.
             let mut model = NotificationsModel::default();
             // When: a non-terminal transition arrives.
-            model.apply_event(&transition(phase, None), &BTreeMap::new());
+            model.apply_event(&transition(phase, None), |_| None);
             // Then: no notification is created.
             assert_eq!(model.items().count(), 0);
             assert_eq!(model.unread_count(), 0);
@@ -285,22 +273,20 @@ mod tests {
         for event in events {
             // Given: an empty model. When: a provider attempt terminates.
             let mut model = NotificationsModel::default();
-            model.apply_event(&Event::new(event), &BTreeMap::new());
+            model.apply_event(&Event::new(event), |_| None);
             // Then: attempts are not run notifications.
             assert_eq!(model.items().count(), 0);
         }
     }
     #[test]
-    fn approval_requested_resolves_single_waiting_run() {
-        // Given: exactly one waiting run, alongside a running run.
+    fn approval_requested_resolves_indexed_call() {
+        // Given: a resolver associating the requested call with run-3.
         let mut model = NotificationsModel::default();
-        let phases = BTreeMap::from([
-            ("run-3".into(), ThreadRunPhase::Waiting),
-            ("run-4".into(), ThreadRunPhase::Running),
-        ]);
         // When: tool approval is requested.
-        model.apply_event(&approval(), &phases);
-        // Then: the notification targets only the waiting run.
+        model.apply_event(&approval(), |call_id| {
+            (call_id == "call-1").then(|| "run-3".into())
+        });
+        // Then: the notification targets the indexed run.
         let item = model.items().next().unwrap();
         assert_eq!(
             item.kind,
@@ -314,23 +300,15 @@ mod tests {
         assert!(model.is_unread(item.id));
     }
     #[test]
-    fn approval_requested_with_zero_or_multiple_waiting_runs_has_no_target() {
-        for phases in [
-            BTreeMap::new(),
-            BTreeMap::from([
-                ("run-3".into(), ThreadRunPhase::Waiting),
-                ("run-4".into(), ThreadRunPhase::Waiting),
-            ]),
-        ] {
-            // Given: no uniquely waiting run.
-            let mut model = NotificationsModel::default();
-            // When: tool approval is requested.
-            model.apply_event(&approval(), &phases);
-            // Then: the notification has no guessed target.
-            let item = model.items().next().unwrap();
-            assert_eq!(item.run_id, None);
-            assert!(model.is_unread(item.id));
-        }
+    fn approval_requested_with_unknown_call_has_no_target() {
+        // Given: a resolver without the requested call.
+        let mut model = NotificationsModel::default();
+        // When: tool approval is requested.
+        model.apply_event(&approval(), |_| None);
+        // Then: the notification has no guessed target.
+        let item = model.items().next().unwrap();
+        assert_eq!(item.run_id, None);
+        assert!(model.is_unread(item.id));
     }
     #[test]
     fn merge_approval_requested_pushes_unread_without_run_target() {
@@ -353,13 +331,13 @@ mod tests {
             },
         };
         let mut model = NotificationsModel::default();
-        // When: merge approval is requested while one run waits.
+        // When: merge approval is requested with an available run resolver.
         model.apply_event(
             &Event::new(OrchestratorEvent::MergeApprovalRequested {
                 goal_id: "goal-1".into(),
                 binding,
             }),
-            &BTreeMap::from([("run-3".into(), ThreadRunPhase::Waiting)]),
+            |_| Some("run-3".into()),
         );
         // Then: the goal notification is unread but never targets a run.
         let item = model.items().next().unwrap();
@@ -408,7 +386,7 @@ mod tests {
     fn unread_count_tracks_acknowledgement() {
         // Given: two unread notifications.
         let mut model = completed();
-        model.apply_event(&approval(), &BTreeMap::new());
+        model.apply_event(&approval(), |_| None);
         let id = model.items().next().unwrap().id;
         let revision = model.revision(id).unwrap();
         assert_eq!(model.unread_count(), 2);
@@ -427,11 +405,11 @@ mod tests {
         let oldest = model.items().next().unwrap().id;
         let revision = model.revision(oldest).unwrap();
         for _ in 1..MAX_NOTIFICATIONS {
-            model.apply_event(&approval(), &BTreeMap::new());
+            model.apply_event(&approval(), |_| None);
         }
         let before: Vec<_> = model.items().map(|item| item.id).collect();
         // When: a new notification exceeds capacity.
-        model.apply_event(&approval(), &BTreeMap::new());
+        model.apply_event(&approval(), |_| None);
         // Then: FIFO eviction removes only the oldest notification and its ack.
         let after: Vec<_> = model.items().map(|item| item.id).collect();
         assert_eq!(after.len(), MAX_NOTIFICATIONS);

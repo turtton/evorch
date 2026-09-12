@@ -108,13 +108,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Synchronous fold for fixtures/tests/headless capture; production uses
     /// `EventPump`.
     pub fn apply_events(&mut self, events: impl IntoIterator<Item = Event>) {
-        let events: Vec<_> = events.into_iter().collect();
-        for event in &events {
-            self.fold_event(event);
-        }
-        // Approval targets must see all phase transitions in this batch.
-        for event in &events {
-            self.notifications.apply_event(event, &self.phases);
+        for event in events {
+            self.fold_event(&event);
         }
         self.refresh_active_thread_workspace();
     }
@@ -122,6 +117,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_event(&mut self, event: &Event) {
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
+        self.notifications.apply_event(event, |call_id| {
+            self.transcripts.run_for_call(call_id).map(str::to_owned)
+        });
         self.ledger.apply(event);
         self.tasks.apply_event(event);
         self.telemetry.apply_event(event);

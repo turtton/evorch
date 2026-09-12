@@ -44,6 +44,10 @@ impl TranscriptRegistry {
         }
     }
 
+    pub fn run_for_call(&self, call_id: &str) -> Option<&str> {
+        self.call_index.get(call_id).map(String::as_str)
+    }
+
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
@@ -395,6 +399,24 @@ mod tests {
                 status: ToolStatus::Succeeded,
             }]
         );
+    }
+
+    #[test]
+    fn run_for_call_returns_indexed_run_or_none() {
+        // Given: one indexed call and one call without run attribution.
+        let mut registry = TranscriptRegistry::new();
+        for (call_id, run_id) in [("known", Some("run-2")), ("runless", None)] {
+            registry.apply(&Event::new(ToolEvent::ToolStarted {
+                input: None,
+                tool_name: "write".into(),
+                call_id: call_id.into(),
+                run_id: run_id.map(str::to_owned),
+            }));
+        }
+        // When: looking up known, unknown, and runless calls.
+        let targets = ["known", "unknown", "runless"].map(|id| registry.run_for_call(id));
+        // Then: only the explicitly attributed call has a target.
+        assert_eq!(targets, [Some("run-2"), None, None]);
     }
 
     #[test]
