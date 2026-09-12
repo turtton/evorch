@@ -12,6 +12,9 @@ use event_bus::{Event, EventKind, MessageEvent, ProviderEvent, ToolEvent};
 #[path = "pricing.rs"]
 pub mod pricing;
 
+#[path = "quota.rs"]
+pub mod quota;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u64,
@@ -51,8 +54,9 @@ impl TelemetryRow {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct TelemetryOverlay {
+    pub quota: quota::QuotaState,
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
     costs: BTreeMap<String, f64>,

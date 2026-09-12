@@ -8,6 +8,14 @@ use crate::model::commands::apply_orchestrator_event;
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn with_quota_backend(
+        mut self,
+        backend: Box<dyn crate::model::telemetry::quota::QuotaBackend>,
+    ) -> Self {
+        self.telemetry.quota = crate::model::telemetry::quota::QuotaState::with_backend(backend);
+        self
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.theme_installed {
@@ -57,6 +65,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
         self.telemetry.refresh_costs(&self.provider_settings);
+        let account = self
+            .provider_settings
+            .profiles
+            .iter()
+            .find(|profile| {
+                profile.kind == crate::model::provider_settings::ProviderKind::CodexSubscription
+            })
+            .and_then(|profile| self.provider_settings.credential(&profile.name))
+            .and_then(|credential| match credential {
+                config::CredentialRefConfig::Keyring { account, .. } => Some(account.as_str()),
+                config::CredentialRefConfig::Env { .. } => None,
+            });
+        self.telemetry
+            .quota
+            .configure(account, self.credential_store.clone());
+        self.telemetry.quota.poll(std::time::Instant::now());
         self.render(ui);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(

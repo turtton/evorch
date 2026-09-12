@@ -38,6 +38,35 @@ pub fn agents_pane<S: AgentRunSource>(
             .then_some(AgentsAction::OpenDefaultPanes);
         ui.add_space(SP_1);
 
+        if let Some(snapshot) = &telemetry.quota.snapshot {
+            ui.label(muted(format!(
+                "Codex quota · Plan: {}",
+                snapshot.quota.plan.as_deref().unwrap_or("unknown")
+            )));
+            if snapshot.stale {
+                ui.label(muted("Stale · quota refresh failed"));
+            }
+            for (label, window) in [
+                ("5h", &snapshot.quota.primary),
+                ("7d", &snapshot.quota.secondary),
+            ] {
+                match window {
+                    Some(window) => {
+                        ui.label(muted(format!(
+                            "{label}: {:.1}% used · resets {}",
+                            window.used_percent,
+                            window.resets_at.format("%Y-%m-%d %H:%M UTC")
+                        )));
+                    }
+                    None => {
+                        ui.label(muted(format!("{label}: unavailable")));
+                    }
+                }
+            }
+        } else if telemetry.quota.error.is_some() {
+            ui.label(muted("Codex quota unavailable · refresh failed"));
+        }
+
         egui::ScrollArea::horizontal().show(ui, |ui| {
             let available = ui.available_width().min(ui.clip_rect().width());
             let widths = column_widths(ui, tasks, telemetry, available);
