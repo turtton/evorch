@@ -504,6 +504,20 @@
           "description": "モデル ID と利用可否の設定。",
           "type": "object",
           "properties": {
+            "cache_read_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "cache_write_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "context_window": {
               "type": [
                 "integer",
@@ -521,6 +535,14 @@
               "description": "モデル ID。",
               "type": "string"
             },
+            "input_price": {
+              "description": "USD per million tokens; omitted prices may be supplied by the catalog.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "metadata_ref": {
               "type": [
                 "string",
@@ -536,6 +558,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "output_price": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
             },
             "preset": {
               "type": [
