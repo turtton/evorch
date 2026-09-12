@@ -1,11 +1,11 @@
 implementation_issue_packet:
-  issue_title: "v09-a: サブエージェントのセッション継続（task_id 再開）と run 台帳を実装"
+  issue_title: "v09-a: send ツール統合の session 継続（終了 run の透過的復元）と run 台帳を実装"
   issue_kind: feature
   source_execution_unit: v09-a-agent-session-resume-ledger
   domain: evorch
   target_repo: turtton/evorch
   target_path: "crates/runtime/ crates/storage/ crates/gui/"
-  target_part: "サブエージェント run をフルコンテキスト保持のまま再開する session continuation プリミティブ（task_id 指定で同一 AgentContext を再開）と、compaction を跨いでも失われない run スコープの durable 作業台帳（agent が自由に追記できる append-only ledger、raw history とは別 surface）"
+  target_part: "send ツールを統合 interface として拡張し、終了・切断・プロセス再起動でメモリ上に存在しない run への配送を storage projection からの AgentContext 再構成で透過的に復元する（interface 統合・機構分割）。加えて compaction を跨いでも失われない run スコープの durable 作業台帳（agent が自由に追記できる append-only ledger、raw history とは別 surface）"
   dependencies: []
   technical_baseline:
     - "実証済みの動機（2026-09-12 の 11 機能 wave、opencode+oh-my-openagent 環境での orchestration 実績）: サブエージェント session の再開（task_id continuation）が3度の stream 断で T13 を救い、逆に session 失効（Task not found）で T10 の文脈が全損した。再開可能性が長時間ランの生死を分ける"
@@ -14,7 +14,7 @@ implementation_issue_packet:
     - "v02-context-compaction が model-visible window の narrowing と raw history 非破壊保持を設計済み。run 台帳は message history とは別の append-only surface として compaction の対象外にする（圧縮で作業上の決定・証拠が消えないことが目的）"
     - "v07-d-memory-task-improvement の memory event ledger は task 境界を跨ぐ知識蓄積が目的。本 unit の run 台帳は in-run/orchestrator 視点の作業記録で目的が異なるが、storage ledger 基盤は共有できる"
     - "GUI の thread/run 表示・transcript_registry（crates/gui/src/model/）は run 単位の routing が既存。再開された run の続行表示はこの経路に載る"
-    - "既存の AgentMessage send（v02、crates/runtime/src/runtime.rs:1060-1065）との境界: send は生存中 run（Pending/Running/Waiting）専用で、Done/Error への配送は RunTerminated で明示拒否される。本 unit はその拒否された領域（終了 run の復元）を担う。send の拡張ではなく別プリミティブとして実装すること"
+    - "既存の AgentMessage send（v02）との関係（2026-09-12 にオペレータと協議・確定）: send は現状、生存中 run（Pending/Running/Waiting）専用で、Done/Error への配送は runtime.rs:1060-1065 が RunTerminated で拒否する。本 unit はこの拒否を撤廃し、send を統合 interface とする: 生存中は現行どおり mailbox 配送（Wake/Steering/Aside）、終了・不在は storage projection から再構成してメッセージを新しい turn として注入する。Done/Error の semantics はどちらも『新しい turn として注入して起動』に統一し、Error 時の部分状態（open tool calls 等）は投影の復元責務とする。復活は配送より重いため内部機構は分割し、復活発生時は event を発行して観測可能にする（silent な復活はしない）。復元不能（投影欠損等）の場合のみ型付きエラーとし、silent に新規 session へフォールバックしない。親子関係の認可境界（MessageDenied）は復元経路でも維持する"
   intent_references:
     - intents/evorch/features/orchestration/overview.md
     - intents/evorch/features/agent-runtime-kernel/overview.md
@@ -22,11 +22,13 @@ implementation_issue_packet:
     - intents/evorch/decisions/0018-sqlite-storage-schema.md
     - intents/evorch/decisions/0025-agent-experience-evaluation.md
   acceptance_criteria:
-    - "終了・エラー・中断したサブエージェント run を task_id 相当の識別子で再開でき、再開先は再開前の完全な会話コンテキスト（compaction 済みなら summary checkpoint 含む）を保持する"
+    - "終了・エラー・中断した run へ send すると、storage projection から再開前の完全な会話コンテキスト（compaction 済みなら summary checkpoint 含む）を保持して復元され、メッセージが新しい turn として処理される"
+    - "生存中 run への send の既存 semantics（Wake/Steering/Aside、親子認可）は不変（回帰テストで固定）"
+    - "復元が発生した場合に event が発行され、GUI/OTel から観測できる"
     - "run 台帳へ agent が tool 経由で追記でき、内容は compaction 後も model-visible に残る（または参照可能）"
     - "台帳は append-only で SQLite に永続化され、run 再開・GUI 表示の両方から読める"
-    - "セッション失効（識別子不明・投影欠損）時に型付きエラーで明示され、silent に新規セッションへフォールバックしない"
-    - "回帰テスト: 中断 run の再開でコンテキストが一致すること、台帳追記が compaction 前後で保持されること"
+    - "復元不能（投影欠損・認可違反）時に型付きエラーで明示され、silent に新規セッションへフォールバックしない"
+    - "回帰テスト: 中断 run の send 再開でコンテキストが一致すること、台帳追記が compaction 前後で保持されること"
 intent_placement:
   primary_intent: intents/evorch/features/orchestration/overview.md
   supporting_intents:

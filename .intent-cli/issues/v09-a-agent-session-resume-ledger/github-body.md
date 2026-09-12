@@ -1,14 +1,18 @@
 ## Goal
 
-サブエージェント run をフルコンテキスト保持のまま再開する session continuation プリミティブと、
-compaction を跨いでも失われない run スコープの durable 作業台帳（append-only ledger）を実装する。
+send ツールを統合 interface として拡張し、終了・切断・プロセス再起動でメモリ上に存在しない
+run への配送を storage projection からの AgentContext 再構成で透過的に復元する
+（interface 統合・機構分割）。加えて compaction を跨いでも失われない run スコープの
+durable 作業台帳（append-only ledger）を実装する。
 
 ## Why This Slice Exists Now
 
 2026-09-12 の 11 機能 wave（ADR 0025 参照）で実証: サブエージェント session の再開が
 3 度の stream 断からの復旧を可能にし、逆に session 失効は文脈の全損を招いた。
-長時間の agent run の信頼性は「再開可能性」に依存する。現状 evorch には run 終了・エラー後に
-同一コンテキストで会話を継続する経路がない。
+長時間の agent run の信頼性は「再開可能性」に依存する。
+現状 evorch の send は生存中 run 専用で、Done/Error への配送は
+runtime.rs:1060-1065 が RunTerminated で明示拒否する。終了した run の会話を
+続ける経路が存在しない。
 
 ## Current Observed State
 
@@ -36,34 +40,43 @@ SQLite 永続化、compaction 非対象）+ GUI での続行表示
 
 ## In Scope
 
-- 終了・エラー・中断した run を識別子で再開し、再開前の会話コンテキスト
-  （compaction 済みなら summary checkpoint 含む）を保持する
+- send の統合 interface 化: 生存中 run へは現行どおり mailbox 配送（Wake/Steering/Aside）、
+  終了・メモリ不在の run へは storage projection から AgentContext を再構成して起動し、
+  メッセージを新しい turn として注入する
+- Done/Error の再開 semantics は「新しい turn として注入して起動」に統一。
+  Error 時の部分状態（open tool calls 等）は投影の復元責務とする
+- 復元は重い処理のため内部機構は分割し、復元発生時に event を発行して観測可能にする
+  （silent な復活はしない）
+- 親子関係の認可境界（MessageDenied）は復元経路でも維持する
 - agent が tool 経由で追記できる run スコープの append-only 台帳
 - 台帳の SQLite 永続化と run 再開・GUI 表示からの参照
-- セッション失効時の型付きエラー（silent な新規 session への fallback はしない）
+- 復元不能時の型付きエラー（silent な新規 session への fallback はしない）
 
 ## Out Of Scope
 
 - task 境界を跨ぐ知識蓄積（v07-d の memory backend の領域）
 - compaction engine 自体（v02-context-compaction の領域）
 - マルチプロセス間の run 移譲（ADR 0024 の handoff の領域）
-- 既存 AgentMessage send の拡張 — send は生存中 run（Pending/Running/Waiting）専用で、
-  Done/Error への配送は runtime.rs:1060-1065 が RunTerminated で明示拒否する設計。
-  本 slice はその拒否された領域（終了 run の復元）を担う**別プリミティブ**として実装する。
+- 生存中 run への既存 send semantics（Wake/Steering/Aside/親子認可）の変更 —
+  回帰テストで不変を固定する
 
 ## Standalone Child Issue Contract
 
-evorch の runtime に「終了・中断したサブエージェント run を識別子指定で再開し、
-再開先が再開前の完全な会話コンテキストを保持する」機能と、「run スコープの
-append-only 作業台帳に agent が tool 経由で追記でき、内容が compaction 後も保持され
-SQLite に永続化される」機能を追加し、両者の回帰テストを添えて PR として提出する。
+evorch の runtime の send（AgentMessage）を統合 interface として拡張し、「終了・中断した
+run へ send されたメッセージを、storage projection から復元した完全な会話コンテキスト付きで
+新しい turn として処理する」機能と、「run スコープの append-only 作業台帳に agent が tool 経由で
+追記でき、内容が compaction 後も保持され SQLite に永続化される」機能を追加し、
+生存中 run への既存 semantics が不変であることの回帰テストを含むテスト群を添えて
+PR として提出する。復元発生時は event を発行し、復元不能時は型付きエラーを返す。
 
 ## Acceptance Criteria
 
-- 中断 run の再開でコンテキストが一致する（回帰テスト）
+- 中断 run への send でコンテキストが一致して再開される（回帰テスト）
+- 生存中 run への send の既存 semantics が不変（回帰テスト）
+- 復元発生が event として観測できる
 - 台帳追記が compaction 前後で保持される（回帰テスト）
 - 台帳が GUI から読める
-- セッション失効が型付きエラーで明示される
+- 復元不能が型付きエラーで明示される
 
 ## Verification
 
