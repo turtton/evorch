@@ -6,8 +6,6 @@ use workspace_ui::{LayoutNode, PanelId, UiSettings, Workspace, load_settings, sa
 #[test]
 fn saved_legacy_layout_exposes_notification_row_and_opens_run_transcript() {
     // Given: an actual saved settings file from before notifications were registered.
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("ui.toml");
     let mut legacy = Workspace::default();
     legacy.panels.remove(&PanelId::new("notifications-main"));
     let LayoutNode::Split(root) = &mut legacy.main.root else {
@@ -21,6 +19,55 @@ fn saved_legacy_layout_exposes_notification_row_and_opens_run_transcript() {
     };
     tabs.panels.retain(|id| id.as_str() != "notifications-main");
     tabs.active = 1;
+    assert_notification_opens_transcript(legacy);
+}
+
+#[test]
+fn notification_opens_transcript_when_saved_layout_has_only_tasks_and_terminal() {
+    // Given: a valid saved layout without either fixed transcript anchor.
+    let legacy = tasks_and_terminal();
+    assert_notification_opens_transcript(legacy);
+}
+
+#[test]
+fn transcript_opens_in_first_leaf_when_all_fixed_anchors_are_absent() {
+    // Given: a layout with no Agents, Agent, or Notifications tab.
+    let mut settings = UiSettings::default();
+    settings.layout.workspace = Some(tasks_and_terminal());
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &settings).unwrap();
+    // When: a transcript is opened directly.
+    state.open_agent_pane("fallback-run");
+    // Then: it is appended and selected beside the existing tabs.
+    let dock = state.dock();
+    let path = dock
+        .find_tab(&PanelId::new("agent-fallback-run"))
+        .expect("transcript opened");
+    let leaf = dock.leaf(path.node_path()).unwrap();
+    assert_eq!(leaf.active, path.tab);
+    assert_eq!(
+        leaf.tabs,
+        vec![
+            PanelId::new("tasks-main"),
+            PanelId::new("terminal-main"),
+            PanelId::new("agent-fallback-run")
+        ]
+    );
+}
+
+fn tasks_and_terminal() -> Workspace {
+    let mut workspace = Workspace::default_v01();
+    workspace.version = workspace_ui::WORKSPACE_SCHEMA_VERSION;
+    workspace.panels.remove(&PanelId::new("agent-main"));
+    workspace.main.root = LayoutNode::Tabs(workspace_ui::Tabs {
+        panels: vec![PanelId::new("tasks-main"), PanelId::new("terminal-main")],
+        active: 1,
+    });
+    workspace
+}
+
+fn assert_notification_opens_transcript(legacy: Workspace) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ui.toml");
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(legacy);
     save_settings(&settings, &path).unwrap();
