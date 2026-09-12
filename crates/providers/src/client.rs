@@ -38,6 +38,49 @@ pub trait ProviderClient: Send + Sync {
         auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<DeltaStream, ProviderError>;
+
+    /// Delivers text/reasoning deltas live and returns the provider's accumulated response.
+    /// Non-streaming clients retain their `send` behavior; premature EOF is an error.
+    async fn send_streaming(
+        &self,
+        auth: &ProviderAuth,
+        request: &ChatRequest,
+        bus: &event_bus::EventBus,
+    ) -> Result<ChatResponse, ProviderError> {
+        use crate::stream::StreamEvent;
+        use event_bus::{Event, MessageEvent};
+        use futures_util::StreamExt;
+
+        if !self.capabilities().streaming {
+            return self.send(auth, request).await;
+        }
+        let mut stream = self.stream(auth, request).await?;
+        while let Some(event) = stream.next().await {
+            let run_id = request
+                .observation
+                .as_ref()
+                .map(|context| context.run_id.clone());
+            match event? {
+                StreamEvent::TextDelta { text } => {
+                    bus.emit(Event::new(MessageEvent::MessageDelta {
+                        delta: text,
+                        run_id,
+                    }));
+                }
+                StreamEvent::ReasoningDelta { text } => {
+                    bus.emit(Event::new(MessageEvent::ReasoningDelta {
+                        delta: text,
+                        run_id,
+                    }));
+                }
+                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::Completed { response } => return Ok(response),
+            }
+        }
+        Err(ProviderError::Request(
+            "stream ended without completion signal".to_owned(),
+        ))
+    }
 }
 
 // dyn 互換性 (object safety) のコンパイル時検証。

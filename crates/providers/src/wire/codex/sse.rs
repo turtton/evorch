@@ -48,7 +48,17 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
             | "response.output_text.done"
             | "response.output_item.done"
             | "response.content_part.added"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.done"
             | "response.function_call_arguments.done" => Ok(FrameInterpretation::default()),
+            "response.reasoning_summary_text.delta" => {
+                let event: TextDelta = parse(value)?;
+                Ok(FrameInterpretation {
+                    events: vec![StreamEvent::ReasoningDelta { text: event.delta }],
+                    completion: None,
+                })
+            }
             "response.output_text.delta" => {
                 let event: TextDelta = parse(value)?;
                 Ok(FrameInterpretation {
@@ -72,7 +82,9 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
                             completion: None,
                         })
                     }
-                    OutputItem::Message => Ok(FrameInterpretation::default()),
+                    OutputItem::Message | OutputItem::Reasoning => {
+                        Ok(FrameInterpretation::default())
+                    }
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -155,6 +167,7 @@ enum OutputItem {
         name: String,
     },
     Message,
+    Reasoning,
 }
 
 #[derive(Deserialize)]
