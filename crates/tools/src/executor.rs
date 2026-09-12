@@ -311,7 +311,7 @@ impl ToolExecutor {
                 if !is_failure(&first) {
                     first
                 } else if let Some(gate) = &self.gate {
-                    match gate.request(tool_name, call_id).await {
+                    match gate.request(tool_name, &approval_id(ctx, call_id)).await {
                         ApprovalOutcome::Approved => registered.tool.execute(args).await,
                         ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
                     }
@@ -403,6 +403,12 @@ fn capabilities_of(permissions: &Permissions) -> Capabilities {
         process_spawn: permissions.process_spawn,
         network: permissions.network,
     }
+}
+
+fn approval_id(ctx: &ToolExecutionContext, call_id: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let attempt = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}:{call_id}:{attempt}", ctx.run_id)
 }
 
 fn is_failure(outcome: &Result<ToolResult, ToolError>) -> bool {

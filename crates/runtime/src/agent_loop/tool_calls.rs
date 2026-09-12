@@ -17,6 +17,296 @@ use crate::escalation::detector::ToolObservation;
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
+#[cfg(test)]
+mod rework_tests {
+    use super::*;
+    use crate::{AgentRuntime, EscalationSettings, Role, RunConfig};
+    use event_bus::{AgentRunPhase, EventKind, ToolEvent};
+    use serde_json::json;
+
+    struct ScriptedModel {
+        responses: tokio::sync::Mutex<std::collections::VecDeque<providers::ChatResponse>>,
+        observed: tokio::sync::Mutex<Vec<Vec<providers::Message>>>,
+    }
+    impl ScriptedModel {
+        fn new(responses: impl IntoIterator<Item = providers::ChatResponse>) -> Self {
+            Self {
+                responses: tokio::sync::Mutex::new(responses.into_iter().collect()),
+                observed: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+        async fn observed(&self) -> Vec<Vec<providers::Message>> {
+            self.observed.lock().await.clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::AgentModel for ScriptedModel {
+        fn selected_model(&self, _: Role) -> String {
+            "test".into()
+        }
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+            messages: &[providers::Message],
+            _: &[ToolSpec],
+        ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+            self.observed.lock().await.push(messages.to_vec());
+            Ok(self.responses.lock().await.pop_front().expect("response"))
+        }
+    }
+    fn tool_response(id: &str, name: &str, input: Value) -> providers::ChatResponse {
+        let mut response = text_response("", providers::FinishReason::ToolUse);
+        response.message.content = vec![providers::ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }];
+        response
+    }
+    fn text_response(
+        text: &str,
+        finish_reason: providers::FinishReason,
+    ) -> providers::ChatResponse {
+        providers::ChatResponse {
+            message: providers::Message {
+                role: providers::Role::Assistant,
+                content: vec![providers::ContentBlock::Text { text: text.into() }],
+            },
+            finish_reason,
+            usage: providers::Usage::default(),
+        }
+    }
+    async fn drain_events(receiver: &mut event_bus::EventReceiver) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(10), receiver.recv()).await
+        {
+            events.push(event);
+        }
+        events
+    }
+
+    struct Panics;
+    struct Waits;
+    #[async_trait::async_trait]
+    impl tools::Tool for Waits {
+        fn name(&self) -> &'static str {
+            "read"
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+        fn permissions(&self) -> tools::Permissions {
+            tools::Permissions::read_only()
+        }
+        fn execution_mode(&self) -> ToolExecutionMode {
+            ToolExecutionMode::Shared
+        }
+        async fn execute(&self, _: Value) -> Result<ToolResult, tools::ToolError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancellation_while_wave_starts_drains_all_terminal_results() {
+        let bus = Arc::new(event_bus::EventBus::new(4096));
+        let mut events = bus.subscribe();
+        let mut executor = tools::ToolExecutor::new(bus.clone());
+        executor.register(Arc::new(Waits)).expect("register");
+        let mut batch = tool_response("0", "read", json!({}));
+        for index in 1..256 {
+            batch.message.content.extend(
+                tool_response(&index.to_string(), "read", json!({}))
+                    .message
+                    .content,
+            );
+        }
+        let model = Arc::new(ScriptedModel::new([batch]));
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), model);
+        let run = runtime.delegate_background(Role::Worker, "cancel".into(), RunConfig::default());
+        loop {
+            if matches!(
+                events.recv().await.expect("event").kind,
+                EventKind::Tool(ToolEvent::ToolStarted { .. })
+            ) {
+                break;
+            }
+        }
+        runtime.cancel(run).expect("cancel");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                .await
+                .expect("drain")
+                .expect("wait"),
+            AgentRunPhase::Error
+        );
+        let events = drain_events(&mut events).await;
+        let completed: std::collections::HashSet<_> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::Tool(ToolEvent::ToolCompleted {
+                    call_id,
+                    is_error: true,
+                    ..
+                }) => Some(call_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed.len(), 256);
+    }
+    #[async_trait::async_trait]
+    impl tools::Tool for Panics {
+        fn name(&self) -> &'static str {
+            "grep"
+        }
+        fn schema(&self) -> Value {
+            json!({})
+        }
+        fn permissions(&self) -> tools::Permissions {
+            tools::Permissions::read_only()
+        }
+        fn execution_mode(&self) -> ToolExecutionMode {
+            ToolExecutionMode::Shared
+        }
+        async fn execute(&self, _: Value) -> Result<ToolResult, tools::ToolError> {
+            panic!("injected panic")
+        }
+    }
+
+    async fn scenario(kind: &str) -> (Vec<Event>, Arc<ScriptedModel>, AgentRunPhase) {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).expect("root");
+        let file = root.join("data");
+        std::fs::write(&file, "data").expect("file");
+        let bus = Arc::new(event_bus::EventBus::new(128));
+        let mut events = bus.subscribe();
+        let mut executor = tools::ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        );
+        executor.register(Arc::new(Panics)).expect("register");
+        executor.set_policy(
+            sandbox::ApprovalPolicy::allow_all()
+                .with_override("shell", sandbox::PolicyDecision::Deny),
+        );
+        if kind == "terminal" {
+            executor.set_policy(
+                sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest)
+                    .with_override("read", sandbox::PolicyDecision::Ask),
+            );
+            executor.set_approval_gate(ApprovalGate::new(bus.clone(), Duration::from_millis(10)));
+        }
+        let mut batch = tool_response("first", "read", json!({"path":file}));
+        let second = match kind {
+            "panic" => tool_response("second", "grep", json!({})),
+            "invalid" => tool_response("second", "edit", json!({})),
+            "terminal" => {
+                batch = tool_response("finish", "finish", json!({"result":"done"}));
+                tool_response("second", "read", json!({"path":file}))
+            }
+            _ => tool_response("second", "shell", json!({"command":"true"})),
+        };
+        batch.message.content.extend(second.message.content);
+        let model = Arc::new(ScriptedModel::new([
+            batch,
+            text_response("done", providers::FinishReason::Stop),
+        ]));
+        let service = Arc::new(
+            crate::snapshot::SnapshotService::new(&root, &temp.path().join("snapshots"))
+                .expect("snapshot"),
+        );
+        let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone())
+            .with_snapshots(service)
+            .with_escalation_settings(EscalationSettings {
+                consecutive_edit_failures: 1,
+                same_file_rewrites: 100,
+                tool_call_threshold: 100,
+            });
+        let role = if kind == "terminal" {
+            Role::Orchestrator
+        } else {
+            Role::Worker
+        };
+        let run = runtime.delegate_background(role, "test".into(), RunConfig::default());
+        let phase = runtime.wait(run).await.expect("wait");
+        (drain_events(&mut events).await, model, phase)
+    }
+
+    #[tokio::test]
+    async fn rejected_preflight_emits_lifecycle_at_original_position() {
+        let (events, _, _) = scenario("denied").await;
+        let order: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::Tool(ToolEvent::ToolStarted { call_id, .. }) => {
+                    Some(format!("start:{call_id}"))
+                }
+                EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => {
+                    Some(format!("deny:{call_id}"))
+                }
+                EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. }) => {
+                    Some(format!("end:{call_id}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "start:first",
+                "end:first",
+                "start:second",
+                "deny:second",
+                "end:second"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_edit_is_observed_without_snapshot() {
+        let (events, _, _) = scenario("invalid").await;
+        assert!(events.iter().any(|e| matches!(
+            e.kind,
+            EventKind::Lifecycle(LifecycleEvent::EscalationProposed { .. })
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::Snapshot(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_preserves_every_wave_result_in_context() {
+        let (_, model, phase) = scenario("panic").await;
+        assert_eq!(phase, AgentRunPhase::Done);
+        let observed = model.observed().await;
+        let results: Vec<_> = observed
+            .last()
+            .expect("request")
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                providers::ContentBlock::ToolResult {
+                    tool_call_id,
+                    is_error,
+                    ..
+                } => Some((tool_call_id.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [("first", false), ("second", true)]);
+    }
+
+    #[tokio::test]
+    async fn terminal_barrier_skips_tail_preflight_events() {
+        let (events, _, _) = scenario("terminal").await;
+        assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. } | ToolEvent::ExecutionDenied { call_id, .. } | ToolEvent::ApprovalRequested { call_id, .. }) if call_id.contains("second"))));
+    }
+}
+
 /// 承認待ちの上限。TimedOut は error result として run を継続する。
 const WEB_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -54,141 +344,161 @@ impl LoopState {
             run_id: self.task.run_id.to_string(),
         };
         let mut rule_targets = Vec::new();
-        let mut validated = Vec::with_capacity(tool_uses.len());
-        for (id, name, input) in tool_uses {
-            if let Some(permit) = &self.task.config.ownership
-                && let Err(error) = permit.validate_mutation()
-            {
-                self.finish_error(error.to_string());
-                return false;
-            }
-            let local = is_meta_op(&name)
-                || matches!(
-                    name.as_str(),
-                    "task_claim" | "task_complete" | "finding_append"
-                );
-            let mut permission = if matches!(
-                name.as_str(),
-                "task_claim" | "task_complete" | "finding_append"
-            ) {
-                Ok(())
-            } else {
-                self.guard_team_artifact(&name, &input)
-                    .and_then(|()| self.policy.authorize(&name).map_err(|e| e.to_string()))
-            };
-            if local && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name) {
-                permission = permission.and_then(|()| {
-                    tools::ToolExecutor::validate_schema(&name, &spec.input_schema, &input)
-                        .map_err(|error| error.to_string())
-                });
-            }
-            let validation = if local {
-                None
-            } else {
-                Some(self.shared.executor.validate_call(
-                    ctx.clone(),
-                    name.clone(),
-                    id.clone(),
-                    input.clone(),
-                ))
-            };
-            validated.push((id, name, input, permission, validation));
-        }
-        let mut calls = std::collections::VecDeque::new();
-        for (id, name, input, permission, validation) in validated {
-            if self.cancelled() {
-                self.finish_cancelled();
-                return false;
-            }
-            let ready = match permission {
-                Err(error) => ReadyCall::Rejected(ToolResult::error(error)),
-                Ok(()) => match validation {
-                    None => ReadyCall::Local,
-                    Some(Err(error)) => match self.gate_network_tool(&name, &id).await {
-                        NetworkGate::Cancelled => return false,
-                        NetworkGate::Reject(result) => ReadyCall::Rejected(result),
-                        NetworkGate::Proceed => ReadyCall::Invalid(error),
-                    },
-                    Some(Ok(call)) => match self.gate_network_tool(&name, &id).await {
-                        NetworkGate::Cancelled => return false,
-                        NetworkGate::Reject(result) => ReadyCall::Rejected(result),
-                        NetworkGate::Proceed => {
-                            let mut cancel = self.channels.cancel_rx.clone();
-                            let authorized = tokio::select! {
-                                biased;
-                                _ = cancel.wait_for(|cancelled| *cancelled) => { self.finish_cancelled(); return false; }
-                                result = call.authorize() => result,
-                            };
-                            match authorized {
-                                Ok(call) => ReadyCall::Tool(call),
-                                Err(error) => {
-                                    ReadyCall::Rejected(ToolResult::error(error.to_string()))
-                                }
-                            }
-                        }
-                    },
-                },
-            };
-            calls.push_back(BatchCall {
-                id,
-                name,
-                input,
-                ready,
-            });
-        }
-        while let Some(first) = calls.pop_front() {
-            let mut wave = vec![first];
-            if self.shared_call(&wave[0]) {
-                while calls.front().is_some_and(|call| self.shared_call(call)) {
-                    if let Some(call) = calls.pop_front() {
-                        wave.push(call);
-                    }
+        let mut remaining = tool_uses.into_iter().peekable();
+        while remaining.peek().is_some() {
+            let mut segment = Vec::new();
+            for call in remaining.by_ref() {
+                let terminal = matches!(call.1.as_str(), "finish" | "escalate");
+                segment.push(call);
+                if terminal {
+                    break;
                 }
             }
-            let mut completed = Vec::new();
-            let mut tasks = tokio::task::JoinSet::new();
-            for (index, call) in wave.into_iter().enumerate() {
+            let mut validated = Vec::with_capacity(segment.len());
+            for (id, name, input) in segment {
                 if let Some(permit) = &self.task.config.ownership
                     && let Err(error) = permit.validate_mutation()
                 {
                     self.finish_error(error.to_string());
                     return false;
                 }
+                let local = is_meta_op(&name)
+                    || matches!(
+                        name.as_str(),
+                        "task_claim" | "task_complete" | "finding_append"
+                    );
+                let mut permission = if matches!(
+                    name.as_str(),
+                    "task_claim" | "task_complete" | "finding_append"
+                ) {
+                    Ok(())
+                } else {
+                    self.guard_team_artifact(&name, &input)
+                        .and_then(|()| self.policy.authorize(&name).map_err(|e| e.to_string()))
+                };
+                if local && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name) {
+                    permission = permission.and_then(|()| {
+                        tools::ToolExecutor::validate_schema(&name, &spec.input_schema, &input)
+                            .map_err(|error| error.to_string())
+                    });
+                }
+                let validation = if local {
+                    None
+                } else {
+                    Some(self.shared.executor.validate_call(
+                        ctx.clone(),
+                        name.clone(),
+                        id.clone(),
+                        input.clone(),
+                    ))
+                };
+                validated.push((id, name, input, permission, validation));
+            }
+            let mut calls = std::collections::VecDeque::new();
+            for (id, name, input, permission, validation) in validated {
                 if self.cancelled() {
                     self.finish_cancelled();
                     return false;
                 }
-                let BatchCall {
+                let ready = match permission {
+                    Err(error) => ReadyCall::Rejected(ToolResult::error(error)),
+                    Ok(()) => match validation {
+                        None => ReadyCall::Local,
+                        Some(Err(error)) => match self.gate_network_tool(&name, &id).await {
+                            NetworkGate::Cancelled => return false,
+                            NetworkGate::Reject(result) => ReadyCall::Rejected(result),
+                            NetworkGate::Proceed => ReadyCall::Invalid(error),
+                        },
+                        Some(Ok(call)) => match self.gate_network_tool(&name, &id).await {
+                            NetworkGate::Cancelled => return false,
+                            NetworkGate::Reject(result) => ReadyCall::Rejected(result),
+                            NetworkGate::Proceed => {
+                                let mut cancel = self.channels.cancel_rx.clone();
+                                let authorized = tokio::select! {
+                                    biased;
+                                    _ = cancel.wait_for(|cancelled| *cancelled) => { self.finish_cancelled(); return false; }
+                                    result = call.authorize() => result,
+                                };
+                                match authorized {
+                                    Ok(call) => ReadyCall::Tool(call),
+                                    Err(error) => ReadyCall::Invalid(error),
+                                }
+                            }
+                        },
+                    },
+                };
+                calls.push_back(BatchCall {
                     id,
                     name,
                     input,
                     ready,
-                } = call;
-                match ready {
-                    ReadyCall::Tool(call) => {
-                        let guard = match self.snapshot_before_tool(&name, &id).await {
-                            Ok(guard) => guard,
-                            Err(error) => {
-                                completed.push((
-                                    index,
-                                    id,
-                                    name,
-                                    input,
-                                    ReadyCall::Rejected(ToolResult::error(error)),
-                                ));
-                                continue;
-                            }
-                        };
-                        if let Some(permit) = &self.task.config.ownership
-                            && let Err(error) = permit.validate_mutation()
-                        {
-                            self.finish_error(error.to_string());
-                            return false;
+                });
+            }
+            while let Some(first) = calls.pop_front() {
+                let mut wave = vec![first];
+                if self.shared_call(&wave[0]) {
+                    while calls.front().is_some_and(|call| self.shared_call(call)) {
+                        if let Some(call) = calls.pop_front() {
+                            wave.push(call);
                         }
-                        let mut cancel = self.channels.cancel_rx.clone();
-                        let bus = Arc::clone(&self.shared.bus);
-                        let run_id = ctx.run_id.clone();
-                        tasks.spawn(async move {
+                    }
+                }
+                let mut completed = Vec::new();
+                let mut tasks = tokio::task::JoinSet::new();
+                let mut pending = std::collections::HashMap::new();
+                let mut prepared_wave = Vec::with_capacity(wave.len());
+                for (index, call) in wave.into_iter().enumerate() {
+                    if let Some(permit) = &self.task.config.ownership
+                        && let Err(error) = permit.validate_mutation()
+                    {
+                        self.finish_error(error.to_string());
+                        return false;
+                    }
+                    if self.cancelled() {
+                        self.finish_cancelled();
+                        return false;
+                    }
+                    let BatchCall {
+                        id,
+                        name,
+                        input,
+                        ready,
+                    } = call;
+                    match ready {
+                        ReadyCall::Tool(call) => {
+                            let guard = match self.snapshot_before_tool(&name, &id).await {
+                                Ok(guard) => guard,
+                                Err(error) => {
+                                    completed.push((
+                                        index,
+                                        id,
+                                        name,
+                                        input,
+                                        ReadyCall::Rejected(ToolResult::error(error)),
+                                    ));
+                                    continue;
+                                }
+                            };
+                            if let Some(permit) = &self.task.config.ownership
+                                && let Err(error) = permit.validate_mutation()
+                            {
+                                self.finish_error(error.to_string());
+                                return false;
+                            }
+                            prepared_wave.push((index, id, name, input, call, guard));
+                        }
+                        ReadyCall::Invalid(error) => {
+                            completed.push((index, id, name, input, ReadyCall::Invalid(error)));
+                        }
+                        ready => completed.push((index, id, name, input, ready)),
+                    }
+                }
+                for (index, id, name, input, call, guard) in prepared_wave {
+                    let metadata = (index, id.clone(), name.clone(), input.clone());
+                    let mut cancel = self.channels.cancel_rx.clone();
+                    let bus = Arc::clone(&self.shared.bus);
+                    let run_id = ctx.run_id.clone();
+                    let handle = tasks.spawn(async move {
                             let _guard = guard;
                             let result = tokio::select! {
                                 biased;
@@ -203,113 +513,129 @@ impl LoopState {
                             };
                             (index, id, name, input, ReadyCall::Executed(result))
                         });
-                    }
-                    ReadyCall::Invalid(error) => {
-                        self.shared.executor.report_invalid_call(
-                            &ctx,
-                            &name,
-                            &id,
-                            input.clone(),
-                            &error,
-                        );
-                        completed.push((
-                            index,
-                            id,
-                            name,
-                            input,
-                            ReadyCall::Rejected(ToolResult::error(error.to_string())),
-                        ));
-                    }
-                    ready => completed.push((index, id, name, input, ready)),
+                    pending.insert(handle.id(), metadata);
                 }
-            }
-            let mut join_error = None;
-            while let Some(result) = tasks.join_next().await {
-                match result {
-                    Ok(result) => completed.push(result),
-                    Err(error) => {
-                        join_error = Some(error.to_string());
-                    }
-                }
-            }
-            if let Some(error) = join_error {
-                self.finish_error(error);
-                return false;
-            }
-            completed.sort_by_key(|(index, ..)| *index);
-            for (_, id, name, input, ready) in completed {
-                if let Some(permit) = &self.task.config.ownership
-                    && let Err(error) = permit.validate_mutation()
-                {
-                    self.finish_error(error.to_string());
-                    return false;
-                }
-                let observed = matches!(&ready, ReadyCall::Executed(_));
-                let result =
-                    if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
-                        result
-                    } else if matches!(
-                        name.as_str(),
-                        "task_claim" | "task_complete" | "finding_append"
-                    ) {
-                        self.team_tool(&name, input.clone()).await
-                    } else if let Err(error) = self.guard_team_artifact(&name, &input) {
-                        ToolResult::error(error)
-                    } else if let Err(error) = self.policy.authorize(&name) {
-                        ToolResult::error(error.to_string())
-                    } else if is_meta_op(&name) {
-                        let dispatch = meta::dispatch(self, &name, input).await;
-                        self.context.push_tool_result(id, dispatch.result);
-                        self.publish_message_count();
-                        match dispatch.terminal {
-                            meta::Terminal::Continue => continue,
-                            meta::Terminal::Finish(result) => {
-                                self.push_final_result(&result);
-                                self.finish_success();
-                                return false;
-                            }
-                            meta::Terminal::Escalate(memo) => {
-                                // 終端指示を返した時点で残りのバッチ tool call は
-                                // 実行しない (新規 tool call 受付の停止)。
-                                self.finish_escalated(*memo);
-                                return false;
+                while let Some(result) = tasks.join_next_with_id().await {
+                    match result {
+                        Ok((task_id, result)) => {
+                            pending.remove(&task_id);
+                            completed.push(result);
+                        }
+                        Err(error) => {
+                            if let Some((index, id, name, input)) = pending.remove(&error.id()) {
+                                let result = ToolResult::error(error.to_string());
+                                self.shared.bus.emit(Event::new(
+                                    event_bus::ToolEvent::ToolCompleted {
+                                        tool_name: name.clone(),
+                                        call_id: id.clone(),
+                                        is_error: true,
+                                        output: Some(result.content.clone()),
+                                        detail: None,
+                                        run_id: Some(ctx.run_id.clone()),
+                                    },
+                                ));
+                                completed.push((
+                                    index,
+                                    id,
+                                    name,
+                                    input,
+                                    ReadyCall::Executed(result),
+                                ));
                             }
                         }
-                    } else {
-                        ToolResult::error("invalid prepared local call")
-                    };
-                let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
-                    .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
-                    .flatten();
-                // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
-                // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
-                let observation_path = if name == "edit" {
-                    rule_target.as_deref().map(PathBuf::from)
-                } else {
-                    None
-                };
-                if observed
-                    && let Some(trigger) = self.escalation_detector.observe(
-                        &ToolObservation {
-                            tool: name.as_str(),
-                            path: observation_path,
-                            is_error: result.is_error,
-                        },
-                        &self.shared.escalation,
-                    )
-                {
-                    self.shared
-                        .bus
-                        .emit(Event::new(LifecycleEvent::EscalationProposed {
-                            run_id: self.caller_run_id().to_string(),
-                            trigger,
-                        }));
+                    }
                 }
-                if observed
-                    && !result.is_error
-                    && let Some(target) = rule_target
-                {
-                    rule_targets.push(target);
+                completed.sort_by_key(|(index, ..)| *index);
+                for (_, id, name, input, ready) in completed {
+                    if matches!(&ready, ReadyCall::Local)
+                        && let Some(permit) = &self.task.config.ownership
+                        && let Err(error) = permit.validate_mutation()
+                    {
+                        self.finish_error(error.to_string());
+                        return false;
+                    }
+                    let observed = matches!(&ready, ReadyCall::Executed(_) | ReadyCall::Invalid(_));
+                    let result =
+                        if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
+                            result
+                        } else if let ReadyCall::Invalid(error) = ready {
+                            self.shared.executor.report_invalid_call(
+                                &ctx,
+                                &name,
+                                &id,
+                                input.clone(),
+                                &error,
+                            );
+                            ToolResult::error(error.to_string())
+                        } else if matches!(
+                            name.as_str(),
+                            "task_claim" | "task_complete" | "finding_append"
+                        ) {
+                            self.team_tool(&name, input.clone()).await
+                        } else if let Err(error) = self.guard_team_artifact(&name, &input) {
+                            ToolResult::error(error)
+                        } else if let Err(error) = self.policy.authorize(&name) {
+                            ToolResult::error(error.to_string())
+                        } else if is_meta_op(&name) {
+                            let dispatch = meta::dispatch(self, &name, input).await;
+                            self.context.push_tool_result(id, dispatch.result);
+                            self.publish_message_count();
+                            match dispatch.terminal {
+                                meta::Terminal::Continue => continue,
+                                meta::Terminal::Finish(result) => {
+                                    self.push_final_result(&result);
+                                    self.finish_success();
+                                    return false;
+                                }
+                                meta::Terminal::Escalate(memo) => {
+                                    // 終端指示を返した時点で残りのバッチ tool call は
+                                    // 実行しない (新規 tool call 受付の停止)。
+                                    self.finish_escalated(*memo);
+                                    return false;
+                                }
+                            }
+                        } else {
+                            ToolResult::error("invalid prepared local call")
+                        };
+                    let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
+                        .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
+                        .flatten();
+                    // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
+                    // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
+                    let observation_path = if name == "edit" {
+                        rule_target.as_deref().map(PathBuf::from)
+                    } else {
+                        None
+                    };
+                    if observed
+                        && let Some(trigger) = self.escalation_detector.observe(
+                            &ToolObservation {
+                                tool: name.as_str(),
+                                path: observation_path,
+                                is_error: result.is_error,
+                            },
+                            &self.shared.escalation,
+                        )
+                    {
+                        self.shared
+                            .bus
+                            .emit(Event::new(LifecycleEvent::EscalationProposed {
+                                run_id: self.caller_run_id().to_string(),
+                                trigger,
+                            }));
+                    }
+                    if observed
+                        && !result.is_error
+                        && let Some(target) = rule_target
+                    {
+                        rule_targets.push(target);
+                    }
+                    self.context.push_tool_result(id, result);
+                    self.publish_message_count();
+                }
+                if self.cancelled() {
+                    self.finish_cancelled();
+                    return false;
                 }
                 if let Some(permit) = &self.task.config.ownership
                     && let Err(error) = permit.validate_mutation()
@@ -317,12 +643,6 @@ impl LoopState {
                     self.finish_error(error.to_string());
                     return false;
                 }
-                self.context.push_tool_result(id, result);
-                self.publish_message_count();
-            }
-            if self.cancelled() {
-                self.finish_cancelled();
-                return false;
             }
         }
         if !rule_targets.is_empty()
