@@ -50,12 +50,18 @@ evorch にあった方が良い機能・強化すべきもの・入れない方�
 4. **v09-d: 承認 UX の相関 ID 明示**
    d5342ce の runtime 修正（run:call:attempt 束縛）の GUI 側仕上げ。
 
-### 既存 intent の優先度を裏付け（新規 packet 不要）
+### 既存実装との関係（2026-09-12 訂正・追記）
 
-5. **v02-workspace-isolation（runtime 所有 git worktree 隔離）**: 今回の index 競合は
-   この unit が解決する問題の実証。worktree 隔離が先にあれば混在コミットは起きない。
-6. **v02-context-compaction（監査可能な compaction）**: raw history 非破壊・発動 event の
-   観測可能性という設計方向は正しい。体験上の要求と一致。
+5. **v02-workspace-isolation は完了済み（実装存在）**: `WorkspaceMode::{Shared, Isolated}` と
+   runtime 所有 worktree は実装済み（crates/runtime/src/run.rs:38-）。今回の混在コミットは
+   **evorch 内の run ではなく、評価者自身の環境（opencode 側の並列サブエージェント）で
+   発生した**もので、evorch の欠陥の実証ではない。初版の「優先度の実証」という記述は
+   誤りであり本項で訂正する。残る実質論点は **既定値が Shared**（run.rs:197-200）である
+   こと: evorch 内で複数 run が同一リポジトリへ並列で書き込む運用を許すか、
+   その場合の既定/選択ポリシーは未決（小規模 packet 候補）。
+6. **v02-context-compaction も完了済み（実装存在）**: crates/runtime/src/compaction/ に
+   ポリシー・発動制御があり、CompactionReason（event.rs:820、automatic 等）で発動が
+   観測可能。不採用項目1（silent compaction 不許可）の設計要求は既に満たされている。
 
 ### 不採用（入れない方が良いもの）
 
@@ -72,7 +78,7 @@ evorch にあった方が良い機能・強化すべきもの・入れない方�
 
 ## Consequences
 
-- v09-a〜d が queue に積まれ、v02-workspace-isolation / v02-context-compaction の
-  優先度根拠が強化された。
+- v09-a〜d が queue に積まれた。v02-workspace-isolation / v02-context-compaction は
+  実装済みと確認され、残論点は「並列書き込み時の Shared/Isolated 既定ポリシー」のみ。
 - エージェント体験に基づく評価を定期入力として使う先例ができた。
   次回の同種評価は improve / inspect のインプットとして扱える。
