@@ -48,6 +48,9 @@ impl TranscriptRegistry {
         match &event.kind {
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
+            EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
+                vec![TranscriptKey::Run(run_id.clone())]
+            }
             EventKind::Diagnostic(event) => event.run_id.as_ref().map_or_else(
                 || vec![TranscriptKey::Thread],
                 |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
@@ -117,6 +120,7 @@ impl TranscriptRegistry {
                 },
             )
             | EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)
@@ -165,6 +169,7 @@ impl TranscriptRegistry {
             EventKind::Diagnostic(event) => event.thread_id.clone(),
             EventKind::Ownership(event) => Some(event.thread_id.clone()),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

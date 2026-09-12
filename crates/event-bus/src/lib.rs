@@ -16,8 +16,8 @@ pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
     CompactionReason, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
-    FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind, RoutingSource,
-    SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
+    FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
+    RoutingSource, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

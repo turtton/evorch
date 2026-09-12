@@ -614,6 +614,7 @@ impl SupervisorActor {
                 self.on_external_orchestrator(orchestrator).await
             }
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_)

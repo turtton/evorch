@@ -12,6 +12,7 @@ impl SpanMapper {
             EventKind::Tool(tool) => self.map_tool(tool, at),
             EventKind::Diagnostic(diagnostic) => self.map_diagnostic(diagnostic, at),
             EventKind::Message(_)
+            | EventKind::Ledger(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)

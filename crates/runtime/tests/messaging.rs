@@ -640,6 +640,7 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
         .filter_map(|event| match &event.kind {
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => Some(message),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

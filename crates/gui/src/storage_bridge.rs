@@ -30,6 +30,7 @@ impl StorageBridge {
                 Ok(())
             }
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Provider(_)
@@ -192,6 +193,25 @@ mod tests {
         // Then: the event remains available for replay.
         let events = db.events_all_ordered().unwrap();
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, event);
+    }
+
+    #[test]
+    fn ledger_event_is_persisted() {
+        // Given: a ledger event and a real storage writer.
+        let (_dir, storage, db) = fixture();
+        let mut bridge = StorageBridge::new(storage.handle(), "session");
+        let event = Event::new(event_bus::LedgerEvent::RunLedgerAppended {
+            run_id: "run-1".into(),
+            seq: 7,
+            body: "entry".into(),
+        });
+        // When: the ledger event reaches the bridge.
+        bridge.handle_event(&event).unwrap();
+        // Then: the complete event is available for replay in its session.
+        let events = db.events_all_ordered().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id.as_deref(), Some("session"));
         assert_eq!(events[0].event, event);
     }
 

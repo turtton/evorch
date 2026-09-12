@@ -46,6 +46,7 @@ impl ApprovalGate {
                             };
                         }
                         EventKind::Lifecycle(_)
+                        | EventKind::Ledger(_)
                         | EventKind::Message(_)
                         | EventKind::Tool(_)
                         | EventKind::Usage(_)

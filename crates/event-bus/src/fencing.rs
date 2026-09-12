@@ -84,6 +84,7 @@ impl MutationFences {
         let accepted = match &event.kind {
             EventKind::Lifecycle(event) => match event {
                 LifecycleEvent::AgentRunStarted { run_id, .. }
+                | LifecycleEvent::AgentRunRestored { run_id, .. }
                 | LifecycleEvent::AgentRunStateChanged { run_id, .. }
                 | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
                 LifecycleEvent::BackgroundTaskStarted { task_id }
@@ -126,6 +127,9 @@ impl MutationFences {
             }
             EventKind::Compaction(CompactionEvent::Compacted { run_id, .. }) => accepts(run_id),
             EventKind::Snapshot(event) => accepts(&event.run_id),
+            EventKind::Ledger(crate::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
+                accepts(run_id)
+            }
             EventKind::Diagnostic(event) => event.run_id.as_deref().is_none_or(accepts),
             EventKind::Provider(ProviderEvent::ProviderFallback { .. })
             | EventKind::Usage(_)

@@ -60,6 +60,7 @@ impl SpanMapper {
                 Vec::new()
             }
             LifecycleEvent::Delegated { .. }
+            | LifecycleEvent::AgentRunRestored { .. }
             | LifecycleEvent::BackgroundTaskCompleted { .. }
             | LifecycleEvent::BackgroundTaskCancelled { .. }
             | LifecycleEvent::RoutingDecision { .. }

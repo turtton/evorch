@@ -60,6 +60,7 @@ fn phases(events: &[Event], run_id: &str) -> Vec<AgentRunPhase> {
                 ..
             }) if event_run_id == run_id => Some(*to),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)
