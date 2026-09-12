@@ -584,11 +584,12 @@ impl LoopState {
                     }
                     continue;
                 }
-                result = self.shared.model.complete(
+                result = self.shared.model.complete_streaming(
                     &invocation,
                     self.task.role,
                     &visible_messages,
                     &self.tool_specs,
+                    &self.shared.bus,
                 ) => result,
             };
             let response = match completion {
@@ -620,30 +621,6 @@ impl LoopState {
                 })
                 .collect();
             let has_tool_uses = !tool_uses.is_empty();
-            let message_events = response
-                .message
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } if !text.is_empty() => {
-                        Some(event_bus::MessageEvent::MessageDelta {
-                            delta: text.clone(),
-                            run_id: Some(self.task.run_id.to_string()),
-                        })
-                    }
-                    ContentBlock::Reasoning { text } if !text.is_empty() => {
-                        Some(event_bus::MessageEvent::ReasoningDelta {
-                            delta: text.clone(),
-                            run_id: Some(self.task.run_id.to_string()),
-                        })
-                    }
-                    ContentBlock::Image { .. }
-                    | ContentBlock::Text { .. }
-                    | ContentBlock::Reasoning { .. }
-                    | ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
-                })
-                .collect::<Vec<_>>();
             if let Some(permit) = &self.task.config.ownership
                 && let Err(error) = permit.validate_mutation()
             {
@@ -652,9 +629,6 @@ impl LoopState {
             }
             self.context.push_assistant(response.message);
             self.publish_message_count();
-            for event in message_events {
-                self.shared.bus.emit(Event::new(event));
-            }
             if !self.execute_tools(tool_uses).await {
                 return;
             }

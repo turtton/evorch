@@ -54,8 +54,10 @@ pub trait AgentModel: Send + Sync {
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError>;
 
-    /// Completes with live deltas on `bus`; legacy models fall back without deltas.
-    /// The canonical response remains authoritative. Dropping the future cancels it.
+    /// Completes with live deltas on `bus`; legacy models emit deferred deltas once.
+    /// Overrides own delta emission; callers must never replay the canonical response.
+    /// The canonical response alone supplies history and tools. Dropping cancels it,
+    /// but already published display deltas cannot be retracted.
     /// Arguments mirror `complete` to preserve the existing model boundary.
     async fn complete_streaming(
         &self,
@@ -63,9 +65,32 @@ pub trait AgentModel: Send + Sync {
         role: Role,
         messages: &[Message],
         tools: &[ToolSpec],
-        _bus: &event_bus::EventBus,
+        bus: &event_bus::EventBus,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete(invocation, role, messages, tools).await
+        let response = self.complete(invocation, role, messages, tools).await?;
+        for block in &response.message.content {
+            let event = match block {
+                providers::ContentBlock::Text { text } if !text.is_empty() => {
+                    event_bus::MessageEvent::MessageDelta {
+                        delta: text.clone(),
+                        run_id: Some(invocation.run_id.clone()),
+                    }
+                }
+                providers::ContentBlock::Reasoning { text } if !text.is_empty() => {
+                    event_bus::MessageEvent::ReasoningDelta {
+                        delta: text.clone(),
+                        run_id: Some(invocation.run_id.clone()),
+                    }
+                }
+                providers::ContentBlock::Image { .. }
+                | providers::ContentBlock::Text { .. }
+                | providers::ContentBlock::Reasoning { .. }
+                | providers::ContentBlock::ToolUse { .. }
+                | providers::ContentBlock::ToolResult { .. } => continue,
+            };
+            bus.emit(event_bus::Event::new(event));
+        }
+        Ok(response)
     }
 
     /// ロールに選択されたモデル識別子を報告する。

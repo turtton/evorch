@@ -14,41 +14,19 @@ use sandbox::credential::{CredentialStore, FileCredentialStore};
 use serde_json::json;
 use tools::ToolExecutor;
 
+use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use support::drain_events;
-use support::mock_openai::RecordingMockOpenAi;
 
 const KEY_ENV: &str = "EVORCH_TEST_KEY_COMPOSITION_E2E";
 const KEY: &str = "composition-e2e-key";
 const MODEL: &str = "local-model";
 
-fn openai_tool_response(id: &str, name: &str, arguments: serde_json::Value) -> String {
-    json!({
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": id,
-                    "type": "function",
-                    "function": { "name": name, "arguments": arguments.to_string() }
-                }]
-            },
-            "finish_reason": "tool_calls"
-        }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-    })
-    .to_string()
+fn openai_tool_response(id: &str, name: &str, arguments: serde_json::Value) -> ScriptedResponse {
+    ScriptedResponse::tool_call(id, MODEL, 0, id, name, [arguments.to_string()]).with_usage(1, 1)
 }
 
-fn openai_text_response(text: &str) -> String {
-    json!({
-        "choices": [{
-            "message": { "role": "assistant", "content": text },
-            "finish_reason": "stop"
-        }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
-    })
-    .to_string()
+fn openai_text_response(text: &str) -> ScriptedResponse {
+    ScriptedResponse::text_stream("text", MODEL, [text]).with_usage(1, 1)
 }
 
 fn load_config(root: &std::path::Path, base_url: &str) -> Config {
@@ -106,7 +84,7 @@ fn composition<'a>(
 async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() {
     let directory = tempfile::tempdir().expect("project directory");
     let edited = directory.path().join("worker-output.txt");
-    let mock = RecordingMockOpenAi::spawn(vec![
+    let mock = StreamingMockOpenAi::spawn(vec![
         openai_tool_response(
             "delegate-1",
             "delegate",
@@ -183,7 +161,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     );
     assert!(message_deltas.contains(&("orchestrator final text", Some(root.to_string()))));
 
-    let requests = mock.requests();
+    let requests = mock.recorded_requests();
     assert_eq!(requests.len(), 4);
     let initial_prompts = requests
         .iter()
@@ -204,6 +182,8 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
             Some("Bearer composition-e2e-key")
         );
         assert_eq!(request.body["model"], MODEL);
+        assert!(request.stream);
+        assert_eq!(request.body["stream"], true);
     }
 }
 
@@ -213,7 +193,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
 #[test]
 fn configured_runtime_fails_before_run_when_credential_is_missing() {
     let directory = tempfile::tempdir().expect("project directory");
-    let mock = RecordingMockOpenAi::spawn(Vec::new());
+    let mock = StreamingMockOpenAi::spawn(Vec::new());
     let config = load_config(directory.path(), &mock.base_url());
     let bus = Arc::new(EventBus::new(32));
 
@@ -232,5 +212,5 @@ fn configured_runtime_fails_before_run_when_credential_is_missing() {
         CompositionError::Routing(routing::RoutingError::MissingCredential { profile, var })
             if profile == "local" && var == KEY_ENV
     ));
-    assert_eq!(mock.request_count(), 0);
+    assert!(mock.recorded_requests().is_empty());
 }

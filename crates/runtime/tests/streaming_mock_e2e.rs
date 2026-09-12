@@ -1,11 +1,9 @@
 //! Configured runtime E2E against the shared streaming-capable OpenAI mock.
 //!
-//! Agent-loop tests retain `complete()` and JSON mode (`stream: false`).
-//! The direct model test exercises live SSE without wiring the agent loop.
+//! Agent-loop and direct-model tests both exercise live SSE (`stream: true`).
 //! Completion is asserted via both `wait()` and the bus lifecycle Done event.
 //! Collection stops on the required-event predicate; timeouts are failsafes only.
-// allow: SIZE_OK — the requested named streaming test shares the existing
-// configured-runtime harness in this file; legacy agent-loop tests stay intact.
+// allow: SIZE_OK — streaming scenarios share the configured-runtime harness.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -294,8 +292,8 @@ async fn worker_run_with_tool_call_completes_over_mock() {
             Some(authorization.as_str())
         );
         assert_eq!(request.body["model"], MODEL);
-        assert!(!request.stream);
-        assert_eq!(request.body["stream"], false);
+        assert!(request.stream);
+        assert_eq!(request.body["stream"], true);
     }
     assert!(
         requests[1].body["messages"]

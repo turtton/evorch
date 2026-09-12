@@ -54,6 +54,9 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
             | "response.function_call_arguments.done" => Ok(FrameInterpretation::default()),
             "response.reasoning_summary_text.delta" => {
                 let event: TextDelta = parse(value)?;
+                if event.delta.is_empty() {
+                    return Ok(FrameInterpretation::default());
+                }
                 Ok(FrameInterpretation {
                     events: vec![StreamEvent::ReasoningDelta { text: event.delta }],
                     completion: None,
@@ -61,6 +64,9 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
             }
             "response.output_text.delta" => {
                 let event: TextDelta = parse(value)?;
+                if event.delta.is_empty() {
+                    return Ok(FrameInterpretation::default());
+                }
                 Ok(FrameInterpretation {
                     events: vec![StreamEvent::TextDelta { text: event.delta }],
                     completion: None,
