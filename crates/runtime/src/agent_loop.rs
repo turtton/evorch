@@ -83,10 +83,10 @@ pub(crate) struct LoopShared {
 }
 
 pub(crate) struct LoopState {
-    task: RunTask,
+    pub(crate) task: RunTask,
     pub(crate) shared: LoopShared,
     pub(crate) channels: LoopChannels,
-    run_state: RunState,
+    pub(crate) run_state: RunState,
     pub(crate) context: AgentContext,
     policy: ExecutionPolicy,
     tool_specs: Vec<ToolSpec>,
@@ -731,14 +731,17 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
-        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
-            self.channels.inbox_rx.close();
-            self.task.mailbox.close();
-        }
         let event = self
             .run_state
             .transition(self.task.run_id, phase, reason)
             .map_err(|_| ())?;
+        if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
+            if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
+                tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");
+            }
+            self.channels.inbox_rx.close();
+            self.task.mailbox.close();
+        }
         // issue #98: 位相 commit はイベント発行に happens-before させる
         // (PR #84 由来の決定論化規約: 観測可能な状態変化はその通知より先)。
         // 先に emit すると、AgentRunStateChanged を受け取った観測者が

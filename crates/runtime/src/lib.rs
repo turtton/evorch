@@ -33,8 +33,10 @@ pub mod orchestration;
 pub mod ownership;
 pub mod policy;
 pub mod prompt;
+pub mod restore;
 pub mod rules;
 pub mod run;
+pub mod run_store;
 pub mod runtime;
 pub mod skill;
 pub mod snapshot;
@@ -82,6 +84,7 @@ pub use run::{
     AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, WorkspaceInspection,
     WorkspaceMode,
 };
+pub use run_store::RunStore;
 pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,

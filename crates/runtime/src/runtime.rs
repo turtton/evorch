@@ -58,6 +58,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
+    pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
@@ -211,6 +212,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
@@ -224,6 +226,12 @@ impl AgentRuntime {
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
+    pub fn with_run_store(self, store: crate::RunStore) -> Self {
+        let _ = self.shared.run_store.set(store);
+        self
     }
 
     /// コンテキスト圧縮設定を接続したランタイムを返す。
@@ -414,6 +422,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
