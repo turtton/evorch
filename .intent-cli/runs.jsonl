@@ -280,3 +280,5 @@
 {"ts":"2026-09-12T20:59:12.7380273+00:00","execution_unit":"v09-b-background-run-notifications","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":107}
 {"ts":"2026-09-12T20:59:12.7380273+00:00","execution_unit":"v09-b-background-run-notifications","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":107}
 {"ts":"2026-09-12T21:02:24.4849007+00:00","execution_unit":"v09-c-stream-failure-recovery","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#108","reason":"https://github.com/turtton/evorch/issues/108"}
+{"ts":"2026-09-12T23:18:11.9306026+00:00","execution_unit":"v09-c-stream-failure-recovery","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":109}
+{"ts":"2026-09-12T23:18:11.9306026+00:00","execution_unit":"v09-c-stream-failure-recovery","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":109}

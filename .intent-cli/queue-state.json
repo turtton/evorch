@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-12T21:02:24.4849007+00:00",
+  "updated_at": "2026-09-12T23:18:11.9395727+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1537,7 +1537,7 @@
     {
       "execution_unit": "v09-c-stream-failure-recovery",
       "title": "v09-c: \u30B9\u30C8\u30EA\u30FC\u30E0/\u30D7\u30ED\u30D0\u30A4\u30C0\u969C\u5BB3\u306E\u56DE\u5FA9\u8A2D\u8A08\uFF08bounded retry \u002B escalation\uFF09\u3092\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1551,6 +1551,7 @@
         "number": 108,
         "url": "https://github.com/turtton/evorch/issues/108"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/109",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
