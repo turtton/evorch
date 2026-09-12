@@ -54,6 +54,20 @@ pub trait AgentModel: Send + Sync {
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError>;
 
+    /// Completes with live deltas on `bus`; legacy models fall back without deltas.
+    /// The canonical response remains authoritative. Dropping the future cancels it.
+    /// Arguments mirror `complete` to preserve the existing model boundary.
+    async fn complete_streaming(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        _bus: &event_bus::EventBus,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete(invocation, role, messages, tools).await
+    }
+
     /// ロールに選択されたモデル識別子を報告する。
     ///
     /// 実装側 (routing profile 層) がロールごとの選択済みモデル identity を報告し、
@@ -74,6 +88,31 @@ mod tests {
 
     /// 履歴長を本文へエコーする stub 実装。
     struct EchoModel;
+
+    #[tokio::test]
+    async fn streaming_falls_back_when_model_only_implements_complete() {
+        // Given: a legacy model behind the object-safe boundary.
+        let model: &dyn AgentModel = &EchoModel;
+        let bus = event_bus::EventBus::new(8);
+        // When: the streaming API is requested.
+        let response = model
+            .complete_streaming(
+                &AgentInvocationContext::default(),
+                Role::Worker,
+                &[],
+                &[],
+                &bus,
+            )
+            .await
+            .expect("legacy completion");
+        // Then: its canonical completion is preserved without an override.
+        assert_eq!(
+            response.message.content,
+            vec![ContentBlock::Text {
+                text: "0 messages".into()
+            }]
+        );
+    }
 
     #[async_trait]
     impl AgentModel for EchoModel {

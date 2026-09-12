@@ -1,4 +1,6 @@
 //! 設定済み provider と runtime kernel を接続する edge composition root。
+// allow: SIZE_OK — T2 restricts runtime production edits to model.rs/compose.rs;
+// retain the existing composition root and shared route/error path in this file.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -204,14 +206,14 @@ impl RoutedModel {
     }
 }
 
-#[async_trait]
-impl AgentModel for RoutedModel {
-    async fn complete(
+impl RoutedModel {
+    async fn complete_request(
         &self,
         invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
         tools: &[ToolSpec],
+        bus: Option<&EventBus>,
     ) -> Result<ChatResponse, RuntimeError> {
         let (route, generation) = match &invocation.model_preference {
             Some(preference) => {
@@ -275,11 +277,16 @@ impl AgentModel for RoutedModel {
                 run_id: invocation.run_id.clone(),
             }),
         };
-        provider
-            .client
-            .send(&provider.auth, &request)
-            .await
-            .map_err(|error| {
+        let result = match bus {
+            Some(bus) => {
+                provider
+                    .client
+                    .send_streaming(&provider.auth, &request, bus)
+                    .await
+            }
+            None => provider.client.send(&provider.auth, &request).await,
+        };
+        result.map_err(|error| {
                 let detail = error.to_string();
                 let scrub = |text: &str| {
                     if provider.auth.api_key.is_empty() {
@@ -296,6 +303,32 @@ impl AgentModel for RoutedModel {
                     reason: format!("profile={profile_name} model={model_id}: {provider_error}"),
                 }
             })
+    }
+}
+
+#[async_trait]
+impl AgentModel for RoutedModel {
+    async fn complete(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_request(invocation, role, messages, tools, None)
+            .await
+    }
+
+    async fn complete_streaming(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &EventBus,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_request(invocation, role, messages, tools, Some(bus))
+            .await
     }
 
     fn selected_model(&self, role: Role) -> String {

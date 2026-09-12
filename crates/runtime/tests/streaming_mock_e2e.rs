@@ -1,10 +1,11 @@
 //! Configured runtime E2E against the shared streaming-capable OpenAI mock.
 //!
-//! The runtime uses `complete()`, sending `stream: false`: these tests exercise
-//! the mock's JSON mode, including argument/text fragment reassembly. SSE mode
-//! is covered separately by client-level tests.
+//! Agent-loop tests retain `complete()` and JSON mode (`stream: false`).
+//! The direct model test exercises live SSE without wiring the agent loop.
 //! Completion is asserted via both `wait()` and the bus lifecycle Done event.
 //! Collection stops on the required-event predicate; timeouts are failsafes only.
+// allow: SIZE_OK — the requested named streaming test shares the existing
+// configured-runtime harness in this file; legacy agent-loop tests stay intact.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,74 @@ const KEY_ENV: &str = "EVORCH_TEST_KEY_STREAMING_MOCK_E2E";
 const KEY: &str = "streaming-mock-e2e-key";
 const MODEL: &str = "local-model";
 const MAX_RECV_ITERS: usize = 10_000;
+
+#[tokio::test]
+async fn streaming_deltas_reach_bus_before_completion() {
+    use runtime::{AgentInvocationContext, AgentModel};
+    // Given: the server cannot finish until the subscriber releases its gate.
+    let directory = tempfile::tempdir().expect("project");
+    let (release, gate) = std::sync::mpsc::channel();
+    let mock = StreamingMockOpenAi::spawn_with(
+        vec![ScriptedResponse::text_stream(
+            "live",
+            MODEL,
+            ["first ", "second"],
+        )],
+        mock_openai::WriteMode::GatedAfterFirst(Arc::new(std::sync::Mutex::new(gate))),
+    );
+    let config = load_config(directory.path(), &mock.base_url());
+    let bus = Arc::new(EventBus::new(64));
+    let mut receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(directory.path().join("credentials"))
+                    .expect("credentials"),
+            ),
+            event_bus: Some(Arc::clone(&bus)),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+            catalog: model::ModelCatalog::builtin(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .expect("model");
+    let invocation = AgentInvocationContext {
+        run_id: "stream-run".into(),
+        model_preference: None,
+    };
+    // When: drive the real model while independently receiving bus events.
+    let completion = model.complete_streaming(&invocation, Role::Worker, &[], &[], &bus);
+    tokio::pin!(completion);
+    let mut first_tokens = 0;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            tokio::select! {
+                result = &mut completion => panic!("completed before subscriber released SSE: {result:?}"),
+                event = receiver.recv() => match event.expect("bus").kind {
+                    EventKind::Message(MessageEvent::MessageDelta { delta, run_id }) => {
+                        assert_eq!(delta, "first ");
+                        assert_eq!(run_id.as_deref(), Some("stream-run"));
+                        break;
+                    }
+                    EventKind::Provider(ProviderEvent::FirstTokenObserved { .. }) => first_tokens += 1,
+                    _ => {}
+                }
+            }
+        }
+    }).await.expect("live delta before completion");
+    // Then: releasing the remaining chunks yields the unchanged canonical message.
+    assert_eq!(first_tokens, 1);
+    release.send(()).expect("release SSE");
+    let response = completion.await.expect("completion");
+    assert_eq!(
+        response.message.content,
+        vec![providers::ContentBlock::Text {
+            text: "first second".into()
+        }]
+    );
+    assert!(mock.recorded_requests()[0].stream);
+}
 
 fn load_config(root: &std::path::Path, base_url: &str) -> Config {
     std::fs::write(
