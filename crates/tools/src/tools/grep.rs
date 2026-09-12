@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// 正規表現でファイル内容を検索するツール。
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +43,10 @@ impl Tool for Grep {
 
     fn permissions(&self) -> Permissions {
         Permissions::read_only()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Shared
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

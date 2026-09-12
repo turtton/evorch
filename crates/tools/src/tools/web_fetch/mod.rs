@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::error::ToolError;
 use crate::network_guard::{GuardedResponse, NetworkGuard, NetworkGuardError};
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +70,10 @@ impl Tool for WebFetch {
 
     fn permissions(&self) -> Permissions {
         Permissions::network()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Shared
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

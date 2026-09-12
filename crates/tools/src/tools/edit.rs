@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// ファイル内の文字列を置換するツール。
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +38,10 @@ impl Tool for Edit {
 
     fn permissions(&self) -> Permissions {
         Permissions::read_write()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Exclusive
     }
 
     /// ファイルを作成・上書き、または `old_string` の最初の一致箇所を置換する。

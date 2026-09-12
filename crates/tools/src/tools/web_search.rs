@@ -19,7 +19,7 @@ use crate::search::{
     ExaKeylessProvider, SearchError, SearchOptions, SearchProvider, SearchResults,
     TavilyKeylessProvider,
 };
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// 環境に API key が存在しないことを表す credential_status。
 const CREDENTIAL_STATUS_KEYLESS: &str = "keyless";
@@ -164,6 +164,10 @@ impl Tool for WebSearch {
 
     fn permissions(&self) -> Permissions {
         Permissions::network()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Shared
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

@@ -19,7 +19,7 @@ use crate::origin::derive_content_origin;
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
 
 /// ツール実行時の文脈情報。
@@ -180,6 +180,15 @@ impl ToolExecutor {
         self.tools
             .get(tool_name)
             .map(|registered| registered.tool.permissions())
+    }
+
+    /// 登録済みツールの並行実行モードを返す。未登録なら排他実行とする。
+    pub fn tool_execution_mode(&self, tool_name: &str) -> ToolExecutionMode {
+        self.tools
+            .get(tool_name)
+            .map_or(ToolExecutionMode::Exclusive, |registered| {
+                registered.tool.execution_mode()
+            })
     }
 
     /// loop 側 3 層 AND 判定の per-tool 層入力として、登録済みツールの実行分類を返す。

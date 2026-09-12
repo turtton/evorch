@@ -7,7 +7,7 @@ use std::io::ErrorKind;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// ファイルを読み取るツール。
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +38,10 @@ impl Tool for Read {
 
     fn permissions(&self) -> Permissions {
         Permissions::read_only()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Shared
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 
 #[cfg(test)]
@@ -214,6 +214,10 @@ impl Tool for Shell {
 
     fn permissions(&self) -> Permissions {
         Permissions::process()
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Exclusive
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

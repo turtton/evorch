@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 use crate::error::ToolError;
 use crate::result::ToolResult;
-use crate::tool::{Permissions, Tool};
+use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// Git の差分を取得するツール。
 #[derive(Clone)]
@@ -51,6 +51,10 @@ impl Tool for GitDiff {
             process_spawn: true,
             network: false,
         }
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Shared
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {

@@ -61,6 +61,15 @@ impl Permissions {
     }
 }
 
+/// ツールを並行実行するときの排他性。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionMode {
+    /// 他の Shared ツールと並行実行できる。
+    Shared,
+    /// 単独で実行する必要がある。
+    Exclusive,
+}
+
 /// 標準ツールの抽象。
 ///
 /// ツールの実行は必ず ToolExecutor（wave 3 で追加）経由で行うこと。ToolExecutor
@@ -76,6 +85,11 @@ pub trait Tool: Send + Sync {
 
     /// ツールが要求する権限。
     fn permissions(&self) -> Permissions;
+
+    /// ツールの実行モード。未分類のツールは安全側に倒して排他実行する。
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Exclusive
+    }
 
     /// ツールを実行する。
     ///
