@@ -24,6 +24,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.drain_pump();
         self.poll_external();
+        self.poll_auto_titles();
         if self.external_command_running() && ui.button("Cancel external command").clicked() {
             self.cancel_external_command();
         }

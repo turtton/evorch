@@ -2,23 +2,26 @@ use super::super::tokens::{CodexTokenStore, parse_jwt_claims};
 use super::{CodexQuota, QuotaConfig, QuotaError, QuotaWindow};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RpcWindow {
     used_percent: f64,
-    window_duration_mins: u64,
-    resets_at: i64,
+    window_duration_mins: Option<i64>,
+    resets_at: Option<i64>,
 }
 
 impl RpcWindow {
-    fn convert(self) -> Result<QuotaWindow, QuotaError> {
-        let seconds = self
-            .window_duration_mins
+    fn convert(self) -> Result<Option<QuotaWindow>, QuotaError> {
+        let (Some(minutes), Some(reset)) = (self.window_duration_mins, self.resets_at) else {
+            return Ok(None);
+        };
+        let seconds = u64::try_from(minutes)
+            .map_err(|_| QuotaError::Protocol("negative window duration"))?
             .checked_mul(60)
             .ok_or(QuotaError::Protocol("window duration overflow"))?;
-        window(self.used_percent, seconds, self.resets_at)
+        window(self.used_percent, seconds, reset).map(Some)
     }
 }
 
@@ -47,8 +50,12 @@ impl RpcLimits {
     pub(super) fn convert(self, plan: Option<String>) -> Result<CodexQuota, QuotaError> {
         Ok(CodexQuota {
             plan: self.plan_type.or(plan),
-            primary: self.primary.map(RpcWindow::convert).transpose()?,
-            secondary: self.secondary.map(RpcWindow::convert).transpose()?,
+            primary: self.primary.map(RpcWindow::convert).transpose()?.flatten(),
+            secondary: self
+                .secondary
+                .map(RpcWindow::convert)
+                .transpose()?
+                .flatten(),
             code_review: None,
         })
     }
@@ -76,7 +83,7 @@ impl WhamWindow {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct WhamLimits {
     primary_window: Option<WhamWindow>,
     secondary_window: Option<WhamWindow>,
@@ -85,7 +92,9 @@ struct WhamLimits {
 #[derive(Deserialize)]
 struct WhamResponse {
     plan_type: Option<String>,
-    rate_limit: WhamLimits,
+    rate_limit: Option<WhamLimits>,
+    // Additional limits are intentionally ignored: the public model has only
+    // primary/secondary and legacy code review, not arbitrary limit identifiers.
     code_review_rate_limit: Option<WhamWindow>,
 }
 
@@ -99,6 +108,14 @@ pub(super) async fn fetch_wham(
         .map_err(|_| QuotaError::Credentials)?
         .ok_or(QuotaError::Credentials)?;
     let claims = parse_jwt_claims(&token.id_token).map_err(|_| QuotaError::Credentials)?;
+    // A separate session manager would race the chat manager's refresh-token
+    // rotation/cache. Keep this reader passive until a shared manager is injected.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| QuotaError::Credentials)?;
+    if claims.exp <= now.as_secs() {
+        return Err(QuotaError::ReauthenticationRequired);
+    }
     let response = http
         .get(&config.wham_endpoint)
         .bearer_auth(&token.access_token)
@@ -112,6 +129,9 @@ pub(super) async fn fetch_wham(
                 QuotaError::HttpTransport
             }
         })?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(QuotaError::ReauthenticationRequired);
+    }
     if !response.status().is_success() {
         return Err(QuotaError::HttpStatus(response.status().as_u16()));
     }
@@ -122,15 +142,11 @@ pub(super) async fn fetch_wham(
             QuotaError::Protocol("invalid WHAM response")
         }
     })?;
+    let limits = raw.rate_limit.unwrap_or_default();
     Ok(CodexQuota {
         plan: raw.plan_type,
-        primary: raw
-            .rate_limit
-            .primary_window
-            .map(WhamWindow::convert)
-            .transpose()?,
-        secondary: raw
-            .rate_limit
+        primary: limits.primary_window.map(WhamWindow::convert).transpose()?,
+        secondary: limits
             .secondary_window
             .map(WhamWindow::convert)
             .transpose()?,

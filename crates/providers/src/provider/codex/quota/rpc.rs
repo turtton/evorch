@@ -53,7 +53,7 @@ impl Connection {
     async fn request<T: DeserializeOwned>(&mut self, message: Value) -> Result<T, QuotaError> {
         let id = message["id"].clone();
         self.send(message).await?;
-        loop {
+        for skipped in 0..=128 {
             // Bound each line even when a corrupt server never emits a newline.
             let mut bytes = Vec::new();
             let count = (&mut self.output)
@@ -70,6 +70,9 @@ impl Connection {
             let frame: Envelope = serde_json::from_slice(&bytes)
                 .map_err(|_| QuotaError::Protocol("invalid RPC frame"))?;
             if frame.id.as_ref() != Some(&id) {
+                if skipped == 128 {
+                    return Err(QuotaError::Protocol("too many unrelated RPC frames"));
+                }
                 continue;
             }
             if let Some(error) = frame.error {
@@ -82,6 +85,7 @@ impl Connection {
             )
             .map_err(|_| QuotaError::Protocol("invalid RPC result"));
         }
+        Err(QuotaError::Protocol("too many unrelated RPC frames"))
     }
 
     async fn quota(&mut self) -> Result<CodexQuota, QuotaError> {
@@ -104,6 +108,23 @@ impl Connection {
 }
 
 pub(super) async fn fetch(config: &QuotaConfig) -> Result<CodexQuota, QuotaError> {
+    let config = config.clone();
+    let (mut sender, receiver) = tokio::sync::oneshot::channel();
+    // The supervisor owns the child even when the caller drops its receiver.
+    // Unlike an aborted task, it can await kill/reaping on cancellation.
+    tokio::spawn(async move {
+        let result = supervise(&config, &mut sender).await;
+        let _ = sender.send(result);
+    });
+    receiver
+        .await
+        .map_err(|_| QuotaError::Protocol("RPC supervisor stopped"))?
+}
+
+async fn supervise(
+    config: &QuotaConfig,
+    sender: &mut tokio::sync::oneshot::Sender<Result<CodexQuota, QuotaError>>,
+) -> Result<CodexQuota, QuotaError> {
     let mut child = Command::new(&config.app_server_program)
         .args(&config.app_server_args)
         .stdin(Stdio::piped())
@@ -112,22 +133,26 @@ pub(super) async fn fetch(config: &QuotaConfig) -> Result<CodexQuota, QuotaError
         .kill_on_drop(true)
         .spawn()
         .map_err(io)?;
-    let mut connection = Connection {
-        input: child
-            .stdin
-            .take()
-            .ok_or(QuotaError::Protocol("missing child stdin"))?,
-        output: BufReader::new(
-            child
-                .stdout
+    let exchange = async {
+        let mut connection = Connection {
+            input: child
+                .stdin
                 .take()
-                .ok_or(QuotaError::Protocol("missing child stdout"))?,
-        ),
+                .ok_or(QuotaError::Protocol("missing child stdin"))?,
+            output: BufReader::new(
+                child
+                    .stdout
+                    .take()
+                    .ok_or(QuotaError::Protocol("missing child stdout"))?,
+            ),
+        };
+        connection.quota().await
     };
-    let result = tokio::time::timeout(config.timeout, connection.quota())
-        .await
-        .map_err(|_| QuotaError::Timeout)?;
-    drop(connection);
+    let result = tokio::select! {
+        _ = sender.closed() => Err(QuotaError::Protocol("RPC request cancelled")),
+        result = tokio::time::timeout(config.timeout, exchange) =>
+            result.unwrap_or(Err(QuotaError::Timeout)),
+    };
     child.kill().await.map_err(io)?;
     result
 }

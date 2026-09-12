@@ -46,6 +46,8 @@ pub enum QuotaError {
     Rpc(i64),
     #[error("quota credentials unavailable or invalid")]
     Credentials,
+    #[error("quota authentication expired or rejected; re-login needed")]
+    ReauthenticationRequired,
     #[error("quota HTTP transport failed")]
     HttpTransport,
     #[error("quota HTTP status {0}")]
@@ -135,7 +137,9 @@ impl CodexQuotaClient {
 
     /// Fetch from app-server, then WHAM on any primary error. Within the polling
     /// interval return cache; after failures retain the last good data as stale.
-    /// No background task is spawned. Dropping the future kills its child process.
+    /// An RPC supervisor kills and reaps its child before returning. Dropping this
+    /// future signals the supervisor to do the same asynchronously; keep the Tokio
+    /// runtime alive until cleanup completes. Runtime shutdown uses kill-on-drop.
     /// # Errors
     /// Returns both source errors when no good snapshot has ever been acquired.
     pub async fn fetch_quota(&mut self) -> Result<QuotaSnapshot, QuotaError> {

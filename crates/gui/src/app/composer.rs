@@ -104,6 +104,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 return;
                             }
                         };
+                        let title_chat = self
+                            .title_candidate(&submission)
+                            .then(|| submission.clone());
                         self.history.push(super::history::UserMessage {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
@@ -118,6 +121,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             Some(permit) => self.sink.submit_chat_with_permit(submission, permit),
                             None => self.sink.submit(WorkbenchCommand::SendChat(submission)),
                         };
+                        let rejected = events.iter().any(|event| {
+                            matches!(
+                                event,
+                                crate::model::commands::LoopEvent::ChatRejected { .. }
+                                    | crate::model::commands::LoopEvent::CommandRejected { .. }
+                            )
+                        });
+                        if !rejected && let Some(chat) = title_chat {
+                            self.start_auto_title(chat);
+                        }
                         for event in events {
                             self.apply_loop_event(event);
                         }

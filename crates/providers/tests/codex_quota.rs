@@ -1,5 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
+#[path = "codex_quota/auth.rs"]
+mod auth;
+#[path = "codex_quota/compat.rs"]
+mod compat;
+#[path = "codex_quota/process.rs"]
+mod process;
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use providers::provider::codex::{
     quota::{CodexQuotaClient, QuotaConfig, QuotaError, QuotaSource},

@@ -2,6 +2,7 @@
 
 mod actions;
 mod attention;
+pub mod auto_title;
 mod composer;
 mod external_commands;
 mod frame;
