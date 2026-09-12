@@ -1,3 +1,7 @@
+#[path = "restore/concurrent.rs"]
+mod concurrent;
+#[path = "restore/send.rs"]
+mod send;
 mod support;
 
 use std::sync::Arc;
@@ -33,6 +37,44 @@ fn storage_fixture() -> (tempfile::TempDir, StorageConfig, Storage, Database) {
     (dir, config, storage, database)
 }
 
+#[tokio::test]
+async fn send_to_done_run_preserves_uncompacted_history() {
+    // Given: a completed child with a durable conversation.
+    let (_dir, config, storage, database) = storage_fixture();
+    let model = Arc::new(ScriptedModel::new(
+        (0..3).map(|_| Ok(text_response("answer", FinishReason::Stop))),
+    ));
+    let (runtime, _) = runtime_with(Arc::clone(&model));
+    let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    terminal(&runtime, parent).await;
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "original", RunConfig::default())
+        .unwrap();
+    assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
+    let record = database.run_context(&child.to_string()).unwrap().unwrap();
+    let original: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    // When: send starts another turn using the same run ID.
+    let id = runtime
+        .send_agent_message(
+            parent,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "follow up",
+            None,
+        )
+        .unwrap();
+    // Then: model receives the original history followed by exactly one trigger.
+    assert_eq!(id, "msg-1");
+    assert_eq!(terminal(&runtime, child).await, AgentRunPhase::Done);
+    let observed = model.observed().await;
+    let restored = observed.last().unwrap();
+    assert_eq!(&restored[..original.len()], original);
+    assert_eq!(restored.len(), original.len() + 1);
+    assert_eq!(restored.last().unwrap().role, providers::Role::User);
+}
+
 async fn terminal(runtime: &AgentRuntime, run_id: RunId) -> AgentRunPhase {
     timeout(Duration::from_secs(5), runtime.wait(run_id))
         .await
@@ -41,7 +83,7 @@ async fn terminal(runtime: &AgentRuntime, run_id: RunId) -> AgentRunPhase {
 }
 
 #[tokio::test]
-async fn terminal_run_persists_context_snapshot_with_checkpoints() {
+async fn send_to_done_run_restores_full_context_and_processes_new_turn() {
     // Given: an interactive run with compactable raw history and a real SQLite writer.
     let (_dir, config, storage, database) = storage_fixture();
     let prompt = "initial request ".repeat(40);
@@ -50,6 +92,8 @@ async fn terminal_run_persists_context_snapshot_with_checkpoints() {
     let model = Arc::new(ScriptedModel::new([
         Ok(first_reply.clone()),
         Ok(final_reply.clone()),
+        Ok(text_response("sender", FinishReason::Stop)),
+        Ok(text_response("restored", FinishReason::Stop)),
     ]));
     let (runtime, bus) = runtime_with(Arc::clone(&model));
     let runtime = runtime
@@ -146,6 +190,29 @@ async fn terminal_run_persists_context_snapshot_with_checkpoints() {
     assert_eq!(record.terminal_phase, "Done");
     assert!(record.restorable);
     assert!(record.updated_at_ns > 0);
+
+    let sender = runtime
+        .delegate_background_as_child(run_id, Role::Worker, "sender", RunConfig::default())
+        .unwrap();
+    terminal(&runtime, sender).await;
+    runtime
+        .send_agent_message(
+            sender,
+            run_id,
+            event_bus::AgentMessageKind::Send,
+            "new turn",
+            None,
+        )
+        .unwrap();
+    assert_eq!(terminal(&runtime, run_id).await, AgentRunPhase::Done);
+    let observed = model.observed().await;
+    let restored = observed.last().unwrap();
+    let checkpoint = &checkpoints[0];
+    let mut expected = messages[..checkpoint.range.0].to_vec();
+    expected.push(checkpoint.summary.clone());
+    expected.extend_from_slice(&messages[checkpoint.range.1..]);
+    assert_eq!(&restored[..expected.len()], expected);
+    assert_eq!(restored.len(), expected.len() + 1);
 }
 
 #[tokio::test]

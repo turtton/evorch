@@ -10,6 +10,12 @@ use storage::{RunContextRecord, StorageError};
 use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 
+pub(crate) struct RestoredState {
+    pub(crate) messages: Vec<providers::Message>,
+    pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
+    pub(crate) trigger: event_bus::AgentMessage,
+}
+
 /// 非直列化の実行権限を含まない復元用設定。拒否理由も snapshot に残す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,5 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
+mod restore_delivery;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -684,6 +686,7 @@ impl AgentRuntime {
             parent,
             mailbox: Arc::clone(&mailbox),
             handoff,
+            restored: None,
         };
         let channels = LoopChannels {
             phase_tx,
@@ -1004,7 +1007,7 @@ impl AgentRuntime {
     /// - Steering が親→子でない: [`RuntimeError::MessageDenied`]
     /// - Reply に `reply_to` なし: [`RuntimeError::MessageDenied`]
     /// - Reply の `reply_to` が相関関係と不一致: [`RuntimeError::UnknownMessage`]
-    /// - 受信者が終端位相: [`RuntimeError::RunTerminated`]
+    /// - 終端・未登録 run の復元失敗: [`RuntimeError::RunRestoreFailed`]
     /// - mailbox 一杯: [`RuntimeError::MailboxFull`]
     pub fn send_agent_message(
         &self,
@@ -1015,9 +1018,31 @@ impl AgentRuntime {
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
         self.validate_run_mutation(sender)?;
-        self.validate_run_mutation(recipient)?;
-        let (message_id, message, disposition) =
-            self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?;
+        let live = lock_runs(&self.shared.runs)
+            .get(&recipient)
+            .is_some_and(|entry| {
+                matches!(
+                    *entry.phase_rx.borrow(),
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            });
+        let (message_id, message, disposition) = if live {
+            self.validate_run_mutation(recipient)?;
+            self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?
+        } else {
+            self.restore_and_deliver(
+                sender,
+                recipient,
+                AgentMessage {
+                    message_id: String::new(),
+                    sender_run_id: sender.to_string(),
+                    recipient_run_id: recipient.to_string(),
+                    kind,
+                    content: content.into(),
+                    reply_to,
+                },
+            )?
+        };
         self.shared.bus.emit(Event::new(EventKind::AgentMessage(
             AgentMessageEvent::Delivered {
                 message,
@@ -1067,12 +1092,6 @@ impl AgentRuntime {
         }
 
         let phase = *recipient_entry.phase_rx.borrow();
-        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
-            return Err(RuntimeError::RunTerminated {
-                run_id: recipient.to_string(),
-            });
-        }
-
         let mut sent = self
             .shared
             .sent

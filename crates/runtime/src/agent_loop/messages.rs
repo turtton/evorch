@@ -42,7 +42,7 @@ impl LoopState {
     }
 }
 
-fn format_agent_message(message: &AgentMessage) -> String {
+pub(super) fn format_agent_message(message: &AgentMessage) -> String {
     let kind = match message.kind {
         AgentMessageKind::Send => "send",
         AgentMessageKind::Reply => "reply",

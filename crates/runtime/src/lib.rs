@@ -56,7 +56,7 @@ pub use entry_routing::{
     COORDINATION_KEYWORDS, DIRECT_KEYWORDS, EntryRouter, LocalVerdict, RoutingDecision,
     UncertainReason, classify_local,
 };
-pub use error::RuntimeError;
+pub use error::{RunRestoreFailure, RuntimeError};
 pub use escalation::{EscalationMemo, EscalationSettings};
 pub use event_bus::{AgentRunPhase, RoutingSource};
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。

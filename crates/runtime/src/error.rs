@@ -7,6 +7,11 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("実行 {run_id} の復元に失敗しました: {reason}")]
+    RunRestoreFailed {
+        run_id: String,
+        reason: RunRestoreFailure,
+    },
     #[error("run ownership generation is stale: {run_id}")]
     StaleOwnership { run_id: String },
     /// 存在しない AgentRun が参照された。
@@ -104,4 +109,16 @@ pub enum RuntimeError {
         /// compaction 実行中の run ID。
         run_id: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RunRestoreFailure {
+    #[error("run storage が設定されていません")]
+    StorageNotConfigured,
+    #[error("復元用コンテキストがありません")]
+    MissingContext,
+    #[error("復元用コンテキストが破損しています: {0}")]
+    CorruptContext(String),
+    #[error("復元できない実行設定です: {0}")]
+    UnsupportedConfig(String),
 }

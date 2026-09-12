@@ -43,6 +43,7 @@ pub(crate) struct RunTask {
     pub(crate) parent: Option<RunId>,
     pub(crate) mailbox: Arc<RunMailbox>,
     pub(crate) handoff: Option<RunHandoff>,
+    pub(crate) restored: Option<crate::restore::RestoredState>,
 }
 
 /// 終端済み run から新規 root run へ排他的に移す workspace 所有権。
@@ -98,7 +99,7 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
 }
 
-pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: LoopChannels) {
+pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
     let Some(mut loop_shared) = loop_shared(&shared) else {
         return;
     };
@@ -108,7 +109,21 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         resolution.apply(&mut loop_shared.compaction).await;
     }
     let policy = ExecutionPolicy::for_role(task.role);
-    let context = AgentContext::new(task.run_id, task.role);
+    let restored = task.restored.take();
+    let is_restored = restored.is_some();
+    let context = match restored {
+        Some(restored) => {
+            let mut context = AgentContext::from_restored(
+                task.run_id,
+                task.role,
+                restored.messages,
+                restored.checkpoints,
+            );
+            context.push_user(&messages::format_agent_message(&restored.trigger));
+            context
+        }
+        None => AgentContext::new(task.run_id, task.role),
+    };
     let mut state = LoopState {
         task,
         shared: loop_shared,
@@ -120,7 +135,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         rules_session: None,
         compaction: CompactionLoopState::default(),
         last_usage: None,
-        resumed: false,
+        resumed: is_restored,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
     };
@@ -131,7 +146,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
         &state.policy,
         state.skills().is_some(),
     );
-    state.add_team_tools();
+    if !is_restored {
+        state.add_team_tools();
+    }
     let mut owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {
@@ -176,32 +193,36 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, task: RunTask, channels: Loo
     if let Some(source) = state.shared.rules.as_ref() {
         state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root));
     }
-    if let Err(error) = push_initial_system_message(
-        &state.shared,
-        &state.task,
-        state.rules_session.as_ref(),
-        &mut state.context,
-    ) {
-        // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
-        // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
-        // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
-        state.finish_error(error.to_string());
-        cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
-        return;
-    }
-    state.context.push_user(&state.task.prompt);
-    if let Some(message) = state.context.messages.last_mut() {
-        message.content.extend(
-            state
-                .task
-                .config
-                .images
-                .iter()
-                .map(|image| ContentBlock::Image {
-                    media_type: image.media_type.clone(),
-                    data: image.data.clone(),
-                }),
-        );
+    if !is_restored {
+        if let Err(error) = push_initial_system_message(
+            &state.shared,
+            &state.task,
+            state.rules_session.as_ref(),
+            &mut state.context,
+        ) {
+            // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
+            // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
+            // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
+            state.finish_error(error.to_string());
+            cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
+            return;
+        }
+        state.context.push_user(&state.task.prompt);
+        if let Some(message) = state.context.messages.last_mut() {
+            message
+                .content
+                .extend(
+                    state
+                        .task
+                        .config
+                        .images
+                        .iter()
+                        .map(|image| ContentBlock::Image {
+                            media_type: image.media_type.clone(),
+                            data: image.data.clone(),
+                        }),
+                );
+        }
     }
     state.publish_message_count();
     if state.transition(AgentRunPhase::Running, None).is_err() {
