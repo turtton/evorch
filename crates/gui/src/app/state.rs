@@ -16,6 +16,7 @@ use crate::model::commands::{
     MergeApprovalView, ReviewerStatus, WorkbenchCommand,
 };
 use crate::model::composer::{ComposerModel, ProviderStatus};
+use crate::model::notifications::NotificationsModel;
 use crate::model::provider_settings::ProviderSettingsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
@@ -36,6 +37,7 @@ pub struct WorkbenchState<S> {
     pub(super) title_generator: Option<Arc<super::auto_title::TitleGenerator>>,
     pub(super) manually_titled: std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) attention_acks: BTreeMap<(PanelId, String), super::attention::ack::AttentionAck>,
+    pub(super) notifications: NotificationsModel,
     pub(super) external_job: Option<super::external_commands::Job>,
     pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) memory: crate::panes::memory::MemoryPane,
@@ -104,6 +106,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             title_generator: None,
             manually_titled: std::collections::BTreeSet::new(),
             attention_acks: BTreeMap::new(),
+            notifications: NotificationsModel::default(),
             external_job: None,
             arena: crate::panes::arena::ArenaPane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
@@ -265,6 +268,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub const fn tasks(&self) -> &TasksModel<S> {
         &self.tasks
+    }
+    pub const fn notifications(&self) -> &NotificationsModel {
+        &self.notifications
+    }
+    pub const fn notifications_mut(&mut self) -> &mut NotificationsModel {
+        &mut self.notifications
     }
     pub const fn terminal(&self) -> &TerminalBuffer {
         &self.terminal

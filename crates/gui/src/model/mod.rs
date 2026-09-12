@@ -10,6 +10,7 @@ pub mod ledger;
 pub mod model_catalog;
 pub mod model_metadata;
 pub mod model_picker;
+pub mod notifications;
 pub mod production;
 pub mod project_bridge;
 pub mod project_path;

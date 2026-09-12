@@ -102,17 +102,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .pump
             .as_mut()
             .map_or_else(Vec::new, crate::events::EventPump::drain);
-        for event in events {
-            self.fold_event(&event);
-        }
-        self.refresh_active_thread_workspace();
+        self.apply_events(events);
     }
 
     /// Synchronous fold for fixtures/tests/headless capture; production uses
     /// `EventPump`.
     pub fn apply_events(&mut self, events: impl IntoIterator<Item = Event>) {
-        for event in events {
-            self.fold_event(&event);
+        let events: Vec<_> = events.into_iter().collect();
+        for event in &events {
+            self.fold_event(event);
+        }
+        // Approval targets must see all phase transitions in this batch.
+        for event in &events {
+            self.notifications.apply_event(event, &self.phases);
         }
         self.refresh_active_thread_workspace();
     }
