@@ -276,3 +276,4 @@
 {"ts":"2026-09-12T14:02:22.7952347+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#104","reason":"https://github.com/turtton/evorch/issues/104"}
 {"ts":"2026-09-12T18:12:06.4604424+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":105}
 {"ts":"2026-09-12T18:12:06.4604424+00:00","execution_unit":"v09-a-agent-session-resume-ledger","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":105}
+{"ts":"2026-09-12T18:16:10.1869826+00:00","execution_unit":"v09-b-background-run-notifications","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#106","reason":"https://github.com/turtton/evorch/issues/106"}

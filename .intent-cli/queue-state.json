@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-12T18:12:06.4710747+00:00",
+  "updated_at": "2026-09-12T18:16:10.1869826+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1522,6 +1522,11 @@
         "implementation": ".intent-cli/issues/v09-b-background-run-notifications/implementation.md",
         "review_context": ".intent-cli/issues/v09-b-background-run-notifications/review-context.md",
         "yaml": ".intent-cli/issues/v09-b-background-run-notifications/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 106,
+        "url": "https://github.com/turtton/evorch/issues/106"
       },
       "worker_role": "implementation",
       "review_role": "review",
