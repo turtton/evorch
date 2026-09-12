@@ -10,49 +10,9 @@ use std::collections::BTreeSet;
 
 use agents::{CapabilityDecision, NetworkAccess, Role, RoleCapabilities};
 
-/// ADR 0002 が定める Orchestrator の許可ツール集合 (期待値)。
-const ORCHESTRATOR_TOOLS: &[&str] = &[
-    "delegate",
-    "delegate_background",
-    "send_message",
-    "skill_load",
-    "send",
-    "wait_reply",
-    "inbox",
-    "wait",
-    "cancel",
-    "list_agents",
-    "inspect_agent",
-    "read",
-    "grep",
-    "git_diff",
-    "compact",
-    "finish",
-    "web_fetch",
-];
-
-/// ADR 0002 が定める Explorer の許可ツール集合 (期待値)。
-const EXPLORER_TOOLS: &[&str] = &["read", "grep"];
-
-/// ADR 0002 が定める Worker の許可ツール集合 (期待値)。
-const WORKER_TOOLS: &[&str] = &[
-    "read",
-    "edit",
-    "grep",
-    "shell",
-    "skill_load",
-    "git_diff",
-    "send",
-    "wait_reply",
-    "inbox",
-    "escalate",
-];
-
-/// ADR 0002 が定める Reviewer の許可ツール集合 (期待値、詳細はワークスペース決定)。
-const REVIEWER_TOOLS: &[&str] = &["read", "grep", "git_diff"];
-
-/// ADR 0002 (2026-09-03 補足) が定める Librarian の許可ツール集合 (期待値)。
-const LIBRARIAN_TOOLS: &[&str] = &["read", "grep", "web_search", "web_fetch"];
+#[path = "support/capability_tools.rs"]
+mod capability_tools;
+use capability_tools::*;
 
 /// Denied 判定の機械消費フィールド (role_name / tool) と拒否理由の存在を検証する。
 fn assert_denied(decision: CapabilityDecision, expected_role: &str, expected_tool: &str) {

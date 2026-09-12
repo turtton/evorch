@@ -358,6 +358,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
             | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
         },
         EventKind::Lifecycle(_)
+        | EventKind::Ledger(_)
         | EventKind::Message(_)
         | EventKind::Tool(_)
         | EventKind::Fault(_)

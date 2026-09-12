@@ -26,6 +26,8 @@ enum Command {
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
     Memory(crate::repo::memory::Mutation, ReplyTx),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
+    AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
+    UpsertRunContext(crate::RunContextRecord, ReplyTx),
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
@@ -93,6 +95,26 @@ impl Drop for Storage {
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    /// Append a guarded, 1..=8192 byte body and return its global sequence number.
+    ///
+    /// # Errors
+    /// Returns an error for invalid bodies, suspended writes, SQLite failure or a closed writer.
+    pub fn append_run_ledger(&self, run_id: &str, body: &str) -> Result<u64, StorageError> {
+        let (reply, result) = mpsc::channel();
+        self.0
+            .send(Command::AppendRunLedger(run_id.into(), body.into(), reply))
+            .map_err(|_| StorageError::WriterClosed)?;
+        result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    /// Replace the stored snapshot for a run; the last write wins.
+    ///
+    /// # Errors
+    /// Returns an error for suspended writes, SQLite failure or a closed writer.
+    pub fn upsert_run_context(&self, record: &crate::RunContextRecord) -> Result<(), StorageError> {
+        self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
+    }
+
     pub fn append_fenced_event(
         &self,
         session_id: Option<&str>,

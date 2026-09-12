@@ -124,6 +124,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             // エージェント実行はセッションではないため、セッション射影を変更しません。
             LifecycleEvent::AgentRunStateChanged { .. } => {}
             LifecycleEvent::AgentRunStarted { .. } => {}
+            LifecycleEvent::AgentRunRestored { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
             LifecycleEvent::EscalationRequested { .. } => {}
@@ -181,6 +182,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         // goal ループの状態は runtime 側の GoalLedger で畳み込むため、
         // セッション射影は変更しない。
         EventKind::Orchestrator(_)
+        | EventKind::Ledger(_)
         | EventKind::Diagnostic(_)
         | EventKind::Ownership(_)
         | EventKind::Snapshot(_) => {}
@@ -268,7 +270,7 @@ mod tests {
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
         CompactionReason, DeliveryDisposition, Event, EventMeta, FaultEvent, ProviderEvent,
-        RoutingSource, UsageEvent,
+        LedgerEvent, RoutingSource, UsageEvent,
     };
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -304,6 +306,8 @@ mod tests {
     noop_test!(provider_does_not_mutate, ProviderEvent::ProviderFallback { from_provider: "a".into(), to_provider: "b".into(), reason: "r".into() });
     noop_test!(fault_does_not_mutate, FaultEvent::SubscriberLagged { subscriber_id: 1, skipped: 2 });
     noop_test!(agent_run_state_changed_does_not_mutate, LifecycleEvent::AgentRunStateChanged { run_id: "r".into(), from: AgentRunPhase::Pending, to: AgentRunPhase::Running, reason: None });
+    noop_test!(agent_run_restored_does_not_mutate, LifecycleEvent::AgentRunRestored { run_id: "r".into(), restored_by: "sender".into(), message_id: "msg-1".into() });
+    noop_test!(run_ledger_appended_does_not_mutate, LedgerEvent::RunLedgerAppended { run_id: "r".into(), seq: 1, body: "entry".into() });
     noop_test!(routing_decision_does_not_touch_sessions_or_tasks, LifecycleEvent::RoutingDecision { shape: "Direct".into(), reason: "direct-keyword".into(), source: RoutingSource::LocalRule { rule: "direct-keyword:direct".into() } });
     #[test] fn projection_ignores_agent_message_events() {
         // Given: Message/Lifecycle イベントのみで構成したイベント列

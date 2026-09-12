@@ -33,8 +33,10 @@ pub mod orchestration;
 pub mod ownership;
 pub mod policy;
 pub mod prompt;
+pub mod restore;
 pub mod rules;
 pub mod run;
+pub mod run_store;
 pub mod runtime;
 pub mod skill;
 pub mod snapshot;
@@ -54,7 +56,7 @@ pub use entry_routing::{
     COORDINATION_KEYWORDS, DIRECT_KEYWORDS, EntryRouter, LocalVerdict, RoutingDecision,
     UncertainReason, classify_local,
 };
-pub use error::RuntimeError;
+pub use error::{RunRestoreFailure, RuntimeError};
 pub use escalation::{EscalationMemo, EscalationSettings};
 pub use event_bus::{AgentRunPhase, RoutingSource};
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
@@ -82,6 +84,7 @@ pub use run::{
     AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, WorkspaceInspection,
     WorkspaceMode,
 };
+pub use run_store::RunStore;
 pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,

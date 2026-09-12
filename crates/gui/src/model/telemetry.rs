@@ -179,6 +179,7 @@ impl TelemetryOverlay {
                 self.rows.entry(run_id.clone()).or_default().current_tool = None;
             }
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

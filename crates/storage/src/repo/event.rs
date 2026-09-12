@@ -204,6 +204,7 @@ const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Diagnostic(_) => "Diagnostic",
         EventKind::Ownership(_) => "Ownership",
         EventKind::Snapshot(_) => "Snapshot",
+        EventKind::Ledger(_) => "Ledger",
     }
 }
 

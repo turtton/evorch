@@ -55,6 +55,7 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
                 message.recipient_run_id.as_str(),
             )),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)
@@ -84,6 +85,7 @@ async fn demo_script_drives_three_done_runs_with_messages_and_telemetry() {
                 ..
             }) => Some(run_id.as_str()),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

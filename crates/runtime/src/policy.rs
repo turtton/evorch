@@ -23,6 +23,8 @@ pub const META_OPS: &[&str] = &[
     "wait_reply",
     "inbox",
     "escalate",
+    "ledger_append",
+    "ledger_read",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -212,7 +214,7 @@ mod tests {
 
     // Given: META_OPS の正規集合
     // When: is_meta_op を全要素と境界外の名前に適用する
-    // Then: 14 操作すべて true、通常ツール・空文字は false
+    // Then: 16 操作すべて true、通常ツール・空文字は false
     #[test]
     fn meta_ops_membership_is_exhaustive() {
         let expected = [
@@ -230,9 +232,11 @@ mod tests {
             "wait_reply",
             "inbox",
             "escalate",
+            "ledger_append",
+            "ledger_read",
         ];
 
-        assert_eq!(META_OPS.len(), 14);
+        assert_eq!(META_OPS.len(), 16);
         assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");

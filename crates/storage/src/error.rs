@@ -78,6 +78,10 @@ pub enum StorageError {
     Serialization(String),
     /// 値が許容範囲外でした。
     OutOfRange(&'static str),
+    /// Run ledger bodies must contain between 1 and 8192 UTF-8 bytes.
+    InvalidRunLedgerBody {
+        bytes: usize,
+    },
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -121,6 +125,10 @@ impl fmt::Display for StorageError {
             ),
             Self::Serialization(message) => write!(formatter, "serialization failed: {message}"),
             Self::OutOfRange(name) => write!(formatter, "value out of range: {name}"),
+            Self::InvalidRunLedgerBody { bytes } => write!(
+                formatter,
+                "run ledger body must contain 1..=8192 bytes: actual={bytes}"
+            ),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -148,6 +156,7 @@ impl std::error::Error for StorageError {
             | Self::RawUsageEventNotPersisted
             | Self::Serialization(_)
             | Self::OutOfRange(_)
+            | Self::InvalidRunLedgerBody { .. }
             | Self::SecretDetected { .. } => None,
         }
     }

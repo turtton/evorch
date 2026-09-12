@@ -4,8 +4,10 @@ use event_bus::{AgentMessage, AgentMessageEvent, DeliveryDisposition, EventKind,
 
 use crate::entity::{AgentRunRecord, MessageRecord, SessionRecord, TaskRecord};
 use crate::projection;
-use crate::repo::{agent_run, event, message, metrics, session, task};
-use crate::{Database, SessionSnapshot, StorageError, StoredEvent};
+use crate::repo::{agent_run, event, message, metrics, run_context, run_ledger, session, task};
+use crate::{
+    Database, RunContextRecord, RunLedgerEntry, SessionSnapshot, StorageError, StoredEvent,
+};
 
 /// 永続化済みの AgentMessage 配送です。
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +19,67 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
+    /// Read only the identity needed to authorize access to a run's context.
+    ///
+    /// # Errors
+    /// Returns an error if the identity column cannot be read.
+    pub fn run_context_parent(&self, run_id: &str) -> Result<Option<Option<String>>, StorageError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT parent_run_id FROM run_contexts WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Highest numeric run ID reserved by a context snapshot or ledger entry.
+    ///
+    /// # Errors
+    /// Returns an error for unreadable rows or invalid run IDs.
+    pub fn max_persisted_run_id(&self) -> Result<u64, StorageError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger")?;
+        let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut maximum = 0;
+        for id in ids {
+            let id = id?;
+            let numeric = id
+                .strip_prefix("run-")
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| StorageError::Serialization(format!("invalid run ID: {id}")))?;
+            maximum = maximum.max(numeric);
+        }
+        Ok(maximum)
+    }
+
+    /// Return a run's ledger entries in global sequence order.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_ledger(&self, run_id: &str) -> Result<Vec<RunLedgerEntry>, StorageError> {
+        run_ledger::list_by_run(&self.conn, run_id)
+    }
+
+    /// Return all ledger entries in global sequence order.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_ledger_all(&self) -> Result<Vec<RunLedgerEntry>, StorageError> {
+        run_ledger::list_all(&self.conn)
+    }
+
+    /// Return the latest snapshot for a run, if present.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn run_context(&self, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
+        run_context::get(&self.conn, run_id)
+    }
+
     /// 識別子に一致するセッションを返します。
     ///
     /// # Errors
@@ -127,6 +190,7 @@ impl Database {
                     disposition,
                 }),
                 EventKind::Lifecycle(_)
+                | EventKind::Ledger(_)
                 | EventKind::Message(_)
                 | EventKind::Tool(_)
                 | EventKind::Usage(_)

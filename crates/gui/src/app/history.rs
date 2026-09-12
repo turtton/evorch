@@ -110,6 +110,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for message in messages {
             self.restore_user_message(message);
         }
+        self.ledger.load_all(db.run_ledger_all()?);
         self.transcripts
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         Ok(())

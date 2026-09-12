@@ -2,12 +2,14 @@
 
 use agents::Role;
 use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent};
+use serde::{Deserialize, Serialize};
 use tools::ToolResult;
 
 use crate::run::RunId;
 
 /// 圧縮チェックポイント。raw messages は変更せず、表示窓だけを狭める。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactionCheckpoint {
     /// チェックポイントの一意な識別子。
     pub id: String,
@@ -40,12 +42,25 @@ pub struct AgentContext {
 impl AgentContext {
     /// 空の履歴でコンテキストを生成する。
     pub fn new(run_id: RunId, role: Role) -> Self {
+        Self::from_restored(run_id, role, Vec::new(), Vec::new())
+    }
+
+    pub(crate) fn from_restored(
+        run_id: RunId,
+        role: Role,
+        messages: Vec<Message>,
+        checkpoints: Vec<CompactionCheckpoint>,
+    ) -> Self {
         Self {
             run_id,
             role,
-            messages: Vec::new(),
-            checkpoints: Vec::new(),
+            messages,
+            checkpoints,
         }
+    }
+
+    pub(crate) fn checkpoints(&self) -> &[CompactionCheckpoint] {
+        &self.checkpoints
     }
 
     /// システムプロンプトを履歴に追加する (Role::System + 単一 Text ブロック)。

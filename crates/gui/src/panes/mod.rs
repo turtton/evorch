@@ -8,6 +8,7 @@ pub mod arena;
 pub mod codex_auth;
 pub mod composer;
 pub mod diff;
+mod ledger;
 pub mod markdown_render;
 pub mod memory;
 pub mod model_metadata;

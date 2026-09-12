@@ -7,7 +7,9 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 17] = [
+const EXPECTED_TABLES: [&str; 19] = [
+    "run_ledger",
+    "run_contexts",
     "team_ledger",
     "task_queue_ledger",
     "memory_ledger",
@@ -27,7 +29,8 @@ const EXPECTED_TABLES: [&str; 17] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 11] = [
+const EXPECTED_INDICES: [&str; 12] = [
+    "idx_run_ledger_run",
     "idx_eval_trace_identity",
     "idx_eval_trace_project",
     "idx_memory_ledger_entry",
@@ -72,13 +75,13 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     drop(Database::open(&config_for(&path)).expect("fresh database must open"));
 
-    // Then: v5 と定義済みテーブル・インデックスだけが作成される
+    // Then: v7 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        5
+        7
     );
     assert_eq!(
         schema_objects(&connection, "table"),
@@ -88,6 +91,7 @@ fn fresh_open_applies_latest_schema() {
         schema_objects(&connection, "index"),
         EXPECTED_INDICES.into_iter().map(String::from).collect()
     );
+    assert!(schema_objects(&connection, "trigger").contains("run_ledger_no_replace"));
 }
 
 #[test]
@@ -100,13 +104,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v5 のまま維持される
+    // Then: スキーマは重複せず v7 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        5
+        7
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -137,7 +141,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 5,
+            supported: 7,
         }
     );
 }
@@ -182,5 +186,48 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 5);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 7);
+}
+
+#[test]
+fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
+    // Given: the shipped v6 ledger schema with a persisted row.
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(include_str!("../src/migrations/v6.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 6).unwrap();
+    connection
+        .execute("INSERT INTO run_ledger VALUES (1, 'a', 'original', 10)", [])
+        .unwrap();
+    drop(connection);
+
+    // When: opening the existing database applies v7.
+    let database = Database::open(&config_for(&path)).unwrap();
+
+    // Then: the migrated row is protected even without recursive triggers.
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 7);
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "recursive_triggers", 0)
+        .unwrap();
+    let error = connection
+        .execute("REPLACE INTO run_ledger VALUES (1, 'b', 'changed', 20)", [])
+        .unwrap_err();
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER)
+    );
+    let entries = database.run_ledger_all().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        (
+            entries[0].seq,
+            entries[0].run_id.as_str(),
+            entries[0].body.as_str(),
+            entries[0].created_at_ns
+        ),
+        (1, "a", "original", 10)
+    );
 }

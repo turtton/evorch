@@ -72,6 +72,7 @@ async fn concurrent_runs_keep_independent_histories_and_run_ids() {
                 Some(run_id.as_str())
             }
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

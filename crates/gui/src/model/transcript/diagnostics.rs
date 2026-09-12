@@ -73,6 +73,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
             text: format!("Subscriber {subscriber_id} lagged: skipped {skipped} events"),
         }),
         EventKind::Lifecycle(_)
+        | EventKind::Ledger(_)
         | EventKind::Message(_)
         | EventKind::Tool(_)
         | EventKind::Usage(_)

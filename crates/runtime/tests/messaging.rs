@@ -430,7 +430,7 @@ async fn addressing_matrix_rejects_non_parent_child_and_self() {
 }
 
 #[tokio::test]
-async fn failed_delivery_leaves_no_correlation_record_and_no_burned_id() {
+async fn restored_delivery_consumes_one_id_before_next_live_delivery() {
     // Given: 親は対話モードで入力待ち、子1 は即座に終了、子2 も対話モードで待機
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
         "child1",
@@ -443,6 +443,14 @@ async fn failed_delivery_leaves_no_correlation_record_and_no_burned_id() {
         .add_keyed("CHILD2", [Ok(text_response("child2", FinishReason::Stop))])
         .await;
     let (runtime, _bus) = runtime_with(Arc::clone(&model));
+    let directory = tempfile::tempdir().unwrap();
+    let storage_config = storage::StorageConfig {
+        db_path: directory.path().join("restore.sqlite3"),
+        ..storage::StorageConfig::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let runtime =
+        runtime.with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
     let parent = runtime.delegate_background(
         Role::Orchestrator,
         "PARENT".to_string(),
@@ -474,34 +482,15 @@ async fn failed_delivery_leaves_no_correlation_record_and_no_burned_id() {
         .expect("子2 run を生成できる");
     wait_for_phase(&runtime, child2, event_bus::AgentRunPhase::Waiting).await;
 
-    // When: 終端後の子1 へ send を試みる（失敗する）
+    // When: restore the terminal child.
     let failed =
         runtime.send_agent_message(parent, child1, AgentMessageKind::Send, "too late", None);
-    assert_eq!(
-        failed,
-        Err(RuntimeError::RunTerminated {
-            run_id: child1.to_string()
-        })
-    );
+    assert_eq!(failed, Ok("msg-1".to_string()));
 
-    // Then: 失敗した send は sent レコードを残さず、message id も消費しない。
-    // 子1 が reply_to="msg-1" で返信を試みても UnknownMessage になる。
-    assert_eq!(
-        runtime.send_agent_message(
-            child1,
-            parent,
-            AgentMessageKind::Reply,
-            "ghost reply",
-            Some("msg-1".to_string())
-        ),
-        Err(RuntimeError::UnknownMessage {
-            message_id: "msg-1".to_string()
-        })
-    );
-    // 次に成功した send は最初の id "msg-1" を得る（id が焼失していない）。
+    // Then: the next live delivery consumes the next ID.
     assert_eq!(
         runtime.send_agent_message(parent, child2, AgentMessageKind::Send, "ok", None),
-        Ok("msg-1".to_string())
+        Ok("msg-2".to_string())
     );
 
     let _ = runtime.cancel(parent);
@@ -511,7 +500,7 @@ async fn failed_delivery_leaves_no_correlation_record_and_no_burned_id() {
 }
 
 #[tokio::test]
-async fn send_to_terminal_recipient_returns_run_terminated() {
+async fn send_to_terminal_recipient_without_store_returns_typed_error() {
     // Given: 即座に終了する子 run
     let (runtime, _bus) = runtime_with(ScriptedModel::new([Ok(text_response(
         "done",
@@ -536,11 +525,12 @@ async fn send_to_terminal_recipient_returns_run_terminated() {
     let result =
         runtime.send_agent_message(parent, child, AgentMessageKind::Send, "too late", None);
 
-    // Then: RunTerminated
+    // Then: storage configuration is required, without a fresh-session fallback.
     assert_eq!(
         result,
-        Err(RuntimeError::RunTerminated {
-            run_id: child.to_string()
+        Err(RuntimeError::RunRestoreFailed {
+            run_id: child.to_string(),
+            reason: runtime::RunRestoreFailure::StorageNotConfigured,
         })
     );
     let _ = runtime.wait(parent).await;
@@ -640,6 +630,7 @@ async fn message_delivery_emits_agent_message_event_and_no_lifecycle_completion(
         .filter_map(|event| match &event.kind {
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => Some(message),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)

@@ -75,6 +75,7 @@ fn usage_events(events: &[Event]) -> Vec<&UsageEvent> {
         .filter_map(|event| match &event.kind {
             EventKind::Usage(usage) => Some(usage),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Provider(_)

@@ -1,5 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
+mod restore_delivery;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,6 +60,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
+    pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
@@ -211,6 +214,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
@@ -224,6 +228,15 @@ impl AgentRuntime {
                 sent: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// 終端保存先を接続する。設定済みの場合は先勝ちで変更しない。
+    pub fn with_run_store(self, store: crate::RunStore) -> Self {
+        self.shared
+            .next_run_id
+            .fetch_max(store.next_run_id, Ordering::Relaxed);
+        let _ = self.shared.run_store.set(store);
+        self
     }
 
     /// コンテキスト圧縮設定を接続したランタイムを返す。
@@ -414,6 +427,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
@@ -675,6 +689,7 @@ impl AgentRuntime {
             parent,
             mailbox: Arc::clone(&mailbox),
             handoff,
+            restored: None,
         };
         let channels = LoopChannels {
             phase_tx,
@@ -995,7 +1010,7 @@ impl AgentRuntime {
     /// - Steering が親→子でない: [`RuntimeError::MessageDenied`]
     /// - Reply に `reply_to` なし: [`RuntimeError::MessageDenied`]
     /// - Reply の `reply_to` が相関関係と不一致: [`RuntimeError::UnknownMessage`]
-    /// - 受信者が終端位相: [`RuntimeError::RunTerminated`]
+    /// - 終端・未登録 run の復元失敗: [`RuntimeError::RunRestoreFailed`]
     /// - mailbox 一杯: [`RuntimeError::MailboxFull`]
     pub fn send_agent_message(
         &self,
@@ -1006,9 +1021,31 @@ impl AgentRuntime {
         reply_to: Option<String>,
     ) -> Result<String, RuntimeError> {
         self.validate_run_mutation(sender)?;
-        self.validate_run_mutation(recipient)?;
-        let (message_id, message, disposition) =
-            self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?;
+        let live = lock_runs(&self.shared.runs)
+            .get(&recipient)
+            .is_some_and(|entry| {
+                matches!(
+                    *entry.phase_rx.borrow(),
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            });
+        let (message_id, message, disposition) = if live {
+            self.validate_run_mutation(recipient)?;
+            self.prepare_delivery(sender, recipient, kind, content.into(), reply_to)?
+        } else {
+            self.restore_and_deliver(
+                sender,
+                recipient,
+                AgentMessage {
+                    message_id: String::new(),
+                    sender_run_id: sender.to_string(),
+                    recipient_run_id: recipient.to_string(),
+                    kind,
+                    content: content.into(),
+                    reply_to,
+                },
+            )?
+        };
         self.shared.bus.emit(Event::new(EventKind::AgentMessage(
             AgentMessageEvent::Delivered {
                 message,
@@ -1019,6 +1056,37 @@ impl AgentRuntime {
     }
 
     fn prepare_delivery(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        kind: AgentMessageKind,
+        content: String,
+        reply_to: Option<String>,
+    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        match self.try_live_delivery(
+            sender,
+            recipient,
+            kind.clone(),
+            content.clone(),
+            reply_to.clone(),
+        ) {
+            Err(RuntimeError::RunTerminated { .. }) => self.restore_and_deliver(
+                sender,
+                recipient,
+                AgentMessage {
+                    message_id: String::new(),
+                    sender_run_id: sender.to_string(),
+                    recipient_run_id: recipient.to_string(),
+                    kind,
+                    content,
+                    reply_to,
+                },
+            ),
+            result => result,
+        }
+    }
+
+    fn try_live_delivery(
         &self,
         sender: RunId,
         recipient: RunId,
@@ -1058,12 +1126,11 @@ impl AgentRuntime {
         }
 
         let phase = *recipient_entry.phase_rx.borrow();
-        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+        if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             return Err(RuntimeError::RunTerminated {
                 run_id: recipient.to_string(),
             });
         }
-
         let mut sent = self
             .shared
             .sent

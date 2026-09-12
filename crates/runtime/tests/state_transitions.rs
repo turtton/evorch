@@ -44,6 +44,7 @@ async fn run_emits_pending_running_done_in_order() {
         .filter_map(|event| match &event.kind {
             EventKind::Lifecycle(event) => Some(event),
             EventKind::Message(_)
+            | EventKind::Ledger(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)

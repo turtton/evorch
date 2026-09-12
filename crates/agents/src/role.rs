@@ -98,7 +98,7 @@ impl Role {
 
     /// ADR 0002 のケイパビリティ行列を返す。
     pub fn capabilities(&self) -> RoleCapabilities {
-        match self {
+        let mut capabilities = match self {
             Role::Orchestrator => RoleCapabilities::new(
                 [
                     "delegate",
@@ -156,6 +156,10 @@ impl Role {
                 RoleCapabilities::new(["read", "grep", "git_diff"], NetworkAccess::Denied, false)
             }
             Role::MultimodalLooker => RoleCapabilities::new(["read"], NetworkAccess::Denied, false),
-        }
+        };
+        capabilities
+            .allowed_tools
+            .extend(["ledger_append", "ledger_read"].map(String::from));
+        capabilities
     }
 }

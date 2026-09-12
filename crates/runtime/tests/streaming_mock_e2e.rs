@@ -245,6 +245,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
                     ..
                 }) if run_id == &expected_run_id => lifecycle_done = true,
                 EventKind::Lifecycle(_)
+                | EventKind::Ledger(_)
                 | EventKind::Provider(_)
                 | EventKind::Tool(_)
                 | EventKind::Message(_)

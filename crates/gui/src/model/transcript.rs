@@ -235,6 +235,7 @@ impl TranscriptModel {
                 },
             ),
             event_bus::EventKind::Lifecycle(_)
+            | event_bus::EventKind::Ledger(_)
             | event_bus::EventKind::Usage(_)
             | event_bus::EventKind::Provider(_)
             | event_bus::EventKind::Fault(_)

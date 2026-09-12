@@ -575,6 +575,7 @@ async fn raw_transcript_reconstructs_in_order() {
         .filter_map(|stored| match &stored.event.kind {
             EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => Some(delta.clone()),
             EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(MessageEvent::ReasoningDelta { .. })
             | EventKind::Tool(_)
             | EventKind::Usage(_)

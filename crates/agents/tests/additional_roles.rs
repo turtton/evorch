@@ -24,10 +24,38 @@ fn additional_roles_have_least_privilege_capabilities() {
         assert_eq!(role.name(), name);
         assert_eq!(
             capabilities.allowed_tools,
-            tools.into_iter().map(String::from).collect()
+            tools
+                .into_iter()
+                .chain(["ledger_append", "ledger_read"])
+                .map(String::from)
+                .collect()
         );
         assert_eq!(capabilities.network, network);
         assert!(!capabilities.can_delegate);
+    }
+}
+
+#[test]
+fn every_role_authorizes_ledger_meta_ops() {
+    // Given: all roles, including read-only roles.
+    for role in [
+        Role::Orchestrator,
+        Role::Explorer,
+        Role::Worker,
+        Role::Reviewer,
+        Role::Librarian,
+        Role::Planner,
+        Role::Oracle,
+        Role::MultimodalLooker,
+    ] {
+        let capabilities = role.capabilities();
+        // When / Then: both self-scoped operations are authorized.
+        for op in ["ledger_append", "ledger_read"] {
+            assert_eq!(
+                capabilities.check_tool(role.name(), op),
+                agents::CapabilityDecision::Allowed
+            );
+        }
     }
 }
 

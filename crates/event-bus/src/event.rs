@@ -86,6 +86,29 @@ pub enum EventKind {
     Diagnostic(DiagnosticEvent),
     Ownership(crate::OwnershipEvent),
     Snapshot(SnapshotEvent),
+    /// run 台帳への追記イベント。
+    Ledger(LedgerEvent),
+}
+
+/// run 台帳に関するイベント。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum LedgerEvent {
+    /// run 台帳に記録を追記した。
+    RunLedgerAppended {
+        /// 追記先の run ID。
+        run_id: String,
+        /// run 内の記録の連番。
+        seq: u64,
+        /// 追記した記録の本文。
+        body: String,
+    },
+}
+
+impl From<LedgerEvent> for EventKind {
+    fn from(event: LedgerEvent) -> Self {
+        Self::Ledger(event)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +374,15 @@ pub enum LifecycleEvent {
         run_id: String,
         /// 昇格提案を発火した観測トリガー。
         trigger: EscalationTrigger,
+    },
+    /// 保存されたエージェント実行を復元した。
+    AgentRunRestored {
+        /// 復元された run ID。
+        run_id: String,
+        /// 復元を要求した送信者。
+        restored_by: String,
+        /// 復元の契機となったメッセージ ID。
+        message_id: String,
     },
 }
 
@@ -799,6 +831,8 @@ pub enum DeliveryDisposition {
     Aside,
     /// 受信者が待機中のため実行を再開させます。
     Wake,
+    /// 保存された受信者の実行を復元して配送します。
+    Restored,
 }
 
 /// エージェント間メッセージの配送に関するイベントです。

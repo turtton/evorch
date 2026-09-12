@@ -46,6 +46,7 @@ pub struct WorkbenchState<S> {
     pub(super) readonly_threads: std::collections::BTreeSet<String>,
     pub(super) pump: Option<EventPump>,
     pub(super) transcripts: TranscriptRegistry,
+    pub(super) ledger: crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: TelemetryOverlay,
     pub(super) tasks: TasksModel<S>,
     pub(super) terminal: TerminalBuffer,
@@ -87,6 +88,10 @@ pub struct WorkbenchState<S> {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub const fn ledger(&self) -> &crate::model::ledger::LedgerRegistry {
+        &self.ledger
+    }
+
     pub fn new(source: S, settings: &UiSettings) -> Result<Self, WorkbenchError> {
         let workspace = settings.layout.workspace.clone().unwrap_or_default();
         workspace
@@ -109,6 +114,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             readonly_threads: std::collections::BTreeSet::new(),
             pump: None,
             transcripts: TranscriptRegistry::new(),
+            ledger: crate::model::ledger::LedgerRegistry::default(),
             telemetry: TelemetryOverlay::new(),
             tasks: TasksModel::new(source),
             terminal: TerminalBuffer::new(10_000),
