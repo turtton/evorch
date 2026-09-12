@@ -146,6 +146,7 @@ pub fn save_openai_compatible_provider(
                             && model.metadata_ref.is_none()
                             && model.preset.is_none()
                             && model.context_window.is_none()
+                            && model.pricing_for(None).is_none()
                         {
                             toml_edit::Value::from(model.id)
                         } else {
@@ -178,6 +179,16 @@ pub fn save_openai_compatible_provider(
                                         },
                                     )?),
                                 );
+                            }
+                            for (key, price) in [
+                                ("input_price", model.input_price),
+                                ("output_price", model.output_price),
+                                ("cache_read_price", model.cache_read_price),
+                                ("cache_write_price", model.cache_write_price),
+                            ] {
+                                if let Some(price) = price {
+                                    table.insert(key, price.into());
+                                }
                             }
                             table.into()
                         },

@@ -41,6 +41,10 @@ const MODEL_ENTRY_KEYS: &[&str] = &[
     "metadata_ref",
     "preset",
     "context_window",
+    "input_price",
+    "output_price",
+    "cache_read_price",
+    "cache_write_price",
 ];
 const MODEL_PRESET_KEYS: &[&str] = &[
     "context_window",

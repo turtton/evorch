@@ -126,7 +126,7 @@ impl Default for CredentialRefConfig {
 }
 
 /// モデル ID と利用可否の設定。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(transform = model_entry_accepts_string)]
 pub struct ModelEntryConfig {
@@ -143,6 +143,25 @@ pub struct ModelEntryConfig {
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// USD per million tokens; omitted prices may be supplied by the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_price: Option<f64>,
+}
+
+/// USD per million tokens. Each `None` is unknown, not zero/free.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelPricing {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -167,7 +186,28 @@ impl ModelEntryConfig {
             metadata_ref: None,
             preset: None,
             context_window: None,
+            input_price: None,
+            output_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
         }
+    }
+
+    /// Resolves each price from static TOML first, then caller-selected catalog data.
+    /// Returns `None` only when all four prices are unknown; no I/O is performed.
+    pub fn pricing_for(&self, catalog: Option<ModelPricing>) -> Option<ModelPricing> {
+        let fallback = catalog.unwrap_or_default();
+        let pricing = ModelPricing {
+            input: self.input_price.or(fallback.input),
+            output: self.output_price.or(fallback.output),
+            cache_read: self.cache_read_price.or(fallback.cache_read),
+            cache_write: self.cache_write_price.or(fallback.cache_write),
+        };
+        (pricing.input.is_some()
+            || pricing.output.is_some()
+            || pricing.cache_read.is_some()
+            || pricing.cache_write.is_some())
+        .then_some(pricing)
     }
 }
 
@@ -192,6 +232,14 @@ struct ModelEntryDe {
     preset: Option<String>,
     #[serde(default)]
     context_window: Option<u64>,
+    #[serde(default)]
+    input_price: Option<f64>,
+    #[serde(default)]
+    output_price: Option<f64>,
+    #[serde(default)]
+    cache_read_price: Option<f64>,
+    #[serde(default)]
+    cache_write_price: Option<f64>,
 }
 
 impl<'de> Deserialize<'de> for ModelEntryConfig {
@@ -232,6 +280,10 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                     metadata_ref: entry.metadata_ref,
                     preset: entry.preset,
                     context_window: entry.context_window,
+                    input_price: entry.input_price,
+                    output_price: entry.output_price,
+                    cache_read_price: entry.cache_read_price,
+                    cache_write_price: entry.cache_write_price,
                 })
             }
         }
