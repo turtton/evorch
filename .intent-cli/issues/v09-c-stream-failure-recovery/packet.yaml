@@ -12,6 +12,7 @@ implementation_issue_packet:
     - "T10/T17（2026-09-12）で固定済みの契約: 部分表示と確定履歴は分離、final response の再 emit による補正はしない、キャンセル優先の biased select、RequestFailed(Other) 分類。本 unit はこの契約を壊さずに retry を追加する"
     - "codex quota client（crates/providers/src/provider/codex/quota.rs）に poll backoff clamp（30s..10min）の実装例がある"
     - "agent loop（crates/runtime/src/agent_loop.rs）は complete_streaming 経由で provider error を受け取る。retry は loop 層か provider 層か、責務配置を実装時に決める（部分 delta が既に配信済みの場合の再送との整合が論点）"
+    - "2026-09-12 オペレータ確定: retry 責務は **provider 層** に置く。backoff・再試行を providers 層に閉じ込め、agent-loop は最終失敗のみ受け取る。部分 delta の重複排除も provider 内で完結させる（retry 中の部分表示保持契約は acceptance_criteria どおり維持）"
   intent_references:
     - intents/evorch/features/agent-runtime-kernel/overview.md
     - intents/evorch/decisions/0025-agent-experience-evaluation.md
