@@ -94,9 +94,12 @@ jobs:
       - name: Run Chromium browser evidence test
         run: cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture
         env:
-          EVORCH_BROWSER_EVIDENCE_DIR: target/browser-evidence
+          # Cargo runs tests from the crate directory, not the workspace root.
+          EVORCH_BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/target/browser-evidence
       - uses: actions/upload-artifact@v4
         with:
           name: browser-e2e-evidence
           path: target/browser-evidence
-          if-no-files-found: warn
+          # Fail loudly when the evidence contract breaks instead of uploading
+          # an empty artifact (issue #114).
+          if-no-files-found: error
