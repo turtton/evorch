@@ -128,6 +128,10 @@ async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
         .unwrap()
         .unwrap();
     // Then: the first event is a scoped approval request and no tool has executed.
+    assert_eq!(
+        serde_json::to_value(&event).expect("event JSON")["kind"]["payload"]["payload"]["input"],
+        json!({"valid": true})
+    );
     let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind else {
         panic!("expected approval before ToolStarted");
     };

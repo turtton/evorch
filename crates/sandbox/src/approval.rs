@@ -24,11 +24,22 @@ impl ApprovalGate {
     }
 
     pub async fn request(&self, tool_name: &str, call_id: &str) -> ApprovalOutcome {
+        self.request_with_input(tool_name, call_id, None).await
+    }
+
+    /// ツール引数を承認要求へ添えて、同じ call ID の応答を待ちます。
+    pub async fn request_with_input(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+        input: Option<serde_json::Value>,
+    ) -> ApprovalOutcome {
         let mut receiver = self.event_bus.subscribe();
         self.event_bus
             .emit(Event::new(ToolEvent::ApprovalRequested {
                 tool_name: tool_name.to_owned(),
                 call_id: call_id.to_owned(),
+                input,
             }));
 
         let response = async {

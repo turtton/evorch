@@ -35,10 +35,12 @@ pub fn demo_pending_approval_events() -> [event_bus::Event; 3] {
             input: Some(serde_json::json!({"command": "rm -rf /tmp/build"})),
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             call_id: "run-2:call-1:17".into(),
             tool_name: "shell".into(),
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             call_id: "run-3:call-2:18".into(),
             tool_name: "write".into(),
         }),

@@ -459,7 +459,12 @@ pub enum ToolEvent {
         run_id: Option<String>,
     },
     /// ツール実行の承認が要求された。
-    ApprovalRequested { tool_name: String, call_id: String },
+    ApprovalRequested {
+        tool_name: String,
+        call_id: String,
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    },
     /// 承認要求への応答（承認 UI / CLI 側が emit する）。
     ApprovalResolved { call_id: String, approved: bool },
     /// ポリシーまたは承認結果によりツール実行が拒否された。
@@ -1278,6 +1283,7 @@ mod tests {
         let event = Event::new(ToolEvent::ApprovalRequested {
             tool_name: "shell".into(),
             call_id: "c1".into(),
+            input: None,
         });
         let json = serde_json::to_string(&event).expect("JSONへ変換できる");
         let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
@@ -1290,7 +1296,7 @@ mod tests {
                 "kind": "Tool",
                 "payload": {
                     "kind": "ApprovalRequested",
-                    "payload": {"tool_name": "shell", "call_id": "c1"}
+                    "payload": {"tool_name": "shell", "call_id": "c1", "input": null}
                 }
             })
         );

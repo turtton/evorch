@@ -9,6 +9,7 @@ use workspace_ui::UiSettings;
 
 fn requested(call_id: &str) -> Event {
     Event::new(ToolEvent::ApprovalRequested {
+        input: None,
         tool_name: "shell".into(),
         call_id: call_id.into(),
     })

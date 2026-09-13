@@ -22,23 +22,29 @@ pub struct PendingApprovalsModel {
 }
 
 impl PendingApprovalsModel {
-    /// run の補完と `(run ID, 元 call ID)` による引数取得を呼び出し元へ委譲する。
+    /// イベントの引数を優先し、欠落時のみ `(run ID, 元 call ID)` で補完する。
     /// 削除は `ApprovalResolved` の完全一致だけで行う。
     pub fn apply_event(
         &mut self,
         event: &Event,
         resolve_run: impl Fn(&str) -> Option<String>,
-        resolve_input: impl Fn(&str, &str) -> Option<Value>,
+        resolve_fallback_input: impl Fn(&str, &str) -> Option<Value>,
     ) {
         match &event.kind {
-            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id }) => {
+            EventKind::Tool(ToolEvent::ApprovalRequested {
+                tool_name,
+                call_id,
+                input,
+            }) => {
                 let (run_id, original_call_id, attempt) = match parse_scoped_call_id(call_id) {
                     Some((run, original, attempt)) => (Some(run), original, attempt),
                     None => (resolve_run(call_id), call_id.clone(), None),
                 };
-                let input = run_id
-                    .as_deref()
-                    .and_then(|run| resolve_input(run, &original_call_id));
+                let input = input.clone().or_else(|| {
+                    run_id
+                        .as_deref()
+                        .and_then(|run| resolve_fallback_input(run, &original_call_id))
+                });
                 let approval = PendingApproval {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),

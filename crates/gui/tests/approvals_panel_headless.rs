@@ -23,6 +23,7 @@ impl CommandSink for SharedSink {
 
 fn requested(call_id: &str, tool_name: &str) -> Event {
     Event::new(ToolEvent::ApprovalRequested {
+        input: None,
         call_id: call_id.into(),
         tool_name: tool_name.into(),
     })
@@ -58,6 +59,31 @@ fn harness() -> (
             state,
         );
     (harness, sink)
+}
+
+#[test]
+fn displays_arguments_when_approval_arrives_before_tool_started() {
+    // Given: ToolStarted がまだ発行されていない承認要求。
+    let mut state =
+        WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
+    let request: ToolEvent = serde_json::from_value(json!({
+        "kind": "ApprovalRequested",
+        "payload": {"tool_name": "shell", "call_id": A, "input": {"command": "pwd"}}
+    }))
+    .expect("approval event");
+    state.apply_events([Event::new(request)]);
+    let mut harness = Harness::builder().build_ui_state(
+        |ui, state| {
+            gui::theme::install(ui.ctx());
+            gui::panes::approvals::approvals_pane(ui, state.pending_approvals());
+        },
+        state,
+    );
+    // When: 承認待ちの pane を描画する。
+    harness.run_steps(3);
+    // Then: 実行開始を待たずにイベントの引数要約を表示する。
+    assert!(harness.query_by_label(r#"{"command":"pwd"}"#).is_some());
+    assert!(harness.query_by_label("引数情報なし").is_none());
 }
 
 #[test]

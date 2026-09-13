@@ -22,6 +22,7 @@ fn notifications_resolve_approval_using_call_index() {
             input: None,
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             tool_name: "shell".into(),
             call_id: "call-1".into(),
         }),
@@ -52,6 +53,7 @@ fn started(call_id: &str, run_id: &str) -> Event {
 
 fn approval(call_id: &str) -> Event {
     Event::new(ToolEvent::ApprovalRequested {
+        input: None,
         tool_name: "shell".into(),
         call_id: call_id.into(),
     })

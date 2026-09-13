@@ -100,7 +100,11 @@ impl ValidatedToolCall {
             Action::AskFirst => match &self.executor.gate {
                 None => Some("承認ゲートが未設定のため拒否されました"),
                 Some(gate) => match gate
-                    .request(&self.name, &approval_id(&self.ctx, &self.id))
+                    .request_with_input(
+                        &self.name,
+                        &approval_id(&self.ctx, &self.id),
+                        Some(self.args.clone()),
+                    )
                     .await
                 {
                     ApprovalOutcome::Approved => {

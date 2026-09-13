@@ -442,6 +442,7 @@ mod tests {
             run_id: Some("run-2".into()),
         }));
         let known = Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             tool_name: "write".into(),
             call_id: "known".into(),
         });
