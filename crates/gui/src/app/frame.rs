@@ -138,6 +138,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Error { .. }
                         | TranscriptEntry::UserMessage { .. }
                         | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }
                         | TranscriptEntry::AgentMessage { .. } => None,

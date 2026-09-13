@@ -26,6 +26,7 @@ pub struct TranscriptRegistry {
     runs: BTreeMap<String, TranscriptModel>,
     call_index: BTreeMap<String, String>,
     ambiguous_calls: BTreeSet<String>,
+    compaction_checkpoints: BTreeSet<(String, String)>,
 }
 
 impl Default for TranscriptRegistry {
@@ -44,6 +45,7 @@ impl TranscriptRegistry {
             runs: BTreeMap::new(),
             call_index: BTreeMap::new(),
             ambiguous_calls: BTreeSet::new(),
+            compaction_checkpoints: BTreeSet::new(),
         }
     }
 
@@ -59,6 +61,9 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
+            EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
+                vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())]
+            }
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
@@ -110,12 +115,22 @@ impl TranscriptRegistry {
             EventKind::Lifecycle(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)
-            | EventKind::Compaction(_)
             | EventKind::Orchestrator(_) => Vec::new(),
         }
     }
 
     pub fn apply(&mut self, event: &Event) {
+        if let EventKind::Compaction(event_bus::CompactionEvent::Compacted {
+            run_id,
+            checkpoint_id,
+            ..
+        }) = &event.kind
+            && !self
+                .compaction_checkpoints
+                .insert((run_id.clone(), checkpoint_id.clone()))
+        {
+            return;
+        }
         match &event.kind {
             EventKind::Message(
                 MessageEvent::MessageDelta { run_id: None, .. }

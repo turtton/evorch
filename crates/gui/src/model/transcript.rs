@@ -1,5 +1,6 @@
-use event_bus::{AgentMessageKind, Event};
+use event_bus::{AgentMessageKind, CompactionReason, Event};
 
+mod compaction;
 mod diagnostics;
 
 #[cfg(test)]
@@ -33,6 +34,17 @@ pub enum TranscriptEntry {
     },
     Notice {
         text: String,
+    },
+    Compaction {
+        reason: CompactionReason,
+        threshold: f64,
+        context_window_tokens: u64,
+        estimated_tokens_before: u64,
+        estimated_tokens_after: u64,
+        compacted_range_start: usize,
+        compacted_range_end: usize,
+        checkpoint_id: String,
+        summary: String,
     },
     Message {
         text: String,
@@ -139,6 +151,7 @@ impl TranscriptModel {
             return;
         }
         match &event.kind {
+            event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
                     to: event_bus::AgentRunPhase::Error,
@@ -242,8 +255,6 @@ impl TranscriptModel {
             | event_bus::EventKind::Fault(_)
             // エージェント間メッセージは transcript 表示の対象外（明示 no-op）。
             | event_bus::EventKind::AgentMessage(_)
-            // コンテキスト圧縮は transcript 表示の対象外（明示 no-op）。
-            | event_bus::EventKind::Compaction(_)
             // オーケストレーション状態は goal pane 表示の対象外（明示 no-op）。
             | event_bus::EventKind::Orchestrator(_)
             | event_bus::EventKind::Diagnostic(_)
@@ -272,6 +283,7 @@ impl TranscriptModel {
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. } => {}
                 }
@@ -503,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_event_is_no_op() {
+    fn compaction_event_preserves_display_fields() {
         let mut model = TranscriptModel::new();
         model.push_message("before");
         let event = Event::new(CompactionEvent::Compacted {
@@ -521,9 +533,22 @@ mod tests {
         model.apply(&event);
         assert_eq!(
             model.entries(),
-            &[TranscriptEntry::Message {
-                text: "before".into()
-            }]
+            &[
+                TranscriptEntry::Message {
+                    text: "before".into()
+                },
+                TranscriptEntry::Compaction {
+                    reason: CompactionReason::Automatic,
+                    threshold: 0.8,
+                    context_window_tokens: 200_000,
+                    estimated_tokens_before: 180_000,
+                    estimated_tokens_after: 60_000,
+                    compacted_range_start: 0,
+                    compacted_range_end: 42,
+                    checkpoint_id: "checkpoint-1".into(),
+                    summary: "圧縮要約".into(),
+                },
+            ]
         );
     }
 

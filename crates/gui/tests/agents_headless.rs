@@ -590,7 +590,8 @@ fn assert_run_entries(
             | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
-            | TranscriptEntry::Error { .. } => None,
+            | TranscriptEntry::Error { .. }
+            | TranscriptEntry::Compaction { .. } => None,
         })
         .collect::<Vec<_>>();
     let contents = entries
@@ -602,7 +603,8 @@ fn assert_run_entries(
             | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }
-            | TranscriptEntry::Error { .. } => None,
+            | TranscriptEntry::Error { .. }
+            | TranscriptEntry::Compaction { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(calls, vec![expected.own_call_id]);
