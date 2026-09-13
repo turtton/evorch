@@ -147,6 +147,8 @@ pub struct DiagnosticEvent {
     pub detail: String,
     pub run_id: Option<String>,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub call_id: Option<String>,
 }
 
 impl From<DiagnosticEvent> for EventKind {

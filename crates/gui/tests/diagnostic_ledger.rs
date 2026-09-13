@@ -27,6 +27,7 @@ fn diagnostic_survives_storage_replay_and_is_visible_in_owning_thread() {
             detail: format!("{} diagnostic detail", severity.as_str()),
             run_id: Some("run-1".into()),
             thread_id: Some("thread-1".into()),
+            call_id: None,
         })
     })
     .collect();

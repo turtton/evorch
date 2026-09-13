@@ -284,6 +284,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
                 detail: "claim held".into(),
                 run_id: None,
                 thread_id: Some("thread-1".into()),
+                call_id: None,
             },
             16,
         ),
