@@ -5,6 +5,7 @@ use super::tab_viewer::WorkbenchTabViewer;
 use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
+    approvals::ApprovalsAction,
     composer::ComposerAction,
     notifications::NotificationsAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
@@ -35,6 +36,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut notifications_action = None;
+        let mut approvals_action = None;
         let mut diff_request = None;
         let mut composer_action = None;
         let mut focus_request = None;
@@ -44,6 +46,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let tab_style = dock_style.tab.clone();
         {
             let mut viewer = WorkbenchTabViewer {
+                pending_approvals: &self.pending_approvals,
+                approvals_action: &mut approvals_action,
                 notifications: &mut self.notifications,
                 notifications_action: &mut notifications_action,
                 attention_acks: &mut self.attention_acks,
@@ -96,6 +100,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(NotificationsAction::OpenRun(run_id)) = notifications_action {
             self.open_agent_pane(&run_id);
+        }
+        if let Some(ApprovalsAction::Decide { call_id, approved }) = approvals_action {
+            self.decide_tool_approval(call_id, approved);
         }
         if let Some(action) = sidebar_action {
             let result = match action {

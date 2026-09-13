@@ -170,7 +170,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             phases: BTreeMap::new(),
         };
         state.tasks.refresh();
+        if settings.layout.workspace.is_none() {
+            state.register_approvals_panel();
+        }
         Ok(state)
+    }
+
+    pub(super) fn register_approvals_panel(&mut self) {
+        let id = PanelId::new("approvals-main");
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::Approvals,
+            title: PanelKind::Approvals.default_title().into(),
+            target: None,
+        });
+        crate::dock::place_approvals(&mut self.dock, id);
     }
 
     pub fn with_pump(mut self, pump: EventPump) -> Self {

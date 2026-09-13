@@ -304,6 +304,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(dock) => {
                 self.dock = dock;
                 self.panels = workspace.panels;
+                self.register_approvals_panel();
                 ctx.request_repaint();
             }
             Err(error) => tracing::warn!(%error, "failed to reset layout"),

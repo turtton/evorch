@@ -34,6 +34,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::Sidebar, None)
             | (PanelKind::Agents, None)
             | (PanelKind::Notifications, None)
+            | (PanelKind::Approvals, None)
             | (PanelKind::Diff, None)
             | (PanelKind::Terminal, None)
             | (PanelKind::Tasks, None) => {}
@@ -42,6 +43,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::Sidebar, Some(_))
             | (PanelKind::Agents, Some(_))
             | (PanelKind::Notifications, Some(_))
+            | (PanelKind::Approvals, Some(_))
             | (PanelKind::Diff, Some(_))
             | (PanelKind::Terminal, Some(_))
             | (PanelKind::Tasks, Some(_)) => {

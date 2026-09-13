@@ -44,6 +44,26 @@ pub fn to_dock_state(workspace: &Workspace) -> Result<DockState<PanelId>, DockCo
     Ok(dock)
 }
 
+/// 既存の配置と選択を保ち、未配置の承認タブを通知の隣へ追加します。
+pub(crate) fn place_approvals(dock: &mut DockState<PanelId>, id: PanelId) {
+    if dock.find_tab(&id).is_some() {
+        return;
+    }
+    let target = dock
+        .find_tab(&PanelId::new("notifications-main"))
+        .or_else(|| dock.find_tab(&PanelId::new("agents-main")))
+        .or_else(|| dock.iter_all_tabs().next().map(|(path, _)| path));
+    if let Some(path) = target
+        && let Ok(leaf) = dock.leaf_mut(path.node_path())
+    {
+        let index = path.tab.0 + 1;
+        if leaf.active.0 >= index {
+            leaf.active.0 += 1;
+        }
+        leaf.tabs.insert(index, id);
+    }
+}
+
 /// サイドバーを左側に持つ水平 split の fraction 下限。
 /// 従来のスレッド行（pin/タイトル/状態/Pause）が狭いウィンドウでクリップされ、
 /// ボタンが操作不能になるのを防ぐ（800px で約 235px、1280px で約 380px）。
