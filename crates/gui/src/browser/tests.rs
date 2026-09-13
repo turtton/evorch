@@ -7,14 +7,89 @@ use tokio::{
 
 use super::{BrowserAction, cdp};
 
+/// Resolves the browser evidence directory.
+///
+/// A relative `EVORCH_BROWSER_EVIDENCE_DIR` is anchored at the workspace root:
+/// Cargo runs test binaries with the crate directory as the working directory,
+/// while CI uploads artifacts relative to the workspace root. Without this
+/// anchor, evidence silently lands in `crates/gui/target/...` and the
+/// `browser-e2e-evidence` artifact uploads nothing (issue #114).
+fn resolve_evidence_dir(
+    configured: Option<std::path::PathBuf>,
+    workspace_root: &std::path::Path,
+    fallback: &std::path::Path,
+) -> std::path::PathBuf {
+    match configured {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => workspace_root.join(path),
+        None => fallback.to_owned(),
+    }
+}
+
+/// The workspace root, found by walking up from this crate's manifest dir
+/// until a `Cargo.toml` declaring a `[workspace]` section.
+fn workspace_root() -> std::path::PathBuf {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        let manifest = ancestor.join("Cargo.toml");
+        if manifest.is_file()
+            && std::fs::read_to_string(&manifest)
+                .is_ok_and(|contents| contents.contains("[workspace]"))
+        {
+            return ancestor.to_owned();
+        }
+    }
+    manifest_dir.to_owned()
+}
+
+#[cfg(test)]
+mod evidence_dir_tests {
+    use super::*;
+
+    #[test]
+    fn relative_config_is_anchored_at_workspace_root() {
+        let resolved = resolve_evidence_dir(
+            Some(std::path::PathBuf::from("target/browser-evidence")),
+            std::path::Path::new("/workspace"),
+            std::path::Path::new("/fallback"),
+        );
+        assert_eq!(
+            resolved,
+            std::path::Path::new("/workspace/target/browser-evidence")
+        );
+    }
+
+    #[test]
+    fn absolute_config_is_used_as_is() {
+        let resolved = resolve_evidence_dir(
+            Some(std::path::PathBuf::from("/elsewhere/evidence")),
+            std::path::Path::new("/workspace"),
+            std::path::Path::new("/fallback"),
+        );
+        assert_eq!(resolved, std::path::Path::new("/elsewhere/evidence"));
+    }
+
+    #[test]
+    fn missing_config_uses_fallback() {
+        let resolved = resolve_evidence_dir(
+            None,
+            std::path::Path::new("/workspace"),
+            std::path::Path::new("/fallback"),
+        );
+        assert_eq!(resolved, std::path::Path::new("/fallback"));
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chromium; run explicitly with --ignored"]
 async fn chromium_screencast_and_action_evidence() {
     // Given: a local fixture and a real, isolated headless Chromium session.
     let temporary = tempfile::tempdir().expect("evidence directory");
-    let evidence = std::env::var_os("EVORCH_BROWSER_EVIDENCE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| temporary.path().to_owned());
+    let evidence = resolve_evidence_dir(
+        std::env::var_os("EVORCH_BROWSER_EVIDENCE_DIR").map(std::path::PathBuf::from),
+        &workspace_root(),
+        temporary.path(),
+    );
     std::fs::create_dir_all(&evidence).expect("create evidence directory");
     let bus = Arc::new(event_bus::EventBus::new(32));
     let mut events = bus.subscribe();
