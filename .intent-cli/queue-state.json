@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-12T23:27:20.3469463+00:00",
+  "updated_at": "2026-09-13T12:36:14.6241477+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1560,7 +1560,7 @@
     {
       "execution_unit": "v09-d-approval-correlation-ux",
       "title": "v09-d: \u627F\u8A8D UX \u306E\u76F8\u95A2 ID \u660E\u793A\uFF08run:call:attempt\uFF09\u3092\u5B9F\u88C5",
-      "state": "queued",
+      "state": "completed",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
@@ -1574,6 +1574,7 @@
         "number": 110,
         "url": "https://github.com/turtton/evorch/issues/110"
       },
+      "linked_pr": "https://github.com/turtton/evorch/pull/111",
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
