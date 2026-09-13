@@ -6,6 +6,7 @@
 //! 優先順に解決するリフレッシュ (`refresh`) を提供します。
 
 pub mod cache;
+pub mod capabilities;
 pub mod catalog;
 pub mod error;
 pub mod fetch;
@@ -13,6 +14,7 @@ pub mod refresh;
 pub mod types;
 
 pub use cache::CatalogCache;
+pub use capabilities::{CapabilitySupport, ModelCapabilities};
 pub use catalog::{Capability, ModelCatalog};
 pub use error::ModelError;
 pub use fetch::{CatalogFetcher, ReqwestModelsDevFetcher};
