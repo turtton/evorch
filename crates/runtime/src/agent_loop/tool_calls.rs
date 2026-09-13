@@ -342,6 +342,8 @@ impl LoopState {
     ) -> bool {
         let ctx = ToolExecutionContext {
             run_id: self.task.run_id.to_string(),
+            // THREAD_ID_SEAM: RunTask currently carries run identity only.
+            thread_id: None,
         };
         let mut rule_targets = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();

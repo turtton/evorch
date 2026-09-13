@@ -35,6 +35,8 @@ pub use prepared::{PreparedToolCall, ValidatedToolCall};
 pub struct ToolExecutionContext {
     /// 実行元 AgentRun の識別子 (例: `run-7`)。
     pub run_id: String,
+    /// 実行元スレッドの識別子。スレッド相関が利用できない場合は `None`。
+    pub thread_id: Option<String>,
 }
 
 /// ツールとコンパイル済みスキーマ検証器の登録エントリ。
@@ -278,7 +280,7 @@ impl ToolExecutor {
             )
         });
         let outcome = match action {
-            Action::Proceed => registered.tool.execute(args).await,
+            Action::Proceed => registered.tool.execute_with_context(ctx, args).await,
             Action::Deny => {
                 return self.deny(ctx, tool_name, call_id, "policy により拒否されました");
             }
@@ -295,7 +297,9 @@ impl ToolExecutor {
                     .request_with_input(tool_name, call_id, Some(args.clone()))
                     .await
                 {
-                    ApprovalOutcome::Approved => registered.tool.execute(args).await,
+                    ApprovalOutcome::Approved => {
+                        registered.tool.execute_with_context(ctx, args).await
+                    }
                     ApprovalOutcome::Denied => {
                         return self.deny(ctx, tool_name, call_id, "承認要求が拒否されました");
                     }
@@ -310,7 +314,10 @@ impl ToolExecutor {
                 }
             }
             Action::AskOnFailure => {
-                let first = registered.tool.execute(args.clone()).await;
+                let first = registered
+                    .tool
+                    .execute_with_context(ctx, args.clone())
+                    .await;
                 if !is_failure(&first) {
                     first
                 } else if let Some(gate) = &self.gate {
@@ -322,7 +329,9 @@ impl ToolExecutor {
                         )
                         .await
                     {
-                        ApprovalOutcome::Approved => registered.tool.execute(args).await,
+                        ApprovalOutcome::Approved => {
+                            registered.tool.execute_with_context(ctx, args).await
+                        }
                         ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
                     }
                 } else {
@@ -447,6 +456,7 @@ mod tests {
         executor.register(Arc::new(Read)).unwrap();
         let ctx = ToolExecutionContext {
             run_id: "r1".into(),
+            thread_id: None,
         };
 
         // When: the executor reads the file.
@@ -504,6 +514,7 @@ mod tests {
 
         let ctx = ToolExecutionContext {
             run_id: "run-1".to_string(),
+            thread_id: None,
         };
         let result = executor
             .execute(&ctx, "origin_tamper", "call-1", serde_json::json!({}))

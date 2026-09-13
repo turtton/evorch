@@ -4,7 +4,7 @@
 //! 制御マーカのエスケープ（ADR 0008）を検証する。
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
@@ -33,6 +33,7 @@ fn setup_executor() -> (Arc<EventBus>, ToolExecutor, EventReceiver) {
 fn test_ctx(run_id: &str) -> ToolExecutionContext {
     ToolExecutionContext {
         run_id: run_id.to_string(),
+        thread_id: None,
     }
 }
 
@@ -298,6 +299,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
     std::fs::write(&path, "hello\n").expect("テストファイルの書き込みに失敗");
     let ctx = ToolExecutionContext {
         run_id: "run-42".to_string(),
+        thread_id: None,
     };
 
     let result = executor
@@ -643,6 +645,69 @@ async fn web_tools_result_origin_is_web_untrusted_fail_closed() {
         .expect("テストツールは成功する");
 
     assert_eq!(result.origin, ContentOrigin::WebUntrusted);
+}
+
+struct ContextSpy {
+    observed: Arc<Mutex<Option<ToolExecutionContext>>>,
+}
+
+#[async_trait]
+impl Tool for ContextSpy {
+    fn name(&self) -> &'static str {
+        "context_spy"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "additionalProperties": false })
+    }
+
+    fn permissions(&self) -> Permissions {
+        Permissions::read_only()
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("spy"))
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        *self.observed.lock().expect("spy lock") = Some(ctx.clone());
+        self.execute(args).await
+    }
+}
+
+// Given: context-aware spy tool and a context with thread_id Some("t-1") / When: execute / Then: spy observes the same thread_id
+#[tokio::test]
+async fn executor_passes_thread_id_to_tool_context() {
+    let bus = Arc::new(EventBus::new(16));
+    let observed = Arc::new(Mutex::new(None));
+    let mut executor = ToolExecutor::new(bus);
+    executor
+        .register(Arc::new(ContextSpy {
+            observed: Arc::clone(&observed),
+        }))
+        .expect("spy tool registration succeeds");
+    let ctx = ToolExecutionContext {
+        run_id: "run-1".to_string(),
+        thread_id: Some("t-1".to_string()),
+    };
+
+    executor
+        .execute(&ctx, "context_spy", "call-1", serde_json::json!({}))
+        .await
+        .expect("spy tool execution succeeds");
+
+    assert_eq!(
+        observed
+            .lock()
+            .expect("spy lock")
+            .as_ref()
+            .and_then(|ctx| ctx.thread_id.as_deref()),
+        Some("t-1")
+    );
 }
 
 /// detail メタデータを添えて正常終了するテスト用ツール。

@@ -15,6 +15,7 @@ fn executor() -> (ToolExecutor, event_bus::EventReceiver) {
 fn context() -> ToolExecutionContext {
     ToolExecutionContext {
         run_id: "r1".into(),
+        thread_id: None,
     }
 }
 

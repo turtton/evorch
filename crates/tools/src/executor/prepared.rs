@@ -190,6 +190,7 @@ mod rework_tests {
                 .validate_call(
                     ToolExecutionContext {
                         run_id: "run".into(),
+                        thread_id: None,
                     },
                     "read".into(),
                     "id".into(),
@@ -231,7 +232,10 @@ mod rework_tests {
         for run in ["run-a", "run-a", "run-b"] {
             let prepared = executor
                 .validate_call(
-                    ToolExecutionContext { run_id: run.into() },
+                    ToolExecutionContext {
+                        run_id: run.into(),
+                        thread_id: None,
+                    },
                     "read".into(),
                     "duplicate".into(),
                     serde_json::json!({}),
