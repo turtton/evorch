@@ -170,9 +170,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             phases: BTreeMap::new(),
         };
         state.tasks.refresh();
-        if settings.layout.workspace.is_none() {
-            state.register_approvals_panel();
-        }
+        state.register_approvals_panel();
         Ok(state)
     }
 
