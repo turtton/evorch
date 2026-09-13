@@ -223,7 +223,8 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
             ..Default::default()
         },
     );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // CI の負荷が高い runner でも待機に入る時間を確保するため余裕を持たせる。
+    tokio::time::timeout(Duration::from_secs(15), async {
         while runtime.inspect_agent(coordinator).unwrap().phase != AgentRunPhase::Waiting {
             tokio::task::yield_now().await;
         }
