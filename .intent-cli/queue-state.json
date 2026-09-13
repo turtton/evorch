@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-13T16:22:20.5960941+00:00",
+  "updated_at": "2026-09-13T16:23:00.2876654+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1494,6 +1494,11 @@
         "implementation": ".intent-cli/issues/v08-b-terminal-pane-coverage/implementation.md",
         "review_context": ".intent-cli/issues/v08-b-terminal-pane-coverage/review-context.md",
         "yaml": ".intent-cli/issues/v08-b-terminal-pane-coverage/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 116,
+        "url": "https://github.com/turtton/evorch/issues/116"
       },
       "worker_role": "implementation",
       "review_role": "review",
