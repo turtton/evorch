@@ -286,3 +286,5 @@
 {"ts":"2026-09-13T12:36:14.6138426+00:00","execution_unit":"v09-d-approval-correlation-ux","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":111}
 {"ts":"2026-09-13T12:36:14.6138426+00:00","execution_unit":"v09-d-approval-correlation-ux","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":111}
 {"ts":"2026-09-13T12:40:46.775932+00:00","execution_unit":"v06-b2-mcp-lsp-compaction-capability","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#112","reason":"https://github.com/turtton/evorch/issues/112"}
+{"ts":"2026-09-13T15:39:45.403506+00:00","execution_unit":"v06-b2-mcp-lsp-compaction-capability","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":113}
+{"ts":"2026-09-13T15:39:45.403506+00:00","execution_unit":"v06-b2-mcp-lsp-compaction-capability","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":113}
