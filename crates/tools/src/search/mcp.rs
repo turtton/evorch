@@ -6,11 +6,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use serde_json::Value;
 
 use super::envelope::parse_envelope;
 use super::error::SearchError;
+use crate::mcp::wire::{accept_headers, request};
 use crate::network_guard::{NetworkGuard, NetworkGuardError};
 
 /// 単発 design lock における JSON-RPC request id。
@@ -69,20 +70,15 @@ impl McpTransport for NetworkGuardMcpTransport {
         tool_name: &str,
         arguments: Value,
     ) -> Result<McpToolSuccess, SearchError> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": REQUEST_ID,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
-        });
-        let mut headers = self.extra_headers.clone();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
+        let body = request(
+            REQUEST_ID,
+            "tools/call",
+            serde_json::json!({
+                    "name": tool_name,
+                    "arguments": arguments,
+            }),
         );
+        let headers = accept_headers(self.extra_headers.clone());
         let response = self
             .guard
             .post_json(&self.endpoint, headers, &body)

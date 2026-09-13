@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod executor;
+pub mod mcp;
 pub mod network_guard;
 pub mod origin;
 pub mod result;

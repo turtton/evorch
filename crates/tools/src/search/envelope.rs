@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::error::SearchError;
 use super::mcp::McpToolSuccess;
+use crate::mcp::wire::{response_frames, search_response};
 
 /// JSON 応答または SSE frame 群から request_id に一致する応答を抽出する。
 ///
@@ -20,60 +21,11 @@ pub(crate) fn parse_envelope(
     content_type: Option<&str>,
     body: &[u8],
 ) -> Result<McpToolSuccess, SearchError> {
-    let frames = if content_type.is_some_and(|value| value.contains("text/event-stream")) {
-        sse_frames(body)?
-    } else {
-        json_frames(body)?
-    };
-    let response = pick_response(frames, request_id)?;
+    let frames = response_frames(content_type, body)
+        .map_err(|error| SearchError::Protocol(error.to_string()))?;
+    let response = search_response(frames, request_id)
+        .map_err(|error| SearchError::Protocol(error.to_string()))?;
     success_of(&response)
-}
-
-fn json_frames(body: &[u8]) -> Result<Vec<Value>, SearchError> {
-    let parsed = serde_json::from_slice::<Value>(body)
-        .map_err(|error| SearchError::Protocol(format!("応答 JSON を解析できません: {error}")))?;
-    Ok(vec![parsed])
-}
-
-fn sse_frames(body: &[u8]) -> Result<Vec<Value>, SearchError> {
-    let text = std::str::from_utf8(body)
-        .map_err(|error| SearchError::Protocol(format!("応答が UTF-8 ではありません: {error}")))?;
-    let mut frames = Vec::new();
-    for frame in text.split("\n\n") {
-        let data = data_lines(frame);
-        if data.is_empty() {
-            continue;
-        }
-        let parsed = serde_json::from_str::<Value>(&data).map_err(|error| {
-            SearchError::Protocol(format!("SSE frame の JSON を解析できません: {error}"))
-        })?;
-        frames.push(parsed);
-    }
-    Ok(frames)
-}
-
-fn data_lines(frame: &str) -> String {
-    frame
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|data| data.strip_prefix(' ').unwrap_or(data))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn pick_response(mut frames: Vec<Value>, request_id: i64) -> Result<Value, SearchError> {
-    if let Some(index) = frames
-        .iter()
-        .position(|frame| frame.get("id").and_then(Value::as_i64) == Some(request_id))
-    {
-        return Ok(frames.swap_remove(index));
-    }
-    if frames.len() == 1 {
-        return Ok(frames.swap_remove(0));
-    }
-    Err(SearchError::Protocol(
-        "request id に一致する JSON-RPC 応答がありません".to_owned(),
-    ))
 }
 
 fn success_of(response: &Value) -> Result<McpToolSuccess, SearchError> {
