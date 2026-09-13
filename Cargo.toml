@@ -55,3 +55,31 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 wiremock = "0.6"
+
+# --- Dev-build bloat mitigation ---
+# Full debuginfo across the ~704-crate dep tree (wgpu/egui stack) produced
+# ~750MB test binaries and 200G+ target dirs. Strip dependency debuginfo
+# entirely and keep only line tables for workspace crates, so backtraces and
+# panic messages keep file:line for OUR code (dep frames keep symbols only).
+# The main `ci` job forces CARGO_PROFILE_DEV_DEBUG=0 / CARGO_PROFILE_TEST_DEBUG=0
+# (env overrides this manifest); other CI jobs (offscreen-gate, browser-e2e)
+# pick up this slimmer profile, which only reduces their disk/link load.
+# Tradeoff: variable inspection in a debugger needs the escape-hatch profile below.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Escape hatch for debugger sessions (gdb/lldb with variable inspection):
+#   cargo build --profile debugging
+#   cargo test  --profile debugging
+# NOTE: package overrides are inherited from dev, so the dep override must be
+# re-specified here — `debug = true` on [profile.debugging] alone would still
+# strip dep debuginfo.
+[profile.debugging]
+inherits = "dev"
+debug = true
+
+[profile.debugging.package."*"]
+debug = true
