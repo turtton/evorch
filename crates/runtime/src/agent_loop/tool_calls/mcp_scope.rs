@@ -1,3 +1,8 @@
+//! Scope rejection precedes execution: emit ExecutionDenied + DiagnosticEvent only.
+//! ReadyCall::Rejected never reaches the executor, so no ToolStarted/ToolCompleted
+//! pair or MCP communication occurs. The diagnostic carries run_id and call_id;
+//! ExecutionDenied carries call_id under the existing event schema.
+
 use super::LoopState;
 use crate::network::NetworkAccessDecision;
 use crate::scope::{ScopeDecision, ScopeDimension, judge_tool_scope};

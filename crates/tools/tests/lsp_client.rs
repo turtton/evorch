@@ -71,7 +71,7 @@ async fn renders_canonical_lines_when_server_publishes() {
     assert_eq!(event.call_id.as_deref(), Some("call-lsp"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&event.detail).unwrap(),
-        serde_json::json!({"file":path,"count":4,"codes":["1","2","3","4"]})
+        serde_json::json!({"file":path,"count":4,"codes":["[redacted]","[redacted]","[redacted]","[redacted]"]})
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(10), events.recv())
@@ -117,4 +117,31 @@ async fn returns_empty_success_when_server_clears_diagnostics() {
     assert!(!result.is_error);
     assert_eq!(result.content, "");
     assert_eq!(result.detail.unwrap()["count"], 0);
+}
+
+#[tokio::test]
+async fn lsp_redacts_secret_code_before_live_delivery() {
+    // Given: a real LSP server placing a credential in its code field.
+    let (dir, tool, bus) = fixture("secret");
+    let mut events = bus.subscribe();
+    // When: the tool opens the document and publishes its diagnostic.
+    let result = tool
+        .execute(serde_json::json!({"path":dir.path().join("sample file.rs")}))
+        .await
+        .unwrap();
+    // Then: live detail (and completion detail) contains no server-controlled text.
+    assert!(!result.is_error);
+    let EventKind::Diagnostic(event) = events.recv().await.unwrap().kind else {
+        panic!("diagnostic")
+    };
+    assert!(!event.detail.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!event.detail.contains("secret message"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&event.detail).unwrap()["codes"],
+        serde_json::json!(["[redacted]"])
+    );
+    assert_eq!(
+        result.detail.unwrap()["codes"],
+        serde_json::json!(["[redacted]"])
+    );
 }

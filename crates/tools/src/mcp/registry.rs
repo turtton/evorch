@@ -76,7 +76,7 @@ impl McpToolRegistry {
         &self,
         definition: &McpToolDefinition,
         args: serde_json::Value,
-    ) -> Result<McpToolResult, McpError> {
+    ) -> Result<(McpToolResult, serde_json::Value), McpError> {
         let session = self.session().await?;
         if !session.definitions.iter().any(|live| {
             live.name == definition.name && live.input_schema == definition.input_schema
@@ -88,11 +88,8 @@ impl McpToolRegistry {
                 kind: McpErrorKind::Configuration,
             });
         }
-        session
-            .client
-            .lock()
-            .await
-            .call_tool(&definition.name, args)
-            .await
+        let mut client = session.client.lock().await;
+        let result = client.call_tool(&definition.name, args).await?;
+        Ok((result, client.call_success_detail()))
     }
 }

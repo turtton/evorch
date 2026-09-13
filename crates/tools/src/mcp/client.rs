@@ -133,6 +133,11 @@ impl McpClient {
         Ok(result)
     }
 
+    pub(super) fn call_success_detail(&self) -> Value {
+        json!({"server":self.config.server_label,"method":"tools/call",
+            "request_id":self.next_id - 1,"class":"success","status":null})
+    }
+
     fn allocate_id(&mut self, method: &'static str) -> Result<i64, McpError> {
         let id = self.next_id;
         self.next_id = id

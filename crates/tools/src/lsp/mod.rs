@@ -1,6 +1,7 @@
 //! One-shot sandboxed LSP diagnostics. Each invocation opens a fresh document version.
 
 mod client;
+mod detail;
 mod protocol;
 
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
@@ -80,7 +81,7 @@ impl LspDiagnostics {
             .await
             .map_err(|_| LspError::Timeout)??;
         let content = batch.render(&args.path)?;
-        let detail = serde_json::json!({"file":args.path,"count":batch.diagnostics.len(),"codes":batch.diagnostics.iter().filter_map(|d| d.code.as_ref()).collect::<Vec<_>>()});
+        let detail = serde_json::json!({"file":detail::file(&args.path),"count":batch.diagnostics.len(),"codes":batch.diagnostics.iter().filter_map(|d| d.code.as_ref()).map(detail::code).collect::<Vec<_>>()});
         if let Some(bus) = &self.event_bus {
             let severity = if batch
                 .diagnostics

@@ -56,7 +56,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
     let diagnostics = (1..=4).map(|n| json!({"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":4}},"severity":n,"code":n.to_string(),"message":format!("message {n}")})).collect::<Vec<_>>();
-    let diagnostics = if mode == "empty" { vec![] } else { diagnostics };
+    let diagnostics = match mode.as_str() {
+        "empty" => vec![],
+        "secret" => vec![
+            json!({"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"code":"AKIAIOSFODNN7EXAMPLE","message":"secret message"}),
+        ],
+        _ => diagnostics,
+    };
     send(
         &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":opened["params"]["textDocument"]["uri"],"diagnostics":diagnostics}}),
     )?;

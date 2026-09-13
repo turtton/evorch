@@ -1,5 +1,8 @@
 #[path = "../../tools/tests/common/mod.rs"]
 mod common;
+#[path = "mcp_scope_diagnostics/mod.rs"]
+mod diagnostics;
+use diagnostics::Failure;
 
 use agents::{NetworkAccess, Role};
 use common::{FixtureServer, response_with_status};
@@ -63,17 +66,21 @@ impl AgentModel for Model {
 
 async fn scenario(
     role: Role,
-    failure: bool,
+    failure: Failure,
     approval: Option<bool>,
 ) -> (FixtureServer, Vec<event_bus::Event>, String) {
     // Given: a fresh HTTPS server logging every request, and a dormant MCP registration.
     let count = AtomicUsize::new(0);
     let server = FixtureServer::start(move |_| {
-        let body = match count.fetch_add(1, Ordering::SeqCst) {
+        let index = count.fetch_add(1, Ordering::SeqCst);
+        if failure == Failure::Http(index) {
+            return response_with_status("503 Service Unavailable", &[], b"secret-body-token");
+        }
+        let body = match index {
             0 => json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}),
             1 => return response_with_status("202 Accepted", &[], b""),
             2 => json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}}),
-            _ if failure => json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"secret-body-token"}}),
+            _ if failure == Failure::Server => json!({"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"secret-body-token"}}),
             _ => json!({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"mcp-ok"}]}}),
         };
         response_with_status("200 OK", &["Content-Type: application/json".into()], body.to_string().as_bytes())
@@ -120,7 +127,9 @@ async fn scenario(
     let mut receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor
-        .register(Arc::new(registry.tool(definition)))
+        .register(Arc::new(
+            registry.tool(definition).with_event_bus(bus.clone()),
+        ))
         .expect("register");
     if approval.is_some() {
         executor.set_policy(
@@ -160,7 +169,7 @@ async fn scenario(
 
 #[tokio::test]
 async fn denies_without_communication_when_role_has_no_network_grant() {
-    let (server, events, run) = scenario(Role::Worker, false, None).await;
+    let (server, events, run) = scenario(Role::Worker, Failure::None, None).await;
     // Then: even initialize never reached the server, and denial is correlated.
     assert!(
         server.captured_requests().is_empty(),
@@ -172,7 +181,7 @@ async fn denies_without_communication_when_role_has_no_network_grant() {
 
 #[tokio::test]
 async fn completes_with_correlation_when_scope_allows() -> common::TestResult {
-    let (server, events, run) = scenario(Role::Librarian, false, None).await;
+    let (server, events, run) = scenario(Role::Librarian, Failure::None, None).await;
     // Then: initialize, initialized, list and call all happen, with one lifecycle pair.
     assert_eq!(server.captured_requests().len(), 4);
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { call_id, run_id, .. }) if call_id == "mcp-call" && run_id.as_deref() == Some(&run))));
@@ -182,7 +191,7 @@ async fn completes_with_correlation_when_scope_allows() -> common::TestResult {
 
 #[tokio::test]
 async fn sanitizes_completed_detail_when_server_rejects() {
-    let (_, events, run) = scenario(Role::Librarian, true, None).await;
+    let (_, events, run) = scenario(Role::Librarian, Failure::Server, None).await;
     // Then: the executor emits an error result with only the MCP metadata allowlist.
     let (output, detail) = events
         .iter()
@@ -216,7 +225,7 @@ async fn sanitizes_completed_detail_when_server_rejects() {
 #[tokio::test]
 async fn executes_once_when_scope_approval_is_granted() {
     // Given/When: a per-tool Ask is approved through the real event bus.
-    let (server, events, _) = scenario(Role::Librarian, false, Some(true)).await;
+    let (server, events, _) = scenario(Role::Librarian, Failure::None, Some(true)).await;
     // Then: one approval, one successful MCP call, no second executor approval.
     assert_eq!(server.captured_requests().len(), 4);
     assert_eq!(
@@ -241,7 +250,7 @@ async fn executes_once_when_scope_approval_is_granted() {
 #[tokio::test]
 async fn denies_without_communication_when_scope_approval_is_refused() {
     // Given/When: a per-tool Ask is rejected through the real event bus.
-    let (server, events, _) = scenario(Role::Librarian, false, Some(false)).await;
+    let (server, events, _) = scenario(Role::Librarian, Failure::None, Some(false)).await;
     // Then: refusal precedes even the first initialize request.
     assert!(server.captured_requests().is_empty());
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Diagnostic(d) if d.detail == "per_tool_policy.network" && d.call_id.as_deref() == Some("mcp-call"))));
