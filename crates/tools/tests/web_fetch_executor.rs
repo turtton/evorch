@@ -101,6 +101,7 @@ async fn executor_overwrites_tool_declared_origin() -> TestResult {
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
                 thread_id: None,
+                call_id: None,
             },
             "web_fetch",
             "call-1",
@@ -126,6 +127,7 @@ async fn executor_escapes_control_markers_in_fetched_content_and_detail() -> Tes
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
                 thread_id: None,
+                call_id: None,
             },
             "web_fetch",
             "call-1",
@@ -169,6 +171,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
                 thread_id: None,
+                call_id: None,
             },
             "web_fetch",
             "call-1",

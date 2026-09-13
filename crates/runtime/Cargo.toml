@@ -33,6 +33,9 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
+reqwest = { workspace = true }
+tokio-rustls = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

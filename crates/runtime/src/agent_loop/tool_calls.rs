@@ -17,6 +17,8 @@ use crate::escalation::detector::ToolObservation;
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
+mod mcp_scope;
+
 #[cfg(test)]
 mod rework_tests {
     use super::*;
@@ -344,6 +346,7 @@ impl LoopState {
             run_id: self.task.run_id.to_string(),
             // THREAD_ID_SEAM: RunTask currently carries run identity only.
             thread_id: None,
+            call_id: None,
         };
         let mut rule_targets = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
@@ -375,8 +378,13 @@ impl LoopState {
                 ) {
                     Ok(())
                 } else {
-                    self.guard_team_artifact(&name, &input)
-                        .and_then(|()| self.policy.authorize(&name).map_err(|e| e.to_string()))
+                    self.guard_team_artifact(&name, &input).and_then(|()| {
+                        if self.shared.executor.requires_scope_gate(&name) {
+                            Ok(())
+                        } else {
+                            self.policy.authorize(&name).map_err(|e| e.to_string())
+                        }
+                    })
                 };
                 if local && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name) {
                     permission = permission.and_then(|()| {
@@ -415,6 +423,15 @@ impl LoopState {
                             NetworkGate::Cancelled => return false,
                             NetworkGate::Reject(result) => ReadyCall::Rejected(result),
                             NetworkGate::Proceed => {
+                                if self.shared.executor.requires_scope_gate(&name) {
+                                    calls.push_back(BatchCall {
+                                        id,
+                                        name,
+                                        input,
+                                        ready: ReadyCall::Tool(call.scope_approved()),
+                                    });
+                                    continue;
+                                }
                                 let mut cancel = self.channels.cancel_rx.clone();
                                 let authorized = tokio::select! {
                                     biased;
@@ -688,15 +705,23 @@ impl LoopState {
             .executor
             .classify_tool(name)
             .unwrap_or(PolicyDecision::Deny);
-        match judge_web_network_access(
-            &self.policy.capabilities,
-            &self.policy.role_name,
-            name,
-            per_tool,
-            self.task.config.network_access,
-        ) {
+        let decision = if self.shared.executor.requires_scope_gate(name) {
+            self.mcp_scope_decision(name)
+        } else {
+            judge_web_network_access(
+                &self.policy.capabilities,
+                &self.policy.role_name,
+                name,
+                per_tool,
+                self.task.config.network_access,
+            )
+        };
+        match decision {
             NetworkAccessDecision::Allow => NetworkGate::Proceed,
             NetworkAccessDecision::Deny { reason } => {
+                if self.shared.executor.requires_scope_gate(name) {
+                    self.emit_mcp_scope_denial(name, call_id, &reason);
+                }
                 NetworkGate::Reject(ToolResult::error(reason))
             }
             NetworkAccessDecision::Ask { reason } => {
@@ -722,12 +747,22 @@ impl LoopState {
                 };
                 match outcome {
                     ApprovalOutcome::Approved => NetworkGate::Proceed,
-                    ApprovalOutcome::Denied => NetworkGate::Reject(ToolResult::error(format!(
-                        "承認要求が拒否されました: {reason}"
-                    ))),
-                    ApprovalOutcome::TimedOut => NetworkGate::Reject(ToolResult::error(format!(
-                        "承認応答がタイムアウトしました: {reason}"
-                    ))),
+                    ApprovalOutcome::Denied => {
+                        if self.shared.executor.requires_scope_gate(name) {
+                            self.emit_mcp_scope_denial(name, call_id, &reason);
+                        }
+                        NetworkGate::Reject(ToolResult::error(format!(
+                            "承認要求が拒否されました: {reason}"
+                        )))
+                    }
+                    ApprovalOutcome::TimedOut => {
+                        if self.shared.executor.requires_scope_gate(name) {
+                            self.emit_mcp_scope_denial(name, call_id, &reason);
+                        }
+                        NetworkGate::Reject(ToolResult::error(format!(
+                            "承認応答がタイムアウトしました: {reason}"
+                        )))
+                    }
                 }
             }
         }

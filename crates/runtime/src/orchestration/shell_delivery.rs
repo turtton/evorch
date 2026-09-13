@@ -236,10 +236,12 @@ impl ShellDeliveryAdapter {
             delivery_ctx: ToolExecutionContext {
                 run_id: DELIVERY_RUN_ID.to_owned(),
                 thread_id: None,
+                call_id: None,
             },
             merge_ctx: ToolExecutionContext {
                 run_id: MERGE_RUN_ID.to_owned(),
                 thread_id: None,
+                call_id: None,
             },
             next_call: AtomicU64::new(0),
         }

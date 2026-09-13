@@ -79,7 +79,12 @@ pub enum ToolExecutionMode {
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// ツールの一意な名前。
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
+
+    /// MCP communication must pass the runtime scope gate before execution.
+    fn requires_scope_gate(&self) -> bool {
+        false
+    }
 
     /// 引数の JSON Schema。
     fn schema(&self) -> serde_json::Value;

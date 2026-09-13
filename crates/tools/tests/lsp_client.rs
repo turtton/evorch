@@ -36,6 +36,7 @@ async fn renders_canonical_lines_when_server_publishes() {
             &ToolExecutionContext {
                 run_id: "run-lsp".into(),
                 thread_id: Some("thread-lsp".into()),
+                call_id: Some("call-lsp".into()),
             },
             serde_json::json!({"path":path}),
         )
@@ -67,7 +68,7 @@ async fn renders_canonical_lines_when_server_publishes() {
     };
     assert_eq!(event.run_id.as_deref(), Some("run-lsp"));
     assert_eq!(event.thread_id.as_deref(), Some("thread-lsp"));
-    assert_eq!(event.call_id, None);
+    assert_eq!(event.call_id.as_deref(), Some("call-lsp"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&event.detail).unwrap(),
         serde_json::json!({"file":path,"count":4,"codes":["1","2","3","4"]})

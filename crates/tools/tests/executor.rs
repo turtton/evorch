@@ -34,6 +34,7 @@ fn test_ctx(run_id: &str) -> ToolExecutionContext {
     ToolExecutionContext {
         run_id: run_id.to_string(),
         thread_id: None,
+        call_id: None,
     }
 }
 
@@ -300,6 +301,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
     let ctx = ToolExecutionContext {
         run_id: "run-42".to_string(),
         thread_id: None,
+        call_id: None,
     };
 
     let result = executor
@@ -693,6 +695,7 @@ async fn executor_passes_thread_id_to_tool_context() {
     let ctx = ToolExecutionContext {
         run_id: "run-1".to_string(),
         thread_id: Some("t-1".to_string()),
+        call_id: None,
     };
 
     executor

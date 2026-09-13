@@ -60,7 +60,7 @@ impl LspDiagnostics {
         self
     }
 
-    /// Context has no emitter or call ID; inject the bus without changing runtime wiring.
+    /// Inject the diagnostic emitter; correlation comes from execution context.
     pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
         self.event_bus = Some(event_bus);
         self
@@ -104,7 +104,7 @@ impl LspDiagnostics {
                 detail: detail.to_string(),
                 run_id: ctx.map(|ctx| ctx.run_id.clone()),
                 thread_id: ctx.and_then(|ctx| ctx.thread_id.clone()),
-                call_id: None,
+                call_id: ctx.and_then(|ctx| ctx.call_id.clone()),
             }));
         }
         tokio::time::timeout(self.timeout, client.shutdown())

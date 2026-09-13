@@ -33,16 +33,18 @@ mod tests {
     // Given: 5 つの標準ツールの静的スキーマ / When: jsonschema::validator_for でコンパイル / Then: すべて成功する
     #[test]
     fn all_standard_tool_schemas_compile() {
+        let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
+        let git_diff = GitDiff::new(Arc::new(DirectSandbox::new_unchecked()));
         let schemas = [
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
             (Grep.name(), Grep.schema()),
             (
-                Shell::new(Arc::new(DirectSandbox::new_unchecked())).name(),
+                shell.name(),
                 Shell::new(Arc::new(DirectSandbox::new_unchecked())).schema(),
             ),
             (
-                GitDiff::new(Arc::new(DirectSandbox::new_unchecked())).name(),
+                git_diff.name(),
                 GitDiff::new(Arc::new(DirectSandbox::new_unchecked())).schema(),
             ),
         ];
