@@ -1,67 +1,80 @@
 ## Goal
 
-TODO: state what this slice will change.
+browser-e2e ジョブの証跡 artifact が空になる問題を修正し、証跡（PNG 等）が必ず
+EVORCH_BROWSER_EVIDENCE_DIR 配下に出力され CI artifact に含まれるようにする。
 
 ## Why This Slice Exists Now
 
-TODO: explain why this is the next step.
+CI run 34605848371 (2026-09-11) で browser-e2e は成功したのに artifact が未アップロード
+（target/browser-evidence not found）だった。検証 two-layer 設計（ADR 0015）の証跡契約が
+実運用で破れており、E2E の証拠性が失われている。
 
 ## Current Observed State
 
-TODO: describe current behavior or repro.
+- chromium_screencast_and_action_evidence は EVORCH_BROWSER_EVIDENCE_DIR を解釈する契約。
+- browser-e2e ジョブ成功時に証跡が出力されない条件が存在する（経路のずれ）。
+- upload-artifact の if-no-files-found 挙動が未明示で、空 artifact が黙って成功し得る。
 
 ## Accepted Baseline You May Assume
 
-- TODO
+- browser-e2e ゲート自体は v08 で導入済みで動作している。
+- ADR 0015（verification two-layer）の証跡契約に従う。
 
 ## Target Repo / Path / Part
 
-Repository: `<owner/repo>`
+Repository: `turtton/evorch`
 
-- Target paths: `<comma- or space-separated paths>`
+- Target paths: `crates/gui/src/browser/tests.rs, .github/workflows/ci.yml`
 
-Target part: `<one-line target description>`
+Target part: browser-e2e ジョブの証跡出力経路
 
 ## In Scope
 
-- TODO
+- 証跡の書き込み経路と出力されない条件の特定・記録
+- browser-e2e ジョブ成功時に証跡が必ず EVORCH_BROWSER_EVIDENCE_DIR 配下に生成される修正
+- CI の browser-e2e artifact（browser-e2e-evidence）に証跡ファイルが含まれるようにする
+- upload-artifact の if-no-files-found 挙動の明示（空 artifact が黙って成功しない）
 
 ## Out Of Scope
 
-- TODO
+- browser-e2e テスト内容自体の拡張
+- 他ジョブ（ci / offscreen-gate）の証跡経路の変更
 
 ## Standalone Child Issue Contract
 
-TODO: one-paragraph restatement of exactly what the child PR must deliver, readable on its own without the surrounding design thread.
+evorch の browser-e2e ジョブについて、証跡が出力されない原因を特定・記録し、ジョブ成功時に
+証跡（PNG 等）が必ず EVORCH_BROWSER_EVIDENCE_DIR 配下に生成され CI artifact
+（browser-e2e-evidence）に含まれるよう修正し、upload-artifact の if-no-files-found 挙動を
+明示して空 artifact が黙って成功しないようにする変更を PR として提出する。
 
 ## Acceptance Criteria
 
-- TODO
+- crates/gui/src/browser/tests.rs を読み、証跡の書き込み経路と出力されない条件を特定して記録する
+- browser-e2e ジョブ成功時に証跡（PNG 等）が必ず EVORCH_BROWSER_EVIDENCE_DIR 配下に生成される
+- CI の browser-e2e artifact（browser-e2e-evidence）に証跡ファイルが含まれる
+- upload-artifact の if-no-files-found 挙動を明示し、空 artifact が黙って成功しない
 
 ## Verification
 
-TODO: focused tests and `git diff --check`.
+- browser-e2e ジョブを実 CI で実行し、artifact に証跡ファイルが含まれることを確認
+- `git diff --check`
 
 ## Related Links
 
-- TODO
+- ADR 0015: intents/evorch/decisions/0015-verification-two-layer.md
+- 参照 CI run: 34605848371（2026-09-11、artifact 未アップロードの事例）
 
 ## Knowledge Maintenance
 
-Optional (G461). Tells the implementer/reviewer whether intent / ADR / diagram / docs
-writeback is expected for this slice. Answer or explicitly decline:
-
-- Intent placement: TODO / none
-- ADR candidate: TODO / none
-- Diagram candidate: TODO / none
-- Docs update: TODO / none
+- Intent placement: architecture overview（既存 intent、新規不要）
+- ADR candidate: none
+- Diagram candidate: none
+- Docs update: none
 - Closeout writeback expected: no
 
 ## Guide Reachability (G645)
 
-While the author still knows the answer, name the guide surface and role that route to every
-role-facing surface this slice adds, or explicitly say that no role-facing surface is added. A
-blank answer is not treated as no-surface. The closeout record is a debt check, not a merge gate.
+no_role_facing_surface: true（CI/テスト基盤の修正で role-facing surface の追加なし）
 
 ## Base Branch Policy
 

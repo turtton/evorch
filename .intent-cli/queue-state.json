@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-13T15:39:45.4124444+00:00",
+  "updated_at": "2026-09-13T15:42:06.9700542+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1471,6 +1471,11 @@
         "implementation": ".intent-cli/issues/v08-a-browser-e2e-evidence/implementation.md",
         "review_context": ".intent-cli/issues/v08-a-browser-e2e-evidence/review-context.md",
         "yaml": ".intent-cli/issues/v08-a-browser-e2e-evidence/packet.yaml"
+      },
+      "linked_issue": {
+        "repo": "turtton/evorch",
+        "number": 114,
+        "url": "https://github.com/turtton/evorch/issues/114"
       },
       "worker_role": "implementation",
       "review_role": "review",
