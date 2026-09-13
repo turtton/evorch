@@ -297,6 +297,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn terminal(&self) -> &TerminalBuffer {
         &self.terminal
     }
+    pub fn feed_terminal(&mut self, bytes: &[u8]) {
+        self.terminal.feed(bytes);
+    }
     pub const fn sidebar(&self) -> &SidebarState {
         &self.sidebar
     }
