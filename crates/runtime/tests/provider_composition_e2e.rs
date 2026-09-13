@@ -7,7 +7,8 @@ use config::{Config, LoadOptions};
 use event_bus::{AgentRunPhase, EventBus, EventKind, MessageEvent, ProviderEvent, ToolEvent};
 use routing::MapEnv;
 use runtime::{
-    CompositionError, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime,
+    AgentInvocationContext, AgentModel, CompositionError, ModelPreference, ModelSource, Role,
+    RunConfig, RuntimeComposition, compose_runtime,
 };
 use sandbox::DirectSandbox;
 use sandbox::credential::{CredentialStore, FileCredentialStore};
@@ -19,7 +20,57 @@ use support::drain_events;
 
 const KEY_ENV: &str = "EVORCH_TEST_KEY_COMPOSITION_E2E";
 const KEY: &str = "composition-e2e-key";
-const MODEL: &str = "local-model";
+const MODEL: &str = "gpt-4o";
+
+#[tokio::test]
+async fn preferred_unknown_model_omits_tools_on_the_wire() {
+    // Given: a discovered model selected explicitly through the real HTTP adapter.
+    let directory = tempfile::tempdir().expect("project");
+    let mock = StreamingMockOpenAi::spawn(vec![openai_text_response("done")]);
+    let mut config = load_config(directory.path(), &mock.base_url());
+    let profile = config.providers.get_mut("local").expect("profile");
+    profile.default_model = "unknown".into();
+    profile.models = vec![config::types::provider::ModelEntryConfig::enabled(
+        "unknown",
+    )];
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: credential_store(directory.path()),
+            event_bus: None,
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+            catalog: model::ModelCatalog::builtin(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .expect("composition");
+    // When: sending through the streaming provider surface with tools requested.
+    model
+        .complete_streaming(
+            &AgentInvocationContext {
+                run_id: "wire".into(),
+                model_preference: Some(ModelPreference {
+                    profile: "local".into(),
+                    model: None,
+                }),
+            },
+            Role::Worker,
+            &[],
+            &[providers::ToolSpec {
+                name: "read".into(),
+                description: String::new(),
+                input_schema: json!({"type": "object"}),
+            }],
+            &EventBus::new(32),
+        )
+        .await
+        .expect("text-only completion");
+    // Then: the serialized provider request has no tools section.
+    let requests = mock.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["model"], "unknown");
+    assert!(requests[0].body.get("tools").is_none());
+}
 
 fn openai_tool_response(id: &str, name: &str, arguments: serde_json::Value) -> ScriptedResponse {
     ScriptedResponse::tool_call(id, MODEL, 0, id, name, [arguments.to_string()]).with_usage(1, 1)

@@ -105,6 +105,8 @@ async fn auto_allow_executes_without_approval_events() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "fake",
             "call-1",
@@ -149,6 +151,8 @@ async fn ask_first_denial_prevents_execution() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "fake",
             "call-2",
@@ -202,6 +206,8 @@ async fn ask_first_approval_executes_once() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "fake",
             "call-3",
@@ -251,6 +257,8 @@ async fn ask_without_available_approval_path_fails_closed() {
             .execute(
                 &ToolExecutionContext {
                     run_id: "run-1".to_string(),
+                    thread_id: None,
+                    call_id: None,
                 },
                 "fake",
                 call_id,
@@ -302,6 +310,8 @@ async fn on_failure_retries_once_only_when_approved() {
             .execute(
                 &ToolExecutionContext {
                     run_id: "run-1".to_string(),
+                    thread_id: None,
+                    call_id: None,
                 },
                 "fake",
                 "call-failure",

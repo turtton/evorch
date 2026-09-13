@@ -22,7 +22,7 @@ use tools::ToolExecutor;
 
 const KEY_ENV: &str = "EVORCH_TEST_KEY_STREAMING_MOCK_E2E";
 const KEY: &str = "streaming-mock-e2e-key";
-const MODEL: &str = "local-model";
+const MODEL: &str = "gpt-4o";
 const MAX_RECV_ITERS: usize = 10_000;
 
 #[tokio::test]

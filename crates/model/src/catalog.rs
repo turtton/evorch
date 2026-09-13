@@ -16,6 +16,10 @@ pub enum Capability {
     ToolCalling,
     /// 推論 (拡張思考)。
     Reasoning,
+    /// Incremental response streaming.
+    Streaming,
+    /// Image input understanding.
+    Vision,
     /// プロンプトキャッシュ。
     PromptCache,
 }
@@ -99,14 +103,7 @@ impl ModelCatalog {
     ///
     /// 存在しない場合は `false` を返します。
     pub fn supports(&self, model_id: &str, capability: Capability) -> bool {
-        self.get(model_id).is_some_and(|entry| {
-            let capabilities = entry.capabilities;
-            match capability {
-                Capability::ToolCalling => capabilities.tool_calling,
-                Capability::Reasoning => capabilities.reasoning,
-                Capability::PromptCache => capabilities.prompt_cache,
-            }
-        })
+        self.capability_support(model_id, capability).is_supported()
     }
 }
 

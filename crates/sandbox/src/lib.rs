@@ -10,6 +10,7 @@ pub mod exec;
 pub mod keychain;
 pub mod network;
 pub mod policy;
+pub mod session;
 
 pub use approval::{ApprovalGate, ApprovalOutcome};
 pub use bwrap::{BwrapConfig, BwrapSandbox};
@@ -21,3 +22,4 @@ pub use exec::{CommandSpec, DirectSandbox, Sandbox, WrappedCommand};
 pub use keychain::KeyringCredentialStore;
 pub use network::NetworkPolicy;
 pub use policy::{Action, ApprovalMode, ApprovalPolicy, Capabilities, PolicyDecision, resolve};
+pub use session::{SessionError, StdioSession};

@@ -78,7 +78,10 @@ impl ToolExecutor {
         );
         Ok(ValidatedToolCall {
             executor: Arc::clone(self),
-            ctx,
+            ctx: ToolExecutionContext {
+                call_id: Some(id.clone()),
+                ..ctx
+            },
             name,
             id,
             args,
@@ -88,6 +91,12 @@ impl ToolExecutor {
 }
 
 impl ValidatedToolCall {
+    /// Consume a call after the runtime has resolved all scope and approval layers.
+    pub fn scope_approved(mut self) -> PreparedToolCall {
+        self.action = Action::Proceed;
+        PreparedToolCall(self)
+    }
+
     /// Resolve only pre-execution gates. AskOnFailure deliberately remains post-hoc.
     /// Approval IDs are run-scoped; cancelling this future never executes the tool.
     ///
@@ -190,6 +199,8 @@ mod rework_tests {
                 .validate_call(
                     ToolExecutionContext {
                         run_id: "run".into(),
+                        thread_id: None,
+                        call_id: None,
                     },
                     "read".into(),
                     "id".into(),
@@ -231,7 +242,11 @@ mod rework_tests {
         for run in ["run-a", "run-a", "run-b"] {
             let prepared = executor
                 .validate_call(
-                    ToolExecutionContext { run_id: run.into() },
+                    ToolExecutionContext {
+                        run_id: run.into(),
+                        thread_id: None,
+                        call_id: None,
+                    },
                     "read".into(),
                     "duplicate".into(),
                     serde_json::json!({}),

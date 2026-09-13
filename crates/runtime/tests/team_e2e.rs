@@ -21,8 +21,8 @@ provider_type = "openai-compatible"
 api_protocol = "openai-completions"
 base_url = "{}"
 credential = {{ type = "env", var = "TEAM_TEST_KEY" }}
-models = ["mock-model"]
-default_model = "mock-model"
+models = ["gpt-4o"]
+default_model = "gpt-4o"
 [team]
 enabled = true
 "#,

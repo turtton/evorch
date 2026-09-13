@@ -11,7 +11,39 @@ fn diagnostic(severity: DiagnosticSeverity) -> Event {
         detail: "Another owner holds the claim".into(),
         run_id: Some("run-1".into()),
         thread_id: Some("thread-1".into()),
+        call_id: Some("call-1".into()),
     })
+}
+
+#[test]
+fn diagnostic_deserializes_legacy_shape_without_call_id() {
+    // Given: an event serialized before call correlation was added.
+    let mut json = serde_json::to_value(diagnostic(DiagnosticSeverity::Info)).expect("serialize");
+    json["kind"]["payload"]
+        .as_object_mut()
+        .expect("diagnostic payload")
+        .remove("call_id");
+    // When: deserializing the legacy JSON shape.
+    let restored: Event = serde_json::from_value(json).expect("deserialize");
+    // Then: the additive field defaults to no call correlation.
+    let EventKind::Diagnostic(value) = restored.kind else {
+        panic!("expected diagnostic event");
+    };
+    assert_eq!(value.call_id, None);
+}
+
+#[test]
+fn diagnostic_call_id_round_trips() {
+    // Given: a diagnostic correlated to a tool call.
+    let event = diagnostic(DiagnosticSeverity::Warning);
+    // When: serializing and deserializing the event.
+    let json = serde_json::to_value(&event).expect("serialize");
+    let restored: Event = serde_json::from_value(json).expect("deserialize");
+    // Then: the call correlation survives intact.
+    let EventKind::Diagnostic(value) = restored.kind else {
+        panic!("expected diagnostic event");
+    };
+    assert_eq!(value.call_id.as_deref(), Some("call-1"));
 }
 
 #[test]

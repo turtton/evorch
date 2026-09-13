@@ -1,6 +1,7 @@
 //! ツールの抽象と権限モデルを定義します。
 
 use crate::error::ToolError;
+use crate::executor::ToolExecutionContext;
 use crate::result::ToolResult;
 
 /// ツールが要求する権限の集合。
@@ -78,7 +79,12 @@ pub enum ToolExecutionMode {
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// ツールの一意な名前。
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
+
+    /// MCP communication must pass the runtime scope gate before execution.
+    fn requires_scope_gate(&self) -> bool {
+        false
+    }
 
     /// 引数の JSON Schema。
     fn schema(&self) -> serde_json::Value;
@@ -95,6 +101,15 @@ pub trait Tool: Send + Sync {
     ///
     /// `args` は [`Tool::schema`] に適合する JSON オブジェクトを想定する。
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError>;
+
+    /// 実行文脈を受け取ってツールを実行する。既存ツールは引数のみの実行へ委譲する。
+    async fn execute_with_context(
+        &self,
+        _ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute(args).await
+    }
 }
 
 #[cfg(test)]

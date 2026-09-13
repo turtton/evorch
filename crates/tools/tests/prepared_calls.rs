@@ -47,6 +47,8 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
     let executor = Arc::new(executor);
     let ctx = ToolExecutionContext {
         run_id: "run-2".into(),
+        thread_id: None,
+        call_id: None,
     };
     assert!(
         executor
@@ -115,6 +117,8 @@ async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
         .validate_call(
             ToolExecutionContext {
                 run_id: "run-2".into(),
+                thread_id: None,
+                call_id: None,
             },
             "counter".into(),
             "call-1".into(),

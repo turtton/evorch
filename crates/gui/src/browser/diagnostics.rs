@@ -19,6 +19,7 @@ pub(super) fn emit(bus: &EventBus, code: &str, detail: &str, failed: bool) {
         detail: detail.into(),
         run_id: None,
         thread_id: None,
+        call_id: None,
     }));
 }
 

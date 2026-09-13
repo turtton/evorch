@@ -325,7 +325,8 @@ fn assert_run_transcript(
             | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
-            | TranscriptEntry::Error { .. } => None,
+            | TranscriptEntry::Error { .. }
+            | TranscriptEntry::Compaction { .. } => None,
         })
         .collect::<Vec<_>>();
     let contents = entries
@@ -337,7 +338,8 @@ fn assert_run_transcript(
             | TranscriptEntry::Notice { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }
-            | TranscriptEntry::Error { .. } => None,
+            | TranscriptEntry::Error { .. }
+            | TranscriptEntry::Compaction { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(

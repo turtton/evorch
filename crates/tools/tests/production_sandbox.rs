@@ -35,6 +35,8 @@ async fn production_executor_runs_shell_inside_bwrap() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "call-production-pwd",
@@ -93,6 +95,8 @@ async fn assert_shell_listing(command: &'static str) {
         .execute(
             &ToolExecutionContext {
                 run_id: "shell-listing-regression".into(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "listing",

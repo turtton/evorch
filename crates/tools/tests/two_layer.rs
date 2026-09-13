@@ -66,6 +66,8 @@ async fn approved_execution_still_routes_through_sandbox() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "call-record",
@@ -98,6 +100,8 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "call-outside",
@@ -119,6 +123,8 @@ async fn approved_bwrap_write_is_confined_to_workspace() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "call-inside",
@@ -157,6 +163,8 @@ async fn interactive_shell_runs_inside_bwrap() {
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
+                thread_id: None,
+                call_id: None,
             },
             "shell",
             "call-pty",
