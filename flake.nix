@@ -160,6 +160,9 @@
             pkgs.libxkbcommon
             pkgs.vulkan-loader
             pkgs.mesa # lavapipe (ソフトウェアレンダリング fallback 用)
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            # mold は ELF リンカのため Linux のみ(Darwin の Mach-O ビルドを壊さない)
+            pkgs.mold
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [
@@ -168,6 +171,9 @@
               pkgs.vulkan-loader
               pkgs.mesa
             ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
+            # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
           '';
         };
       }
