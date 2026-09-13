@@ -38,6 +38,7 @@ pub mod rules;
 pub mod run;
 pub mod run_store;
 pub mod runtime;
+pub mod scope;
 pub mod skill;
 pub mod snapshot;
 pub mod state;
