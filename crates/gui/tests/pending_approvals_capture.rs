@@ -59,7 +59,7 @@ fn capture_pending_approvals_png_evidence() -> Result<(), Box<dyn std::error::Er
     let temporary = tempfile::tempdir()?;
     let output = std::env::var_os("EVORCH_APPROVALS_EVIDENCE")
         .map(std::path::PathBuf::from)
-        .map_or_else(|| temporary.path().to_path_buf(), |path| path);
+        .unwrap_or_else(|| temporary.path().to_path_buf());
     std::fs::create_dir_all(&output)?;
     let path = output.join("pending-approvals-1280x900@1.0.png");
     frame.save_png(&path)?;
