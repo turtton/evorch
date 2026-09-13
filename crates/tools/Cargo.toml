@@ -7,6 +7,10 @@ publish = false
 [lib]
 name = "tools"
 
+[[bin]]
+name = "lsp-test-server"
+path = "tests/support/lsp_server.rs"
+
 [dependencies]
 async-trait = { workspace = true }
 dom_smoothie = { workspace = true }
