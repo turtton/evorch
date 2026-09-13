@@ -237,6 +237,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.submit_command(command);
     }
 
+    pub(super) fn decide_tool_approval(&mut self, call_id: String, approved: bool) {
+        self.submit_command(WorkbenchCommand::DecideToolApproval { call_id, approved });
+    }
+
     pub fn save_sidebar(&self) {
         let Some(path) = self.sidebar_path.as_ref() else {
             return;

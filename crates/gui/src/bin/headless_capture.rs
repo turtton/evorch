@@ -15,6 +15,7 @@ struct CaptureArgs {
     output: PathBuf,
     demo: bool,
     error_thread: bool,
+    pending_approvals: bool,
     provider_configured: bool,
     open_settings: bool,
     edit_profile: bool,
@@ -73,7 +74,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if capture.error_thread {
         state.apply_events(demo_error_events());
     }
-    if let Some(id) = capture.activate.as_deref() {
+    if capture.pending_approvals {
+        state.apply_events(gui::fixture::demo_pending_approval_events());
+    }
+    let active_panel = if capture.pending_approvals {
+        Some("approvals-main")
+    } else {
+        capture.activate.as_deref()
+    };
+    if let Some(id) = active_panel {
         let path = state
             .dock()
             .find_tab(&workspace_ui::PanelId::new(id))
@@ -107,6 +116,7 @@ fn parse_args(
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
     let mut error_thread = false;
+    let mut pending_approvals = false;
     let mut provider_configured = false;
     let mut open_settings = false;
     let mut edit_profile = false;
@@ -187,6 +197,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--error-thread") => error_thread = true,
+            Some("--pending-approvals") if pending_approvals => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--pending-approvals") => pending_approvals = true,
             Some("--provider-configured") if provider_configured => {
                 return Err("unexpected additional arguments".into());
             }
@@ -213,10 +227,14 @@ fn parse_args(
     if error_thread && !demo {
         return Err("--error-thread requires --demo".into());
     }
+    if pending_approvals && !demo {
+        return Err("--pending-approvals requires --demo".into());
+    }
     Ok(CaptureArgs {
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
         error_thread,
+        pending_approvals,
         provider_configured,
         open_settings,
         edit_profile,
@@ -229,7 +247,7 @@ fn parse_args(
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--error-thread] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--size WxH] [--dpi F] [--out PATH] [PATH]
+        r#"Usage: headless_capture [--demo] [--error-thread] [--pending-approvals] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--size WxH] [--dpi F] [--out PATH] [PATH]
 
 Captures a headless workbench frame as PNG.
 
@@ -237,6 +255,7 @@ Modes:
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
+   --pending-approvals  with --demo: show two requests in Approvals (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  show the registered demo profile list
    --edit-profile   open the local demo profile editor
@@ -264,6 +283,38 @@ CI:    the headless-capture job runs the same command with WGPU_BACKEND=vulkan.
 // allow: SIZE_OK — private CLI parser の既存BDDテストを同一ファイルに維持するため。
 mod tests {
     use super::{DEFAULT_OUTPUT, parse_args};
+
+    #[test]
+    fn parse_args_accepts_pending_approvals_with_demo() -> Result<(), Box<dyn std::error::Error>> {
+        // Given: デモ上の承認待ちシナリオ。
+        let arguments = args(["--demo", "--pending-approvals"]);
+        // When: CLI 引数を解析する。
+        let capture = parse_args(arguments)?;
+        // Then: デモが有効なまま受理される。
+        assert!(capture.demo);
+        assert!(capture.pending_approvals);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_args_rejects_pending_approvals_without_demo() {
+        // Given: デモ指定がない承認待ちシナリオ。
+        let arguments = args(["--pending-approvals"]);
+        // When: CLI 引数を解析する。
+        let error = parse_args(arguments).expect_err("demo required");
+        // Then: デモ依存が報告される。
+        assert_eq!(error.to_string(), "--pending-approvals requires --demo");
+    }
+
+    #[test]
+    fn parse_args_rejects_duplicate_pending_approvals() {
+        // Given: 同じシナリオを重複指定する。
+        let arguments = args(["--demo", "--pending-approvals", "--pending-approvals"]);
+        // When: CLI 引数を解析する。
+        let error = parse_args(arguments).expect_err("duplicate scenario");
+        // Then: 既存の重複引数エラーを返す。
+        assert_eq!(error.to_string(), "unexpected additional arguments");
+    }
 
     fn args<const N: usize>(values: [&str; N]) -> impl Iterator<Item = std::ffi::OsString> {
         values.map(std::ffi::OsString::from).into_iter()

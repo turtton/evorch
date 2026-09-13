@@ -4,12 +4,13 @@ set -euo pipefail
 OUT=${1:-target/gui-evidence}
 mkdir -p "$OUT"
 
-for state in empty demo error-thread edit-profile; do
+for state in empty demo error-thread edit-profile pending-approvals; do
     flags=()
     case "$state" in
         demo) flags=(--demo) ;;
         error-thread) flags=(--demo --error-thread) ;;
         edit-profile) flags=(--demo --edit-profile) ;;
+        pending-approvals) flags=(--demo --pending-approvals) ;;
     esac
     for s in 1280x720 1024x768 1920x720 960x600; do
         d=1.0
@@ -33,8 +34,8 @@ done
 # Ignored tests store their own evidence in subdirectories, outside this matrix.
 shopt -s nullglob dotglob
 pngs=("$OUT"/*.png)
-if [[ ${#pngs[@]} -ne 20 ]]; then
-    printf 'Expected 20 matrix PNGs in %s, found %s\n' "$OUT" "${#pngs[@]}" >&2
+if [[ ${#pngs[@]} -ne 24 ]]; then
+    printf 'Expected 24 matrix PNGs in %s, found %s\n' "$OUT" "${#pngs[@]}" >&2
     exit 1
 fi
 printf '%s\n' "${pngs[@]}"

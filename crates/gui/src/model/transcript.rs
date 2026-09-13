@@ -208,6 +208,7 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
                 tool_name,
                 call_id,
+                ..
             }) => self.update_tool(call_id, tool_name, ToolStatus::AwaitingApproval),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
                 call_id,

@@ -137,6 +137,7 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DecideMerge(_)
+            | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => {}
         }
     }
@@ -243,6 +244,7 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();

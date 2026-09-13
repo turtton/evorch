@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
+use super::scoped_call::parse_scoped_call_id;
 use super::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,12 +48,8 @@ impl TranscriptRegistry {
     }
 
     pub fn run_for_call<'a>(&'a self, call_id: &'a str) -> Option<&'a str> {
-        if let Some((run_id, _)) = call_id.split_once(':')
-            && let Some(number) = run_id.strip_prefix("run-")
-            && !number.is_empty()
-            && number.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Some(run_id);
+        if let Some((run_id, _, _)) = parse_scoped_call_id(call_id) {
+            return call_id.get(..run_id.len());
         }
         if self.ambiguous_calls.contains(call_id) {
             return None;
@@ -445,6 +442,7 @@ mod tests {
             run_id: Some("run-2".into()),
         }));
         let known = Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             tool_name: "write".into(),
             call_id: "known".into(),
         });

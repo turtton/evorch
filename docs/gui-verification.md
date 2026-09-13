@@ -48,8 +48,8 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 - コマンド:
   -  ignored テスト一括: `cargo test -p gui --tests -- --ignored --nocapture`
   -  証跡マトリクス: `scripts/gui-evidence-matrix.sh [OUT]`
-     (デフォルト出力 `target/gui-evidence`、4 状態 x 4 サイズ @1.0 と
-     demo / edit-profile @1.5, @2.0 の計 20 PNG を生成し、枚数を検査する)
+     (デフォルト出力 `target/gui-evidence`、5 状態 x 4 サイズ @1.0 と
+     demo / edit-profile @1.5, @2.0 の計 24 PNG を生成し、枚数を検査する)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
@@ -150,6 +150,7 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 | Dock レイアウト | L2 | `dock_roundtrip.rs::workspace_dock_workspace_round_trip_preserves_nested_structure`, `dock_roundtrip.rs::complex_nested_split_round_trip_preserves_tree_and_active_tabs`, `layout_v02.rs::default_layout_is_sidebar_center_right_tabs`, `layout_v02.rs::v1_layout_file_loads_via_migration_into_workbench` |
 | Empty ステート | L2, L3, L4 | `empty_states_headless.rs::conversation_without_project_offers_go_to_projects`, `empty_states_headless.rs::composer_is_docked_at_bottom_in_empty_state`, `sidebar_headless.rs::sidebar_without_projects_shows_placeholder_and_single_add_project_cta`, `size_dpi_matrix.rs::empty_geometry_matrix`, `empty_states_headless.rs::capture_empty_composer_evidence` |
 | 最小ウィンドウサイズ | L2, L3, L7 | `window_options.rs::native_options_set_layout_sizes_when_created`, `window_options.rs::minimum_fits_default_when_sizes_are_compared`, `size_dpi_matrix.rs::min_size_matches_real_app_viewport`, L7 実機スモーク手順 4 |
+| ツール承認 (相関 ID 表示・個別承認/拒否) | L1, L2, L4 | `pending_approvals.rs::pending_approvals_removes_only_exact_resolved_key`, `pending_approvals.rs::pending_approvals_ignores_unknown_and_other_scope_resolutions`, `pending_approvals.rs::pending_approvals_workbench_removes_only_resolved_request`, `approvals_panel_headless.rs::displays_correlations_and_arguments_when_requests_are_pending`, `approvals_panel_headless.rs::approves_exact_scope_when_second_row_is_clicked`, `approvals_panel_headless.rs::removes_only_resolved_row_when_resolution_arrives`, `pending_approvals_capture.rs::capture_pending_approvals_png_evidence` |
 
 テストファイルは特記なき限り `crates/gui/tests/` 配下。
 
@@ -163,7 +164,7 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 | `CHROME` | 環境変数 | chromiumoxide の実行ファイル検出が参照する Chromium パス。browser-e2e で設定 | L6 |
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
-| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 20 PNG のサイズ x DPI 証跡マトリクスを生成し枚数を検査。内部で `headless_capture --size WxH --dpi F --demo/--error-thread/--edit-profile --out` を使用 | L4 |
+| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 24 PNG のサイズ x DPI 証跡マトリクスを生成し枚数を検査。内部で `headless_capture --size WxH --dpi F --demo/--error-thread/--edit-profile/--pending-approvals --out` を使用 | L4 |
 | `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
 | `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L7 |

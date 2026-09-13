@@ -65,6 +65,7 @@ pub enum WorkbenchCommand {
     CancelChat { thread_id: String },
     SubmitGoal(GoalSubmission),
     DecideMerge(MergeCommand),
+    DecideToolApproval { call_id: String, approved: bool },
     PauseGoal { goal_id: String },
     ResumeGoal { goal_id: String },
     CancelGoal { goal_id: String },
@@ -228,6 +229,7 @@ impl CommandSink for FixtureLoopAdapter {
                 }]
             }
             WorkbenchCommand::CancelChat { .. } => Vec::new(),
+            WorkbenchCommand::DecideToolApproval { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);
                 vec![LoopEvent::ChatAccepted {

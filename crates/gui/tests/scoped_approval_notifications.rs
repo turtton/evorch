@@ -12,6 +12,7 @@ fn runtime_approval_formats_open_run_transcript_without_started_event() {
         let mut state =
             WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
         state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             tool_name: "shell".into(),
             call_id: call_id.into(),
         })]);

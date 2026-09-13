@@ -60,7 +60,9 @@ impl NotificationsModel {
                 };
                 (kind, Some(run_id.clone()), summary)
             }
-            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id }) => (
+            EventKind::Tool(ToolEvent::ApprovalRequested {
+                tool_name, call_id, ..
+            }) => (
                 NotificationKind::ApprovalPending {
                     tool_name: tool_name.clone(),
                     call_id: call_id.clone(),
@@ -162,6 +164,7 @@ mod tests {
     }
     fn approval() -> Event {
         Event::new(ToolEvent::ApprovalRequested {
+            input: None,
             tool_name: "shell".into(),
             call_id: "call-1".into(),
         })

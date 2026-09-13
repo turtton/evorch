@@ -8,6 +8,7 @@ use super::attention::{PaneAttention, ack::AttentionAck, acknowledged_attention}
 use crate::diff::{DiffMode, DiffModel};
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::notifications::NotificationsModel;
+use crate::model::pending_approvals::PendingApprovalsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
@@ -16,6 +17,7 @@ use crate::panes::{
     agent::{AgentIdentity, AgentPaneAction, ConversationContext, agent_pane},
     agent_transcript::agent_transcript_pane,
     agents::{AgentsAction, agents_pane},
+    approvals::{ApprovalsAction, approvals_pane},
     composer::ComposerAction,
     diff::diff_pane,
     notifications::{NotificationsAction, notifications_pane},
@@ -26,6 +28,8 @@ use crate::panes::{
 use crate::pty::PtySession;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
+    pub(super) pending_approvals: &'a PendingApprovalsModel,
+    pub(super) approvals_action: &'a mut Option<ApprovalsAction>,
     pub(super) notifications: &'a mut NotificationsModel,
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
@@ -188,6 +192,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .collect();
         let surface_visible = ui.is_visible() && ui.clip_rect().intersects(ui.max_rect());
         match panel.kind {
+            PanelKind::Approvals => {
+                if let Some(action) = approvals_pane(ui, self.pending_approvals) {
+                    *self.approvals_action = Some(action);
+                }
+            }
             PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {
                 if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases) {

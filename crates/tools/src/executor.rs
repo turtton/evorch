@@ -291,7 +291,10 @@ impl ToolExecutor {
                         "承認ゲートが未設定のため拒否されました",
                     );
                 };
-                match gate.request(tool_name, call_id).await {
+                match gate
+                    .request_with_input(tool_name, call_id, Some(args.clone()))
+                    .await
+                {
                     ApprovalOutcome::Approved => registered.tool.execute(args).await,
                     ApprovalOutcome::Denied => {
                         return self.deny(ctx, tool_name, call_id, "承認要求が拒否されました");
@@ -311,7 +314,14 @@ impl ToolExecutor {
                 if !is_failure(&first) {
                     first
                 } else if let Some(gate) = &self.gate {
-                    match gate.request(tool_name, &approval_id(ctx, call_id)).await {
+                    match gate
+                        .request_with_input(
+                            tool_name,
+                            &approval_id(ctx, call_id),
+                            Some(args.clone()),
+                        )
+                        .await
+                    {
                         ApprovalOutcome::Approved => registered.tool.execute(args).await,
                         ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
                     }

@@ -193,7 +193,7 @@ async fn orchestrator_web_fetch_session_opt_in_executes_only_after_approval() {
         .position(|event| {
             matches!(
                 &event.kind,
-                EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
                     if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-1")
             )
         })
@@ -247,7 +247,7 @@ async fn orchestrator_web_fetch_session_opt_in_denied_approval_never_starts() {
     // 拒否されたため executor に到達しない (AC6)。
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
             if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-1")
     )));
     assert!(!events.iter().any(|event| matches!(
@@ -317,12 +317,12 @@ async fn parallel_optin_runs_do_not_cross_accept_approval_resolutions() {
     // 承認要求は run ごとに run スコープ相関キー (`{run_id}:{call_id}`) で発行される。
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
             if tool_name == "web_fetch" && call_id == &format!("{run_a}:fetch-1")
     )));
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
             if tool_name == "web_fetch" && call_id == &format!("{run_b}:fetch-1")
     )));
     // ToolStarted / ToolCompleted の call_id は生 call_id のまま (相関キー化は
