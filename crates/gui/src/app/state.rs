@@ -1,3 +1,4 @@
+// allow: SIZE_OK - #110 は既存の状態所有・初期化 API への追加に限定し、状態全体の分割は別変更とする。
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use crate::model::commands::{
 };
 use crate::model::composer::{ComposerModel, ProviderStatus};
 use crate::model::notifications::NotificationsModel;
+use crate::model::pending_approvals::PendingApprovalsModel;
 use crate::model::provider_settings::ProviderSettingsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::model::telemetry::TelemetryOverlay;
@@ -38,6 +40,7 @@ pub struct WorkbenchState<S> {
     pub(super) manually_titled: std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) attention_acks: BTreeMap<(PanelId, String), super::attention::ack::AttentionAck>,
     pub(super) notifications: NotificationsModel,
+    pub(super) pending_approvals: PendingApprovalsModel,
     pub(super) external_job: Option<super::external_commands::Job>,
     pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) memory: crate::panes::memory::MemoryPane,
@@ -107,6 +110,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             manually_titled: std::collections::BTreeSet::new(),
             attention_acks: BTreeMap::new(),
             notifications: NotificationsModel::default(),
+            pending_approvals: PendingApprovalsModel::default(),
             external_job: None,
             arena: crate::panes::arena::ArenaPane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
@@ -271,6 +275,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub const fn notifications(&self) -> &NotificationsModel {
         &self.notifications
+    }
+    pub const fn pending_approvals(&self) -> &PendingApprovalsModel {
+        &self.pending_approvals
     }
     pub const fn notifications_mut(&mut self) -> &mut NotificationsModel {
         &mut self.notifications

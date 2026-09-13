@@ -1,3 +1,4 @@
+// allow: SIZE_OK - #110 の相関 join は既存 fold 順序に依存するため、フレーム全体の分割は別変更とする。
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::RunId;
 use workspace_ui::{KeyAction, PanelId, ThreadRunPhase, Workspace};
@@ -6,6 +7,7 @@ use super::WorkbenchState;
 use crate::dock::{from_dock_state, to_dock_state};
 use crate::model::commands::apply_orchestrator_event;
 use crate::model::tasks::AgentRunSource;
+use crate::model::transcript::TranscriptEntry;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn with_quota_backend(
@@ -117,6 +119,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_event(&mut self, event: &Event) {
         self.apply_runtime_event(event);
         self.transcripts.apply(event);
+        self.pending_approvals.apply_event(
+            event,
+            |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
+            |run_id, original_call_id| {
+                self.transcripts
+                    .run(run_id)?
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        TranscriptEntry::Tool { call_id, input, .. }
+                            if call_id == original_call_id =>
+                        {
+                            Some(input.clone())
+                        }
+                        TranscriptEntry::Tool { .. }
+                        | TranscriptEntry::Error { .. }
+                        | TranscriptEntry::UserMessage { .. }
+                        | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::Message { .. }
+                        | TranscriptEntry::Reasoning { .. }
+                        | TranscriptEntry::AgentMessage { .. } => None,
+                    })
+                    .flatten()
+            },
+        );
         self.notifications.apply_event(event, |call_id| {
             self.transcripts.run_for_call(call_id).map(str::to_owned)
         });

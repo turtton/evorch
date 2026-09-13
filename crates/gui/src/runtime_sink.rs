@@ -7,9 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use event_bus::{ApprovalDecision, GoalReference};
+use event_bus::{ApprovalDecision, Event, EventBus, GoalReference};
 use runtime::orchestration::supervisor::SupervisorError;
 use runtime::{AgentRuntime, GoalSpec, Role, RunConfig, RunId, SupervisorHandle};
 
@@ -54,6 +54,7 @@ struct RepoIdentity {
 /// その root run に紐付けて supervisor へ goal を登録する (issue #71, #73)。
 /// DecideMerge / PauseGoal / ResumeGoal / CancelGoal は supervisor へ転送する。
 pub struct RuntimeCommandSink {
+    event_bus: Option<Arc<EventBus>>,
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
     runtime: AgentRuntime,
@@ -90,6 +91,7 @@ impl RuntimeCommandSink {
     ) -> Self {
         let (events_tx, events_rx) = std::sync::mpsc::channel();
         Self {
+            event_bus: None,
             team_writer: None,
             memory_config: None,
             runtime,
@@ -103,6 +105,11 @@ impl RuntimeCommandSink {
             events_tx,
             events_rx,
         }
+    }
+
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     pub fn with_ownership(
@@ -194,6 +201,7 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::RestoreSnapshot { .. } => None,
                 WorkbenchCommand::PauseGoal { .. }
+                | WorkbenchCommand::DecideToolApproval { .. }
                 | WorkbenchCommand::ResumeGoal { .. }
                 | WorkbenchCommand::CancelGoal { .. } => None,
             };
@@ -219,6 +227,15 @@ impl RuntimeCommandSink {
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<LoopEvent> {
         match command {
+            WorkbenchCommand::DecideToolApproval { call_id, approved } => {
+                if let Some(bus) = &self.event_bus {
+                    bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
+                        call_id,
+                        approved,
+                    }));
+                }
+                Vec::new()
+            }
             WorkbenchCommand::RestoreSnapshot { thread_id, redo } => {
                 let Some(&run) = self.chat_runs.get(&thread_id) else {
                     return vec![LoopEvent::ChatRejected {
@@ -652,6 +669,54 @@ mod tests {
         let sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
         (rt, sink, runtime, supervisor)
+    }
+
+    #[test]
+    fn tool_approval_preserves_correlation_when_bus_is_configured() {
+        // Given: 承認結果を購読する bus を注入した sink。
+        let (rt, sink, _, _) = build_sink();
+        let bus = Arc::new(EventBus::new(64));
+        let mut subscriber = bus.subscribe();
+        let mut sink = sink.with_event_bus(Arc::clone(&bus));
+
+        for approved in [true, false] {
+            // When: 相関 ID を含む承認・拒否を提出する。
+            let events = sink.submit(WorkbenchCommand::DecideToolApproval {
+                call_id: "run-2:call-1:17".into(),
+                approved,
+            });
+
+            // Then: 即応イベントはなく、相関 ID と判断をそのまま配送する。
+            assert!(events.is_empty());
+            let event = rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), subscriber.recv())
+                    .await
+                    .expect("approval delivery completes")
+                    .expect("approval resolved event")
+            });
+            assert!(matches!(
+                event.kind,
+                EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
+                    call_id,
+                    approved: actual,
+                }) if call_id.as_bytes() == b"run-2:call-1:17" && actual == approved
+            ));
+        }
+    }
+
+    #[test]
+    fn tool_approval_returns_empty_when_bus_is_unconfigured() {
+        // Given: bus を注入していない sink。
+        let (_rt, mut sink, _, _) = build_sink();
+
+        // When: tool 承認を提出する。
+        let events = sink.submit(WorkbenchCommand::DecideToolApproval {
+            call_id: "run-2:call-1:17".into(),
+            approved: true,
+        });
+
+        // Then: panic せず、即応イベントも返さない。
+        assert!(events.is_empty());
     }
 
     #[test]

@@ -556,6 +556,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
@@ -598,6 +599,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. }
+            | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
