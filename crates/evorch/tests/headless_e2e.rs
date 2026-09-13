@@ -12,7 +12,7 @@ use runtime::Role;
 
 const KEY_ENV: &str = "EVORCH_TEST_KEY_HEADLESS_E2E";
 const KEY: &str = "headless-e2e-key";
-const MODEL: &str = "local-model";
+const MODEL: &str = "gpt-4o";
 const PROMPT: &str = "HEADLESS-PROMPT";
 
 fn argv(items: &[&str]) -> impl Iterator<Item = String> {
@@ -152,7 +152,7 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
 // Given: sugar provider 設定 (localhost モック) と MapEnv credential
 // When: DirectUnchecked で worker を headless 実行する
 // Then: phase Done、final_text にモック応答が含まれ、モックは Bearer 認証付き
-//       model=local-model の 1 リクエストだけを受け取る
+//       model=gpt-4o の 1 リクエストだけを受け取る
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_run_completes_with_single_mock_response() {
     let directory = tempfile::tempdir().expect("project directory");

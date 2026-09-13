@@ -6,7 +6,7 @@ use std::sync::Arc;
 use event_bus::{Event, EventBus, ProviderEvent};
 
 use crate::{FailureKind, ProviderProfile, RoutingError, SessionAffinity};
-use model::{LogicalModelId, ModelCatalog};
+use model::{Capability, LogicalModelId, ModelCatalog};
 
 /// 解決済みのルート。
 ///
@@ -33,6 +33,7 @@ pub struct Router {
     routes: BTreeMap<String, Vec<config::RouteCandidateConfig>>,
     /// 利用可否の判定に使用するモデルカタログ。
     catalog: ModelCatalog,
+    required_capabilities: Vec<Capability>,
     /// フォールバック選択の観測イベント発行先。未接続なら発行しない。
     event_bus: Option<Arc<EventBus>>,
 }
@@ -43,6 +44,7 @@ impl std::fmt::Debug for Router {
             .field("profiles", &self.profiles)
             .field("routes", &self.routes)
             .field("catalog", &self.catalog)
+            .field("required_capabilities", &self.required_capabilities)
             .field("has_event_bus", &self.event_bus.is_some())
             .finish()
     }
@@ -55,10 +57,30 @@ impl PartialEq for Router {
         self.profiles == other.profiles
             && self.routes == other.routes
             && self.catalog == other.catalog
+            && self.required_capabilities == other.required_capabilities
     }
 }
 
 impl Router {
+    /// Requires explicit canonical support for both resolution and fallback.
+    pub fn requiring_capability(mut self, capability: Capability) -> Self {
+        self.required_capabilities.push(capability);
+        self
+    }
+
+    /// Shares the routing catalog with provider request assembly.
+    pub fn catalog(&self) -> &ModelCatalog {
+        &self.catalog
+    }
+
+    fn is_eligible(&self, model_id: &str) -> bool {
+        self.catalog.is_available(model_id)
+            && self
+                .required_capabilities
+                .iter()
+                .all(|capability| self.catalog.supports(model_id, *capability))
+    }
+
     /// 検証済みプロファイル・ルーティング設定・モデルカタログからルーターを構築します。
     ///
     /// 全ルート候補は既知のプロファイルを参照していなければならず、
@@ -93,6 +115,7 @@ impl Router {
             profiles: profile_map,
             routes: routing.routes.clone(),
             catalog,
+            required_capabilities: Vec::new(),
             event_bus: None,
         })
     }
@@ -136,7 +159,7 @@ impl Router {
 
         if let Some(pinned_name) = affinity.pinned(session_id, logical_name)
             && let Some(profile) = self.profiles.get(pinned_name)
-            && self.catalog.is_available(&profile.default_model)
+            && self.is_eligible(&profile.default_model)
         {
             return Ok(ResolvedRoute {
                 profile: pinned_name.to_string(),
@@ -156,7 +179,7 @@ impl Router {
                 continue; // new() で検証済みのため通常は到達しない
             };
             let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-            if !self.catalog.is_available(model_id) {
+            if !self.is_eligible(model_id) {
                 continue;
             }
             let attributes_confirmed = self
@@ -332,7 +355,7 @@ impl Router {
         // new() で検証済みのため、未知のプロファイルは通常発生しない。
         let profile = self.profiles.get(&candidate.profile)?;
         let model_id = candidate.model.as_deref().unwrap_or(&profile.default_model);
-        if !self.catalog.is_available(model_id) {
+        if !self.is_eligible(model_id) {
             return None;
         }
         Some(ResolvedRoute {

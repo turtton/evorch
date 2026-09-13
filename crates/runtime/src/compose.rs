@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use event_bus::EventBus;
-use model::{LogicalModelId, ModelCatalog};
+use model::{Capability, LogicalModelId, ModelCatalog};
 use providers::{ChatRequest, ChatResponse, Message, ObservationContext, ToolSpec};
 use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
@@ -160,6 +160,7 @@ fn compose_agent_runtime(
 /// routing の解決結果を provider request へ変換する AgentModel adapter。
 pub struct RoutedModel {
     router: routing::Router,
+    tool_router: routing::Router,
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
     agents: config::AgentsConfig,
@@ -181,6 +182,10 @@ impl RoutedModel {
 
     pub fn new(composed: ComposedProviders, agents: config::AgentsConfig) -> Self {
         Self {
+            tool_router: composed
+                .router
+                .clone()
+                .requiring_capability(Capability::ToolCalling),
             router: composed.router,
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
@@ -192,8 +197,14 @@ impl RoutedModel {
         &self,
         session_id: &str,
         logical: &LogicalModelId,
+        requires_tools: bool,
     ) -> Result<routing::ResolvedRoute, RuntimeError> {
-        self.router
+        let router = if requires_tools {
+            &self.tool_router
+        } else {
+            &self.router
+        };
+        router
             .resolve(
                 &mut self
                     .affinity
@@ -257,6 +268,7 @@ impl RoutedModel {
                 let route = self.resolve(
                     &invocation.run_id,
                     &LogicalModelId::from(binding.logical_model),
+                    !tools.is_empty(),
                 )?;
                 (route, binding.generation)
             }
@@ -267,10 +279,20 @@ impl RoutedModel {
             .ok_or_else(|| RuntimeError::Model {
                 reason: "resolved provider profile is unavailable".to_string(),
             })?;
+        let tools = if self
+            .router
+            .catalog()
+            .supports(&route.model_id, Capability::ToolCalling)
+            && provider.client.capabilities().tool_use
+        {
+            tools.to_vec()
+        } else {
+            Vec::new()
+        };
         let request = ChatRequest {
             model: route.model_id,
             messages: messages.to_vec(),
-            tools: tools.to_vec(),
+            tools,
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
             observation: Some(ObservationContext {
@@ -336,7 +358,7 @@ impl AgentModel for RoutedModel {
             return format!("unresolved:{}", role_key(role));
         };
         let logical = LogicalModelId::from(binding.logical_model);
-        self.resolve("runtime-selected-model", &logical)
+        self.resolve("runtime-selected-model", &logical, false)
             .map(|route| format!("{}/{}", route.profile, route.model_id))
             .unwrap_or_else(|_| format!("unresolved:{}", logical.as_str()))
     }
