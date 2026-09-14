@@ -33,18 +33,30 @@ struct CodexModel {
     slug: String,
 }
 
-/// OAuth の Bearer トークンで Codex のモデルカタログを取得する。
+/// カタログの `minimal_client_version` フィルタを満たす Codex CLI 互換バージョン。
+///
+/// 観測例では 0.7.x→0件、0.147.0→9件で、gpt-6-astra は 0.153.0 必須。
+/// アプリ自身のバージョンを送るとモデルが除外されるため、絶対に代用しない。
+pub const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.0";
+
+/// OAuth の Bearer トークンとアカウント ID で Codex のモデルカタログを取得する。
 ///
 /// # Errors
 /// HTTP・通信エラー、または応答形式が不正な場合の JSON エラーを返す。
 pub async fn list_codex_models(
     base_url: &str,
     auth: &ProviderAuth,
-    client_version: &str,
+    account_id: &str,
 ) -> Result<Vec<String>, ProviderError> {
     let request = build_http_client(None)?
         .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .query(&[("client_version", client_version)])
+        .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
+        .header("ChatGPT-Account-ID", account_id)
+        .header("originator", "codex_cli_rs")
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("codex_cli_rs/{CODEX_MODELS_CLIENT_VERSION}"),
+        )
         .bearer_auth(&auth.api_key);
     let models: CodexModelList = fetch_list(request).await?;
     Ok(models.models.into_iter().map(|model| model.slug).collect())

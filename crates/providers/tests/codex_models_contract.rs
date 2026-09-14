@@ -1,4 +1,4 @@
-use providers::{ProviderAuth, ProviderError};
+use providers::{CODEX_MODELS_CLIENT_VERSION, ProviderAuth, ProviderError};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -9,7 +9,10 @@ async fn lists_slugs_when_codex_catalog_is_returned() {
     Mock::given(method("GET"))
         .and(path("/backend-api/codex/models"))
         .and(header("authorization", "Bearer oauth-access"))
-        .and(query_param("client_version", "0.1.0"))
+        .and(query_param("client_version", CODEX_MODELS_CLIENT_VERSION))
+        .and(header("chatgpt-account-id", "catalog-account"))
+        .and(header("originator", "codex_cli_rs"))
+        .and(header("user-agent", "codex_cli_rs/0.153.0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "models": [{"slug": "gpt-b", "display_name": "B"}, {"slug": "gpt-a"}]
         })))
@@ -20,7 +23,7 @@ async fn lists_slugs_when_codex_catalog_is_returned() {
     let models = providers::list_codex_models(
         &format!("{}/backend-api/codex/", server.uri()),
         &ProviderAuth::new("oauth-access"),
-        "0.1.0",
+        "catalog-account",
     )
     .await
     .unwrap();
@@ -43,8 +46,12 @@ async fn rejects_invalid_codex_response_when_schema_is_wrong() {
             .mount(&server)
             .await;
         // When
-        let result =
-            providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "0.1.0").await;
+        let result = providers::list_codex_models(
+            &server.uri(),
+            &ProviderAuth::new("token"),
+            "catalog-account",
+        )
+        .await;
         // Then
         assert!(matches!(result, Err(ProviderError::InvalidJson { .. })));
     }
@@ -59,8 +66,12 @@ async fn returns_empty_when_codex_catalog_is_empty() {
         .mount(&server)
         .await;
     // When
-    let result =
-        providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "0.1.0").await;
+    let result = providers::list_codex_models(
+        &server.uri(),
+        &ProviderAuth::new("token"),
+        "catalog-account",
+    )
+    .await;
     // Then
     assert!(result.unwrap().is_empty());
 }
@@ -74,11 +85,41 @@ async fn returns_http_error_when_oauth_is_rejected() {
         .mount(&server)
         .await;
     // When
-    let result =
-        providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "0.1.0").await;
+    let result = providers::list_codex_models(
+        &server.uri(),
+        &ProviderAuth::new("token"),
+        "catalog-account",
+    )
+    .await;
     // Then
     assert!(matches!(
         result,
         Err(ProviderError::Http { status: 401, .. })
     ));
+}
+
+#[tokio::test]
+async fn strict_catalog_does_not_match_when_client_headers_are_missing() {
+    // Given
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("client_version", CODEX_MODELS_CLIENT_VERSION))
+        .and(header("chatgpt-account-id", "catalog-account"))
+        .and(header("originator", "codex_cli_rs"))
+        .and(header("user-agent", "codex_cli_rs/0.153.0"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    // When
+    let response = reqwest::Client::new()
+        .get(format!("{}/models", server.uri()))
+        .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
+        .bearer_auth("oauth-access")
+        .send()
+        .await
+        .unwrap();
+    // Then
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }

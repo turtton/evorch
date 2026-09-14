@@ -21,6 +21,6 @@ pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ObservationContext,
     ProviderCapabilities, ReasoningEffort, Role, ToolResultContent, ToolSpec, Usage,
 };
-pub use models::{list_codex_models, list_models};
+pub use models::{CODEX_MODELS_CLIENT_VERSION, list_codex_models, list_models};
 pub use retry::RetryPolicy;
 pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};
