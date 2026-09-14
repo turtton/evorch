@@ -60,7 +60,7 @@ impl CodexEditorModel {
                         &providers::ProviderAuth::new(credentials.access_token),
                         &credentials.account_id,
                     ))
-                    .map(|models| models.into_iter().map(|info| info.slug).collect())
+                    .map(expand_fetched_models)
                     .map_err(|error| map_fetch_error(&error))
             });
             let _ = tx.send(result);
@@ -161,11 +161,32 @@ fn map_fetch_error(error: &providers::ProviderError) -> String {
     }
 }
 
+/// 取得したカタログを選択肢 ID へ展開する。fast 対応モデルは通常版の直後に `+fast` 版を並べる。
+fn expand_fetched_models(models: Vec<providers::CodexModelInfo>) -> Vec<String> {
+    models
+        .into_iter()
+        .flat_map(|info| {
+            let mut ids = vec![info.slug.clone()];
+            if info.supports_fast {
+                ids.push(config::types::provider::fast_variant_id(&info.slug));
+            }
+            ids
+        })
+        .collect()
+}
+
+/// モデル選択肢の表示名を返す。fast 版は `<base> (fast)` と表示する。
+pub fn model_display_label(id: &str) -> String {
+    match config::types::provider::parse_model_speed(id) {
+        (base, config::types::provider::ModelSpeed::Fast) => format!("{base} (fast)"),
+        _ => id.to_owned(),
+    }
+}
+
 fn access_token(
     store: Option<Arc<dyn sandbox::CredentialStore>>,
     account: String,
-) -> Result<CatalogCredentials, String> {
-    let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
+) -> Result<CatalogCredentials, String> {    let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
     let bundle = routing::factory::CredentialStoreTokenStore::new(store, account)
         .load()
         .map_err(|_| "Could not read Codex credentials; Sign in again")?

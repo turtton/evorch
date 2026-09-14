@@ -7,6 +7,7 @@ mod codex_models;
 #[path = "provider_openai_editor.rs"]
 mod openai;
 pub use codex_models::CodexModelsFetch;
+pub use codex_models::model_display_label;
 pub use openai::ProviderSettingsModel as OpenAiEditorModel;
 pub use openai::{CredentialMode, ModelsFetchState, ProviderSettingsTab, provider_status_of};
 

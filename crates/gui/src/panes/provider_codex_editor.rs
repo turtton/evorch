@@ -1,5 +1,5 @@
 use super::ProviderSettingsAction;
-use crate::model::provider_settings::{CodexEditorModel, ModelsFetchState};
+use crate::model::provider_settings::{CodexEditorModel, ModelsFetchState, model_display_label};
 use crate::theme::text::{badge, muted};
 use crate::theme::tokens::palette;
 use crate::theme::widgets::primary_button;
@@ -154,10 +154,10 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
                 if let Some(models) = &editor.fetch.available_models {
                     for id in models {
                         if editor.models.contains(id) {
-                            ui.label(muted(format!("{id} · Already added")));
+                            ui.label(muted(format!("{} · Already added", model_display_label(id))));
                         } else {
                             let mut selected = editor.fetch.fetch_selected.contains(id);
-                            if ui.checkbox(&mut selected, id).changed() {
+                            if ui.checkbox(&mut selected, model_display_label(id)).changed() {
                                 if selected {
                                     editor.fetch.fetch_selected.insert(id.clone());
                                 } else {

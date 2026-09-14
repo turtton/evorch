@@ -141,6 +141,28 @@ fn rejects_id_token_when_account_claim_is_invalid() {
 }
 
 #[test]
+fn expands_fast_capable_models_into_base_and_fast_rows() {
+    // Given
+    let models = vec![
+        providers::CodexModelInfo { slug: "gpt-a".into(), supports_fast: true },
+        providers::CodexModelInfo { slug: "gpt-b".into(), supports_fast: false },
+        providers::CodexModelInfo { slug: "gpt-c".into(), supports_fast: true },
+    ];
+    // When
+    let ids = expand_fetched_models(models);
+    // Then: fast 対応は通常版の直後に fast 版が並び、非対応は単独行のまま
+    assert_eq!(ids, ["gpt-a", "gpt-a+fast", "gpt-b", "gpt-c", "gpt-c+fast"]);
+}
+
+#[test]
+fn labels_fast_variant_with_marker_and_keeps_standard_ids() {
+    // Given / When / Then
+    assert_eq!(model_display_label("gpt-a+fast"), "gpt-a (fast)");
+    assert_eq!(model_display_label("gpt-a"), "gpt-a");
+    assert_eq!(model_display_label("+fast"), "+fast");
+}
+
+#[test]
 fn surfaces_hint_when_backend_returns_zero_models() {
     // Given
     let mut settings = super::super::ProviderSettingsModel::default();
