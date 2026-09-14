@@ -14,11 +14,18 @@ fn saved_legacy_layout_exposes_notification_row_and_opens_run_transcript() {
     let LayoutNode::Split(content) = root.second.as_mut() else {
         panic!("split")
     };
-    let LayoutNode::Tabs(tabs) = content.second.as_mut() else {
-        panic!("tabs")
-    };
-    tabs.panels.retain(|id| id.as_str() != "notifications-main");
-    tabs.active = 1;
+    *content.first = LayoutNode::Tabs(workspace_ui::Tabs {
+        panels: vec![PanelId::new("agent-main")],
+        active: 0,
+    });
+    *content.second = LayoutNode::Tabs(workspace_ui::Tabs {
+        panels: vec![
+            PanelId::new("agents-main"),
+            PanelId::new("diff-main"),
+            PanelId::new("terminal-main"),
+        ],
+        active: 1,
+    });
     assert_notification_opens_transcript(legacy);
 }
 

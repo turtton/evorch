@@ -36,7 +36,7 @@ pub fn model_picker(
                                 .selectable_label(
                                     context.preference == Some(&preference),
                                     egui::RichText::new(preference_label(&preference))
-                                        .color(crate::theme::tokens::TEXT),
+                                        .color(crate::theme::tokens::palette().TEXT),
                                 )
                                 .clicked()
                             {

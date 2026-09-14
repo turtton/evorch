@@ -138,7 +138,7 @@ fn tool_card_collapsed_shows_compact_preview() {
 #[test]
 fn transcript_card_accent_line_does_not_overlap_text() {
     // Given
-    let accent = gui::theme::tokens::INFO;
+    let accent = gui::theme::tokens::palette().INFO;
     let mut harness = Harness::new_ui(move |ui| {
         gui::theme::install(ui.ctx());
         gui::theme::widgets::card(ui, accent, |ui| {

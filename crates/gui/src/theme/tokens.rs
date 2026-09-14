@@ -2,30 +2,110 @@ use egui::Color32;
 use event_bus::AgentRunPhase;
 use workspace_ui::{ThreadRunPhase, ThreadState};
 
-pub const CANVAS: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0a);
-pub const SURFACE: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
-pub const SURFACE_RAISED: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
-pub const OVERLAY: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
-pub const SIDEBAR: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
-pub const TEXT: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf5);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x81, 0x81, 0x81);
-pub const BORDER: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
-pub const INPUT: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
-pub const ACCENT: Color32 = Color32::from_rgb(0x34, 0x6b, 0xf1);
-pub const ACCENT_FG: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
-pub const HOVER_ROW: Color32 = Color32::from_rgb(0x13, 0x13, 0x13);
-pub const ACTIVE_ROW: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x1b);
-pub const SELECTED_ROW: Color32 = SURFACE;
-pub const ERROR: Color32 = Color32::from_rgb(0xfb, 0x41, 0x4a);
-pub const ERROR_FG: Color32 = Color32::from_rgb(0xff, 0x64, 0x67);
-pub const ERROR_SURFACE: Color32 = Color32::from_rgb(0x30, 0x12, 0x14);
-pub const WARNING: Color32 = Color32::from_rgb(0xfe, 0x9a, 0x00);
-pub const WARNING_FG: Color32 = Color32::from_rgb(0xff, 0xb9, 0x00);
-pub const WARNING_SURFACE: Color32 = Color32::from_rgb(0x31, 0x21, 0x08);
-pub const SUCCESS: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
-pub const INFO: Color32 = Color32::from_rgb(0x60, 0xa5, 0xfa);
-pub const RUNNING: Color32 = Color32::from_rgb(0x22, 0xd3, 0xee);
-pub const WAITING: Color32 = INFO;
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(non_snake_case)]
+pub struct Palette {
+    pub CANVAS: Color32,
+    pub SURFACE: Color32,
+    pub SURFACE_RAISED: Color32,
+    pub OVERLAY: Color32,
+    pub SIDEBAR: Color32,
+    pub TEXT: Color32,
+    pub TEXT_MUTED: Color32,
+    pub BORDER: Color32,
+    pub INPUT: Color32,
+    pub ACCENT: Color32,
+    pub ACCENT_FG: Color32,
+    pub HOVER_ROW: Color32,
+    pub ACTIVE_ROW: Color32,
+    pub SELECTED_ROW: Color32,
+    pub ERROR: Color32,
+    pub ERROR_FG: Color32,
+    pub ERROR_SURFACE: Color32,
+    pub WARNING: Color32,
+    pub WARNING_FG: Color32,
+    pub WARNING_SURFACE: Color32,
+    pub SUCCESS: Color32,
+    pub INFO: Color32,
+    pub RUNNING: Color32,
+    pub WAITING: Color32,
+}
+
+impl Palette {
+    pub const fn tokyo_night() -> Self {
+        Self {
+            CANVAS: Color32::from_rgb(0x1a, 0x1b, 0x26),
+            SURFACE: Color32::from_rgb(0x1f, 0x23, 0x35),
+            SURFACE_RAISED: Color32::from_rgb(0x29, 0x2e, 0x42),
+            // Next blue-gray elevation: raised + (9, 10, 14), preserving its hue.
+            OVERLAY: Color32::from_rgb(0x32, 0x38, 0x50),
+            SIDEBAR: Color32::from_rgb(0x16, 0x16, 0x1e),
+            TEXT: Color32::from_rgb(0xc0, 0xca, 0xf5),
+            TEXT_MUTED: Color32::from_rgb(0x73, 0x7a, 0xa2),
+            BORDER: Color32::from_rgb(0x29, 0x2e, 0x42),
+            INPUT: Color32::from_rgb(0x16, 0x16, 0x1e),
+            ACCENT: Color32::from_rgb(0x7a, 0xa2, 0xf7),
+            ACCENT_FG: Color32::from_rgb(0x1a, 0x1b, 0x26),
+            HOVER_ROW: Color32::from_rgb(0x1f, 0x23, 0x35),
+            ACTIVE_ROW: Color32::from_rgb(0x28, 0x34, 0x57),
+            SELECTED_ROW: Color32::from_rgb(0x28, 0x34, 0x57),
+            ERROR: Color32::from_rgb(0xdb, 0x4b, 0x4b),
+            ERROR_FG: Color32::from_rgb(0xf7, 0x76, 0x8e),
+            // Semantic surfaces: 85% canvas + 15% base role, rounded in sRGB.
+            ERROR_SURFACE: Color32::from_rgb(0x37, 0x22, 0x2c),
+            WARNING: Color32::from_rgb(0xff, 0x9e, 0x64),
+            WARNING_FG: Color32::from_rgb(0xff, 0xc7, 0x77),
+            WARNING_SURFACE: Color32::from_rgb(0x3c, 0x2f, 0x2f),
+            SUCCESS: Color32::from_rgb(0x9e, 0xce, 0x6a),
+            INFO: Color32::from_rgb(0x2a, 0xc3, 0xde),
+            RUNNING: Color32::from_rgb(0x7d, 0xcf, 0xff),
+            WAITING: Color32::from_rgb(0x2a, 0xc3, 0xde),
+        }
+    }
+
+    pub const fn graphite() -> Self {
+        Self {
+            CANVAS: Color32::from_rgb(0x0a, 0x0a, 0x0a),
+            SURFACE: Color32::from_rgb(0x11, 0x11, 0x11),
+            SURFACE_RAISED: Color32::from_rgb(0x14, 0x14, 0x14),
+            OVERLAY: Color32::from_rgb(0x19, 0x19, 0x19),
+            SIDEBAR: Color32::from_rgb(0x00, 0x00, 0x00),
+            TEXT: Color32::from_rgb(0xf5, 0xf5, 0xf5),
+            TEXT_MUTED: Color32::from_rgb(0x81, 0x81, 0x81),
+            BORDER: Color32::from_rgb(0x19, 0x19, 0x19),
+            INPUT: Color32::from_rgb(0x1e, 0x1e, 0x1e),
+            ACCENT: Color32::from_rgb(0x34, 0x6b, 0xf1),
+            ACCENT_FG: Color32::from_rgb(0xff, 0xff, 0xff),
+            HOVER_ROW: Color32::from_rgb(0x13, 0x13, 0x13),
+            ACTIVE_ROW: Color32::from_rgb(0x1a, 0x1b, 0x1b),
+            SELECTED_ROW: Color32::from_rgb(0x11, 0x11, 0x11),
+            ERROR: Color32::from_rgb(0xfb, 0x41, 0x4a),
+            ERROR_FG: Color32::from_rgb(0xff, 0x64, 0x67),
+            ERROR_SURFACE: Color32::from_rgb(0x30, 0x12, 0x14),
+            WARNING: Color32::from_rgb(0xfe, 0x9a, 0x00),
+            WARNING_FG: Color32::from_rgb(0xff, 0xb9, 0x00),
+            WARNING_SURFACE: Color32::from_rgb(0x31, 0x21, 0x08),
+            SUCCESS: Color32::from_rgb(0x34, 0xd3, 0x99),
+            INFO: Color32::from_rgb(0x60, 0xa5, 0xfa),
+            RUNNING: Color32::from_rgb(0x22, 0xd3, 0xee),
+            WAITING: Color32::from_rgb(0x60, 0xa5, 0xfa),
+        }
+    }
+}
+
+static CURRENT: std::sync::RwLock<Palette> = std::sync::RwLock::new(Palette::graphite());
+
+pub fn palette() -> Palette {
+    *CURRENT
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn install_palette(p: Palette) {
+    *CURRENT
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = p;
+}
 pub const STATUS_STROKE: f32 = 1.0;
 
 pub const SP_1: f32 = 4.0;
@@ -87,34 +167,34 @@ pub fn text_style_badge() -> egui::TextStyle {
     egui::TextStyle::Name("badge".into())
 }
 
-pub const fn state_color(state: ThreadState) -> Color32 {
+pub fn state_color(state: ThreadState) -> Color32 {
     match state {
-        ThreadState::Active => ACCENT,
-        ThreadState::Paused => TEXT_MUTED,
-        ThreadState::Running => INFO,
-        ThreadState::Waiting => WAITING,
-        ThreadState::Done => SUCCESS,
-        ThreadState::Error => ERROR_FG,
+        ThreadState::Active => palette().ACCENT,
+        ThreadState::Paused => palette().TEXT_MUTED,
+        ThreadState::Running => palette().INFO,
+        ThreadState::Waiting => palette().WAITING,
+        ThreadState::Done => palette().SUCCESS,
+        ThreadState::Error => palette().ERROR_FG,
     }
 }
 
-pub const fn phase_color(phase: ThreadRunPhase) -> Color32 {
+pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
     match phase {
-        ThreadRunPhase::Pending => TEXT_MUTED,
-        ThreadRunPhase::Running => RUNNING,
-        ThreadRunPhase::Waiting => WAITING,
-        ThreadRunPhase::Done => SUCCESS,
-        ThreadRunPhase::Error => ERROR_FG,
+        ThreadRunPhase::Pending => palette().TEXT_MUTED,
+        ThreadRunPhase::Running => palette().RUNNING,
+        ThreadRunPhase::Waiting => palette().WAITING,
+        ThreadRunPhase::Done => palette().SUCCESS,
+        ThreadRunPhase::Error => palette().ERROR_FG,
     }
 }
 
-pub const fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
+pub fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
     match phase {
-        AgentRunPhase::Pending => TEXT_MUTED,
-        AgentRunPhase::Running => RUNNING,
-        AgentRunPhase::Waiting => WAITING,
-        AgentRunPhase::Done => SUCCESS,
-        AgentRunPhase::Error => ERROR_FG,
+        AgentRunPhase::Pending => palette().TEXT_MUTED,
+        AgentRunPhase::Running => palette().RUNNING,
+        AgentRunPhase::Waiting => palette().WAITING,
+        AgentRunPhase::Done => palette().SUCCESS,
+        AgentRunPhase::Error => palette().ERROR_FG,
     }
 }
 
@@ -123,15 +203,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tokyo_night_palette_matches_spec() {
+        // Given: the Night variant role contract; When: constructing its palette.
+        let p = Palette::tokyo_night();
+        // Then: every field retains its exact RGB value, including aliases.
+        for (actual, expected) in [
+            (p.CANVAS, [0x1a, 0x1b, 0x26]),
+            (p.SIDEBAR, [0x16, 0x16, 0x1e]),
+            (p.SURFACE, [0x1f, 0x23, 0x35]),
+            (p.SURFACE_RAISED, [0x29, 0x2e, 0x42]),
+            (p.OVERLAY, [0x32, 0x38, 0x50]),
+            (p.INPUT, [0x16, 0x16, 0x1e]),
+            (p.BORDER, [0x29, 0x2e, 0x42]),
+            (p.TEXT, [0xc0, 0xca, 0xf5]),
+            (p.TEXT_MUTED, [0x73, 0x7a, 0xa2]),
+            (p.ACCENT, [0x7a, 0xa2, 0xf7]),
+            (p.ACCENT_FG, [0x1a, 0x1b, 0x26]),
+            (p.HOVER_ROW, [0x1f, 0x23, 0x35]),
+            (p.ACTIVE_ROW, [0x28, 0x34, 0x57]),
+            (p.SELECTED_ROW, [0x28, 0x34, 0x57]),
+            (p.ERROR, [0xdb, 0x4b, 0x4b]),
+            (p.ERROR_FG, [0xf7, 0x76, 0x8e]),
+            (p.ERROR_SURFACE, [0x37, 0x22, 0x2c]),
+            (p.WARNING, [0xff, 0x9e, 0x64]),
+            (p.WARNING_FG, [0xff, 0xc7, 0x77]),
+            (p.WARNING_SURFACE, [0x3c, 0x2f, 0x2f]),
+            (p.SUCCESS, [0x9e, 0xce, 0x6a]),
+            (p.INFO, [0x2a, 0xc3, 0xde]),
+            (p.RUNNING, [0x7d, 0xcf, 0xff]),
+            (p.WAITING, [0x2a, 0xc3, 0xde]),
+        ] {
+            assert_eq!(
+                actual,
+                Color32::from_rgb(expected[0], expected[1], expected[2])
+            );
+        }
+    }
+
+    #[test]
+    fn graphite_palette_matches_legacy_values() {
+        // Given the legacy Graphite RGB values, when constructing the palette,
+        // then every color, including aliases, retains its exact value.
+        let p = Palette::graphite();
+        assert_eq!(p.CANVAS, Color32::from_rgb(0x0a, 0x0a, 0x0a));
+        assert_eq!(p.SURFACE, Color32::from_rgb(0x11, 0x11, 0x11));
+        assert_eq!(p.SURFACE_RAISED, Color32::from_rgb(0x14, 0x14, 0x14));
+        assert_eq!(p.OVERLAY, Color32::from_rgb(0x19, 0x19, 0x19));
+        assert_eq!(p.SIDEBAR, Color32::from_rgb(0x00, 0x00, 0x00));
+        assert_eq!(p.TEXT, Color32::from_rgb(0xf5, 0xf5, 0xf5));
+        assert_eq!(p.TEXT_MUTED, Color32::from_rgb(0x81, 0x81, 0x81));
+        assert_eq!(p.BORDER, Color32::from_rgb(0x19, 0x19, 0x19));
+        assert_eq!(p.INPUT, Color32::from_rgb(0x1e, 0x1e, 0x1e));
+        assert_eq!(p.ACCENT, Color32::from_rgb(0x34, 0x6b, 0xf1));
+        assert_eq!(p.ACCENT_FG, Color32::from_rgb(0xff, 0xff, 0xff));
+        assert_eq!(p.HOVER_ROW, Color32::from_rgb(0x13, 0x13, 0x13));
+        assert_eq!(p.ACTIVE_ROW, Color32::from_rgb(0x1a, 0x1b, 0x1b));
+        assert_eq!(p.SELECTED_ROW, Color32::from_rgb(0x11, 0x11, 0x11));
+        assert_eq!(p.ERROR, Color32::from_rgb(0xfb, 0x41, 0x4a));
+        assert_eq!(p.ERROR_FG, Color32::from_rgb(0xff, 0x64, 0x67));
+        assert_eq!(p.ERROR_SURFACE, Color32::from_rgb(0x30, 0x12, 0x14));
+        assert_eq!(p.WARNING, Color32::from_rgb(0xfe, 0x9a, 0x00));
+        assert_eq!(p.WARNING_FG, Color32::from_rgb(0xff, 0xb9, 0x00));
+        assert_eq!(p.WARNING_SURFACE, Color32::from_rgb(0x31, 0x21, 0x08));
+        assert_eq!(p.SUCCESS, Color32::from_rgb(0x34, 0xd3, 0x99));
+        assert_eq!(p.INFO, Color32::from_rgb(0x60, 0xa5, 0xfa));
+        assert_eq!(p.RUNNING, Color32::from_rgb(0x22, 0xd3, 0xee));
+        assert_eq!(p.WAITING, Color32::from_rgb(0x60, 0xa5, 0xfa));
+    }
+
+    #[test]
     fn phase_indicator_tokens_are_distinct() {
-        let colors = [RUNNING, WAITING, ERROR_FG, TEXT_MUTED, SUCCESS, WARNING_FG];
+        let colors = [
+            palette().RUNNING,
+            palette().WAITING,
+            palette().ERROR_FG,
+            palette().TEXT_MUTED,
+            palette().SUCCESS,
+            palette().WARNING_FG,
+        ];
         let distinct: std::collections::HashSet<_> = colors.into_iter().collect();
         assert_eq!(distinct.len(), colors.len());
-        assert_eq!(WAITING, INFO);
-        assert_eq!(phase_color(ThreadRunPhase::Running), RUNNING);
-        assert_eq!(phase_color(ThreadRunPhase::Waiting), WAITING);
-        assert_eq!(agent_phase_color(AgentRunPhase::Running), RUNNING);
-        assert_eq!(agent_phase_color(AgentRunPhase::Waiting), WAITING);
+        assert_eq!(palette().WAITING, palette().INFO);
+        assert_eq!(phase_color(ThreadRunPhase::Running), palette().RUNNING);
+        assert_eq!(phase_color(ThreadRunPhase::Waiting), palette().WAITING);
+        assert_eq!(agent_phase_color(AgentRunPhase::Running), palette().RUNNING);
+        assert_eq!(agent_phase_color(AgentRunPhase::Waiting), palette().WAITING);
     }
 
     #[test]

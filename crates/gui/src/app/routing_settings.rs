@@ -40,6 +40,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
         }
         self.provider_settings.open = false;
+        self.close_theme_settings();
         self.role_settings.open = false;
         self.routing_settings.open = true;
     }

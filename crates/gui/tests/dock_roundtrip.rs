@@ -19,6 +19,50 @@ fn workspace_dock_workspace_round_trip_preserves_nested_structure() {
 }
 
 #[test]
+fn persisted_old_right_tab_group_keeps_arrangement_and_selection() {
+    // Given: the old arrangement with Terminal selected and a custom sidebar width
+    let tabs = |ids: &[&str], active| {
+        LayoutNode::Tabs(Tabs {
+            panels: ids.iter().map(|id| PanelId::new(*id)).collect(),
+            active,
+        })
+    };
+    let mut workspace = Workspace::default();
+    workspace.main.root = LayoutNode::Split(Split {
+        direction: SplitDirection::Horizontal,
+        fraction: 0.35,
+        first: Box::new(tabs(&["sidebar-main"], 0)),
+        second: Box::new(LayoutNode::Split(Split {
+            direction: SplitDirection::Horizontal,
+            fraction: 0.625,
+            first: Box::new(tabs(&["agent-main"], 0)),
+            second: Box::new(tabs(
+                &[
+                    "agents-main",
+                    "diff-main",
+                    "terminal-main",
+                    "notifications-main",
+                ],
+                2,
+            )),
+        })),
+    });
+    let mut settings = workspace_ui::UiSettings::default();
+    settings.layout.workspace = Some(workspace.clone());
+
+    // When: persisted settings are reloaded and converted through the renderer
+    let encoded = serde_json::to_string(&settings).expect("encode settings");
+    let loaded: workspace_ui::UiSettings = serde_json::from_str(&encoded).expect("decode settings");
+    let restored = loaded.layout.workspace.expect("saved layout");
+    let dock = to_dock_state(&restored).expect("old dock");
+    let extracted = from_dock_state(&dock, &restored.panels).expect("old workspace");
+
+    // Then: the old tree, fractions, tab order and Terminal selection remain intact
+    assert_eq!(extracted.main.root, workspace.main.root);
+    assert_eq!(restored, workspace);
+}
+
+#[test]
 fn extraction_does_not_depend_on_unrendered_rects() {
     // Given: a newly-created DockState whose egui rectangles are Rect::NOTHING
     let workspace = Workspace::default();

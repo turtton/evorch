@@ -1,3 +1,4 @@
+// allow: SIZE_OK - Existing GUI composition root; T3 only wires UI settings into startup, without restructuring runtime ownership.
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -184,16 +185,27 @@ fn next_path(values: &mut impl Iterator<Item = String>, option: &str) -> Result<
 }
 
 fn load_settings(arguments: &Arguments) -> Result<UiSettings, GuiError> {
-    let mut settings = arguments
-        .settings
-        .as_deref()
-        .map(workspace_ui::load_settings)
-        .transpose()?
-        .unwrap_or_default();
+    let mut settings = match ui_settings_path(arguments) {
+        Some(path) if path.exists() => match workspace_ui::load_settings(&path) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(%error, "UI settings load failed; using Graphite defaults");
+                UiSettings::default()
+            }
+        },
+        Some(_) | None => UiSettings::default(),
+    };
     if let Some(layout) = arguments.layout.as_deref() {
         settings.layout.workspace = Some(workspace_ui::load_workspace(layout)?);
     }
     Ok(settings)
+}
+
+fn ui_settings_path(arguments: &Arguments) -> Option<PathBuf> {
+    arguments
+        .settings
+        .clone()
+        .or_else(|| config::user_config_dir().map(|directory| directory.join("ui.toml")))
 }
 
 fn sidebar_path(arguments: &Arguments) -> Option<PathBuf> {
@@ -831,6 +843,15 @@ fn run() -> Result<(), GuiError> {
                 .with_memory_storage(storage_config.clone())
                 .with_team_writer(storage.handle()),
         ));
+    if let Some(path) = ui_settings_path(&arguments) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
+        }
+        state = state.with_ui_settings_path(path);
+    }
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);
         if let Some((context, model)) = production_model {
@@ -880,6 +901,7 @@ fn run() -> Result<(), GuiError> {
         options,
         Box::new(move |creation_context| {
             let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
+            state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
             Ok(Box::new(GuiApp {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]
@@ -928,6 +950,45 @@ mod tests {
     use super::orchestration_settings_or_default;
     use config::ConfigError;
     use runtime::OrchestrationSettings;
+
+    #[test]
+    fn startup_restores_theme_from_explicit_settings() {
+        // Given: a persisted preset in an isolated explicit settings path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui.toml");
+        let settings = workspace_ui::UiSettings {
+            theme_preset: workspace_ui::ThemePresetName::TokyoNight,
+            ..Default::default()
+        };
+        workspace_ui::save_settings(&settings, &path).unwrap();
+        let arguments = super::Arguments {
+            settings: Some(path),
+            ..Default::default()
+        };
+        // When: the production startup loader runs.
+        let loaded = super::load_settings(&arguments).unwrap();
+        // Then: the persisted preset reaches startup unchanged.
+        assert_eq!(
+            loaded.theme_preset,
+            workspace_ui::ThemePresetName::TokyoNight
+        );
+    }
+
+    #[test]
+    fn startup_uses_graphite_when_settings_are_invalid() {
+        // Given: an invalid settings file in an isolated directory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui.toml");
+        std::fs::write(&path, "not valid TOML [").unwrap();
+        let arguments = super::Arguments {
+            settings: Some(path),
+            ..Default::default()
+        };
+        // When: the production startup loader cannot parse it.
+        let loaded = super::load_settings(&arguments).unwrap();
+        // Then: startup can continue with Graphite.
+        assert_eq!(loaded.theme_preset, workspace_ui::ThemePresetName::Graphite);
+    }
 
     #[test]
     fn window_title_is_selected_when_provided() {

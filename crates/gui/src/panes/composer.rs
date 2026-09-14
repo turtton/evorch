@@ -3,8 +3,7 @@
 use crate::model::composer::{ComposerModel, ProviderStatus, completions};
 use crate::theme::text::muted;
 use crate::theme::tokens::{
-    COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, INPUT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3,
-    SURFACE_RAISED,
+    COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
 };
 use crate::theme::widgets::{primary_button, surface_frame};
 use workspace_ui::ThreadRunPhase;
@@ -28,7 +27,7 @@ pub fn composer_strip(
     phase: Option<ThreadRunPhase>,
 ) -> Option<ComposerAction> {
     let mut action = None;
-    surface_frame(SURFACE_RAISED)
+    surface_frame(palette().SURFACE_RAISED)
         .corner_radius(R_2XL)
         .inner_margin(egui::vec2(SP_3, SP_2))
         .show(ui, |ui| {
@@ -72,8 +71,8 @@ pub fn composer_strip(
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
                 let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();
                 let send = if can_cancel {
-                    ui.add(egui::Button::new(egui::RichText::new("Cancel").color(crate::theme::tokens::ERROR_FG))
-                        .fill(crate::theme::tokens::ERROR_SURFACE))
+ui.add(egui::Button::new(egui::RichText::new("Cancel").color(palette().ERROR_FG))
+.fill(palette().ERROR_SURFACE))
                 } else if can_send {
                     primary_button(ui, "Send")
                 } else {
@@ -109,7 +108,7 @@ pub fn composer_strip(
                             .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter))
                             .frame(egui::Frame::NONE.inner_margin(egui::vec2(SP_3, SP_2)))
                             .margin(egui::vec2(SP_3, SP_2))
-                            .background_color(INPUT))
+.background_color(palette().INPUT))
                         }).inner
                     }).inner;
                 input.widget_info(|| {

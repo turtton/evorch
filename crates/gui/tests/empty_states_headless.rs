@@ -33,6 +33,10 @@ fn conversation_without_project_offers_go_to_projects() {
     harness.run();
 
     assert!(harness.has_label("No project selected"));
+    assert!(harness.has_label("Add a repository in the Projects panel to begin."));
+    assert!(harness.has_label("No projects yet"));
+    assert!(harness.has_label("Add a repository root to start orchestrating."));
+    assert!(harness.has_label("Add project"));
     harness.click_label("Go to Projects");
     harness.run();
     assert!(is_active_tab(
@@ -52,6 +56,9 @@ fn conversation_with_project_but_no_thread_offers_start_thread() {
     harness.run();
 
     assert!(harness.has_label("No thread selected"));
+    assert!(harness.has_label("Start a thread to open a conversation."));
+    assert!(harness.has_label("Start a thread to begin a conversation."));
+    assert!(harness.has_label("New thread"));
     harness.click_label("Start a thread");
     harness.run();
     assert!(harness.state().sidebar().active_thread.is_some());
@@ -190,4 +197,84 @@ fn capture_empty_composer_evidence() {
     frame
         .save_png(std::path::Path::new("/tmp/opencode/w-d-empty.png"))
         .expect("PNG saved");
+}
+
+#[test]
+fn empty_monitoring_panes_explain_what_will_appear() {
+    for (panel, title, hint, action) in [
+        (
+            "agents-main",
+            "No agent runs yet",
+            "Send a message or /goal in Conversation to start an agent run.",
+            Some("Open default panes"),
+        ),
+        (
+            "notifications-main",
+            "No notifications yet",
+            "Run completions, failures and approval requests will appear here.",
+            None,
+        ),
+        (
+            "diff-main",
+            "No diff loaded",
+            "Choose Working tree or Branch vs main.",
+            Some("Working tree"),
+        ),
+    ] {
+        // Given: an empty workbench with the audited pane active.
+        let mut state =
+            WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
+        let path = state.dock().find_tab(&PanelId::new(panel)).expect("tab");
+        state.dock_mut().set_active_tab(path).expect("activate");
+        let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
+        // When: the pane is displayed.
+        harness.run();
+        // Then: guidance and any available action are visible.
+        assert!(harness.has_label(title), "{panel}: {title}");
+        assert!(harness.has_label(hint), "{panel}: {hint}");
+        if let Some(action) = action {
+            assert!(harness.has_label(action));
+        }
+    }
+}
+
+#[test]
+fn empty_agent_transcript_explains_event_delivery() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    // Given: either an absent transcript or one without events.
+    let model = gui::model::transcript::TranscriptModel::default();
+    for transcript in [None, Some(&model)] {
+        // When: the individual agent pane is rendered.
+        let harness = Harness::builder().build_ui(|ui| {
+            gui::panes::agent_transcript::agent_transcript_pane(ui, "run-1", transcript);
+        });
+        // Then: run identity and event-delivery guidance are exposed.
+        assert!(harness.query_by_label("no events for run-1").is_some());
+        assert!(
+            harness
+                .query_by_label("Messages and tool activity will appear as this agent runs.")
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn empty_diff_keeps_refresh_action_with_guidance() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    // Given: a successfully fetched empty diff.
+    let mut diff = gui::diff::DiffModel::new();
+    diff.show_snapshot(String::new());
+    // When: rendering the diff pane.
+    let harness = Harness::builder().build_ui(|ui| {
+        gui::panes::diff::diff_pane(ui, &diff);
+    });
+    // Then: absence of changes is distinguished from an unfetched diff, with refresh controls.
+    assert!(harness.query_by_label("no changes").is_some());
+    assert!(
+        harness
+            .query_by_label("Edit files, then choose Working tree or Branch vs main to refresh.")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Working tree").is_some());
+    assert!(harness.query_by_label("Branch vs main").is_some());
 }

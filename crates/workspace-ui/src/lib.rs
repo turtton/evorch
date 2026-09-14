@@ -25,8 +25,8 @@ pub use persist::{
 };
 pub use project::{AllowedDirectory, Membership, ProjectId, ProjectRecord, TrustState};
 pub use settings::{
-    KeyAction, KeyChord, KeybindSettings, LayoutSettings, SaveLayout, UI_SETTINGS_VERSION,
-    UiSettings,
+    KeyAction, KeyChord, KeybindSettings, LayoutSettings, SaveLayout, ThemePresetName,
+    UI_SETTINGS_VERSION, UiSettings,
 };
 pub use sidebar::{SIDEBAR_SCHEMA_VERSION, SidebarState};
 pub use thread::{ModelPreference, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};

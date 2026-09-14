@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use tempfile::tempdir;
 use workspace_ui::{
-    KeyAction, KeyChord, LayoutNode, PanelKind, SettingsError, UiSettings, load_settings,
-    save_settings,
+    KeyAction, KeyChord, LayoutNode, PanelKind, SettingsError, ThemePresetName, UiSettings,
+    load_settings, save_settings,
 };
 
 #[test]
@@ -86,6 +86,51 @@ fn missing_sections_fall_back_to_defaults() {
 
     // Then: backward-compatible defaults fill both sections.
     assert_eq!(parsed, UiSettings::default());
+}
+
+#[test]
+fn missing_theme_preset_falls_back_to_graphite() {
+    // Given: an older settings document without a theme preset.
+    let directory = tempdir().expect("temporary directory must be created");
+    let path = directory.path().join("ui.toml");
+    std::fs::write(&path, "version = 1\n").expect("settings fixture must be writable");
+
+    // When: the document crosses the public settings load boundary.
+    let restored = load_settings(&path).expect("legacy settings must load");
+
+    // Then: the framework-independent default preset is selected.
+    assert_eq!(restored.theme_preset, ThemePresetName::Graphite);
+}
+
+#[test]
+fn theme_preset_tokyo_night_survives_save_load_round_trip() {
+    // Given: settings configured with Tokyo Night.
+    let directory = tempdir().expect("temporary directory must be created");
+    let path = directory.path().join("ui.toml");
+    let mut settings = UiSettings::default();
+    settings.theme_preset = ThemePresetName::TokyoNight;
+
+    // When: settings are saved and loaded again.
+    save_settings(&settings, &path).expect("settings must save");
+    let restored = load_settings(&path).expect("settings must load");
+
+    // Then: the selected preset is preserved.
+    assert_eq!(restored.theme_preset, ThemePresetName::TokyoNight);
+}
+
+#[test]
+fn unknown_theme_preset_is_rejected() {
+    // Given: a settings document with an unsupported theme preset.
+    let directory = tempdir().expect("temporary directory must be created");
+    let path = directory.path().join("ui.toml");
+    std::fs::write(&path, "version = 1\ntheme_preset = \"unknown\"\n")
+        .expect("settings fixture must be writable");
+
+    // When: the document crosses the public settings load boundary.
+    let result = load_settings(&path);
+
+    // Then: serde reports a deserialization error instead of defaulting silently.
+    assert!(matches!(result, Err(SettingsError::Serialization(_))));
 }
 
 #[test]

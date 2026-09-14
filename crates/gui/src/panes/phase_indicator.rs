@@ -2,8 +2,7 @@ use egui::Ui;
 use workspace_ui::ThreadRunPhase;
 
 use crate::theme::tokens::{
-    CANVAS, FONT_BADGE, FONT_SMALL, INFO, R_SM, RUNNING, SP_1, STATUS_STROKE, SURFACE_RAISED,
-    phase_color,
+    FONT_BADGE, FONT_SMALL, R_SM, SP_1, STATUS_STROKE, palette, phase_color,
 };
 use crate::theme::widgets::badge;
 
@@ -21,18 +20,22 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
     };
     ui.horizontal(|ui| {
         if phase == ThreadRunPhase::Running {
-            ui.add(egui::Spinner::new().size(FONT_SMALL).color(RUNNING));
+            ui.add(
+                egui::Spinner::new()
+                    .size(FONT_SMALL)
+                    .color(palette().RUNNING),
+            );
         }
         match phase {
             ThreadRunPhase::Pending | ThreadRunPhase::Running => {
-                badge(ui, label, phase_color(phase), SURFACE_RAISED);
+                badge(ui, label, phase_color(phase), palette().SURFACE_RAISED);
             }
             ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
                 let accent = match phase {
                     ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
                         phase_color(phase)
                     }
-                    ThreadRunPhase::Waiting | ThreadRunPhase::Done => INFO,
+                    ThreadRunPhase::Waiting | ThreadRunPhase::Done => palette().INFO,
                 };
                 egui::Frame::new()
                     .fill(if unread {
@@ -47,7 +50,7 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
                         ui.label(
                             egui::RichText::new(label)
                                 .size(FONT_BADGE)
-                                .color(if unread { CANVAS } else { accent }),
+                                .color(if unread { palette().CANVAS } else { accent }),
                         );
                     });
             }
@@ -92,7 +95,7 @@ mod tests {
             .iter()
             .filter(|shape| {
                 matches!(&shape.shape, Shape::Rect(rect)
-                if rect.fill == crate::theme::tokens::SURFACE_RAISED || rect.fill == INFO)
+if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == palette().INFO)
             })
             .count()
     }

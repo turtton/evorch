@@ -21,7 +21,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut ComposerModel) {
         }
     });
     if let Some(warning) = model.image_warning() {
-        ui.colored_label(crate::theme::tokens::WARNING_FG, warning);
+        ui.colored_label(crate::theme::tokens::palette().WARNING_FG, warning);
     }
     if model.attachments.is_empty() {
         return;

@@ -11,6 +11,7 @@ pub enum State {
     Demo,
     ErrorThread,
     EditProfile,
+    ThemeSettings,
 }
 
 impl State {
@@ -20,13 +21,16 @@ impl State {
             Self::Demo => "demo",
             Self::ErrorThread => "error-thread",
             Self::EditProfile => "edit-profile",
+            Self::ThemeSettings => "theme-settings",
         }
     }
 
     pub fn build(self, root: &std::path::Path) -> WorkbenchState<DemoSource> {
         let mut state = match self {
-            Self::Empty => WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
-                .expect("empty state builds"),
+            Self::Empty | Self::ThemeSettings => {
+                WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+                    .expect("empty state builds")
+            }
             Self::Demo | Self::ErrorThread | Self::EditProfile => populate(
                 WorkbenchState::new(DemoSource(demo_runs()), &UiSettings::default())
                     .expect("demo state builds"),
@@ -43,6 +47,7 @@ impl State {
                 state.provider_settings_mut().open = true;
                 state.provider_settings_mut().edit("local");
             }
+            Self::ThemeSettings => state.open_theme_settings(),
         }
         state
     }

@@ -1,6 +1,6 @@
 use crate::model::provider_settings::{ModelsFetchState, OpenAiEditorModel};
-use crate::theme::text::{h3, muted};
-use crate::theme::tokens::{ERROR_FG, INPUT};
+use crate::theme::text::{badge, muted};
+use crate::theme::tokens::palette;
 use crate::theme::widgets::primary_button;
 
 #[derive(Clone, Default)]
@@ -19,7 +19,7 @@ pub fn provider_models(
     let top = ui.cursor().top();
     let state_id = ui.id().with("provider-model-inputs");
     let mut inputs = ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
-    ui.label(h3("Configured models"));
+    ui.label(badge("Configured models"));
     ui.push_id("configured-models", |ui| {
         let mut remove = None;
         for index in 0..editor.models.len() {
@@ -48,7 +48,7 @@ pub fn provider_models(
                             let edit = ui.add(
                                 egui::TextEdit::singleline(draft)
                                     .desired_width((ui.available_width() - 130.0).max(40.0))
-                                    .background_color(INPUT),
+                                    .background_color(palette().INPUT),
                             );
                             edit.widget_info(|| {
                                 egui::WidgetInfo::labeled(
@@ -106,7 +106,7 @@ pub fn provider_models(
                         remove = Some(index);
                     }
                 });
-                ui.collapsing(format!("Metadata: {id}"), |ui| {
+                ui.collapsing(badge(format!("Metadata: {id}")), |ui| {
                     super::model_metadata::model_metadata(ui, &mut editor.models[index], sources);
                 });
                 ui.horizontal_wrapped(|ui| {
@@ -127,7 +127,7 @@ pub fn provider_models(
             .add(
                 egui::TextEdit::singleline(&mut inputs.add)
                     .desired_width((ui.available_width() - 60.0).max(40.0))
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
         let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -142,10 +142,10 @@ pub fn provider_models(
         }
     });
     if let Some(error) = &inputs.error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
     if let Some(error) = &editor.validation_error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
     let refresh = fetch_models(ui, editor);
     let height = ui.cursor().top() - top;
@@ -160,7 +160,7 @@ pub fn provider_models(
 fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
     let mut refresh = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label("Fetch models");
+        ui.label(badge("Fetch models"));
         refresh = ui.button("Refresh models").clicked();
         match &editor.models_fetch_state {
             ModelsFetchState::Idle => {}
@@ -176,14 +176,14 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
             }
             ModelsFetchState::Failed(error) => {
                 ui.colored_label(
-                    ERROR_FG,
+                    palette().ERROR_FG,
                     format!("Auto-fetch failed ({error}); manual entry below"),
                 );
             }
         }
     });
     if editor.models_fetch_state == ModelsFetchState::Loaded {
-        ui.label(h3("Fetched models"));
+        ui.label(badge("Fetched models"));
         let mut toggled = None;
         egui::ScrollArea::vertical()
             .id_salt("fetched-models")

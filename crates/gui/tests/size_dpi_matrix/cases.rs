@@ -1,4 +1,5 @@
 use gui::headless::HeadlessWorkbench;
+use gui::theme::style::ThemePreset;
 
 use super::{geometry::Geometry, states::State};
 
@@ -6,6 +7,10 @@ pub const SIZES: [[u16; 2]; 4] = [[1280, 720], [1024, 768], [1920, 720], [960, 6
 const DPIS: [f32; 3] = [1.0, 1.5, 2.0];
 
 pub fn verify(state: State) {
+    verify_with_theme(state, ThemePreset::Graphite);
+}
+
+pub fn verify_with_theme(state: State, theme: ThemePreset) {
     let mut failures = Vec::new();
     for [width, height] in SIZES {
         for dpi in DPIS {
@@ -15,6 +20,7 @@ pub fn verify(state: State) {
                 [f32::from(width), f32::from(height)],
                 dpi,
             );
+            workbench.reload_theme(theme);
             workbench.run();
             let mut geometry = Geometry {
                 workbench: &mut workbench,
@@ -57,7 +63,7 @@ pub fn verify(state: State) {
                             geometry.reachable("Error");
                         }
                         State::Demo => {}
-                        State::Empty | State::EditProfile => unreachable!(),
+                        State::Empty | State::EditProfile | State::ThemeSettings => unreachable!(),
                     }
                     geometry.sidebar("intent-cli");
                     if geometry.workbench.count_labels("intent-cli") == 1 {
@@ -67,6 +73,17 @@ pub fn verify(state: State) {
                     geometry.sidebar("Queue seed CLI");
                 }
                 State::EditProfile => geometry.modal(),
+                State::ThemeSettings => {
+                    for label in [
+                        "Theme settings",
+                        "Graphite",
+                        "Tokyo Night",
+                        "High Contrast",
+                        "Close",
+                    ] {
+                        geometry.reachable(label);
+                    }
+                }
             }
         }
     }

@@ -18,7 +18,7 @@ impl ArenaPane {
         };
         let refresh = ui
             .horizontal_wrapped(|ui| {
-                ui.heading("Role evaluation arena");
+                ui.label(crate::theme::text::h3("Role evaluation arena"));
                 ui.button("Refresh").clicked()
             })
             .inner;
@@ -54,7 +54,7 @@ impl ArenaPane {
         ));
         ui.label("Active routing is unchanged.");
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::ERROR_FG, error);
+            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
         if self.reports.is_empty() {
             ui.label("No evaluation traces for this project.");
@@ -76,7 +76,7 @@ impl ArenaPane {
                                 "Time (ms)",
                                 "Routing candidate",
                             ] {
-                                ui.strong(title);
+                                ui.label(crate::theme::text::badge(title).strong());
                             }
                             ui.end_row();
                             for trace in report.traces() {
@@ -103,15 +103,18 @@ impl ArenaPane {
                                 ui.end_row();
                             }
                         });
-                        ui.collapsing("Task and output evidence", |ui| {
-                            if let Some(trace) = report.traces().first() {
-                                ui.label(&trace.task_spec);
-                            }
-                            for trace in report.traces() {
-                                ui.monospace(&trace.config_id);
-                                ui.label(&trace.output);
-                            }
-                        });
+                        ui.collapsing(
+                            crate::theme::text::badge("Task and output evidence"),
+                            |ui| {
+                                if let Some(trace) = report.traces().first() {
+                                    ui.label(&trace.task_spec);
+                                }
+                                for trace in report.traces() {
+                                    ui.monospace(&trace.config_id);
+                                    ui.label(&trace.output);
+                                }
+                            },
+                        );
                     });
                 }
             });

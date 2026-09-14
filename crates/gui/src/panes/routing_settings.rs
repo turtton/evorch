@@ -17,8 +17,8 @@ pub fn routing_settings_modal(
     let mut action = None;
     let busy = model.is_saving();
     egui::Modal::new(egui::Id::new("routing-settings"))
-        .backdrop_color(OVERLAY)
-        .frame(surface_frame(SURFACE_RAISED))
+.backdrop_color(palette().OVERLAY)
+.frame(surface_frame(palette().SURFACE_RAISED))
         .show(ctx, |ui| {
             ui.set_width((ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
@@ -31,7 +31,7 @@ pub fn routing_settings_modal(
                     .show(ui, |ui| route_list(ui, model));
             });
             if let Some(error) = &model.validation_error {
-                ui.colored_label(ERROR_FG, error);
+ui.colored_label(palette().ERROR_FG, error);
             }
             if busy {
                 ui.label(muted("Saving and reloading runtime..."));
@@ -63,7 +63,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
             ui.add(
                 egui::TextEdit::singleline(draft)
                     .desired_width(ui.available_width())
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
             if ui.button("Remove route").clicked() {
@@ -135,7 +135,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
     ui.add(
         egui::TextEdit::singleline(&mut model.new_route_name)
             .desired_width(ui.available_width())
-            .background_color(INPUT),
+            .background_color(palette().INPUT),
     )
     .labelled_by(label.id);
     if ui.button("Add route").clicked() {
@@ -189,7 +189,7 @@ fn candidate_picker(
         .add(
             egui::TextEdit::singleline(&mut text)
                 .desired_width(ui.available_width())
-                .background_color(INPUT)
+                .background_color(palette().INPUT)
                 .hint_text("(profile default)"),
         )
         .labelled_by(label.id)

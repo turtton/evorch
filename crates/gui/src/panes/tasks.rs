@@ -2,7 +2,7 @@
 
 use crate::model::tasks::{AgentRunSource, TasksModel};
 use crate::theme::text::muted;
-use crate::theme::tokens::{SP_1, TEXT, agent_phase_color};
+use crate::theme::tokens::{SP_1, agent_phase_color, palette};
 use crate::theme::widgets::status_dot;
 
 /// タスク一覧を Grid で描画します。
@@ -19,14 +19,14 @@ pub fn tasks_pane<S: AgentRunSource>(ui: &mut egui::Ui, model: &TasksModel<S>) {
                 ui.end_row();
 
                 for row in model.rows() {
-                    ui.label(egui::RichText::new(&row.name).color(TEXT));
-                    ui.label(egui::RichText::new(row.run_id.to_string()).color(TEXT));
-                    ui.label(egui::RichText::new(&row.role).color(TEXT));
+                    ui.label(egui::RichText::new(&row.name).color(palette().TEXT));
+                    ui.label(egui::RichText::new(row.run_id.to_string()).color(palette().TEXT));
+                    ui.label(egui::RichText::new(&row.role).color(palette().TEXT));
                     ui.horizontal(|ui| {
                         status_dot(ui, agent_phase_color(row.status));
                         ui.label(format!("{:?}", row.status));
                     });
-                    ui.label(egui::RichText::new(&row.model).color(TEXT));
+                    ui.label(egui::RichText::new(&row.model).color(palette().TEXT));
                     ui.end_row();
                 }
             });
@@ -66,7 +66,7 @@ pub fn dependencies_pane(ui: &mut egui::Ui, config: &storage::StorageConfig) {
                 });
         }
         Err(error) => {
-            ui.colored_label(crate::theme::tokens::ERROR_FG, error.to_string());
+            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error.to_string());
         }
     }
 }

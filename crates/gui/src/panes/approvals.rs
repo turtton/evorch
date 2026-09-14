@@ -1,7 +1,7 @@
 use egui::{RichText, Ui};
 
 use crate::model::{pending_approvals::PendingApprovalsModel, scoped_call::parse_scoped_call_id};
-use crate::theme::tokens::{FONT_MONO, INFO, R_SM, SP_2, STATUS_STROKE, TEXT, TEXT_MUTED};
+use crate::theme::tokens::{FONT_MONO, R_SM, SP_2, STATUS_STROKE, palette};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApprovalsAction {
@@ -13,18 +13,22 @@ pub fn approvals_pane(ui: &mut Ui, model: &PendingApprovalsModel) -> Option<Appr
     egui::ScrollArea::vertical().show(ui, |ui| {
         let mut items = model.items().peekable();
         if items.peek().is_none() {
-            ui.label(RichText::new("保留中の承認要求はありません").color(TEXT_MUTED));
+            ui.label(RichText::new("保留中の承認要求はありません").color(palette().TEXT_MUTED));
         }
         for item in items {
             ui.push_id(&item.call_id, |ui| {
                 egui::Frame::new()
-                    .stroke(egui::Stroke::new(STATUS_STROKE, INFO))
+                    .stroke(egui::Stroke::new(STATUS_STROKE, palette().INFO))
                     .corner_radius(R_SM)
                     .inner_margin(SP_2)
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(&item.tool_name).strong().color(TEXT))
-                                .wrap(),
+                            egui::Label::new(
+                                RichText::new(&item.tool_name)
+                                    .strong()
+                                    .color(palette().TEXT),
+                            )
+                            .wrap(),
                         );
                         let original = parse_scoped_call_id(&item.call_id)
                             .map(|(_, call, _)| call)
@@ -44,7 +48,7 @@ pub fn approvals_pane(ui: &mut Ui, model: &PendingApprovalsModel) -> Option<Appr
                                 RichText::new(correlation)
                                     .monospace()
                                     .size(FONT_MONO)
-                                    .color(TEXT_MUTED),
+                                    .color(palette().TEXT_MUTED),
                             )
                             .wrap(),
                         )
@@ -61,7 +65,10 @@ pub fn approvals_pane(ui: &mut Ui, model: &PendingApprovalsModel) -> Option<Appr
                             }
                             None => "引数情報なし".into(),
                         };
-                        ui.add(egui::Label::new(RichText::new(summary).color(TEXT_MUTED)).wrap());
+                        ui.add(
+                            egui::Label::new(RichText::new(summary).color(palette().TEXT_MUTED))
+                                .wrap(),
+                        );
                         ui.horizontal_wrapped(|ui| {
                             for (label, approved) in [("Approve", true), ("Reject", false)] {
                                 if ui.button(label).clicked() {

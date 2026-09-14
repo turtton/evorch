@@ -112,7 +112,7 @@ fn header_strip(
     if identity.is_none() && ctx.active_thread_title.is_none() {
         return;
     }
-    surface_frame(SURFACE).show(ui, |ui| {
+    surface_frame(palette().SURFACE).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
             if let Some(identity) = identity {
@@ -124,7 +124,7 @@ fn header_strip(
                     (None, Some(role)) => format!("{} / {role}", identity.run_id),
                     (None, None) => identity.run_id.to_owned(),
                 };
-                ui.label(egui::RichText::new(label).color(TEXT));
+                ui.label(h3(label));
                 if ui.button("← Thread").clicked() {
                     *action = Some(AgentPaneAction::Agents(AgentsAction::ReturnToThread));
                 }
@@ -209,9 +209,9 @@ fn run_detail_body(
                         return;
                     }
                     let foreground = match entry {
-                        TranscriptEntry::Error { .. } => ERROR_FG,
-                        TranscriptEntry::Reasoning { .. } => TEXT_MUTED,
-                        _ => TEXT,
+                        TranscriptEntry::Error { .. } => palette().ERROR_FG,
+                        TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
+                        _ => palette().TEXT,
                     };
                     ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
                 });
@@ -224,15 +224,15 @@ fn run_detail_body(
 
 fn entry_accent(entry: &TranscriptEntry) -> Color32 {
     match entry {
-        TranscriptEntry::Error { .. } => ERROR_FG,
-        TranscriptEntry::UserMessage { .. } => TEXT,
-        TranscriptEntry::Notice { .. } | TranscriptEntry::Compaction { .. } => TEXT_MUTED,
-        TranscriptEntry::Message { .. } => ACCENT,
-        TranscriptEntry::Reasoning { .. } => TEXT_MUTED,
-        TranscriptEntry::Tool { .. } => INFO,
+        TranscriptEntry::Error { .. } => palette().ERROR_FG,
+        TranscriptEntry::UserMessage { .. } => palette().TEXT,
+        TranscriptEntry::Notice { .. } | TranscriptEntry::Compaction { .. } => palette().TEXT_MUTED,
+        TranscriptEntry::Message { .. } => palette().ACCENT,
+        TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
+        TranscriptEntry::Tool { .. } => palette().INFO,
         TranscriptEntry::AgentMessage { direction, .. } => match direction {
-            MessageDirection::Incoming => SUCCESS,
-            MessageDirection::Outgoing => WARNING_FG,
+            MessageDirection::Incoming => palette().SUCCESS,
+            MessageDirection::Outgoing => palette().WARNING_FG,
         },
     }
 }

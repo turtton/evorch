@@ -1,3 +1,4 @@
+// allow: SIZE_OK - Keep the existing capture parser and its private BDD tests together; T3 adds only one capture mode.
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
@@ -6,6 +7,7 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, demo_error_events, demo_runs, demo_sidebar, populate};
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ProviderStatus;
+use gui::theme::style::ThemePreset;
 use workspace_ui::UiSettings;
 
 const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
@@ -18,11 +20,13 @@ struct CaptureArgs {
     pending_approvals: bool,
     provider_configured: bool,
     open_settings: bool,
+    open_theme_settings: bool,
     edit_profile: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
     size: (u32, u32),
     dpi: f32,
+    theme: ThemePreset,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +37,8 @@ enum CaptureArgumentError {
     SizeDimensions,
     #[error("--dpi requires a positive number")]
     Dpi,
+    #[error("--theme requires graphite or tokyo-night")]
+    Theme,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -68,6 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.provider_settings_mut().edit("local");
         }
     }
+    if capture.open_theme_settings {
+        state.open_theme_settings();
+    }
     if let Some(dir) = demo_dir.as_ref() {
         state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
     }
@@ -98,6 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         [capture.size.0 as f32, capture.size.1 as f32],
         capture.dpi,
     );
+    workbench.reload_theme(capture.theme);
     workbench.run();
     if let Some((x, y)) = capture.pointer {
         workbench.pointer_move(egui::pos2(x, y));
@@ -119,13 +129,26 @@ fn parse_args(
     let mut pending_approvals = false;
     let mut provider_configured = false;
     let mut open_settings = false;
+    let mut open_theme_settings = false;
     let mut edit_profile = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
     let mut size: Option<(u32, u32)> = None;
     let mut dpi: Option<f32> = None;
+    let mut theme = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
+            Some("--theme") => {
+                if theme.is_some() {
+                    return Err(CaptureArgumentError::Theme.into());
+                }
+                let value = arguments.next().ok_or(CaptureArgumentError::Theme)?;
+                theme = Some(match value.to_str() {
+                    Some("graphite") => ThemePreset::Graphite,
+                    Some("tokyo-night") => ThemePreset::TokyoNight,
+                    _ => return Err(CaptureArgumentError::Theme.into()),
+                });
+            }
             Some("--out") => {
                 let path = arguments.next().ok_or("--out requires an output path")?;
                 output = Some(PathBuf::from(path));
@@ -209,6 +232,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--open-settings") => open_settings = true,
+            Some("--open-theme-settings") if open_theme_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-theme-settings") => open_theme_settings = true,
             Some("--edit-profile") => {
                 open_settings = true;
                 edit_profile = true;
@@ -237,11 +264,13 @@ fn parse_args(
         pending_approvals,
         provider_configured,
         open_settings,
+        open_theme_settings,
         edit_profile,
         activate,
         pointer,
         size: size.unwrap_or((1280, 720)),
         dpi: dpi.unwrap_or(1.0),
+        theme: theme.unwrap_or(ThemePreset::Graphite),
     })
 }
 
@@ -252,12 +281,14 @@ fn print_help() {
 Captures a headless workbench frame as PNG.
 
 Modes:
+   --theme NAME   graphite (default) or tokyo-night
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --pending-approvals  with --demo: show two requests in Approvals (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  show the registered demo profile list
+   --open-theme-settings  show the theme picker
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
@@ -283,6 +314,45 @@ CI:    the headless-capture job runs the same command with WGPU_BACKEND=vulkan.
 // allow: SIZE_OK — private CLI parser の既存BDDテストを同一ファイルに維持するため。
 mod tests {
     use super::{DEFAULT_OUTPUT, parse_args};
+
+    #[test]
+    fn parse_args_selects_theme() {
+        // Given: each supported theme name; When: parsing; Then: select its preset.
+        for (name, expected) in [
+            ("graphite", gui::theme::style::ThemePreset::Graphite),
+            ("tokyo-night", gui::theme::style::ThemePreset::TokyoNight),
+        ] {
+            assert_eq!(parse_args(args(["--theme", name])).unwrap().theme, expected);
+        }
+        assert_eq!(
+            parse_args(args([])).unwrap().theme,
+            gui::theme::style::ThemePreset::Graphite
+        );
+    }
+
+    #[test]
+    fn parse_args_opens_theme_settings_with_tokyo_night() {
+        // Given: the theme picker capture mode and existing theme flag.
+        let arguments = args(["--open-theme-settings", "--theme", "tokyo-night"]);
+        // When: the capture arguments are parsed.
+        let capture = parse_args(arguments).unwrap();
+        // Then: the picker opens with the requested theme, not provider settings.
+        assert!(capture.open_theme_settings);
+        assert!(!capture.open_settings);
+        assert_eq!(capture.theme, gui::theme::style::ThemePreset::TokyoNight);
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_theme() {
+        // Given: missing, unknown or duplicate themes; When: parsing; Then: reject.
+        for values in [
+            vec!["--theme"],
+            vec!["--theme", "moon"],
+            vec!["--theme", "graphite", "--theme", "tokyo-night"],
+        ] {
+            assert!(parse_args(values.into_iter().map(std::ffi::OsString::from)).is_err());
+        }
+    }
 
     #[test]
     fn parse_args_accepts_pending_approvals_with_demo() -> Result<(), Box<dyn std::error::Error>> {

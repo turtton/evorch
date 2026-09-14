@@ -63,7 +63,7 @@ impl MemoryPane {
             }
         }
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::ERROR_FG, error);
+            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
         ui.label(crate::theme::text::muted(format!(
             "{} lessons (up to 100)",
@@ -82,7 +82,7 @@ impl MemoryPane {
                             ui.label(entry.status.as_str());
                         });
                         ui.label(&entry.lesson.content);
-                        ui.collapsing("Evidence", |ui| {
+                        ui.collapsing(crate::theme::text::badge("Evidence"), |ui| {
                             ui.label(&entry.lesson.evidence);
                             ui.monospace(&entry.lesson.task_id);
                         });

@@ -9,7 +9,7 @@ use workspace_ui::{PanelId, PanelKind, ThreadRunPhase};
 
 use super::WorkbenchState;
 use crate::model::tasks::{AgentRunSource, TaskRow};
-use crate::theme::tokens::{ERROR_FG, INFO};
+use crate::theme::tokens::palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PaneAttention {
@@ -19,11 +19,11 @@ pub(super) enum PaneAttention {
 }
 
 impl PaneAttention {
-    pub(super) const fn color(self) -> Option<Color32> {
+    pub(super) fn color(self) -> Option<Color32> {
         match self {
             PaneAttention::None => None,
-            PaneAttention::Info => Some(INFO),
-            PaneAttention::Error => Some(ERROR_FG),
+            PaneAttention::Info => Some(palette().INFO),
+            PaneAttention::Error => Some(palette().ERROR_FG),
         }
     }
 }
@@ -204,7 +204,7 @@ mod tests {
             attention_for(PanelKind::AgentTranscript, Some("run-1"), &inputs),
             PaneAttention::Info
         );
-        assert_eq!(PaneAttention::Info.color(), Some(INFO));
+        assert_eq!(PaneAttention::Info.color(), Some(palette().INFO));
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
             attention_for(PanelKind::AgentTranscript, Some("run-1"), &inputs),
             PaneAttention::Error
         );
-        assert_eq!(PaneAttention::Error.color(), Some(ERROR_FG));
+        assert_eq!(PaneAttention::Error.color(), Some(palette().ERROR_FG));
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
                 "{kind:?}"
             );
         }
-        assert_eq!(PaneAttention::Info.color(), Some(INFO));
+        assert_eq!(PaneAttention::Info.color(), Some(palette().INFO));
     }
 
     #[test]

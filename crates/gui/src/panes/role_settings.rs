@@ -1,6 +1,6 @@
 use crate::model::role_settings::{CATEGORIES, RoleSettingsModel};
 use crate::theme::{
-    text::{h3, muted},
+    text::{badge, h3, muted},
     tokens::*,
     widgets::{primary_button, surface_frame},
 };
@@ -17,8 +17,8 @@ pub fn role_settings_modal(
     let mut action = None;
     let busy = model.is_saving();
     egui::Modal::new(egui::Id::new("role-settings"))
-        .backdrop_color(OVERLAY)
-        .frame(surface_frame(SURFACE_RAISED))
+        .backdrop_color(palette().OVERLAY)
+        .frame(surface_frame(palette().SURFACE_RAISED))
         .show(ctx, |ui| {
             ui.set_width(
                 (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
@@ -45,19 +45,19 @@ pub fn role_settings_modal(
                             ("Multimodal Looker", &mut agents.roles.multimodal_looker),
                         ] {
                             ui.push_id(name, |ui| {
-                                ui.collapsing(name, |ui| {
+                                ui.collapsing(badge(name), |ui| {
                                     model_picker(
                                         ui,
                                         &mut binding.logical_model,
                                         (&model.logical_models, "Role logical model"),
                                     );
                                     optional_text(ui, "Preset reference", &mut binding.preset);
-                                    ui.collapsing("Generation overrides", |ui| {
+                                    ui.collapsing(badge("Generation overrides"), |ui| {
                                         generation(ui, &mut binding.generation)
                                     });
                                     ui.label(muted("Category overrides"));
                                     for category in CATEGORIES {
-                                        ui.collapsing(category, |ui| {
+                                        ui.collapsing(badge(category), |ui| {
                                             let mut draft = binding
                                                 .categories
                                                 .get(category)
@@ -93,7 +93,7 @@ pub fn role_settings_modal(
                     });
             });
             if let Some(error) = &model.error {
-                ui.colored_label(ERROR_FG, error);
+                ui.colored_label(palette().ERROR_FG, error);
             }
             if busy {
                 ui.label(muted("Saving and reloading runtime..."));
@@ -134,7 +134,7 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
         .add(
             egui::TextEdit::singleline(&mut text)
                 .desired_width(ui.available_width())
-                .background_color(INPUT)
+                .background_color(palette().INPUT)
                 .hint_text("Inherit default"),
         )
         .labelled_by(label.id)

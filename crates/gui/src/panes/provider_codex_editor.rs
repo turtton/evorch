@@ -1,7 +1,7 @@
 use super::ProviderSettingsAction;
 use crate::model::provider_settings::{CodexEditorModel, ModelsFetchState};
-use crate::theme::text::{h3, muted};
-use crate::theme::tokens::{ERROR_FG, INPUT};
+use crate::theme::text::{badge, muted};
+use crate::theme::tokens::palette;
 use crate::theme::widgets::primary_button;
 
 #[derive(Clone, Default)]
@@ -18,13 +18,13 @@ pub(super) fn codex_body(
     ui.add_enabled_ui(!busy, |ui| {
         let previous = editor.name.clone();
         let name = ui.label("Name");
-        ui.add(egui::TextEdit::singleline(&mut editor.name).background_color(INPUT))
+        ui.add(egui::TextEdit::singleline(&mut editor.name).background_color(palette().INPUT))
             .labelled_by(name.id);
         if editor.account == previous {
             editor.account.clone_from(&editor.name);
         }
         let account = ui.label("Account");
-        ui.add(egui::TextEdit::singleline(&mut editor.account).background_color(INPUT))
+        ui.add(egui::TextEdit::singleline(&mut editor.account).background_color(palette().INPUT))
             .labelled_by(account.id);
     });
     let login = crate::panes::codex_auth::codex_auth_section(ui, &editor.auth);
@@ -36,7 +36,7 @@ pub(super) fn codex_body(
         let state_id = ui.id().with("codex-model-inputs");
         let mut inputs =
             ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
-        ui.label(h3("Configured models"));
+        ui.label(badge("Configured models"));
         let mut remove = None;
         for (index, id) in editor.models.iter().enumerate() {
             ui.push_id(id, |ui| {
@@ -72,7 +72,7 @@ pub(super) fn codex_body(
             ui.add(
                 egui::TextEdit::singleline(&mut inputs.add)
                     .desired_width((ui.available_width() - 60.0).max(40.0))
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
             if ui.button("Add").clicked() {
@@ -92,7 +92,7 @@ pub(super) fn codex_body(
             }
         });
         if let Some(error) = &inputs.error {
-            ui.colored_label(ERROR_FG, error);
+            ui.colored_label(palette().ERROR_FG, error);
         }
         let label = ui.label("Default model");
         egui::ComboBox::from_id_salt("codex-default-model")
@@ -116,7 +116,7 @@ pub(super) fn codex_body(
 fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
     let mut refresh = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label("Fetch models");
+        ui.label(badge("Fetch models"));
         refresh = ui
             .add_enabled(
                 editor.fetch.models_rx.is_none(),
@@ -139,14 +139,14 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
             }
             ModelsFetchState::Failed(error) => {
                 ui.colored_label(
-                    ERROR_FG,
+                    palette().ERROR_FG,
                     format!("Auto-fetch failed ({error}); configured models are unchanged"),
                 );
             }
         }
     });
     if editor.fetch.models_fetch_state == ModelsFetchState::Loaded {
-        ui.label(h3("Fetched models"));
+        ui.label(badge("Fetched models"));
         egui::ScrollArea::vertical()
             .id_salt("codex-fetched-models")
             .max_height(200.0)

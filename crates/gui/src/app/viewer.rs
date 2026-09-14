@@ -16,6 +16,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll_role_save();
         ui.menu_button("Workbench settings", |ui| {
+            if ui.button("Theme").clicked() {
+                self.open_theme_settings();
+                ui.close();
+            }
             if ui.button("Providers").clicked() {
                 self.open_provider_settings();
                 ui.close();
@@ -138,6 +142,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        self.render_theme_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase, TrustState};
 
-use crate::theme::tokens::SIDEBAR;
+use crate::theme::tokens::palette;
 use crate::theme::widgets::{pane_root, surface_frame};
 
 mod projects;
@@ -44,7 +44,7 @@ pub fn sidebar_pane(
     let mut action = None;
 
     pane_root(ui, "Projects", |ui| {
-        surface_frame(SIDEBAR).show(ui, |ui| {
+        surface_frame(palette().SIDEBAR).show(ui, |ui| {
             let selected = selected_project(sidebar);
             projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
             if let Some(project) = selected {

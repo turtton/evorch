@@ -23,11 +23,11 @@ pub fn surface_frame(fill: Color32) -> Frame {
         .fill(fill)
         .inner_margin(Margin::same(SP_3 as i8))
         .corner_radius(CornerRadius::same(R_MD))
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0, palette().BORDER))
 }
 
 pub fn card(ui: &mut Ui, accent: Color32, add: impl FnOnce(&mut Ui)) {
-    surface_frame(SURFACE).show(ui, |ui| {
+    surface_frame(palette().SURFACE).show(ui, |ui| {
         let left_top = ui.available_rect_before_wrap().left_top();
         let content = Frame::new()
             .inner_margin(Margin {
@@ -61,8 +61,8 @@ pub fn badge(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32) -> 
 
 pub fn primary_button(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(
-        Button::new(RichText::new(text).color(ACCENT_FG))
-            .fill(ACCENT)
+        Button::new(RichText::new(text).color(palette().ACCENT_FG))
+            .fill(palette().ACCENT)
             .corner_radius(CornerRadius::same(R_SM)),
     )
 }
@@ -85,7 +85,7 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str, cta: Option<&str>) -> b
 
 pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> R) -> Response {
     let fill = if selected {
-        SELECTED_ROW
+        palette().ACTIVE_ROW
     } else {
         ui.visuals().faint_bg_color
     };
@@ -109,7 +109,7 @@ pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> 
             .response
     };
     if response.hovered() && !selected {
-        prepared.frame.fill = HOVER_ROW;
+        prepared.frame.fill = palette().HOVER_ROW;
     }
     prepared.end(ui)
 }

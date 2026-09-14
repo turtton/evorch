@@ -6,7 +6,7 @@ use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::tasks::AgentRunSource;
 use runtime::{AgentSummary, RunId};
-use workspace_ui::{LayoutNode, PanelId, UiSettings, Workspace};
+use workspace_ui::{LayoutNode, PanelId, Split, SplitDirection, Tabs, UiSettings, Workspace};
 
 #[derive(Clone)]
 struct Source(Vec<AgentSummary>);
@@ -17,39 +17,57 @@ impl AgentRunSource for Source {
     }
 }
 
-fn leaf_panels(node: &LayoutNode, leaves: &mut Vec<Vec<PanelId>>) {
-    match node {
-        LayoutNode::Split(split) => {
-            leaf_panels(&split.first, leaves);
-            leaf_panels(&split.second, leaves);
-        }
-        LayoutNode::Tabs(tabs) => leaves.push(tabs.panels.clone()),
-    }
+fn assert_content_layout(root: &LayoutNode, approvals: bool) {
+    let LayoutNode::Split(root) = root else {
+        panic!("sidebar split")
+    };
+    assert_eq!(root.direction, SplitDirection::Horizontal);
+    let LayoutNode::Split(content) = root.second.as_ref() else {
+        panic!("content split")
+    };
+    assert_eq!(content.direction, SplitDirection::Horizontal);
+    assert_eq!(content.fraction, 0.625);
+    let tabs = |ids: &[&str]| {
+        LayoutNode::Tabs(Tabs {
+            panels: ids.iter().map(|id| PanelId::new(*id)).collect(),
+            active: 0,
+        })
+    };
+    assert_eq!(*root.first, tabs(&["sidebar-main"]));
+    assert_eq!(
+        *content.first,
+        LayoutNode::Split(Split {
+            direction: SplitDirection::Vertical,
+            fraction: 0.7,
+            first: Box::new(tabs(&["agent-main"])),
+            second: Box::new(tabs(&["terminal-main"])),
+        })
+    );
+    let right_tabs: &[&str] = if approvals {
+        &["agents-main", "notifications-main", "approvals-main"]
+    } else {
+        &["agents-main", "notifications-main"]
+    };
+    assert_eq!(
+        *content.second,
+        LayoutNode::Split(Split {
+            direction: SplitDirection::Vertical,
+            fraction: 0.5,
+            first: Box::new(tabs(right_tabs)),
+            second: Box::new(tabs(&["diff-main"])),
+        })
+    );
 }
 
 #[test]
-fn default_layout_is_sidebar_center_right_tabs() {
+fn default_layout_has_bottom_terminal_and_split_right_pane() {
     // Given: the default v0.2 workspace
     let workspace = Workspace::default();
-    let mut leaves = Vec::new();
-
-    // When: its dock leaves are collected from left to right
-    leaf_panels(&workspace.main.root, &mut leaves);
-
-    // Then: sidebar, conversation, and workbench tabs occupy the three leaves
-    assert_eq!(
-        leaves,
-        vec![
-            vec![PanelId::new("sidebar-main")],
-            vec![PanelId::new("agent-main")],
-            vec![
-                PanelId::new("agents-main"),
-                PanelId::new("diff-main"),
-                PanelId::new("terminal-main"),
-                PanelId::new("notifications-main"),
-            ],
-        ]
-    );
+    // When: the actual egui_dock tree is built and extracted
+    let dock = gui::dock::to_dock_state(&workspace).expect("dock");
+    let extracted = gui::dock::from_dock_state(&dock, &workspace.panels).expect("workspace");
+    // Then: Terminal is below Conversation and Diff is below Agents/Notifications
+    assert_content_layout(&extracted.main.root, false);
 }
 
 #[test]
@@ -85,7 +103,7 @@ fn reset_layout_restores_v02_default() {
     // Given: a workbench whose terminal tab has been undocked
     let state =
         WorkbenchState::new(Source(Vec::new()), &UiSettings::default()).expect("build workbench");
-    let mut workbench = HeadlessWorkbench::new(state, [800.0, 600.0]);
+    let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
     let terminal = PanelId::new("terminal-main");
     let path = workbench
@@ -102,7 +120,22 @@ fn reset_layout_restores_v02_default() {
     workbench.key_press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
     workbench.run();
 
-    // Then: all default v0.2 panels are back on the main surface
+    // Then: reset restores the new splits, proportions and active tabs
+    let mut panels = Workspace::default().panels;
+    let id = PanelId::new("approvals-main");
+    panels.insert(
+        id.clone(),
+        workspace_ui::Panel {
+            id,
+            kind: workspace_ui::PanelKind::Approvals,
+            title: "Approvals".into(),
+            target: None,
+        },
+    );
+    let extracted =
+        gui::dock::from_dock_state(workbench.state().dock(), &panels).expect("reset workspace");
+    assert_content_layout(&extracted.main.root, true);
+    // And: all default v0.2 panels are back on the main surface
     for id in [
         "sidebar-main",
         "agent-main",

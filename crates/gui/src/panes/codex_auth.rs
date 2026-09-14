@@ -6,7 +6,7 @@ use crate::model::codex_auth::{
     CodexAuthState, format_expiry,
 };
 use crate::theme::text::{h4, muted};
-use crate::theme::tokens::{ERROR_FG, FONT_SMALL, SUCCESS};
+use crate::theme::tokens::{FONT_SMALL, palette};
 
 pub const CODEX_LOGIN_FAILED_NETWORK: &str =
     "Codex login failed: network unavailable. Please retry.";
@@ -32,7 +32,7 @@ pub fn codex_auth_section(ui: &mut egui::Ui, model: &CodexAuthModel) -> bool {
             ui.hyperlink_to("Open the sign-in page again", &prompt.authorize_url);
         }
         CodexAuthState::Authenticated { expires_at_unix } => {
-            ui.label(RichText::new(CODEX_AUTHENTICATED_LABEL).color(SUCCESS));
+            ui.label(RichText::new(CODEX_AUTHENTICATED_LABEL).color(palette().SUCCESS));
             if let Some(expiry) = expires_at_unix {
                 ui.label(muted(format_expiry(now_unix(), *expiry)));
             }
@@ -48,7 +48,11 @@ pub fn codex_auth_section(ui: &mut egui::Ui, model: &CodexAuthModel) -> bool {
                 }
                 CodexAuthError::Timeout => "Codex browser sign-in timed out. Please retry.",
             };
-            ui.label(RichText::new(message).color(ERROR_FG).size(FONT_SMALL));
+            ui.label(
+                RichText::new(message)
+                    .color(palette().ERROR_FG)
+                    .size(FONT_SMALL),
+            );
         }
     }
     ui.label(muted(format!(

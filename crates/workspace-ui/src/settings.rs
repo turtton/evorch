@@ -8,6 +8,16 @@ use crate::{SettingsError, Workspace};
 
 pub const UI_SETTINGS_VERSION: u32 = 1;
 
+/// Framework 非依存の UI テーマプリセット名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePresetName {
+    #[default]
+    Graphite,
+    TokyoNight,
+    HighContrast,
+}
+
 /// UI 設定ファイルのルート構造。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,6 +25,8 @@ pub struct UiSettings {
     pub version: u32,
     pub layout: LayoutSettings,
     pub keybinds: KeybindSettings,
+    #[serde(default)]
+    pub theme_preset: ThemePresetName,
 }
 
 impl Default for UiSettings {
@@ -23,6 +35,7 @@ impl Default for UiSettings {
             version: UI_SETTINGS_VERSION,
             layout: LayoutSettings::default(),
             keybinds: KeybindSettings::default(),
+            theme_preset: ThemePresetName::default(),
         }
     }
 }

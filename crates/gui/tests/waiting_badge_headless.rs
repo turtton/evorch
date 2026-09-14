@@ -1,6 +1,6 @@
 use egui::{Color32, epaint::Shape};
 use egui_kittest::Harness;
-use gui::{app::WorkbenchState, theme::tokens::INFO};
+use gui::{app::WorkbenchState, theme::tokens::palette};
 use workspace_ui::ThreadRunPhase;
 
 type Workbench = WorkbenchState<runtime::AgentRuntime>;
@@ -21,7 +21,7 @@ fn unread_waiting_badge_filled_info_accent() {
             .output()
             .shapes
             .iter()
-            .any(|shape| { matches!(&shape.shape, Shape::Rect(rect) if rect.fill == INFO && rect.rect.height() < gui::theme::tokens::ROW_DENSE) })
+.any(|shape| { matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().INFO && rect.rect.height() < gui::theme::tokens::ROW_DENSE) })
     );
 }
 
@@ -40,7 +40,7 @@ fn read_waiting_badge_outline_only() {
     // Then: the pill has no fill and retains its info-blue outline.
     assert!(harness.output().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Rect(rect)
-            if rect.fill == Color32::TRANSPARENT && rect.stroke.color == INFO && rect.stroke.width > 0.0)
+if rect.fill == Color32::TRANSPARENT && rect.stroke.color == palette().INFO && rect.stroke.width > 0.0)
     }));
 }
 
@@ -115,7 +115,7 @@ fn visible_tab_stays_unread_without_outer_focus() {
             harness
                 .state()
                 .pane_attention(&workspace_ui::PanelId::new("agents-main")),
-            Some(INFO)
+            Some(palette().INFO)
         );
     }
 }
@@ -160,7 +160,7 @@ fn capture_waiting_read_unread_png_evidence() {
 
 #[test]
 fn hidden_tab_stays_unread_in_focused_window() {
-    // Given: waiting Agents hidden behind the Diff tab.
+    // Given: waiting Agents hidden behind the Notifications tab.
     let mut runs = gui::fixture::demo_runs();
     for run in &mut runs {
         run.phase = event_bus::AgentRunPhase::Waiting;
@@ -172,8 +172,8 @@ fn hidden_tab_stays_unread_in_focused_window() {
     .expect("state");
     let path = state
         .dock()
-        .find_tab(&workspace_ui::PanelId::new("diff-main"))
-        .expect("diff tab");
+        .find_tab(&workspace_ui::PanelId::new("notifications-main"))
+        .expect("notifications tab");
     state.dock_mut().set_active_tab(path).expect("activate");
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 720.0))
@@ -196,6 +196,6 @@ fn hidden_tab_stays_unread_in_focused_window() {
         harness
             .state()
             .pane_attention(&workspace_ui::PanelId::new("agents-main")),
-        Some(INFO)
+        Some(palette().INFO)
     );
 }

@@ -2,8 +2,8 @@ use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::text::muted;
-use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, TEXT, agent_phase_color};
-use crate::theme::widgets::{pane_root, status_dot};
+use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, agent_phase_color, palette};
+use crate::theme::widgets::{empty_state, pane_root, status_dot};
 use egui::{Align, Button, Label, Layout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,9 +70,18 @@ pub fn agents_pane<S: AgentRunSource>(
             ui.label(muted(format!("Quota error: {error}")));
         }
 
+        if tasks.rows().is_empty() {
+            empty_state(
+                ui,
+                "No agent runs yet",
+                "Send a message or /goal in Conversation to start an agent run.",
+                None,
+            );
+            return action;
+        }
+
         egui::ScrollArea::horizontal().show(ui, |ui| {
-            let available = ui.available_width().min(ui.clip_rect().width());
-            let widths = column_widths(ui, tasks, telemetry, available);
+            let widths = column_widths(ui, tasks, telemetry);
 
             render_header_row(ui, &widths);
             for row in tasks.rows() {
@@ -117,12 +126,11 @@ fn column_widths<S: AgentRunSource>(
     ui: &egui::Ui,
     tasks: &TasksModel<S>,
     telemetry: &TelemetryOverlay,
-    available: f32,
 ) -> Vec<f32> {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
     let text_width = |text: &str| {
         ui.painter()
-            .layout_no_wrap(text.into(), font_id.clone(), TEXT)
+            .layout_no_wrap(text.into(), font_id.clone(), palette().TEXT)
             .size()
             .x
     };
@@ -159,16 +167,16 @@ fn column_widths<S: AgentRunSource>(
         }
     }
 
-    fit_columns(&natural, SP_1, available)
+    fit_columns(&natural, SP_1, f32::INFINITY)
 }
 
 fn render_header_row(ui: &mut egui::Ui, widths: &[f32]) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
-        for (index, heading) in HEADERS.iter().enumerate() {
+        for index in [2, 4, 0, 1, 3, 5, 6, 7, 8] {
             ui.add_sized(
                 [widths[index], ROW_DENSE],
-                Label::new(muted(*heading).strong()).truncate(),
+                Label::new(muted(HEADERS[index]).strong()).truncate(),
             );
         }
     });
@@ -185,6 +193,18 @@ fn render_data_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
 
+        ui.add_sized(
+            [widths[2], ROW_DENSE],
+            Label::new(egui::RichText::new(&row.name).color(palette().TEXT)).truncate(),
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(widths[4], ROW_DENSE),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                status_dot(ui, agent_phase_color(row.status));
+                ui.add(Label::new(format!("{:?}", row.status)).truncate());
+            },
+        );
         if ui
             .add_sized([widths[0], ROW_DENSE], Button::new(&run_id).truncate())
             .clicked()
@@ -198,20 +218,8 @@ fn render_data_row(
             *action = Some(AgentsAction::OpenPane(run_id.clone()));
         }
         ui.add_sized(
-            [widths[2], ROW_DENSE],
-            Label::new(egui::RichText::new(&row.name).color(TEXT)).truncate(),
-        );
-        ui.add_sized(
             [widths[3], ROW_DENSE],
-            Label::new(egui::RichText::new(&row.role).color(TEXT)).truncate(),
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(widths[4], ROW_DENSE),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                status_dot(ui, agent_phase_color(row.status));
-                ui.add(Label::new(format!("{:?}", row.status)).truncate());
-            },
+            Label::new(egui::RichText::new(&row.role).color(palette().TEXT)).truncate(),
         );
         let model = row_telemetry
             .and_then(|value| value.model.as_deref())

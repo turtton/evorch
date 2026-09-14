@@ -11,7 +11,17 @@ fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
     // Then: surviving panels remain and the newly available notification tab is added.
     assert_eq!(ws.version, 3);
     assert_eq!(ws.panels.len(), 6);
-    assert_eq!(ws, Workspace::default_v02());
+    let mut expected = Workspace::default_v02();
+    expected.main.root = serde_json::from_value(serde_json::json!({
+        "type": "split", "direction": "horizontal", "fraction": 0.2,
+        "first": {"type": "tabs", "panels": ["sidebar-main"], "active": 0},
+        "second": {
+            "type": "split", "direction": "horizontal", "fraction": 0.625,
+            "first": {"type": "tabs", "panels": ["agent-main"], "active": 0},
+            "second": {"type": "tabs", "panels": ["agents-main", "diff-main", "terminal-main", "notifications-main"], "active": 0}
+        }
+    })).expect("frozen migrated tree");
+    assert_eq!(ws, expected);
 }
 
 #[test]

@@ -58,12 +58,14 @@ fn terminal_pane_renders_cjk_lines() {
     assert!(harness.has_label("テスト結果: 全緑"));
 }
 
-// Given: empty terminal / When: terminal tab active / Then: pane renders without error.
+// Given: no PTY or output / When: terminal tab active / Then: connection state is explicit.
 #[test]
 fn terminal_pane_renders_empty_buffer() {
     let harness = terminal_harness();
 
     assert!(harness.has_label("Projects"));
+    assert!(harness.has_label("Waiting for terminal connection"));
+    assert!(harness.has_label("Shell output will appear when a terminal session is connected."));
 }
 
 // Given: terminal with content / When: geometry check / Then: content labels are within viewport.

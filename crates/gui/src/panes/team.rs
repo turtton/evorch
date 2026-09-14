@@ -4,7 +4,7 @@ use runtime::{
 };
 
 pub fn team_pane(ui: &mut egui::Ui, teams: &[(RunId, Vec<TeamTask>)]) {
-    ui.heading("Team");
+    ui.label(crate::theme::text::h3("Team"));
     if teams.is_empty() {
         ui.label(crate::theme::text::muted(
             "Team mode is disabled or no team has started.",
@@ -17,11 +17,13 @@ pub fn team_pane(ui: &mut egui::Ui, teams: &[(RunId, Vec<TeamTask>)]) {
         .show(ui, |ui| {
             for (coordinator, tasks) in teams {
                 ui.push_id(coordinator.get(), |ui| {
-                    ui.label(format!("Coordinator {coordinator}"));
+                    ui.label(crate::theme::text::badge(format!(
+                        "Coordinator {coordinator}"
+                    )));
                     egui::Grid::new("claims").striped(true).show(ui, |ui| {
-                        ui.strong("Task");
-                        ui.strong("State");
-                        ui.strong("Owner");
+                        ui.label(crate::theme::text::badge("Task").strong());
+                        ui.label(crate::theme::text::badge("State").strong());
+                        ui.label(crate::theme::text::badge("Owner").strong());
                         ui.end_row();
                         for task in tasks {
                             ui.monospace(&task.spec.id);
