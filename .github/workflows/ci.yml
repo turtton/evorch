@@ -45,6 +45,17 @@ jobs:
           cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
           git diff --exit-code docs/config/evorch-config-v2.schema.json
 
+  # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
+  # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build flake package (runs checkPhase tests in the Nix sandbox)
+        run: nix build -L .#evorch
+
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
   offscreen-gate:
