@@ -74,11 +74,12 @@ impl Router {
     }
 
     fn is_eligible(&self, model_id: &str) -> bool {
+        let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
         self.catalog.is_available(model_id)
             && self
                 .required_capabilities
                 .iter()
-                .all(|capability| self.catalog.supports(model_id, *capability))
+                .all(|capability| self.catalog.supports(base_model_id, *capability))
     }
 
     /// 検証済みプロファイル・ルーティング設定・モデルカタログからルーターを構築します。

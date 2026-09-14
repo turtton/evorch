@@ -16,6 +16,7 @@ mod additional_roles;
 mod capabilities;
 mod live;
 mod preference;
+mod speed;
 
 #[derive(Clone)]
 struct StubClient {

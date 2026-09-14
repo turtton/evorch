@@ -273,6 +273,7 @@ impl RoutedModel {
                 (route, binding.generation)
             }
         };
+        let (base_model_id, speed) = config::types::provider::parse_model_speed(&route.model_id);
         let provider = self
             .providers
             .get(&route.profile)
@@ -282,7 +283,7 @@ impl RoutedModel {
         let tools = if self
             .router
             .catalog()
-            .supports(&route.model_id, Capability::ToolCalling)
+            .supports(base_model_id, Capability::ToolCalling)
             && provider.client.capabilities().tool_use
         {
             tools.to_vec()
@@ -290,13 +291,16 @@ impl RoutedModel {
             Vec::new()
         };
         let request = ChatRequest {
-            model: route.model_id,
+            model: base_model_id.to_owned(),
             messages: messages.to_vec(),
             tools,
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
             reasoning_effort: generation.reasoning_effort.map(map_reasoning_effort),
-            service_tier: None,
+            service_tier: match speed {
+                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
+                config::types::provider::ModelSpeed::Standard => None,
+            },
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),
