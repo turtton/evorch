@@ -8,6 +8,53 @@ use gui::theme::tokens::{DOT_SIZE, ROW_DENSE, palette};
 use gui::theme::widgets::{compact_row, status_dot};
 
 #[test]
+fn tokyo_night_renders_demo_with_dark_style() {
+    // Given: process-global palettes must not race the other Graphite harnesses.
+    const CHILD: &str = "EVORCH_TOKYO_NIGHT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tokyo_night_renders_demo_with_dark_style"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let state = gui::fixture::populate(
+        gui::app::WorkbenchState::new(
+            gui::fixture::DemoSource(gui::fixture::demo_runs()),
+            &workspace_ui::UiSettings::default(),
+        )
+        .unwrap(),
+        gui::fixture::demo_sidebar(dir.path()).unwrap(),
+    );
+    let mut harness = Harness::builder()
+        .with_size(vec2(1280.0, 720.0))
+        .build_ui_state(
+            |ui, state: &mut gui::app::WorkbenchState<gui::fixture::DemoSource>| {
+                state.reload_theme(ui.ctx(), gui::theme::style::ThemePreset::TokyoNight);
+                state.ui(ui, &mut eframe::Frame::_new_kittest());
+            },
+            state,
+        );
+    // When: the real populated workbench renders with the installed preset.
+    harness.run_steps(16);
+    // Then: it remains dark and uses Tokyo Night rather than first-frame Graphite.
+    let p = gui::theme::tokens::Palette::tokyo_night();
+    let style = harness.ctx.style_of(Theme::Dark);
+    assert!(style.visuals.dark_mode);
+    assert_eq!(style.visuals.panel_fill, p.CANVAS);
+    assert_eq!(palette(), p);
+    assert_eq!(
+        gui::theme::dock::dock_style(&style)
+            .tab_bar
+            .bg_fill,
+        p.OVERLAY
+    );
+}
+
+#[test]
 fn compact_row_is_dense_and_centers_status_dot() {
     // Given: a themed compact row containing a status dot and a single-line title
     let row_rect = std::cell::Cell::new(egui::Rect::ZERO);

@@ -6,6 +6,7 @@ use gui::app::WorkbenchState;
 use gui::fixture::{DemoSource, demo_error_events, demo_runs, demo_sidebar, populate};
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ProviderStatus;
+use gui::theme::style::ThemePreset;
 use workspace_ui::UiSettings;
 
 const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
@@ -23,6 +24,7 @@ struct CaptureArgs {
     pointer: Option<(f32, f32)>,
     size: (u32, u32),
     dpi: f32,
+    theme: ThemePreset,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +35,8 @@ enum CaptureArgumentError {
     SizeDimensions,
     #[error("--dpi requires a positive number")]
     Dpi,
+    #[error("--theme requires graphite or tokyo-night")]
+    Theme,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -98,6 +102,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         [capture.size.0 as f32, capture.size.1 as f32],
         capture.dpi,
     );
+    workbench.reload_theme(capture.theme);
     workbench.run();
     if let Some((x, y)) = capture.pointer {
         workbench.pointer_move(egui::pos2(x, y));
@@ -124,8 +129,20 @@ fn parse_args(
     let mut pointer: Option<(f32, f32)> = None;
     let mut size: Option<(u32, u32)> = None;
     let mut dpi: Option<f32> = None;
+    let mut theme = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
+            Some("--theme") => {
+                if theme.is_some() {
+                    return Err(CaptureArgumentError::Theme.into());
+                }
+                let value = arguments.next().ok_or(CaptureArgumentError::Theme)?;
+                theme = Some(match value.to_str() {
+                    Some("graphite") => ThemePreset::Graphite,
+                    Some("tokyo-night") => ThemePreset::TokyoNight,
+                    _ => return Err(CaptureArgumentError::Theme.into()),
+                });
+            }
             Some("--out") => {
                 let path = arguments.next().ok_or("--out requires an output path")?;
                 output = Some(PathBuf::from(path));
@@ -242,6 +259,7 @@ fn parse_args(
         pointer,
         size: size.unwrap_or((1280, 720)),
         dpi: dpi.unwrap_or(1.0),
+        theme: theme.unwrap_or(ThemePreset::Graphite),
     })
 }
 
@@ -252,6 +270,7 @@ fn print_help() {
 Captures a headless workbench frame as PNG.
 
 Modes:
+   --theme NAME   graphite (default) or tokyo-night
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
@@ -283,6 +302,33 @@ CI:    the headless-capture job runs the same command with WGPU_BACKEND=vulkan.
 // allow: SIZE_OK — private CLI parser の既存BDDテストを同一ファイルに維持するため。
 mod tests {
     use super::{DEFAULT_OUTPUT, parse_args};
+
+    #[test]
+    fn parse_args_selects_theme() {
+        // Given: each supported theme name; When: parsing; Then: select its preset.
+        for (name, expected) in [
+            ("graphite", gui::theme::style::ThemePreset::Graphite),
+            ("tokyo-night", gui::theme::style::ThemePreset::TokyoNight),
+        ] {
+            assert_eq!(parse_args(args(["--theme", name])).unwrap().theme, expected);
+        }
+        assert_eq!(
+            parse_args(args([])).unwrap().theme,
+            gui::theme::style::ThemePreset::Graphite
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_theme() {
+        // Given: missing, unknown or duplicate themes; When: parsing; Then: reject.
+        for values in [
+            vec!["--theme"],
+            vec!["--theme", "moon"],
+            vec!["--theme", "graphite", "--theme", "tokyo-night"],
+        ] {
+            assert!(parse_args(values.into_iter().map(std::ffi::OsString::from)).is_err());
+        }
+    }
 
     #[test]
     fn parse_args_accepts_pending_approvals_with_demo() -> Result<(), Box<dyn std::error::Error>> {

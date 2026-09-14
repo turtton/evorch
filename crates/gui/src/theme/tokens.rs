@@ -32,6 +32,37 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub const fn tokyo_night() -> Self {
+        Self {
+            CANVAS: Color32::from_rgb(0x1a, 0x1b, 0x26),
+            SURFACE: Color32::from_rgb(0x1f, 0x23, 0x35),
+            SURFACE_RAISED: Color32::from_rgb(0x29, 0x2e, 0x42),
+            // Next blue-gray elevation: raised + (9, 10, 14), preserving its hue.
+            OVERLAY: Color32::from_rgb(0x32, 0x38, 0x50),
+            SIDEBAR: Color32::from_rgb(0x16, 0x16, 0x1e),
+            TEXT: Color32::from_rgb(0xc0, 0xca, 0xf5),
+            TEXT_MUTED: Color32::from_rgb(0x73, 0x7a, 0xa2),
+            BORDER: Color32::from_rgb(0x29, 0x2e, 0x42),
+            INPUT: Color32::from_rgb(0x16, 0x16, 0x1e),
+            ACCENT: Color32::from_rgb(0x7a, 0xa2, 0xf7),
+            ACCENT_FG: Color32::from_rgb(0x1a, 0x1b, 0x26),
+            HOVER_ROW: Color32::from_rgb(0x1f, 0x23, 0x35),
+            ACTIVE_ROW: Color32::from_rgb(0x28, 0x34, 0x57),
+            SELECTED_ROW: Color32::from_rgb(0x28, 0x34, 0x57),
+            ERROR: Color32::from_rgb(0xdb, 0x4b, 0x4b),
+            ERROR_FG: Color32::from_rgb(0xf7, 0x76, 0x8e),
+            // Semantic surfaces: 85% canvas + 15% base role, rounded in sRGB.
+            ERROR_SURFACE: Color32::from_rgb(0x37, 0x22, 0x2c),
+            WARNING: Color32::from_rgb(0xff, 0x9e, 0x64),
+            WARNING_FG: Color32::from_rgb(0xff, 0xc7, 0x77),
+            WARNING_SURFACE: Color32::from_rgb(0x3c, 0x2f, 0x2f),
+            SUCCESS: Color32::from_rgb(0x9e, 0xce, 0x6a),
+            INFO: Color32::from_rgb(0x2a, 0xc3, 0xde),
+            RUNNING: Color32::from_rgb(0x7d, 0xcf, 0xff),
+            WAITING: Color32::from_rgb(0x2a, 0xc3, 0xde),
+        }
+    }
+
     pub const fn graphite() -> Self {
         Self {
             CANVAS: Color32::from_rgb(0x0a, 0x0a, 0x0a),
@@ -170,6 +201,44 @@ pub fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokyo_night_palette_matches_spec() {
+        // Given: the Night variant role contract; When: constructing its palette.
+        let p = Palette::tokyo_night();
+        // Then: every field retains its exact RGB value, including aliases.
+        for (actual, expected) in [
+            (p.CANVAS, [0x1a, 0x1b, 0x26]),
+            (p.SIDEBAR, [0x16, 0x16, 0x1e]),
+            (p.SURFACE, [0x1f, 0x23, 0x35]),
+            (p.SURFACE_RAISED, [0x29, 0x2e, 0x42]),
+            (p.OVERLAY, [0x32, 0x38, 0x50]),
+            (p.INPUT, [0x16, 0x16, 0x1e]),
+            (p.BORDER, [0x29, 0x2e, 0x42]),
+            (p.TEXT, [0xc0, 0xca, 0xf5]),
+            (p.TEXT_MUTED, [0x73, 0x7a, 0xa2]),
+            (p.ACCENT, [0x7a, 0xa2, 0xf7]),
+            (p.ACCENT_FG, [0x1a, 0x1b, 0x26]),
+            (p.HOVER_ROW, [0x1f, 0x23, 0x35]),
+            (p.ACTIVE_ROW, [0x28, 0x34, 0x57]),
+            (p.SELECTED_ROW, [0x28, 0x34, 0x57]),
+            (p.ERROR, [0xdb, 0x4b, 0x4b]),
+            (p.ERROR_FG, [0xf7, 0x76, 0x8e]),
+            (p.ERROR_SURFACE, [0x37, 0x22, 0x2c]),
+            (p.WARNING, [0xff, 0x9e, 0x64]),
+            (p.WARNING_FG, [0xff, 0xc7, 0x77]),
+            (p.WARNING_SURFACE, [0x3c, 0x2f, 0x2f]),
+            (p.SUCCESS, [0x9e, 0xce, 0x6a]),
+            (p.INFO, [0x2a, 0xc3, 0xde]),
+            (p.RUNNING, [0x7d, 0xcf, 0xff]),
+            (p.WAITING, [0x2a, 0xc3, 0xde]),
+        ] {
+            assert_eq!(
+                actual,
+                Color32::from_rgb(expected[0], expected[1], expected[2])
+            );
+        }
+    }
 
     #[test]
     fn graphite_palette_matches_legacy_values() {

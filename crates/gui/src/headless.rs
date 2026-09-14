@@ -122,6 +122,12 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.state_mut()
     }
 
+    /// Applies a preset to both the workbench and its rendering context.
+    pub fn reload_theme(&mut self, preset: crate::theme::style::ThemePreset) {
+        let ctx = self.harness.ctx.clone();
+        self.harness.state_mut().reload_theme(&ctx, preset);
+    }
+
     /// 指定ラベルの UI node をクリックします。
     pub fn click_label(&self, label: &str) {
         self.harness.get_by_label(label).click();
