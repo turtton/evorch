@@ -4,7 +4,7 @@ mod sse;
 
 use serde::Serialize;
 
-use crate::message::{ChatRequest, ContentBlock, ReasoningEffort, Role};
+use crate::message::{ChatRequest, ContentBlock, ReasoningEffort, Role, ServiceTier};
 
 pub use sse::CodexStreamInterpreter;
 
@@ -23,6 +23,8 @@ pub struct CodexResponsesRequest {
     tool_choice: ToolChoice,
     parallel_tool_calls: bool,
     reasoning: Reasoning,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<ServiceTier>,
     include: Vec<String>,
 }
 
@@ -161,6 +163,7 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
             summary: ReasoningSummary::Auto,
         },
         include: Vec::new(),
+        service_tier: request.service_tier,
     }
 }
 

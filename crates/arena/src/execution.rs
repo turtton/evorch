@@ -58,6 +58,7 @@ pub(crate) async fn execute(
             temperature: Some(0.0),
             max_tokens: Some(spec.max_output_tokens),
             reasoning_effort: None,
+            service_tier: None,
             observation: None,
         };
         let execution = trace

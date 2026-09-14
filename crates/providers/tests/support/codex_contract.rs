@@ -43,6 +43,7 @@ impl Match for CodexBodyMatcher {
             && body["store"] == false
             && body["stream"] == true
             && body.get("max_output_tokens").is_none()
+            && body.get("service_tier").is_none()
             && body["tool_choice"] == "auto"
             && body["parallel_tool_calls"] == true
             && body["reasoning"].is_object()

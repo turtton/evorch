@@ -38,6 +38,7 @@ fn request() -> ChatRequest {
         temperature: Some(0.2),
         max_tokens: None,
         reasoning_effort: None,
+        service_tier: None,
         observation: None,
     }
 }

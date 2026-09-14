@@ -1,4 +1,4 @@
-use crate::message::ReasoningEffort;
+use crate::message::{ReasoningEffort, ServiceTier};
 use serde::{Deserialize, Serialize};
 
 /// Chat Completions リクエスト本文。
@@ -20,6 +20,9 @@ pub struct WireChatRequest {
     /// 推論強度。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// サービス階層。未指定なら送信しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
     /// SSE ストリーミングを有効にするか。
     pub stream: bool,
     /// ストリーム固有設定。

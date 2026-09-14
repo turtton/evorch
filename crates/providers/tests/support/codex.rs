@@ -21,6 +21,7 @@ pub fn request() -> ChatRequest {
         temperature: None,
         max_tokens: Some(123),
         reasoning_effort: None,
+        service_tier: None,
         observation: None,
     }
 }

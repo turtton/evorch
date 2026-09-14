@@ -148,6 +148,14 @@ pub enum ReasoningEffort {
     High,
 }
 
+/// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    /// 優先処理を要求する。
+    Priority,
+}
+
 /// チャット完了リクエスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -167,6 +175,9 @@ pub struct ChatRequest {
     /// 推論強度。未指定ならプロバイダ既定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// サービス階層。未指定なら標準処理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
     /// 観測相関コンテキスト。wire へは送信されない。
     #[serde(default, skip_serializing)]
     pub observation: Option<ObservationContext>,
@@ -293,6 +304,7 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(256),
             reasoning_effort: None,
+            service_tier: None,
             observation: None,
         };
 

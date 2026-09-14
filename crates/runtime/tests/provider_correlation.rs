@@ -80,6 +80,7 @@ impl AgentModel for ProviderCorrelatedModel {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            service_tier: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),

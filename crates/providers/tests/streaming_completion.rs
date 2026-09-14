@@ -14,6 +14,7 @@ fn request() -> providers::ChatRequest {
         temperature: None,
         max_tokens: None,
         reasoning_effort: None,
+        service_tier: None,
         observation: None,
     }
 }
