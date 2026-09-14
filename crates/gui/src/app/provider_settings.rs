@@ -13,6 +13,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn open_provider_settings(&mut self) {
+        if self.settings_save_in_progress() {
+            return;
+        }
+        self.routing_settings.open = false;
+        self.role_settings.open = false;
         self.provider_settings.error = None;
         self.provider_settings.editor = None;
         self.provider_settings.open = true;
@@ -63,7 +68,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_provider_settings(&mut self) {
-        if self.provider_save_rx.is_some() {
+        if self.settings_save_in_progress() {
             return;
         }
         let Some(path) = self.provider_settings_path.clone() else {
@@ -121,7 +126,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn delete_provider_settings(&mut self, name: String) {
-        if self.provider_save_rx.is_some() {
+        if self.settings_save_in_progress() {
             return;
         }
         let Some(path) = self.provider_settings_path.clone() else {

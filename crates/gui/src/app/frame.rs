@@ -38,6 +38,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.drain_pty(&ctx);
         self.handle_input(&ctx);
         self.poll_provider_save();
+        self.poll_routing_save();
         if self.provider_settings.catalog.poll() {
             ctx.request_repaint();
         }

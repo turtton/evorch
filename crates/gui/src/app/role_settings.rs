@@ -25,7 +25,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn open_role_settings(&mut self) {
-        if self.role_settings.is_saving() {
+        if self.settings_save_in_progress() {
             return;
         }
         match config::Config::load(&self.role_load_options()) {
@@ -33,11 +33,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Err(error) => self.role_settings.error = Some(error.to_string()),
         }
         self.provider_settings.open = false;
+        self.routing_settings.open = false;
         self.role_settings.open = true;
     }
 
     pub fn submit_role_settings(&mut self) {
-        if self.role_settings.is_saving() || self.provider_save_rx.is_some() {
+        if self.settings_save_in_progress() {
             return;
         }
         if let Err(error) = self.role_settings.validate() {

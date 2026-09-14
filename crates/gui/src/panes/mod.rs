@@ -19,6 +19,7 @@ pub mod phase_indicator;
 pub mod provider_models;
 pub mod provider_settings;
 pub mod role_settings;
+pub mod routing_settings;
 pub mod sidebar;
 pub mod tasks;
 pub mod team;
