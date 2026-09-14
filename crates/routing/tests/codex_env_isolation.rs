@@ -45,6 +45,7 @@ fn request() -> ChatRequest {
         tools: Vec::new(),
         temperature: None,
         max_tokens: Some(1),
+        reasoning_effort: None,
         observation: None,
     }
 }

@@ -20,6 +20,7 @@ pub fn request() -> ChatRequest {
         tools: Vec::new(),
         temperature: None,
         max_tokens: Some(123),
+        reasoning_effort: None,
         observation: None,
     }
 }

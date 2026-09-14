@@ -19,7 +19,7 @@ pub use client::ProviderClient;
 pub use error::ProviderError;
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ObservationContext,
-    ProviderCapabilities, Role, ToolResultContent, ToolSpec, Usage,
+    ProviderCapabilities, ReasoningEffort, Role, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{list_codex_models, list_models};
 pub use retry::RetryPolicy;

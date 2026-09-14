@@ -47,6 +47,7 @@ fn canonical_request_converts_to_anthropic_wire_shape() {
         }],
         temperature: Some(0.2),
         max_tokens: None,
+        reasoning_effort: None,
         observation: None,
     };
 
@@ -96,6 +97,7 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
         tools: vec![],
         temperature: None,
         max_tokens: Some(32),
+        reasoning_effort: None,
         observation: None,
     };
 

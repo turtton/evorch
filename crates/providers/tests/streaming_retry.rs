@@ -34,6 +34,7 @@ async fn send(base_url: &str, bus: &EventBus) -> Result<ChatResponse, ProviderEr
         tools: vec![],
         temperature: None,
         max_tokens: None,
+        reasoning_effort: None,
         observation: None,
     };
     tokio::time::timeout(

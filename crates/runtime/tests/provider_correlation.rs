@@ -79,6 +79,7 @@ impl AgentModel for ProviderCorrelatedModel {
             tools: tools.to_vec(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),

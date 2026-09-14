@@ -1,3 +1,4 @@
+use crate::message::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 /// Chat Completions リクエスト本文。
@@ -16,6 +17,9 @@ pub struct WireChatRequest {
     /// 最大生成トークン数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// 推論強度。未指定なら送信しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// SSE ストリーミングを有効にするか。
     pub stream: bool,
     /// ストリーム固有設定。

@@ -389,6 +389,7 @@ mod tests {
             tools: Vec::new(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             observation: None,
         }
     }

@@ -2,6 +2,25 @@ use super::super::*;
 use crate::message::{ChatRequest, ContentBlock, Message, Role, ToolResultContent, ToolSpec};
 use serde_json::json;
 
+#[test]
+fn wire_request_maps_reasoning_effort_when_configured() {
+    for effort in [Some("medium"), None] {
+        // Given: 推論強度を指定または省略した canonical request。
+        let mut input = json!({"model": "gpt-test", "messages": []});
+        if let Some(effort) = effort {
+            input["reasoning_effort"] = json!(effort);
+        }
+        let canonical: ChatRequest = serde_json::from_value(input).unwrap();
+        // When: OpenAI wire JSON に変換する。
+        let value = serde_json::to_value(to_wire_request(&canonical, false)).unwrap();
+        // Then: 指定値を保持し、未指定ならキーを省略する。
+        assert_eq!(
+            value.get("reasoning_effort"),
+            effort.map(|v| json!(v)).as_ref()
+        );
+    }
+}
+
 // Given: 全 role とツール往復を含む canonical request / When: OpenAI wire request に変換 / Then: 公式 Chat Completions JSON 形状になる
 #[test]
 fn canonical_request_maps_to_chat_completions_json() {
@@ -68,6 +87,7 @@ fn canonical_request_maps_to_chat_completions_json() {
         }],
         temperature: Some(0.2),
         max_tokens: Some(128),
+        reasoning_effort: None,
         observation: None,
     };
 

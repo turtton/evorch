@@ -295,6 +295,7 @@ impl RoutedModel {
             tools,
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
+            reasoning_effort: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),

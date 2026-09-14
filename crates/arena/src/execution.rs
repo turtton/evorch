@@ -57,6 +57,7 @@ pub(crate) async fn execute(
             tools: Vec::new(),
             temperature: Some(0.0),
             max_tokens: Some(spec.max_output_tokens),
+            reasoning_effort: None,
             observation: None,
         };
         let execution = trace

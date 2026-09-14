@@ -37,7 +37,28 @@ fn request() -> ChatRequest {
         }],
         temperature: Some(0.2),
         max_tokens: None,
+        reasoning_effort: None,
         observation: None,
+    }
+}
+
+#[test]
+fn wire_request_maps_reasoning_effort_when_configured() {
+    for (effort, expected) in [
+        (Some("high"), "high"),
+        (Some("low"), "low"),
+        (None, "medium"),
+    ] {
+        // Given: 推論強度を指定または省略した canonical request。
+        let mut input = serde_json::to_value(request()).unwrap();
+        if let Some(effort) = effort {
+            input["reasoning_effort"] = json!(effort);
+        }
+        let canonical: ChatRequest = serde_json::from_value(input).unwrap();
+        // When: Codex wire JSON に変換する。
+        let value = serde_json::to_value(to_wire_request(&canonical)).unwrap();
+        // Then: 指定強度を使用し、未指定だけ medium にする。
+        assert_eq!(value["reasoning"]["effort"], expected);
     }
 }
 

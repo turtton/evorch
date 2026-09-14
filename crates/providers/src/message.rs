@@ -135,6 +135,19 @@ pub struct ObservationContext {
     pub run_id: String,
 }
 
+/// モデルの推論に割り当てる強度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// 低い推論強度。
+    Low,
+    /// 標準の推論強度。
+    #[default]
+    Medium,
+    /// 高い推論強度。
+    High,
+}
+
 /// チャット完了リクエスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -151,6 +164,9 @@ pub struct ChatRequest {
     /// 最大出力トークン数。未指定ならプロバイダ既定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// 推論強度。未指定ならプロバイダ既定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// 観測相関コンテキスト。wire へは送信されない。
     #[serde(default, skip_serializing)]
     pub observation: Option<ObservationContext>,
@@ -276,6 +292,7 @@ mod tests {
             }],
             temperature: Some(0.7),
             max_tokens: Some(256),
+            reasoning_effort: None,
             observation: None,
         };
 
@@ -287,6 +304,25 @@ mod tests {
         assert_eq!(json["tools"][0]["name"], "get_weather");
         let restored: ChatRequest = serde_json::from_value(json).unwrap();
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn chat_request_preserves_reasoning_effort_when_configured() {
+        for effort in [Some("low"), None] {
+            // Given: 推論強度を指定または省略した canonical JSON。
+            let mut input = json!({"model": "gpt-test", "messages": []});
+            if let Some(effort) = effort {
+                input["reasoning_effort"] = json!(effort);
+            }
+            // When: リクエストとして復元し再シリアライズする。
+            let request: ChatRequest = serde_json::from_value(input).unwrap();
+            let value = serde_json::to_value(&request).unwrap();
+            // Then: 指定値を保持し、未指定ならキーを省略する。
+            assert_eq!(
+                value.get("reasoning_effort"),
+                effort.map(|v| json!(v)).as_ref()
+            );
+        }
     }
 
     // Given: ChatResponse / When: JSON 化して復元 / Then: message/usage/finish_reason が保存される

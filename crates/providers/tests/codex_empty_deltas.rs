@@ -48,6 +48,7 @@ async fn empty_deltas_are_noops_and_reasoning_alone_has_no_ttft() {
         tools: vec![],
         temperature: None,
         max_tokens: None,
+        reasoning_effort: None,
         observation: None,
     };
     // When: complete over real HTTP and terminate event collection with a sentinel.

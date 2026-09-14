@@ -4,7 +4,7 @@ mod sse;
 
 use serde::Serialize;
 
-use crate::message::{ChatRequest, ContentBlock, Role};
+use crate::message::{ChatRequest, ContentBlock, ReasoningEffort, Role};
 
 pub use sse::CodexStreamInterpreter;
 
@@ -100,12 +100,6 @@ struct Reasoning {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum ReasoningEffort {
-    Medium,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
 enum ReasoningSummary {
     Auto,
 }
@@ -163,7 +157,7 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         tool_choice: ToolChoice::Auto,
         parallel_tool_calls: true,
         reasoning: Reasoning {
-            effort: ReasoningEffort::Medium,
+            effort: request.reasoning_effort.unwrap_or_default(),
             summary: ReasoningSummary::Auto,
         },
         include: Vec::new(),

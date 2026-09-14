@@ -42,6 +42,7 @@ impl AgentModel for HttpModel {
                     tools: tools.to_vec(),
                     temperature: None,
                     max_tokens: None,
+                    reasoning_effort: None,
                     observation: Some(providers::ObservationContext {
                         run_id: invocation.run_id.clone(),
                     }),
