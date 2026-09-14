@@ -89,7 +89,7 @@ fn tool_card_error_status_shows_error_label_and_red_output() {
             .job
             .sections
             .iter()
-            .all(|section| { section.format.color == gui::theme::tokens::ERROR_FG })
+            .all(|section| { section.format.color == gui::theme::tokens::palette().ERROR_FG })
     );
 }
 

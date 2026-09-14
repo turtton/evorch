@@ -17,8 +17,8 @@ pub fn role_settings_modal(
     let mut action = None;
     let busy = model.is_saving();
     egui::Modal::new(egui::Id::new("role-settings"))
-        .backdrop_color(OVERLAY)
-        .frame(surface_frame(SURFACE_RAISED))
+        .backdrop_color(palette().OVERLAY)
+        .frame(surface_frame(palette().SURFACE_RAISED))
         .show(ctx, |ui| {
             ui.set_width(
                 (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0,
@@ -93,7 +93,7 @@ pub fn role_settings_modal(
                     });
             });
             if let Some(error) = &model.error {
-                ui.colored_label(ERROR_FG, error);
+                ui.colored_label(palette().ERROR_FG, error);
             }
             if busy {
                 ui.label(muted("Saving and reloading runtime..."));
@@ -134,7 +134,7 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
         .add(
             egui::TextEdit::singleline(&mut text)
                 .desired_width(ui.available_width())
-                .background_color(INPUT)
+                .background_color(palette().INPUT)
                 .hint_text("Inherit default"),
         )
         .labelled_by(label.id)

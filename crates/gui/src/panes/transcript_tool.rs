@@ -3,10 +3,7 @@ use std::borrow::Cow;
 use egui::{Color32, RichText, Ui};
 
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
-use crate::theme::tokens::{
-    ERROR_FG, FONT_SMALL, INFO, R_SM, RUNNING, SP_2, SUCCESS, SURFACE, SURFACE_RAISED, TEXT,
-    WARNING_FG,
-};
+use crate::theme::tokens::{FONT_SMALL, R_SM, SP_2, palette};
 use crate::theme::widgets::surface_frame;
 
 pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
@@ -26,18 +23,22 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let (indicator, status_color) = match status {
-        ToolStatus::Running => ("Running", INFO),
-        ToolStatus::Succeeded => ("OK", SUCCESS),
-        ToolStatus::Failed => ("ERROR", ERROR_FG),
-        ToolStatus::AwaitingApproval => ("Awaiting approval", WARNING_FG),
-        ToolStatus::Approved => ("Approved", SUCCESS),
-        ToolStatus::Denied { .. } => ("Denied", ERROR_FG),
+        ToolStatus::Running => ("Running", palette().INFO),
+        ToolStatus::Succeeded => ("OK", palette().SUCCESS),
+        ToolStatus::Failed => ("ERROR", palette().ERROR_FG),
+        ToolStatus::AwaitingApproval => ("Awaiting approval", palette().WARNING_FG),
+        ToolStatus::Approved => ("Approved", palette().SUCCESS),
+        ToolStatus::Denied { .. } => ("Denied", palette().ERROR_FG),
     };
-    let color = if *is_error { ERROR_FG } else { status_color };
+    let color = if *is_error {
+        palette().ERROR_FG
+    } else {
+        status_color
+    };
     let indicator = if *is_error { "ERROR" } else { indicator };
     let short_id: String = call_id.chars().take(8).collect();
     let summary = tool_display_summary(entry);
-    surface_frame(SURFACE).show(ui, |ui| {
+    surface_frame(palette().SURFACE).show(ui, |ui| {
         let arrow = if running {
             ""
         } else if expanded {
@@ -52,7 +53,11 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
         }
         let response = ui.horizontal(|ui| {
             if running {
-                ui.add(egui::Spinner::new().size(FONT_SMALL).color(RUNNING));
+                ui.add(
+                    egui::Spinner::new()
+                        .size(FONT_SMALL)
+                        .color(palette().RUNNING),
+                );
             }
             ui.add_enabled(
                 !running,
@@ -75,14 +80,18 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
                 let content = focused_input(tool_name, input)
                     .map(Cow::Borrowed)
                     .unwrap_or_else(|| Cow::Owned(pretty_json(input)));
-                code(ui, &content, TEXT);
+                code(ui, &content, palette().TEXT);
             }
             if let Some(output) = output {
                 ui.label(if *is_error { "Error" } else { "Output" });
                 code(
                     ui,
                     &display_output(tool_name, output),
-                    if *is_error { ERROR_FG } else { TEXT },
+                    if *is_error {
+                        palette().ERROR_FG
+                    } else {
+                        palette().TEXT
+                    },
                 );
             }
             if let Some(detail) = detail {
@@ -90,17 +99,29 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
                 code(
                     ui,
                     &pretty_json(detail),
-                    if *is_error { ERROR_FG } else { TEXT },
+                    if *is_error {
+                        palette().ERROR_FG
+                    } else {
+                        palette().TEXT
+                    },
                 );
             }
             if let ToolStatus::Denied { reason } = status {
-                code(ui, reason, ERROR_FG);
+                code(ui, reason, palette().ERROR_FG);
             }
         } else if let Some(output) = output {
             let output = display_output(tool_name, output);
             let preview = output.lines().take(5).collect::<Vec<_>>().join("\n");
             if !preview.is_empty() {
-                code(ui, &preview, if *is_error { ERROR_FG } else { TEXT });
+                code(
+                    ui,
+                    &preview,
+                    if *is_error {
+                        palette().ERROR_FG
+                    } else {
+                        palette().TEXT
+                    },
+                );
             }
             if output.lines().nth(5).is_some() {
                 ui.label("... expand for full output");
@@ -168,7 +189,7 @@ fn pretty_json(value: &serde_json::Value) -> String {
 
 fn code(ui: &mut Ui, content: &str, color: Color32) {
     egui::Frame::new()
-        .fill(SURFACE_RAISED)
+        .fill(palette().SURFACE_RAISED)
         .corner_radius(R_SM)
         .inner_margin(SP_2)
         .show(ui, |ui| {

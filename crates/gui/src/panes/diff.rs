@@ -2,7 +2,7 @@
 
 use crate::diff::{DiffMode, DiffModel, DiffState};
 use crate::theme::text::muted;
-use crate::theme::tokens::{ERROR_FG, SURFACE};
+use crate::theme::tokens::palette;
 use crate::theme::widgets::{empty_state, surface_frame};
 
 /// Diff tab を描画し、click された取得要求を返す。
@@ -25,7 +25,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
         .ctx()
         .data_mut(|data| data.get_temp::<DiffMode>(mode_id))
         .unwrap_or(DiffMode::WorkingTree);
-    surface_frame(SURFACE).show(ui, |ui| match diff.state(&mode) {
+    surface_frame(palette().SURFACE).show(ui, |ui| match diff.state(&mode) {
         DiffState::Idle => {
             empty_state(
                 ui,
@@ -50,7 +50,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             diff_body(ui, text);
         }
         DiffState::Error { message } => {
-            ui.label(egui::RichText::new(format!("error: {message}")).color(ERROR_FG));
+            ui.label(egui::RichText::new(format!("error: {message}")).color(palette().ERROR_FG));
         }
     });
     requested

@@ -1,6 +1,6 @@
 use egui::{Color32, epaint::Shape};
 use egui_kittest::Harness;
-use gui::{app::WorkbenchState, theme::tokens::INFO};
+use gui::{app::WorkbenchState, theme::tokens::palette};
 use workspace_ui::ThreadRunPhase;
 
 type Workbench = WorkbenchState<runtime::AgentRuntime>;
@@ -21,7 +21,7 @@ fn unread_waiting_badge_filled_info_accent() {
             .output()
             .shapes
             .iter()
-            .any(|shape| { matches!(&shape.shape, Shape::Rect(rect) if rect.fill == INFO && rect.rect.height() < gui::theme::tokens::ROW_DENSE) })
+.any(|shape| { matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().INFO && rect.rect.height() < gui::theme::tokens::ROW_DENSE) })
     );
 }
 
@@ -40,7 +40,7 @@ fn read_waiting_badge_outline_only() {
     // Then: the pill has no fill and retains its info-blue outline.
     assert!(harness.output().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Rect(rect)
-            if rect.fill == Color32::TRANSPARENT && rect.stroke.color == INFO && rect.stroke.width > 0.0)
+if rect.fill == Color32::TRANSPARENT && rect.stroke.color == palette().INFO && rect.stroke.width > 0.0)
     }));
 }
 
@@ -115,7 +115,7 @@ fn visible_tab_stays_unread_without_outer_focus() {
             harness
                 .state()
                 .pane_attention(&workspace_ui::PanelId::new("agents-main")),
-            Some(INFO)
+            Some(palette().INFO)
         );
     }
 }
@@ -196,6 +196,6 @@ fn hidden_tab_stays_unread_in_focused_window() {
         harness
             .state()
             .pane_attention(&workspace_ui::PanelId::new("agents-main")),
-        Some(INFO)
+        Some(palette().INFO)
     );
 }

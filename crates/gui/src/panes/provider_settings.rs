@@ -26,8 +26,8 @@ pub fn provider_settings_modal(
     let mut action = None;
     let width = (ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0;
     egui::Modal::new(egui::Id::new("provider-settings"))
-        .backdrop_color(OVERLAY)
-        .frame(surface_frame(SURFACE_RAISED))
+        .backdrop_color(palette().OVERLAY)
+        .frame(surface_frame(palette().SURFACE_RAISED))
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
@@ -77,7 +77,12 @@ pub fn provider_settings_modal(
                                     config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
                                     config::ProviderTypeConfig::Openrouter => "OpenRouter",
                                 };
-                                crate::theme::widgets::badge(ui, label, ACCENT, SURFACE);
+                                crate::theme::widgets::badge(
+                                    ui,
+                                    label,
+                                    palette().ACCENT,
+                                    palette().SURFACE,
+                                );
                                 ui.label(muted(&profile.default_model));
                                 if ui.button("Edit").clicked() {
                                     edit = Some(profile.name.clone());
@@ -113,7 +118,7 @@ pub fn provider_settings_modal(
                 }
             }
             if let Some(error) = &model.error {
-                ui.label(egui::RichText::new(error).color(ERROR_FG));
+                ui.label(egui::RichText::new(error).color(palette().ERROR_FG));
             }
             ui.horizontal(|ui| {
                 if model.editor.is_some() && primary_button(ui, "Save").clicked() {
@@ -138,14 +143,14 @@ fn openai_body(
     ui.add(
         egui::TextEdit::singleline(&mut model.name)
             .desired_width(width)
-            .background_color(INPUT),
+            .background_color(palette().INPUT),
     )
     .labelled_by(name.id);
     let base = ui.label("Base URL");
     ui.add(
         egui::TextEdit::singleline(&mut model.base_url)
             .desired_width(width)
-            .background_color(INPUT),
+            .background_color(palette().INPUT),
     )
     .labelled_by(base.id);
     ui.horizontal(|ui| {
@@ -173,7 +178,7 @@ fn openai_body(
                     .password(true)
                     .hint_text(hint)
                     .desired_width(width)
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
         }
@@ -183,7 +188,7 @@ fn openai_body(
                 egui::TextEdit::singleline(&mut model.api_key_env)
                     .hint_text("Environment variable NAME, e.g. OPENAI_API_KEY")
                     .desired_width(width)
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
         }
@@ -197,7 +202,7 @@ fn openai_body(
             .hint_text("one per line")
             .desired_rows(3)
             .desired_width(width)
-            .background_color(INPUT),
+            .background_color(palette().INPUT),
     )
     .labelled_by(excluded.id);
     let label = ui.label("Default model");

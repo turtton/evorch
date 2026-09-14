@@ -54,7 +54,7 @@ impl ArenaPane {
         ));
         ui.label("Active routing is unchanged.");
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::ERROR_FG, error);
+            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
         if self.reports.is_empty() {
             ui.label("No evaluation traces for this project.");

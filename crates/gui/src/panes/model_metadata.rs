@@ -2,7 +2,7 @@ use config::{MetadataSource, ModelEntryConfig};
 
 use crate::model::model_catalog::{CatalogRequest, CatalogState};
 use crate::model::model_metadata::MetadataSources;
-use crate::theme::{text::muted, tokens::ERROR_FG};
+use crate::theme::{text::muted, tokens::palette};
 
 pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
     state.poll();
@@ -25,7 +25,7 @@ pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
         )));
     });
     if let Some(error) = &state.error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
     if state.is_busy() {
         ui.ctx()
@@ -102,7 +102,7 @@ pub fn model_metadata(
         }
         Err(_) => {
             ui.colored_label(
-                ERROR_FG,
+                palette().ERROR_FG,
                 "Enter a non-negative integer; previous override is retained",
             );
         }

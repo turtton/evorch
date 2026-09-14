@@ -1,7 +1,7 @@
 use egui::{Color32, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{AgentRunPhase, Event, LifecycleEvent};
-use gui::{app::WorkbenchState, model::notifications::NotificationsModel, theme::tokens::SUCCESS};
+use gui::{app::WorkbenchState, model::notifications::NotificationsModel, theme::tokens::palette};
 use workspace_ui::PanelId;
 
 fn done() -> Event {
@@ -44,7 +44,7 @@ fn unread_notification_badge_filled_read_outline() {
     // When: rendering before and after acknowledging the displayed revision.
     harness.run();
     assert!(harness.output().shapes.iter().any(|shape| {
-        matches!(&shape.shape, Shape::Rect(rect) if rect.fill == SUCCESS
+        matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().SUCCESS
             && rect.rect.height() < gui::theme::tokens::ROW_DENSE)
     }));
     let id = harness.state().items().next().expect("notification").id;
@@ -56,15 +56,11 @@ fn unread_notification_badge_filled_read_outline() {
     // Then: the same badge is outline-only.
     assert!(harness.output().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Rect(rect) if rect.fill == Color32::TRANSPARENT
-            && rect.stroke.color == SUCCESS && rect.stroke.width > 0.0)
+&& rect.stroke.color == palette().SUCCESS && rect.stroke.width > 0.0)
     }));
-    assert!(
-        !harness
-            .output()
-            .shapes
-            .iter()
-            .any(|shape| { matches!(&shape.shape, Shape::Rect(rect) if rect.fill == SUCCESS) })
-    );
+    assert!(!harness.output().shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().SUCCESS)
+    }));
 }
 
 #[test]

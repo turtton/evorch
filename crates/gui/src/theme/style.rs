@@ -19,45 +19,45 @@ pub fn visuals() -> Visuals {
 pub fn visuals_for(preset: ThemePreset) -> Visuals {
     let mut visuals = Visuals::dark();
     visuals.dark_mode = true;
-    visuals.panel_fill = CANVAS;
-    visuals.window_fill = OVERLAY;
-    visuals.window_stroke = Stroke::new(1.0, BORDER);
+    visuals.panel_fill = palette().CANVAS;
+    visuals.window_fill = palette().OVERLAY;
+    visuals.window_stroke = Stroke::new(1.0, palette().BORDER);
     visuals.window_corner_radius = CornerRadius::same(R_LG);
     visuals.menu_corner_radius = CornerRadius::same(R_MD);
-    visuals.extreme_bg_color = INPUT;
-    visuals.faint_bg_color = SURFACE;
-    visuals.code_bg_color = SURFACE_RAISED;
-    visuals.text_edit_bg_color = Some(INPUT);
+    visuals.extreme_bg_color = palette().INPUT;
+    visuals.faint_bg_color = palette().SURFACE;
+    visuals.code_bg_color = palette().SURFACE_RAISED;
+    visuals.text_edit_bg_color = Some(palette().INPUT);
     visuals.selection.bg_fill = match preset {
-        ThemePreset::Graphite => ACCENT,
+        ThemePreset::Graphite => palette().ACCENT,
         ThemePreset::HighContrast => Color32::from_rgb(255, 190, 0),
     };
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    visuals.hyperlink_color = ACCENT;
-    visuals.error_fg_color = ERROR_FG;
-    visuals.warn_fg_color = WARNING_FG;
-    visuals.weak_text_color = Some(TEXT_MUTED);
+    visuals.selection.stroke = Stroke::new(1.0, palette().ACCENT);
+    visuals.hyperlink_color = palette().ACCENT;
+    visuals.error_fg_color = palette().ERROR_FG;
+    visuals.warn_fg_color = palette().WARNING_FG;
+    visuals.weak_text_color = Some(palette().TEXT_MUTED);
 
-    visuals.widgets.noninteractive.bg_fill = SURFACE;
-    visuals.widgets.noninteractive.weak_bg_fill = SURFACE;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    visuals.widgets.noninteractive.fg_stroke.color = TEXT_MUTED;
+    visuals.widgets.noninteractive.bg_fill = palette().SURFACE;
+    visuals.widgets.noninteractive.weak_bg_fill = palette().SURFACE;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette().BORDER);
+    visuals.widgets.noninteractive.fg_stroke.color = palette().TEXT_MUTED;
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(R_SM);
 
-    visuals.widgets.inactive.weak_bg_fill = SURFACE_RAISED;
-    visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    visuals.widgets.inactive.fg_stroke.color = TEXT;
+    visuals.widgets.inactive.weak_bg_fill = palette().SURFACE_RAISED;
+    visuals.widgets.inactive.bg_fill = palette().SURFACE_RAISED;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette().BORDER);
+    visuals.widgets.inactive.fg_stroke.color = palette().TEXT;
     visuals.widgets.inactive.corner_radius = CornerRadius::same(R_SM);
 
-    visuals.widgets.hovered.weak_bg_fill = HOVER_ROW;
-    visuals.widgets.hovered.fg_stroke.color = TEXT;
-    visuals.widgets.hovered.bg_stroke.color = TEXT_MUTED;
+    visuals.widgets.hovered.weak_bg_fill = palette().HOVER_ROW;
+    visuals.widgets.hovered.fg_stroke.color = palette().TEXT;
+    visuals.widgets.hovered.bg_stroke.color = palette().TEXT_MUTED;
     visuals.widgets.hovered.corner_radius = CornerRadius::same(R_SM);
 
-    visuals.widgets.active.weak_bg_fill = ACTIVE_ROW;
-    visuals.widgets.active.fg_stroke.color = TEXT;
-    visuals.widgets.active.bg_stroke.color = ACCENT;
+    visuals.widgets.active.weak_bg_fill = palette().ACTIVE_ROW;
+    visuals.widgets.active.fg_stroke.color = palette().TEXT;
+    visuals.widgets.active.bg_stroke.color = palette().ACCENT;
     visuals.widgets.active.corner_radius = CornerRadius::same(R_SM);
 
     visuals.widgets.open = visuals.widgets.hovered;
@@ -135,6 +135,9 @@ pub fn install(ctx: &egui::Context) {
 }
 
 pub fn install_preset(ctx: &egui::Context, preset: ThemePreset) {
+    install_palette(match preset {
+        ThemePreset::Graphite | ThemePreset::HighContrast => Palette::graphite(),
+    });
     ctx.set_theme(ThemePreference::Dark);
     ctx.set_style_of(Theme::Dark, style_for(preset));
     // A stray light preference should still render the dark design.

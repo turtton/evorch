@@ -63,7 +63,7 @@ impl MemoryPane {
             }
         }
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::ERROR_FG, error);
+            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
         ui.label(crate::theme::text::muted(format!(
             "{} lessons (up to 100)",

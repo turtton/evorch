@@ -2,7 +2,7 @@
 
 use crate::model::terminal::TerminalBuffer;
 use crate::pty::PtySession;
-use crate::theme::tokens::INPUT;
+use crate::theme::tokens::palette;
 use crate::theme::widgets::surface_frame;
 
 /// 端末バッファと一行入力を描画します。
@@ -13,7 +13,7 @@ pub fn terminal_pane(
     input: &mut String,
     pty: &mut Option<PtySession>,
 ) {
-    surface_frame(INPUT).show(ui, |ui| {
+    surface_frame(palette().INPUT).show(ui, |ui| {
         ui.vertical(|ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])

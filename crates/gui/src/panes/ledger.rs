@@ -1,4 +1,4 @@
-use crate::theme::tokens::{SURFACE, TEXT};
+use crate::theme::tokens::palette;
 use crate::theme::widgets::surface_frame;
 
 pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage::RunLedgerEntry]) {
@@ -7,13 +7,15 @@ pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage
     }
     let id = ui.id().with(("ledger-expanded", run_id));
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
-    surface_frame(SURFACE).show(ui, |ui| {
+    surface_frame(palette().SURFACE).show(ui, |ui| {
         let arrow = if expanded { "v" } else { ">" };
         if ui
             .add(
-                egui::Button::new(egui::RichText::new(format!("{arrow} Ledger")).color(TEXT))
-                    .frame(false)
-                    .wrap(),
+                egui::Button::new(
+                    egui::RichText::new(format!("{arrow} Ledger")).color(palette().TEXT),
+                )
+                .frame(false)
+                .wrap(),
             )
             .clicked()
         {
@@ -25,7 +27,7 @@ pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(format!("- seq {}: {}", entry.seq, entry.body))
-                            .color(TEXT),
+                            .color(palette().TEXT),
                     )
                     .wrap(),
                 );

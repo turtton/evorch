@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{BrowserAction, ChromiumSource, FrameSource};
-use crate::theme::{text::muted, tokens::ERROR_FG, widgets::pane_root};
+use crate::theme::{text::muted, tokens::palette, widgets::pane_root};
 
 pub struct BrowserPane<S> {
     source: S,
@@ -68,7 +68,7 @@ impl<S: FrameSource> BrowserPane<S> {
                 }
             });
             if let Some(error) = self.error.clone().or_else(|| self.source.error()) {
-                ui.colored_label(ERROR_FG, error);
+                ui.colored_label(palette().ERROR_FG, error);
             }
             while let Some(report) = self.source.poll_report() {
                 if self.reports.len() == 32 {

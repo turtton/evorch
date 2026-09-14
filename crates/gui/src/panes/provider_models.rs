@@ -1,6 +1,6 @@
 use crate::model::provider_settings::{ModelsFetchState, OpenAiEditorModel};
 use crate::theme::text::{h3, muted};
-use crate::theme::tokens::{ERROR_FG, INPUT};
+use crate::theme::tokens::palette;
 use crate::theme::widgets::primary_button;
 
 #[derive(Clone, Default)]
@@ -48,7 +48,7 @@ pub fn provider_models(
                             let edit = ui.add(
                                 egui::TextEdit::singleline(draft)
                                     .desired_width((ui.available_width() - 130.0).max(40.0))
-                                    .background_color(INPUT),
+                                    .background_color(palette().INPUT),
                             );
                             edit.widget_info(|| {
                                 egui::WidgetInfo::labeled(
@@ -127,7 +127,7 @@ pub fn provider_models(
             .add(
                 egui::TextEdit::singleline(&mut inputs.add)
                     .desired_width((ui.available_width() - 60.0).max(40.0))
-                    .background_color(INPUT),
+                    .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
         let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -142,10 +142,10 @@ pub fn provider_models(
         }
     });
     if let Some(error) = &inputs.error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
     if let Some(error) = &editor.validation_error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
     let refresh = fetch_models(ui, editor);
     let height = ui.cursor().top() - top;
@@ -176,7 +176,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
             }
             ModelsFetchState::Failed(error) => {
                 ui.colored_label(
-                    ERROR_FG,
+                    palette().ERROR_FG,
                     format!("Auto-fetch failed ({error}); manual entry below"),
                 );
             }

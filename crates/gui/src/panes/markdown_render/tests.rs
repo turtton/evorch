@@ -2,7 +2,7 @@ use egui::{FontFamily, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
 
 use super::render_markdown;
-use crate::theme::tokens::{ACCENT_FG, SURFACE_RAISED};
+use crate::theme::tokens::palette;
 
 fn harness(source: &'static str) -> Harness<'static> {
     let mut harness = Harness::new_ui(move |ui| {
@@ -38,7 +38,7 @@ fn render_markdown_bold_text_uses_strong_color() {
             .job
             .sections
             .iter()
-            .all(|s| s.format.color == ACCENT_FG)
+            .all(|s| s.format.color == palette().ACCENT_FG)
     );
 }
 
@@ -64,7 +64,7 @@ fn render_markdown_code_block_has_background() {
     let code = text_shape(&harness, "let x");
     assert!(!code.galley.text().contains("```"));
     assert!(harness.output().shapes.iter().any(|shape| {
-        matches!(&shape.shape, Shape::Rect(rect) if rect.fill == SURFACE_RAISED
+        matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().SURFACE_RAISED
             && rect.rect.contains(code.pos))
     }));
 }
@@ -158,7 +158,7 @@ fn render_markdown_headings_emphasis_and_links() {
     assert!(harness.query_by_label("website").is_some());
     assert_eq!(
         text_shape(&harness, "website").fallback_color,
-        crate::theme::tokens::ACCENT
+        crate::theme::tokens::palette().ACCENT
     );
     assert!(harness.query_by_label("quoted").is_some());
 }

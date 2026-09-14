@@ -2,7 +2,7 @@ use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::text::muted;
-use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, TEXT, agent_phase_color};
+use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, agent_phase_color, palette};
 use crate::theme::widgets::{pane_root, status_dot};
 use egui::{Align, Button, Label, Layout};
 
@@ -122,7 +122,7 @@ fn column_widths<S: AgentRunSource>(
     let font_id = egui::TextStyle::Body.resolve(ui.style());
     let text_width = |text: &str| {
         ui.painter()
-            .layout_no_wrap(text.into(), font_id.clone(), TEXT)
+            .layout_no_wrap(text.into(), font_id.clone(), palette().TEXT)
             .size()
             .x
     };
@@ -199,11 +199,11 @@ fn render_data_row(
         }
         ui.add_sized(
             [widths[2], ROW_DENSE],
-            Label::new(egui::RichText::new(&row.name).color(TEXT)).truncate(),
+            Label::new(egui::RichText::new(&row.name).color(palette().TEXT)).truncate(),
         );
         ui.add_sized(
             [widths[3], ROW_DENSE],
-            Label::new(egui::RichText::new(&row.role).color(TEXT)).truncate(),
+            Label::new(egui::RichText::new(&row.role).color(palette().TEXT)).truncate(),
         );
         ui.allocate_ui_with_layout(
             egui::vec2(widths[4], ROW_DENSE),

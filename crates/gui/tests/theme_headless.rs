@@ -4,7 +4,7 @@ use egui_kittest::{
     Harness,
     kittest::{By, Queryable},
 };
-use gui::theme::tokens::{ACCENT, DOT_SIZE, ROW_DENSE};
+use gui::theme::tokens::{DOT_SIZE, ROW_DENSE, palette};
 use gui::theme::widgets::{compact_row, status_dot};
 
 #[test]
@@ -19,7 +19,7 @@ fn compact_row_is_dense_and_centers_status_dot() {
             gui::theme::install(ui.ctx());
             row_rect.set(
                 compact_row(ui, false, |ui| {
-                    dot_rect.set(status_dot(ui, ACCENT).rect);
+                    dot_rect.set(status_dot(ui, palette().ACCENT).rect);
                     title_rect.set(
                         ui.add_sized(
                             vec2(ui.available_width(), ROW_DENSE),
@@ -86,7 +86,10 @@ fn install_applies_dark_design_tokens() {
 
     // Then: dark theme tokens are installed.
     let style = harness.ctx.style_of(Theme::Dark);
-    assert_eq!(style.visuals.panel_fill, gui::theme::tokens::CANVAS);
+    assert_eq!(
+        style.visuals.panel_fill,
+        gui::theme::tokens::palette().CANVAS
+    );
     assert!(style.visuals.dark_mode);
     assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 14.0);
     assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 4.0));
@@ -149,7 +152,7 @@ fn workbench_installs_theme_on_first_frame() {
     // Then: the dark design tokens are installed.
     assert_eq!(
         harness.ctx.style_of(Theme::Dark).visuals.panel_fill,
-        gui::theme::tokens::CANVAS
+        gui::theme::tokens::palette().CANVAS
     );
     assert_eq!(harness.ctx.theme(), Theme::Dark);
 }
@@ -163,7 +166,10 @@ fn dock_style_distinguishes_tab_states() {
     // Then: tab states are visually distinct and sized as specified.
     assert_ne!(dock.tab.active.bg_fill, dock.tab.inactive.bg_fill);
     assert_ne!(dock.tab.hovered.text_color, dock.tab.inactive.text_color);
-    assert_eq!(dock.tab.active.outline_color, gui::theme::tokens::ACCENT);
+    assert_eq!(
+        dock.tab.active.outline_color,
+        gui::theme::tokens::palette().ACCENT
+    );
     assert_eq!(dock.tab_bar.height, 28.0);
     assert_eq!(dock.tab.tab_body.inner_margin, egui::Margin::same(8));
 }
@@ -172,7 +178,7 @@ fn dock_style_distinguishes_tab_states() {
 fn attention_tab_style_overrides_text_and_outline() {
     // Given: a base dock tab style and an attention color
     let base = gui::theme::dock::dock_style(&gui::theme::style::style()).tab;
-    let color = gui::theme::tokens::WARNING_FG;
+    let color = gui::theme::tokens::palette().WARNING_FG;
     let attention = gui::theme::dock::attention_tab_style(&base, color);
 
     // Then: the attention color is applied to text and outline.

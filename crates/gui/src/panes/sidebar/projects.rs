@@ -1,9 +1,7 @@
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{SidebarState, TrustState};
 
-use crate::theme::tokens::{
-    ACCENT, ERROR_FG, FONT_SMALL, ROW_DENSE, SP_2, SURFACE_RAISED, TEXT_MUTED, WARNING,
-};
+use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_2, palette};
 use crate::theme::widgets::{badge, compact_row, empty_state, primary_button, status_dot};
 
 use super::{SidebarAction, SidebarUiState};
@@ -27,7 +25,11 @@ pub fn render(
     for project in &sidebar.projects {
         let selected_project = selected.map(|p| &p.id) == Some(&project.id);
         compact_row(ui, selected_project, |ui| {
-            let dot_color = if selected_project { ACCENT } else { TEXT_MUTED };
+            let dot_color = if selected_project {
+                palette().ACCENT
+            } else {
+                palette().TEXT_MUTED
+            };
             status_dot(ui, dot_color);
             let count = sidebar
                 .threads
@@ -36,7 +38,12 @@ pub fn render(
                 .count();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if count > 0 {
-                    badge(ui, count.to_string(), TEXT_MUTED, SURFACE_RAISED);
+                    badge(
+                        ui,
+                        count.to_string(),
+                        palette().TEXT_MUTED,
+                        palette().SURFACE_RAISED,
+                    );
                 }
                 let title_response = ui.add_sized(
                     egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
@@ -55,7 +62,7 @@ pub fn render(
             egui::Label::new(
                 egui::RichText::new(&path)
                     .size(FONT_SMALL)
-                    .color(TEXT_MUTED),
+                    .color(palette().TEXT_MUTED),
             )
             .truncate(),
         )
@@ -88,7 +95,7 @@ pub fn render(
     });
 
     if let Some(error) = &pane_state.error {
-        ui.colored_label(ERROR_FG, error);
+        ui.colored_label(palette().ERROR_FG, error);
     }
 
     if let Some(project) = selected
@@ -113,10 +120,15 @@ pub fn render(
                 }
                 ui.horizontal(|ui| match directory.trust {
                     TrustState::Approved => {
-                        badge(ui, "trusted", TEXT_MUTED, SURFACE_RAISED);
+                        badge(
+                            ui,
+                            "trusted",
+                            palette().TEXT_MUTED,
+                            palette().SURFACE_RAISED,
+                        );
                     }
                     TrustState::Unapproved => {
-                        badge(ui, "untrusted", WARNING, SURFACE_RAISED);
+                        badge(ui, "untrusted", palette().WARNING, palette().SURFACE_RAISED);
                         if ui.button("Trust").clicked() {
                             *action = Some(SidebarAction::SetTrust {
                                 path: directory.path.clone(),
