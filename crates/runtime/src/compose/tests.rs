@@ -183,6 +183,37 @@ async fn complete_builds_request_from_binding_and_route() {
     );
 }
 
+#[tokio::test]
+async fn complete_forwards_reasoning_effort_when_binding_configures_it() {
+    for (configured, expected) in [
+        (
+            Some(config::ReasoningEffortConfig::High),
+            Some(providers::ReasoningEffort::High),
+        ),
+        (
+            Some(config::ReasoningEffortConfig::Medium),
+            Some(providers::ReasoningEffort::Medium),
+        ),
+        (
+            Some(config::ReasoningEffortConfig::Low),
+            Some(providers::ReasoningEffort::Low),
+        ),
+        (None, None),
+    ] {
+        // Given: worker binding に推論強度を指定または省略する。
+        let (mut model, requests) = routed_model(Ok(response()), "local-model", None);
+        model.agents.worker.generation.reasoning_effort = configured;
+        // When: 既存の composition adapter 経由で完了を要求する。
+        let result = complete(&model, "run-effort").await;
+        // Then: provider に届く request が指定強度を保持する。
+        assert_eq!(result, Ok(response()));
+        let recorded = requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(recorded[0].reasoning_effort, expected);
+    }
+}
+
 // Given: secret を含む provider error を返す stub client
 // When: RoutedModel.complete が失敗する
 // Then: status and route identity survive while the authentication secret is scrubbed.
