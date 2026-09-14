@@ -1,9 +1,11 @@
 //! OS の資格情報サービスを利用するストアです。
+// allow: SIZE_OK — review follow-up の変更先制限により worker と回帰テストを同じファイルに保持する。
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, mpsc},
+    sync::{Arc, Once, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 
 use keyring::{Entry, Error};
@@ -12,11 +14,14 @@ use crate::{CredentialError, CredentialStore, Secret};
 
 const SERVICE: &str = "evorch";
 const PROBE_KEY: &str = "__evorch_probe__";
+const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
+static PANIC_HOOK: Once = Once::new();
 
 /// OS の資格情報サービスへ保存するストア。
 #[derive(Debug, Clone)]
 pub struct KeyringCredentialStore {
     requests: Arc<mpsc::SyncSender<Request>>,
+    timeout: Duration,
 }
 
 /// worker 内だけで資格情報を操作する差し替え可能な境界。
@@ -63,11 +68,26 @@ impl KeyringCredentialStore {
     }
 
     /// backend を一つの通常スレッドへ移し、全操作を直列化する。
-    fn spawn(mut backend: impl KeyringBackend) -> Result<Self, CredentialError> {
+    fn spawn(backend: impl KeyringBackend) -> Result<Self, CredentialError> {
+        Self::spawn_with_timeout(backend, WORKER_TIMEOUT)
+    }
+
+    fn spawn_with_timeout(
+        mut backend: impl KeyringBackend,
+        timeout: Duration,
+    ) -> Result<Self, CredentialError> {
         let (requests, receiver) = mpsc::sync_channel::<Request>(0);
         thread::Builder::new()
             .name("evorch-keyring".to_owned())
             .spawn(move || {
+                PANIC_HOOK.call_once(|| {
+                    let previous = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(move |info| {
+                        if !should_suppress_panic_output(thread::current().name()) {
+                            previous(info);
+                        }
+                    }));
+                });
                 for request in receiver {
                     let result = catch_unwind(AssertUnwindSafe(|| match request.operation {
                         Operation::Get(key) => match backend.get(key) {
@@ -94,19 +114,47 @@ impl KeyringCredentialStore {
             .map_err(|error| unavailable(&error.to_string()))?;
         Ok(Self {
             requests: Arc::new(requests),
+            timeout,
         })
     }
 
-    /// 要求を送信し、チャネル切断を利用不可エラーへ変換する。
+    /// 送受信の待機時間を制限し、期限超過・切断を利用不可へ変換する。
     fn dispatch(&self, operation: Operation) -> Result<Option<String>, CredentialError> {
         let (reply, response) = mpsc::channel();
-        self.requests
-            .send(Request { operation, reply })
-            .map_err(|_| unavailable("資格情報 worker が終了しています"))?;
+        let started = Instant::now();
+        let mut request = Request { operation, reply };
+        // std の SyncSender に send_timeout がないため、rendezvous を期限付きで試行する。
+        loop {
+            match self.requests.try_send(request) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(unavailable("資格情報 worker が終了しています"));
+                }
+                Err(mpsc::TrySendError::Full(pending)) => request = pending,
+            }
+            let remaining = self.timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(unavailable(
+                    "資格情報 worker が要求を受信しません（タイムアウト）",
+                ));
+            }
+            thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
         response
-            .recv()
-            .map_err(|_| unavailable("資格情報 worker の応答がありません"))?
+            .recv_timeout(self.timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    unavailable("資格情報 worker が応答しません（タイムアウト）")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    unavailable("資格情報 worker の応答がありません")
+                }
+            })?
     }
+}
+
+fn should_suppress_panic_output(thread_name: Option<&str>) -> bool {
+    thread_name == Some("evorch-keyring")
 }
 
 impl CredentialStore for KeyringCredentialStore {
@@ -152,6 +200,7 @@ mod tests {
     struct FakeBackend {
         values: HashMap<String, String>,
         thread: Option<thread::ThreadId>,
+        release: Option<mpsc::Receiver<()>>,
     }
 
     impl FakeBackend {
@@ -160,6 +209,13 @@ mod tests {
             let current = thread::current().id();
             assert_eq!(*self.thread.get_or_insert(current), current);
             assert_ne!(key, "panic", "意図した backend panic");
+            if key == "blocked" {
+                self.release
+                    .take()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+            }
         }
     }
 
@@ -176,6 +232,51 @@ mod tests {
         fn delete(&mut self, key: String) -> Result<(), Error> {
             self.check(&key);
             self.values.remove(&key).map(|_| ()).ok_or(Error::NoEntry)
+        }
+    }
+
+    // Given: 応答を保留する backend / When: 受信・送信期限を超過 / Then: 復旧後の要求に連鎖しない
+    #[test]
+    fn worker_recovers_after_dispatch_timeouts() -> Result<(), Box<dyn std::error::Error>> {
+        let (release, receiver) = mpsc::channel();
+        let mut store = KeyringCredentialStore::spawn_with_timeout(
+            FakeBackend {
+                release: Some(receiver),
+                ..Default::default()
+            },
+            std::time::Duration::from_millis(100),
+        )?;
+        let result = store.get("blocked");
+        assert!(matches!(
+            result,
+            Err(CredentialError::KeychainUnavailable { detail })
+                if detail == "資格情報 worker が応答しません（タイムアウト）"
+        ));
+        let result = store.set("must-not-run", &Secret::from("discarded".to_owned()));
+        assert!(matches!(
+            result,
+            Err(CredentialError::KeychainUnavailable { detail })
+                if detail == "資格情報 worker が要求を受信しません（タイムアウト）"
+        ));
+        release.send(())?;
+        store.timeout = std::time::Duration::from_secs(2);
+        assert_eq!(store.get("must-not-run")?, None);
+        store.set("token", &Secret::from("retained".to_owned()))?;
+        assert_eq!(store.get("token")?.unwrap().expose(), "retained");
+        Ok(())
+    }
+
+    // Given: worker と他のスレッド名 / When: hook の判定 / Then: worker のみ出力を抑制する
+    #[test]
+    fn panic_output_is_suppressed_only_for_keyring_worker() {
+        assert!(should_suppress_panic_output(Some("evorch-keyring")));
+        for name in [
+            None,
+            Some("main"),
+            Some("tokio-runtime-worker"),
+            Some("evorch-keyring-other"),
+        ] {
+            assert!(!should_suppress_panic_output(name));
         }
     }
 
@@ -234,6 +335,7 @@ mod tests {
         drop(receiver);
         let store = KeyringCredentialStore {
             requests: Arc::new(requests),
+            timeout: WORKER_TIMEOUT,
         };
         for result in [
             store.get("token").map(|_| ()),

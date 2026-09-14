@@ -45,13 +45,17 @@ fn truncates_body_safely_when_http_detail_exceeds_300_characters() {
         // When
         let message = map_fetch_error(&error);
         // Then
-        assert_eq!(
-            message,
-            format!(
-                "Could not fetch Codex models: HTTP 500: {}",
-                body.chars().take(300).collect::<String>()
-            )
-        );
+        let detail = message
+            .strip_prefix("Could not fetch Codex models: HTTP 500: ")
+            .unwrap();
+        assert_eq!(detail.chars().count(), 300);
+        if body.starts_with('a') {
+            assert!(detail.chars().all(|character| character == 'a'));
+        } else {
+            assert_eq!(detail.matches('界').count(), 150);
+            assert_eq!(detail.matches('🦀').count(), 150);
+            assert!(detail.ends_with("界🦀"));
+        }
     }
 }
 

@@ -51,7 +51,7 @@ pub async fn list_codex_models(
     let request = build_http_client(None)?
         .get(format!("{}/models", base_url.trim_end_matches('/')))
         .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
-        .header("ChatGPT-Account-ID", account_id)
+        .header("chatgpt-account-id", account_id)
         .header("originator", "codex_cli_rs")
         .header(
             reqwest::header::USER_AGENT,
