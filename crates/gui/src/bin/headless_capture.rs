@@ -1,3 +1,4 @@
+// allow: SIZE_OK - Keep the existing capture parser and its private BDD tests together; T3 adds only one capture mode.
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ struct CaptureArgs {
     pending_approvals: bool,
     provider_configured: bool,
     open_settings: bool,
+    open_theme_settings: bool,
     edit_profile: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
@@ -72,6 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.provider_settings_mut().edit("local");
         }
     }
+    if capture.open_theme_settings {
+        state.open_theme_settings();
+    }
     if let Some(dir) = demo_dir.as_ref() {
         state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
     }
@@ -124,6 +129,7 @@ fn parse_args(
     let mut pending_approvals = false;
     let mut provider_configured = false;
     let mut open_settings = false;
+    let mut open_theme_settings = false;
     let mut edit_profile = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
@@ -226,6 +232,10 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--open-settings") => open_settings = true,
+            Some("--open-theme-settings") if open_theme_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-theme-settings") => open_theme_settings = true,
             Some("--edit-profile") => {
                 open_settings = true;
                 edit_profile = true;
@@ -254,6 +264,7 @@ fn parse_args(
         pending_approvals,
         provider_configured,
         open_settings,
+        open_theme_settings,
         edit_profile,
         activate,
         pointer,
@@ -277,6 +288,7 @@ Modes:
    --pending-approvals  with --demo: show two requests in Approvals (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  show the registered demo profile list
+   --open-theme-settings  show the theme picker
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
@@ -316,6 +328,18 @@ mod tests {
             parse_args(args([])).unwrap().theme,
             gui::theme::style::ThemePreset::Graphite
         );
+    }
+
+    #[test]
+    fn parse_args_opens_theme_settings_with_tokyo_night() {
+        // Given: the theme picker capture mode and existing theme flag.
+        let arguments = args(["--open-theme-settings", "--theme", "tokyo-night"]);
+        // When: the capture arguments are parsed.
+        let capture = parse_args(arguments).unwrap();
+        // Then: the picker opens with the requested theme, not provider settings.
+        assert!(capture.open_theme_settings);
+        assert!(!capture.open_settings);
+        assert_eq!(capture.theme, gui::theme::style::ThemePreset::TokyoNight);
     }
 
     #[test]

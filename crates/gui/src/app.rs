@@ -13,6 +13,7 @@ mod role_settings;
 mod routing_settings;
 mod state;
 mod tab_viewer;
+mod theme_settings;
 mod viewer;
 
 pub use attention::ack::{AttentionAck, DisplayRevision};
