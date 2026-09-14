@@ -17,16 +17,16 @@ pub trait DnsResolver: Send + Sync {
 }
 
 pub(crate) struct HickoryResolver {
-    resolver: TokioResolver,
+    resolver: Mutex<Option<TokioResolver>>,
 }
 
 impl HickoryResolver {
+    /// system DNS 設定の読み込みは初回の名前解決時まで遅延する。
+    /// これにより /etc/resolv.conf を持たない環境(Nix sandbox 等)でも構築自体は成功する。
     pub(crate) fn new() -> Result<Self, NetworkGuardError> {
-        TokioResolver::builder_tokio()
-            .map(|builder| Self {
-                resolver: builder.build(),
-            })
-            .map_err(|error| NetworkGuardError::DnsResolverInitialization(error.to_string()))
+        Ok(Self {
+            resolver: Mutex::new(None),
+        })
     }
 }
 
@@ -43,8 +43,20 @@ impl DnsResolver for HickoryResolver {
             ]);
         }
 
-        let addrs: Vec<IpAddr> = self
-            .resolver
+        let mut guard = self.resolver.lock().await;
+        let resolver = match guard.as_ref() {
+            Some(resolver) => resolver,
+            None => {
+                let built = TokioResolver::builder_tokio()
+                    .map(|builder| builder.build())
+                    .map_err(|error| {
+                        NetworkGuardError::DnsResolverInitialization(error.to_string())
+                    })?;
+                guard.insert(built)
+            }
+        };
+
+        let addrs: Vec<IpAddr> = resolver
             .lookup_ip(host)
             .await
             .map_err(|error| NetworkGuardError::DnsResolutionFailed {

@@ -92,24 +92,6 @@
             "--skip=parallel_isolated_runs_get_distinct_worktrees"
             # PRE-EXISTING: local workspace_runtime fails the fixture's initial git commit.
             "--skip=worktree_removed_on_done_and_on_cancel"
-            # Local tools --lib passes; sandbox lacks system DNS resolver configuration.
-            "--skip=network_guard::dns::tests::resolves_literals_and_localhost_without_dns"
-            # Local tools --lib passes; sandbox lacks system DNS resolver configuration.
-            "--skip=tools::tests::web_tool_schemas_compile"
-            # Local tools --lib passes; sandbox lacks system DNS resolver configuration.
-            "--skip=tools::web_fetch::tests::name_is_web_fetch"
-            # Local tools --lib passes; sandbox lacks system DNS resolver configuration.
-            "--skip=tools::web_fetch::tests::permissions_declare_network"
-            # Local tools --lib passes; sandbox lacks system DNS resolver configuration.
-            "--skip=tools::web_fetch::tests::schema_lists_url_selector_format_only"
-            # Local executor tests pass; sandbox DNS initialization fails.
-            "--skip=tool_permissions_and_classify_report_registered_network_tools"
-            # Local executor tests pass; sandbox DNS initialization fails.
-            "--skip=web_tools_result_origin_is_web_untrusted_fail_closed"
-            # Local executor tests pass; sandbox DNS initialization fails.
-            "--skip=with_web_tools_registers_web_search_and_web_fetch_with_real_schemas"
-            # Local cargo test passes; sandbox lacks system DNS resolver configuration.
-            "--skip=keyless_default_builds_without_env_or_config"
           ];
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           nativeBuildInputs = [

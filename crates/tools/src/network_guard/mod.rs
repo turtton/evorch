@@ -56,8 +56,8 @@ pub struct NetworkGuard {
 impl NetworkGuard {
     /// system DNS resolver を使う production guard を構築する。
     ///
-    /// # Errors
-    /// OS の DNS 設定を読み込めない場合はエラーを返す。
+    /// OS の DNS 設定の読み込みは初回の名前解決時に遅延実行されるため、
+    /// 設定が読めない環境でも構築は成功し、解決時に [`NetworkGuardError::DnsResolverInitialization`] が返る。
     pub fn new() -> Result<Self, NetworkGuardError> {
         Ok(Self::with_resolver(Arc::new(HickoryResolver::new()?)))
     }
