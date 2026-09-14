@@ -21,7 +21,12 @@ pub fn demo_provider_config() -> config::Config {
         "work-codex".into(),
         config::ProviderProfileConfig {
             provider_type: config::ProviderTypeConfig::OpenAiCodex,
-            default_model: "gpt-5-codex".into(),
+            models: config::types::provider::CODEX_DEFAULT_MODELS
+                .iter()
+                .copied()
+                .map(config::ModelEntryConfig::enabled)
+                .collect(),
+            default_model: config::types::provider::CODEX_DEFAULT_MODEL.into(),
             ..Default::default()
         },
     );

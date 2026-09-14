@@ -2,8 +2,11 @@ use std::collections::BTreeMap;
 
 use super::codex_auth::CodexAuthModel;
 
+#[path = "provider_codex_models.rs"]
+mod codex_models;
 #[path = "provider_openai_editor.rs"]
 mod openai;
+pub use codex_models::CodexModelsFetch;
 pub use openai::ProviderSettingsModel as OpenAiEditorModel;
 pub use openai::{CredentialMode, ModelsFetchState, ProviderSettingsTab, provider_status_of};
 
@@ -29,6 +32,7 @@ pub struct CodexEditorModel {
     pub auth: CodexAuthModel,
     pub models: Vec<String>,
     pub default_model: String,
+    pub fetch: CodexModelsFetch,
 }
 
 #[derive(Debug)]
@@ -101,6 +105,7 @@ impl ProviderSettingsModel {
                     .map(|id| (*id).to_owned())
                     .collect(),
                 default_model: config::types::provider::CODEX_DEFAULT_MODEL.to_owned(),
+                fetch: CodexModelsFetch::default(),
             }),
         });
         self.error = None;
@@ -137,6 +142,10 @@ impl ProviderSettingsModel {
                         .map(|model| model.id.clone())
                         .collect(),
                     default_model: profile.default_model.clone(),
+                    fetch: CodexModelsFetch {
+                        base_url: profile.base_url.clone(),
+                        ..Default::default()
+                    },
                 })
             }
             _ => {
@@ -188,13 +197,20 @@ impl ProviderSettingsModel {
         &mut self,
         store: Option<std::sync::Arc<dyn sandbox::CredentialStore>>,
     ) {
-        if let Some(editor) = self.openai_mut() {
-            editor.start_models_fetch_with_store(store);
+        match &mut self.editor {
+            Some(ProfileEditor::OpenAiCompatible(editor)) => {
+                editor.start_models_fetch_with_store(store)
+            }
+            Some(ProfileEditor::Codex(editor)) => editor.start_models_fetch_with_store(store),
+            None => {}
         }
     }
 
     pub fn poll_models(&mut self) -> bool {
-        self.openai_mut()
-            .is_some_and(OpenAiEditorModel::poll_models)
+        match &mut self.editor {
+            Some(ProfileEditor::OpenAiCompatible(editor)) => editor.poll_models(),
+            Some(ProfileEditor::Codex(editor)) => editor.poll_models(),
+            None => false,
+        }
     }
 }

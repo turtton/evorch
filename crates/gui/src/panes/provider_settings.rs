@@ -53,8 +53,8 @@ pub fn provider_settings_modal(
                         .auto_shrink([false, false])
                         .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
                         .show(ui, |ui| {
-                            if codex_editor::codex_body(ui, editor) {
-                                action = Some(ProviderSettingsAction::StartCodexLogin);
+                            if let Some(editor_action) = codex_editor::codex_body(ui, editor) {
+                                action = Some(editor_action);
                             }
                         });
                 }

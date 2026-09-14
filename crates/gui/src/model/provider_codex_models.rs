@@ -1,0 +1,167 @@
+use super::{CodexEditorModel, ModelsFetchState};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use providers::provider::codex::tokens::CodexTokenStore;
+use std::collections::BTreeSet;
+use std::sync::{Arc, mpsc};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug)]
+pub struct CodexModelsFetch {
+    pub base_url: String,
+    pub models_fetch_state: ModelsFetchState,
+    pub available_models: Option<Vec<String>>,
+    pub fetch_selected: BTreeSet<String>,
+    pub models_rx: Option<mpsc::Receiver<Result<Vec<String>, String>>>,
+    pub(super) source: Option<(String, String)>,
+}
+
+impl Default for CodexModelsFetch {
+    fn default() -> Self {
+        Self {
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            models_fetch_state: ModelsFetchState::Idle,
+            available_models: None,
+            fetch_selected: BTreeSet::new(),
+            models_rx: None,
+            source: None,
+        }
+    }
+}
+
+impl CodexEditorModel {
+    pub fn start_models_fetch_with_store(
+        &mut self,
+        store: Option<Arc<dyn sandbox::CredentialStore>>,
+    ) {
+        if self.fetch.models_rx.is_some() {
+            return;
+        }
+        self.fetch.models_fetch_state = ModelsFetchState::Loading;
+        self.fetch.available_models = None;
+        self.fetch.fetch_selected.clear();
+        let account = self.account.clone();
+        let base_url = self.fetch.base_url.clone();
+        self.fetch.source = Some((account.clone(), base_url.clone()));
+        let (tx, rx) = mpsc::channel();
+        self.fetch.models_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = access_token(store, account).and_then(|token| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                runtime
+                    .block_on(providers::list_codex_models(
+                        &base_url,
+                        &providers::ProviderAuth::new(token),
+                        env!("CARGO_PKG_VERSION"),
+                    ))
+                    .map_err(|error| match error {
+                        providers::ProviderError::Http {
+                            status: 401 | 403, ..
+                        } => "Codex authorization rejected; Sign in again".into(),
+                        _ => "Could not fetch Codex models; check the connection and try again"
+                            .into(),
+                    })
+            });
+            let _ = tx.send(result);
+        });
+    }
+
+    pub fn poll_models(&mut self) -> bool {
+        let Some(rx) = self.fetch.models_rx.take() else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => {
+                self.fetch.models_rx = Some(rx);
+                return false;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("Model fetch finished without result".into())
+            }
+        };
+        let result = if self
+            .fetch
+            .source
+            .as_ref()
+            .is_some_and(|(account, base_url)| {
+                account != &self.account || base_url != &self.fetch.base_url
+            }) {
+            Err("Account or base URL changed during fetch; result discarded".into())
+        } else {
+            result
+        };
+        self.fetch.source = None;
+        match result {
+            Ok(models) => {
+                let mut seen = BTreeSet::new();
+                self.fetch.available_models = Some(
+                    models
+                        .into_iter()
+                        .filter(|id| !id.trim().is_empty() && seen.insert(id.clone()))
+                        .collect(),
+                );
+                self.fetch.models_fetch_state = ModelsFetchState::Loaded;
+            }
+            Err(error) => {
+                self.fetch.available_models = None;
+                self.fetch.models_fetch_state = ModelsFetchState::Failed(error);
+            }
+        }
+        true
+    }
+
+    pub fn apply_fetched_selection(&mut self) {
+        if let Some(models) = &self.fetch.available_models {
+            for id in models {
+                if self.fetch.fetch_selected.contains(id) && !self.models.contains(id) {
+                    self.models.push(id.clone());
+                    if self.default_model.is_empty() {
+                        self.default_model.clone_from(id);
+                    }
+                }
+            }
+        }
+        self.fetch.fetch_selected.clear();
+    }
+}
+
+fn access_token(
+    store: Option<Arc<dyn sandbox::CredentialStore>>,
+    account: String,
+) -> Result<String, String> {
+    let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
+    let bundle = routing::factory::CredentialStoreTokenStore::new(store, account)
+        .load()
+        .map_err(|_| "Could not read Codex credentials; Sign in again")?
+        .ok_or("No stored Codex credentials; Sign in first")?;
+    #[derive(serde::Deserialize)]
+    struct Expiry {
+        exp: u64,
+    }
+    let mut segments = bundle.access_token.split('.');
+    let payload = match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some(_), Some(payload), Some(_), None) => payload,
+        _ => return Err("Invalid Codex access token; Sign in again".into()),
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .map_err(|_| "Invalid Codex access token; Sign in again")?;
+    let expiry: Expiry =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid Codex access token; Sign in again")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "System clock is invalid")?
+        .as_secs();
+    if expiry.exp <= now {
+        return Err("Codex access token expired; Sign in again".into());
+    }
+    Ok(bundle.access_token)
+}

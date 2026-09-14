@@ -1,6 +1,8 @@
-use crate::model::provider_settings::CodexEditorModel;
+use super::ProviderSettingsAction;
+use crate::model::provider_settings::{CodexEditorModel, ModelsFetchState};
 use crate::theme::text::{h3, muted};
 use crate::theme::tokens::{ERROR_FG, INPUT};
+use crate::theme::widgets::primary_button;
 
 #[derive(Clone, Default)]
 struct ModelInputs {
@@ -8,7 +10,10 @@ struct ModelInputs {
     error: Option<String>,
 }
 
-pub(super) fn codex_body(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
+pub(super) fn codex_body(
+    ui: &mut egui::Ui,
+    editor: &mut CodexEditorModel,
+) -> Option<ProviderSettingsAction> {
     let busy = editor.auth.is_authenticating();
     ui.add_enabled_ui(!busy, |ui| {
         let previous = editor.name.clone();
@@ -23,7 +28,11 @@ pub(super) fn codex_body(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bo
             .labelled_by(account.id);
     });
     let login = crate::panes::codex_auth::codex_auth_section(ui, &editor.auth);
+    let mut action = login.then_some(ProviderSettingsAction::StartCodexLogin);
     ui.add_enabled_ui(!busy, |ui| {
+        if fetch_models(ui, editor) {
+            action = Some(ProviderSettingsAction::RefreshModels);
+        }
         let state_id = ui.id().with("codex-model-inputs");
         let mut inputs =
             ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
@@ -101,5 +110,74 @@ pub(super) fn codex_body(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bo
         )).wrap());
         ui.data_mut(|data| data.insert_temp(state_id, inputs));
     });
-    login
+    action
+}
+
+fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
+    let mut refresh = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Fetch models");
+        refresh = ui
+            .add_enabled(
+                editor.fetch.models_rx.is_none(),
+                egui::Button::new("Refresh models"),
+            )
+            .clicked();
+        match &editor.fetch.models_fetch_state {
+            ModelsFetchState::Idle => {}
+            ModelsFetchState::Loading => {
+                ui.spinner();
+                ui.label(muted("Loading models…"));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            ModelsFetchState::Loaded => {
+                ui.label(muted(format!(
+                    "Loaded {} models from Codex",
+                    editor.fetch.available_models.as_ref().map_or(0, Vec::len)
+                )));
+            }
+            ModelsFetchState::Failed(error) => {
+                ui.colored_label(
+                    ERROR_FG,
+                    format!("Auto-fetch failed ({error}); configured models are unchanged"),
+                );
+            }
+        }
+    });
+    if editor.fetch.models_fetch_state == ModelsFetchState::Loaded {
+        ui.label(h3("Fetched models"));
+        egui::ScrollArea::vertical()
+            .id_salt("codex-fetched-models")
+            .max_height(200.0)
+            .show(ui, |ui| {
+                if let Some(models) = &editor.fetch.available_models {
+                    for id in models {
+                        if editor.models.contains(id) {
+                            ui.label(muted(format!("{id} · Already added")));
+                        } else {
+                            let mut selected = editor.fetch.fetch_selected.contains(id);
+                            if ui.checkbox(&mut selected, id).changed() {
+                                if selected {
+                                    editor.fetch.fetch_selected.insert(id.clone());
+                                } else {
+                                    editor.fetch.fetch_selected.remove(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        ui.add_enabled_ui(!editor.fetch.fetch_selected.is_empty(), |ui| {
+            if primary_button(
+                ui,
+                format!("Apply selected ({})", editor.fetch.fetch_selected.len()),
+            )
+            .clicked()
+            {
+                editor.apply_fetched_selection();
+            }
+        });
+    }
+    refresh
 }
