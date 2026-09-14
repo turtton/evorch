@@ -41,7 +41,7 @@ pub fn visuals_for(preset: ThemePreset) -> Visuals {
     visuals.text_edit_bg_color = Some(p.INPUT);
     visuals.selection.bg_fill = match preset {
         ThemePreset::Graphite => p.ACCENT,
-        ThemePreset::HighContrast => Color32::from_rgb(255, 190, 0),
+        ThemePreset::HighContrast => p.WARNING_FG,
         ThemePreset::TokyoNight => p.SELECTED_ROW,
     };
     visuals.selection.stroke = Stroke::new(1.0, p.ACCENT);
@@ -62,26 +62,19 @@ pub fn visuals_for(preset: ThemePreset) -> Visuals {
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.TEXT);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(R_SM);
 
-    // Pin legacy egui fills explicitly; Night must never inherit neutral defaults.
-    visuals.widgets.hovered.bg_fill = match preset {
-        ThemePreset::Graphite | ThemePreset::HighContrast => Color32::from_gray(70),
-        ThemePreset::TokyoNight => p.HOVER_ROW,
-    };
+    visuals.widgets.hovered.bg_fill = p.HOVER_ROW;
     visuals.widgets.hovered.weak_bg_fill = p.HOVER_ROW;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, p.TEXT);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.TEXT_MUTED);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.TEXT);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.BORDER);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(R_SM);
 
-    visuals.widgets.active.bg_fill = match preset {
-        ThemePreset::Graphite | ThemePreset::HighContrast => Color32::from_gray(55),
-        ThemePreset::TokyoNight => p.ACTIVE_ROW,
-    };
+    visuals.widgets.active.bg_fill = p.ACTIVE_ROW;
     visuals.widgets.active.weak_bg_fill = p.ACTIVE_ROW;
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, p.TEXT);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, p.TEXT);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, p.ACCENT);
     visuals.widgets.active.corner_radius = CornerRadius::same(R_SM);
 
-    visuals.widgets.open = visuals.widgets.hovered;
+    visuals.widgets.open = visuals.widgets.active;
     visuals.button_frame = true;
     visuals.striped = false;
     visuals.window_shadow = egui::Shadow {
@@ -223,9 +216,9 @@ mod tests {
                 graphite.widgets.hovered,
                 p.HOVER_ROW,
                 p.HOVER_ROW,
-                p.TEXT_MUTED,
+                p.BORDER,
                 p.TEXT,
-                1.5,
+                1.0,
             ),
             (
                 v.widgets.active,
@@ -234,16 +227,16 @@ mod tests {
                 p.ACTIVE_ROW,
                 p.ACCENT,
                 p.TEXT,
-                2.0,
+                1.0,
             ),
             (
                 v.widgets.open,
                 graphite.widgets.open,
-                p.HOVER_ROW,
-                p.HOVER_ROW,
-                p.TEXT_MUTED,
+                p.ACTIVE_ROW,
+                p.ACTIVE_ROW,
+                p.ACCENT,
                 p.TEXT,
-                1.5,
+                1.0,
             ),
         ] {
             assert_eq!(state.bg_fill, fill);

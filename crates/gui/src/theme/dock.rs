@@ -13,7 +13,7 @@ pub fn dock_style(style: &egui::Style) -> Style {
     dock.separator.color_hovered = palette().TEXT_MUTED;
     dock.separator.color_dragged = palette().ACCENT;
 
-    dock.tab_bar.bg_fill = palette().OVERLAY;
+    dock.tab_bar.bg_fill = palette().SURFACE_RAISED;
     dock.tab_bar.height = TAB_HEIGHT + 2.0 * TAB_GAP;
     dock.tab_bar.inner_margin = Margin::symmetric(SP_1 as i8, TAB_GAP as i8);
     dock.tab_bar.corner_radius = CornerRadius::ZERO;
@@ -32,19 +32,19 @@ pub fn dock_style(style: &egui::Style) -> Style {
         se: 0,
     };
     dock.tab.active = TabInteractionStyle {
-        bg_fill: palette().SURFACE_RAISED,
+        bg_fill: palette().ACTIVE_ROW,
         text_color: palette().TEXT,
         outline_color: palette().ACCENT,
         corner_radius: top_radius,
     };
     dock.tab.focused = TabInteractionStyle {
-        bg_fill: palette().CANVAS,
+        bg_fill: palette().ACTIVE_ROW,
         text_color: palette().TEXT,
         outline_color: palette().ACCENT,
         corner_radius: top_radius,
     };
     dock.tab.inactive = TabInteractionStyle {
-        bg_fill: palette().OVERLAY,
+        bg_fill: palette().SURFACE_RAISED,
         text_color: palette().TEXT_MUTED,
         outline_color: Color32::TRANSPARENT,
         corner_radius: top_radius,

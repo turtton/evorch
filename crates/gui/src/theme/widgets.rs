@@ -85,7 +85,7 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str, cta: Option<&str>) -> b
 
 pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> R) -> Response {
     let fill = if selected {
-        palette().SELECTED_ROW
+        palette().ACTIVE_ROW
     } else {
         ui.visuals().faint_bg_color
     };

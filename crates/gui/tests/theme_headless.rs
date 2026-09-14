@@ -47,10 +47,8 @@ fn tokyo_night_renders_demo_with_dark_style() {
     assert_eq!(style.visuals.panel_fill, p.CANVAS);
     assert_eq!(palette(), p);
     assert_eq!(
-        gui::theme::dock::dock_style(&style)
-            .tab_bar
-            .bg_fill,
-        p.OVERLAY
+        gui::theme::dock::dock_style(&style).tab_bar.bg_fill,
+        p.SURFACE_RAISED
     );
 }
 
