@@ -382,7 +382,7 @@ fn v02_end_to_end_chained_scenario() {
     // source, the fixture loop adapter, and persistence paths.
     let mut fixture = ChainedFixture::new();
 
-    // Then: the default layout is sidebar | conversation | workbench tabs.
+    // Then: the default layout contains all workbench panels.
     assert_default_v02_layout(&fixture.workbench);
 
     // When: a project and a thread are created through the public state API.
@@ -625,7 +625,7 @@ fn v02_end_to_end_chained_scenario() {
     let saved_sidebar =
         workspace_ui::load_sidebar(&fixture.sidebar_path).expect("saved sidebar loads");
 
-    // Then: the saved tree keeps the three v0.2 regions plus the dynamic tabs.
+    // Then: the saved tree keeps the five default leaves plus the dynamic tabs.
     let mut leaves = Vec::new();
     leaf_panels(&saved_workspace.main.root, &mut leaves);
     let leaf_sets = leaves
@@ -641,16 +641,16 @@ fn v02_end_to_end_chained_scenario() {
         vec![
             BTreeSet::from(["sidebar-main".to_string()]),
             BTreeSet::from(["agent-main".to_string()]),
+            BTreeSet::from(["terminal-main".to_string()]),
             BTreeSet::from([
                 "agents-main".to_string(),
-                "diff-main".to_string(),
-                "terminal-main".to_string(),
                 "notifications-main".to_string(),
                 "approvals-main".to_string(),
                 "agent-run-1".to_string(),
                 "agent-run-2".to_string(),
                 "agent-run-3".to_string(),
             ]),
+            BTreeSet::from(["diff-main".to_string()]),
         ],
         "saved tree must keep the v0.2 regions and dynamic transcript tabs"
     );

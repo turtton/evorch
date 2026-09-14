@@ -4,12 +4,12 @@ use workspace_ui::{
 };
 
 #[test]
-fn default_v02_places_sidebar_center_and_right_tabs() {
+fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
     // Given: the current default workspace constructor.
     // When: the framework-independent workspace is built.
     let workspace = Workspace::default_v02();
 
-    // Then: the exact three-region tree and panel registry are present.
+    // Then: the exact split tree and unchanged panel registry are present.
     assert_eq!(workspace.version, WORKSPACE_SCHEMA_VERSION);
     assert_eq!(workspace.version, 3);
     assert_eq!(workspace.panels.len(), 6);
@@ -30,22 +30,44 @@ fn default_v02_places_sidebar_center_and_right_tabs() {
     };
     assert_eq!(content.direction, SplitDirection::Horizontal);
     assert_eq!(content.fraction, 0.625);
+    let LayoutNode::Split(center) = content.first.as_ref() else {
+        panic!("center must split conversation above terminal");
+    };
+    assert_eq!(center.direction, SplitDirection::Vertical);
+    assert_eq!(center.fraction, 0.7);
     assert_eq!(
-        content.first.as_ref(),
+        center.first.as_ref(),
         &LayoutNode::Tabs(Tabs {
             panels: vec![PanelId::new("agent-main")],
             active: 0,
         })
     );
     assert_eq!(
-        content.second.as_ref(),
+        *center.second,
+        LayoutNode::Tabs(Tabs {
+            panels: vec![PanelId::new("terminal-main")],
+            active: 0,
+        })
+    );
+    let LayoutNode::Split(right) = content.second.as_ref() else {
+        panic!("right must split agents/notifications above diff");
+    };
+    assert_eq!(right.direction, SplitDirection::Vertical);
+    assert_eq!(right.fraction, 0.5);
+    assert_eq!(
+        right.first.as_ref(),
         &LayoutNode::Tabs(Tabs {
             panels: vec![
                 PanelId::new("agents-main"),
-                PanelId::new("diff-main"),
-                PanelId::new("terminal-main"),
                 PanelId::new("notifications-main"),
             ],
+            active: 0,
+        })
+    );
+    assert_eq!(
+        *right.second,
+        LayoutNode::Tabs(Tabs {
+            panels: vec![PanelId::new("diff-main")],
             active: 0,
         })
     );

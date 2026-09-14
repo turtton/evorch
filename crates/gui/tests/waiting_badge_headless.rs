@@ -160,7 +160,7 @@ fn capture_waiting_read_unread_png_evidence() {
 
 #[test]
 fn hidden_tab_stays_unread_in_focused_window() {
-    // Given: waiting Agents hidden behind the Diff tab.
+    // Given: waiting Agents hidden behind the Notifications tab.
     let mut runs = gui::fixture::demo_runs();
     for run in &mut runs {
         run.phase = event_bus::AgentRunPhase::Waiting;
@@ -172,8 +172,8 @@ fn hidden_tab_stays_unread_in_focused_window() {
     .expect("state");
     let path = state
         .dock()
-        .find_tab(&workspace_ui::PanelId::new("diff-main"))
-        .expect("diff tab");
+        .find_tab(&workspace_ui::PanelId::new("notifications-main"))
+        .expect("notifications tab");
     state.dock_mut().set_active_tab(path).expect("activate");
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 720.0))

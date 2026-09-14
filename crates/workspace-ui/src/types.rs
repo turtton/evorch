@@ -120,7 +120,7 @@ impl Workspace {
         }
     }
 
-    /// Sidebar・Conversation・Workbench tabs の三領域既定レイアウトを構築します。
+    /// Sidebar・中央下部 Terminal・右側上下ペインの既定レイアウトを構築します。
     pub fn default_v02() -> Self {
         let tabs = |panels: &[&str]| {
             LayoutNode::Tabs(Tabs {
@@ -130,12 +130,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let workbench_panels: &[&str] = &[
-            "agents-main",
-            "diff-main",
-            "terminal-main",
-            "notifications-main",
-        ];
+        let workbench_panels: &[&str] = &["agents-main", "notifications-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,
@@ -148,8 +143,18 @@ impl Workspace {
                     second: Box::new(LayoutNode::Split(Split {
                         direction: SplitDirection::Horizontal,
                         fraction: 0.625,
-                        first: Box::new(tabs(conversation_panels)),
-                        second: Box::new(tabs(workbench_panels)),
+                        first: Box::new(LayoutNode::Split(Split {
+                            direction: SplitDirection::Vertical,
+                            fraction: 0.7,
+                            first: Box::new(tabs(conversation_panels)),
+                            second: Box::new(tabs(&["terminal-main"])),
+                        })),
+                        second: Box::new(LayoutNode::Split(Split {
+                            direction: SplitDirection::Vertical,
+                            fraction: 0.5,
+                            first: Box::new(tabs(workbench_panels)),
+                            second: Box::new(tabs(&["diff-main"])),
+                        })),
                     })),
                 }),
                 floating: Vec::new(),
