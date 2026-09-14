@@ -183,9 +183,11 @@ impl Router {
             if !self.is_eligible(model_id) {
                 continue;
             }
+            // fast variant は base モデルの属性を継承する (is_eligible と同じ規約)
+            let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
             let attributes_confirmed = self
                 .catalog
-                .get(model_id)
+                .get(base_model_id)
                 .is_some_and(|entry| entry.attributes_confirmed);
             let group = if attributes_confirmed {
                 &mut confirmed
@@ -602,6 +604,46 @@ mod tests {
             ResolvedRoute {
                 profile: "confirmed-second".to_string(),
                 model_id: "model-confirmed".to_string(),
+            }
+        );
+    }
+
+    // Given: base が属性確定済みの fast variant を先頭に、別の確定済み候補を後位に宣言したルート
+    // When: 解決する
+    // Then: fast variant は base の属性を継承して確定済み扱いとなり、宣言順どおり先頭が選ばれる
+    #[test]
+    fn resolve_treats_fast_variant_as_confirmed_via_base_model() {
+        let profiles = vec![
+            profile("fast-first", "model-x+fast"),
+            profile("confirmed-second", "model-y"),
+        ];
+        let routing = routing_config(&[(
+            "summary",
+            vec![
+                candidate("fast-first", None),
+                candidate("confirmed-second", None),
+            ],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-x", Availability::Available),
+                ("model-y", Availability::Available),
+            ],
+            &["model-x+fast"],
+        );
+        let router =
+            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
+
+        let mut affinity = SessionAffinity::default();
+        let resolved = router
+            .resolve(&mut affinity, "session-1", &logical("summary"))
+            .expect("fast variant を含む候補から解決できる");
+
+        assert_eq!(
+            resolved,
+            ResolvedRoute {
+                profile: "fast-first".to_string(),
+                model_id: "model-x+fast".to_string(),
             }
         );
     }

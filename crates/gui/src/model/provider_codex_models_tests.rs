@@ -144,9 +144,18 @@ fn rejects_id_token_when_account_claim_is_invalid() {
 fn expands_fast_capable_models_into_base_and_fast_rows() {
     // Given
     let models = vec![
-        providers::CodexModelInfo { slug: "gpt-a".into(), supports_fast: true },
-        providers::CodexModelInfo { slug: "gpt-b".into(), supports_fast: false },
-        providers::CodexModelInfo { slug: "gpt-c".into(), supports_fast: true },
+        providers::CodexModelInfo {
+            slug: "gpt-a".into(),
+            supports_fast: true,
+        },
+        providers::CodexModelInfo {
+            slug: "gpt-b".into(),
+            supports_fast: false,
+        },
+        providers::CodexModelInfo {
+            slug: "gpt-c".into(),
+            supports_fast: true,
+        },
     ];
     // When
     let ids = expand_fetched_models(models);

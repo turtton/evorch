@@ -186,7 +186,8 @@ pub fn model_display_label(id: &str) -> String {
 fn access_token(
     store: Option<Arc<dyn sandbox::CredentialStore>>,
     account: String,
-) -> Result<CatalogCredentials, String> {    let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
+) -> Result<CatalogCredentials, String> {
+    let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
     let bundle = routing::factory::CredentialStoreTokenStore::new(store, account)
         .load()
         .map_err(|_| "Could not read Codex credentials; Sign in again")?

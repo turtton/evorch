@@ -51,14 +51,19 @@ pub(crate) async fn execute(
         {
             return Err(FailureAttribution::BudgetExceeded);
         }
+        let (base_model_id, speed) =
+            config::types::provider::parse_model_speed(config.model_for(*role));
         let request = ChatRequest {
-            model: config.model_for(*role).into(),
+            model: base_model_id.to_owned(),
             messages: messages.clone(),
             tools: Vec::new(),
             temperature: Some(0.0),
             max_tokens: Some(spec.max_output_tokens),
             reasoning_effort: None,
-            service_tier: None,
+            service_tier: match speed {
+                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
+                config::types::provider::ModelSpeed::Standard => None,
+            },
             observation: None,
         };
         let execution = trace

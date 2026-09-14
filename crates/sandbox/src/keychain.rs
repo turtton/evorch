@@ -119,6 +119,7 @@ impl KeyringCredentialStore {
     }
 
     /// 送受信の待機時間を制限し、期限超過・切断を利用不可へ変換する。
+    /// 送信と応答は独立した budget のため、最悪の待ち時間は timeout の 2 倍。
     fn dispatch(&self, operation: Operation) -> Result<Option<String>, CredentialError> {
         let (reply, response) = mpsc::channel();
         let started = Instant::now();

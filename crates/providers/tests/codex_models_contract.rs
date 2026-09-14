@@ -28,7 +28,13 @@ async fn lists_slugs_when_codex_catalog_is_returned() {
     .await
     .unwrap();
     // Then
-    assert_eq!(models.iter().map(|info| info.slug.as_str()).collect::<Vec<_>>(), ["gpt-b", "gpt-a"]);
+    assert_eq!(
+        models
+            .iter()
+            .map(|info| info.slug.as_str())
+            .collect::<Vec<_>>(),
+        ["gpt-b", "gpt-a"]
+    );
 }
 
 #[tokio::test]
@@ -46,11 +52,25 @@ async fn catalog_advertises_fast_support_leniently() {
         .expect(1)
         .mount(&server).await;
     // When: カタログを取得する。
-    let models = providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
-        .await.expect("catalog");
+    let models =
+        providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
+            .await
+            .expect("catalog");
     // Then: 広告されたpriorityまたはfastだけが対応扱いになる。
-    let actual: Vec<_> = models.iter().map(|info| (info.slug.as_str(), info.supports_fast)).collect();
-    assert_eq!(actual, [("priority", true), ("legacy", true), ("standard", false), ("other", false), ("null", false)]);
+    let actual: Vec<_> = models
+        .iter()
+        .map(|info| (info.slug.as_str(), info.supports_fast))
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            ("priority", true),
+            ("legacy", true),
+            ("standard", false),
+            ("other", false),
+            ("null", false)
+        ]
+    );
 }
 
 #[tokio::test]

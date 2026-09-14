@@ -77,11 +77,23 @@ pub async fn list_codex_models(
         )
         .bearer_auth(&auth.api_key);
     let models: CodexModelList = fetch_list(request).await?;
-    Ok(models.models.into_iter().map(|model| CodexModelInfo {
-        supports_fast: model.service_tiers.iter().flatten().any(|tier| tier.id == "priority")
-            || model.additional_speed_tiers.iter().flatten().any(|tier| tier == "fast"),
-        slug: model.slug,
-    }).collect())
+    Ok(models
+        .models
+        .into_iter()
+        .map(|model| CodexModelInfo {
+            supports_fast: model
+                .service_tiers
+                .iter()
+                .flatten()
+                .any(|tier| tier.id == "priority")
+                || model
+                    .additional_speed_tiers
+                    .iter()
+                    .flatten()
+                    .any(|tier| tier == "fast"),
+            slug: model.slug,
+        })
+        .collect())
 }
 
 async fn fetch_list<T: DeserializeOwned>(

@@ -97,10 +97,14 @@ pub(super) fn codex_body(
         let label = ui.label("Default model");
         egui::ComboBox::from_id_salt("codex-default-model")
             .width(ui.available_width())
-            .selected_text(&editor.default_model)
+            .selected_text(model_display_label(&editor.default_model))
             .show_ui(ui, |ui| {
                 for id in &editor.models {
-                    ui.selectable_value(&mut editor.default_model, id.clone(), id);
+                    ui.selectable_value(
+                        &mut editor.default_model,
+                        id.clone(),
+                        model_display_label(id),
+                    );
                 }
             })
             .response
@@ -154,10 +158,16 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
                 if let Some(models) = &editor.fetch.available_models {
                     for id in models {
                         if editor.models.contains(id) {
-                            ui.label(muted(format!("{} · Already added", model_display_label(id))));
+                            ui.label(muted(format!(
+                                "{} · Already added",
+                                model_display_label(id)
+                            )));
                         } else {
                             let mut selected = editor.fetch.fetch_selected.contains(id);
-                            if ui.checkbox(&mut selected, model_display_label(id)).changed() {
+                            if ui
+                                .checkbox(&mut selected, model_display_label(id))
+                                .changed()
+                            {
                                 if selected {
                                     editor.fetch.fetch_selected.insert(id.clone());
                                 } else {
