@@ -353,6 +353,31 @@ pub const CODEX_DEFAULT_MODELS: &[&str] = &[
 /// Codex プロファイルで既定選択するモデル。
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-6-astra";
 
+/// Codexの対応モデルにだけ生成するfast variantの識別用suffix。
+pub const FAST_MODEL_SUFFIX: &str = "+fast";
+
+/// モデル処理速度。Fastのクォータ消費は標準の約2〜2.5倍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSpeed {
+    /// 標準処理。
+    Standard,
+    /// 優先処理。
+    Fast,
+}
+
+/// 末尾のfast markerを一つだけ分離する。空のbaseになる場合は通常IDとして扱う。
+pub fn parse_model_speed(model_id: &str) -> (&str, ModelSpeed) {
+    match model_id.strip_suffix(FAST_MODEL_SUFFIX) {
+        Some(base) if !base.is_empty() => (base, ModelSpeed::Fast),
+        Some(_) | None => (model_id, ModelSpeed::Standard),
+    }
+}
+
+/// Codexカタログでfast対応が広告されたbaseからvariant IDを生成する。
+pub fn fast_variant_id(base: &str) -> String {
+    format!("{base}{FAST_MODEL_SUFFIX}")
+}
+
 impl Default for ProviderProfileConfig {
     fn default() -> Self {
         Self {
