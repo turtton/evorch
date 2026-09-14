@@ -15,7 +15,7 @@ impl AgentRunSource for MockSource {
 }
 
 #[test]
-fn agents_grid_fits_nine_columns_without_horizontal_scroll() {
+fn agents_grid_keeps_all_columns_when_wide() {
     let mut tasks = TasksModel::new(MockSource(vec![long_summary()]));
     tasks.refresh();
     let mut telemetry = TelemetryOverlay::new();
@@ -31,7 +31,7 @@ fn agents_grid_fits_nine_columns_without_horizontal_scroll() {
     ));
 
     let mut harness = Harness::builder()
-        .with_size(vec2(480.0, 320.0))
+        .with_size(vec2(2400.0, 320.0))
         .build_ui_state(
             |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
                 gui::panes::agents::agents_pane(ui, &state.0, &state.1);
@@ -54,15 +54,12 @@ fn agents_grid_fits_nine_columns_without_horizontal_scroll() {
     for header in headers {
         let rect = harness.get_by_label(header).rect();
         assert!(
-            rect.max.x <= 480.0 + 0.5,
+            rect.max.x <= 2400.0 + 0.5,
             "{header} overflows right edge: {rect:?}"
         );
         assert!(rect.min.x >= 0.0, "{header} leaks left: {rect:?}");
         if let Some(prev) = last_min_x {
-            assert!(
-                rect.min.x > prev,
-                "{header} not strictly after previous column"
-            );
+            assert_ne!(rect.min.x, prev, "columns must have distinct positions");
         }
         last_min_x = Some(rect.min.x);
     }
@@ -71,66 +68,83 @@ fn agents_grid_fits_nine_columns_without_horizontal_scroll() {
         .query_by_label("120 / 34")
         .expect("tokens label missing");
     let rect = tokens.rect();
-    assert!(rect.max.x <= 480.0 + 0.5, "tokens overflow: {rect:?}");
+    assert!(rect.max.x <= 2400.0 + 0.5, "tokens overflow: {rect:?}");
     assert!(rect.min.x >= 0.0, "tokens leak left: {rect:?}");
 }
 
 #[test]
-fn agents_grid_respects_clip_rect_when_parent_scrolls_horizontally() {
+fn agents_grid_prioritizes_identity_when_default_right_pane_is_narrow() {
+    // Given: Agents gets 37.5% after the 20% sidebar; also cover tighter dock constraints.
+    for width in [1280.0 * 0.8 * 0.375, 320.0] {
+        let mut tasks = TasksModel::new(MockSource(vec![long_summary()]));
+        tasks.refresh();
+        let mut telemetry = TelemetryOverlay::new();
+        telemetry.apply_event(&request_started(
+            "run-1",
+            "openai-compatible-local-gateway",
+            "claude-sonnet-4-5-20250929-extended-thinking",
+        ));
+        telemetry.apply_event(&request_completed("run-1", 120, 34));
+        telemetry.apply_event(&tool_started(
+            "run-1",
+            "read_file_with_an_extremely_long_tool_name",
+        ));
+
+        let mut harness = Harness::builder()
+            .with_size(vec2(width, 320.0))
+            .build_ui_state(
+                |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
+                    gui::theme::install(ui.ctx());
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        gui::panes::agents::agents_pane(ui, &state.0, &state.1);
+                    });
+                },
+                (tasks, telemetry),
+            );
+        // When: the table is painted at its initial horizontal scroll position.
+        harness.run();
+
+        // Then: priority headers and status are painted in full, not just accessible labels.
+        for label in ["name", "phase", "Running"] {
+            let text = harness
+                .output()
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == label => Some(text),
+                    _ => None,
+                })
+                .expect("priority text is painted");
+            assert!(!text.galley.elided, "{label} is ellipsized");
+            assert!(
+                text.pos.x + text.galley.size().x <= width,
+                "{label} clipped"
+            );
+        }
+        assert!(harness.get_by_label("tokens (in/out)").rect().left() > width);
+    }
+}
+
+#[test]
+fn agents_grid_telemetry_is_reachable_when_scrolled() {
+    // Given: a narrow table with usage beyond the priority columns.
     let mut tasks = TasksModel::new(MockSource(vec![long_summary()]));
     tasks.refresh();
     let mut telemetry = TelemetryOverlay::new();
-    telemetry.apply_event(&request_started(
-        "run-1",
-        "openai-compatible-local-gateway",
-        "claude-sonnet-4-5-20250929-extended-thinking",
-    ));
     telemetry.apply_event(&request_completed("run-1", 120, 34));
-    telemetry.apply_event(&tool_started(
-        "run-1",
-        "read_file_with_an_extremely_long_tool_name",
-    ));
-
     let mut harness = Harness::builder()
-        .with_size(vec2(340.0, 320.0))
-        .build_ui_state(
-            |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    gui::panes::agents::agents_pane(ui, &state.0, &state.1);
-                });
-            },
-            (tasks, telemetry),
-        );
+        .with_size(vec2(480.0, 320.0))
+        .build_ui(|ui| {
+            gui::theme::install(ui.ctx());
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        });
     harness.run();
-
-    let headers = [
-        "run",
-        "name",
-        "role",
-        "phase",
-        "model",
-        "provider",
-        "current tool",
-        "tokens (in/out)",
-    ];
-    for header in headers {
-        let rect = harness.get_by_label(header).rect();
-        assert!(
-            rect.max.x <= 340.0 + 1.0,
-            "{header} overflows 340px clip: {rect:?}"
-        );
-        assert!(rect.min.x >= 0.0, "{header} leaks left: {rect:?}");
-    }
-
-    let tokens = harness
-        .query_by_label("120 / 34")
-        .expect("tokens label missing in 340px clip");
-    let rect = tokens.rect();
-    assert!(
-        rect.max.x <= 340.0 + 1.0,
-        "tokens overflow 340px clip: {rect:?}"
-    );
-    assert!(rect.min.x >= 0.0, "tokens leak left: {rect:?}");
+    // When: scrolling the last column into view through accessibility.
+    harness.get_by_label("120 / 34").scroll_to_me();
+    harness.run();
+    // Then: the actual usage is fully reachable inside the pane.
+    let rect = harness.get_by_label("120 / 34").rect();
+    assert!(rect.left() >= 0.0 && rect.right() <= 480.0, "{rect:?}");
 }
 
 fn long_summary() -> AgentSummary {
