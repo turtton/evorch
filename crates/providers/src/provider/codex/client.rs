@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use event_bus::EventBus;
 use futures_util::StreamExt;
+use uuid::Uuid;
 
 use super::oauth::DeviceAuthClient;
 use super::session::CodexSessionManager;
@@ -26,8 +27,7 @@ const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_LABEL: &str = "openai-codex";
 const PROTOCOL: &str = "openai-codex-responses";
-const ORIGINATOR: &str = "evorch";
-const USER_AGENT: &str = concat!("evorch/", env!("CARGO_PKG_VERSION"));
+const ORIGINATOR: &str = "codex_cli_rs";
 
 /// Codex subscription backend client の設定。
 #[derive(Clone)]
@@ -60,6 +60,8 @@ pub struct CodexClient {
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
     session: CodexSessionManager,
+    /// クライアントの生存期間を通じて維持するセッション識別子。
+    session_id: String,
 }
 
 impl CodexClient {
@@ -77,6 +79,7 @@ impl CodexClient {
             timeout: config.timeout,
             event_bus: config.event_bus,
             session,
+            session_id: Uuid::new_v4().to_string(),
         })
     }
 
@@ -102,6 +105,7 @@ impl CodexClient {
             timeout: config.timeout,
             event_bus: config.event_bus,
             session,
+            session_id: Uuid::new_v4().to_string(),
         })
     }
 
@@ -124,6 +128,7 @@ impl CodexClient {
     ) -> Result<DeltaStream, ProviderError> {
         let token = self.session.current().await?;
         let wire_request = to_wire_request(request);
+        let turn_id = Uuid::new_v4().to_string();
         let mut observer = self.observer(request, streaming);
         let mut builder = self
             .http_client
@@ -131,7 +136,14 @@ impl CodexClient {
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("codex_cli_rs/{}", crate::CODEX_MODELS_CLIENT_VERSION),
+            )
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header("session-id", &self.session_id)
+            .header("thread-id", &turn_id)
+            .header("x-client-request-id", &turn_id)
             .json(&wire_request);
         if !streaming {
             builder = builder.timeout(self.timeout);

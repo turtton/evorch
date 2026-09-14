@@ -120,7 +120,7 @@ async fn factory_builds_codex_client_from_profile() {
         .and(path("/backend-api/codex/responses"))
         .and(header("authorization", "Bearer access-tok-1"))
         .and(header("chatgpt-account-id", "acc-123"))
-        .and(header("originator", "evorch"))
+        .and(header("originator", "codex_cli_rs"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(SSE_SUCCESS, "text/event-stream"))
         .expect(1)
         .mount(&server)

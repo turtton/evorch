@@ -1,16 +1,17 @@
 #[path = "support/codex.rs"]
 mod codex_support;
+#[path = "support/codex_contract.rs"]
+mod contract_support;
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codex_support::{MODEL, client, request};
+use codex_support::{client, request};
+use contract_support::{CodexBodyMatcher, CodexIdMatcher, seeded_store};
 use event_bus::{EventBus, ProviderEvent, UsageEvent};
 use futures_util::StreamExt;
-use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
+use providers::provider::codex::tokens::InMemoryTokenStore;
 use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::{
     ContentBlock, FinishReason, ProviderAuth, ProviderClient, ProviderError, StreamEvent, Usage,
@@ -18,72 +19,67 @@ use providers::{
 use serde_json::json;
 use support::{fixture, json_response, next_provider_event, next_usage_event, sse_response};
 use wiremock::matchers::{header, method, path};
-use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
-
-#[derive(Debug)]
-struct CodexBodyMatcher;
-
-impl Match for CodexBodyMatcher {
-    fn matches(&self, request: &Request) -> bool {
-        let body: serde_json::Value = match serde_json::from_slice(&request.body) {
-            Ok(body) => body,
-            Err(_) => return false,
-        };
-        body["model"] == MODEL
-            && body["store"] == false
-            && body["stream"] == true
-            && body.get("max_output_tokens").is_none()
-            && body["tool_choice"] == "auto"
-            && body["parallel_tool_calls"] == true
-            && body["reasoning"].is_object()
-            && body["include"].is_array()
-            && body["instructions"].is_string()
-            && body["input"].is_array()
-    }
-}
-
-fn make_dummy_jwt(exp: u64, account_id: &str) -> String {
-    let payload = json!({
-        "exp": exp,
-        "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
-    });
-    format!(
-        "e30.{}.signature",
-        URL_SAFE_NO_PAD.encode(payload.to_string())
-    )
-}
-
-fn seeded_store() -> Arc<InMemoryTokenStore> {
-    let store = Arc::new(InMemoryTokenStore::new());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time is after epoch")
-        .as_secs();
-    store
-        .save(&TokenBundle {
-            access_token: "access-tok-1".to_string(),
-            refresh_token: "refresh-tok-1".to_string(),
-            id_token: make_dummy_jwt(now + 3_600, "acc-123"),
-        })
-        .expect("token bundle can be seeded");
-    store
-}
+use wiremock::{Match, Mock, MockServer, ResponseTemplate};
 
 async fn mount(server: &MockServer, response: ResponseTemplate) {
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
         .and(header("authorization", "Bearer access-tok-1"))
         .and(header("chatgpt-account-id", "acc-123"))
-        .and(header("originator", "evorch"))
+        .and(header("originator", "codex_cli_rs"))
         .and(header(
             "user-agent",
-            concat!("evorch/", env!("CARGO_PKG_VERSION")),
+            format!("codex_cli_rs/{}", providers::CODEX_MODELS_CLIENT_VERSION),
         ))
+        .and(header("accept", "text/event-stream"))
+        .and(CodexIdMatcher)
         .and(CodexBodyMatcher)
         .respond_with(response)
         .expect(1)
         .mount(server)
         .await;
+}
+
+#[tokio::test]
+async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
+    // Given: 同じクライアントからの2リクエストを記録するサーバー。
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .respond_with(sse_response(&fixture("codex", "responses_success.sse")))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client(&server, seeded_store());
+    // When: 同一クライアントで連続した2ターンを送信する。
+    for _ in 0..2 {
+        client
+            .send(&ProviderAuth::new(""), &request())
+            .await
+            .expect("send succeeds");
+    }
+    // Then: セッションは共通で、ターン識別子だけが更新される。
+    let requests = server
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    assert!(
+        requests
+            .iter()
+            .all(|request| CodexIdMatcher.matches(request))
+    );
+    let triples: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            ["session-id", "thread-id", "x-client-request-id"]
+                .map(|name| request.headers[name].to_str().expect("UUID is ASCII"))
+        })
+        .collect();
+    assert_eq!(triples[0][0], triples[1][0]);
+    assert_ne!(triples[0][1], triples[1][1]);
+    for [_, thread, request] in triples {
+        assert_eq!(thread, request);
+    }
 }
 
 #[tokio::test]
