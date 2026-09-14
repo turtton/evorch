@@ -39,6 +39,27 @@ fn add_codex_editor_defaults_account_to_profile_name() {
 }
 
 #[test]
+fn add_codex_editor_seeds_gpt_models() {
+    // Given
+    let mut model = ProviderSettingsModel::default();
+    // When
+    model.add(ProviderKind::CodexSubscription);
+    // Then
+    let editor = model.codex_mut().unwrap();
+    assert_eq!(
+        editor.models,
+        [
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5"
+        ]
+    );
+    assert_eq!(editor.default_model, "gpt-6-astra");
+}
+
+#[test]
 fn edit_existing_openai_profile_prefills_form() {
     // Given
     let mut config = Config::default();

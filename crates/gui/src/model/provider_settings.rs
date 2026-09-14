@@ -96,8 +96,11 @@ impl ProviderSettingsModel {
                 account: name.clone(),
                 auth: CodexAuthModel::for_account(name.clone()),
                 name,
-                models: Vec::new(),
-                default_model: String::new(),
+                models: config::types::provider::CODEX_DEFAULT_MODELS
+                    .iter()
+                    .map(|id| (*id).to_owned())
+                    .collect(),
+                default_model: config::types::provider::CODEX_DEFAULT_MODEL.to_owned(),
             }),
         });
         self.error = None;

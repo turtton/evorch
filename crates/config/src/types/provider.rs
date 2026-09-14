@@ -341,6 +341,18 @@ impl ProviderProfileConfig {
     }
 }
 
+/// Codex CLI 同梱カタログの既定モデル一覧 (2026-09)。
+pub const CODEX_DEFAULT_MODELS: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
+
+/// Codex プロファイルで既定選択するモデル。
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-6-astra";
+
 impl Default for ProviderProfileConfig {
     fn default() -> Self {
         Self {
@@ -373,7 +385,7 @@ struct ProviderProfileDe {
 }
 
 // 省略フィールドは公開構造体の既定値で補完する (コンテナ serde(default) の契約)。
-// api_protocol と credential の既定化は TryFrom 側で sugar 規則を考慮して行う。
+// モデルと認証・プロトコルの既定化は TryFrom 側でプロバイダ種別と sugar 規則を考慮する。
 impl Default for ProviderProfileDe {
     fn default() -> Self {
         Self {
@@ -382,9 +394,9 @@ impl Default for ProviderProfileDe {
             base_url: "https://api.anthropic.com".to_string(),
             credential: None,
             api_key_env: None,
-            models: vec![ModelEntryConfig::enabled("claude-sonnet-4-5")],
+            models: Vec::new(),
             excluded_models: Vec::new(),
-            default_model: "claude-sonnet-4-5".to_string(),
+            default_model: String::new(),
         }
     }
 }
@@ -416,14 +428,37 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
             ProviderTypeConfig::OpenAiCompatible => ApiProtocolConfig::OpenAiCompletions,
             _ => ApiProtocolConfig::default(),
         });
+        let (default_models, default_model): (&[&str], &str) = match value.provider_type {
+            ProviderTypeConfig::OpenAiCodex => (CODEX_DEFAULT_MODELS, CODEX_DEFAULT_MODEL),
+            ProviderTypeConfig::Anthropic
+            | ProviderTypeConfig::AnthropicSubscription
+            | ProviderTypeConfig::OpenAi
+            | ProviderTypeConfig::GithubCopilot
+            | ProviderTypeConfig::Openrouter
+            | ProviderTypeConfig::OpenAiCompatible => (&["claude-sonnet-4-5"], "claude-sonnet-4-5"),
+        };
+        let models = if value.models.is_empty() {
+            default_models
+                .iter()
+                .copied()
+                .map(ModelEntryConfig::enabled)
+                .collect()
+        } else {
+            value.models
+        };
+        let default_model = if value.default_model.is_empty() {
+            default_model.to_owned()
+        } else {
+            value.default_model
+        };
         Ok(Self {
             provider_type: value.provider_type,
             api_protocol,
             base_url: value.base_url,
             credential,
-            models: value.models,
+            models,
             excluded_models: value.excluded_models,
-            default_model: value.default_model,
+            default_model,
         })
     }
 }

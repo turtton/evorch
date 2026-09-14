@@ -6,6 +6,9 @@ use crate::theme::text::{h3, muted};
 use crate::theme::tokens::*;
 use crate::theme::widgets::{primary_button, surface_frame};
 
+#[path = "provider_codex_editor.rs"]
+mod codex_editor;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderSettingsAction {
     Save,
@@ -45,22 +48,15 @@ pub fn provider_settings_modal(
                         });
                 }
                 Some(ProfileEditor::Codex(editor)) => {
-                    let busy = editor.auth.is_authenticating();
-                    ui.add_enabled_ui(!busy, |ui| {
-                        let previous = editor.name.clone();
-                        let name = ui.label("Name");
-                        ui.text_edit_singleline(&mut editor.name)
-                            .labelled_by(name.id);
-                        if editor.account == previous {
-                            editor.account.clone_from(&editor.name);
-                        }
-                        let account = ui.label("Account");
-                        ui.text_edit_singleline(&mut editor.account)
-                            .labelled_by(account.id);
-                    });
-                    if crate::panes::codex_auth::codex_auth_section(ui, &editor.auth) {
-                        action = Some(ProviderSettingsAction::StartCodexLogin);
-                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("codex-editor")
+                        .auto_shrink([false, false])
+                        .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
+                        .show(ui, |ui| {
+                            if codex_editor::codex_body(ui, editor) {
+                                action = Some(ProviderSettingsAction::StartCodexLogin);
+                            }
+                        });
                 }
                 None => {
                     let mut edit = None;
