@@ -156,7 +156,10 @@ fn loads_catalog_when_profile_account_has_valid_access_token() {
     let bundle = providers::provider::codex::tokens::TokenBundle {
         access_token: token.clone(),
         refresh_token: "unused-refresh".into(),
-        id_token: "not-the-access-token".into(),
+        id_token: format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(r#"{"exp":18446744073709551615,"https://api.openai.com/auth":{"chatgpt_account_id":"jwt-account"}}"#)
+        ),
     };
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(sandbox::FileCredentialStore::open(dir.path()).unwrap());
@@ -181,11 +184,10 @@ fn loads_catalog_when_profile_account_has_valid_access_token() {
         Some(vec!["gpt-fetched".into()])
     );
     let request = server.join().unwrap();
-    assert!(request.starts_with(concat!(
-        "GET /models?client_version=",
-        env!("CARGO_PKG_VERSION"),
-        " HTTP/1.1"
-    )));
+    assert!(request.starts_with("GET /models?client_version=0.153.0 HTTP/1.1"));
+    assert!(request.contains("chatgpt-account-id: jwt-account\r\n"));
+    assert!(request.contains("originator: codex_cli_rs\r\n"));
+    assert!(request.contains("user-agent: codex_cli_rs/0.153.0\r\n"));
     assert!(request.contains(&format!("authorization: Bearer {token}\r\n")));
     assert!(!request.contains("unused-refresh"));
 }

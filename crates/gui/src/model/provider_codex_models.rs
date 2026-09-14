@@ -1,9 +1,13 @@
 use super::{CodexEditorModel, ModelsFetchState};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use providers::provider::codex::tokens::CodexTokenStore;
+use providers::provider::codex::tokens::{CodexTokenStore, parse_jwt_claims};
 use std::collections::BTreeSet;
 use std::sync::{Arc, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+#[path = "provider_codex_models_tests.rs"]
+mod tests;
 
 #[derive(Debug)]
 pub struct CodexModelsFetch {
@@ -45,7 +49,7 @@ impl CodexEditorModel {
         let (tx, rx) = mpsc::channel();
         self.fetch.models_rx = Some(rx);
         std::thread::spawn(move || {
-            let result = access_token(store, account).and_then(|token| {
+            let result = access_token(store, account).and_then(|credentials| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -53,16 +57,10 @@ impl CodexEditorModel {
                 runtime
                     .block_on(providers::list_codex_models(
                         &base_url,
-                        &providers::ProviderAuth::new(token),
-                        env!("CARGO_PKG_VERSION"),
+                        &providers::ProviderAuth::new(credentials.access_token),
+                        &credentials.account_id,
                     ))
-                    .map_err(|error| match error {
-                        providers::ProviderError::Http {
-                            status: 401 | 403, ..
-                        } => "Codex authorization rejected; Sign in again".into(),
-                        _ => "Could not fetch Codex models; check the connection and try again"
-                            .into(),
-                    })
+                    .map_err(|error| map_fetch_error(&error))
             });
             let _ = tx.send(result);
         });
@@ -95,6 +93,13 @@ impl CodexEditorModel {
         };
         self.fetch.source = None;
         match result {
+            Ok(models) if models.is_empty() => {
+                self.fetch.available_models = None;
+                self.fetch.models_fetch_state = ModelsFetchState::Failed(format!(
+                    "Codex backend returned 0 models; pinned client version {} may have been rejected",
+                    providers::CODEX_MODELS_CLIENT_VERSION,
+                ));
+            }
             Ok(models) => {
                 let mut seen = BTreeSet::new();
                 self.fetch.available_models = Some(
@@ -128,10 +133,37 @@ impl CodexEditorModel {
     }
 }
 
+struct CatalogCredentials {
+    access_token: String,
+    account_id: String,
+}
+
+fn map_fetch_error(error: &providers::ProviderError) -> String {
+    use providers::ProviderError;
+    match error {
+        ProviderError::Http {
+            status: 401 | 403, ..
+        } => "Codex authorization rejected; Sign in again".into(),
+        ProviderError::Http { status, body } => format!(
+            "Could not fetch Codex models: HTTP {status}: {}",
+            body.chars().take(300).collect::<String>(),
+        ),
+        ProviderError::Timeout
+        | ProviderError::Request(_)
+        | ProviderError::Transport { .. }
+        | ProviderError::InvalidJson { .. }
+        | ProviderError::InvalidSse { .. }
+        | ProviderError::RateLimited { .. }
+        | ProviderError::RetriesExhausted { .. } => {
+            format!("Could not fetch Codex models: {error}")
+        }
+    }
+}
+
 fn access_token(
     store: Option<Arc<dyn sandbox::CredentialStore>>,
     account: String,
-) -> Result<String, String> {
+) -> Result<CatalogCredentials, String> {
     let store = store.ok_or("Credential store unavailable; restart with keyring access")?;
     let bundle = routing::factory::CredentialStoreTokenStore::new(store, account)
         .load()
@@ -163,5 +195,10 @@ fn access_token(
     if expiry.exp <= now {
         return Err("Codex access token expired; Sign in again".into());
     }
-    Ok(bundle.access_token)
+    let claims =
+        parse_jwt_claims(&bundle.id_token).map_err(|_| "Invalid Codex ID token; Sign in again")?;
+    Ok(CatalogCredentials {
+        access_token: bundle.access_token,
+        account_id: claims.chatgpt_account_id,
+    })
 }
