@@ -1,7 +1,6 @@
 //! Diff tab pane: working tree / branch unified diff viewer.
 
 use crate::diff::{DiffMode, DiffModel, DiffState};
-use crate::theme::text::muted;
 use crate::theme::tokens::palette;
 use crate::theme::widgets::{empty_state, surface_frame};
 
@@ -35,10 +34,18 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             );
         }
         DiffState::Empty => {
-            ui.label(muted("no changes"));
+            empty_state(
+                ui,
+                "no changes",
+                "Edit files, then choose Working tree or Branch vs main to refresh.",
+                None,
+            );
         }
         DiffState::Loading => {
-            ui.label("loading…");
+            ui.label(match mode {
+                DiffMode::WorkingTree => "Loading working tree diff…",
+                DiffMode::Branch => "Loading branch diff against main…",
+            });
         }
         DiffState::Ready { text } => diff_body(ui, text),
         DiffState::Truncated {

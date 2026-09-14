@@ -2,6 +2,7 @@ use egui::{RichText, Ui};
 
 use crate::model::notifications::{NotificationKind, NotificationsModel};
 use crate::theme::tokens::{FONT_BADGE, R_SM, STATUS_STROKE, palette};
+use crate::theme::widgets::empty_state;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotificationsAction {
@@ -16,6 +17,14 @@ pub fn notifications_pane(
     let mut action = None;
     let mut displayed = Vec::new();
     egui::ScrollArea::vertical().show(ui, |ui| {
+        if model.items().next().is_none() {
+            empty_state(
+                ui,
+                "No notifications yet",
+                "Run completions, failures and approval requests will appear here.",
+                None,
+            );
+        }
         for notification in model.items() {
             let revision = model.revision(notification.id);
             let unread = model.is_unread(notification.id);
@@ -44,6 +53,11 @@ pub fn notifications_pane(
                                     accent
                                 }));
                             });
+                        ui.label(crate::theme::text::muted(if unread {
+                            "Unread"
+                        } else {
+                            "Read"
+                        }));
                         let summary = RichText::new(&notification.summary);
                         let summary = if unread {
                             summary.strong().color(palette().TEXT)

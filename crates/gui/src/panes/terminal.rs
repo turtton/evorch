@@ -3,7 +3,7 @@
 use crate::model::terminal::TerminalBuffer;
 use crate::pty::PtySession;
 use crate::theme::tokens::palette;
-use crate::theme::widgets::surface_frame;
+use crate::theme::widgets::{empty_state, surface_frame};
 
 /// 端末バッファと一行入力を描画します。
 /// Enter が押されたら `PtySession` へ入力行を送信します。
@@ -18,7 +18,21 @@ pub fn terminal_pane(
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
-                    for line in buffer.lines() {
+                    let lines = buffer.lines();
+                    if lines.iter().all(String::is_empty) {
+                        let (title, hint) = match pty {
+                            Some(_) => (
+                                "Waiting for shell output",
+                                "Type a command below and press Enter to run it.",
+                            ),
+                            None => (
+                                "Waiting for terminal connection",
+                                "Shell output will appear when a terminal session is connected.",
+                            ),
+                        };
+                        empty_state(ui, title, hint, None);
+                    }
+                    for line in lines {
                         ui.monospace(&line);
                     }
                 });

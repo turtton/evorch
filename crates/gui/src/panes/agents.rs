@@ -3,7 +3,7 @@ use crate::model::telemetry::{TelemetryOverlay, TelemetryRow};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::text::muted;
 use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, agent_phase_color, palette};
-use crate::theme::widgets::{pane_root, status_dot};
+use crate::theme::widgets::{empty_state, pane_root, status_dot};
 use egui::{Align, Button, Label, Layout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,16 @@ pub fn agents_pane<S: AgentRunSource>(
         }
         if let Some(error) = &telemetry.quota.error {
             ui.label(muted(format!("Quota error: {error}")));
+        }
+
+        if tasks.rows().is_empty() {
+            empty_state(
+                ui,
+                "No agent runs yet",
+                "Send a message or /goal in Conversation to start an agent run.",
+                None,
+            );
+            return action;
         }
 
         egui::ScrollArea::horizontal().show(ui, |ui| {

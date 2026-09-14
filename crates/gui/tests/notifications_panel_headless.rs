@@ -43,6 +43,7 @@ fn unread_notification_badge_filled_read_outline() {
     );
     // When: rendering before and after acknowledging the displayed revision.
     harness.run();
+    assert!(harness.query_by_label("Unread").is_some());
     assert!(harness.output().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Rect(rect) if rect.fill == palette().SUCCESS
             && rect.rect.height() < gui::theme::tokens::ROW_DENSE)
@@ -53,6 +54,7 @@ fn unread_notification_badge_filled_read_outline() {
         .state_mut()
         .acknowledge(id, Some(&revision), Some(true));
     harness.run_steps(2);
+    assert!(harness.query_by_label("Read").is_some());
     // Then: the same badge is outline-only.
     assert!(harness.output().shapes.iter().any(|shape| {
         matches!(&shape.shape, Shape::Rect(rect) if rect.fill == Color32::TRANSPARENT

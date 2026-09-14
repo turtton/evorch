@@ -116,7 +116,7 @@ fn diff_pane_shows_loading_then_ready_from_fixture() {
         DiffState::Loading
     ));
     harness.step();
-    assert!(harness.has_label("loading…"));
+    assert!(harness.has_label("Loading working tree diff…"));
 
     // When: the worker result is released and frames settle
     tx.send(()).expect("release gate");
