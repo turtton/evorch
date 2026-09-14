@@ -1,6 +1,6 @@
 use super::ProviderSettingsAction;
 use crate::model::provider_settings::{CodexEditorModel, ModelsFetchState};
-use crate::theme::text::{h3, muted};
+use crate::theme::text::{badge, muted};
 use crate::theme::tokens::palette;
 use crate::theme::widgets::primary_button;
 
@@ -36,7 +36,7 @@ pub(super) fn codex_body(
         let state_id = ui.id().with("codex-model-inputs");
         let mut inputs =
             ui.data_mut(|data| data.get_temp::<ModelInputs>(state_id).unwrap_or_default());
-        ui.label(h3("Configured models"));
+        ui.label(badge("Configured models"));
         let mut remove = None;
         for (index, id) in editor.models.iter().enumerate() {
             ui.push_id(id, |ui| {
@@ -116,7 +116,7 @@ pub(super) fn codex_body(
 fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
     let mut refresh = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label("Fetch models");
+        ui.label(badge("Fetch models"));
         refresh = ui
             .add_enabled(
                 editor.fetch.models_rx.is_none(),
@@ -146,7 +146,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
         }
     });
     if editor.fetch.models_fetch_state == ModelsFetchState::Loaded {
-        ui.label(h3("Fetched models"));
+        ui.label(badge("Fetched models"));
         egui::ScrollArea::vertical()
             .id_salt("codex-fetched-models")
             .max_height(200.0)

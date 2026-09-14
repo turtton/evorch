@@ -124,7 +124,7 @@ fn header_strip(
                     (None, Some(role)) => format!("{} / {role}", identity.run_id),
                     (None, None) => identity.run_id.to_owned(),
                 };
-                ui.label(egui::RichText::new(label).color(palette().TEXT));
+                ui.label(h3(label));
                 if ui.button("← Thread").clicked() {
                     *action = Some(AgentPaneAction::Agents(AgentsAction::ReturnToThread));
                 }

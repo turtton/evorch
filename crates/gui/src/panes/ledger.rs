@@ -11,11 +11,9 @@ pub(super) fn ledger_section(ui: &mut egui::Ui, run_id: &str, entries: &[storage
         let arrow = if expanded { "v" } else { ">" };
         if ui
             .add(
-                egui::Button::new(
-                    egui::RichText::new(format!("{arrow} Ledger")).color(palette().TEXT),
-                )
-                .frame(false)
-                .wrap(),
+                egui::Button::new(crate::theme::text::badge(format!("{arrow} Ledger")))
+                    .frame(false)
+                    .wrap(),
             )
             .clicked()
         {

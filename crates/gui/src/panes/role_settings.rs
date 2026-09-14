@@ -1,6 +1,6 @@
 use crate::model::role_settings::{CATEGORIES, RoleSettingsModel};
 use crate::theme::{
-    text::{h3, muted},
+    text::{badge, h3, muted},
     tokens::*,
     widgets::{primary_button, surface_frame},
 };
@@ -45,19 +45,19 @@ pub fn role_settings_modal(
                             ("Multimodal Looker", &mut agents.roles.multimodal_looker),
                         ] {
                             ui.push_id(name, |ui| {
-                                ui.collapsing(name, |ui| {
+                                ui.collapsing(badge(name), |ui| {
                                     model_picker(
                                         ui,
                                         &mut binding.logical_model,
                                         (&model.logical_models, "Role logical model"),
                                     );
                                     optional_text(ui, "Preset reference", &mut binding.preset);
-                                    ui.collapsing("Generation overrides", |ui| {
+                                    ui.collapsing(badge("Generation overrides"), |ui| {
                                         generation(ui, &mut binding.generation)
                                     });
                                     ui.label(muted("Category overrides"));
                                     for category in CATEGORIES {
-                                        ui.collapsing(category, |ui| {
+                                        ui.collapsing(badge(category), |ui| {
                                             let mut draft = binding
                                                 .categories
                                                 .get(category)
