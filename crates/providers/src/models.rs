@@ -31,6 +31,24 @@ struct CodexModelList {
 #[derive(Deserialize)]
 struct CodexModel {
     slug: String,
+    #[serde(default)]
+    service_tiers: Option<Vec<CodexServiceTierEntry>>,
+    #[serde(default)]
+    additional_speed_tiers: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct CodexServiceTierEntry {
+    id: String,
+}
+
+/// Codexカタログに広告されたモデルとfast対応情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModelInfo {
+    /// APIへ送信する実モデル識別子。
+    pub slug: String,
+    /// priority tierまたは旧fast tierの対応が広告されているか。
+    pub supports_fast: bool,
 }
 
 /// カタログの `minimal_client_version` フィルタを満たす Codex CLI 互換バージョン。
@@ -47,7 +65,7 @@ pub async fn list_codex_models(
     base_url: &str,
     auth: &ProviderAuth,
     account_id: &str,
-) -> Result<Vec<String>, ProviderError> {
+) -> Result<Vec<CodexModelInfo>, ProviderError> {
     let request = build_http_client(None)?
         .get(format!("{}/models", base_url.trim_end_matches('/')))
         .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
@@ -59,7 +77,11 @@ pub async fn list_codex_models(
         )
         .bearer_auth(&auth.api_key);
     let models: CodexModelList = fetch_list(request).await?;
-    Ok(models.models.into_iter().map(|model| model.slug).collect())
+    Ok(models.models.into_iter().map(|model| CodexModelInfo {
+        supports_fast: model.service_tiers.iter().flatten().any(|tier| tier.id == "priority")
+            || model.additional_speed_tiers.iter().flatten().any(|tier| tier == "fast"),
+        slug: model.slug,
+    }).collect())
 }
 
 async fn fetch_list<T: DeserializeOwned>(

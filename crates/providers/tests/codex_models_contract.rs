@@ -28,7 +28,29 @@ async fn lists_slugs_when_codex_catalog_is_returned() {
     .await
     .unwrap();
     // Then
-    assert_eq!(models, ["gpt-b", "gpt-a"]);
+    assert_eq!(models.iter().map(|info| info.slug.as_str()).collect::<Vec<_>>(), ["gpt-b", "gpt-a"]);
+}
+
+#[tokio::test]
+async fn catalog_advertises_fast_support_leniently() {
+    // Given: 新旧tier形式・非対応・未知フィールドを含むカタログ。
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": [
+            {"slug": "priority", "service_tiers": [{"id": "priority", "cost": 2.5}], "extra": true},
+            {"slug": "legacy", "additional_speed_tiers": ["fast"]},
+            {"slug": "standard"},
+            {"slug": "other", "service_tiers": [{"id": "default"}], "additional_speed_tiers": ["slow"]},
+            {"slug": "null", "service_tiers": null, "additional_speed_tiers": null}
+        ]})))
+        .expect(1)
+        .mount(&server).await;
+    // When: カタログを取得する。
+    let models = providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
+        .await.expect("catalog");
+    // Then: 広告されたpriorityまたはfastだけが対応扱いになる。
+    let actual: Vec<_> = models.iter().map(|info| (info.slug.as_str(), info.supports_fast)).collect();
+    assert_eq!(actual, [("priority", true), ("legacy", true), ("standard", false), ("other", false), ("null", false)]);
 }
 
 #[tokio::test]

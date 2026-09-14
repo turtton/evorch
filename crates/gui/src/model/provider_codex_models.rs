@@ -60,6 +60,7 @@ impl CodexEditorModel {
                         &providers::ProviderAuth::new(credentials.access_token),
                         &credentials.account_id,
                     ))
+                    .map(|models| models.into_iter().map(|info| info.slug).collect())
                     .map_err(|error| map_fetch_error(&error))
             });
             let _ = tx.send(result);
