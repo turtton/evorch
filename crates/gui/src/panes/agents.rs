@@ -47,13 +47,14 @@ pub fn agents_pane<S: AgentRunSource>(
                 ui.label(muted("Stale · quota refresh failed"));
             }
             for (label, window) in [
-                ("5h", &snapshot.quota.primary),
-                ("7d", &snapshot.quota.secondary),
+                ("primary", &snapshot.quota.primary),
+                ("secondary", &snapshot.quota.secondary),
             ] {
                 match window {
                     Some(window) => {
                         ui.label(muted(format!(
-                            "{label}: {:.1}% used · resets {}",
+                            "{}: {:.1}% used · resets {}",
+                            window.duration_label(),
                             window.used_percent,
                             window.resets_at.format("%Y-%m-%d %H:%M UTC")
                         )));

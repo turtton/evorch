@@ -220,3 +220,34 @@ fn reauth_required_shows_relogin_message() {
         }
     }
 }
+
+#[test]
+fn weekly_only_plan_labels_primary_window_by_its_duration() {
+    // Given: a Pro+ plan whose only limit is weekly, delivered in `primary`.
+    let mut telemetry = TelemetryOverlay::new();
+    let mut weekly = snapshot(false);
+    weekly.quota.primary = Some(QuotaWindow {
+        used_percent: 25.0,
+        remaining_percent: 75.0,
+        window_duration: Duration::from_secs(604800),
+        resets_at: "2026-09-13T12:00:00Z".parse().expect("timestamp"),
+    });
+    weekly.quota.secondary = None;
+    telemetry.quota.accept(Ok(weekly));
+    let tasks = TasksModel::new(DemoSource(Vec::new()));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 400.0))
+        .build_ui(move |ui| {
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        });
+    // When: the pane renders headlessly.
+    harness.run();
+    // Then: the weekly window is labeled by its own duration, not "5h".
+    harness.get_by_label("7d: 25.0% used · resets 2026-09-13 12:00 UTC");
+    assert!(
+        harness
+            .query_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC")
+            .is_none()
+    );
+    harness.get_by_label("secondary: unavailable");
+}
