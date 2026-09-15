@@ -1,23 +1,26 @@
 use config::Config;
 
 #[test]
-fn named_roles_resolve_category_overrides() {
+fn named_roles_reject_category_overrides_when_loaded() {
     for role in ["planner", "oracle", "multimodal_looker"] {
+        // Given: a named non-worker role with a category override.
+        let directory = tempfile::tempdir().expect("temporary config directory");
         let doc = format!(
             "[agents.roles.{role}]\nlogical_model = 'role-model'\n[agents.roles.{role}.categories.visual]\nlogical_model = 'visual-model'\n"
         );
-        let config: Config = toml::from_str(&doc).expect("closed named role binding");
-        assert_eq!(
-            config.agents.binding_for(role, None).unwrap().logical_model,
-            "role-model"
-        );
-        assert_eq!(
-            config
-                .agents
-                .binding_for(role, Some("visual"))
-                .unwrap()
-                .logical_model,
-            "visual-model"
+        // When: loading through strict validation.
+        let error = Config::load(&config::LoadOptions {
+            user_config_dir: Some(directory.path().to_path_buf()),
+            read_env: false,
+            cli_overrides: Some(toml::from_str(&doc).expect("TOML")),
+            ..Default::default()
+        })
+        .expect_err("named role categories must be rejected");
+        // Then: the category field itself is rejected before deserialization.
+        assert!(
+            matches!(&error, config::ConfigError::InvalidField { path, .. }
+                if path == &format!("agents.roles.{role}.categories")),
+            "{error}"
         );
     }
 }
@@ -43,7 +46,7 @@ fn layered_loading_validates_closed_role_bindings() {
         ),
         (
             "[agents.roles.multimodal_looker.categories.typo]\nlogical_model = 'vision'",
-            Some("agents.roles.multimodal_looker.categories.typo"),
+            Some("agents.roles.multimodal_looker.categories"),
         ),
     ] {
         // When: the merged configuration crosses the strict boundary.

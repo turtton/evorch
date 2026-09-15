@@ -1,4 +1,4 @@
-use config::{AgentsConfig, Config, LoadOptions, save_agent_bindings};
+use config::{AgentsConfig, Config, ConfigError, LoadOptions};
 
 #[test]
 fn librarian_defaults_when_binding_is_absent() {
@@ -36,9 +36,9 @@ fn librarian_explicit_binding_resolves_when_configured() {
 }
 
 #[test]
-fn librarian_roundtrips_when_saved_with_category_and_generation() {
+fn librarian_rejects_category_and_generation_when_loaded() {
     // Given: distinct role and category bindings with generation inheritance.
-    let config: Config = toml::from_str(
+    let overrides = toml::from_str(
         r#"
 [agents.roles.librarian]
 logical_model = "research-model"
@@ -56,30 +56,20 @@ max_tokens = 4096
 reasoning_effort = "high"
 "#,
     )
-    .expect("librarian schema");
+    .expect("TOML");
     let directory = tempfile::tempdir().expect("temp");
-    // When: saving through the strict save API and loading from disk.
-    save_agent_bindings(&directory.path().join("evorch.toml"), &config.agents).expect("save");
-    let loaded = Config::load(&LoadOptions {
-        project_dir: Some(directory.path().into()),
+    // When: loading through strict validation.
+    let error = Config::load(&LoadOptions {
         user_config_dir: Some(directory.path().join("user")),
         read_env: false,
+        cli_overrides: Some(overrides),
         ..Default::default()
     })
-    .expect("load");
-    // Then: every field survives and category overrides inherit role generation.
-    assert_eq!(loaded.agents, config.agents);
-    let binding = loaded
-        .agents
-        .binding_for("librarian", Some("research"))
-        .expect("binding");
-    assert_eq!(binding.logical_model, "deep-model");
-    assert_eq!(binding.preset.as_deref(), Some("deep-preset"));
-    assert_eq!(binding.generation.temperature, Some(0.25));
-    assert_eq!(binding.generation.top_p, Some(0.8));
-    assert_eq!(binding.generation.max_tokens, Some(4096));
-    assert_eq!(
-        binding.generation.reasoning_effort,
-        Some(config::ReasoningEffortConfig::High)
+    .expect_err("librarian categories must be rejected");
+    // Then: the category field itself is rejected before deserialization.
+    assert!(
+        matches!(&error, ConfigError::InvalidField { path, .. }
+            if path == "agents.roles.librarian.categories"),
+        "{error}"
     );
 }
