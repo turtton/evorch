@@ -76,7 +76,8 @@ pub struct RunConfig {
     pub keep_alive: bool,
     /// run の表示名。`None` の場合はロール名へフォールバックする。
     pub name: Option<String>,
-    /// run のタスクカテゴリ。システムプロンプトの category overlay 選択に使う。
+    /// Worker 専用の実行プロファイル。システムプロンプトの category overlay と
+    /// カテゴリにバインドされた論理モデルの選択に使う。
     /// `None` の場合は overlay を挿入しない。
     pub category: Option<String>,
     /// 委譲時に子 run の初期 System メッセージへ本文を注入する skill 名。既定は空。

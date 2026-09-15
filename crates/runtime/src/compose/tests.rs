@@ -124,13 +124,16 @@ fn routed_model(
         RoutedModel::new(
             ComposedProviders { router, providers },
             config::AgentsConfig {
-                worker: RoleBindingConfig {
-                    generation: GenerationOverridesConfig {
-                        temperature: Some(0.25),
-                        max_tokens: Some(321),
-                        ..GenerationOverridesConfig::default()
+                worker: config::WorkerBindingConfig {
+                    base: RoleBindingConfig {
+                        generation: GenerationOverridesConfig {
+                            temperature: Some(0.25),
+                            max_tokens: Some(321),
+                            ..GenerationOverridesConfig::default()
+                        },
+                        ..RoleBindingConfig::default()
                     },
-                    ..RoleBindingConfig::default()
+                    ..config::WorkerBindingConfig::default()
                 },
                 ..config::AgentsConfig::default()
             },
@@ -203,7 +206,7 @@ async fn complete_forwards_reasoning_effort_when_binding_configures_it() {
     ] {
         // Given: worker binding に推論強度を指定または省略する。
         let (mut model, requests) = routed_model(Ok(response()), "local-model", None);
-        model.agents.worker.generation.reasoning_effort = configured;
+        model.agents.worker.base.generation.reasoning_effort = configured;
         // When: 既存の composition adapter 経由で完了を要求する。
         let result = complete(&model, "run-effort").await;
         // Then: provider に届く request が指定強度を保持する。

@@ -100,6 +100,9 @@ pub(super) fn delegate_background(
         Ok(category) => category,
         Err(message) => return error(message),
     };
+    if category.is_some() && role != agents::Role::Worker {
+        return error("category is only valid for role=worker");
+    }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
         Err(message) => return error(message),
@@ -148,6 +151,9 @@ pub(super) async fn delegate(
         Ok(category) => category,
         Err(message) => return error(message),
     };
+    if category.is_some() && role != agents::Role::Worker {
+        return error("category is only valid for role=worker");
+    }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
         Err(message) => return error(message),
