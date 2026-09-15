@@ -476,6 +476,43 @@ fn agents_category_unknown_name_is_rejected_with_path() {
     assert_error_contains(result, &["agents.worker.categories.quick.weight"]);
 }
 
+fn assert_worker_only_categories(role_path: &str, category: &str) {
+    // Given: worker 以外のロールにカテゴリを指定した設定。
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let document = format!("[{role_path}.categories.{category}]\npreset = 'p'\n");
+    // When: 実際の設定ロード境界を通す。
+    let error = load_project(&tmp, &document).expect_err("非workerカテゴリは拒否される");
+    // Then: serde エラーではなく完全なパス付きの strict エラーになる。
+    let expected_path = format!("{role_path}.categories");
+    let display = error.to_string();
+    assert!(display.contains(&expected_path), "{display}");
+    assert!(
+        display.contains("categories are only allowed on worker"),
+        "{display}"
+    );
+    assert!(matches!(error, ConfigError::InvalidField { path, .. } if path == expected_path));
+}
+
+#[test]
+fn explorer_categories_are_rejected_with_worker_only_path() {
+    assert_worker_only_categories("agents.explorer", "quick");
+}
+
+#[test]
+fn orchestrator_categories_are_rejected_with_worker_only_path() {
+    assert_worker_only_categories("agents.orchestrator", "deep");
+}
+
+#[test]
+fn oracle_categories_are_rejected_with_worker_only_path() {
+    assert_worker_only_categories("agents.roles.oracle", "visual");
+}
+
+#[test]
+fn reviewer_categories_are_rejected_with_worker_only_path() {
+    assert_worker_only_categories("agents.reviewer", "writing");
+}
+
 // Given: openai-compatible の sugar 形式 (type エイリアス + api_key_env) / When: 読み込む
 // Then: 正規化された OpenAiCompatible + env credential として受理される
 #[test]
