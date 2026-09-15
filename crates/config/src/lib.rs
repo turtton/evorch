@@ -39,4 +39,5 @@ pub use types::{
     MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig, PermissionConfig,
     ProviderProfileConfig, ProviderTypeConfig, ReasoningEffortConfig, ResolvedAgentBinding,
     RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SummarizerKind,
+    WorkerBindingConfig,
 };

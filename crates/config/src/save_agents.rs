@@ -19,10 +19,21 @@ pub fn save_agent_bindings(path: &Path, agents: &AgentsConfig) -> Result<(), Con
     for (name, binding) in [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
-        ("worker", &agents.worker),
         ("reviewer", &agents.reviewer),
     ] {
         insert_binding(&mut agents_table, name, binding);
+    }
+
+    let mut worker = binding_table(&agents.worker.base);
+    if !agents.worker.categories.is_empty() {
+        let mut categories = Table::new();
+        for (name, binding) in &agents.worker.categories {
+            categories.insert(name, Item::Table(category_table(binding)));
+        }
+        worker.insert("categories", Item::Table(categories));
+    }
+    if !worker.is_empty() {
+        agents_table.insert("worker", Item::Table(worker));
     }
 
     let mut roles = Table::new();
@@ -57,13 +68,6 @@ fn binding_table(binding: &RoleBindingConfig) -> Table {
         table.insert("preset", value(preset.as_str()));
     }
     insert_generation(&mut table, &binding.generation);
-    if !binding.categories.is_empty() {
-        let mut categories = Table::new();
-        for (name, binding) in &binding.categories {
-            categories.insert(name, Item::Table(category_table(binding)));
-        }
-        table.insert("categories", Item::Table(categories));
-    }
     table
 }
 

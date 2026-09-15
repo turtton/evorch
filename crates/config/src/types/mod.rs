@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub use agents::{
     AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, ReasoningEffortConfig,
-    ResolvedAgentBinding, RoleBindingConfig,
+    ResolvedAgentBinding, RoleBindingConfig, WorkerBindingConfig,
 };
 pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
