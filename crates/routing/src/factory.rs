@@ -16,7 +16,7 @@ use crate::{CredentialRef, ProviderProfile, RoutingError};
 /// codex の OAuth refresh endpoint の既定ベース URL。
 pub const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 /// codex backend の既定ベース URL。
-pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com";
+pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// provider request の既定タイムアウト。
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 

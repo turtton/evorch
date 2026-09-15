@@ -70,7 +70,7 @@ fn profile(
         name: ACCOUNT.to_string(),
         provider_type,
         api_protocol,
-        base_url: "https://chatgpt.com".to_string(),
+        base_url: "https://chatgpt.com/backend-api/codex".to_string(),
         credential,
         models: vec![MODEL.to_string()],
         default_model: MODEL.to_string(),
@@ -122,6 +122,8 @@ async fn factory_builds_codex_client_from_profile() {
         .and(header("authorization", "Bearer access-tok-1"))
         .and(header("chatgpt-account-id", "acc-123"))
         .and(header("originator", "codex_cli_rs"))
+        .and(header("openai-beta", "responses=experimental"))
+        .and(header("version", providers::CODEX_MODELS_CLIENT_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_raw(SSE_SUCCESS, "text/event-stream"))
         .expect(1)
         .mount(&server)
