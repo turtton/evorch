@@ -4,6 +4,8 @@ use std::{sync::Arc, time::Duration};
 mod auth;
 #[path = "codex_quota/compat.rs"]
 mod compat;
+#[path = "codex_quota/label.rs"]
+mod label;
 #[path = "codex_quota/process.rs"]
 mod process;
 

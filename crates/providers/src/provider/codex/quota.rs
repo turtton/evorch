@@ -20,6 +20,24 @@ pub struct QuotaWindow {
     pub resets_at: DateTime<Utc>,
 }
 
+impl QuotaWindow {
+    /// Compact window-length label derived from the window itself ("5h", "7d").
+    /// Slots are plan-dependent: Pro+ plans return their only (weekly) limit as
+    /// `primary`, so labels must come from `window_duration`, not slot position.
+    pub fn duration_label(&self) -> String {
+        let seconds = self.window_duration.as_secs();
+        if seconds.is_multiple_of(86_400) {
+            format!("{}d", seconds / 86_400)
+        } else if seconds.is_multiple_of(3_600) {
+            format!("{}h", seconds / 3_600)
+        } else if seconds.is_multiple_of(60) {
+            format!("{}m", seconds / 60)
+        } else {
+            format!("{seconds}s")
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexQuota {
     pub plan: Option<String>,
