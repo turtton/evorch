@@ -16,10 +16,11 @@ config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
-sandbox = { path = "../sandbox" }
+sandbox = { path = "../sandbox", features = ["keychain"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tools = { path = "../tools" }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }

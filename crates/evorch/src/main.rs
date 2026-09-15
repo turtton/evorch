@@ -8,6 +8,11 @@ use evorch::headless::{self, SandboxChoice};
 use routing::ProcessEnv;
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = match headless::parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(error) => {
@@ -39,6 +44,9 @@ fn main() -> ExitCode {
         }
         Ok(outcome) => {
             eprintln!("run ended in phase {:?}", outcome.phase);
+            if let Some(text) = outcome.final_text {
+                eprintln!("{text}");
+            }
             ExitCode::from(1)
         }
         Err(error) => {
