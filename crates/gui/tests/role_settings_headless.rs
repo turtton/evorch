@@ -72,6 +72,7 @@ fn role_binding_edit_saves_toml_and_reloads_runtime() {
         .role_settings_mut()
         .agents
         .worker
+        .base
         .logical_model = Some("fast".into());
     harness.run();
     // When: saving through the actual modal.
@@ -89,7 +90,7 @@ fn role_binding_edit_saves_toml_and_reloads_runtime() {
     .expect("saved config");
     assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("fast"));
     assert_eq!(harness.state().role_settings().agents, saved.agents);
-    assert_eq!(model.selected_model(Role::Worker), "accelerated/fast");
+    assert_eq!(model.selected_model(Role::Worker, None), "accelerated/fast");
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn category_override_editable_per_role() {
         Some("fast")
     );
     assert_eq!(agents.worker.logical_model, None);
-    assert!(agents.explorer.categories.is_empty());
+    assert_eq!(agents.explorer, config::RoleBindingConfig::default());
 }
 
 #[test]
@@ -148,7 +149,10 @@ fn librarian_row_saves_when_model_selected() {
             .logical_model,
         "fast"
     );
-    assert_eq!(model.selected_model(Role::Librarian), "accelerated/fast");
+    assert_eq!(
+        model.selected_model(Role::Librarian, None),
+        "accelerated/fast"
+    );
 }
 
 #[test]
@@ -163,6 +167,7 @@ fn validation_error_blocks_save() {
             .role_settings_mut()
             .agents
             .worker
+            .base
             .logical_model = Some(name.into());
         harness.run();
         // When: saving is requested.
@@ -230,6 +235,7 @@ fn menu_opens_role_settings_and_cancel_discards_edits() {
         .role_settings_mut()
         .agents
         .worker
+        .base
         .logical_model = Some("fast".into());
     harness.run();
     harness.click_label("Cancel");

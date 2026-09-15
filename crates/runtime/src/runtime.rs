@@ -668,7 +668,10 @@ impl AgentRuntime {
             .name
             .clone()
             .unwrap_or_else(|| role.name().to_string());
-        let model = self.shared.model.selected_model(role);
+        let model = self
+            .shared
+            .model
+            .selected_model(role, config.category.as_deref());
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);

@@ -43,7 +43,7 @@ mod rework_tests {
     }
     #[async_trait::async_trait]
     impl crate::AgentModel for ScriptedModel {
-        fn selected_model(&self, _: Role) -> String {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
             "test".into()
         }
         async fn complete(

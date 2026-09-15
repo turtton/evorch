@@ -64,7 +64,10 @@ pub(crate) async fn compact_now(
     let estimated_before = estimate_visible(&visible, state.last_usage.as_ref());
     let window = resolve_window(
         &settings,
-        &state.shared.model.selected_model(state.run_role()),
+        &state
+            .shared
+            .model
+            .selected_model(state.run_role(), state.task.config.category.as_deref()),
     );
     if reason == CompactionReason::Automatic {
         // 圧縮成功直後は閾値未満の境界を一度観測するまで自動発火しない (ラチェット)。

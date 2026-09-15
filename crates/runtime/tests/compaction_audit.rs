@@ -74,7 +74,7 @@ impl AgentModel for AuditModel {
         }
     }
 
-    fn selected_model(&self, role: AgentRole) -> String {
+    fn selected_model(&self, role: AgentRole, _category: Option<&str>) -> String {
         format!("audit-{}", role.name().to_lowercase())
     }
 }

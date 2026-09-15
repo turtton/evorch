@@ -261,7 +261,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 })
             })
             .unwrap_or_else(|| {
-                runtime::AgentModel::selected_model(model.as_ref(), runtime::Role::Worker)
+                runtime::AgentModel::selected_model(model.as_ref(), runtime::Role::Worker, None)
             });
         self.composer.image_input_supported = self
             .provider_settings

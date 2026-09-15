@@ -30,6 +30,7 @@ async fn tools_are_omitted_when_preferred_model_support_is_unknown_or_unsupporte
         model
             .complete(
                 &AgentInvocationContext {
+                    category: None,
                     run_id: "run".into(),
                     model_preference: Some(ModelPreference {
                         profile: "local".into(),
@@ -55,6 +56,7 @@ async fn automatic_tool_flow_fails_when_model_support_is_unknown() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "run".into(),
                 model_preference: None,
             },
@@ -77,6 +79,7 @@ async fn tool_specs_are_unchanged_when_canonical_support_is_supported() {
     model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "run".into(),
                 model_preference: None,
             },

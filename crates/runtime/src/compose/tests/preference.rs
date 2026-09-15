@@ -26,6 +26,7 @@ async fn preferred(
     model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "run-preference".into(),
                 model_preference: preference,
             },

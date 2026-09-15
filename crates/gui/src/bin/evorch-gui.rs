@@ -759,7 +759,7 @@ fn run() -> Result<(), GuiError> {
     };
     if production_model.as_ref().is_some_and(|(_, model)| {
         model
-            .selected_model(Role::Worker)
+            .selected_model(Role::Worker, None)
             .starts_with("unresolved:")
     }) {
         provider_status = ProviderStatus::NotConfigured {

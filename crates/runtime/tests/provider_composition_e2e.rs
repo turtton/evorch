@@ -48,6 +48,7 @@ async fn preferred_unknown_model_omits_tools_on_the_wire() {
     model
         .complete_streaming(
             &AgentInvocationContext {
+                category: None,
                 run_id: "wire".into(),
                 model_preference: Some(ModelPreference {
                     profile: "local".into(),

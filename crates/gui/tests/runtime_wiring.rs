@@ -99,7 +99,7 @@ impl AgentModel for ScriptedModel {
             })
     }
 
-    fn selected_model(&self, role: Role) -> String {
+    fn selected_model(&self, role: Role, _category: Option<&str>) -> String {
         format!("test-{}", role.name().to_lowercase())
     }
 }

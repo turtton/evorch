@@ -55,7 +55,7 @@ impl AgentModel for HttpModel {
                 reason: error.to_string(),
             })
     }
-    fn selected_model(&self, _: Role) -> String {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "http".into()
     }
 }

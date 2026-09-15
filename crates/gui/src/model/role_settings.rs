@@ -36,7 +36,9 @@ impl RoleSettingsModel {
             for (_, binding) in bindings(&config.agents) {
                 names.extend(binding.logical_model.clone());
                 names.extend(
-                    binding
+                    config
+                        .agents
+                        .worker
                         .categories
                         .values()
                         .filter_map(|binding| binding.logical_model.clone()),
@@ -61,7 +63,7 @@ impl RoleSettingsModel {
                 binding.logical_model.as_deref(),
             )?;
             validate_generation(&binding.generation, role)?;
-            for (category, binding) in &binding.categories {
+            for (category, binding) in &self.agents.worker.categories {
                 if !CATEGORIES.contains(&category.as_str()) {
                     return Err(config::ConfigError::UnknownCategory {
                         role: role.into(),

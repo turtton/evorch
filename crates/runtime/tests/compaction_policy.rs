@@ -243,8 +243,8 @@ impl AgentModel for BlockingSummaryModel {
         self.inner.complete(invocation, role, messages, tools).await
     }
 
-    fn selected_model(&self, role: Role) -> String {
-        self.inner.selected_model(role)
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        self.inner.selected_model(role, category)
     }
 }
 

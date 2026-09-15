@@ -11,6 +11,7 @@ async fn switchable_model_delegates_to_replaced_model() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "switch".into(),
                 model_preference: None,
             },
@@ -23,7 +24,7 @@ async fn switchable_model_delegates_to_replaced_model() {
     assert_eq!(result, Ok(response()));
     assert!(first_requests.lock().unwrap().is_empty());
     assert_eq!(second_requests.lock().unwrap()[0].model, "second");
-    assert_eq!(model.selected_model(Role::Worker), "local/second");
+    assert_eq!(model.selected_model(Role::Worker, None), "local/second");
 }
 
 #[tokio::test]
@@ -34,6 +35,7 @@ async fn unconfigured_model_reports_settings_guidance() {
     let result = model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "empty".into(),
                 model_preference: None,
             },
@@ -49,7 +51,10 @@ async fn unconfigured_model_reports_settings_guidance() {
             reason: "no provider configured — open Settings".into()
         })
     );
-    assert_eq!(model.selected_model(Role::Worker), "unresolved:worker");
+    assert_eq!(
+        model.selected_model(Role::Worker, None),
+        "unresolved:worker"
+    );
 }
 
 #[test]
@@ -98,8 +103,8 @@ fn compose_routed_model_matches_compose_runtime_output() {
     })
     .unwrap();
     // Then: the same role identities used by runtime composition are preserved.
-    assert_eq!(model.selected_model(Role::Worker), "local/live");
-    assert_eq!(model.selected_model(Role::Orchestrator), "local/live");
+    assert_eq!(model.selected_model(Role::Worker, None), "local/live");
+    assert_eq!(model.selected_model(Role::Orchestrator, None), "local/live");
     assert_eq!(
         model.providers.keys().cloned().collect::<Vec<_>>(),
         ["local"]
@@ -110,7 +115,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
             profiles: vec!["local".into()],
             selected: routed_roles()
                 .into_iter()
-                .map(|role| (role_key(role).into(), model.selected_model(role)))
+                .map(|role| (role_key(role).into(), model.selected_model(role, None)))
                 .collect(),
         }
     );

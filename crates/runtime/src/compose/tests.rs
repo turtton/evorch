@@ -14,6 +14,7 @@ use super::*;
 
 mod additional_roles;
 mod capabilities;
+mod category;
 mod live;
 mod preference;
 mod speed;
@@ -146,6 +147,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
     model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: run_id.to_string(),
                 model_preference: None,
             },
@@ -267,7 +269,10 @@ async fn complete_reports_timeout_reason() {
 fn selected_model_formats_profile_and_model() {
     let (model, _) = routed_model(Ok(response()), "local-model", None);
 
-    assert_eq!(model.selected_model(Role::Worker), "local/local-model");
+    assert_eq!(
+        model.selected_model(Role::Worker, None),
+        "local/local-model"
+    );
 }
 
 // Given: route candidate の model override と別 default model を持つ profile

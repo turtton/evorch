@@ -55,7 +55,7 @@ impl AgentModel for HttpModel {
             })
     }
 
-    fn selected_model(&self, _: Role) -> String {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "http".into()
     }
 }

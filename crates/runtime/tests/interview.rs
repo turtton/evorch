@@ -32,7 +32,7 @@ impl AgentModel for InterviewModel {
             finish_reason: FinishReason::Stop,
         })
     }
-    fn selected_model(&self, _: Role) -> String {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "fixture".into()
     }
 }

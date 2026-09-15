@@ -455,7 +455,9 @@ fn push_initial_system_message(
 ) -> Result<(), InitialSystemPromptError> {
     let catalog_text = match shared.system_prompts.as_ref() {
         Some(catalog) => {
-            let model_id = shared.model.selected_model(task.role);
+            let model_id = shared
+                .model
+                .selected_model(task.role, task.config.category.as_deref());
             Some(catalog.system_prompt_for(
                 task.role,
                 task.config.category.as_deref(),
@@ -466,7 +468,9 @@ fn push_initial_system_message(
     };
     let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
     let compaction_text = shared.compaction_configured.then(|| {
-        let model_id = shared.model.selected_model(task.role);
+        let model_id = shared
+            .model
+            .selected_model(task.role, task.config.category.as_deref());
         compaction_policy_text(&shared.compaction, classify(&model_id))
     });
     let estimated_history_bytes = u64::try_from(
@@ -582,7 +586,10 @@ impl LoopState {
                     compaction::estimator::estimate_visible(&visible, self.last_usage.as_ref());
                 let window = compaction::policy::resolve_window(
                     &self.shared.compaction,
-                    &self.shared.model.selected_model(self.task.role),
+                    &self
+                        .shared
+                        .model
+                        .selected_model(self.task.role, self.task.config.category.as_deref()),
                 );
                 // 閾値未満の境界を観測したら自動トリガを再武装する (ラチェット解除)。
                 if (estimated as f64) < window as f64 * self.shared.compaction.threshold {
@@ -610,6 +617,7 @@ impl LoopState {
                 }
             }
             let invocation = AgentInvocationContext {
+                category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
             };

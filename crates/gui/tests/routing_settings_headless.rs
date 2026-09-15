@@ -101,7 +101,7 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     assert_eq!(harness.state().routing_settings().routes, expected.routes);
     assert_eq!(saved.routing.routes["worker"][0].profile, "local");
     assert_eq!(saved.routing.routes["worker"][1].profile, "accelerated");
-    assert_eq!(model.selected_model(Role::Worker), "local/base");
+    assert_eq!(model.selected_model(Role::Worker, None), "local/base");
     assert!(harness.state().routing_settings().open);
 }
 

@@ -26,8 +26,8 @@ impl runtime::AgentModel for ObservedModel {
         self.inner.complete(invocation, role, messages, tools).await
     }
 
-    fn selected_model(&self, role: Role) -> String {
-        runtime::AgentModel::selected_model(self.inner.as_ref(), role)
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        runtime::AgentModel::selected_model(self.inner.as_ref(), role, category)
     }
 }
 

@@ -37,7 +37,7 @@ pub fn role_settings_modal(
                         for (name, binding) in [
                             ("Orchestrator", &mut agents.orchestrator),
                             ("Explorer", &mut agents.explorer),
-                            ("Worker", &mut agents.worker),
+                            ("Worker", &mut agents.worker.base),
                             ("Reviewer", &mut agents.reviewer),
                             ("Librarian", &mut agents.roles.librarian),
                             ("Planner", &mut agents.roles.planner),
@@ -58,7 +58,8 @@ pub fn role_settings_modal(
                                     ui.label(muted("Category overrides"));
                                     for category in CATEGORIES {
                                         ui.collapsing(badge(category), |ui| {
-                                            let mut draft = binding
+                                            let mut draft = agents
+                                                .worker
                                                 .categories
                                                 .get(category)
                                                 .cloned()
@@ -81,9 +82,12 @@ pub fn role_settings_modal(
                                                 draft = Default::default();
                                             }
                                             if draft == config::CategoryBindingConfig::default() {
-                                                binding.categories.remove(category);
+                                                agents.worker.categories.remove(category);
                                             } else {
-                                                binding.categories.insert(category.into(), draft);
+                                                agents
+                                                    .worker
+                                                    .categories
+                                                    .insert(category.into(), draft);
                                             }
                                         });
                                     }

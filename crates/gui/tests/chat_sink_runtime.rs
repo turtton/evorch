@@ -47,7 +47,7 @@ impl AgentModel for ScriptedModel {
             })
     }
 
-    fn selected_model(&self, _role: Role) -> String {
+    fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
         "test-chat".into()
     }
 }
