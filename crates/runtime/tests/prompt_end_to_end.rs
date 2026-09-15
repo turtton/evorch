@@ -11,9 +11,9 @@ use tempfile::TempDir;
 
 /// Orchestrator binding が appendix として参照する同梱プリセット名。
 ///
-/// 同梱 16 名のうち、比較対象の Orchestrator/quick/claude プロンプトの他
-/// レイヤー (role-orchestrator baseline / family-claude / category-quick
-/// overlay) に現れない名前を選ぶ。これによりユーザー上書きテストで変化する
+/// 同梱プリセットのうち、Orchestrator/claude プロンプトの他
+/// レイヤー (role-orchestrator baseline / family-claude)
+/// に現れない名前を選ぶ。これによりユーザー上書きテストで変化する
 /// レイヤーを appendix だけに限定して主張できる。
 const ORCHESTRATOR_APPENDIX_PRESET: &str = "category-research";
 
@@ -29,7 +29,7 @@ const OVERRIDE_SENTINEL: &str = "USER-OVERRIDE-SENTINEL-この行はユーザー
 fn bound_config() -> Config {
     let mut config = Config::default();
     config.agents.orchestrator.preset = Some(ORCHESTRATOR_APPENDIX_PRESET.to_owned());
-    config.agents.worker.preset = Some(WORKER_APPENDIX_PRESET.to_owned());
+    config.agents.worker.base.preset = Some(WORKER_APPENDIX_PRESET.to_owned());
     config
 }
 
@@ -57,8 +57,8 @@ fn production_catalog(
 }
 
 // Given: 同梱プリセットのみで解決したソースから構築したカタログ
-// When: Orchestrator / quick / claude-opus-4-1 で system_prompt_for を 2 回呼ぶ
-// Then: 出力はバイト単位で同一 (AC3) で、同一入力の Worker 出力とは異なり、
+// When: Orchestrator / カテゴリなし / claude-opus-4-1 で system_prompt_for を 2 回呼ぶ
+// Then: 出力はバイト単位で同一 (AC3) で、Worker / quick 出力とは異なり、
 //       appendix には binding 参照のプリセット本文が入る
 #[test]
 fn config_driven_catalog_produces_byte_identical_system_prompt() {
@@ -70,10 +70,10 @@ fn config_driven_catalog_produces_byte_identical_system_prompt() {
         production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
 
     let first = catalog
-        .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
     let second = catalog
-        .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
     let worker = catalog
         .system_prompt_for(Role::Worker, Some("quick"), "claude-opus-4-1")
@@ -85,7 +85,7 @@ fn config_driven_catalog_produces_byte_identical_system_prompt() {
     );
     assert_ne!(
         first, worker,
-        "同一入力でもロールが違えば出力は異なるはずです"
+        "ロールとカテゴリが違えば出力は異なるはずです"
     );
     assert!(
         first.ends_with(sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()),
@@ -106,20 +106,20 @@ fn user_override_preset_changes_appendix_layer_only() {
     let before_catalog =
         production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
     let before = before_catalog
-        .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
+        .system_prompt_for(Role::Worker, Some("quick"), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
     let override_path = user_dir
         .path()
         .join("presets")
-        .join(format!("{ORCHESTRATOR_APPENDIX_PRESET}.md"));
+        .join(format!("{WORKER_APPENDIX_PRESET}.md"));
     std::fs::write(&override_path, format!("{OVERRIDE_SENTINEL}\n"))
         .expect("ユーザー上書きプリセットを書き込めるはずです");
 
     let after_catalog =
         production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
     let after = after_catalog
-        .system_prompt_for(Role::Orchestrator, Some("quick"), "claude-opus-4-1")
+        .system_prompt_for(Role::Worker, Some("quick"), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
     assert!(
@@ -151,7 +151,7 @@ fn user_override_preset_changes_appendix_layer_only() {
         "quick overlay は不変のはずです"
     );
     assert!(
-        before.ends_with(before_sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()),
+        before.ends_with(before_sources.appendices[WORKER_APPENDIX_PRESET].trim_end()),
         "上書き前の末尾セクションは同梱プリセット本文のはずです"
     );
     assert!(
@@ -230,7 +230,7 @@ fn unknown_model_id_uses_generic_family_section_end_to_end() {
         production_catalog(&config, &user_dir).expect("必須部品が揃いカタログは構築できるはずです");
 
     let prompt = catalog
-        .system_prompt_for(Role::Orchestrator, Some("quick"), "totally-unknown-model")
+        .system_prompt_for(Role::Orchestrator, None, "totally-unknown-model")
         .expect("登録済みの部品のみを参照するはずです");
 
     assert!(
