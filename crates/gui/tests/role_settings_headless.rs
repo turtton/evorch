@@ -122,6 +122,35 @@ fn category_override_editable_per_role() {
 }
 
 #[test]
+fn category_ui_is_scoped_to_worker_row() {
+    for role in ["Explorer", "Librarian", "Worker"] {
+        // Given: a fresh modal with every role row collapsed.
+        let temp = tempfile::tempdir().expect("temp");
+        let (mut harness, _) = fixture(temp.path());
+        harness.run();
+        // When: only the selected role row is opened.
+        harness.click_label(role);
+        harness.run();
+        // Then: the category section and all six headers belong only to Worker.
+        for label in [
+            "Category overrides",
+            "quick",
+            "deep",
+            "high-reasoning",
+            "visual",
+            "writing",
+            "research",
+        ] {
+            assert_eq!(
+                harness.has_label(label),
+                role == "Worker",
+                "{role}: {label}"
+            );
+        }
+    }
+}
+
+#[test]
 fn librarian_row_saves_when_model_selected() {
     // Given: the real role settings modal with distinct routes.
     let temp = tempfile::tempdir().expect("temp");
@@ -260,7 +289,7 @@ fn capture_role_settings_png_evidence() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     harness.run();
-    harness.click_label("Librarian");
+    harness.click_label("Worker");
     harness.run();
     harness.click_label("research");
     harness.run();

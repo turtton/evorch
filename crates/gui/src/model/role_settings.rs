@@ -35,15 +35,15 @@ impl RoleSettingsModel {
             names.extend(["orchestrator", "explorer", "worker", "reviewer"].map(String::from));
             for (_, binding) in bindings(&config.agents) {
                 names.extend(binding.logical_model.clone());
-                names.extend(
-                    config
-                        .agents
-                        .worker
-                        .categories
-                        .values()
-                        .filter_map(|binding| binding.logical_model.clone()),
-                );
             }
+            names.extend(
+                config
+                    .agents
+                    .worker
+                    .categories
+                    .values()
+                    .filter_map(|binding| binding.logical_model.clone()),
+            );
         }
         Self {
             agents: config.agents.clone(),
@@ -63,22 +63,22 @@ impl RoleSettingsModel {
                 binding.logical_model.as_deref(),
             )?;
             validate_generation(&binding.generation, role)?;
-            for (category, binding) in &self.agents.worker.categories {
-                if !CATEGORIES.contains(&category.as_str()) {
-                    return Err(config::ConfigError::UnknownCategory {
-                        role: role.into(),
-                        category: category.clone(),
-                    });
-                }
-                self.validate_model(
-                    &format!("agents.{role}.categories.{category}.logical_model"),
-                    binding.logical_model.as_deref(),
-                )?;
-                validate_generation(
-                    &binding.generation,
-                    &format!("{role}.categories.{category}"),
-                )?;
+        }
+        for (category, binding) in &self.agents.worker.categories {
+            if !CATEGORIES.contains(&category.as_str()) {
+                return Err(config::ConfigError::UnknownCategory {
+                    role: "worker".into(),
+                    category: category.clone(),
+                });
             }
+            self.validate_model(
+                &format!("agents.worker.categories.{category}.logical_model"),
+                binding.logical_model.as_deref(),
+            )?;
+            validate_generation(
+                &binding.generation,
+                &format!("worker.categories.{category}"),
+            )?;
         }
         Ok(())
     }
