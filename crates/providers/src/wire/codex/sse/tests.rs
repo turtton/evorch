@@ -121,3 +121,32 @@ fn interpreter_rejects_invalid_json_frame() {
 
     assert!(matches!(error, ProviderError::InvalidJson { .. }));
 }
+
+// Given: stream containing an unknown lifecycle event / When: interpreted / Then: the unknown event is skipped and later deltas still flow
+#[test]
+fn interpreter_skips_unknown_events() {
+    let mut interpreter = CodexStreamInterpreter::new();
+
+    let skipped = interpreter
+        .interpret(SseFrame {
+            event: Some("response.in_progress".to_string()),
+            data: r#"{"type":"response.in_progress","response":{"status":"in_progress"}}"#
+                .to_string(),
+        })
+        .unwrap();
+    let delta = interpreter
+        .interpret(SseFrame {
+            event: Some("response.output_text.delta".to_string()),
+            data: r#"{"type":"response.output_text.delta","delta":"ok"}"#.to_string(),
+        })
+        .unwrap();
+
+    assert!(skipped.events.is_empty());
+    assert!(skipped.completion.is_none());
+    assert_eq!(
+        delta.events,
+        vec![StreamEvent::TextDelta {
+            text: "ok".to_string()
+        }]
+    );
+}

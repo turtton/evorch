@@ -136,9 +136,8 @@ impl WireStreamInterpreter for CodexStreamInterpreter {
                     ),
                 })
             }
-            unknown => Err(ProviderError::InvalidSse {
-                detail: format!("未知の Codex Responses event: {unknown}"),
-            }),
+            // backend が新イベントを追加しても既存 client を壊さないよう、未知イベントは無視する
+            _ => Ok(FrameInterpretation::default()),
         }
     }
 
