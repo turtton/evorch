@@ -22,12 +22,28 @@ use crate::sse::SseFrame;
 use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::codex::{CodexStreamInterpreter, to_wire_request};
 
-const DEFAULT_BASE_URL: &str = "https://chatgpt.com";
+const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_LABEL: &str = "openai-codex";
 const PROTOCOL: &str = "openai-codex-responses";
 const ORIGINATOR: &str = "codex_cli_rs";
+
+/// base URL から responses endpoint を一意に解決します。正の形は
+/// `https://chatgpt.com/backend-api/codex` で、二重 append による 404 を防ぐため
+/// `/responses` 込み・裸ホスト等の指定も正規化します（pi の resolveCodexUrl 方式）。
+fn resolve_endpoint(base_url: &str) -> String {
+    let normalized = base_url.trim_end_matches('/');
+    if normalized.ends_with("/responses") {
+        normalized.to_string()
+    } else if normalized.ends_with("/codex") {
+        format!("{normalized}/responses")
+    } else if normalized.ends_with("/backend-api") {
+        format!("{normalized}/codex/responses")
+    } else {
+        format!("{normalized}/backend-api/codex/responses")
+    }
+}
 
 /// Codex subscription backend client の設定。
 #[derive(Clone)]
@@ -72,10 +88,7 @@ impl CodexClient {
     pub fn new(config: CodexConfig, session: CodexSessionManager) -> Result<Self, ProviderError> {
         Ok(Self {
             http_client: build_http_client(None)?,
-            endpoint: format!(
-                "{}/backend-api/codex/responses",
-                config.base_url.trim_end_matches('/')
-            ),
+            endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
             session,
@@ -98,10 +111,7 @@ impl CodexClient {
         );
         Ok(Self {
             http_client,
-            endpoint: format!(
-                "{}/backend-api/codex/responses",
-                config.base_url.trim_end_matches('/')
-            ),
+            endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
             session,
@@ -136,6 +146,8 @@ impl CodexClient {
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("version", crate::CODEX_MODELS_CLIENT_VERSION)
             .header(
                 reqwest::header::USER_AGENT,
                 format!("codex_cli_rs/{}", crate::CODEX_MODELS_CLIENT_VERSION),
@@ -216,5 +228,24 @@ impl WireStreamInterpreter for CodexInterpreterAdapter {
 
     fn finish(&mut self) -> Result<FrameInterpretation, ProviderError> {
         self.0.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_endpoint;
+
+    #[test]
+    fn resolve_endpoint_normalizes_base_url_shapes() {
+        let canonical = "https://chatgpt.com/backend-api/codex/responses";
+        for (input, expected) in [
+            ("https://chatgpt.com/backend-api/codex", canonical),
+            ("https://chatgpt.com/backend-api/codex/", canonical),
+            ("https://chatgpt.com/backend-api/codex/responses", canonical),
+            ("https://chatgpt.com/backend-api", canonical),
+            ("https://chatgpt.com", canonical),
+        ] {
+            assert_eq!(resolve_endpoint(input), expected, "input: {input}");
+        }
     }
 }
