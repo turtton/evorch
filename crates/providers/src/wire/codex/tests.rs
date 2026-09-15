@@ -114,3 +114,56 @@ fn wire_request_maps_tools_and_messages() {
     assert_eq!(tools[0]["description"], "Read a workspace file");
     assert_eq!(tools[0]["parameters"]["required"], json!(["path"]));
 }
+
+// Given: a tool round trip (assistant ToolUse + user ToolResult) / When: converted / Then: replayed as function_call and function_call_output items
+#[test]
+fn wire_request_replays_tool_round_trip() {
+    let mut canonical = request();
+    canonical.messages.push(Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Text {
+                text: "Reading the file.".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "call_123".to_string(),
+                name: "read_file".to_string(),
+                input: json!({"path": "AGENTS.md"}),
+            },
+        ],
+    });
+    canonical.messages.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_123".to_string(),
+            content: vec![crate::message::ToolResultContent::Text {
+                text: "file body".to_string(),
+            }],
+            is_error: false,
+        }],
+    });
+
+    let value = serde_json::to_value(to_wire_request(&canonical)).unwrap();
+    let input = value["input"].as_array().unwrap();
+
+    assert_eq!(input.len(), 5);
+    assert_eq!(input[2]["type"], "message");
+    assert_eq!(input[2]["role"], "assistant");
+    assert_eq!(input[2]["content"][0]["text"], "Reading the file.");
+    let call = &input[3];
+    assert_eq!(call["type"], "function_call");
+    assert_eq!(call["call_id"], "call_123");
+    assert_eq!(call["name"], "read_file");
+    assert_eq!(call["arguments"], json!({"path": "AGENTS.md"}).to_string());
+    let output = &input[4];
+    assert_eq!(output["type"], "function_call_output");
+    assert_eq!(output["call_id"], "call_123");
+    assert_eq!(output["output"], "file body");
+    assert!(
+        input
+            .iter()
+            .filter(|item| item["type"] == "message")
+            .all(|item| !item["content"].as_array().unwrap().is_empty()),
+        "空の content を持つ message 項目を送らない"
+    );
+}

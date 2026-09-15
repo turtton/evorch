@@ -16,7 +16,7 @@ pub use sse::CodexStreamInterpreter;
 pub struct CodexResponsesRequest {
     model: String,
     instructions: String,
-    input: Vec<InputMessage>,
+    input: Vec<InputItem>,
     tools: Vec<FunctionTool>,
     store: bool,
     stream: bool,
@@ -34,6 +34,25 @@ struct InputMessage {
     kind: MessageType,
     role: InputRole,
     content: Vec<InputContent>,
+}
+
+/// Responses API の入力項目。ツール往復の再生には message 以外に
+/// function_call / function_call_output が必要です。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum InputItem {
+    Message(InputMessage),
+    FunctionCall {
+        r#type: &'static str,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        r#type: &'static str,
+        call_id: String,
+        output: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -126,18 +145,10 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
     let input = request
         .messages
         .iter()
-        .filter_map(|message| match message.role {
-            Role::System => None,
-            Role::User => Some(to_input_message(
-                message,
-                InputRole::User,
-                TextType::InputText,
-            )),
-            Role::Assistant => Some(to_input_message(
-                message,
-                InputRole::Assistant,
-                TextType::OutputText,
-            )),
+        .flat_map(|message| match message.role {
+            Role::System => Vec::new(),
+            Role::User => to_input_items(message, InputRole::User, TextType::InputText),
+            Role::Assistant => to_input_items(message, InputRole::Assistant, TextType::OutputText),
         })
         .collect();
     CodexResponsesRequest {
@@ -167,33 +178,67 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
     }
 }
 
-fn to_input_message(
+fn to_input_items(
     message: &crate::message::Message,
     role: InputRole,
     text_type: TextType,
-) -> InputMessage {
-    let content = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Image { media_type, data } => Some(InputContent::Image {
+) -> Vec<InputItem> {
+    let mut items = Vec::new();
+    let mut content: Vec<InputContent> = Vec::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Image { media_type, data } => content.push(InputContent::Image {
                 r#type: "input_image",
                 image_url: format!("data:{media_type};base64,{data}"),
             }),
-            ContentBlock::Text { text } => Some(InputContent::Text(InputText {
+            ContentBlock::Text { text } => content.push(InputContent::Text(InputText {
                 kind: text_type,
                 text: text.clone(),
             })),
-            ContentBlock::Reasoning { .. }
-            | ContentBlock::ToolUse { .. }
-            | ContentBlock::ToolResult { .. } => None,
-        })
-        .collect();
-    InputMessage {
+            ContentBlock::ToolUse { id, name, input } => {
+                flush_message(&mut items, &mut content, role);
+                items.push(InputItem::FunctionCall {
+                    r#type: "function_call",
+                    call_id: id.clone(),
+                    name: name.clone(),
+                    arguments: input.to_string(),
+                });
+            }
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content: blocks,
+                ..
+            } => {
+                flush_message(&mut items, &mut content, role);
+                let output = blocks
+                    .iter()
+                    .map(|block| match block {
+                        crate::message::ToolResultContent::Text { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                items.push(InputItem::FunctionCallOutput {
+                    r#type: "function_call_output",
+                    call_id: tool_call_id.clone(),
+                    output,
+                });
+            }
+            ContentBlock::Reasoning { .. } => {}
+        }
+    }
+    flush_message(&mut items, &mut content, role);
+    items
+}
+
+fn flush_message(items: &mut Vec<InputItem>, content: &mut Vec<InputContent>, role: InputRole) {
+    if content.is_empty() {
+        return;
+    }
+    items.push(InputItem::Message(InputMessage {
         kind: MessageType::Message,
         role,
-        content,
-    }
+        content: std::mem::take(content),
+    }));
 }
 
 #[cfg(test)]
