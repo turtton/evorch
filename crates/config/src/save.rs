@@ -147,6 +147,7 @@ pub fn save_openai_compatible_provider(
                             && model.preset.is_none()
                             && model.context_window.is_none()
                             && model.pricing_for(None).is_none()
+                            && model.effort_levels.is_none()
                         {
                             toml_edit::Value::from(model.id)
                         } else {
@@ -189,6 +190,16 @@ pub fn save_openai_compatible_provider(
                                 if let Some(price) = price {
                                     table.insert(key, price.into());
                                 }
+                            }
+                            if let Some(levels) = model.effort_levels {
+                                table.insert(
+                                    "effort_levels",
+                                    levels
+                                        .iter()
+                                        .map(toml_edit::Value::from)
+                                        .collect::<toml_edit::Array>()
+                                        .into(),
+                                );
                             }
                             table.into()
                         },

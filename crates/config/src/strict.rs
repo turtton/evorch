@@ -45,6 +45,7 @@ const MODEL_ENTRY_KEYS: &[&str] = &[
     "output_price",
     "cache_read_price",
     "cache_write_price",
+    "effort_levels",
 ];
 const MODEL_PRESET_KEYS: &[&str] = &[
     "context_window",

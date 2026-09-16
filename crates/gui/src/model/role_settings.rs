@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
 pub const CATEGORIES: [&str; 6] = [
@@ -10,13 +10,46 @@ pub const CATEGORIES: [&str; 6] = [
     "research",
 ];
 
+/// モデルに effort_levels が未設定のときに提示する共通の推論強度一覧。
+pub const DEFAULT_EFFORT_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+
 #[derive(Debug, Default)]
 pub struct RoleSettingsModel {
     pub open: bool,
     pub agents: config::AgentsConfig,
     pub logical_models: Vec<String>,
+    pub effort_choices: BTreeMap<String, Vec<String>>,
     pub error: Option<String>,
     pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
+}
+
+/// 論理モデル名から提示する推論強度の選択肢を引く。未登録なら共通既定一覧。
+pub fn effort_options(
+    choices: &BTreeMap<String, Vec<String>>,
+    logical_model: Option<&str>,
+) -> Vec<String> {
+    logical_model
+        .and_then(|name| choices.get(name))
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_EFFORT_LEVELS.map(str::to_owned).into_iter().collect())
+}
+
+fn effort_choices_for(config: &config::Config, name: &str) -> Vec<String> {
+    let entry = if let Some(candidates) = config.routing.routes.get(name) {
+        candidates.first().and_then(|candidate| {
+            let profile = config.providers.get(&candidate.profile)?;
+            let model = candidate.model.as_deref().unwrap_or(&profile.default_model);
+            profile.models.iter().find(|entry| entry.id == model)
+        })
+    } else {
+        config
+            .providers
+            .values()
+            .find_map(|profile| profile.models.iter().find(|entry| entry.id == name))
+    };
+    entry
+        .and_then(|entry| entry.effort_levels.clone())
+        .unwrap_or_else(|| DEFAULT_EFFORT_LEVELS.map(str::to_owned).into_iter().collect())
 }
 
 impl RoleSettingsModel {
@@ -47,7 +80,11 @@ impl RoleSettingsModel {
         }
         Self {
             agents: config.agents.clone(),
-            logical_models: names.into_iter().collect(),
+            logical_models: names.iter().cloned().collect(),
+            effort_choices: names
+                .iter()
+                .map(|name| (name.clone(), effort_choices_for(config, name)))
+                .collect(),
             ..Self::default()
         }
     }

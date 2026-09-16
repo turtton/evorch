@@ -135,19 +135,6 @@ pub struct ObservationContext {
     pub run_id: String,
 }
 
-/// モデルの推論に割り当てる強度。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    /// 低い推論強度。
-    Low,
-    /// 標準の推論強度。
-    #[default]
-    Medium,
-    /// 高い推論強度。
-    High,
-}
-
 /// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -172,9 +159,9 @@ pub struct ChatRequest {
     /// 最大出力トークン数。未指定ならプロバイダ既定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// 推論強度。未指定ならプロバイダ既定。
+    /// 推論強度。モデルごとに有効な値が異なるため自由形式の文字列とする。未指定ならプロバイダ既定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<String>,
     /// サービス階層。未指定なら標準処理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,

@@ -1,4 +1,4 @@
-use crate::model::role_settings::{CATEGORIES, RoleSettingsModel};
+use crate::model::role_settings::{CATEGORIES, RoleSettingsModel, effort_options};
 use crate::theme::{
     text::{badge, h3, muted},
     tokens::*,
@@ -16,6 +16,7 @@ pub fn role_settings_modal(
 ) -> Option<RoleSettingsAction> {
     let mut action = None;
     let busy = model.is_saving();
+    let effort_choices = model.effort_choices.clone();
     egui::Modal::new(egui::Id::new("role-settings"))
         .backdrop_color(palette().OVERLAY)
         .frame(surface_frame(palette().SURFACE_RAISED))
@@ -57,7 +58,11 @@ pub fn role_settings_modal(
                                     );
                                     optional_text(ui, "Preset reference", &mut binding.preset);
                                     ui.collapsing(badge("Generation overrides"), |ui| {
-                                        generation(ui, &mut binding.generation)
+                                        generation(
+                                            ui,
+                                            &mut binding.generation,
+                                            effort_options(&effort_choices, binding.logical_model.as_deref()),
+                                        )
                                     });
                                     if let Some(categories) = categories {
                                         ui.label(muted("Category overrides"));
@@ -80,7 +85,14 @@ pub fn role_settings_modal(
                                                     "Category preset reference",
                                                     &mut draft.preset,
                                                 );
-                                                generation(ui, &mut draft.generation);
+                                                generation(
+                                                    ui,
+                                                    &mut draft.generation,
+                                                    effort_options(
+                                                        &effort_choices,
+                                                        draft.logical_model.as_deref(),
+                                                    ),
+                                                );
                                                 if ui.button("Reset category").clicked() {
                                                     draft = Default::default();
                                                 }
@@ -149,26 +161,48 @@ fn optional_text(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     }
 }
 
-fn generation(ui: &mut egui::Ui, value: &mut config::GenerationOverridesConfig) {
+fn generation(
+    ui: &mut egui::Ui,
+    value: &mut config::GenerationOverridesConfig,
+    efforts: Vec<String>,
+) {
     optional_number(ui, "Temperature", (&mut value.temperature, 0.0..=2.0));
     optional_number(ui, "Top p", (&mut value.top_p, 0.0..=1.0));
     optional_number(ui, "Max tokens", (&mut value.max_tokens, 1..=u32::MAX));
     let label = ui.label("Reasoning effort");
-    egui::ComboBox::from_id_salt("reasoning-effort")
-        .selected_text(match value.reasoning_effort {
-            None => "Inherit default",
-            Some(config::ReasoningEffortConfig::Low) => "Low",
-            Some(config::ReasoningEffortConfig::Medium) => "Medium",
-            Some(config::ReasoningEffortConfig::High) => "High",
+    let selected = value
+        .reasoning_effort
+        .clone()
+        .map(|effort| {
+            if efforts.iter().any(|level| level == &effort) {
+                effort
+            } else {
+                format!("{effort} (custom)")
+            }
         })
+        .unwrap_or_else(|| "Inherit default".to_owned());
+    let custom = value
+        .reasoning_effort
+        .as_ref()
+        .filter(|current| !efforts.iter().any(|level| level == *current))
+        .cloned();
+    egui::ComboBox::from_id_salt("reasoning-effort")
+        .selected_text(selected)
         .show_ui(ui, |ui| {
-            for (value_option, name) in [
-                (None, "Inherit default"),
-                (Some(config::ReasoningEffortConfig::Low), "Low"),
-                (Some(config::ReasoningEffortConfig::Medium), "Medium"),
-                (Some(config::ReasoningEffortConfig::High), "High"),
-            ] {
-                ui.selectable_value(&mut value.reasoning_effort, value_option, name);
+            ui.selectable_value(&mut value.reasoning_effort, None, "Inherit default");
+            for effort in &efforts {
+                ui.selectable_value(
+                    &mut value.reasoning_effort,
+                    Some(effort.clone()),
+                    effort,
+                );
+            }
+            if let Some(current) = custom {
+                ui.selectable_value(
+                    &mut value.reasoning_effort,
+                    Some(current.clone()),
+                    format!("{current} (custom)"),
+                );
             }
         })
         .response

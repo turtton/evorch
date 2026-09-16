@@ -13,6 +13,7 @@ fn model_entry_cost_fields_roundtrip_via_save() {
     let path = dir.path().join("evorch.toml");
     let input = OpenAiCompatibleProviderInput {
         name: "x".into(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: "https://example.com/v1".into(),
         credential: ProviderCredentialInput::Env {
             var: "API_KEY".into(),

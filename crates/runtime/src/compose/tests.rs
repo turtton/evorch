@@ -192,23 +192,14 @@ async fn complete_builds_request_from_binding_and_route() {
 #[tokio::test]
 async fn complete_forwards_reasoning_effort_when_binding_configures_it() {
     for (configured, expected) in [
-        (
-            Some(config::ReasoningEffortConfig::High),
-            Some(providers::ReasoningEffort::High),
-        ),
-        (
-            Some(config::ReasoningEffortConfig::Medium),
-            Some(providers::ReasoningEffort::Medium),
-        ),
-        (
-            Some(config::ReasoningEffortConfig::Low),
-            Some(providers::ReasoningEffort::Low),
-        ),
+        (Some("high"), Some("high".to_owned())),
+        (Some("medium"), Some("medium".to_owned())),
+        (Some("xhigh"), Some("xhigh".to_owned())),
         (None, None),
     ] {
         // Given: worker binding に推論強度を指定または省略する。
         let (mut model, requests) = routed_model(Ok(response()), "local-model", None);
-        model.agents.worker.base.generation.reasoning_effort = configured;
+        model.agents.worker.base.generation.reasoning_effort = configured.map(str::to_owned);
         // When: 既存の composition adapter 経由で完了を要求する。
         let result = complete(&model, "run-effort").await;
         // Then: provider に届く request が指定強度を保持する。

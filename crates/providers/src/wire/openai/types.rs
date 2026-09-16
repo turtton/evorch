@@ -1,4 +1,4 @@
-use crate::message::{ReasoningEffort, ServiceTier};
+use crate::message::ServiceTier;
 use serde::{Deserialize, Serialize};
 
 /// Chat Completions リクエスト本文。
@@ -19,7 +19,7 @@ pub struct WireChatRequest {
     pub max_tokens: Option<u64>,
     /// 推論強度。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<String>,
     /// サービス階層。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,

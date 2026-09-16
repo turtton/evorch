@@ -296,7 +296,7 @@ impl RoutedModel {
             tools,
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
-            reasoning_effort: generation.reasoning_effort.map(map_reasoning_effort),
+            reasoning_effort: generation.reasoning_effort.clone(),
             service_tier: match speed {
                 config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
                 config::types::provider::ModelSpeed::Standard => None,
@@ -386,14 +386,6 @@ pub struct ProfileSummary {
 fn model_error(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Model {
         reason: error.to_string(),
-    }
-}
-
-const fn map_reasoning_effort(effort: config::ReasoningEffortConfig) -> providers::ReasoningEffort {
-    match effort {
-        config::ReasoningEffortConfig::Low => providers::ReasoningEffort::Low,
-        config::ReasoningEffortConfig::Medium => providers::ReasoningEffort::Medium,
-        config::ReasoningEffortConfig::High => providers::ReasoningEffort::High,
     }
 }
 

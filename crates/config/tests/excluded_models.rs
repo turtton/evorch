@@ -90,6 +90,7 @@ fn save_round_trips_exclusions_when_input_needs_normalization() {
     let path = tmp.path().join("evorch.toml");
     let input = OpenAiCompatibleProviderInput {
         name: "local".into(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: "https://example.com/v1".into(),
         credential: config::ProviderCredentialInput::Env {
             var: "LOCAL_KEY".into(),
@@ -119,6 +120,7 @@ fn save_omits_exclusions_when_normalized_input_is_empty() {
         let path = tmp.path().join("evorch.toml");
         let input = OpenAiCompatibleProviderInput {
             name: "local".into(),
+            provider_type: config::ProviderTypeConfig::OpenAiCompatible,
             base_url: "https://example.com/v1".into(),
             credential: config::ProviderCredentialInput::Env {
                 var: "LOCAL_KEY".into(),

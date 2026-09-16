@@ -185,6 +185,99 @@ fn librarian_row_saves_when_model_selected() {
 }
 
 #[test]
+fn effort_choices_follow_selected_model_levels() {
+    // Given: a config where route "fast" maps to a model with restricted effort levels.
+    let temp = tempfile::tempdir().expect("temp");
+    std::fs::write(
+        temp.path().join("evorch.toml"),
+        r#"
+[providers.local]
+type = "openai-compatible"
+base_url = "https://example.invalid/v1"
+api_key_env = "TEST_KEY"
+default_model = "base"
+models = [
+  { id = "base", enabled = true },
+  { id = "fast", enabled = true, effort_levels = ["minimal", "high"] },
+]
+[routing.routes]
+worker = [{ profile = "local", model = "base" }]
+fast = [{ profile = "local", model = "fast" }]
+"#,
+    )
+    .expect("fixture config");
+    let context = gui::model::production::ProductionModel {
+        load_options: config::LoadOptions {
+            project_dir: Some(temp.path().into()),
+            user_config_dir: Some(temp.path().join("user")),
+            read_env: false,
+            ..Default::default()
+        },
+        credential_store: Arc::new(
+            sandbox::credential::FileCredentialStore::open(temp.path().join("credentials"))
+                .expect("store"),
+        ),
+        bus: Arc::new(event_bus::EventBus::new(32)),
+        env: Arc::new(routing::MapEnv::new(
+            [("TEST_KEY".into(), "test-secret".into())].into(),
+        )),
+    };
+    let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
+        .expect("state")
+        .with_provider_settings_path(temp.path().join("evorch.toml"))
+        .with_production_model(context, model);
+    state.open_role_settings();
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    // When: the worker role points at the restricted model.
+    harness
+        .state_mut()
+        .role_settings_mut()
+        .agents
+        .worker
+        .base
+        .logical_model = Some("fast".into());
+    harness.run();
+    harness.click_label("Worker");
+    harness.run();
+    harness.click_label("Generation overrides");
+    harness.run();
+    harness.click_label("Reasoning effort");
+    harness.run();
+    // Then: only the model's levels are offered, and the default route keeps common levels.
+    assert!(harness.has_label("minimal"));
+    assert!(harness.has_label("high"));
+    assert!(!harness.has_label("xhigh"));
+    assert_eq!(
+        gui::model::role_settings::effort_options(
+            &harness.state().role_settings().effort_choices,
+            Some("worker"),
+        ),
+        gui::model::role_settings::DEFAULT_EFFORT_LEVELS
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn save_success_closes_modal() {    // Given: an open role editor with a valid change.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = fixture(temp.path());
+    harness.run();
+    assert!(harness.has_label("Agent role settings"));
+    // When: saving through the actual modal.
+    harness.click_label("Save role settings");
+    harness.step();
+    finish(&mut harness);
+    // Then: the modal closes without an error.
+    assert_eq!(harness.state().role_settings().error, None);
+    assert!(!harness.state().role_settings().open);
+    assert!(!harness.has_label("Agent role settings"));
+}
+
+#[test]
 fn validation_error_blocks_save() {
     // Given: unknown and empty explicit model assignments.
     for name in ["unknown", ""] {
@@ -270,7 +363,7 @@ fn menu_opens_role_settings_and_cancel_discards_edits() {
     harness.click_label("Cancel");
     harness.run();
     // When: reopening through the settings menu.
-    harness.click_label("Workbench settings");
+    harness.click_label("⚙");
     harness.run();
     harness.click_label("Agent roles");
     harness.run();

@@ -121,7 +121,10 @@ fn merge_generation(
         temperature: category.temperature.or(role.temperature),
         top_p: category.top_p.or(role.top_p),
         max_tokens: category.max_tokens.or(role.max_tokens),
-        reasoning_effort: category.reasoning_effort.or(role.reasoning_effort),
+        reasoning_effort: category
+            .reasoning_effort
+            .clone()
+            .or_else(|| role.reasoning_effort.clone()),
     }
 }
 
@@ -185,22 +188,9 @@ pub struct GenerationOverridesConfig {
     /// 最大出力トークン数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// 推論強度。
+    /// 推論強度。モデルごとに有効な値が異なるため自由形式の文字列とする。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<ReasoningEffortConfig>,
-}
-
-/// 推論強度の指定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffortConfig {
-    /// 低強度。
-    Low,
-    /// 中強度。
-    #[default]
-    Medium,
-    /// 高強度。
-    High,
+    pub reasoning_effort: Option<String>,
 }
 
 /// [`AgentsConfig::binding_for`] の解決結果。
@@ -277,7 +267,7 @@ preset = "quick-appendix"
         assert_eq!(agents.worker.generation.max_tokens, Some(4096));
         assert_eq!(
             agents.worker.generation.reasoning_effort,
-            Some(ReasoningEffortConfig::Medium)
+            Some("medium".to_owned())
         );
         let quick = agents
             .worker
@@ -331,7 +321,7 @@ reasoning_effort = "high"
         assert_eq!(generation.max_tokens, Some(8192));
         assert_eq!(
             generation.reasoning_effort,
-            Some(ReasoningEffortConfig::High)
+            Some("high".to_owned())
         );
     }
 

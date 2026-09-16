@@ -104,3 +104,34 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
         "worker-model"
     );
 }
+
+// Given: 自由形式の reasoning_effort を持つ worker binding
+// When: 保存してロードする
+// Then: 文字列がそのままラウンドトリップされる (enum 検証で落ちない)
+#[test]
+fn save_role_binding_roundtrips_freeform_reasoning_effort() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("evorch.toml");
+    let agents = AgentsConfig {
+        worker: WorkerBindingConfig {
+            base: RoleBindingConfig {
+                generation: GenerationOverridesConfig {
+                    reasoning_effort: Some("xhigh".into()),
+                    ..GenerationOverridesConfig::default()
+                },
+                ..RoleBindingConfig::default()
+            },
+            categories: Default::default(),
+        },
+        ..AgentsConfig::default()
+    };
+
+    save_agent_bindings(&path, &agents).expect("agent bindings save succeeds");
+    let loaded = load(directory.path());
+
+    let role = loaded
+        .agents
+        .binding_for("worker", None)
+        .expect("worker binding");
+    assert_eq!(role.generation.reasoning_effort.as_deref(), Some("xhigh"));
+}

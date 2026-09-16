@@ -152,6 +152,9 @@ pub struct ModelEntryConfig {
     pub cache_read_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_price: Option<f64>,
+    /// このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_levels: Option<Vec<String>>,
 }
 
 /// USD per million tokens. Each `None` is unknown, not zero/free.
@@ -190,6 +193,7 @@ impl ModelEntryConfig {
             output_price: None,
             cache_read_price: None,
             cache_write_price: None,
+            effort_levels: None,
         }
     }
 
@@ -240,6 +244,8 @@ struct ModelEntryDe {
     cache_read_price: Option<f64>,
     #[serde(default)]
     cache_write_price: Option<f64>,
+    #[serde(default)]
+    effort_levels: Option<Vec<String>>,
 }
 
 impl<'de> Deserialize<'de> for ModelEntryConfig {
@@ -284,6 +290,7 @@ impl<'de> Deserialize<'de> for ModelEntryConfig {
                     output_price: entry.output_price,
                     cache_read_price: entry.cache_read_price,
                     cache_write_price: entry.cache_write_price,
+                    effort_levels: entry.effort_levels,
                 })
             }
         }

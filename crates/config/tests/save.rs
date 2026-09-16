@@ -7,6 +7,7 @@ use config::{
 fn input() -> OpenAiCompatibleProviderInput {
     OpenAiCompatibleProviderInput {
         name: "local".into(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: "https://example.com/v1".into(),
         credential: ProviderCredentialInput::Env {
             var: "API_KEY".into(),
@@ -134,4 +135,41 @@ fn save_normalizes_ids_and_prefers_enabled_duplicates_in_either_order() {
             disabled("c")
         ]
     );
+}
+
+// Given: effort_levels を持つモデルを含むプロバイダ入力 / When: 保存して読み直す
+// Then: effort_levels がラウンドトリップされ、sugar (文字列表現) に潰されない
+#[test]
+fn save_round_trips_model_effort_levels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("evorch.toml");
+    let mut candidate = input();
+    candidate.models = vec![ModelEntryConfig {
+        effort_levels: Some(vec!["minimal".into(), "high".into()]),
+        ..ModelEntryConfig::enabled("fast")
+    }];
+    candidate.default_model = "fast".into();
+
+    save_openai_compatible_provider(&path, &candidate).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("effort_levels"), "saved doc: {text}");
+    let config: Config = toml::from_str(&text).unwrap();
+    assert_eq!(
+        config.providers["local"].models[0].effort_levels,
+        Some(vec!["minimal".to_owned(), "high".to_owned()])
+    );
+}
+
+// Given: effort_levels 未設定のモデル / When: 保存する
+// Then: キーが出力されず省略時テーブル形状にも影響しない
+#[test]
+fn save_omits_effort_levels_when_unset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("evorch.toml");
+
+    save_openai_compatible_provider(&path, &input()).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("effort_levels"), "saved doc: {text}");
 }

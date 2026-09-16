@@ -20,7 +20,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
         tools: request.tools.iter().map(to_wire_tool).collect(),
         temperature: request.temperature,
         max_tokens: request.max_tokens,
-        reasoning_effort: request.reasoning_effort,
+        reasoning_effort: request.reasoning_effort.clone(),
         service_tier: request.service_tier,
         stream,
         stream_options: stream.then_some(WireStreamOptions {

@@ -22,6 +22,7 @@ fn load(dir: &std::path::Path) -> Config {
 fn openai(name: &str) -> config::OpenAiCompatibleProviderInput {
     config::OpenAiCompatibleProviderInput {
         name: name.into(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: "https://example.com/v1".into(),
         credential: config::ProviderCredentialInput::Env {
             var: "API_KEY".into(),

@@ -12,6 +12,7 @@ use config::{
 fn input() -> OpenAiCompatibleProviderInput {
     OpenAiCompatibleProviderInput {
         name: "local".into(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: " http://localhost:11434/v1 ".into(),
         credential: config::ProviderCredentialInput::Env {
             var: "LOCAL_API_KEY".into(),
@@ -305,6 +306,7 @@ fn validation_reports_first_invalid_field_in_order() {
     // Given: 全フィールドが不正
     let mut candidate = OpenAiCompatibleProviderInput {
         name: String::new(),
+        provider_type: config::ProviderTypeConfig::OpenAiCompatible,
         base_url: String::new(),
         credential: config::ProviderCredentialInput::Env { var: String::new() },
         models: vec![],
