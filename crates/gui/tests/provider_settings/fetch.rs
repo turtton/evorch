@@ -1,4 +1,4 @@
-use super::workbench_with_seeded_settings;
+use super::{open_providers_menu, workbench_with_seeded_settings};
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::provider_settings::{ModelsFetchState, OpenAiEditorModel as ProviderSettingsModel};
@@ -81,8 +81,7 @@ fn fetched_models_populate_modal_when_request_succeeds() {
         },
         [1200.0, 900.0],
     );
-    harness.click_label("Open Settings");
-    harness.run();
+    open_providers_menu(&mut harness);
     harness.click_label("Edit");
     harness.run();
     // When: the modal fetches using an injected key without mutating the environment.
@@ -137,8 +136,7 @@ fn manual_models_remain_available_when_request_fails() {
         },
         [1200.0, 900.0],
     );
-    harness.click_label("Open Settings");
-    harness.run();
+    open_providers_menu(&mut harness);
     harness.click_label("Edit");
     harness.run();
     // When: an authenticated request fails and the UI polls the result.
@@ -186,8 +184,7 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
         },
         [1200.0, 900.0],
     );
-    harness.click_label("Open Settings");
-    harness.run();
+    open_providers_menu(&mut harness);
     harness.click_label("Edit");
     harness.run();
     harness

@@ -14,7 +14,7 @@ fn capture_both_settings_tabs() {
     frame
         .save_png(std::path::Path::new("/tmp/opencode/w-b-openai.png"))
         .unwrap();
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
     harness.click_label("+ Add Codex subscription");
     harness.run();
@@ -48,7 +48,7 @@ fn codex_tab_hides_openai_grid_and_shows_login() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
     harness.click_label("+ Add Codex subscription");
     harness.run();

@@ -76,6 +76,9 @@ pub fn provider_settings_modal(
                                     config::ProviderTypeConfig::OpenAi => "OpenAI",
                                     config::ProviderTypeConfig::GithubCopilot => "GitHub Copilot",
                                     config::ProviderTypeConfig::Openrouter => "OpenRouter",
+                                    config::ProviderTypeConfig::KimiSubscription => {
+                                        "Kimi subscription"
+                                    }
                                 };
                                 crate::theme::widgets::badge(
                                     ui,
@@ -115,6 +118,9 @@ pub fn provider_settings_modal(
                     if ui.button("+ Add Codex subscription").clicked() {
                         model.add(ProviderKind::CodexSubscription);
                     }
+                    if ui.button("+ Add Kimi subscription").clicked() {
+                        model.add(ProviderKind::KimiSubscription);
+                    }
                 }
             }
             if let Some(error) = &model.error {
@@ -124,7 +130,7 @@ pub fn provider_settings_modal(
                 if model.editor.is_some() && primary_button(ui, "Save").clicked() {
                     action = Some(ProviderSettingsAction::Save);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("Close").clicked() {
                     action = Some(ProviderSettingsAction::Cancel);
                 }
             });

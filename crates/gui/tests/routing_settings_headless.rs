@@ -65,7 +65,7 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
     // When: メニューで開き候補を追加・移動して保存する。
-    harness.click_label("Workbench settings");
+    harness.click_label("⚙");
     harness.run();
     harness.click_label("Routing");
     harness.run();

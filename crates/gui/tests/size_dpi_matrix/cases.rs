@@ -52,12 +52,7 @@ pub fn verify_with_theme(state: State, theme: ThemePreset) {
                     ] {
                         geometry.sidebar(label);
                     }
-                    let settings = if geometry.workbench.has_label("Settings") {
-                        "Settings"
-                    } else {
-                        "Open Settings"
-                    };
-                    geometry.reachable(settings);
+                    geometry.reachable("⚙");
                     match state {
                         State::ErrorThread => {
                             geometry.reachable("Error");

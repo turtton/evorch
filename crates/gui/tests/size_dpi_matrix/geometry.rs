@@ -74,7 +74,7 @@ impl Geometry<'_> {
         self.reachable("Provider settings");
         for label in ["Name", "Base URL"] {
             let fields = self.reachable(label);
-            for button in ["Save", "Cancel"] {
+            for button in ["Save", "Close"] {
                 let buttons = self.reachable(button);
                 for field in &fields {
                     for rect in &buttons {

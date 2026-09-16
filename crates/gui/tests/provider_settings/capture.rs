@@ -170,7 +170,7 @@ fn capture_modal_png_evidence() {
         assert_eq!((frame.width, frame.height), dimensions);
         assert!(harness.has_label("Provider settings"));
         assert!(harness.has_label("Save"));
-        assert!(harness.has_label("Cancel"));
+        assert!(harness.has_label("Close"));
         frame
             .save_png(&directory.join(filename))
             .expect("PNG saved");

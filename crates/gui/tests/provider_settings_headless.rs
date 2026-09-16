@@ -4,7 +4,7 @@ use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::codex_auth::CODEX_LOGIN_BUTTON;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
-use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+use gui::model::composer::ProviderStatus;
 use gui::model::provider_settings::{OpenAiEditorModel, ProviderSettingsModel};
 use gui::theme::tokens::PROVIDER_MODAL_MAX_WIDTH;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
@@ -46,8 +46,15 @@ fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbe
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
+fn open_providers_menu(harness: &mut HeadlessWorkbench<DemoSource>) {
+    harness.click_label("⚙");
+    harness.run();
+    harness.click_label("Providers");
+    harness.run();
+}
+
 #[test]
-fn open_settings_button_visible_when_not_configured() {
+fn provider_settings_open_from_settings_menu() {
     // Given: conversations with and without a configured provider.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut missing = workbench(temp.path(), ProviderStatus::default());
@@ -55,10 +62,13 @@ fn open_settings_button_visible_when_not_configured() {
     // When: both conversations render.
     missing.run();
     configured.run();
-    // Then: only the unconfigured conversation offers settings.
-    assert!(missing.has_label(PROVIDER_MISSING_GUIDANCE));
-    assert!(missing.has_label("Open Settings"));
-    assert!(!configured.has_label("Open Settings"));
+    // Then: the settings menu offers provider settings in both states.
+    for harness in [&mut missing, &mut configured] {
+        open_providers_menu(harness);
+        assert!(harness.has_label("Provider settings"));
+        harness.click_label("Close");
+        harness.run();
+    }
 }
 
 #[test]
@@ -68,25 +78,21 @@ fn clicking_open_settings_shows_modal_fields() {
     let mut harness = workbench(temp.path(), ProviderStatus::default());
     harness.run();
     // When: settings are opened through the composer.
-    harness.click_label("Open Settings");
-    harness.run();
+    open_providers_menu(&mut harness);
     // Then: the settings modal offers save and cancel.
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("+ Add OpenAI-compatible"));
-    assert!(harness.has_label("Cancel"));
+    assert!(harness.has_label("Close"));
 }
 
 #[test]
-fn settings_button_opens_modal_when_provider_is_configured() {
-    // Given: a configured conversation offers the compact settings action.
+fn settings_menu_opens_modal_when_provider_is_configured() {
+    // Given: a configured conversation.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
     harness.run();
-    assert!(!harness.has_label("Open Settings"));
-    assert!(harness.has_label("Settings"));
-    // When: settings are opened through the composer.
-    harness.click_label("Settings");
-    harness.run();
+    // When: settings are opened through the workbench menu.
+    open_providers_menu(&mut harness);
     // Then: the modal still offers Codex login.
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("+ Add Codex subscription"));
@@ -117,8 +123,7 @@ fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoS
 
 fn open_valid_settings(harness: &mut HeadlessWorkbench<DemoSource>) {
     harness.run();
-    harness.click_label("Open Settings");
-    harness.run();
+    open_providers_menu(harness);
     harness.click_label("+ Add OpenAI-compatible");
     harness.run();
     let model = harness
@@ -202,8 +207,7 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
         harness.state().provider_status(),
         &ProviderStatus::Configured
     );
-    assert!(!harness.has_label(PROVIDER_MISSING_GUIDANCE));
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
     assert!(!harness.state().provider_settings().open);
     harness.step();
@@ -290,7 +294,7 @@ fn cancel_closes_modal_without_writing() {
     let mut harness = workbench_with_config_path(temp.path());
     open_valid_settings(&mut harness);
     // When: the user cancels rather than saving.
-    harness.click_label("Cancel");
+    harness.click_label("Close");
     harness.run();
     // Then: the modal closes without configuring the provider or writing a file.
     assert!(!harness.has_label("Save"));
@@ -303,15 +307,14 @@ fn cancel_closes_modal_without_writing() {
 }
 
 #[test]
-fn open_settings_from_composer_when_not_configured() {
-    // Given: an unconfigured conversation offers provider setup.
+fn open_settings_from_menu_when_not_configured() {
+    // Given: an unconfigured conversation.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::default());
     harness.run();
-    // When: the composer's settings action is clicked.
-    harness.click_label("Open Settings");
-    harness.run();
-    // Then: the same provider Settings modal opens.
+    // When: settings are opened through the workbench menu.
+    open_providers_menu(&mut harness);
+    // Then: the provider Settings modal opens.
     assert!(harness.has_label("Provider settings"));
     assert!(harness.has_label("+ Add OpenAI-compatible"));
 }
@@ -401,8 +404,7 @@ fn modal_width_scales_with_viewport_and_respects_cap() {
         let mut harness =
             workbench_with_seeded_settings(temp.path(), model.clone(), [viewport_width, 600.0]);
         // When: settings are opened at the given viewport width.
-        harness.click_label("Open Settings");
-        harness.run();
+        open_providers_menu(&mut harness);
         harness.click_label("Edit");
         harness.run();
         // Then: controls are visible and the modal fits within the viewport.
@@ -447,4 +449,49 @@ fn modal_width_scales_with_viewport_and_respects_cap() {
             "modal should not exceed PROVIDER_MODAL_MAX_WIDTH ({PROVIDER_MODAL_MAX_WIDTH}), got {modal_width_approx}"
         );
     }
+}
+
+#[test]
+fn add_kimi_subscription_saves_kimi_profile() {
+    // Given: a project config path and the provider settings modal.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench_with_config_path(temp.path());
+    harness.run();
+    open_providers_menu(&mut harness);
+    // When: a Kimi subscription profile is added and saved with an env credential.
+    harness.click_label("+ Add Kimi subscription");
+    harness.run();
+    {
+        let model = harness
+            .state_mut()
+            .provider_settings_mut()
+            .openai_mut()
+            .unwrap();
+        assert_eq!(model.provider_type, ProviderTypeConfig::KimiSubscription);
+        assert_eq!(
+            model.base_url,
+            config::types::provider::KIMI_DEFAULT_BASE_URL
+        );
+        model.credential_mode = gui::model::provider_settings::CredentialMode::Env;
+        model.api_key_env = "KIMI_API_KEY".into();
+    }
+    harness.run();
+    harness.click_label("Save");
+    finish_save(&mut harness);
+    // Then: the profile persists as kimi-subscription with the preset endpoint and models.
+    let raw =
+        std::fs::read_to_string(temp.path().join("evorch.toml")).expect("saved file readable");
+    assert!(raw.contains("type = \"kimi-subscription\""));
+    let config = load_config(temp.path());
+    let provider = config.providers.get("kimi").expect("kimi provider saved");
+    assert_eq!(provider.provider_type, ProviderTypeConfig::KimiSubscription);
+    assert_eq!(
+        provider.base_url,
+        config::types::provider::KIMI_DEFAULT_BASE_URL
+    );
+    assert_eq!(
+        provider.default_model,
+        config::types::provider::KIMI_DEFAULT_MODEL
+    );
+    assert_eq!(provider.api_protocol, ApiProtocolConfig::OpenAiCompletions);
 }

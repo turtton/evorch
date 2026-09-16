@@ -41,7 +41,7 @@ fn picker(path: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
         .with_ui_settings_path(path);
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     workbench.run();
-    workbench.click_label("Workbench settings");
+    workbench.click_label("⚙");
     workbench.run();
     workbench.click_label("Theme");
     workbench.run();
