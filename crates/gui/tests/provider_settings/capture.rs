@@ -67,6 +67,10 @@ fn capture_codex_auth_png_evidence() {
     };
 
     // When: browser login starts and publishes its prompt.
+    // The Codex editor body lives inside a ScrollArea; bring the button into the
+    // visible clip before clicking so the headless harness can hit it.
+    harness.scroll_label_into_view(CODEX_LOGIN_BUTTON);
+    harness.run();
     harness.click_label(CODEX_LOGIN_BUTTON);
     step_until(&mut harness, |state| {
         matches!(
