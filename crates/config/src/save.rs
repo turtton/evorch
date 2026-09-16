@@ -19,6 +19,8 @@ pub enum ProviderCredentialInput {
 pub struct OpenAiCompatibleProviderInput {
     /// 保存先のプロファイル名。
     pub name: String,
+    /// 保存するプロバイダ種別。`openai-compatible` または `kimi-subscription`。
+    pub provider_type: crate::types::provider::ProviderTypeConfig,
     /// HTTP または HTTPS のベース URL (前後の空白は除去する)。
     pub base_url: String,
     /// 秘密値ではなく、その参照先の環境変数名。
@@ -120,7 +122,7 @@ pub fn save_openai_compatible_provider(
     let mut doc = read_document(path)?;
 
     let mut profile = Table::new();
-    profile.insert("type", value("openai-compatible"));
+    profile.insert("type", value(input.provider_type.as_str()));
     profile.insert("base_url", value(input.base_url.trim()));
     match &input.credential {
         ProviderCredentialInput::Env { var } => {

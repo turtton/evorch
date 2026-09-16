@@ -107,8 +107,10 @@ fn theme_preset_tokyo_night_survives_save_load_round_trip() {
     // Given: settings configured with Tokyo Night.
     let directory = tempdir().expect("temporary directory must be created");
     let path = directory.path().join("ui.toml");
-    let mut settings = UiSettings::default();
-    settings.theme_preset = ThemePresetName::TokyoNight;
+    let settings = UiSettings {
+        theme_preset: ThemePresetName::TokyoNight,
+        ..UiSettings::default()
+    };
 
     // When: settings are saved and loaded again.
     save_settings(&settings, &path).expect("settings must save");
