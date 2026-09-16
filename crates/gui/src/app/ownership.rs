@@ -99,21 +99,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ui.label(error);
         }
         let ctx = ui.ctx().clone();
-        if ctx.input(|input| input.viewport().close_requested()) {
+        if ctx.input(|input| input.viewport().close_requested()) && !self.close_in_flight {
             self.shutdown_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        if self.shutdown_requested && !self.shutdown_confirmed {
+        if self.shutdown_requested && !self.shutdown_confirmed && !self.close_in_flight {
             let has_active_turns = host.has_active_turns().unwrap_or(true);
             if !has_active_turns {
                 match host.quiesce() {
-                    Ok(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Ok(false) => {
+                        self.close_in_flight = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                     Ok(true) => self.shutdown_confirmed = true,
                     Err(error) => self.ownership_error = Some(error.to_string()),
                 }
             }
         }
-        if self.shutdown_requested && !self.shutdown_confirmed {
+        if self.shutdown_requested && !self.shutdown_confirmed && !self.close_in_flight {
             egui::Window::new("Active thread ownership").collapsible(false).show(&ctx, |ui| {
                 ui.label("Closing stops this process. Drain active tools and checkpoint before releasing ownership. Other windows may claim after release.");
                 if ui.button("Drain and close").clicked() {
@@ -122,12 +125,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         Err(error) => self.ownership_error = Some(error.to_string()),
                     }
                 }
-                if ui.button("Keep open").clicked() { self.shutdown_requested = false; }
+                if ui.button("Keep open").clicked() {
+                    self.shutdown_requested = false;
+                    self.shutdown_confirmed = false;
+                }
             });
         }
         if self.shutdown_confirmed {
             match host.quiesce() {
-                Ok(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Ok(false) => {
+                    self.close_in_flight = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 Ok(true) => {
                     ui.label("Waiting for active tools and checkpoint…");
                 }
