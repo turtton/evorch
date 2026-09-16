@@ -2,6 +2,7 @@
 //!
 //! ADR 0013 のハイブリッド 4 供給源のうち、組み込みデフォルト・外部カタログ
 //! (models.dev) のマージ・プロバイダ検出モデルのマージを担います。
+// allow: SIZE_OK — built-in model data table and existing catalog contract tests.
 
 use std::collections::BTreeMap;
 
@@ -130,6 +131,30 @@ fn builtin_entries() -> Vec<CatalogEntry> {
     }
 
     vec![
+        entry(
+            "kimi-for-coding",
+            ProviderType::KimiSubscription,
+            256_000,
+            32_000,
+            CatalogCapabilities {
+                tool_calling: true,
+                reasoning: false,
+                prompt_cache: false,
+            },
+            None,
+        ),
+        entry(
+            "kimi-k2-thinking",
+            ProviderType::KimiSubscription,
+            256_000,
+            32_000,
+            CatalogCapabilities {
+                tool_calling: true,
+                reasoning: true,
+                prompt_cache: false,
+            },
+            None,
+        ),
         entry(
             "claude-sonnet-4-5",
             ProviderType::Anthropic,
@@ -415,7 +440,7 @@ mod tests {
             assert_eq!(entry.source, CatalogSource::Builtin, "{model_id} の source");
             assert!(entry.attributes_confirmed, "{model_id} は属性確定済み");
         }
-        assert_eq!(catalog.entries().len(), 10, "組み込みカタログは 10 項目");
+        assert_eq!(catalog.entries().len(), 12, "組み込みカタログは 12 項目");
     }
 
     // Given: 組み込みカタログと、組み込み項目を上書きする外部カタログのエントリ
@@ -440,7 +465,7 @@ mod tests {
         assert!(entry.attributes_confirmed, "属性確定フラグが true になる");
         assert_eq!(
             catalog.entries().len(),
-            10,
+            12,
             "追加ではなく上書きのため項目数は不変"
         );
     }
@@ -487,7 +512,7 @@ mod tests {
         assert_eq!(&before, after, "既存の確定済み項目は変更されない");
     }
 
-    // Given: 組み込みカタログ (10 項目) と既存 ID・未知 ID の混在リスト
+    // Given: 組み込みカタログ (12 項目) と既存 ID・未知 ID の混在リスト
     // When: merge_discovered でマージする
     // Then: 未知 ID のみ挿入され、既存 ID は組み込みのまま残る
     #[test]
@@ -496,7 +521,7 @@ mod tests {
 
         catalog.merge_discovered(vec!["gpt-4o".to_string(), "llama-3-3-70b".to_string()]);
 
-        assert_eq!(catalog.entries().len(), 11, "未知 ID のみ追加される");
+        assert_eq!(catalog.entries().len(), 13, "未知 ID のみ追加される");
         let discovered = catalog.get("llama-3-3-70b").expect("未知 ID が挿入される");
         assert_eq!(discovered.source, CatalogSource::Discovered);
         let existing = catalog.get("gpt-4o").expect("既存 ID が残る");

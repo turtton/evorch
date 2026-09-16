@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use event_bus::EventBus;
-use model::{Capability, LogicalModelId, ModelCatalog};
+use model::{Capability, CapabilitySupport, LogicalModelId, ModelCatalog};
 use providers::{ChatRequest, ChatResponse, Message, ObservationContext, ToolSpec};
 use routing::factory::FactoryOptions;
 use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
@@ -280,12 +280,15 @@ impl RoutedModel {
             .ok_or_else(|| RuntimeError::Model {
                 reason: "resolved provider profile is unavailable".to_string(),
             })?;
-        let tools = if self
+        let model_allows_tools = match self
             .router
             .catalog()
-            .supports(base_model_id, Capability::ToolCalling)
-            && provider.client.capabilities().tool_use
+            .capability_support(base_model_id, Capability::ToolCalling)
         {
+            CapabilitySupport::Unsupported => false,
+            CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
+        };
+        let tools = if model_allows_tools && provider.client.capabilities().tool_use {
             tools.to_vec()
         } else {
             Vec::new()

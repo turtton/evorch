@@ -10,7 +10,7 @@ fn specs() -> Vec<ToolSpec> {
 }
 
 #[tokio::test]
-async fn tools_are_omitted_when_preferred_model_support_is_unknown_or_unsupported() {
+async fn tools_follow_declaration_when_preferred_model_support_is_unknown_or_unsupported() {
     // Given: an explicitly selected model with unknown or unsupported tools.
     for confirmed in [false, true] {
         let (mut model, requests) = routed_model(Ok(response()), "custom", None);
@@ -43,8 +43,11 @@ async fn tools_are_omitted_when_preferred_model_support_is_unknown_or_unsupporte
             )
             .await
             .expect("text-only degradation");
-        // Then: the provider sees no tool specs.
-        assert!(requests.lock().expect("requests")[0].tools.is_empty());
+        // Then: only an explicit unsupported declaration strips tool specs.
+        assert_eq!(
+            requests.lock().expect("requests")[0].tools.is_empty(),
+            confirmed
+        );
     }
 }
 

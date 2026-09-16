@@ -23,7 +23,7 @@ const KEY: &str = "composition-e2e-key";
 const MODEL: &str = "gpt-4o";
 
 #[tokio::test]
-async fn preferred_unknown_model_omits_tools_on_the_wire() {
+async fn preferred_unknown_model_preserves_tools_on_the_wire() {
     // Given: a discovered model selected explicitly through the real HTTP adapter.
     let directory = tempfile::tempdir().expect("project");
     let mock = StreamingMockOpenAi::spawn(vec![openai_text_response("done")]);
@@ -66,11 +66,11 @@ async fn preferred_unknown_model_omits_tools_on_the_wire() {
         )
         .await
         .expect("text-only completion");
-    // Then: the serialized provider request has no tools section.
+    // Then: the serialized provider request preserves the requested tool.
     let requests = mock.recorded_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["model"], "unknown");
-    assert!(requests[0].body.get("tools").is_none());
+    assert_eq!(requests[0].body["tools"][0]["function"]["name"], "read");
 }
 
 fn openai_tool_response(id: &str, name: &str, arguments: serde_json::Value) -> ScriptedResponse {

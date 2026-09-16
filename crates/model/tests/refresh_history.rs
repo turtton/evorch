@@ -103,8 +103,8 @@ async fn refresh_success_merges_and_records_history() {
         "供給源は models-dev"
     );
     assert_eq!(
-        outcome.merged_count, 11,
-        "組み込み 10 項目 + 新規 1 項目 = 11 項目"
+        outcome.merged_count, 13,
+        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
     );
     let entry = catalog
         .get("gemma-3-27b")
@@ -123,7 +123,7 @@ async fn refresh_success_merges_and_records_history() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "models-dev");
-    assert_eq!(records[0].model_count, 11, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
 }
 
 // Given: キャッシュが存在せず、常に失敗するフェッチャー
@@ -146,7 +146,7 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
         .expect("refresh は成功する");
 
     assert_eq!(outcome.source, RefreshSource::Builtin, "供給源は builtin");
-    assert_eq!(outcome.merged_count, 10, "組み込みカタログのまま");
+    assert_eq!(outcome.merged_count, 12, "組み込みカタログのまま");
     assert_eq!(catalog.entries(), &before, "組み込みカタログは変更されない");
 
     storage.close();
@@ -156,7 +156,7 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "builtin");
-    assert_eq!(records[0].model_count, 10, "維持した項目数が記録される");
+    assert_eq!(records[0].model_count, 12, "維持した項目数が記録される");
     assert!(
         records[0].detail.contains("boom"),
         "詳細にフェッチエラーの文言が含まれる: {}",
@@ -191,8 +191,8 @@ async fn fresh_cache_skips_fetch() {
     );
     assert_eq!(outcome.source, RefreshSource::Cache, "供給源は cache");
     assert_eq!(
-        outcome.merged_count, 11,
-        "組み込み 10 項目 + 新規 1 項目 = 11 項目"
+        outcome.merged_count, 13,
+        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
     );
     let entry = catalog
         .get("cached-model")
@@ -206,7 +206,7 @@ async fn fresh_cache_skips_fetch() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache");
-    assert_eq!(records[0].model_count, 11, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
 }
 
 // Given: 期限切れまで待機したキャッシュと、常に失敗するフェッチャー
@@ -239,8 +239,8 @@ async fn stale_cache_used_when_fetch_fails() {
         "供給源は cache-stale"
     );
     assert_eq!(
-        outcome.merged_count, 11,
-        "組み込み 10 項目 + 新規 1 項目 = 11 項目"
+        outcome.merged_count, 13,
+        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
     );
     assert!(
         catalog.get("stale-model").is_some(),
@@ -254,7 +254,7 @@ async fn stale_cache_used_when_fetch_fails() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache-stale");
-    assert_eq!(records[0].model_count, 11, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
     assert!(
         records[0].detail.contains("boom"),
         "詳細にフェッチエラーの文言が含まれる: {}",
