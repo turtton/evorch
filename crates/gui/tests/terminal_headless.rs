@@ -27,6 +27,12 @@ fn terminal_harness() -> HeadlessWorkbench<Source> {
         .dock_mut()
         .set_active_tab(path)
         .expect("terminal tab can be activated");
+    harness
+        .state_mut()
+        .dock_mut()
+        .leaf_mut(path.node_path())
+        .expect("terminal leaf exists")
+        .collapsed = false;
     harness.run();
     harness
 }

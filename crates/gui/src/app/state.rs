@@ -107,6 +107,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .map_err(WorkbenchError::InvalidWorkspace)?;
         let mut dock = to_dock_state(&workspace)?;
         crate::dock::enforce_sidebar_min_fraction(&mut dock, &workspace);
+        if settings.layout.workspace.is_none()
+            && let Some(path) = dock.find_tab(&PanelId::new("terminal-main"))
+            && let Ok(leaf) = dock.leaf_mut(path.node_path())
+        {
+            leaf.collapsed = true;
+        }
         let mut state = Self {
             auto_title_jobs: Vec::new(),
             title_generator: None,
