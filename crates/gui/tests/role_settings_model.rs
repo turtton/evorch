@@ -1,4 +1,6 @@
-use gui::model::role_settings::RoleSettingsModel;
+use std::collections::BTreeMap;
+
+use gui::model::role_settings::{RoleSettingsModel, effort_options};
 
 #[test]
 fn librarian_model_is_validated_when_binding_changes() {
@@ -61,4 +63,17 @@ fn picker_uses_enabled_provider_models_when_routes_are_automatic() {
     // Then: only enabled provider models appear.
     assert!(editor.logical_models.iter().any(|name| name == "enabled"));
     assert!(!editor.logical_models.iter().any(|name| name == "disabled"));
+}
+
+#[test]
+fn effort_options_includes_max_and_preserves_model_override() {
+    // Given: no model-specific options and a distinct model-specific override.
+    let mut choices = BTreeMap::new();
+    choices.insert("custom".into(), vec!["custom-level".into()]);
+    // When: resolving options for an unregistered and a registered model.
+    let defaults = effort_options(&choices, Some("default"));
+    let override_options = effort_options(&choices, Some("custom"));
+    // Then: max is the highest default option, while the override wins unchanged.
+    assert_eq!(defaults.last().map(String::as_str), Some("max"));
+    assert_eq!(override_options, vec!["custom-level"]);
 }

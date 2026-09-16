@@ -11,7 +11,8 @@ pub const CATEGORIES: [&str; 6] = [
 ];
 
 /// モデルに effort_levels が未設定のときに提示する共通の推論強度一覧。
-pub const DEFAULT_EFFORT_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+pub const DEFAULT_EFFORT_LEVELS: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Default)]
 pub struct RoleSettingsModel {
