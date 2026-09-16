@@ -19,6 +19,10 @@ impl Tool for Read {
         "read"
     }
 
+    fn description(&self) -> &str {
+        "Read the UTF-8 contents of a file at the given path."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

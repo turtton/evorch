@@ -55,6 +55,10 @@ impl Tool for WebFetch {
         "web_fetch"
     }
 
+    fn description(&self) -> &str {
+        "Fetch a URL and extract text, Markdown, or HTML, optionally using a CSS selector."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

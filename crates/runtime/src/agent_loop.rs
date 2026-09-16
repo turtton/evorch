@@ -160,7 +160,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
     state.tool_specs = visible_tool_specs(
-        standard_tool_specs(),
+        standard_tool_specs(&state.shared.executor),
         &state.policy,
         state.skills().is_some(),
     );

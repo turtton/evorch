@@ -192,6 +192,10 @@ impl Tool for Shell {
         "shell"
     }
 
+    fn description(&self) -> &str {
+        "Run a POSIX shell command in the configured sandbox with an optional directory and timeout."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

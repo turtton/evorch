@@ -81,6 +81,11 @@ pub trait Tool: Send + Sync {
     /// ツールの一意な名前。
     fn name(&self) -> &str;
 
+    /// モデルに提示する説明。独自ツールは名前を既定の説明として使う。
+    fn description(&self) -> &str {
+        self.name()
+    }
+
     /// MCP communication must pass the runtime scope gate before execution.
     fn requires_scope_gate(&self) -> bool {
         false

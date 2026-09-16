@@ -32,6 +32,10 @@ impl Tool for GitDiff {
         "git_diff"
     }
 
+    fn description(&self) -> &str {
+        "Show unstaged Git changes in a working directory, optionally limited to a path."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

@@ -773,24 +773,22 @@ impl LoopState {
 /// Web ツールの露出ゲートは [`ExecutionPolicy::filter_tool_specs`] が担い、
 /// 実行時には network 権限ツールへの 3 層 AND 判定 (role / per-tool / session、
 /// session OptIn は承認プロンプト) が execute_tools の network gate で行われる。
-pub(super) fn standard_tool_specs() -> Vec<ToolSpec> {
-    [
-        "read",
-        "edit",
-        "grep",
-        "shell",
-        "git_diff",
-        "web_search",
-        "web_fetch",
-    ]
-    .into_iter()
-    .chain(META_OPS.iter().copied())
-    .map(|name| ToolSpec {
+pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
+    let mut specs: Vec<_> = executor
+        .tool_specs()
+        .into_iter()
+        .map(|spec| ToolSpec {
+            name: spec.name,
+            description: spec.description,
+            input_schema: spec.input_schema,
+        })
+        .collect();
+    specs.extend(META_OPS.iter().map(|name| ToolSpec {
         name: name.to_string(),
         description: format!("{name} tool"),
         input_schema: serde_json::json!({ "type": "object" }),
-    })
-    .collect()
+    }));
+    specs
 }
 
 /// モデルに見せるツール定義を決定する。
@@ -819,8 +817,37 @@ mod tests {
     use super::*;
     use crate::ExecutionPolicy;
 
+    fn standard_tool_specs() -> Vec<ToolSpec> {
+        let executor = tools::ToolExecutor::with_standard_tools(
+            Arc::new(event_bus::EventBus::new(16)),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        )
+        .with_web_tools()
+        .unwrap();
+        super::standard_tool_specs(&executor)
+    }
+
     fn names(specs: &[ToolSpec]) -> Vec<&str> {
         specs.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn standard_tool_specs_preserve_read_and_edit_schemas() {
+        // Given: the real standard tool schemas.
+        use tools::Tool;
+        let expected = [
+            ("read", tools::Read.schema()),
+            ("edit", tools::Edit.schema()),
+        ];
+
+        // When: runtime builds the model-facing definitions.
+        let specs = standard_tool_specs();
+
+        // Then: both parameter schemas reach the model unchanged.
+        for (name, schema) in expected {
+            let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+            assert_eq!(spec.input_schema, schema);
+        }
     }
 
     // Given: 標準ツール定義

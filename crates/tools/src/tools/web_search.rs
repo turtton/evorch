@@ -150,6 +150,10 @@ impl Tool for WebSearch {
         "web_search"
     }
 
+    fn description(&self) -> &str {
+        "Search the web for a query and return a bounded number of results."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

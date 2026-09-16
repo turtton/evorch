@@ -23,6 +23,10 @@ impl Tool for Edit {
         "edit"
     }
 
+    fn description(&self) -> &str {
+        "Write a file with new_string, or replace the first old_string match when provided."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

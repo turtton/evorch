@@ -23,7 +23,9 @@ use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
 
 mod prepared;
+mod specs;
 pub use prepared::{PreparedToolCall, ValidatedToolCall};
+pub use specs::ToolSpec;
 
 /// ツール実行時の文脈情報。
 ///

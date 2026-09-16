@@ -29,6 +29,10 @@ impl Tool for Grep {
         "grep"
     }
 
+    fn description(&self) -> &str {
+        "Search file contents at a path with a regular expression and return matching lines."
+    }
+
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
