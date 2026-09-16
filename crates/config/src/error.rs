@@ -63,6 +63,11 @@ pub enum ConfigError {
         /// 指定されたカテゴリ名。
         category: String,
     },
+    /// worker 以外のロールにカテゴリが指定された。
+    #[error(
+        "category `{category}` is not allowed for role `{role}`; only worker supports categories"
+    )]
+    CategoryNotAllowedForRole { role: String, category: String },
     /// 指定された名前のプリセットが同梱・ユーザーのどちらにも存在しない。
     #[error("preset not found: `{name}`")]
     PresetNotFound {

@@ -98,7 +98,7 @@ impl AgentModel for NoPullRequestModel {
         Ok(text_response("root stopped without a pull request"))
     }
 
-    fn selected_model(&self, role: Role) -> String {
+    fn selected_model(&self, role: Role, _category: Option<&str>) -> String {
         format!("headless-{}", role.name().to_lowercase())
     }
 }

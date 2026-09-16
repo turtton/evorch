@@ -106,6 +106,7 @@ impl Summarizer for ModelSummarizer {
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
+            category: None,
             model_preference: None,
             run_id: self.run_id.clone(),
         };
@@ -383,7 +384,7 @@ mod tests {
             self.response.clone()
         }
 
-        fn selected_model(&self, _role: Role) -> String {
+        fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
             "stub-summary-model".to_string()
         }
     }

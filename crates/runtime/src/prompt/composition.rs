@@ -99,14 +99,14 @@ pub fn build_catalog(
         if let Some(preset) = &binding.preset {
             builder = builder.appendix(role, appendix_body(&sources, preset));
         }
-        for (category, category_binding) in &binding.categories {
-            if let Some(preset) = &category_binding.preset {
-                builder = builder.category_appendix(
-                    role,
-                    category.as_str(),
-                    appendix_body(&sources, preset),
-                );
-            }
+    }
+    for (category, category_binding) in &input.config.agents.worker.categories {
+        if let Some(preset) = &category_binding.preset {
+            builder = builder.category_appendix(
+                Role::Worker,
+                category.as_str(),
+                appendix_body(&sources, preset),
+            );
         }
     }
     for (family_key, body) in &sources.family_sections {

@@ -122,7 +122,7 @@ impl EntryRouter {
     /// 出所はいずれの場合も Model になる。
     async fn decide_by_model(&self, message: &str, reason_prefix: &str) -> RoutingDecision {
         let source = RoutingSource::Model {
-            model: self.model.selected_model(Role::Orchestrator),
+            model: self.model.selected_model(Role::Orchestrator, None),
         };
         let (shape, reason) = match reclassify(&self.model, message).await {
             ReclassifyOutcome::Classified(shape) => {
@@ -259,7 +259,7 @@ mod tests {
                 })
         }
 
-        fn selected_model(&self, _role: Role) -> String {
+        fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
             "stub-model".to_string()
         }
     }
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
         assert_eq!(decision.role(), Role::Worker);
@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
         assert_eq!(decision.role(), Role::Orchestrator);
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
         assert_eq!(decision.role(), Role::Orchestrator);
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
     }
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
     }
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(
             decision.source,
             RoutingSource::Model {
-                model: stub.selected_model(Role::Orchestrator)
+                model: stub.selected_model(Role::Orchestrator, None)
             }
         );
         assert!(decision.reason.contains("Coordinated に倒した"));

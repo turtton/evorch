@@ -95,13 +95,14 @@ pub fn default_logical_models(agents: &config::AgentsConfig) -> Vec<String> {
         if let Some(logical_model) = &binding.logical_model {
             names.insert(logical_model.clone());
         }
-        names.extend(
-            binding
-                .categories
-                .values()
-                .filter_map(|category| category.logical_model.clone()),
-        );
     }
+    names.extend(
+        agents
+            .worker
+            .categories
+            .values()
+            .filter_map(|category| category.logical_model.clone()),
+    );
     names.into_iter().collect()
 }
 

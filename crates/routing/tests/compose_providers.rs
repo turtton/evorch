@@ -98,9 +98,12 @@ fn compose_fails_when_environment_credential_is_empty() {
 #[test]
 fn compose_builds_clients_and_router_with_discovered_models() {
     let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
-    config.agents.worker = RoleBindingConfig {
-        logical_model: Some("coding".to_string()),
-        ..RoleBindingConfig::default()
+    config.agents.worker = config::WorkerBindingConfig {
+        base: RoleBindingConfig {
+            logical_model: Some("coding".to_string()),
+            ..RoleBindingConfig::default()
+        },
+        ..config::WorkerBindingConfig::default()
     };
     let composed = compose_providers(&config, deps(populated_env())).expect("composeに成功する");
     let mut affinity = SessionAffinity::default();

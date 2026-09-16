@@ -1,4 +1,4 @@
-//! Orchestrator システムプロンプト組立の金標テスト (issue #49 / AC3)。
+//! Orchestrator / Worker システムプロンプト組立の金標テスト (issue #49 / AC3)。
 //!
 //! カタログ経由で解決した完全なプロンプトが、フィクスチャとバイト単位で
 //! 一致することを検証する。フィクスチャ (`golden/system_prompt_orchestrator.txt`)
@@ -8,7 +8,7 @@ use agents::Role;
 use runtime::prompt::default_role_triggers;
 use runtime::{SystemPromptCatalog, SystemPromptCatalogError};
 
-/// テスト用の完全カタログ。bug カテゴリと Orchestrator の appendix を持つ。
+/// テスト用の完全カタログ。quick カテゴリと Orchestrator の appendix を持つ。
 fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogError> {
     SystemPromptCatalog::builder()
         .role_baseline(
@@ -56,8 +56,8 @@ fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogErro
             "汎用規約: 出力は単一の System プロンプトに従い、ロール境界を守ること。",
         )
         .category_overlay(
-            "bug",
-            "バグ対応カテゴリ: 根本原因の特定を最優先にし、修正前に再現手順を確定すること。",
+            "quick",
+            "小規模な作業は変更範囲を絞り、必要な検証を行うこと。",
         )
         .appendix(
             Role::Orchestrator,
@@ -68,16 +68,32 @@ fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogErro
 }
 
 // Given: 完全なカタログ
-// When: Orchestrator / bug カテゴリ / claude-opus-4-1 でシステムプロンプトを解決する
+// When: Orchestrator / カテゴリなし / claude-opus-4-1 でシステムプロンプトを解決する
 // Then: 金標フィクスチャとバイト単位で一致する
 #[test]
 fn orchestrator_full_prompt_matches_golden_fixture() {
     let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
     let prompt = catalog
-        .system_prompt_for(Role::Orchestrator, Some("bug"), "claude-opus-4-1")
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
     assert_eq!(prompt, GOLDEN_FIXTURE.trim_end());
 }
 
 const GOLDEN_FIXTURE: &str = include_str!("golden/system_prompt_orchestrator.txt");
+
+// Given: quick overlay を登録した完全なカタログ
+// When: Worker / quick / claude-opus-4-1 で解決する
+// Then: Worker 用金標フィクスチャとバイト単位で一致する
+#[test]
+fn worker_quick_prompt_matches_golden_fixture() {
+    let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
+    let prompt = catalog
+        .system_prompt_for(Role::Worker, Some("quick"), "claude-opus-4-1")
+        .expect("登録済みの部品のみを参照するはずです");
+
+    assert_eq!(
+        prompt,
+        include_str!("golden/system_prompt_worker_quick.txt").trim_end()
+    );
+}

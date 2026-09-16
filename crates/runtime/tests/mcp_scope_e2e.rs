@@ -28,7 +28,7 @@ impl DnsResolver for Resolver {
 struct Model(AtomicUsize);
 #[async_trait::async_trait]
 impl AgentModel for Model {
-    fn selected_model(&self, _: Role) -> String {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "fixture".into()
     }
     async fn complete(

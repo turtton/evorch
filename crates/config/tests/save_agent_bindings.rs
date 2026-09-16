@@ -1,6 +1,6 @@
 use config::{
     AgentsConfig, CategoryBindingConfig, Config, GenerationOverridesConfig, LoadOptions,
-    RoleBindingConfig, save_agent_bindings,
+    RoleBindingConfig, WorkerBindingConfig, save_agent_bindings,
 };
 
 fn load(directory: &std::path::Path) -> Config {
@@ -19,12 +19,14 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("evorch.toml");
     let agents = AgentsConfig {
-        worker: RoleBindingConfig {
-            logical_model: Some("worker-model".into()),
-            preset: Some("worker-preset".into()),
-            generation: GenerationOverridesConfig {
-                temperature: Some(0.2),
-                ..GenerationOverridesConfig::default()
+        worker: WorkerBindingConfig {
+            base: RoleBindingConfig {
+                logical_model: Some("worker-model".into()),
+                preset: Some("worker-preset".into()),
+                generation: GenerationOverridesConfig {
+                    temperature: Some(0.2),
+                    ..GenerationOverridesConfig::default()
+                },
             },
             categories: [(
                 "quick".into(),
@@ -77,9 +79,12 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
     )
     .expect("write initial config");
     let agents = AgentsConfig {
-        worker: RoleBindingConfig {
-            logical_model: Some("worker-model".into()),
-            ..RoleBindingConfig::default()
+        worker: WorkerBindingConfig {
+            base: RoleBindingConfig {
+                logical_model: Some("worker-model".into()),
+                ..RoleBindingConfig::default()
+            },
+            ..WorkerBindingConfig::default()
         },
         ..AgentsConfig::default()
     };

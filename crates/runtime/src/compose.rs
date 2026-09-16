@@ -128,7 +128,7 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             let profiles = model.providers.keys().cloned().collect();
             let selected = routed_roles()
                 .into_iter()
-                .map(|role| (role_key(role).to_string(), model.selected_model(role)))
+                .map(|role| (role_key(role).to_string(), model.selected_model(role, None)))
                 .collect();
             ComposedRuntime {
                 runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
@@ -263,7 +263,7 @@ impl RoutedModel {
             None => {
                 let binding = self
                     .agents
-                    .binding_for(role_key(role), None)
+                    .binding_for(role_key(role), invocation.category.as_deref())
                     .map_err(model_error)?;
                 let route = self.resolve(
                     &invocation.run_id,
@@ -359,8 +359,8 @@ impl AgentModel for RoutedModel {
             .await
     }
 
-    fn selected_model(&self, role: Role) -> String {
-        let Ok(binding) = self.agents.binding_for(role_key(role), None) else {
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        let Ok(binding) = self.agents.binding_for(role_key(role), category) else {
             return format!("unresolved:{}", role_key(role));
         };
         let logical = LogicalModelId::from(binding.logical_model);

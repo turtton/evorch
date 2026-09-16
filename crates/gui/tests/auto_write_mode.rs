@@ -138,7 +138,7 @@ impl runtime::AgentModel for HeldModel {
     ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
         std::future::pending().await
     }
-    fn selected_model(&self, _: runtime::Role) -> String {
+    fn selected_model(&self, _: runtime::Role, _: Option<&str>) -> String {
         "test".into()
     }
 }

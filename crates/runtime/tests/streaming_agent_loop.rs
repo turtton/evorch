@@ -52,7 +52,7 @@ impl AgentModel for LiveModel {
             .await
     }
 
-    fn selected_model(&self, _: Role) -> String {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "live".into()
     }
 }

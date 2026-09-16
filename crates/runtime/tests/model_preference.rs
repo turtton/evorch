@@ -40,7 +40,7 @@ impl AgentModel for RecordingModel {
         })
     }
 
-    fn selected_model(&self, _role: Role) -> String {
+    fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
         "recording".into()
     }
 }

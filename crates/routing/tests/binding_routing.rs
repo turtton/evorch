@@ -74,7 +74,8 @@ fn catalog(model_ids: &[&str]) -> ModelCatalog {
 /// preset は参照の余地を残しつつ未指定 (None) とする。
 fn worker_quick_binding() -> config::AgentsConfig {
     config::AgentsConfig {
-        worker: config::RoleBindingConfig {
+        worker: config::WorkerBindingConfig {
+            base: config::RoleBindingConfig::default(),
             categories: [(
                 "quick".to_string(),
                 config::CategoryBindingConfig {
@@ -84,7 +85,6 @@ fn worker_quick_binding() -> config::AgentsConfig {
             )]
             .into_iter()
             .collect(),
-            ..config::RoleBindingConfig::default()
         },
         ..config::AgentsConfig::default()
     }

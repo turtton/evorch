@@ -25,7 +25,7 @@ impl ArenaReport {
         let (role, binding) = match winner.attribution {
             Attribution::Orchestrator => ("orchestrator", &mut target.config.agents.orchestrator),
             Attribution::Explorer => ("explorer", &mut target.config.agents.explorer),
-            Attribution::Worker => ("worker", &mut target.config.agents.worker),
+            Attribution::Worker => ("worker", &mut target.config.agents.worker.base),
             Attribution::Reviewer => ("reviewer", &mut target.config.agents.reviewer),
             Attribution::Planner => ("planner", &mut target.config.agents.roles.planner),
             Attribution::Oracle => ("oracle", &mut target.config.agents.roles.oracle),

@@ -9,32 +9,25 @@
       "$ref": "#/$defs/AgentsConfig",
       "default": {
         "explorer": {
-          "categories": {},
           "generation": {}
         },
         "orchestrator": {
-          "categories": {},
           "generation": {}
         },
         "reviewer": {
-          "categories": {},
           "generation": {}
         },
         "roles": {
           "librarian": {
-            "categories": {},
             "generation": {}
           },
           "multimodal_looker": {
-            "categories": {},
             "generation": {}
           },
           "oracle": {
-            "categories": {},
             "generation": {}
           },
           "planner": {
-            "categories": {},
             "generation": {}
           }
         },
@@ -166,28 +159,24 @@
         "librarian": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
         "oracle": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
         "planner": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         }
@@ -202,7 +191,6 @@
           "description": "explorer ロールのバインディング。",
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
@@ -210,7 +198,6 @@
           "description": "オーケストレータロールのバインディング。",
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
@@ -218,7 +205,6 @@
           "description": "reviewer ロールのバインディング。",
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
-            "categories": {},
             "generation": {}
           }
         },
@@ -226,26 +212,22 @@
           "$ref": "#/$defs/AdditionalRoleBindings",
           "default": {
             "librarian": {
-              "categories": {},
               "generation": {}
             },
             "multimodal_looker": {
-              "categories": {},
               "generation": {}
             },
             "oracle": {
-              "categories": {},
               "generation": {}
             },
             "planner": {
-              "categories": {},
               "generation": {}
             }
           }
         },
         "worker": {
           "description": "worker ロールのバインディング。",
-          "$ref": "#/$defs/RoleBindingConfig",
+          "$ref": "#/$defs/WorkerBindingConfig",
           "default": {
             "categories": {},
             "generation": {}
@@ -886,14 +868,6 @@
       "description": "ロール 1 件分のバインディング設定。",
       "type": "object",
       "properties": {
-        "categories": {
-          "description": "カテゴリ別のバインディング (キーは固定 6 カテゴリ名)。",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/CategoryBindingConfig"
-          },
-          "default": {}
-        },
         "generation": {
           "description": "生成パラメータの上書き。",
           "$ref": "#/$defs/GenerationOverridesConfig",
@@ -1009,6 +983,40 @@
           "default": 3,
           "maximum": 3,
           "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkerBindingConfig": {
+      "description": "worker 専用のロール設定とカテゴリ別バインディング。",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "カテゴリ別のバインディング (キーは固定 6 カテゴリ名)。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CategoryBindingConfig"
+          },
+          "default": {}
+        },
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "logical_model": {
+          "description": "使用する論理モデル名。省略時はロール名 (小文字) を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

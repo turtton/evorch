@@ -52,8 +52,8 @@ impl AgentModel for SwitchableModel {
             .await
     }
 
-    fn selected_model(&self, role: Role) -> String {
-        self.current().selected_model(role)
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String {
+        self.current().selected_model(role, category)
     }
 
     fn available_profiles(&self) -> Vec<super::ProfileSummary> {
@@ -77,7 +77,7 @@ impl AgentModel for UnconfiguredModel {
         })
     }
 
-    fn selected_model(&self, role: Role) -> String {
+    fn selected_model(&self, role: Role, _category: Option<&str>) -> String {
         format!("unresolved:{}", super::role_key(role))
     }
 }

@@ -26,7 +26,7 @@ pub fn role_settings_modal(
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Agent role settings"));
             ui.label(muted(
-                "Category overrides take precedence; unset fields inherit the role default.",
+                "Worker categories take precedence over the worker default; other roles use their role model.",
             ));
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
@@ -34,15 +34,19 @@ pub fn role_settings_modal(
                     .max_height((ctx.viewport_rect().height() - TOPBAR * 4.0).max(TOPBAR))
                     .show(ui, |ui| {
                         let agents = &mut model.agents;
-                        for (name, binding) in [
-                            ("Orchestrator", &mut agents.orchestrator),
-                            ("Explorer", &mut agents.explorer),
-                            ("Worker", &mut agents.worker),
-                            ("Reviewer", &mut agents.reviewer),
-                            ("Librarian", &mut agents.roles.librarian),
-                            ("Planner", &mut agents.roles.planner),
-                            ("Oracle", &mut agents.roles.oracle),
-                            ("Multimodal Looker", &mut agents.roles.multimodal_looker),
+                        for (name, binding, categories) in [
+                            ("Orchestrator", &mut agents.orchestrator, None),
+                            ("Explorer", &mut agents.explorer, None),
+                            (
+                                "Worker",
+                                &mut agents.worker.base,
+                                Some(&mut agents.worker.categories),
+                            ),
+                            ("Reviewer", &mut agents.reviewer, None),
+                            ("Librarian", &mut agents.roles.librarian, None),
+                            ("Planner", &mut agents.roles.planner, None),
+                            ("Oracle", &mut agents.roles.oracle, None),
+                            ("Multimodal Looker", &mut agents.roles.multimodal_looker, None),
                         ] {
                             ui.push_id(name, |ui| {
                                 ui.collapsing(badge(name), |ui| {
@@ -55,37 +59,38 @@ pub fn role_settings_modal(
                                     ui.collapsing(badge("Generation overrides"), |ui| {
                                         generation(ui, &mut binding.generation)
                                     });
-                                    ui.label(muted("Category overrides"));
-                                    for category in CATEGORIES {
-                                        ui.collapsing(badge(category), |ui| {
-                                            let mut draft = binding
-                                                .categories
-                                                .get(category)
-                                                .cloned()
-                                                .unwrap_or_default();
-                                            model_picker(
-                                                ui,
-                                                &mut draft.logical_model,
-                                                (
-                                                    &model.logical_models,
-                                                    &format!("{category} logical model"),
-                                                ),
-                                            );
-                                            optional_text(
-                                                ui,
-                                                "Category preset reference",
-                                                &mut draft.preset,
-                                            );
-                                            generation(ui, &mut draft.generation);
-                                            if ui.button("Reset category").clicked() {
-                                                draft = Default::default();
-                                            }
-                                            if draft == config::CategoryBindingConfig::default() {
-                                                binding.categories.remove(category);
-                                            } else {
-                                                binding.categories.insert(category.into(), draft);
-                                            }
-                                        });
+                                    if let Some(categories) = categories {
+                                        ui.label(muted("Category overrides"));
+                                        for category in CATEGORIES {
+                                            ui.collapsing(badge(category), |ui| {
+                                                let mut draft = categories
+                                                    .get(category)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                model_picker(
+                                                    ui,
+                                                    &mut draft.logical_model,
+                                                    (
+                                                        &model.logical_models,
+                                                        &format!("{category} logical model"),
+                                                    ),
+                                                );
+                                                optional_text(
+                                                    ui,
+                                                    "Category preset reference",
+                                                    &mut draft.preset,
+                                                );
+                                                generation(ui, &mut draft.generation);
+                                                if ui.button("Reset category").clicked() {
+                                                    draft = Default::default();
+                                                }
+                                                if draft == config::CategoryBindingConfig::default() {
+                                                    categories.remove(category);
+                                                } else {
+                                                    categories.insert(category.into(), draft);
+                                                }
+                                            });
+                                        }
                                     }
                                 });
                             });

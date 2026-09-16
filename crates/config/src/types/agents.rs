@@ -26,7 +26,7 @@ pub struct AgentsConfig {
     /// explorer ロールのバインディング。
     pub explorer: RoleBindingConfig,
     /// worker ロールのバインディング。
-    pub worker: RoleBindingConfig,
+    pub worker: WorkerBindingConfig,
     /// reviewer ロールのバインディング。
     pub reviewer: RoleBindingConfig,
     pub roles: AdditionalRoleBindings,
@@ -50,6 +50,7 @@ impl AgentsConfig {
     /// 設定に含まれない。
     ///
     /// # Errors
+    /// worker 以外へのカテゴリ指定は [`ConfigError::CategoryNotAllowedForRole`]、
     /// ロール名が固定 8 ロール外なら [`ConfigError::UnknownAgentRole`]、
     /// カテゴリ名が固定 6 カテゴリ外なら [`ConfigError::UnknownCategory`] を返す。
     pub fn binding_for(
@@ -57,10 +58,18 @@ impl AgentsConfig {
         role: &str,
         category: Option<&str>,
     ) -> Result<ResolvedAgentBinding, ConfigError> {
+        if role != "worker"
+            && let Some(category) = category
+        {
+            return Err(ConfigError::CategoryNotAllowedForRole {
+                role: role.to_string(),
+                category: category.to_string(),
+            });
+        }
         let binding = match role {
             "orchestrator" => &self.orchestrator,
             "explorer" => &self.explorer,
-            "worker" => &self.worker,
+            "worker" => &self.worker.base,
             "reviewer" => &self.reviewer,
             "librarian" => &self.roles.librarian,
             "planner" => &self.roles.planner,
@@ -80,7 +89,7 @@ impl AgentsConfig {
                 category: category.to_string(),
             });
         }
-        let category_binding = category.and_then(|name| binding.categories.get(name));
+        let category_binding = category.and_then(|name| self.worker.categories.get(name));
         let logical_model = category_binding
             .and_then(|found| found.logical_model.clone())
             .or_else(|| binding.logical_model.clone())
@@ -128,8 +137,25 @@ pub struct RoleBindingConfig {
     pub preset: Option<String>,
     /// 生成パラメータの上書き。
     pub generation: GenerationOverridesConfig,
+}
+
+/// worker 専用のロール設定とカテゴリ別バインディング。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerBindingConfig {
+    #[serde(flatten)]
+    pub base: RoleBindingConfig,
     /// カテゴリ別のバインディング (キーは固定 6 カテゴリ名)。
     pub categories: BTreeMap<String, CategoryBindingConfig>,
+}
+
+/// 共通フィールドの読み取りは `worker.logical_model` 等でも可能。変更は `base` 経由。
+impl std::ops::Deref for WorkerBindingConfig {
+    type Target = RoleBindingConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 /// カテゴリ 1 件分のバインディング設定。
@@ -192,6 +218,33 @@ pub struct ResolvedAgentBinding {
 mod tests {
     use super::*;
     use crate::{Config, ConfigError};
+
+    #[test]
+    fn binding_for_rejects_category_when_role_is_not_worker() {
+        // Given: worker 以外のロールと既知のカテゴリ。
+        let agents = AgentsConfig::default();
+        // When: explorer のカテゴリを解決する。
+        let result = agents.binding_for("explorer", Some("quick"));
+        // Then: ロールの既定値へ黙ってフォールバックしない。
+        match result {
+            Err(ConfigError::CategoryNotAllowedForRole { role, category }) => {
+                assert_eq!(role, "explorer");
+                assert_eq!(category, "quick");
+            }
+            other => panic!("CategoryNotAllowedForRole を期待した: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agents_binding_rejects_categories_when_role_is_not_worker() {
+        // Given: explorer にカテゴリを設定した TOML。
+        let doc = "[agents.explorer.categories.quick]\nlogical_model = \"fast\"\n";
+        // When: 設定をパースする。
+        let result = toml::from_str::<Config>(doc);
+        // Then: categories は未知フィールドとして拒否される。
+        let error = result.expect_err("worker 以外に categories は設定できない");
+        assert!(error.to_string().contains("unknown field `categories`"));
+    }
 
     // Given: ロール直下と categories.quick の両方に logical_model / preset を含む設定 TOML
     // When: Config にパースする

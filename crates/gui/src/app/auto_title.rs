@@ -64,8 +64,8 @@ fn generate(context: ProductionModel, chat: ChatSubmission) -> Result<String, St
     let mut config = config::Config::load(&context.load_options).map_err(|e| e.to_string())?;
     let preference = match select_model(&config.agents, chat.model_preference) {
         TitleSelection::Quick(binding) => {
-            config.agents.worker.logical_model = Some(binding.logical_model);
-            config.agents.worker.generation = binding.generation;
+            config.agents.worker.base.logical_model = Some(binding.logical_model);
+            config.agents.worker.base.generation = binding.generation;
             None
         }
         TitleSelection::Thread(preference) => preference,
@@ -77,7 +77,8 @@ fn generate(context: ProductionModel, chat: ChatSubmission) -> Result<String, St
         .build()
         .map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let invocation = AgentInvocationContext {
+    let invocation = AgentInvocationContext {
+        category: None,
             run_id: format!("auto-title:{}", chat.thread_id),
             model_preference: preference,
         };

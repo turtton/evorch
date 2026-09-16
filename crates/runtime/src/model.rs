@@ -28,6 +28,7 @@ pub struct AgentInvocationContext {
     /// モデル呼び出しを行う run の ID (`run-{n}` 形式)。
     pub run_id: String,
     pub model_preference: Option<ModelPreference>,
+    pub category: Option<String>,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -98,7 +99,7 @@ pub trait AgentModel: Send + Sync {
     /// 実装側 (routing profile 層) がロールごとの選択済みモデル identity を報告し、
     /// runtime はそれをそのまま記録する。runtime は解決を行わない
     /// (lib.rs の「ルーティングの委譲」契約と一貫)。
-    fn selected_model(&self, role: Role) -> String;
+    fn selected_model(&self, role: Role, category: Option<&str>) -> String;
 
     /// Configured picker entries; fixed models expose no provider profiles.
     fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
@@ -160,7 +161,7 @@ mod tests {
             })
         }
 
-        fn selected_model(&self, _role: Role) -> String {
+        fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
             "echo".to_string()
         }
     }
@@ -187,6 +188,7 @@ mod tests {
         ];
 
         let invocation = AgentInvocationContext {
+            category: None,
             run_id: "run-1".to_string(),
             model_preference: None,
         };

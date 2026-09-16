@@ -62,6 +62,7 @@ account = "live"
     let response = model
         .complete(
             &AgentInvocationContext {
+                category: None,
                 run_id: "gui-chat".into(),
                 model_preference: None,
             },
@@ -123,7 +124,10 @@ fn provider_save_recomposes_live_model() {
         "new-model",
     )];
     settings.default_model = "new-model".into();
-    assert_eq!(model.selected_model(Role::Worker), "unresolved:worker");
+    assert_eq!(
+        model.selected_model(Role::Worker, None),
+        "unresolved:worker"
+    );
     // When
     state.submit_provider_settings();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -134,7 +138,7 @@ fn provider_save_recomposes_live_model() {
     }
     // Then
     assert_eq!(state.provider_settings().error, None);
-    assert_eq!(model.selected_model(Role::Worker), "live/new-model");
+    assert_eq!(model.selected_model(Role::Worker, None), "live/new-model");
     assert_eq!(
         state.provider_status(),
         &gui::model::composer::ProviderStatus::Configured

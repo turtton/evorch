@@ -115,10 +115,10 @@ fn resolve_appendices(
         if let Some(preset) = &binding.preset {
             names.insert(preset.clone());
         }
-        for category in binding.categories.values() {
-            if let Some(preset) = &category.preset {
-                names.insert(preset.clone());
-            }
+    }
+    for category in agents.worker.categories.values() {
+        if let Some(preset) = &category.preset {
+            names.insert(preset.clone());
         }
     }
     let mut sources = BTreeMap::new();

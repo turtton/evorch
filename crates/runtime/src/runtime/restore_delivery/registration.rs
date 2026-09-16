@@ -13,7 +13,11 @@ impl AgentRuntime {
             |entry| entry.name.clone(),
         );
         let model = runs.get(&run_id).map_or_else(
-            || self.shared.model.selected_model(role),
+            || {
+                self.shared
+                    .model
+                    .selected_model(role, config.category.as_deref())
+            },
             |entry| entry.model.clone(),
         );
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);

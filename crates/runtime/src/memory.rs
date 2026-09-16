@@ -94,6 +94,7 @@ impl Interviewer {
             (Role::Reviewer, input.reviewer_report),
         ] {
             let invocation = AgentInvocationContext {
+                category: None,
                 run_id: format!("interview:{}:{}", input.task_id, role.name()),
                 model_preference: Some(self.quick.clone()),
             };

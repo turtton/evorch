@@ -178,7 +178,7 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
     ] {
         assert_eq!(
             selected.get(&role.name().to_lowercase()),
-            Some(&direct.selected_model(role))
+            Some(&direct.selected_model(role, None))
         );
     }
 }

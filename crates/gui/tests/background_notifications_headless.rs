@@ -164,7 +164,7 @@ impl AgentModel for PendingModel {
         std::future::pending().await
     }
 
-    fn selected_model(&self, _role: Role) -> String {
+    fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
         "test-background".into()
     }
 }

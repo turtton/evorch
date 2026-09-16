@@ -404,7 +404,7 @@ impl AgentModel for DemoScriptModel {
             "DEMO-W1" | "DEMO-R1" => 2 - remaining_turns,
             _ => 1,
         };
-        let model = self.selected_model(role);
+        let model = self.selected_model(role, invocation.category.as_deref());
         let request_id = format!("demo-{}-{turn}", invocation.run_id);
         self.bus.emit(Event::new(ProviderEvent::RequestStarted {
             request_id: request_id.clone(),
@@ -461,7 +461,7 @@ impl AgentModel for DemoScriptModel {
         Ok(response)
     }
 
-    fn selected_model(&self, role: Role) -> String {
+    fn selected_model(&self, role: Role, _category: Option<&str>) -> String {
         format!("demo-{}", role.name().to_lowercase())
     }
 }

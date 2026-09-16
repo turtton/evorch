@@ -313,6 +313,12 @@ fn validate_role_categories(
     binding: &toml::value::Table,
     role_path: &str,
 ) -> Result<(), ConfigError> {
+    if role_path != "agents.worker" && binding.contains_key("categories") {
+        return Err(ConfigError::InvalidField {
+            path: format!("{role_path}.categories"),
+            message: "categories are only allowed on worker".into(),
+        });
+    }
     let Some(categories) = binding.get("categories").and_then(toml::Value::as_table) else {
         return Ok(());
     };

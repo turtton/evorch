@@ -21,7 +21,7 @@ use tools::ToolExecutor;
 
 use support::ScriptedModel;
 
-/// Orchestrator ロール直下 binding が参照する同梱プリセット名。
+/// Worker ロール直下 binding が参照する同梱プリセット名。
 const ROLE_APPENDIX_PRESET: &str = "category-writing";
 
 /// categories.quick binding が参照する同梱プリセット名。
@@ -59,9 +59,9 @@ fn build_input<'a>(
     }
 }
 
-// Given: Orchestrator のロール直下 preset と categories.quick preset が両方とも
+// Given: Worker のロール直下 preset と categories.quick preset が両方とも
 //        同梱プリセットを参照する設定
-// When: availability 空で build_catalog し、Orchestrator / quick で
+// When: availability 空で build_catalog し、Worker / quick で
 //       system_prompt_for する
 // Then: appendix レイヤーはカテゴリスコープ preset の本文で終わり、ロール直下
 //       preset の本文は置き換わり、baseline / overlay は sources どおり現れる
@@ -69,8 +69,8 @@ fn build_input<'a>(
 fn production_composition_builds_config_driven_catalog() {
     let user_dir = empty_user_dir();
     let mut config = Config::default();
-    config.agents.orchestrator.preset = Some(ROLE_APPENDIX_PRESET.to_owned());
-    config.agents.orchestrator.categories.insert(
+    config.agents.worker.base.preset = Some(ROLE_APPENDIX_PRESET.to_owned());
+    config.agents.worker.categories.insert(
         CATEGORY.to_owned(),
         CategoryBindingConfig {
             preset: Some(CATEGORY_APPENDIX_PRESET.to_owned()),
@@ -83,7 +83,7 @@ fn production_composition_builds_config_driven_catalog() {
     let catalog = build_catalog(&build_input(&config, &user_dir, &[], &[]))
         .expect("必須部品が揃いカタログは構築できるはずです");
     let prompt = catalog
-        .system_prompt_for(Role::Orchestrator, Some(CATEGORY), "claude-opus-4-1")
+        .system_prompt_for(Role::Worker, Some(CATEGORY), "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
     let scoped_body = sources.appendices[CATEGORY_APPENDIX_PRESET].trim_end();
@@ -101,7 +101,7 @@ fn production_composition_builds_config_driven_catalog() {
         "quick overlay は sources どおりに現れるはずです"
     );
     assert!(
-        prompt.contains(sources.role_baselines["orchestrator"].trim_end()),
+        prompt.contains(sources.role_baselines["worker"].trim_end()),
         "role baseline は sources どおりに現れるはずです"
     );
 }
