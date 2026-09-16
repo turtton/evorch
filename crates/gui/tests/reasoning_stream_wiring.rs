@@ -149,6 +149,10 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
         gui::panes::agent_transcript::agent_transcript_pane(ui, &run_id, transcript);
     });
     pane.run();
-    assert!(pane.query_by_label("Reasoning: weighing options").is_some());
+    assert!(pane.query_by_label("thinking").is_some());
+    assert!(pane.query_by_label("weighing options").is_none());
+    pane.get_by_label("thinking").click();
+    pane.run();
+    assert!(pane.query_by_label("weighing options").is_some());
     assert!(pane.query_by_label("final answer").is_some());
 }

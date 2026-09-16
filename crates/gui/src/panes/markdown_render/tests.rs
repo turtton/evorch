@@ -118,7 +118,8 @@ fn transcript_message_renders_markdown() {
     // Then
     assert!(harness.query_by_label("agent answer").is_some());
     assert!(harness.query_by_label("You: **user input**").is_some());
-    assert!(harness.query_by_label("Reasoning: **thinking**").is_some());
+    assert!(harness.query_by_label("thinking").is_some());
+    assert!(harness.query_by_label("**thinking**").is_none());
 }
 
 #[test]

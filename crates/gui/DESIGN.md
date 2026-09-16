@@ -19,6 +19,10 @@ Keep native keyboard focus and selected/hover/disabled states.
 Conversation message/reasoning cards show a small TEXT_MUTED `[role]` label
 above the body, resolved from the entry's run ID and current task rows.
 Unknown runs and legacy entries omit the label; no role is inferred from focus.
+Reasoning uses a lowercase `thinking` collapsing header in TEXT_MUTED, with a
+wrapped, muted italic body. Live reasoning opens; the following answer or run
+completion closes it once. History starts closed. Native keyboard and pointer
+toggles remain available, and manual expansion persists across subsequent frames.
 Memory uses labeled search and status controls, result count, expandable evidence,
 explicit empty/error states and refresh. Tasks retains its existing grid.
 Browser reuses pane_root, labeled inputs, wrapping toolbars and aspect-preserving

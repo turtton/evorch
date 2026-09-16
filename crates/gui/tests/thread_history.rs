@@ -142,3 +142,32 @@ fn unknown_run_does_not_leak_into_selected_thread() {
         1
     );
 }
+
+#[test]
+fn interrupted_reasoning_is_collapsed_when_history_is_restored() {
+    // Given: persisted reasoning with no terminal event (an interrupted process).
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let started = reply("chat-1", "one", "unused")[0].clone();
+    let thought = Event::new(MessageEvent::ReasoningDelta {
+        run_id: Some("chat-1".into()),
+        delta: "Interrupted thought".into(),
+    });
+    for event in [started, thought] {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    // When: the database is replayed into a new workbench.
+    let mut reopened = state(dir.path());
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    let mut gui = HeadlessWorkbench::new(reopened, [1200.0, 900.0]);
+    gui.run();
+    // Then: replayed reasoning is historical, not an active stream.
+    assert!(gui.has_label("thinking"));
+    assert!(!gui.has_label("Interrupted thought"));
+}

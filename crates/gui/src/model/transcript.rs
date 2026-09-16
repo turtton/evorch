@@ -2,6 +2,7 @@ use event_bus::{AgentMessageKind, CompactionReason, Event};
 
 mod compaction;
 mod diagnostics;
+mod thinking;
 
 #[cfg(test)]
 mod tool_tests;
@@ -77,6 +78,8 @@ pub struct TranscriptModel {
     capacity: usize,
     view_start: usize,
     view_len: usize,
+    first_entry_id: usize,
+    thinking: std::collections::BTreeMap<Option<String>, usize>,
 }
 
 impl Default for TranscriptModel {
@@ -96,6 +99,8 @@ impl TranscriptModel {
             capacity,
             view_start: 0,
             view_len: capacity,
+            first_entry_id: 0,
+            thinking: std::collections::BTreeMap::new(),
         }
     }
 
@@ -154,6 +159,7 @@ impl TranscriptModel {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        self.finish_thinking(event);
         if let Some(entry) = diagnostics::entry(&event.kind) {
             self.push(entry);
             return;
@@ -275,6 +281,9 @@ impl TranscriptModel {
         if delta.is_empty() {
             return;
         }
+        if matches!(message, MessageEvent::MessageDelta { .. }) {
+            self.thinking.remove(run_id);
+        }
         let matching = self.entries.last().is_some_and(|entry| {
             matches!(
                 (message, entry),
@@ -308,6 +317,10 @@ impl TranscriptModel {
                 },
             });
         }
+        if matches!(message, MessageEvent::ReasoningDelta { .. }) && !self.entries.is_empty() {
+            self.thinking
+                .insert(run_id.clone(), self.first_entry_id + self.entries.len() - 1);
+        }
     }
 
     fn update_tool(&mut self, call_id: &str, tool_name: &str, status: ToolStatus) {
@@ -336,6 +349,8 @@ impl TranscriptModel {
         self.entries.push(entry);
         if self.entries.len() > self.capacity {
             self.entries.remove(0);
+            self.first_entry_id += 1;
+            self.thinking.retain(|_, id| *id >= self.first_entry_id);
         }
         self.view_start = self.view_start.min(self.entries.len());
     }

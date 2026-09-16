@@ -36,6 +36,13 @@ impl Default for TranscriptRegistry {
 }
 
 impl TranscriptRegistry {
+    pub(crate) fn finish_history(&mut self) {
+        self.thread.finish_history();
+        for model in self.threads.values_mut().chain(self.runs.values_mut()) {
+            model.finish_history();
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             thread: TranscriptModel::new(),
@@ -75,7 +82,7 @@ impl TranscriptRegistry {
             ),
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
-                to: event_bus::AgentRunPhase::Error,
+                to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error,
                 ..
             }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
             EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. })

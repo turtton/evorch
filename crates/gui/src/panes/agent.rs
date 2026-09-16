@@ -12,6 +12,8 @@ use crate::theme::text::h3;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{card, empty_state, pane_root, surface_frame};
 
+mod thinking;
+
 #[derive(Debug, Clone, Copy)]
 pub struct AgentIdentity<'a> {
     pub run_id: &'a str,
@@ -223,6 +225,15 @@ fn run_detail_body(
                         );
                         return;
                     }
+                    if let TranscriptEntry::Reasoning { text, run_id } = entry {
+                        let entry_id = model.visible_entry_id(entry_idx);
+                        thinking::show(
+                            ui,
+                            pane_id.with(("thinking", run_id, entry_id)),
+                            (text, model.thinking_is_streaming(entry_id)),
+                        );
+                        return;
+                    }
                     let foreground = match entry {
                         TranscriptEntry::Error { .. } => palette().ERROR_FG,
                         TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
@@ -257,7 +268,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         TranscriptEntry::UserMessage { text } => format!("You: {text}"),
         TranscriptEntry::Notice { text } | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
-        TranscriptEntry::Reasoning { text, .. } => format!("Reasoning: {text}"),
+        TranscriptEntry::Reasoning { text, .. } => text.clone(),
         TranscriptEntry::Compaction {
             reason,
             threshold,
