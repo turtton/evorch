@@ -153,11 +153,22 @@ fn refresh_button_triggers_force_refresh() {
     let state = CatalogState::with_backend(dir.path().into(), Arc::new(FailedBackend(tx)));
     let mut harness = Harness::new_ui_state(gui::panes::model_metadata::catalog_toolbar, state);
     harness.get_by_label("Model catalog Refresh").click();
-    harness.run();
+    // A spinner intentionally never settles; drive frames until the worker finishes.
+    harness.step();
     assert_eq!(
         rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
         CatalogRequest::ForceRefresh
     );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.state().is_busy() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "refresh did not finish"
+        );
+        harness.step();
+        std::thread::yield_now();
+    }
+    assert_eq!(harness.state().error.as_deref(), Some("offline fixture"));
 }
 
 #[test]

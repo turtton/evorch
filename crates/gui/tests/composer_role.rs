@@ -103,6 +103,9 @@ fn capture_role_indicators() {
     // Given: both roles in the real desktop composer.
     let temp = tempfile::tempdir().expect("root");
     let mut harness = workbench(temp.path());
+    let evidence = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/gui-evidence/composer-role");
+    std::fs::create_dir_all(&evidence).expect("evidence directory");
     for role in [ComposerRole::Worker, ComposerRole::Orchestrator] {
         harness.state_mut().composer_mut().role = role;
         harness.run();
@@ -110,10 +113,7 @@ fn capture_role_indicators() {
         let capture = harness.capture().expect("offscreen adapter");
         // Then: save a reviewable screenshot in this worktree's evidence directory.
         capture
-            .save_png(std::path::Path::new(&format!(
-                ".omo/evidence/t7-{}.png",
-                role.label()
-            )))
+            .save_png(&evidence.join(format!("{}.png", role.label())))
             .expect("PNG evidence");
     }
 }
