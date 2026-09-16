@@ -93,7 +93,7 @@ pub fn build_provider_client(
 ) -> Result<Box<dyn ProviderClient>, RoutingError> {
     match profile.provider_type {
         model::ProviderType::OpenAiCodex => build_codex(profile, store, event_bus, options),
-        model::ProviderType::OpenAiCompatible => {
+        model::ProviderType::OpenAiCompatible | model::ProviderType::KimiSubscription => {
             build_openai_compatible(profile, event_bus, options)
         }
         other @ (model::ProviderType::Anthropic
@@ -160,14 +160,19 @@ fn build_openai_compatible(
     if profile.api_protocol != model::ApiProtocol::OpenAiCompletions {
         return Err(RoutingError::InvalidProfile {
             reason: format!(
-                "provider type `openai-compatible` は api protocol `openai-completions` のみをサポートします (actual: {})",
+                "provider type `{}` は api protocol `openai-completions` のみをサポートします (actual: {})",
+                provider_type_label(profile.provider_type),
                 protocol_label(profile.api_protocol)
             ),
         });
     }
     let timeout = options.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
-    let client =
-        OpenAiCompatibleClient::new(&profile.base_url, "openai-compatible", timeout, event_bus)
+    let client = OpenAiCompatibleClient::new(
+        &profile.base_url,
+        provider_type_label(profile.provider_type),
+        timeout,
+        event_bus,
+    )
             .map_err(|error| RoutingError::InvalidProfile {
                 reason: format!("openai-compatible client の構築に失敗しました: {error}"),
             })?
@@ -199,6 +204,7 @@ const fn provider_type_label(provider_type: model::ProviderType) -> &'static str
         model::ProviderType::GithubCopilot => "github-copilot",
         model::ProviderType::Openrouter => "openrouter",
         model::ProviderType::OpenAiCompatible => "openai-compatible",
+        model::ProviderType::KimiSubscription => "kimi-subscription",
     }
 }
 

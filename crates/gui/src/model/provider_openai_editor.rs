@@ -45,6 +45,7 @@ pub struct ProviderSettingsModel {
     pub api_key_input: String,
     pub api_key_stored: bool,
     pub name: String,
+    pub provider_type: config::ProviderTypeConfig,
     pub base_url: String,
     pub api_key_env: String,
     pub models: Vec<ModelEntryConfig>,
@@ -68,6 +69,7 @@ impl Default for ProviderSettingsModel {
             api_key_input: String::new(),
             api_key_stored: false,
             name: "openai-compat".into(),
+            provider_type: config::ProviderTypeConfig::OpenAiCompatible,
             base_url: String::new(),
             api_key_env: String::new(),
             models: Vec::new(),
@@ -89,6 +91,7 @@ impl std::fmt::Debug for ProviderSettingsModel {
         f.debug_struct("ProviderSettingsModel")
             .field("open", &self.open)
             .field("name", &self.name)
+            .field("provider_type", &self.provider_type)
             .field("base_url", &self.base_url)
             .field("api_key_env", &self.api_key_env)
             .field("models", &self.models)
@@ -114,6 +117,7 @@ impl Clone for ProviderSettingsModel {
             api_key_input: String::new(),
             api_key_stored: self.api_key_stored,
             name: self.name.clone(),
+            provider_type: self.provider_type,
             base_url: self.base_url.clone(),
             api_key_env: self.api_key_env.clone(),
             models: self.models.clone(),
@@ -137,6 +141,7 @@ impl PartialEq for ProviderSettingsModel {
             && self.credential_mode == other.credential_mode
             && self.api_key_stored == other.api_key_stored
             && self.name == other.name
+            && self.provider_type == other.provider_type
             && self.base_url == other.base_url
             && self.api_key_env == other.api_key_env
             && self.models == other.models
@@ -154,10 +159,14 @@ impl PartialEq for ProviderSettingsModel {
 impl Eq for ProviderSettingsModel {}
 
 impl ProviderSettingsModel {
-    /// 名前順で最初の OpenAI 互換プロバイダから編集状態を作る。
+    /// 名前順で最初の OpenAI 互換系 (openai-compatible / kimi-subscription) プロバイダから編集状態を作る。
     pub fn seed_from_config(config: &config::Config) -> Self {
         let Some((name, profile)) = config.providers.iter().find(|(_, profile)| {
-            profile.provider_type == config::ProviderTypeConfig::OpenAiCompatible
+            matches!(
+                profile.provider_type,
+                config::ProviderTypeConfig::OpenAiCompatible
+                    | config::ProviderTypeConfig::KimiSubscription
+            )
         }) else {
             return Self {
                 tab: if config
@@ -178,6 +187,7 @@ impl ProviderSettingsModel {
         };
         Self {
             name: name.clone(),
+            provider_type: profile.provider_type,
             credential_mode: match &profile.credential {
                 config::CredentialRefConfig::Env { .. } => CredentialMode::Env,
                 config::CredentialRefConfig::Keyring { .. } => CredentialMode::Keyring,
@@ -230,6 +240,7 @@ impl ProviderSettingsModel {
     pub fn to_input(&self) -> config::OpenAiCompatibleProviderInput {
         config::OpenAiCompatibleProviderInput {
             name: self.name.clone(),
+            provider_type: self.provider_type,
             base_url: self.base_url.clone(),
             credential: match self.credential_mode {
                 CredentialMode::Env => config::ProviderCredentialInput::Env {

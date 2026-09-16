@@ -29,6 +29,24 @@ pub enum ProviderTypeConfig {
     /// OpenAI 互換 API (汎用プレースホルダ)。
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
+    /// Kimi サブスクリプション (Kimi For Coding)。
+    KimiSubscription,
+}
+
+impl ProviderTypeConfig {
+    /// 設定ファイル上のシリアライズ識別子を返す。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::AnthropicSubscription => "anthropic-subscription",
+            Self::OpenAi => "openai",
+            Self::OpenAiCodex => "openai-codex",
+            Self::GithubCopilot => "github-copilot",
+            Self::Openrouter => "openrouter",
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::KimiSubscription => "kimi-subscription",
+        }
+    }
 }
 
 /// モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。
@@ -360,6 +378,15 @@ pub const CODEX_DEFAULT_MODELS: &[&str] = &[
 /// Codex プロファイルで既定選択するモデル。
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-6-astra";
 
+/// Kimi For Coding (サブスクリプション) の既定ベース URL。
+pub const KIMI_DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+
+/// Kimi サブスクリプションの既定モデル一覧。
+pub const KIMI_DEFAULT_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2-thinking"];
+
+/// Kimi サブスクリプションで既定選択するモデル。
+pub const KIMI_DEFAULT_MODEL: &str = "kimi-for-coding";
+
 /// Codexの対応モデルにだけ生成するfast variantの識別用suffix。
 pub const FAST_MODEL_SUFFIX: &str = "+fast";
 
@@ -408,7 +435,7 @@ struct ProviderProfileDe {
     #[serde(alias = "type")]
     provider_type: ProviderTypeConfig,
     api_protocol: Option<ApiProtocolConfig>,
-    base_url: String,
+    base_url: Option<String>,
     credential: Option<CredentialRefConfig>,
     api_key_env: Option<String>,
     models: Vec<ModelEntryConfig>,
@@ -418,12 +445,13 @@ struct ProviderProfileDe {
 
 // 省略フィールドは公開構造体の既定値で補完する (コンテナ serde(default) の契約)。
 // モデルと認証・プロトコルの既定化は TryFrom 側でプロバイダ種別と sugar 規則を考慮する。
+#[allow(clippy::derivable_impls)]
 impl Default for ProviderProfileDe {
     fn default() -> Self {
         Self {
             provider_type: ProviderTypeConfig::default(),
             api_protocol: None,
-            base_url: "https://api.anthropic.com".to_string(),
+            base_url: None,
             credential: None,
             api_key_env: None,
             models: Vec::new(),
@@ -457,11 +485,14 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
         // api_protocol が省略された場合のみ、openai-compatible の既定プロトコル
         // (openai-completions) を適用する。明示指定は常に優先される。
         let api_protocol = value.api_protocol.unwrap_or(match value.provider_type {
-            ProviderTypeConfig::OpenAiCompatible => ApiProtocolConfig::OpenAiCompletions,
+            ProviderTypeConfig::OpenAiCompatible | ProviderTypeConfig::KimiSubscription => {
+                ApiProtocolConfig::OpenAiCompletions
+            }
             _ => ApiProtocolConfig::default(),
         });
         let (default_models, default_model): (&[&str], &str) = match value.provider_type {
             ProviderTypeConfig::OpenAiCodex => (CODEX_DEFAULT_MODELS, CODEX_DEFAULT_MODEL),
+            ProviderTypeConfig::KimiSubscription => (KIMI_DEFAULT_MODELS, KIMI_DEFAULT_MODEL),
             ProviderTypeConfig::Anthropic
             | ProviderTypeConfig::AnthropicSubscription
             | ProviderTypeConfig::OpenAi
@@ -483,10 +514,14 @@ impl TryFrom<ProviderProfileDe> for ProviderProfileConfig {
         } else {
             value.default_model
         };
+        let base_url = value.base_url.unwrap_or_else(|| match value.provider_type {
+            ProviderTypeConfig::KimiSubscription => KIMI_DEFAULT_BASE_URL.to_owned(),
+            _ => "https://api.anthropic.com".to_owned(),
+        });
         Ok(Self {
             provider_type: value.provider_type,
             api_protocol,
-            base_url: value.base_url,
+            base_url,
             credential,
             models,
             excluded_models: value.excluded_models,

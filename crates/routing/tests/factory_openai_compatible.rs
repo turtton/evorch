@@ -149,3 +149,37 @@ fn factory_keeps_anthropic_unsupported() {
         }
     );
 }
+
+#[test]
+fn kimi_subscription_builds_chat_completions_client() {
+    // Given
+    let (_directory, store) = credential_store();
+    let kimi = profile(
+        model::ProviderType::KimiSubscription,
+        model::ApiProtocol::OpenAiCompletions,
+        env_credential(),
+    );
+    // When
+    let client = build_provider_client(&kimi, store, None, &FactoryOptions::default());
+    // Then
+    assert!(client.is_ok());
+}
+
+#[test]
+fn kimi_subscription_rejects_non_completions_protocol() {
+    // Given
+    let (_directory, store) = credential_store();
+    let kimi = profile(
+        model::ProviderType::KimiSubscription,
+        model::ApiProtocol::OpenAiResponses,
+        env_credential(),
+    );
+    // When
+    let Err(RoutingError::InvalidProfile { reason }) =
+        build_provider_client(&kimi, store, None, &FactoryOptions::default())
+    else {
+        panic!("non-completions protocol must be rejected");
+    };
+    // Then
+    assert!(reason.contains("kimi-subscription"));
+}

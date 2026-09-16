@@ -57,6 +57,7 @@ impl TryFrom<(&str, &config::ProviderProfileConfig)> for ProviderProfile {
             config::ProviderTypeConfig::GithubCopilot => model::ProviderType::GithubCopilot,
             config::ProviderTypeConfig::Openrouter => model::ProviderType::Openrouter,
             config::ProviderTypeConfig::OpenAiCompatible => model::ProviderType::OpenAiCompatible,
+            config::ProviderTypeConfig::KimiSubscription => model::ProviderType::KimiSubscription,
         };
         let api_protocol = match config.api_protocol {
             config::ApiProtocolConfig::AnthropicMessages => model::ApiProtocol::AnthropicMessages,
@@ -141,6 +142,20 @@ mod tests {
             profile.api_protocol,
             model::ApiProtocol::OpenAiCodexResponses
         );
+    }
+
+    #[test]
+    fn provider_profile_maps_kimi_subscription_type() {
+        let config = config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::KimiSubscription,
+            api_protocol: config::ApiProtocolConfig::OpenAiCompletions,
+            ..valid_config()
+        };
+
+        let profile = ProviderProfile::try_from(("kimi", &config)).expect("kimi 設定は変換できる");
+
+        assert_eq!(profile.provider_type, model::ProviderType::KimiSubscription);
+        assert_eq!(profile.api_protocol, model::ApiProtocol::OpenAiCompletions);
     }
 
     #[test]

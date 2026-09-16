@@ -15,6 +15,7 @@ pub use openai::{CredentialMode, ModelsFetchState, ProviderSettingsTab, provider
 pub enum ProviderKind {
     OpenAiCompatible,
     CodexSubscription,
+    KimiSubscription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,9 @@ impl ProviderSettingsModel {
                     name: name.clone(),
                     kind: match profile.provider_type {
                         config::ProviderTypeConfig::OpenAiCodex => ProviderKind::CodexSubscription,
+                        config::ProviderTypeConfig::KimiSubscription => {
+                            ProviderKind::KimiSubscription
+                        }
                         _ => ProviderKind::OpenAiCompatible,
                     },
                     default_model: profile.default_model.clone(),
@@ -85,6 +89,7 @@ impl ProviderSettingsModel {
         let prefix = match kind {
             ProviderKind::OpenAiCompatible => "openai-compat",
             ProviderKind::CodexSubscription => "codex",
+            ProviderKind::KimiSubscription => "kimi",
         };
         let mut name = prefix.to_owned();
         let mut suffix = 2;
@@ -95,6 +100,17 @@ impl ProviderSettingsModel {
         self.editor = Some(match kind {
             ProviderKind::OpenAiCompatible => ProfileEditor::OpenAiCompatible(OpenAiEditorModel {
                 name,
+                ..Default::default()
+            }),
+            ProviderKind::KimiSubscription => ProfileEditor::OpenAiCompatible(OpenAiEditorModel {
+                name,
+                provider_type: config::ProviderTypeConfig::KimiSubscription,
+                base_url: config::types::provider::KIMI_DEFAULT_BASE_URL.to_owned(),
+                models: config::types::provider::KIMI_DEFAULT_MODELS
+                    .iter()
+                    .map(|id| config::types::provider::ModelEntryConfig::enabled(*id))
+                    .collect(),
+                default_model: config::types::provider::KIMI_DEFAULT_MODEL.to_owned(),
                 ..Default::default()
             }),
             ProviderKind::CodexSubscription => ProfileEditor::Codex(CodexEditorModel {
@@ -119,7 +135,9 @@ impl ProviderSettingsModel {
         };
         if !matches!(
             profile.provider_type,
-            config::ProviderTypeConfig::OpenAiCompatible | config::ProviderTypeConfig::OpenAiCodex
+            config::ProviderTypeConfig::OpenAiCompatible
+                | config::ProviderTypeConfig::OpenAiCodex
+                | config::ProviderTypeConfig::KimiSubscription
         ) {
             self.error = Some(
                 "This provider type must be edited in evorch.toml; its configuration is preserved."
@@ -151,8 +169,7 @@ impl ProviderSettingsModel {
             }
             _ => {
                 let mut cfg = config::Config::default();
-                let mut profile = profile.clone();
-                profile.provider_type = config::ProviderTypeConfig::OpenAiCompatible;
+                let profile = profile.clone();
                 cfg.providers.insert(name.into(), profile);
                 ProfileEditor::OpenAiCompatible(OpenAiEditorModel::seed_from_config(&cfg))
             }

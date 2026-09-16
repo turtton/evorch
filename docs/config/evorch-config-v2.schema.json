@@ -434,14 +434,10 @@
           "minimum": 0
         },
         "reasoning_effort": {
-          "description": "推論強度。",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ReasoningEffortConfig"
-            },
-            {
-              "type": "null"
-            }
+          "description": "推論強度。モデルごとに有効な値が異なるため自由形式の文字列とする。",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "temperature": {
@@ -522,6 +518,16 @@
               ],
               "format": "uint64",
               "minimum": 0
+            },
+            "effort_levels": {
+              "description": "このモデルで選択可能な推論強度の一覧。省略時は共通の既定一覧を提示する。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
             },
             "enabled": {
               "description": "利用可能かどうか。省略時は有効。",
@@ -841,26 +847,11 @@
           "description": "OpenAI 互換 API (汎用プレースホルダ)。",
           "type": "string",
           "const": "openai-compatible"
-        }
-      ]
-    },
-    "ReasoningEffortConfig": {
-      "description": "推論強度の指定。",
-      "oneOf": [
-        {
-          "description": "低強度。",
-          "type": "string",
-          "const": "low"
         },
         {
-          "description": "中強度。",
+          "description": "Kimi サブスクリプション (Kimi For Coding)。",
           "type": "string",
-          "const": "medium"
-        },
-        {
-          "description": "高強度。",
-          "type": "string",
-          "const": "high"
+          "const": "kimi-subscription"
         }
       ]
     },

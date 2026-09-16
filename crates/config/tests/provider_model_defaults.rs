@@ -60,3 +60,33 @@ fn other_providers_keep_existing_defaults_when_models_are_omitted() {
         assert_eq!(profile.default_model, "claude-sonnet-4-5");
     }
 }
+
+#[test]
+fn kimi_subscription_defaults_when_fields_are_omitted() {
+    // Given
+    let profile: ProviderProfileConfig = toml::from_str("type = 'kimi-subscription'").unwrap();
+    // Then
+    assert_eq!(
+        profile.provider_type,
+        config::ProviderTypeConfig::KimiSubscription
+    );
+    assert_eq!(
+        profile.base_url,
+        config::types::provider::KIMI_DEFAULT_BASE_URL
+    );
+    assert_eq!(
+        profile.api_protocol,
+        config::ApiProtocolConfig::OpenAiCompletions
+    );
+    assert_eq!(
+        profile.models,
+        config::types::provider::KIMI_DEFAULT_MODELS
+            .iter()
+            .map(|id| ModelEntryConfig::enabled(*id))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        profile.default_model,
+        config::types::provider::KIMI_DEFAULT_MODEL
+    );
+}

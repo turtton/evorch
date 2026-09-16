@@ -27,6 +27,8 @@ pub enum ProviderType {
     /// OpenAI 互換 API (汎用プレースホルダ)。
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
+    /// Kimi サブスクリプション (Kimi For Coding)。
+    KimiSubscription,
 }
 
 /// モデルとの通信に用いる API プロトコル。
@@ -161,6 +163,7 @@ mod tests {
             (ProviderType::GithubCopilot, "github-copilot"),
             (ProviderType::Openrouter, "openrouter"),
             (ProviderType::OpenAiCompatible, "openai-compatible"),
+            (ProviderType::KimiSubscription, "kimi-subscription"),
         ];
 
         for (value, expected) in cases {
