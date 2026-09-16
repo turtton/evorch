@@ -9,7 +9,7 @@ pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
     ui.push_id(id_salt, |ui| {
         ui.visuals_mut().override_text_color = None;
         ui.visuals_mut().widgets.noninteractive.fg_stroke.color = palette().TEXT;
-        ui.visuals_mut().widgets.active.fg_stroke.color = palette().ACCENT_FG;
+        ui.visuals_mut().widgets.active.fg_stroke.color = palette().TEXT;
         ui.visuals_mut().extreme_bg_color = palette().SURFACE_RAISED;
         CommonMarkViewer::new().show(ui, &mut CommonMarkCache::default(), source);
     });

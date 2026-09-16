@@ -38,7 +38,7 @@ fn render_markdown_bold_text_uses_strong_color() {
             .job
             .sections
             .iter()
-            .all(|s| s.format.color == palette().ACCENT_FG)
+            .all(|s| s.format.color == palette().TEXT)
     );
 }
 
