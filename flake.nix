@@ -141,6 +141,7 @@
           packages = [
             pkgs.bashInteractive
             rustToolchain
+            pkgs.cargo-nextest
             intent-system
             # GUI (evorch-gui / winit+wgpu) が dev shell から起動できるようにする動的ライブラリ群
             pkgs.pkg-config
