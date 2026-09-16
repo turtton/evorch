@@ -7,29 +7,46 @@
     inputs.systems.follows = "systems";
   };
   inputs.intent-system-flake.url = "github:turtton/intent-system-flake";
+  inputs.crane.url = "github:ipetkov/crane";
+  inputs.fenix = {
+    url = "github:nix-community/fenix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs =
-    { nixpkgs, flake-utils, intent-system-flake, ... }:
+    { nixpkgs, flake-utils, intent-system-flake, crane, fenix, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         intent-system = intent-system-flake.packages."${system}".intent-cli;
+        fenixPkgs = fenix.packages.${system};
+        rustToolchain = fenixPkgs.fromToolchainFile {
+          file = ./rust-toolchain.toml;
+          sha256 = "sha256-OATSZm98Es5kIFuqaba+UvkQtFsVgJEBMmS+t6od5/U=";
+        };
+        craneLib = (crane.mkLib pkgs).overrideToolchain (_p: rustToolchain);
         guiLibraries = [
           pkgs.wayland
           pkgs.libxkbcommon
           pkgs.vulkan-loader
           pkgs.mesa
         ];
-        evorch = pkgs.rustPlatform.buildRustPackage {
+        commonArgs = {
           pname = "evorch";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = pkgs.lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "--workspace" ];
-          cargoTestFlags = [ "--workspace" ];
+          cargoExtraArgs = "--workspace";
+          strictDeps = true;
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.makeWrapper ];
+          buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ];
+        };
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        evorch = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
-          checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             "--skip=pty::tests::pty_drop_terminates_child"
             "--skip=pty::tests::pty_echo_roundtrip"
             "--skip=pty::tests::pty_kill_terminates_reader"
@@ -92,19 +109,13 @@
             "--skip=parallel_isolated_runs_get_distinct_worktrees"
             # PRE-EXISTING: local workspace_runtime fails the fixture's initial git commit.
             "--skip=worktree_removed_on_done_and_on_cancel"
-          ];
-          nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
-          nativeBuildInputs = [
-            pkgs.pkg-config
-            pkgs.makeWrapper
-          ];
-          buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ];
+          ]);
           postFixup = ''
             wrapProgram "$out/bin/evorch-gui" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
           '';
           meta.mainProgram = "evorch-gui";
-        };
+        });
       in
       {
         packages = {
@@ -129,11 +140,7 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.bashInteractive
-            pkgs.rustc
-            pkgs.cargo
-            pkgs.rustfmt
-            pkgs.clippy
-            pkgs.rust-analyzer
+            rustToolchain
             intent-system
             # GUI (evorch-gui / winit+wgpu) が dev shell から起動できるようにする動的ライブラリ群
             pkgs.pkg-config
