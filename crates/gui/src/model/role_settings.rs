@@ -31,7 +31,12 @@ pub fn effort_options(
     logical_model
         .and_then(|name| choices.get(name))
         .cloned()
-        .unwrap_or_else(|| DEFAULT_EFFORT_LEVELS.map(str::to_owned).into_iter().collect())
+        .unwrap_or_else(|| {
+            DEFAULT_EFFORT_LEVELS
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        })
 }
 
 fn effort_choices_for(config: &config::Config, name: &str) -> Vec<String> {
@@ -49,7 +54,12 @@ fn effort_choices_for(config: &config::Config, name: &str) -> Vec<String> {
     };
     entry
         .and_then(|entry| entry.effort_levels.clone())
-        .unwrap_or_else(|| DEFAULT_EFFORT_LEVELS.map(str::to_owned).into_iter().collect())
+        .unwrap_or_else(|| {
+            DEFAULT_EFFORT_LEVELS
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        })
 }
 
 impl RoleSettingsModel {

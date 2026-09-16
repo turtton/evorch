@@ -223,10 +223,11 @@ fast = [{ profile = "local", model = "fast" }]
         )),
     };
     let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
-    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-        .expect("state")
-        .with_provider_settings_path(temp.path().join("evorch.toml"))
-        .with_production_model(context, model);
+    let mut state =
+        WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
+            .expect("state")
+            .with_provider_settings_path(temp.path().join("evorch.toml"))
+            .with_production_model(context, model);
     state.open_role_settings();
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
@@ -262,7 +263,8 @@ fast = [{ profile = "local", model = "fast" }]
 }
 
 #[test]
-fn save_success_closes_modal() {    // Given: an open role editor with a valid change.
+fn save_success_closes_modal() {
+    // Given: an open role editor with a valid change.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     harness.run();

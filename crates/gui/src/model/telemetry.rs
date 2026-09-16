@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent};
+use event_bus::{
+    AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+};
 
 #[path = "pricing.rs"]
 pub mod pricing;
@@ -385,7 +387,8 @@ mod tests {
             start + Duration::from_secs(90),
         );
 
-        let metrics = overlay.thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120));
+        let metrics =
+            overlay.thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120));
         assert_eq!(metrics.wall_time, Duration::from_secs(90));
     }
 

@@ -173,10 +173,10 @@ fn build_openai_compatible(
         timeout,
         event_bus,
     )
-            .map_err(|error| RoutingError::InvalidProfile {
-                reason: format!("openai-compatible client の構築に失敗しました: {error}"),
-            })?
-            .with_profile(&profile.name);
+    .map_err(|error| RoutingError::InvalidProfile {
+        reason: format!("openai-compatible client の構築に失敗しました: {error}"),
+    })?
+    .with_profile(&profile.name);
     Ok(Box::new(client))
 }
 

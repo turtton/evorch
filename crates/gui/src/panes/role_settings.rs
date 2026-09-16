@@ -191,11 +191,7 @@ fn generation(
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut value.reasoning_effort, None, "Inherit default");
             for effort in &efforts {
-                ui.selectable_value(
-                    &mut value.reasoning_effort,
-                    Some(effort.clone()),
-                    effort,
-                );
+                ui.selectable_value(&mut value.reasoning_effort, Some(effort.clone()), effort);
             }
             if let Some(current) = custom {
                 ui.selectable_value(

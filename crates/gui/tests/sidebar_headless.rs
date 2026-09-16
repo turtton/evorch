@@ -460,5 +460,8 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
     harness.run();
 
     // Then: the thread row exposes estimated cost and cache hit rate
-    assert!(harness.has_label("$1.000 · cache 17%"), "metrics line label");
+    assert!(
+        harness.has_label("$1.000 · cache 17%"),
+        "metrics line label"
+    );
 }

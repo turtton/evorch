@@ -319,10 +319,7 @@ reasoning_effort = "high"
         assert_eq!(generation.temperature, Some(0.2));
         assert_eq!(generation.top_p, Some(0.9));
         assert_eq!(generation.max_tokens, Some(8192));
-        assert_eq!(
-            generation.reasoning_effort,
-            Some("high".to_owned())
-        );
+        assert_eq!(generation.reasoning_effort, Some("high".to_owned()));
     }
 
     // Given: generation に未知のキーを含む設定 TOML / When: パースする

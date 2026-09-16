@@ -49,7 +49,15 @@ pub fn sidebar_pane(
             let selected = selected_project(sidebar);
             projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
             if let Some(project) = selected {
-                threads::render(ui, sidebar, project, phases, telemetry, &mut pane_state, &mut action);
+                threads::render(
+                    ui,
+                    sidebar,
+                    project,
+                    phases,
+                    telemetry,
+                    &mut pane_state,
+                    &mut action,
+                );
             }
         });
     });
