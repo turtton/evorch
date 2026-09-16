@@ -2,7 +2,7 @@ use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::commands::{ChatSubmission, WorkbenchCommand};
-use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
+use gui::model::composer::ProviderStatus;
 use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
@@ -68,13 +68,12 @@ fn slash_completion_button_fills_input() {
 }
 
 #[test]
-fn provider_guidance_visible_in_pane() {
+fn goal_submission_unblocked_without_provider() {
     // Given: an active conversation without provider configuration.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::default());
     harness.state_mut().composer_mut().input = "/goal x".into();
     harness.run();
-    assert!(harness.has_label(PROVIDER_MISSING_GUIDANCE));
     // When: a command is sent despite the missing chat provider.
     harness.click_label("Send");
     harness.run();

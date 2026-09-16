@@ -1,7 +1,6 @@
 //! Composer strip rendering and action reporting without dispatch.
 
-use crate::model::composer::{ComposerModel, ProviderStatus, completions};
-use crate::theme::text::muted;
+use crate::model::composer::{ComposerModel, completions};
 use crate::theme::tokens::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
 };
@@ -17,13 +16,14 @@ pub enum ComposerAction {
     Cancel,
     Complete(&'static str),
     CompleteExternal(String),
-    OpenSettings,
+    ModelPreference(Option<workspace_ui::ModelPreference>),
 }
 
 pub fn composer_strip(
     ui: &mut egui::Ui,
     model: &mut ComposerModel,
-    provider: &crate::model::composer::ProviderStatus,
+    picker: crate::panes::model_picker::ModelPickerContext<'_>,
+    picker_state: &mut crate::model::model_picker::ModelPickerState,
     phase: Option<ThreadRunPhase>,
 ) -> Option<ComposerAction> {
     let mut action = None;
@@ -53,18 +53,10 @@ pub fn composer_strip(
                     }
                 });
             }
-            match provider {
-                ProviderStatus::Configured => {
-                    if ui.add(egui::Button::new("Settings").small()).clicked() {
-                        action = Some(ComposerAction::OpenSettings);
-                    }
-                }
-                ProviderStatus::NotConfigured { guidance } => {
-                    ui.label(muted(guidance));
-                    if primary_button(ui, "Open Settings").clicked() {
-                        action = Some(ComposerAction::OpenSettings);
-                    }
-                }
+            if let Some(preference) =
+                crate::panes::model_picker::model_picker(ui, picker, picker_state)
+            {
+                action = Some(ComposerAction::ModelPreference(preference));
             }
             images::render(ui, model);
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
@@ -152,23 +144,30 @@ mod tests {
     };
 
     use super::*;
-    use crate::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
     use crate::theme::tokens::SP_3;
 
     struct Fixture {
         phase: Option<workspace_ui::ThreadRunPhase>,
         model: ComposerModel,
-        provider: ProviderStatus,
+        picker_state: crate::model::model_picker::ModelPickerState,
         action: Option<ComposerAction>,
     }
 
-    fn harness(input: &str, provider: ProviderStatus) -> Harness<'static, Fixture> {
+    fn harness(input: &str) -> Harness<'static, Fixture> {
         Harness::builder().build_ui_state(
             |ui, state: &mut Fixture| {
                 crate::theme::install(ui.ctx());
-                if let Some(action) =
-                    composer_strip(ui, &mut state.model, &state.provider, state.phase)
-                {
+                if let Some(action) = composer_strip(
+                    ui,
+                    &mut state.model,
+                    crate::panes::model_picker::ModelPickerContext {
+                        profiles: &[],
+                        preference: None,
+                        enabled: false,
+                    },
+                    &mut state.picker_state,
+                    state.phase,
+                ) {
                     state.action = Some(action);
                 }
             },
@@ -178,7 +177,7 @@ mod tests {
                     input: input.into(),
                     ..Default::default()
                 },
-                provider,
+                picker_state: crate::model::model_picker::ModelPickerState::default(),
                 action: None,
             },
         )
@@ -188,7 +187,7 @@ mod tests {
 
     #[test]
     fn esc_with_completions_visible_dismisses_them_and_emits_no_action() {
-        let mut h = harness("/", ProviderStatus::Configured);
+        let mut h = harness("/");
         h.get_by_label("Message or /command").focus();
         h.run();
         let focus = h.ctx.memory(|m| m.focused());
@@ -201,7 +200,7 @@ mod tests {
 
     #[test]
     fn esc_without_completions_emits_cancel_when_running() {
-        let mut h = harness("draft", ProviderStatus::Configured);
+        let mut h = harness("draft");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.get_by_label("Message or /command").focus();
         h.run();
@@ -213,7 +212,7 @@ mod tests {
 
     #[test]
     fn esc_when_idle_emits_nothing() {
-        let mut h = harness("draft", ProviderStatus::Configured);
+        let mut h = harness("draft");
         h.get_by_label("Message or /command").focus();
         h.run();
         h.key_press(egui::Key::Escape);
@@ -223,7 +222,7 @@ mod tests {
 
     #[test]
     fn esc_dismisses_completions_before_cancel_even_when_running() {
-        let mut h = harness("/", ProviderStatus::Configured);
+        let mut h = harness("/");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.get_by_label("Message or /command").focus();
         h.run();
@@ -239,7 +238,7 @@ mod tests {
 
     #[test]
     fn cancel_button_replaces_send_while_running() {
-        let mut h = harness("", ProviderStatus::Configured);
+        let mut h = harness("");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.run();
         assert!(h.query_by_label("Send").is_none());
@@ -250,7 +249,7 @@ mod tests {
 
     #[test]
     fn send_button_shown_while_waiting() {
-        let mut h = harness("draft", ProviderStatus::Configured);
+        let mut h = harness("draft");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Waiting);
         h.run();
         assert!(h.query_by_label("Cancel").is_none());
@@ -261,7 +260,7 @@ mod tests {
 
     #[test]
     fn typing_after_dismissal_reshows_completions() {
-        let mut h = harness("/", ProviderStatus::Configured);
+        let mut h = harness("/");
         h.get_by_label("Message or /command").focus();
         h.run();
         h.key_press(egui::Key::Escape);
@@ -274,7 +273,7 @@ mod tests {
 
     #[test]
     fn enter_still_sends_while_running() {
-        let mut h = harness("queued", ProviderStatus::Configured);
+        let mut h = harness("queued");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.get_by_label("Message or /command").focus();
         h.run();
@@ -286,7 +285,7 @@ mod tests {
     #[test]
     fn send_button_disabled_on_empty_input() {
         // Given
-        let mut harness = harness("", ProviderStatus::Configured);
+        let mut harness = harness("");
         // When
         harness.run();
         // Then
@@ -297,7 +296,7 @@ mod tests {
     #[test]
     fn send_click_emits_send_action() {
         // Given
-        let mut harness = harness("hi", ProviderStatus::Configured);
+        let mut harness = harness("hi");
         harness.run();
         // When
         harness.get_by_label("Send").click();
@@ -309,7 +308,7 @@ mod tests {
     #[test]
     fn slash_prefix_shows_completion_candidates_and_click_fills_via_action() {
         // Given
-        let mut harness = harness("/", ProviderStatus::Configured);
+        let mut harness = harness("/");
         harness.run();
         harness.get_by_label("/help");
         // When
@@ -326,7 +325,7 @@ mod tests {
     #[test]
     fn typing_slash_prefix_keeps_focus() {
         // Given: the composer has focus and no input
-        let mut harness = harness("", ProviderStatus::Configured);
+        let mut harness = harness("");
         harness.get_by_label("Message or /command").focus();
         harness.run();
 
@@ -361,7 +360,7 @@ mod tests {
     #[test]
     fn completion_disappearance_keeps_focus() {
         // Given: a focused composer with slash completions visible
-        let mut harness = harness("/g", ProviderStatus::Configured);
+        let mut harness = harness("/g");
         harness.get_by_label("Message or /command").focus();
         harness.run();
 
@@ -377,19 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn guidance_label_shown_when_provider_missing() {
-        // Given
-        let mut harness = harness("", ProviderStatus::default());
-        // When
+    fn model_picker_is_rendered_inside_the_strip() {
+        let mut harness = harness("");
         harness.run();
-        // Then
-        harness.get_by_label(PROVIDER_MISSING_GUIDANCE);
+        harness.get_by_label("Select model");
     }
 
     #[test]
     fn send_button_disabled_on_whitespace_input() {
         // Given
-        let mut harness = harness("  ", ProviderStatus::Configured);
+        let mut harness = harness("  ");
         // When
         harness.run();
         // Then
@@ -399,7 +395,7 @@ mod tests {
     #[test]
     fn enter_with_focus_emits_send() {
         // Given
-        let mut harness = harness("hi", ProviderStatus::Configured);
+        let mut harness = harness("hi");
         harness.get_by_label("Message or /command").focus();
         harness.run();
         // When
@@ -412,7 +408,7 @@ mod tests {
     #[test]
     fn shift_enter_inserts_newline_and_does_not_send() {
         // Given
-        let mut harness = harness("hi", ProviderStatus::Configured);
+        let mut harness = harness("hi");
         harness.get_by_label("Message or /command").focus();
         harness.run();
         // When
@@ -426,7 +422,7 @@ mod tests {
     #[test]
     fn enter_during_ime_preedit_does_not_send() {
         // Given: composition persists across frames without another preedit event.
-        let mut harness = harness("hi", ProviderStatus::Configured);
+        let mut harness = harness("hi");
         harness.get_by_label("Message or /command").focus();
         harness.run();
         harness
@@ -447,7 +443,7 @@ mod tests {
     #[test]
     fn enter_after_ime_commit_emits_send() {
         // Given
-        let mut harness = harness("hi", ProviderStatus::Configured);
+        let mut harness = harness("hi");
         harness.get_by_label("Message or /command").focus();
         harness.run();
         harness
@@ -473,7 +469,7 @@ mod tests {
     #[test]
     fn composer_respects_min_height_token() {
         // Given
-        let mut harness = harness("", ProviderStatus::Configured);
+        let mut harness = harness("");
         // When
         harness.run();
         // Then
@@ -484,7 +480,7 @@ mod tests {
     #[test]
     fn composer_caps_height_and_scrolls() {
         // Given
-        let mut harness = harness(&"line\n".repeat(40), ProviderStatus::Configured);
+        let mut harness = harness(&"line\n".repeat(40));
         // When
         harness.run();
         // Then: a scrollable text document is taller than its bounded viewport.

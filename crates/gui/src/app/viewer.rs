@@ -15,24 +15,6 @@ use crate::panes::{
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll_role_save();
-        ui.menu_button("Workbench settings", |ui| {
-            if ui.button("Theme").clicked() {
-                self.open_theme_settings();
-                ui.close();
-            }
-            if ui.button("Providers").clicked() {
-                self.open_provider_settings();
-                ui.close();
-            }
-            if ui.button("Agent roles").clicked() {
-                self.open_role_settings();
-                ui.close();
-            }
-            if ui.button("Routing").clicked() {
-                self.open_routing_settings();
-                ui.close();
-            }
-        });
         self.refresh_image_capability();
         self.ownership_ui(ui);
         self.panels.retain(|panel_id, _| {
@@ -76,7 +58,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 diff: &self.diff,
                 diff_request: &mut diff_request,
                 composer: &mut self.composer,
-                provider_status: &self.provider_status,
                 composer_action: &mut composer_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,
@@ -133,7 +114,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match action {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Cancel => self.cancel_chat(),
-                ComposerAction::OpenSettings => self.open_provider_settings(),
+                ComposerAction::ModelPreference(_) => {}
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }

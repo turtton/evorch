@@ -6,7 +6,7 @@ use workspace_ui::{Panel, PanelId, PanelKind, SidebarState};
 use super::ConversationFocus;
 use super::attention::{PaneAttention, ack::AttentionAck, acknowledged_attention};
 use crate::diff::{DiffMode, DiffModel};
-use crate::model::composer::{ComposerModel, ProviderStatus};
+use crate::model::composer::ComposerModel;
 use crate::model::notifications::NotificationsModel;
 use crate::model::pending_approvals::PendingApprovalsModel;
 use crate::model::tasks::{AgentRunSource, TasksModel};
@@ -51,7 +51,6 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) diff: &'a DiffModel,
     pub(super) diff_request: &'a mut Option<DiffMode>,
     pub(super) composer: &'a mut ComposerModel,
-    pub(super) provider_status: &'a ProviderStatus,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
     pub(super) dock_tab_style: &'a egui_dock::TabStyle,
@@ -126,7 +125,6 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             identity,
             ctx,
             self.composer,
-            self.provider_status,
             self.picker_state,
         ) {
             match action {
@@ -199,7 +197,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {
-                if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases) {
+                if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases, self.telemetry) {
                     *self.sidebar_action = Some(action);
                 }
             }

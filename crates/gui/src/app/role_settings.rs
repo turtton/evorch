@@ -79,7 +79,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match rx.try_recv() {
             Ok(Ok(config)) => {
                 self.role_settings = RoleSettingsModel::seed_from_config(&config);
-                self.role_settings.open = true;
+                self.role_settings.open = false;
                 self.push_notice("Agent role settings updated");
             }
             Ok(Err(error)) => self.role_settings.error = Some(error),

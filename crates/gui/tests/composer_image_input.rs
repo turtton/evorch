@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use gui::model::composer::{ComposerModel, ProviderStatus};
+use gui::model::composer::ComposerModel;
+use gui::model::model_picker::ModelPickerState;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -28,7 +29,17 @@ fn paste_and_drop_render_real_thumbnails_without_pasting_base64_into_text() {
         let bytes = png();
         let mut harness = egui_kittest::Harness::builder().build_ui_state(
             |ui, model: &mut ComposerModel| {
-                gui::panes::composer::composer_strip(ui, model, &ProviderStatus::Configured, None);
+                gui::panes::composer::composer_strip(
+                    ui,
+                    model,
+                    gui::panes::model_picker::ModelPickerContext {
+                        profiles: &[],
+                        preference: None,
+                        enabled: false,
+                    },
+                    &mut ModelPickerState::default(),
+                    None,
+                );
             },
             ComposerModel {
                 image_input_supported: true,

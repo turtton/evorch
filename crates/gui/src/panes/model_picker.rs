@@ -3,6 +3,7 @@ use workspace_ui::ModelPreference;
 
 use crate::model::model_picker::{ModelPickerState, preference_label, profile_options};
 
+#[derive(Clone, Copy)]
 pub struct ModelPickerContext<'a> {
     pub profiles: &'a [ProfileSummary],
     pub preference: Option<&'a ModelPreference>,

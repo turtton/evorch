@@ -18,6 +18,7 @@ fn entry() -> ModelEntryConfig {
         output_price: None,
         cache_read_price: None,
         cache_write_price: None,
+        effort_levels: None,
     }
 }
 

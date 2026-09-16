@@ -31,7 +31,12 @@ fn sidebar_header_uses_h4_when_project_is_selected() {
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui(|ui| {
             gui::theme::install(ui.ctx());
-            gui::panes::sidebar::sidebar_pane(ui, &sidebar, &Default::default());
+            gui::panes::sidebar::sidebar_pane(
+                ui,
+                &sidebar,
+                &Default::default(),
+                &gui::model::telemetry::TelemetryOverlay::new(),
+            );
         });
     // When: the sidebar renders.
     harness.run_steps(2);
@@ -71,7 +76,6 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
     let model = gui::model::transcript::TranscriptModel::default();
     let mut composer = gui::model::composer::ComposerModel::default();
     let mut picker = gui::model::model_picker::ModelPickerState::default();
-    let provider = gui::model::composer::ProviderStatus::default();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 600.0))
         .build_ui(|ui| {
@@ -98,7 +102,6 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     },
                 },
                 &mut composer,
-                &provider,
                 &mut picker,
             );
         });

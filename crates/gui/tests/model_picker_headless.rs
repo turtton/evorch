@@ -170,7 +170,9 @@ fn picker_disabled_without_profiles_offers_settings() {
     let mut harness = workbench(temp.path(), false);
     harness.run();
     // When
-    harness.click_label("Open Settings");
+    harness.click_label("⚙");
+    harness.run();
+    harness.click_label("Providers");
     harness.run();
     // Then
     assert!(harness.state().provider_settings().open);

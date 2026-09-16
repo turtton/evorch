@@ -3,7 +3,7 @@
 use egui::Color32;
 use workspace_ui::ThreadRunPhase;
 
-use crate::model::composer::{ComposerModel, ProviderStatus};
+use crate::model::composer::ComposerModel;
 use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
@@ -46,7 +46,6 @@ pub fn agent_pane(
     identity: Option<AgentIdentity<'_>>,
     ctx: ConversationContext<'_>,
     composer: &mut ComposerModel,
-    provider: &ProviderStatus,
     picker_state: &mut crate::model::model_picker::ModelPickerState,
 ) -> Option<AgentPaneAction> {
     pane_root(ui, "Conversation", |ui| {
@@ -63,19 +62,8 @@ pub fn agent_pane(
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let strip = ui.scope(|ui| {
-                    if let Some(preference) = crate::panes::model_picker::model_picker(
-                        ui,
-                        crate::panes::model_picker::ModelPickerContext {
-                            profiles: ctx.model_picker.profiles,
-                            preference: ctx.model_picker.preference,
-                            enabled: ctx.model_picker.enabled,
-                        },
-                        picker_state,
-                    ) {
-                        action = Some(AgentPaneAction::ModelPreference(preference));
-                    }
                     ui.push_id("composer-strip", |ui| {
-                        composer_strip(ui, composer, provider, ctx.phase)
+                        composer_strip(ui, composer, ctx.model_picker, picker_state, ctx.phase)
                     })
                     .inner
                 });
@@ -85,7 +73,12 @@ pub fn agent_pane(
                     ui.ctx().request_repaint();
                 }
                 if let Some(composer_action) = strip.inner {
-                    action = Some(AgentPaneAction::Composer(composer_action));
+                    action = Some(match composer_action {
+                        ComposerAction::ModelPreference(preference) => {
+                            AgentPaneAction::ModelPreference(preference)
+                        }
+                        other => AgentPaneAction::Composer(other),
+                    });
                 }
             });
         egui::CentralPanel::default()

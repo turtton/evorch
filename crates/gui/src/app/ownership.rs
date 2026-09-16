@@ -48,53 +48,78 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.menu_button("⚙", |ui| {
+                if ui.button("Theme").clicked() {
+                    self.open_theme_settings();
+                    ui.close();
+                }
+                if ui.button("Providers").clicked() {
+                    self.open_provider_settings();
+                    ui.close();
+                }
+                if ui.button("Agent roles").clicked() {
+                    self.open_role_settings();
+                    ui.close();
+                }
+                if ui.button("Routing").clicked() {
+                    self.open_routing_settings();
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("Workbench settings");
+            let Some(host) = self.ownership.clone() else {
+                return;
+            };
+            if let Some(thread) = self.sidebar.active_thread.clone() {
+                let thread = thread.to_string();
+                match host.attach(thread.as_str()) {
+                    Ok(owner) => {
+                        let writable = self.thread_writable();
+                        ui.label(format!(
+                            "Owner {} · generation {} · {:?} · {}",
+                            owner.lease.owner_id,
+                            owner.lease.generation,
+                            owner.state,
+                            if writable { "write" } else { "read-only" }
+                        ));
+                        if ui.button("Attach (read-only)").clicked() {
+                            self.readonly_threads.insert(thread.clone());
+                            self.ownership_error = host
+                                .attach(thread.as_str())
+                                .err()
+                                .map(|error| error.to_string());
+                        }
+                        if !writable && ui.button("Claim").clicked() {
+                            let result = host.owned_permit(&thread).or_else(|_| host.claim(&owner));
+                            match result {
+                                Ok(_) => {
+                                    self.readonly_threads.remove(&thread);
+                                    self.ownership_error = None;
+                                }
+                                Err(error) => self.ownership_error = Some(error.to_string()),
+                            }
+                        }
+                    }
+                    Err(RegistryError::Absent) => {
+                        ui.label("No process owner · read-only");
+                        if ui.button("Start").clicked() {
+                            self.ownership_error = host
+                                .start(thread.as_str())
+                                .err()
+                                .map(|error| error.to_string());
+                        }
+                    }
+                    Err(error) => {
+                        self.ownership_error = Some(error.to_string());
+                    }
+                }
+            }
+        });
         let Some(host) = self.ownership.clone() else {
             return;
         };
-        if let Some(thread) = self.sidebar.active_thread.clone() {
-            let thread = thread.to_string();
-            ui.horizontal_wrapped(|ui| match host.attach(thread.as_str()) {
-                Ok(owner) => {
-                    let writable = self.thread_writable();
-                    ui.label(format!(
-                        "Owner {} · generation {} · {:?} · {}",
-                        owner.lease.owner_id,
-                        owner.lease.generation,
-                        owner.state,
-                        if writable { "write" } else { "read-only" }
-                    ));
-                    if ui.button("Attach (read-only)").clicked() {
-                        self.readonly_threads.insert(thread.clone());
-                        self.ownership_error = host
-                            .attach(thread.as_str())
-                            .err()
-                            .map(|error| error.to_string());
-                    }
-                    if !writable && ui.button("Claim").clicked() {
-                        let result = host.owned_permit(&thread).or_else(|_| host.claim(&owner));
-                        match result {
-                            Ok(_) => {
-                                self.readonly_threads.remove(&thread);
-                                self.ownership_error = None;
-                            }
-                            Err(error) => self.ownership_error = Some(error.to_string()),
-                        }
-                    }
-                }
-                Err(RegistryError::Absent) => {
-                    ui.label("No process owner · read-only");
-                    if ui.button("Start").clicked() {
-                        self.ownership_error = host
-                            .start(thread.as_str())
-                            .err()
-                            .map(|error| error.to_string());
-                    }
-                }
-                Err(error) => {
-                    self.ownership_error = Some(error.to_string());
-                }
-            });
-        }
         if let Some(error) = &self.ownership_error {
             ui.label(error);
         }
