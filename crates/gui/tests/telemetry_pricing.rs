@@ -3,6 +3,27 @@ use event_bus::{Event, ProviderEvent};
 use gui::model::{provider_settings::ProviderSettingsModel, telemetry::TelemetryOverlay};
 use std::sync::Arc;
 
+#[test]
+fn cost_includes_known_prices_when_cache_prices_are_unknown() {
+    // Given: input/output prices without cache prices.
+    let usage = gui::model::telemetry::TokenUsage {
+        input: 20_000,
+        output: 15_400,
+        cache_read: 78_300,
+        cache_write: 1_700,
+    };
+    let pricing = config::types::provider::ModelPricing {
+        input: Some(0.5),
+        output: Some(2.0),
+        cache_read: None,
+        cache_write: None,
+    };
+    // When: the cost is estimated for cached usage.
+    let cost = usage.estimated_cost(Some(pricing));
+    // Then: the input and output portion remains visible.
+    assert_eq!(cost, Some(0.0408));
+}
+
 fn completed(model: &str) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
         request_id: model.into(),
@@ -19,6 +40,57 @@ fn completed(model: &str) -> Event {
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
     })
+}
+
+#[test]
+fn zero_usage_cost_is_zero_when_pricing_exists() {
+    let usage = gui::model::telemetry::TokenUsage::default();
+    let pricing = config::types::provider::ModelPricing {
+        input: Some(0.5),
+        output: Some(2.0),
+        cache_read: Some(0.01),
+        cache_write: Some(0.25),
+    };
+    assert_eq!(usage.estimated_cost(Some(pricing)), Some(0.0));
+}
+
+#[test]
+fn run_cost_survives_when_another_priced_model_has_zero_usage() {
+    let mut config = Config::default();
+    let models = ["model", "zero"].map(|name| {
+        let mut entry = ModelEntryConfig::enabled(name);
+        entry.input_price = Some(0.5);
+        entry.output_price = Some(2.0);
+        entry
+    });
+    config.providers.insert(
+        "local".into(),
+        ProviderProfileConfig {
+            models: models.into(),
+            ..ProviderProfileConfig::default()
+        },
+    );
+    let settings = ProviderSettingsModel::seed_from_config(&config);
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&completed("model"));
+    overlay.apply_event(&Event::new(ProviderEvent::RequestCompleted {
+        request_id: "zero".into(),
+        provider: "vendor".into(),
+        profile: Some("local".into()),
+        protocol: "fixture".into(),
+        model: "zero".into(),
+        streaming: true,
+        duration_ms: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        finish_reason: "stop".into(),
+        run_id: Some("run-1".into()),
+    }));
+    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.0408));
+    overlay.refresh_costs(&settings);
+    assert_eq!(overlay.cost("run-1"), Some(0.0408));
 }
 
 fn settings() -> ProviderSettingsModel {
@@ -71,7 +143,7 @@ async fn catalog_fills_missing_fields_but_static_prices_win() {
     let mut settings = ProviderSettingsModel::seed_from_config(&config);
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed("model"));
-    assert_eq!(overlay.estimated_cost("run-1", &settings), None);
+    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.01));
     settings.catalog.catalog = Some(Arc::new(
         catalog::ModelCatalog::load_or_refresh(dir.path())
             .await

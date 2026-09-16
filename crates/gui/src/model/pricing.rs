@@ -29,18 +29,25 @@ impl TokenUsage {
 
     pub fn estimated_cost(&self, pricing: Option<ModelPricing>) -> Option<f64> {
         let pricing = pricing?;
+        if self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_write == 0 {
+            return Some(0.0);
+        }
         let mut cost = 0.0;
+        let mut has_known_price = false;
         for (count, price) in [
             (self.input, pricing.input),
             (self.output, pricing.output),
             (self.cache_read, pricing.cache_read),
             (self.cache_write, pricing.cache_write),
         ] {
-            if count > 0 {
-                cost += tokens(count) * price? / 1_000_000.0;
+            if count > 0
+                && let Some(price) = price
+            {
+                has_known_price = true;
+                cost += tokens(count) * price / 1_000_000.0;
             }
         }
-        cost.is_finite().then_some(cost)
+        (has_known_price && cost.is_finite()).then_some(cost)
     }
 }
 
