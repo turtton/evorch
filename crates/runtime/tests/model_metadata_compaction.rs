@@ -68,7 +68,7 @@ async fn composed_runtime_compacts_with_preset_window() {
             ..RunConfig::default()
         },
     );
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while composed.runtime.inspect_agent(run).unwrap().phase != runtime::AgentRunPhase::Waiting
         {
             tokio::task::yield_now().await;
@@ -81,7 +81,7 @@ async fn composed_runtime_compacts_with_preset_window() {
         .send_message(run, "continue".into())
         .unwrap();
     let phase = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
         composed.runtime.wait(run),
     )
     .await

@@ -192,8 +192,8 @@ async fn rpc_timeout_and_error_fall_back_without_leaking_server_messages() {
         let server = MockServer::start().await;
         let config = QuotaConfig {
             app_server_program: "sh".into(),
-            app_server_args: vec!["-c".into(), script.into()],
-            timeout: Duration::from_millis(100),
+            // Read initialize before replying/exiting so EOF cannot race the client's write.
+            app_server_args: vec!["-c".into(), format!("IFS= read -r r; {script}")],
             wham_endpoint: server.uri(),
             ..QuotaConfig::default()
         };
@@ -207,9 +207,15 @@ async fn rpc_timeout_and_error_fall_back_without_leaking_server_messages() {
         };
         assert!(matches!(*wham, QuotaError::HttpStatus(404)));
         match kind {
-            "timeout" => assert!(matches!(*app_server, QuotaError::Timeout)),
-            "rpc" => assert!(matches!(*app_server, QuotaError::Rpc(-32000))),
-            _ => assert!(matches!(*app_server, QuotaError::Protocol(_))),
+            "timeout" => assert!(matches!(*app_server, QuotaError::Timeout), "{app_server:?}"),
+            "rpc" => assert!(
+                matches!(*app_server, QuotaError::Rpc(-32000)),
+                "{app_server:?}"
+            ),
+            _ => assert!(
+                matches!(*app_server, QuotaError::Protocol(_)),
+                "{app_server:?}"
+            ),
         }
     }
 }

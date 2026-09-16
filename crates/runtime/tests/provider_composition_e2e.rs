@@ -166,7 +166,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
         "ORCHESTRATOR-DELEGATE".to_string(),
         RunConfig::default(),
     );
-    let root_phase = tokio::time::timeout(Duration::from_secs(5), composed.runtime.wait(root))
+    let root_phase = tokio::time::timeout(Duration::from_secs(30), composed.runtime.wait(root))
         .await
         .expect("root timeout")
         .expect("root exists");

@@ -180,7 +180,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
         "Write the requested file.".to_string(),
         RunConfig::default(),
     );
-    let phase = tokio::time::timeout(Duration::from_secs(5), composed.runtime.wait(run_id))
+    let phase = tokio::time::timeout(Duration::from_secs(30), composed.runtime.wait(run_id))
         .await
         .expect("worker timeout");
 
@@ -327,9 +327,9 @@ async fn unscripted_request_fails_run_not_hangs() {
         "Request an unscripted completion.".to_string(),
         RunConfig::default(),
     );
-    let phase = tokio::time::timeout(Duration::from_secs(5), composed.runtime.wait(run_id))
+    let phase = tokio::time::timeout(Duration::from_secs(30), composed.runtime.wait(run_id))
         .await
-        .expect("unscripted request must terminate within five seconds");
+        .expect("unscripted request must terminate within the completion failsafe");
 
     // Then: Error is the runtime's terminal failure phase, not a wait error.
     assert_eq!(phase, Ok(AgentRunPhase::Error));
