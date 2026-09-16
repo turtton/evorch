@@ -106,8 +106,12 @@ fn attributed_delta_display_is_unchanged_after_mirror_removal() {
     let expected = [
         TranscriptEntry::Message {
             text: "once".into(),
+            run_id: Some("run-1".into()),
         },
-        TranscriptEntry::Reasoning { text: "why".into() },
+        TranscriptEntry::Reasoning {
+            text: "why".into(),
+            run_id: Some("run-1".into()),
+        },
     ];
     assert_eq!(
         state

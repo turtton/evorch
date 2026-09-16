@@ -105,7 +105,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
         .entries()
         .iter()
         .map(|entry| match entry {
-            TranscriptEntry::Message { text } => text.as_str(),
+            TranscriptEntry::Message { text, .. } => text.as_str(),
             TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
@@ -162,7 +162,7 @@ fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
     let mut harness = Harness::new();
     let mut expected: [Vec<String>; 2] = std::array::from_fn(|_| Vec::new());
     let mut received: [Vec<String>; 2] = std::array::from_fn(|_| Vec::new());
-    let mut thread_expected = String::new();
+    let mut thread_expected = Vec::new();
     let mut latencies = Vec::with_capacity(TICKS);
     let mut total_received = 0;
     let start = Instant::now();
@@ -172,7 +172,7 @@ fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
         let events = burst(tick);
         for i in 0..TOKENS_PER_TICK {
             let delta = format!("t{tick}-{i} ");
-            thread_expected.push_str(&delta);
+            thread_expected.push(delta.clone());
             expected[i % 2].push(delta);
         }
         let tick_start = Instant::now();
@@ -217,7 +217,7 @@ fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
     }
     assert_eq!(
         transcript_text(harness.state.transcripts().thread()),
-        thread_expected
+        thread_expected[thread_expected.len().saturating_sub(10_000)..].concat()
     );
     assert!(elapsed < Duration::from_secs(30), "burst exceeded failsafe");
     latencies.sort_unstable();

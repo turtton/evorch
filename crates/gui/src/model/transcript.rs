@@ -48,9 +48,11 @@ pub enum TranscriptEntry {
     },
     Message {
         text: String,
+        run_id: Option<String>,
     },
     Reasoning {
         text: String,
+        run_id: Option<String>,
     },
     Tool {
         tool_name: String,
@@ -113,7 +115,10 @@ impl TranscriptModel {
     }
 
     pub fn push_message(&mut self, text: impl Into<String>) {
-        self.push(TranscriptEntry::Message { text: text.into() });
+        self.push(TranscriptEntry::Message {
+            text: text.into(),
+            run_id: None,
+        });
     }
 
     pub fn push_user_message(&mut self, text: impl Into<String>) {
@@ -125,7 +130,10 @@ impl TranscriptModel {
     }
 
     pub fn push_reasoning(&mut self, text: impl Into<String>) {
-        self.push(TranscriptEntry::Reasoning { text: text.into() });
+        self.push(TranscriptEntry::Reasoning {
+            text: text.into(),
+            run_id: None,
+        });
     }
 
     pub fn push_tool(
@@ -170,12 +178,7 @@ impl TranscriptModel {
             ) => self.push(TranscriptEntry::Error {
                 text: format!("Run failed: {reason}"),
             }),
-            event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) => {
-                self.append_text(delta, false)
-            }
-            event_bus::EventKind::Message(event_bus::MessageEvent::ReasoningDelta { delta, .. }) => {
-                self.append_text(delta, true)
-            }
+            event_bus::EventKind::Message(message) => self.append_text(message),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
@@ -263,23 +266,28 @@ impl TranscriptModel {
         }
     }
 
-    fn append_text(&mut self, delta: &str, reasoning: bool) {
+    fn append_text(&mut self, message: &event_bus::MessageEvent) {
+        use event_bus::MessageEvent;
+        let (delta, run_id) = match message {
+            MessageEvent::MessageDelta { delta, run_id }
+            | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
+        };
         if delta.is_empty() {
             return;
         }
         let matching = self.entries.last().is_some_and(|entry| {
             matches!(
-                (reasoning, entry),
-                (true, TranscriptEntry::Reasoning { .. })
-                    | (false, TranscriptEntry::Message { .. })
+                (message, entry),
+                (MessageEvent::ReasoningDelta { .. }, TranscriptEntry::Reasoning { run_id: previous, .. })
+                    | (MessageEvent::MessageDelta { .. }, TranscriptEntry::Message { run_id: previous, .. })
+                    if previous == run_id
             )
         });
         if matching {
             if let Some(entry) = self.entries.last_mut() {
                 match entry {
-                    TranscriptEntry::Message { text } | TranscriptEntry::Reasoning { text } => {
-                        text.push_str(delta)
-                    }
+                    TranscriptEntry::Message { text, .. }
+                    | TranscriptEntry::Reasoning { text, .. } => text.push_str(delta),
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
@@ -288,10 +296,17 @@ impl TranscriptModel {
                     | TranscriptEntry::AgentMessage { .. } => {}
                 }
             }
-        } else if reasoning {
-            self.push_reasoning(delta)
         } else {
-            self.push_message(delta)
+            self.push(match message {
+                MessageEvent::MessageDelta { .. } => TranscriptEntry::Message {
+                    text: delta.clone(),
+                    run_id: run_id.clone(),
+                },
+                MessageEvent::ReasoningDelta { .. } => TranscriptEntry::Reasoning {
+                    text: delta.clone(),
+                    run_id: run_id.clone(),
+                },
+            });
         }
     }
 
@@ -388,13 +403,15 @@ mod tests {
             model.entries(),
             &[
                 TranscriptEntry::Message {
-                    text: "before".into()
+                    text: "before".into(),
+                    run_id: None,
                 },
                 TranscriptEntry::Error {
                     text: "Run failed: timeout".into()
                 },
                 TranscriptEntry::Message {
-                    text: "after".into()
+                    text: "after".into(),
+                    run_id: Some("run-error".into()),
                 },
             ]
         );
@@ -415,7 +432,10 @@ mod tests {
             model.entries(),
             &[
                 TranscriptEntry::UserMessage { text: "hi".into() },
-                TranscriptEntry::Message { text: "yo".into() },
+                TranscriptEntry::Message {
+                    text: "yo".into(),
+                    run_id: Some("r1".into())
+                },
             ]
         );
     }
@@ -435,7 +455,10 @@ mod tests {
             model.entries(),
             &[
                 TranscriptEntry::Notice { text: "n".into() },
-                TranscriptEntry::Message { text: "yo".into() },
+                TranscriptEntry::Message {
+                    text: "yo".into(),
+                    run_id: Some("r1".into())
+                },
             ]
         );
     }
@@ -454,7 +477,8 @@ mod tests {
         assert_eq!(
             model.entries(),
             &[TranscriptEntry::Message {
-                text: "hello".into()
+                text: "hello".into(),
+                run_id: None,
             }]
         );
     }
@@ -509,7 +533,8 @@ mod tests {
         assert_eq!(
             model.entries(),
             &[TranscriptEntry::Message {
-                text: "before".into()
+                text: "before".into(),
+                run_id: None,
             }]
         );
     }
@@ -535,7 +560,8 @@ mod tests {
             model.entries(),
             &[
                 TranscriptEntry::Message {
-                    text: "before".into()
+                    text: "before".into(),
+                    run_id: None,
                 },
                 TranscriptEntry::Compaction {
                     reason: CompactionReason::Automatic,
@@ -561,9 +587,13 @@ mod tests {
         assert_eq!(
             model.entries(),
             &[
-                TranscriptEntry::Message { text: "two".into() },
                 TranscriptEntry::Message {
-                    text: "three".into()
+                    text: "two".into(),
+                    run_id: None
+                },
+                TranscriptEntry::Message {
+                    text: "three".into(),
+                    run_id: None,
                 }
             ]
         );

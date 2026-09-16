@@ -42,12 +42,15 @@ fn interleaved_text_reasoning_deltas_render_in_order() {
     let expected = [
         TranscriptEntry::Message {
             text: "First ".into(),
+            run_id: Some("stream".into()),
         },
         TranscriptEntry::Reasoning {
             text: "think more".into(),
+            run_id: Some("stream".into()),
         },
         TranscriptEntry::Message {
             text: "second.".into(),
+            run_id: Some("stream".into()),
         },
     ];
     assert_eq!(registry.thread().visible_entries(), expected);
@@ -72,6 +75,7 @@ fn empty_delta_is_noop_before_kind_switch() {
         transcript.entries(),
         [TranscriptEntry::Reasoning {
             text: "keep thinking".into(),
+            run_id: Some("stream".into()),
         }]
     );
 }
@@ -80,8 +84,10 @@ fn empty_delta_is_noop_before_kind_switch() {
 fn delta_stream_final_state_matches_snapshot() {
     // Given: an independently specified canonical visible message snapshot.
     let canonical_message = "Hello, 世界!\n";
-    let mut snapshot = TranscriptModel::new();
-    snapshot.push_message(canonical_message);
+    let snapshot = [TranscriptEntry::Message {
+        text: canonical_message.into(),
+        run_id: Some("stream".into()),
+    }];
     let mut registry = TranscriptRegistry::new();
 
     // When: the complete stream arrives without replaying the final response.
@@ -99,13 +105,10 @@ fn delta_stream_final_state_matches_snapshot() {
     }
 
     // Then: streamed visible content and block boundaries equal the snapshot.
-    assert_eq!(
-        registry.thread().visible_entries(),
-        snapshot.visible_entries()
-    );
+    assert_eq!(registry.thread().visible_entries(), snapshot);
     assert_eq!(
         registry.run("stream").expect("run").visible_entries(),
-        snapshot.visible_entries()
+        snapshot
     );
 }
 
@@ -156,9 +159,11 @@ fn failed_or_cancelled_stream_keeps_partial_display() {
         let expected = [
             TranscriptEntry::Reasoning {
                 text: "partial thought".into(),
+                run_id: Some("stream".into()),
             },
             TranscriptEntry::Message {
                 text: "partial answer".into(),
+                run_id: Some("stream".into()),
             },
             terminal,
         ];
@@ -192,8 +197,8 @@ fn retries_exhausted_keeps_partial_display_with_one_terminal_error() {
     // Then: 部分表示を保持し、終端エラーは1件だけで両transcriptが一致する。
     let entries = registry.thread().entries();
     assert!(matches!(entries, [
-        TranscriptEntry::Reasoning { text: thought },
-        TranscriptEntry::Message { text: answer },
+        TranscriptEntry::Reasoning { text: thought, .. },
+        TranscriptEntry::Message { text: answer, .. },
         TranscriptEntry::Error { text },
     ] if thought == "partial thought" && answer == "partial answer"
         && text.contains("Run failed") && text.contains("3 attempts")));
@@ -222,7 +227,7 @@ fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
     // Then: retrying Noticeが部分表示に続き、両transcriptが一致する。
     let entries = registry.thread().entries();
     assert!(matches!(entries, [
-        TranscriptEntry::Message { text: partial },
+        TranscriptEntry::Message { text: partial, .. },
         TranscriptEntry::Notice { text },
     ] if partial == "partial" && text.contains("transport error")
         && text.contains(", retrying")));

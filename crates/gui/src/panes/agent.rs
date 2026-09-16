@@ -22,6 +22,7 @@ pub struct AgentIdentity<'a> {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
+    pub task_rows: &'a [crate::model::tasks::TaskRow],
     pub phase_unread: bool,
     pub has_project: bool,
     pub active_thread_title: Option<&'a str>,
@@ -89,7 +90,7 @@ pub fn agent_pane(
                 {
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
-                    run_detail_body(ui, model, identity);
+                    run_detail_body(ui, model, (identity, ctx.task_rows));
                 }
             });
         action
@@ -173,14 +174,15 @@ fn empty_state_body(
 }
 
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
-    run_detail_body(ui, model, None);
+    run_detail_body(ui, model, (None, &[]));
 }
 
 fn run_detail_body(
     ui: &mut egui::Ui,
     model: &TranscriptModel,
-    identity: Option<AgentIdentity<'_>>,
+    context: (Option<AgentIdentity<'_>>, &[crate::model::tasks::TaskRow]),
 ) {
+    let (identity, task_rows) = context;
     let pane_id = ui.id();
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
@@ -193,7 +195,27 @@ fn run_detail_body(
                 }
                 let accent = entry_accent(entry);
                 card(ui, accent, |ui| {
-                    if let TranscriptEntry::Message { text } = entry {
+                    match entry {
+                        TranscriptEntry::Message { run_id, .. }
+                        | TranscriptEntry::Reasoning { run_id, .. } => {
+                            if let Some(role) = run_id.as_deref().and_then(|run_id| {
+                                crate::model::tasks::role_for_run(task_rows, run_id)
+                            }) {
+                                ui.label(
+                                    egui::RichText::new(format!("[{role}]"))
+                                        .small()
+                                        .color(palette().TEXT_MUTED),
+                                );
+                            }
+                        }
+                        TranscriptEntry::Error { .. }
+                        | TranscriptEntry::UserMessage { .. }
+                        | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::Compaction { .. }
+                        | TranscriptEntry::Tool { .. }
+                        | TranscriptEntry::AgentMessage { .. } => {}
+                    }
+                    if let TranscriptEntry::Message { text, .. } = entry {
                         crate::panes::markdown_render::render_markdown(
                             ui,
                             text,
@@ -234,8 +256,8 @@ fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
         TranscriptEntry::UserMessage { text } => format!("You: {text}"),
         TranscriptEntry::Notice { text } | TranscriptEntry::Error { text } => text.clone(),
-        TranscriptEntry::Message { text } => format!("Message: {text}"),
-        TranscriptEntry::Reasoning { text } => format!("Reasoning: {text}"),
+        TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
+        TranscriptEntry::Reasoning { text, .. } => format!("Reasoning: {text}"),
         TranscriptEntry::Compaction {
             reason,
             threshold,
@@ -288,6 +310,7 @@ mod tests {
         let mut model = TranscriptModel::default();
         model.push(TranscriptEntry::Message {
             text: "Transcript content".into(),
+            run_id: None,
         });
         let entries = [
             storage::RunLedgerEntry {
@@ -310,12 +333,15 @@ mod tests {
                 run_detail_body(
                     ui,
                     &model,
-                    Some(AgentIdentity {
-                        run_id: "selected",
-                        name: None,
-                        role: None,
-                        ledger: &entries,
-                    }),
+                    (
+                        Some(AgentIdentity {
+                            run_id: "selected",
+                            name: None,
+                            role: None,
+                            ledger: &entries,
+                        }),
+                        &[],
+                    ),
                 );
             });
         harness.run_steps(2);
@@ -346,12 +372,15 @@ mod tests {
             run_detail_body(
                 ui,
                 &model,
-                Some(AgentIdentity {
-                    run_id: "empty",
-                    name: None,
-                    role: None,
-                    ledger: &[],
-                }),
+                (
+                    Some(AgentIdentity {
+                        run_id: "empty",
+                        name: None,
+                        role: None,
+                        ledger: &[],
+                    }),
+                    &[],
+                ),
             );
         });
         // Then: no ledger header is exposed.
@@ -370,6 +399,7 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
+                        task_rows: &[],
                         phase_unread: true,
                         has_project: true,
                         active_thread_title: Some("Chat"),

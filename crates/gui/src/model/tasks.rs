@@ -104,6 +104,12 @@ pub struct TasksModel<S> {
     rows: Vec<TaskRow>,
 }
 
+pub fn role_for_run<'a>(rows: &'a [TaskRow], run_id: &str) -> Option<&'a str> {
+    rows.iter()
+        .find(|row| row.run_id.to_string() == run_id)
+        .map(|row| row.role.as_str())
+}
+
 impl<S: AgentRunSource> TasksModel<S> {
     pub fn teams(&self) -> Vec<(RunId, Vec<runtime::team::TeamTask>)> {
         self.source.teams()

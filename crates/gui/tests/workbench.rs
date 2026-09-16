@@ -208,7 +208,7 @@ fn transcript_text_appears_after_bus_event() {
     let entries = harness.state().transcript().entries();
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        TranscriptEntry::Message { text } if text == "hello from bus"
+            TranscriptEntry::Message { text, .. } if text == "hello from bus"
     )));
 }
 

@@ -127,7 +127,7 @@ fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
         Some(&ThreadRunPhase::Running)
     );
     assert!(state.transcripts().thread().entries().iter().any(
-        |entry| matches!(entry, TranscriptEntry::Message { text } if text == "thread-only text")
+        |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "thread-only text")
     ));
     assert_eq!(
         state.sidebar().threads[0].run_ids,
@@ -211,8 +211,14 @@ fn attributed_deltas_route_to_their_own_run_under_concurrency() {
             .expect("run-1 transcript")
             .entries(),
         &[
-            TranscriptEntry::Message { text: "m1".into() },
-            TranscriptEntry::Reasoning { text: "r1".into() },
+            TranscriptEntry::Message {
+                text: "m1".into(),
+                run_id: Some("run-1".into())
+            },
+            TranscriptEntry::Reasoning {
+                text: "r1".into(),
+                run_id: Some("run-1".into())
+            },
         ]
     );
     assert_eq!(
@@ -222,19 +228,35 @@ fn attributed_deltas_route_to_their_own_run_under_concurrency() {
             .expect("run-2 transcript")
             .entries(),
         &[
-            TranscriptEntry::Reasoning { text: "r2".into() },
-            TranscriptEntry::Message { text: "m2".into() },
+            TranscriptEntry::Reasoning {
+                text: "r2".into(),
+                run_id: Some("run-2".into())
+            },
+            TranscriptEntry::Message {
+                text: "m2".into(),
+                run_id: Some("run-2".into())
+            },
         ]
     );
     assert_eq!(
         state.transcripts().thread().entries(),
         &[
-            TranscriptEntry::Message { text: "m1".into() },
-            // Consecutive reasoning deltas coalesce in the existing thread model.
-            TranscriptEntry::Reasoning {
-                text: "r2r1".into()
+            TranscriptEntry::Message {
+                text: "m1".into(),
+                run_id: Some("run-1".into())
             },
-            TranscriptEntry::Message { text: "m2".into() },
+            TranscriptEntry::Reasoning {
+                text: "r2".into(),
+                run_id: Some("run-2".into())
+            },
+            TranscriptEntry::Reasoning {
+                text: "r1".into(),
+                run_id: Some("run-1".into())
+            },
+            TranscriptEntry::Message {
+                text: "m2".into(),
+                run_id: Some("run-2".into())
+            },
         ]
     );
 }
@@ -263,7 +285,8 @@ fn attributed_delta_is_applied_exactly_once_to_sole_running_run() {
             .expect("run transcript")
             .entries(),
         &[TranscriptEntry::Message {
-            text: "once".into()
+            text: "once".into(),
+            run_id: Some("run-1".into()),
         },]
     );
 }
@@ -291,7 +314,10 @@ fn attributed_delta_targets_its_run_even_when_another_run_is_sole_running() {
             .run("run-2")
             .expect("run-2 transcript")
             .entries(),
-        &[TranscriptEntry::Message { text: "x".into() },]
+        &[TranscriptEntry::Message {
+            text: "x".into(),
+            run_id: Some("run-2".into())
+        },]
     );
     assert!(state.transcripts().run("run-1").is_none());
 }

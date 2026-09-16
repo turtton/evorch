@@ -110,9 +110,11 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     let expected = [
         TranscriptEntry::Reasoning {
             text: "weighing options".into(),
+            run_id: Some(run_id.clone()),
         },
         TranscriptEntry::Message {
             text: "final answer".into(),
+            run_id: Some(run_id.clone()),
         },
     ];
     let deadline = Instant::now() + Duration::from_secs(5);

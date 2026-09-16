@@ -101,6 +101,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .as_ref()
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
         let ctx = ConversationContext {
+            task_rows: self.tasks.rows(),
             phase_unread: self
                 .attention_acks
                 .iter()
