@@ -35,6 +35,7 @@ pub fn sidebar_pane(
     ui: &mut egui::Ui,
     sidebar: &SidebarState,
     phases: &BTreeMap<String, ThreadRunPhase>,
+    telemetry: &crate::model::telemetry::TelemetryOverlay,
 ) -> Option<SidebarAction> {
     let id = egui::Id::new(UI_STATE_ID);
     let mut pane_state = ui
@@ -48,7 +49,7 @@ pub fn sidebar_pane(
             let selected = selected_project(sidebar);
             projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
             if let Some(project) = selected {
-                threads::render(ui, sidebar, project, phases, &mut pane_state, &mut action);
+                threads::render(ui, sidebar, project, phases, telemetry, &mut pane_state, &mut action);
             }
         });
     });

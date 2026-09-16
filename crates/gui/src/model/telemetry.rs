@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use event_bus::{Event, EventKind, MessageEvent, ProviderEvent, ToolEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent};
 
 #[path = "pricing.rs"]
 pub mod pricing;
@@ -60,6 +60,16 @@ pub struct TelemetryOverlay {
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
     costs: BTreeMap<String, f64>,
+    run_started: BTreeMap<String, Instant>,
+    run_wall_time: BTreeMap<String, Duration>,
+}
+
+/// スレッドに紐づく全 run の累計メトリクス。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThreadMetrics {
+    pub cost: Option<f64>,
+    pub cache_hit_rate: Option<f64>,
+    pub wall_time: Duration,
 }
 
 impl TelemetryOverlay {
@@ -178,6 +188,19 @@ impl TelemetryOverlay {
             }) => {
                 self.rows.entry(run_id.clone()).or_default().current_tool = None;
             }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+                self.run_started.entry(run_id.clone()).or_insert(now);
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done | AgentRunPhase::Error,
+                ..
+            }) => {
+                if let Some(start) = self.run_started.remove(run_id) {
+                    *self.run_wall_time.entry(run_id.clone()).or_default() +=
+                        now.saturating_duration_since(start);
+                }
+            }
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)
             | EventKind::Message(_)
@@ -196,6 +219,43 @@ impl TelemetryOverlay {
 
     pub fn row(&self, run_id: &str) -> Option<&TelemetryRow> {
         self.rows.get(run_id)
+    }
+
+    pub fn thread_metrics(&self, run_ids: &[String]) -> ThreadMetrics {
+        self.thread_metrics_at(run_ids, Instant::now())
+    }
+
+    pub fn thread_metrics_at(&self, run_ids: &[String], now: Instant) -> ThreadMetrics {
+        let mut cost_total = 0.0;
+        let mut has_cost = false;
+        let mut usage = TokenUsage::default();
+        let mut wall_time = Duration::ZERO;
+        for run_id in run_ids {
+            if let Some(cost) = self.costs.get(run_id) {
+                cost_total += cost;
+                has_cost = true;
+            }
+            if let Some(billed) = self.billed.get(run_id) {
+                for entry in billed.values() {
+                    usage.input = usage.input.saturating_add(entry.input);
+                    usage.output = usage.output.saturating_add(entry.output);
+                    usage.cache_read = usage.cache_read.saturating_add(entry.cache_read);
+                    usage.cache_write = usage.cache_write.saturating_add(entry.cache_write);
+                }
+            }
+            if let Some(done) = self.run_wall_time.get(run_id) {
+                wall_time += *done;
+            }
+            if let Some(start) = self.run_started.get(run_id) {
+                wall_time += now.saturating_duration_since(*start);
+            }
+        }
+        let billed_tokens = usage.input + usage.cache_read + usage.cache_write;
+        ThreadMetrics {
+            cost: has_cost.then_some(cost_total),
+            cache_hit_rate: (billed_tokens > 0).then(|| usage.cache_hit_rate()),
+            wall_time,
+        }
     }
 }
 
@@ -295,5 +355,74 @@ mod tests {
                 .current_tool
                 .is_none()
         );
+    }
+
+    fn agent_run_started(run_id: &str) -> Event {
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: run_id.into(),
+            parent_run_id: None,
+            agent_name: "agent".into(),
+            role: "worker".into(),
+        })
+    }
+
+    fn agent_run_finished(run_id: &str, to: AgentRunPhase) -> Event {
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: run_id.into(),
+            from: AgentRunPhase::Running,
+            to,
+            reason: None,
+        })
+    }
+
+    #[test]
+    fn wall_time_accumulates_between_run_start_and_terminal_state() {
+        let mut overlay = TelemetryOverlay::new();
+        let start = Instant::now();
+        overlay.apply_event_at(&agent_run_started("run-1"), start);
+        overlay.apply_event_at(
+            &agent_run_finished("run-1", AgentRunPhase::Done),
+            start + Duration::from_secs(90),
+        );
+
+        let metrics = overlay.thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120));
+        assert_eq!(metrics.wall_time, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn wall_time_includes_in_flight_runs() {
+        let mut overlay = TelemetryOverlay::new();
+        let start = Instant::now();
+        overlay.apply_event_at(&agent_run_started("run-1"), start);
+        overlay.apply_event_at(
+            &agent_run_finished("run-1", AgentRunPhase::Error),
+            start + Duration::from_secs(30),
+        );
+        overlay.apply_event_at(&agent_run_started("run-2"), start + Duration::from_secs(40));
+
+        let metrics = overlay.thread_metrics_at(
+            &["run-1".to_owned(), "run-2".to_owned()],
+            start + Duration::from_secs(100),
+        );
+        assert_eq!(metrics.wall_time, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn thread_metrics_aggregates_cache_hit_rate_across_runs() {
+        let mut overlay = TelemetryOverlay::new();
+        overlay.apply_event(&request_completed(Some("run-1"), 100, 10));
+        overlay.apply_event(&request_completed(Some("run-2"), 100, 10));
+
+        let metrics = overlay.thread_metrics(&["run-1".to_owned(), "run-2".to_owned()]);
+        let rate = metrics.cache_hit_rate.expect("cache hit rate");
+        assert!((rate - (6.0 / 214.0 * 100.0)).abs() < 0.01);
+        assert!(metrics.cost.is_none());
+    }
+
+    #[test]
+    fn thread_metrics_empty_for_unknown_runs() {
+        let overlay = TelemetryOverlay::new();
+        let metrics = overlay.thread_metrics(&["missing".to_owned()]);
+        assert_eq!(metrics, ThreadMetrics::default());
     }
 }

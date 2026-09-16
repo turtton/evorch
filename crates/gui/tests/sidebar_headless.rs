@@ -389,3 +389,76 @@ fn sidebar_rows_are_single_line_dense_rows() {
         "Running must share the title line: title={title:?}, running={running:?}"
     );
 }
+
+#[test]
+fn thread_row_shows_cost_and_cache_metrics() {
+    // Given: a thread whose run billed usage against a provider with known pricing
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        temp.path().join("evorch.toml"),
+        r#"
+[providers.local]
+type = "openai-compatible"
+base_url = "https://example.invalid/v1"
+api_key_env = "TEST_KEY"
+default_model = "base"
+models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }]
+"#,
+    )
+    .expect("fixture config");
+    let config = config::Config::load(&config::LoadOptions {
+        project_dir: Some(temp.path().into()),
+        read_env: false,
+        ..Default::default()
+    })
+    .expect("config loads");
+    let mut sidebar = sidebar_with_project(temp.path());
+    sidebar
+        .create_thread(
+            workspace_ui::ThreadId::new("thread-1"),
+            ProjectId::new("demo"),
+            "thread-1",
+        )
+        .expect("thread can be created");
+    sidebar.threads[0].run_ids.push("run-1".into());
+    let workbench = state(MockSource::default(), sidebar).with_provider_settings(
+        gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&config),
+    );
+    let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
+    harness.run();
+
+    // When: the run bills tokens and finishes
+    harness.state_mut().apply_events([
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-1".into(),
+            parent_run_id: None,
+            agent_name: "worker".into(),
+            role: "worker".into(),
+        }),
+        Event::new(event_bus::ProviderEvent::RequestCompleted {
+            request_id: "request-1".into(),
+            provider: "local".into(),
+            profile: None,
+            protocol: "openai-completions".into(),
+            model: "base".into(),
+            streaming: true,
+            duration_ms: 10,
+            input_tokens: 500_000,
+            output_tokens: 250_000,
+            cache_read_tokens: 100_000,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-1".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Done,
+            reason: None,
+        }),
+    ]);
+    harness.run();
+
+    // Then: the thread row exposes estimated cost and cache hit rate
+    assert!(harness.has_label("$1.000 · cache 17%"), "metrics line label");
+}
