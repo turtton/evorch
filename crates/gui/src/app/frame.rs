@@ -20,6 +20,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_input(&ctx);
         if !self.theme_installed {
             crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
@@ -36,7 +37,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.diff.poll();
         self.drain_pty(&ctx);
-        self.handle_input(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
         if self.provider_settings.catalog.poll() {
@@ -265,6 +265,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         if let Some(action) = ctx.input(|input| self.keymap.action_for_input(input)) {
+            if action == KeyAction::CycleAgentRole {
+                let tab = ctx.input_mut(|input| {
+                    let reverse = input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) || reverse
+                });
+                if tab {
+                    // egui queues traversal in begin_pass, before widgets consume events.
+                    ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+                }
+            }
             self.dispatch(action, ctx);
         }
     }
@@ -283,6 +293,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             KeyAction::SaveLayout => self.save_layout(),
             KeyAction::ResetLayout => self.reset_layout(ctx),
+            KeyAction::CycleAgentRole => self.composer.toggle_role(),
         }
     }
 

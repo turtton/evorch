@@ -8,6 +8,43 @@ use crate::{SettingsError, Workspace};
 
 pub const UI_SETTINGS_VERSION: u32 = 1;
 
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    #[test]
+    fn cycle_role_defaults_to_tab_and_parses_from_config() {
+        // Given: the default settings and an explicit role binding.
+        let source = "[keybinds.bindings]\ncycle_agent_role = 'Tab'";
+        // When: deserialize the new action.
+        let settings: UiSettings = toml::from_str(source).expect("role config");
+        // Then: both use the unmodified Tab chord.
+        let expected: KeyChord = "Tab".parse().expect("Tab chord");
+        assert_eq!(
+            settings.keybinds.bindings[&KeyAction::CycleAgentRole],
+            expected
+        );
+        assert_eq!(
+            KeybindSettings::default().bindings[&KeyAction::CycleAgentRole],
+            expected
+        );
+    }
+
+    #[test]
+    fn old_config_without_role_binding_still_loads() {
+        // Given: a pre-role config with a customized binding.
+        let source = "version = 1\n[keybinds.bindings]\nsave_layout = 'Alt+S'";
+        // When: loading the old schema.
+        let settings: UiSettings = toml::from_str(source).expect("old config");
+        // Then: existing bindings are preserved without a version migration.
+        assert_eq!(settings.version, UI_SETTINGS_VERSION);
+        assert_eq!(
+            settings.keybinds.bindings[&KeyAction::SaveLayout].to_string(),
+            "Alt+S"
+        );
+    }
+}
+
 /// Framework 非依存の UI テーマプリセット名。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +94,7 @@ pub enum KeyAction {
     FocusTasksPane,
     SaveLayout,
     ResetLayout,
+    CycleAgentRole,
 }
 
 /// Workspace 保存要求として event bus の payload に利用するイベント。
@@ -145,6 +183,15 @@ pub struct KeybindSettings {
 impl Default for KeybindSettings {
     fn default() -> Self {
         let bindings = [
+            (
+                KeyAction::CycleAgentRole,
+                KeyChord {
+                    ctrl: false,
+                    shift: false,
+                    alt: false,
+                    key: "Tab".to_owned(),
+                },
+            ),
             (
                 KeyAction::FocusAgentPane,
                 KeyChord {

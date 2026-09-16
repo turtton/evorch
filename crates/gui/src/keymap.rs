@@ -24,6 +24,7 @@ pub fn panel_keybinds(
             "focus_tasks_pane" => KeyAction::FocusTasksPane,
             "save_layout" => KeyAction::SaveLayout,
             "reset_layout" => KeyAction::ResetLayout,
+            "cycle_agent_role" => KeyAction::CycleAgentRole,
             _ => return Err(PanelKeybindError::Action(name.clone())),
         };
         let chord: workspace_ui::KeyChord = value
@@ -77,8 +78,13 @@ impl Keymap {
     pub fn action_for_input(&self, input: &egui::InputState) -> Option<KeyAction> {
         for (action, resolved) in &self.bindings {
             if input.key_pressed(resolved.key)
-                && input.modifiers.command == resolved.ctrl
-                && input.modifiers.shift == resolved.shift
+                && (input.modifiers.command || input.modifiers.ctrl) == resolved.ctrl
+                && (input.modifiers.shift == resolved.shift
+                    || (*action == KeyAction::CycleAgentRole
+                        && resolved.key == egui::Key::Tab
+                        && !resolved.ctrl
+                        && !resolved.alt
+                        && !resolved.shift))
                 && input.modifiers.alt == resolved.alt
             {
                 return Some(*action);

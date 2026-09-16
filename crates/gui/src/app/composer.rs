@@ -1,6 +1,6 @@
 use super::WorkbenchState;
 use crate::model::commands::{ChatSubmission, WorkbenchCommand};
-use crate::model::composer::{ComposerInput, ProviderStatus, parse_input};
+use crate::model::composer::{ComposerInput, ProviderStatus};
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
 
@@ -49,7 +49,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let parsed = if raw.trim().is_empty() && !self.composer.attachments.is_empty() {
             ComposerInput::Chat("")
         } else {
-            parse_input(&raw)
+            self.composer.parse_submission(&raw)
         };
         if !matches!(parsed, ComposerInput::Chat(_)) && !self.thread_writable() {
             self.push_notice("Read-only attach: explicitly Start or Claim before sending.");

@@ -59,6 +59,8 @@ pub fn composer_strip(
                 action = Some(ComposerAction::ModelPreference(preference));
             }
             images::render(ui, model);
+            ui.label(egui::RichText::new(format!("送信先: {}  (Tab で切替)", model.role.label()))
+                .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
                 let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();

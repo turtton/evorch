@@ -191,6 +191,7 @@ fn default_keybinds_cover_every_action() {
         KeyAction::FocusTasksPane,
         KeyAction::SaveLayout,
         KeyAction::ResetLayout,
+        KeyAction::CycleAgentRole,
     ];
 
     // Then: every action has exactly one binding.

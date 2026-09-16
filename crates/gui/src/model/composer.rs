@@ -1,5 +1,8 @@
 #[path = "external_slash.rs"]
 mod external_slash;
+#[path = "composer_role.rs"]
+mod role;
+pub use role::ComposerRole;
 
 pub struct SlashCommandSpec {
     pub name: &'static str,
@@ -64,6 +67,12 @@ impl SlashCommandRegistry {
     }
 }
 
+const GOAL_COMMAND: SlashCommandSpec = SlashCommandSpec {
+    name: "goal",
+    description: "Submit a goal to the orchestrator loop",
+    argument_hint: Some("<text>"),
+};
+
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "team",
@@ -80,11 +89,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Restore the next workspace snapshot",
         argument_hint: None,
     },
-    SlashCommandSpec {
-        name: "goal",
-        description: "Submit a goal to the orchestrator loop",
-        argument_hint: Some("<text>"),
-    },
+    GOAL_COMMAND,
     SlashCommandSpec {
         name: "help",
         description: "Show available commands",
@@ -204,6 +209,7 @@ impl Default for ProviderStatus {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
+    pub role: ComposerRole,
     pub registry: SlashCommandRegistry,
     pub input: String,
     pub completions_dismissed_for: Option<String>,
