@@ -52,6 +52,19 @@ impl AgentModel for SwitchableModel {
             .await
     }
 
+    async fn complete_streaming(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &event_bus::EventBus,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.current()
+            .complete_streaming(invocation, role, messages, tools, bus)
+            .await
+    }
+
     fn selected_model(&self, role: Role, category: Option<&str>) -> String {
         self.current().selected_model(role, category)
     }

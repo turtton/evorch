@@ -32,7 +32,6 @@ use sandbox::credential::FileCredentialStore;
 /// the actual request flag. No sleeps or scheduler-dependent timing assertions
 /// are needed to distinguish real streaming from the deferred fallback.
 #[tokio::test]
-#[ignore = "repro for streaming gap; fixed in follow-up"]
 async fn streaming_preserves_provider_deltas_when_routed_model_is_switchable() {
     // Given: the same configured provider, response and bus for both model paths.
     let directory = tempfile::tempdir().expect("project");
