@@ -2,7 +2,9 @@ mod support;
 
 use std::sync::Arc;
 
-use event_bus::{AgentMessage, AgentMessageKind, EventBus, GateRejection, OrchestratorEvent};
+use event_bus::{
+    AgentMessage, AgentMessageKind, EventBus, EventKind, GateRejection, OrchestratorEvent,
+};
 use providers::FinishReason;
 use runtime::orchestration::delivery::FixtureDeliveryAdapter;
 use runtime::orchestration::ledger::{GoalLedger, OrchestrationSettings};
@@ -38,7 +40,37 @@ async fn recover_starts_new_run_with_snapshot_and_transcript_context() {
             rejections: vec![GateRejection::NoDeliverableBranch],
         })
         .expect("rejection applies");
+    for event in [
+        OrchestratorEvent::TaskProgressed {
+            task_id: "task-recover".into(),
+            run_id: old_run.to_string(),
+            progress: serde_json::json!({"step": 7}),
+            reason: "saved".into(),
+        },
+        OrchestratorEvent::TaskCheckpoint {
+            task_id: "task-recover".into(),
+            run_id: old_run.to_string(),
+            tool_call_count: 50,
+            cumulative_input_tokens: 1000,
+            cumulative_output_tokens: 200,
+            elapsed_ms: 500,
+        },
+        OrchestratorEvent::TaskRetryScheduled {
+            task_id: "task-recover".into(),
+            attempt: 1,
+            reason: "retry".into(),
+            new_run_id: "run-old-retry".into(),
+        },
+        OrchestratorEvent::TaskStaleMarked {
+            task_id: "task-recover".into(),
+            run_id: "run-old-retry".into(),
+            last_heartbeat_ns: 900,
+        },
+    ] {
+        ledger.apply(&event).expect("durable state applies");
+    }
     let snapshot = ledger.snapshot().clone();
+    let expected = snapshot.clone();
     let transcript = vec![AgentMessage {
         message_id: "msg-last".into(),
         sender_run_id: old_run.to_string(),
@@ -66,9 +98,23 @@ async fn recover_starts_new_run_with_snapshot_and_transcript_context() {
     );
 
     // When: snapshot から recovery run を開始する
+    let mut events = handle.subscribe();
     let new_run = handle
         .recover(snapshot, transcript)
         .expect("recovery command accepted");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("supervisor event");
+            if matches!(
+                event.kind,
+                EventKind::Orchestrator(OrchestratorEvent::ContinuationDispatched { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("recovery attached");
     timeout(Duration::from_secs(2), runtime.wait(new_run))
         .await
         .expect("recovery run timeout")
@@ -93,4 +139,11 @@ async fn recover_starts_new_run_with_snapshot_and_transcript_context() {
     assert!(prompt.contains("NoDeliverableBranch"));
     assert!(!prompt.contains("tool snapshot"));
     assert_eq!(runtime.list_agents().len(), 1);
+    let recovered = handle.snapshot("goal-recover").expect("recovered snapshot");
+    assert_eq!(recovered.task_progress, expected.task_progress);
+    assert_eq!(recovered.task_checkpoints, expected.task_checkpoints);
+    assert_eq!(recovered.task_attempts, expected.task_attempts);
+    assert_eq!(recovered.task_retries, expected.task_retries);
+    assert_eq!(recovered.stale_marks, expected.stale_marks);
+    assert_eq!(recovered.task_runs, expected.task_runs);
 }

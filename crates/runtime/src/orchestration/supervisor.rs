@@ -818,7 +818,20 @@ impl SupervisorActor {
     }
 
     async fn on_external_orchestrator(&mut self, event: OrchestratorEvent) {
-        let Some(goal_id) = orchestrator_goal_id(&event).map(str::to_string) else {
+        let goal_id = {
+            let ledgers = self
+                .ledgers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut owners = ledgers
+                .iter()
+                .filter(|(_, ledger)| ledger.owns_event(&event));
+            match (owners.next(), owners.next()) {
+                (Some((goal_id, _)), None) => Some(goal_id.clone()),
+                (None, _) | (Some(_), Some(_)) => None,
+            }
+        };
+        let Some(goal_id) = goal_id else {
             return;
         };
         if !self.event_is_applied(&goal_id, &event)
@@ -1623,6 +1636,51 @@ impl SupervisorActor {
         };
         match event {
             OrchestratorEvent::GoalCreated { .. } => true,
+            OrchestratorEvent::TaskProgressed {
+                task_id,
+                run_id,
+                progress,
+                ..
+            } => {
+                snapshot.task_progress.get(task_id) == Some(progress)
+                    && snapshot.task_runs.get(task_id) == Some(run_id)
+            }
+            OrchestratorEvent::TaskCheckpoint {
+                task_id,
+                tool_call_count,
+                cumulative_input_tokens,
+                cumulative_output_tokens,
+                elapsed_ms,
+                ..
+            } => snapshot
+                .task_checkpoints
+                .get(task_id)
+                .is_some_and(|checkpoints| {
+                    checkpoints.contains(&(
+                        *tool_call_count,
+                        *cumulative_input_tokens,
+                        *cumulative_output_tokens,
+                        *elapsed_ms,
+                    ))
+                }),
+            OrchestratorEvent::TaskRetryScheduled {
+                task_id,
+                attempt,
+                reason,
+                new_run_id,
+            } => snapshot
+                .task_retries
+                .iter()
+                .any(|(task, number, why, run)| {
+                    task == task_id && number == attempt && why == reason && run == new_run_id
+                }),
+            OrchestratorEvent::TaskStaleMarked {
+                task_id,
+                run_id,
+                last_heartbeat_ns,
+            } => snapshot.stale_marks.iter().any(|(task, run, heartbeat)| {
+                task == task_id && run == run_id && heartbeat == last_heartbeat_ns
+            }),
             OrchestratorEvent::GoalStateChanged { to, .. } => snapshot.state == *to,
             OrchestratorEvent::GoalStageChanged { to, .. } => snapshot.stage == *to,
             OrchestratorEvent::RunAttached { run_id, .. } => snapshot
@@ -1653,30 +1711,5 @@ impl SupervisorActor {
             | OrchestratorEvent::CloseoutStepRecorded { .. }
             | OrchestratorEvent::ShellCommandDenied { .. } => false,
         }
-    }
-}
-
-fn orchestrator_goal_id(event: &OrchestratorEvent) -> Option<&str> {
-    match event {
-        OrchestratorEvent::GoalCreated { goal_id, .. }
-        | OrchestratorEvent::GoalStateChanged { goal_id, .. }
-        | OrchestratorEvent::GoalStageChanged { goal_id, .. }
-        | OrchestratorEvent::RunAttached { goal_id, .. }
-        | OrchestratorEvent::DeliverableBranchBound { goal_id, .. }
-        | OrchestratorEvent::EvidenceRecorded { goal_id, .. }
-        | OrchestratorEvent::FinishRejected { goal_id, .. }
-        | OrchestratorEvent::FinishAccepted { goal_id, .. }
-        | OrchestratorEvent::ContinuationDispatched { goal_id, .. }
-        | OrchestratorEvent::ContinuationSuppressed { goal_id, .. }
-        | OrchestratorEvent::ReviewRoundStarted { goal_id, .. }
-        | OrchestratorEvent::RepairDispatched { goal_id, .. }
-        | OrchestratorEvent::StallDetected { goal_id, .. }
-        | OrchestratorEvent::NudgeSent { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalRequested { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalResolved { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalInvalidated { goal_id, .. }
-        | OrchestratorEvent::MergeExecuted { goal_id, .. }
-        | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
-        OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
     }
 }

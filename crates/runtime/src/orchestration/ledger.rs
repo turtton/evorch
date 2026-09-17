@@ -11,6 +11,9 @@ use event_bus::{
 
 use super::gate::{CiEvidence, CriteriaEvidence, GateInputs, PullRequestEvidence, ReviewEvidence};
 
+mod durable;
+mod replay;
+
 /// 証跡 map のキー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EvidenceKind {
@@ -105,6 +108,18 @@ pub struct GoalSnapshot {
     pub detached: bool,
     /// goal に紐付いた run。
     pub attached_runs: Vec<AttachedRun>,
+    /// task ごとの最新進捗。
+    pub task_progress: BTreeMap<String, serde_json::Value>,
+    /// task ごとの累積予算計測履歴。
+    pub task_checkpoints: BTreeMap<String, Vec<(u32, u64, u64, u64)>>,
+    /// task ごとの再試行番号。
+    pub task_attempts: BTreeMap<String, u32>,
+    /// task、再試行番号、理由、新 run の履歴。
+    pub task_retries: Vec<(String, u32, String, String)>,
+    /// task、stale run、最終 heartbeat の履歴。
+    pub stale_marks: Vec<(String, String, u64)>,
+    /// task の最新 run。goal ID を持たないイベントの所属解決に使う。
+    pub task_runs: BTreeMap<String, String>,
     /// デリバラブルブランチ。
     pub deliverable_branch: Option<String>,
     /// ブランチを作成した run ID。
@@ -197,6 +212,9 @@ impl From<&OrchestrationConfig> for OrchestrationSettings {
 /// ledger への不正なイベント適用。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerError {
+    /// イベントの所属 goal/run/task を解決できない。
+    #[error("event has no unique ledger owner: {0}")]
+    UnresolvedEvent(String),
     /// イベントの goal ID が ledger と一致しない。
     #[error("event goal {actual} does not match ledger goal {expected}")]
     GoalMismatch {
@@ -301,6 +319,12 @@ impl GoalLedger {
                     role: "orchestrator".to_string(),
                     purpose: RunPurpose::Root,
                 }],
+                task_progress: BTreeMap::new(),
+                task_checkpoints: BTreeMap::new(),
+                task_attempts: BTreeMap::new(),
+                task_retries: Vec::new(),
+                stale_marks: Vec::new(),
+                task_runs: BTreeMap::new(),
                 deliverable_branch: None,
                 deliverable_run_id: None,
                 evidence: BTreeMap::new(),
@@ -340,6 +364,10 @@ impl GoalLedger {
             self.ensure_goal(goal_id)?;
         }
         match event {
+            OrchestratorEvent::TaskProgressed { .. }
+            | OrchestratorEvent::TaskCheckpoint { .. }
+            | OrchestratorEvent::TaskRetryScheduled { .. }
+            | OrchestratorEvent::TaskStaleMarked { .. } => self.apply_task(event),
             OrchestratorEvent::GoalCreated { .. } => Err(LedgerError::DuplicateCreation),
             OrchestratorEvent::GoalStateChanged { from, to, .. } => {
                 if self.snapshot.state != *from {
@@ -583,26 +611,6 @@ impl GoalLedger {
         })
     }
 
-    /// 複数 goal のイベント列を goal ID ごとの ledger へ replay する。
-    pub fn replay<'a>(
-        events: impl Iterator<Item = &'a OrchestratorEvent>,
-    ) -> BTreeMap<String, GoalLedger> {
-        let mut ledgers = BTreeMap::new();
-        for event in events {
-            if let OrchestratorEvent::GoalCreated { goal_id, .. } = event {
-                ledgers.insert(goal_id.clone(), Self::new(event));
-                continue;
-            }
-            let Some(goal_id) = event_goal_id(event) else {
-                continue;
-            };
-            if let Some(ledger) = ledgers.get_mut(goal_id) {
-                let _ = ledger.apply(event);
-            }
-        }
-        ledgers
-    }
-
     /// 現在の ledger から finish gate 入力を借用して構築する。
     pub fn gate_inputs<'a>(
         &'a self,
@@ -701,7 +709,7 @@ fn evidence_kind(evidence: &GateEvidence) -> EvidenceKind {
     }
 }
 
-fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
+pub(super) fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
     match event {
         OrchestratorEvent::GoalCreated { goal_id, .. }
         | OrchestratorEvent::GoalStateChanged { goal_id, .. }
@@ -723,5 +731,9 @@ fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::MergeExecuted { goal_id, .. }
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
         OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
+        OrchestratorEvent::TaskProgressed { .. }
+        | OrchestratorEvent::TaskCheckpoint { .. }
+        | OrchestratorEvent::TaskRetryScheduled { .. }
+        | OrchestratorEvent::TaskStaleMarked { .. } => None,
     }
 }

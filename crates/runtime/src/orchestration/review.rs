@@ -201,6 +201,7 @@ pub fn parse_review_result(text: &str) -> Result<ReviewResult, ParseError> {
                 id: check.id,
                 status: check.status.into(),
                 note: check.note,
+                evidence: None,
             })
             .collect(),
     })
