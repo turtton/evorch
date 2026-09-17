@@ -3,6 +3,50 @@ use event_bus::otel::span::{
 };
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventKind};
 
+#[test]
+fn diagnostic_event_carries_budget_and_provider_codes() {
+    // Given: the shared codes and their persisted wire spellings.
+    for (code, wire_code) in [
+        (
+            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED,
+            "BudgetExhausted",
+        ),
+        (
+            event_bus::event::diagnostic_codes::NO_PROGRESS,
+            "NoProgress",
+        ),
+        (
+            event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE,
+            "ProviderUnavailable",
+        ),
+    ] {
+        let diagnostic = DiagnosticEvent {
+            source: "supervisor".into(),
+            severity: DiagnosticSeverity::Warning,
+            code: code.into(),
+            detail: "execution suspended".into(),
+            run_id: Some("run-1".into()),
+            thread_id: Some("thread-1".into()),
+            call_id: None,
+        };
+        // When: crossing JSON both directly and through EventKind conversion.
+        let json = serde_json::to_value(&diagnostic).expect("serialize diagnostic");
+        let restored: DiagnosticEvent =
+            serde_json::from_value(json.clone()).expect("deserialize diagnostic");
+        let kind = EventKind::from(diagnostic.clone());
+        let tagged_json = serde_json::to_value(&kind).expect("serialize EventKind");
+        let restored_kind: EventKind =
+            serde_json::from_value(tagged_json.clone()).expect("deserialize EventKind");
+        // Then: the code and complete diagnostic payload survive both boundaries.
+        assert_eq!(json["code"], wire_code);
+        assert_eq!(restored.code, code);
+        assert_eq!(restored, diagnostic);
+        assert_eq!(tagged_json["kind"], "Diagnostic");
+        assert_eq!(tagged_json["payload"]["code"], code);
+        assert_eq!(restored_kind, EventKind::Diagnostic(diagnostic));
+    }
+}
+
 fn diagnostic(severity: DiagnosticSeverity) -> Event {
     Event::new(DiagnosticEvent {
         source: "process_owner".into(),

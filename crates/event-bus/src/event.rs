@@ -151,6 +151,16 @@ pub struct DiagnosticEvent {
     pub call_id: Option<String>,
 }
 
+/// Stable diagnostic codes shared by execution producers and consumers.
+pub mod diagnostic_codes {
+    /// Execution stopped because its budget was exhausted.
+    pub const BUDGET_EXHAUSTED: &str = "BudgetExhausted";
+    /// Execution stopped making progress.
+    pub const NO_PROGRESS: &str = "NoProgress";
+    /// No verified provider is available for execution.
+    pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
+}
+
 impl From<DiagnosticEvent> for EventKind {
     fn from(event: DiagnosticEvent) -> Self {
         Self::Diagnostic(event)
