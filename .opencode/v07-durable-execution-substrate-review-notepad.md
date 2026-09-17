@@ -17,6 +17,11 @@
 - Full workspace gates after repairs.
 - Re-review verdict and any remaining notes before PR creation.
 
+## Re-review 1
+- Blockers resolved: durable state, budget circuit breaker, provider admission, typed reviewer evidence.
+- Remaining blocker: GUI `demo_loop` fixture returns legacy approval without complete evidence, so the strengthened gate correctly requests repair and the scripted demo times out.
+- Required next repair: update `crates/gui/src/model/demo.rs` reviewer fixture to submit typed complete evidence and rerun workspace locked tests.
+
 ## Blocker #3 minimal retry — RED not reproducible
 
 - Inspected only review.rs, supervisor finish_review, and review_loop.rs.
@@ -101,3 +106,10 @@
 - `cargo check -p runtime -p providers -p gui --all-targets` and matching clippy `-- -D warnings`: pass. All 12 touched Rust paths: LSP clean and scoped rustfmt check pass.
 - Wider gates: runtime background 2 failures are fixed-model event-count assertions; GUI demo_loop fails on missing review evidence and demo repair shell argument splitting. Package fmt reported concurrent review_loop formatting. These are outside this repair; budget tracker/review transport were not edited.
 - Detailed evidence: `.omo/notepads/v07-durable-execution-substrate/reviewer-gate-provider-admission.md`. Shared oversized runtime/compose hosts receive seam wiring only; new admission module is 55 pure LOC. No push.
+
+## Demo reviewer fixture repair — 2026-09-18
+
+- RED first: `cargo test -p gui --test demo_loop demo_goal_reaches_awaiting_merge_then_complete_deterministically --locked` exited 101 after 21.01s. The demo timed out at `crates/gui/src/model/demo.rs:318` (`demo script gate timed out after 10s`); the collected events showed the reviewer recorded an approved criterion with `evidence: None`, then produced `request-update` and exhausted the scripted repair path before the goal reached completion.
+- Repair: the approval script now supplies complete evidence for `ac-1`: `cargo test --workspace --locked`, exit status `0`, the fixture's current 40-character HEAD_B SHA, non-empty `main...evorch/task/run-2` diff ref, artifact path, and RED evidence path. The test collector ignores volatile `TaskProgressed` events (timestamps and temporary worktree paths) when comparing the lifecycle sequence.
+- GREEN: `cargo test -p gui --test demo_loop --locked` exited 0: **1 passed, 0 failed** in 2.02s. Both deterministic runs reached `complete` and merge approval remained evidence-gated.
+- Requested gates: `cargo fmt --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` each exited 0. `cargo test --workspace --locked` exited 101 only at the pre-existing `runtime_wiring::live::production_non_demo_composition_uses_loaded_config_and_file_store` assertion (`left: 2`, `right: 1`); all other reported workspace tests, including `demo_loop`, passed.
