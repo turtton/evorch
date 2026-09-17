@@ -33,9 +33,11 @@ impl RoutedModel {
                                 Some(account) => {
                                     providers::list_codex_models(&key.0, &auth, &account)
                                         .await
-                                        .map(|_| ())
+                                        .map(|models| {
+                                            models.into_iter().map(|model| model.slug).collect()
+                                        })
                                 }
-                                None => providers::verify_connectivity(&key.0, &auth).await,
+                                None => providers::list_models(&key.0, &auth).await,
                             }
                             .map_err(|error| match error {
                                 ProviderError::Http { status, .. } => ProviderError::Http {
@@ -56,6 +58,101 @@ impl RoutedModel {
             .filter(|(_, result)| result.is_ok())
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    pub(super) async fn admit_candidates(
+        &self,
+        invocation: &crate::AgentInvocationContext,
+        role: agents::Role,
+    ) -> Result<(), crate::RuntimeError> {
+        self.verify_candidates().await;
+        let selected = match &invocation.model_preference {
+            Some(preference) => {
+                let provider = self.providers.get(&preference.profile).ok_or_else(|| {
+                    crate::RuntimeError::Model {
+                        reason: format!(
+                            "selected provider profile `{}` is not configured",
+                            preference.profile
+                        ),
+                    }
+                })?;
+                routing::ResolvedRoute {
+                    profile: preference.profile.clone(),
+                    model_id: preference
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| provider.profile.default_model.clone()),
+                }
+            }
+            None => {
+                let binding = self
+                    .agents
+                    .binding_for(super::role_key(role), invocation.category.as_deref())
+                    .map_err(super::model_error)?;
+                self.resolve(
+                    &invocation.run_id,
+                    &model::LogicalModelId::from(binding.logical_model),
+                    false,
+                )?
+            }
+        };
+        self.verify_route(&selected, invocation)?;
+        for route in &self.admission_routes {
+            self.verify_route(route, invocation)?;
+        }
+        Ok(())
+    }
+
+    fn verify_route(
+        &self,
+        route: &routing::ResolvedRoute,
+        invocation: &crate::AgentInvocationContext,
+    ) -> Result<(), crate::RuntimeError> {
+        let (base, _) = config::types::provider::parse_model_speed(&route.model_id);
+        if let Some(provider) = self.providers.get(&route.profile)
+            && !provider.profile.models.is_empty()
+            && !provider.profile.models.contains(&route.model_id)
+        {
+            return Err(crate::RuntimeError::Model {
+                reason: format!(
+                    "model `{}` is not listed for profile `{}`",
+                    route.model_id, route.profile
+                ),
+            });
+        }
+        let failure = match self
+            .verification
+            .get()
+            .and_then(|results| results.get(&route.profile))
+        {
+            Some(Ok(models)) if models.iter().any(|model| model == base) => return Ok(()),
+            Some(Ok(_)) => "model is not advertised by provider".to_owned(),
+            Some(Err(error)) => error.to_string(),
+            None => "profile was not verified".to_owned(),
+        };
+        let detail = format!(
+            "profile={} model={}: {failure}",
+            route.profile, route.model_id
+        );
+        let detail = match self.providers.get(&route.profile) {
+            Some(provider) if !provider.auth.api_key.is_empty() => {
+                detail.replace(&provider.auth.api_key, "***")
+            }
+            Some(_) | None => detail,
+        };
+        let detail: String = detail.chars().take(500).collect();
+        if let Some(bus) = &self.event_bus {
+            bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                source: "runtime::compose".into(),
+                severity: event_bus::DiagnosticSeverity::Error,
+                code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
+                detail: detail.clone(),
+                run_id: Some(invocation.run_id.clone()),
+                thread_id: None,
+                call_id: None,
+            }));
+        }
+        Err(crate::RuntimeError::Model { reason: detail })
     }
 
     fn verification_auth(

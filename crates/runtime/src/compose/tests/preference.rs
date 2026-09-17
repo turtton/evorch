@@ -17,8 +17,8 @@ fn fixture() -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
         },
     );
     model.verification = tokio::sync::OnceCell::new_with(Some(BTreeMap::from([
-        ("local".into(), Ok(())),
-        ("profile-b".into(), Ok(())),
+        ("local".into(), Ok(Vec::new())),
+        ("profile-b".into(), Ok(Vec::new())),
     ])));
     (model, requests)
 }

@@ -140,7 +140,10 @@ fn routed_model(
     );
     model
         .verification
-        .set(BTreeMap::from([("local".into(), Ok(()))]))
+        .set(BTreeMap::from([(
+            "local".into(),
+            Ok(model.providers["local"].profile.models.clone()),
+        )]))
         .unwrap();
     (model, requests)
 }

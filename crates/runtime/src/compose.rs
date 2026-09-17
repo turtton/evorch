@@ -164,7 +164,9 @@ pub struct RoutedModel {
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
     agents: config::AgentsConfig,
-    verification: tokio::sync::OnceCell<BTreeMap<String, Result<(), providers::ProviderError>>>,
+    admission_routes: Vec<routing::ResolvedRoute>,
+    verification:
+        tokio::sync::OnceCell<BTreeMap<String, Result<Vec<String>, providers::ProviderError>>>,
     event_bus: Option<Arc<EventBus>>,
     credential_store: Option<Arc<dyn CredentialStore>>,
 }
@@ -193,6 +195,7 @@ impl RoutedModel {
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
+            admission_routes: Vec::new(),
             verification: tokio::sync::OnceCell::new(),
             event_bus: None,
             credential_store: None,
@@ -378,6 +381,18 @@ impl RoutedModel {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn requires_admission(&self) -> bool {
+        true
+    }
+
+    async fn admit(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<(), RuntimeError> {
+        self.admit_candidates(invocation, role).await
+    }
+
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,
@@ -471,6 +486,22 @@ pub fn compose_routed_model(
         other => CompositionError::Routing(other),
     })?;
     let mut model = RoutedModel::new(composed, config.agents.clone());
+    model.admission_routes = config
+        .routing
+        .routes
+        .values()
+        .flatten()
+        .filter_map(|candidate| {
+            let provider = model.providers.get(&candidate.profile)?;
+            Some(routing::ResolvedRoute {
+                profile: candidate.profile.clone(),
+                model_id: candidate
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| provider.profile.default_model.clone()),
+            })
+        })
+        .collect();
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);
     Ok(Arc::new(model))

@@ -40,6 +40,18 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn requires_admission(&self) -> bool {
+        self.current().requires_admission()
+    }
+
+    async fn admit(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<(), RuntimeError> {
+        self.current().admit(invocation, role).await
+    }
+
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,
@@ -78,6 +90,20 @@ pub struct UnconfiguredModel;
 
 #[async_trait]
 impl AgentModel for UnconfiguredModel {
+    fn requires_admission(&self) -> bool {
+        true
+    }
+
+    async fn admit(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Model {
+            reason: "no provider configured — open Settings".into(),
+        })
+    }
+
     async fn complete(
         &self,
         _invocation: &AgentInvocationContext,
