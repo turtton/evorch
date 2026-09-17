@@ -173,3 +173,64 @@
   receive errors/timeouts fail loudly. No added unwrap, allow, casts, unsafe,
   dependencies, production logging, or changes to shared test support. Temporary
   event prints and debug journal were removed. No push.
+
+## Full workspace compatibility closeout — 2026-09-18
+
+Initial HEAD: 653de64. First command was
+`cargo test --workspace --locked --no-fail-fast`; it completed with exactly
+8 failed runtime targets / 14 failed tests. Full RED output:
+`/home/turtton/.local/share/opencode/tool-output/tool_0b1b6d9e8001W5zTsfzssRDLCx`.
+
+### Complete initial failure matrix
+
+All rows are branch-induced compatibility failures and now PASS. No failure was
+exempted as pre-existing. Compared `13d8a04..HEAD` source changes: budget/durable
+publications and verification/admission are new; reviewer gained submit_review.
+A clean merge-base execution was not needed to excuse any failure because none
+was left unresolved. Production code was not changed in this repair.
+
+| Target | Failed test | Cause / direct repair | Final target result |
+| --- | --- | --- | --- |
+| capability_enforcement | worker_edit_emits_started_and_completed | TaskProgressed fills fixed event window; reuse drain_events | 11/11 |
+| state_transitions | run_emits_pending_running_done_in_order | Only four lifecycle entries within old window; drain before checking unchanged ordering | 5/5 |
+| catalog_unknown_tools | tools_reach_wire_when_preferred_model_is_absent_from_catalog | Old server consumes completion fixture for catalog GET; use shared mock with advertised custom model | 1/1 |
+| provider_composition_e2e | preferred_unknown_model_preserves_tools_on_the_wire | Catalog GET counted as completion; filter endpoint, retain model/tool assertions | 3/3 |
+| provider_composition_e2e | configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end | gpt-4o not advertised; advertise configured model, retain four completion assertions | 3/3 |
+| streaming_mock_e2e | streaming_deltas_reach_bus_before_completion | GET has stream=false; assert exactly one streaming completion | 3/3 |
+| streaming_mock_e2e | worker_run_with_tool_call_completes_over_mock | Missing advertisement; fix catalog fixture and retain two completions/history/disk/events | 3/3 |
+| streaming_mock_e2e | unscripted_request_fails_run_not_hangs | Admission rejects before intended HTTP failure; advertise model, assert actual completion attempted and Error | 3/3 |
+| streaming_switchable_model | streaming_preserves_provider_deltas_when_routed_model_is_switchable | Catalog GET adds false to stream flags; retain exactly four streaming completions and per-role deltas | 1/1 |
+| team_e2e | three_team_workers_are_faster_than_serial_over_mock_openai | Missing advertisement plus async admission changes registration order; wait for first three registrations before fourth worker capacity assertion | 4/4 |
+| team_e2e | worker_claims_appends_finding_and_completes_over_mock_openai | Missing advertisement; catalog fixture update | 4/4 |
+| team_e2e | abandoned_claim_expires_and_notifies_waiting_coordinator | Inspect before admission returns UnknownRun; observe registered Waiting agent; exclude catalog GET from message search | 4/4 |
+| team_e2e | team_requires_explicit_delegation_value | Catalog verification precedes team rejection; require exactly one GET and zero completions, retain Error for both invalid values | 4/4 |
+| prompt_assembly_golden | orchestrator_full_prompt_matches_golden_fixture | Reviewer adds submit_review; replace prose equality with exact parsed reviewer tool-set contract, renamed orchestrator_prompt_exposes_typed_reviewer_tools | 2/2 |
+
+Intermediate RED after catalog repairs: team capacity test observed Done instead
+of Error for the designated fourth worker. After waiting for the first three
+registrations, team 4/4 passed; measured parallel=252.003502ms vs serial=754.102805ms.
+Capacity rejection, parallel speed comparison, findings, lease expiry and explicit
+delegation-value requirements all remain asserted.
+
+### Final gates
+
+- `cargo test --workspace --locked --no-fail-fast`: exit 0, all enabled tests and
+  doctests pass, no failed target. Existing ignored bwrap/live tests remain ignored;
+  no ignores were added. Full GREEN output:
+  `/home/turtton/.local/share/opencode/tool-output/tool_0b1be4786001sVGS7tQGanouoq`.
+- An earlier verification invocation hit the tool's 120-second command timeout
+  during tools/lsp_client (no completed failure result); repeated with 600-second
+  command timeout and completed, including all four lsp_client tests.
+- `cargo check --workspace --locked`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `cargo fmt --check`: exit 0; `git diff --check`: exit 0.
+- LSP: no diagnostics on all eight modified Rust test files.
+- Existing evidence/budget/provider rejection suites also pass in the workspace
+  run. No production gate, runtime behavior, dependency, ignore or lint allowance
+  changed. Real HTTP/SSE composition tests verify requests, output files, tools,
+  events and team execution through public runtime APIs.
+- Self-review: only fixture compatibility edits, shared mock reuse, exact tool-set
+  contract and existing event drain helper. No new unwrap or narrowing cast.
+  Existing oversized test harnesses were kept intact to avoid broad refactoring;
+  state_transitions remains in the 200–250-line warning band. No debugger or
+  temporary production instrumentation. Debug journal removed; no push.
