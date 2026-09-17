@@ -113,3 +113,18 @@
 - Repair: the approval script now supplies complete evidence for `ac-1`: `cargo test --workspace --locked`, exit status `0`, the fixture's current 40-character HEAD_B SHA, non-empty `main...evorch/task/run-2` diff ref, artifact path, and RED evidence path. The test collector ignores volatile `TaskProgressed` events (timestamps and temporary worktree paths) when comparing the lifecycle sequence.
 - GREEN: `cargo test -p gui --test demo_loop --locked` exited 0: **1 passed, 0 failed** in 2.02s. Both deterministic runs reached `complete` and merge approval remained evidence-gated.
 - Requested gates: `cargo fmt --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` each exited 0. `cargo test --workspace --locked` exited 101 only at the pre-existing `runtime_wiring::live::production_non_demo_composition_uses_loaded_config_and_file_store` assertion (`left: 2`, `right: 1`); all other reported workspace tests, including `demo_loop`, passed.
+
+## GUI runtime wiring fixture repair — RED — 2026-09-18
+
+- Exact test before editing: `cargo test -p gui --test runtime_wiring --test runtime_wiring live::production_non_demo_composition_uses_loaded_config_and_file_store`
+- Result: exit 101, 0 passed, 1 failed. `crates/gui/tests/runtime_wiring/live.rs:88` observed `left: 2`, expected `right: 1`; provider admission adds the `/v1/models` preflight alongside the completion request.
+
+- Repair: `crates/gui/tests/runtime_wiring/live.rs` now filters `RecordedRequest` values to
+  `/v1/chat/completions`, asserts exactly one completion request, and retains the authorization
+  and selected-model assertions against that request. No runtime or provider code changed.
+- GREEN: `cargo test -p gui --test runtime_wiring` exited 0: **3 passed, 0 failed**.
+- Requested gates: `cargo fmt --check`, `cargo check --workspace`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` each exited 0.
+- `cargo test --workspace --locked` exited 101 only in pre-existing
+  `crates/runtime/tests/background.rs`: `background_start_is_observable_before_wait_and_completion_is_success_only`
+  and `cancel_mid_model_turn_emits_cancelled_and_error` failed; the GUI runtime wiring tests passed.
