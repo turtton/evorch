@@ -91,7 +91,14 @@ async fn streaming_deltas_reach_bus_before_completion() {
             text: "first second".into()
         }]
     );
-    assert!(mock.recorded_requests()[0].stream);
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let completions: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert!(completions[0].stream);
 }
 
 fn load_config(root: &std::path::Path, base_url: &str) -> Config {
@@ -148,21 +155,25 @@ async fn worker_run_with_tool_call_completes_over_mock() {
     let directory = tempfile::tempdir().expect("project directory");
     let edited = directory.path().join("worker-output.txt");
     let path_chunk = format!("{{\"path\":{},", json!(edited));
-    let mock = StreamingMockOpenAi::spawn(vec![
-        ScriptedResponse::tool_call(
-            "chatcmpl-1",
-            MODEL,
-            0,
-            "call_1",
-            "edit",
-            [
-                path_chunk.as_str(),
-                "\"new_string\":\"written by ",
-                "streaming mock e2e\"}",
-            ],
-        ),
-        ScriptedResponse::text_stream("chatcmpl-2", MODEL, ["All ", "done."]),
-    ]);
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            ScriptedResponse::tool_call(
+                "chatcmpl-1",
+                MODEL,
+                0,
+                "call_1",
+                "edit",
+                [
+                    path_chunk.as_str(),
+                    "\"new_string\":\"written by ",
+                    "streaming mock e2e\"}",
+                ],
+            ),
+            ScriptedResponse::text_stream("chatcmpl-2", MODEL, ["All ", "done."]),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
     let config = load_config(directory.path(), &mock.base_url());
     let bus = Arc::new(EventBus::new(256));
     let mut receiver = bus.subscribe();
@@ -285,7 +296,12 @@ async fn worker_run_with_tool_call_completes_over_mock() {
     assert!(!message_deltas.is_empty());
     assert_eq!(message_deltas.concat(), "All done.");
 
-    let requests = mock.recorded_requests();
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
     assert_eq!(requests.len(), 2);
     let authorization = format!("Bearer {KEY}");
     for request in &requests {
@@ -310,7 +326,11 @@ async fn worker_run_with_tool_call_completes_over_mock() {
 async fn unscripted_request_fails_run_not_hangs() {
     // Given: a configured runtime whose mock has no scripted response.
     let directory = tempfile::tempdir().expect("project directory");
-    let mock = StreamingMockOpenAi::spawn(Vec::new());
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        Vec::new(),
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
     let config = load_config(directory.path(), &mock.base_url());
     let bus = Arc::new(EventBus::new(256));
     let composed = compose_runtime(composition(
@@ -333,5 +353,9 @@ async fn unscripted_request_fails_run_not_hangs() {
 
     // Then: Error is the runtime's terminal failure phase, not a wait error.
     assert_eq!(phase, Ok(AgentRunPhase::Error));
-    assert!(!mock.recorded_requests().is_empty());
+    assert!(
+        mock.recorded_requests()
+            .iter()
+            .any(|request| request.path == "/v1/chat/completions")
+    );
 }

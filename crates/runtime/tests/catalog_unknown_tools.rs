@@ -1,29 +1,26 @@
-mod support;
-
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use mock_openai::{ScriptedResponse, StreamingMockOpenAi, WriteMode};
 use model::{ApiProtocol, ModelCatalog, ProviderType};
 use providers::{ProviderAuth, ToolSpec, provider::openai_compatible::OpenAiCompatibleClient};
 use routing::{ComposedProvider, ComposedProviders, CredentialRef, ProviderProfile, Router};
 use runtime::{AgentInvocationContext, AgentModel, ModelPreference, Role, RoutedModel};
 use serde_json::json;
-use support::mock_openai::RecordingMockOpenAi;
 
 #[tokio::test]
 async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
     // Given: an unknown model explicitly selected on a tool-capable HTTP provider.
     let catalog = ModelCatalog::builtin();
     assert!(catalog.get("custom-tool-model").is_none());
-    let server = RecordingMockOpenAi::spawn(vec![
-        json!({
-            "choices": [{
-                "message": {"role": "assistant", "content": "done"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
-        })
-        .to_string(),
-    ]);
+    let server = StreamingMockOpenAi::spawn_with_models(
+        vec![ScriptedResponse::text_stream(
+            "reply",
+            "custom-tool-model",
+            ["done"],
+        )],
+        WriteMode::default(),
+        vec!["custom-tool-model".into()],
+    );
     let profile = ProviderProfile {
         name: "local".into(),
         provider_type: ProviderType::OpenAiCompatible,
@@ -82,7 +79,13 @@ async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
         .expect("completion succeeds");
 
     // Then: tools survive catalog uncertainty all the way to the HTTP body.
-    let requests = server.requests();
+    let recorded = server.recorded_requests();
+    assert_eq!(recorded[0].method, "GET");
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
     assert_eq!(requests.len(), 1);
     assert!(
         requests[0].body["tools"]
