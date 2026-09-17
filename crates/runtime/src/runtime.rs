@@ -50,6 +50,7 @@ pub struct AgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     admissions: admission::Admissions,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) learning_runs: LearningRunReceivers,
@@ -205,6 +206,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                reviewer_results: Mutex::new(HashMap::new()),
                 admissions: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
@@ -437,6 +439,7 @@ impl AgentRuntime {
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
+                reviewer_results: Mutex::new(HashMap::new()),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),

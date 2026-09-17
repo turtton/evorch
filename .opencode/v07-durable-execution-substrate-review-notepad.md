@@ -17,6 +17,16 @@
 - Full workspace gates after repairs.
 - Re-review verdict and any remaining notes before PR creation.
 
+## Blocker #3 minimal retry — RED not reproducible
+
+- Inspected only review.rs, supervisor finish_review, and review_loop.rs.
+- Current ReviewLoop already rejects an empty checklist and calls criterion_verified for each criterion; finish_review already obtains reviewer_result and passes it to parse_reviewer_output before the prose fallback.
+- Added two regression tests without editing production. Each command below passed (1 passed, 0 failed):
+  - `cargo test -p runtime --test review_loop approve_with_missing_evidence_requests_update -- --exact`
+  - `cargo test -p runtime --test review_loop approve_with_empty_checklist_requests_update -- --exact`
+  - `cargo test -p runtime --test review_loop supervisor_prefers_typed_tool_result_over_prose -- --exact` (existing T11-path test).
+- No RED evidence exists for these requested cases in the current worktree. Stopped rather than weakening assertions or reverting an existing fix to manufacture RED. No production edits, commit, or push. Two test additions remain uncommitted. Full evidence-validator semantics and remaining quality gates are not claimed verified by this minimal probe.
+
 ## Blocker #1 repair — 2026-09-18
 
 - Production path: a real `AgentRuntime` worker produces `validated patch`, then
@@ -81,3 +91,13 @@
   logging, or extra parameter. Invalid approval records RequestUpdate with the
   affected criterion IDs; empty checklist records its own concrete finding.
 - Existing supervisor/recovery and other staged edits are excluded; no push.
+
+## Blockers #2 provider admission / #4 title fixture — 2026-09-18
+
+- RED first: `cargo test -p runtime --test provider_admission` failed all 3 rejection tests with `failed admission registered a worker`. `cargo test -p gui --test auto_title_provider` failed on GET Content-Length and wrong title. Oversized-catalog RED also failed before bounding the response.
+- Registration boundary now waits for selected route and configured fallback model advertisement/connectivity verification before reserving worker slots, enqueueing tasks, inserting runs, or emitting runtime start events. Synchronous API returns a reserved ID; `wait` returns admission failure without a registered worker. Direct complete verification remains a compatibility path.
+- Catalog requests: ten-second timeout and 1 MiB body bound. Reused mock-openai `spawn_with_models`. GUI fixture serves `/v1/models`, then completion, asserting quick=fast and explicit=chosen titles.
+- GREEN: provider_admission 4, provider_verify 6, list_models_contract 5, codex_models_contract 6, auto_title_provider 1. Full providers tests pass with `--test-threads=1`; runtime library 366 pass. Actual runtime HTTP/SSE happy path returns `admitted` after catalog discovery.
+- `cargo check -p runtime -p providers -p gui --all-targets` and matching clippy `-- -D warnings`: pass. All 12 touched Rust paths: LSP clean and scoped rustfmt check pass.
+- Wider gates: runtime background 2 failures are fixed-model event-count assertions; GUI demo_loop fails on missing review evidence and demo repair shell argument splitting. Package fmt reported concurrent review_loop formatting. These are outside this repair; budget tracker/review transport were not edited.
+- Detailed evidence: `.omo/notepads/v07-durable-execution-substrate/reviewer-gate-provider-admission.md`. Shared oversized runtime/compose hosts receive seam wiring only; new admission module is 55 pure LOC. No push.

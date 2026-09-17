@@ -139,9 +139,11 @@ impl Role {
                 NetworkAccess::Denied,
                 false,
             ),
-            Role::Reviewer => {
-                RoleCapabilities::new(["read", "grep", "git_diff"], NetworkAccess::Denied, false)
-            }
+            Role::Reviewer => RoleCapabilities::new(
+                ["read", "grep", "git_diff", "submit_review"],
+                NetworkAccess::Denied,
+                false,
+            ),
             Role::Librarian => RoleCapabilities::new(
                 ["read", "grep", "web_search", "web_fetch"],
                 NetworkAccess::Allowed,

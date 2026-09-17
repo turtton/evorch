@@ -19,13 +19,11 @@ fn evidence() -> CriterionEvidence {
 }
 
 #[test]
-fn approval_requires_valid_evidence_with_at_least_one_reference() {
-    // Given: each evidence field is varied independently, including reference alternatives.
+fn approval_requires_complete_evidence_references() {
+    // Given: every evidence reference is required for an approval.
     let all = [Some("diff"), Some("log"), Some("red")];
     for (command, exit_status, sha, references, approved) in [
-        ("test", 0, HEAD_A, [Some("diff"), None, None], true),
-        ("test", 0, HEAD_A, [None, Some("artifact"), None], true),
-        ("test", 0, HEAD_A, [None, None, Some("red")], true),
+        ("test", 0, HEAD_A, all, true),
         ("", 0, HEAD_A, all, false),
         (" \t", 0, HEAD_A, all, false),
         ("test", 1, HEAD_A, all, false),

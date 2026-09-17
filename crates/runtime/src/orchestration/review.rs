@@ -91,6 +91,30 @@ pub struct ReviewLoop {
 }
 
 impl ReviewLoop {
+    /// Restores consumed rounds and the last repair findings from durable state.
+    pub const fn restore(
+        max_rounds: u32,
+        rounds_used: u32,
+        previous_findings: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            max_rounds,
+            rounds_used,
+            previous_findings,
+        }
+    }
+
+    pub(super) fn from_snapshot(max_rounds: u32, snapshot: &super::ledger::GoalSnapshot) -> Self {
+        let findings = snapshot
+            .review
+            .as_ref()
+            .and_then(|review| match &review.verdict {
+                ReviewVerdict::Approve => None,
+                ReviewVerdict::RequestUpdate { findings } => Some(findings.clone()),
+            });
+        Self::restore(max_rounds, snapshot.review_rounds, findings)
+    }
+
     /// 最大 round 数を指定して初期化する。
     pub const fn new(max_rounds: u32) -> Self {
         Self {
@@ -145,12 +169,15 @@ impl ReviewLoop {
                             &evidence.red_evidence,
                         ]
                         .into_iter()
-                        .any(|reference| reference.as_ref().is_some_and(|s| !s.trim().is_empty()))
+                        .all(|reference| reference.as_ref().is_some_and(|s| !s.trim().is_empty()))
                 }),
             })
             .map(|check| check.id.clone())
             .collect::<Vec<_>>();
         let verdict = match parsed.verdict {
+            _ if round > self.max_rounds => ReviewVerdict::RequestUpdate {
+                findings: vec!["review rounds exhausted".into()],
+            },
             ReviewVerdict::Approve if parsed.criteria.is_empty() => ReviewVerdict::RequestUpdate {
                 findings: vec!["acceptance criteria checklist is empty".into()],
             },
@@ -177,6 +204,13 @@ impl ReviewLoop {
             },
         };
 
+        if round > self.max_rounds {
+            return ReviewOutcome::Blocked {
+                round,
+                reason: "review rounds exhausted".into(),
+                evidence,
+            };
+        }
         match verdict {
             ReviewVerdict::Approve => ReviewOutcome::Approve { round, evidence },
             ReviewVerdict::RequestUpdate { findings } => {

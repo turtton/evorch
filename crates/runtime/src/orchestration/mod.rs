@@ -21,6 +21,7 @@ pub mod ledger;
 pub mod prompts;
 pub mod registry;
 pub mod review;
+mod reviewer_channel;
 pub mod shell_delivery;
 pub mod stall;
 pub mod supervisor;

@@ -99,10 +99,21 @@ async fn goal_runs_to_awaiting_merge_then_complete_with_one_request_update_round
     model
         .add_keyed(
             "[evorch review round=2",
-            [Ok(text_response(
-                "```json\n{\"verdict\":\"approve\",\"findings\":[],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"met\",\"note\":\"ok\"}]}\n```",
-                FinishReason::Stop,
-            ))],
+            [
+                Ok(tool_response("review-result", "submit_review", json!({
+                    "verdict": "approve", "criteria": [{
+                        "id": "ac-1", "status": "met", "note": "ok", "evidence": {
+                            "command": "cargo test", "exit_status": 0, "target_sha": HEAD_B,
+                            "diff_ref": "HEAD~1..HEAD", "artifact_path": "green.log",
+                            "red_evidence": "red.log"
+                        }
+                    }]
+                }))),
+                Ok(text_response(
+                    "```json\n{\"verdict\":\"request-update\",\"findings\":[\"contradictory prose\"]}\n```",
+                    FinishReason::Stop,
+                )),
+            ],
         )
         .await;
     model

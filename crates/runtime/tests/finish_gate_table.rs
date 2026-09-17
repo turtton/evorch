@@ -5,6 +5,9 @@ use evorch_runtime::orchestration::gate::{
 };
 use runtime as evorch_runtime;
 
+#[path = "support/review_gate_contract.rs"]
+mod review_gate_contract;
+
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OLD_HEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -44,7 +47,14 @@ impl Fixture {
                     id: "ac1".into(),
                     status: CriterionStatus::Met,
                     note: "verified".into(),
-                    evidence: None,
+                    evidence: Some(event_bus::orchestrator::CriterionEvidence {
+                        command: "cargo test".into(),
+                        exit_status: 0,
+                        target_sha: HEAD.into(),
+                        diff_ref: Some("base..head".into()),
+                        artifact_path: Some("green.log".into()),
+                        red_evidence: Some("red.log".into()),
+                    }),
                 }],
             }),
             review: Some(ReviewEvidence {

@@ -11,7 +11,6 @@ use event_bus::{
     GoalStage, GoalState, InvalidationReason, LifecycleEvent, OrchestratorEvent, ProviderEvent,
     RecvError, RunPurpose, SuppressReason, ToolEvent,
 };
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -27,7 +26,7 @@ use super::prompts::{
     render_continuation_prompt, render_recovery_prompt, render_repair_prompt, render_review_prompt,
 };
 use super::registry::GoalRegistry;
-use super::review::{ReviewLoop, ReviewOutcome, ReviewResult, parse_reviewer_output};
+use super::review::{ReviewLoop, ReviewOutcome, parse_reviewer_output};
 use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
@@ -489,15 +488,13 @@ impl SupervisorActor {
             let goal_id = snapshot.goal_id.clone();
             let active = snapshot.state == GoalState::Active;
             snapshot.detached = true;
+            let review_loop = ReviewLoop::from_snapshot(self.settings.max_review_rounds, &snapshot);
             self.transcripts.insert(goal_id.clone(), transcript);
             self.ledgers
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(goal_id.clone(), GoalLedger::from_snapshot(snapshot));
-            self.reviews.insert(
-                goal_id.clone(),
-                ReviewLoop::new(self.settings.max_review_rounds),
-            );
+            self.reviews.insert(goal_id.clone(), review_loop);
             if active {
                 let _ = self.transition(&goal_id, GoalState::Paused, "recovered-after-restart");
             }
@@ -567,9 +564,9 @@ impl SupervisorActor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(goal_id.clone(), GoalLedger::from_snapshot(snapshot.clone()));
         }
-        self.reviews
-            .entry(goal_id.clone())
-            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds));
+        self.reviews.entry(goal_id.clone()).or_insert_with(|| {
+            ReviewLoop::from_snapshot(self.settings.max_review_rounds, &snapshot)
+        });
         self.emit_for_goal(
             &goal_id,
             OrchestratorEvent::RunAttached {
@@ -1142,9 +1139,9 @@ impl SupervisorActor {
             .find_run(run_id)
             .and_then(|run| self.runtime.run_result(run).ok().flatten())
             .unwrap_or_default();
-        let typed = serde_json::from_str::<Value>(&result)
-            .ok()
-            .and_then(|value| serde_json::from_value::<ReviewResult>(value).ok());
+        let typed = self
+            .find_run(run_id)
+            .and_then(|run| self.runtime.reviewer_result(run));
         let review_loop = self
             .reviews
             .entry(goal_id.to_string())
