@@ -11,6 +11,8 @@ use crate::db::system_time_to_ns;
 use crate::entity::{SessionStatus, TaskStatus};
 use crate::repo::event::{self, StoredEvent};
 
+mod durable;
+
 /// イベントログを畳み込んだセッション復元状態です。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
@@ -256,6 +258,7 @@ pub(crate) fn reconcile(conn: &Connection) -> Result<ReconcileSummary, StorageEr
             params![id, value.session_id, value.status.as_str(), system_time_to_ns(value.first_seen)?, system_time_to_ns(value.last_seen)?],
         )?;
     }
+    durable::reconcile(&tx, &event::list_all_ordered(&tx)?)?;
     crate::task_queue::resolve(&tx)?;
     tx.commit()?;
     Ok(summary)

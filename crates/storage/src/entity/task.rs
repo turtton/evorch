@@ -1,7 +1,8 @@
 use std::time::SystemTime;
 
 /// タスクの永続化状態です。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending,
     Queued,
@@ -11,6 +12,18 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
+}
+
+/// TaskProgressed の再開可能な payload。attempts は現在の run generation です。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskContinuation {
+    pub status: TaskStatus,
+    pub input: Option<String>,
+    pub resume_cursor: Option<String>,
+    pub last_artifact: Option<String>,
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 string_enum!(TaskStatus {

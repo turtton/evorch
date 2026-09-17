@@ -13,6 +13,26 @@ pub enum ContinuationDecision {
     Suppress(SuppressReason),
 }
 
+pub fn decide_task(
+    task: &storage::entity::TaskContinuation,
+    max_attempts: u32,
+) -> ContinuationDecision {
+    use storage::entity::TaskStatus;
+    let reason = match task.status {
+        TaskStatus::Cancelled => Some(SuppressReason::Cancelled),
+        TaskStatus::Completed => Some(SuppressReason::Complete),
+        TaskStatus::Running | TaskStatus::Retrying => Some(SuppressReason::Duplicate),
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Blocked | TaskStatus::Failed => None,
+    };
+    if let Some(reason) = reason {
+        return ContinuationDecision::Suppress(reason);
+    }
+    if task.attempts >= max_attempts {
+        return ContinuationDecision::Suppress(SuppressReason::LimitReached { max: max_attempts });
+    }
+    ContinuationDecision::Dispatch
+}
+
 /// 現在の epoch を dispatch できるかを副作用なしで判定する。
 pub fn decide(
     snapshot: &GoalSnapshot,

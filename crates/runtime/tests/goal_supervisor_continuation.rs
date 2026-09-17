@@ -1,5 +1,23 @@
 mod support;
 
+#[path = "support/durable_continuation.rs"]
+mod durable_continuation;
+
+#[tokio::test]
+async fn resume_task_after_interruption_replays_from_persisted_cursor() {
+    durable_continuation::resume_after_interruption().await;
+}
+
+#[tokio::test]
+async fn retry_till_attempt_cap_then_suppress() {
+    durable_continuation::retry_to_cap().await;
+}
+
+#[tokio::test]
+async fn cancel_task_persists_cancelled_status() {
+    durable_continuation::cancel_persisted().await;
+}
+
 use std::sync::Arc;
 
 use event_bus::{
@@ -17,6 +35,7 @@ use tools::ToolExecutor;
 use support::ScriptedModel;
 
 struct Fixture {
+    model: Arc<ScriptedModel>,
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     handle: runtime::orchestration::supervisor::SupervisorHandle,
@@ -32,11 +51,8 @@ impl Fixture {
             Arc::clone(&bus),
             Arc::new(DirectSandbox::new_unchecked()),
         ));
-        let runtime = AgentRuntime::new(
-            Arc::clone(&bus),
-            executor,
-            Arc::new(ScriptedModel::gated([], Arc::new(Notify::new()))),
-        );
+        let model = Arc::new(ScriptedModel::gated([], Arc::new(Notify::new())));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
         let settings = OrchestrationSettings {
             max_continuations,
             stall_after_secs: 86_400,
@@ -80,6 +96,7 @@ impl Fixture {
             root,
         );
         let fixture = Self {
+            model,
             runtime,
             bus,
             handle,

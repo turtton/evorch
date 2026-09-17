@@ -56,6 +56,34 @@ impl GoalLedger {
         }
         match event {
             OrchestratorEvent::TaskProgressed {
+                task_id, run_id, ..
+            }
+            | OrchestratorEvent::TaskCheckpoint {
+                task_id, run_id, ..
+            } => {
+                if self
+                    .snapshot
+                    .task_runs
+                    .get(task_id)
+                    .is_some_and(|current| current != run_id)
+                {
+                    return Ok(());
+                }
+            }
+            OrchestratorEvent::TaskRetryScheduled {
+                task_id, attempt, ..
+            } if self
+                .snapshot
+                .task_attempts
+                .get(task_id)
+                .is_some_and(|current| current >= attempt) =>
+            {
+                return Ok(());
+            }
+            _ => {}
+        }
+        match event {
+            OrchestratorEvent::TaskProgressed {
                 task_id,
                 run_id,
                 progress,

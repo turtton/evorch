@@ -1,0 +1,237 @@
+use storage::entity::{TaskContinuation, TaskStatus};
+
+use super::*;
+
+pub(super) struct TaskRequest {
+    goal_id: String,
+    task_id: String,
+    run_id: String,
+    attempt: u32,
+}
+
+impl SupervisorHandle {
+    pub fn resume_task(&self, task_id: &str) -> Result<(), SupervisorError> {
+        self.tx
+            .send(SupervisorCommand::ResumeTask(self.task_request(task_id)?))
+            .map_err(|_| SupervisorError::Closed)
+    }
+
+    pub fn retry_task(&self, task_id: &str) -> Result<(), SupervisorError> {
+        self.tx
+            .send(SupervisorCommand::RetryTask(self.task_request(task_id)?))
+            .map_err(|_| SupervisorError::Closed)
+    }
+
+    pub fn cancel_task(&self, task_id: &str) -> Result<(), SupervisorError> {
+        self.tx
+            .send(SupervisorCommand::CancelTask(self.task_request(task_id)?))
+            .map_err(|_| SupervisorError::Closed)
+    }
+
+    fn task_request(&self, task_id: &str) -> Result<TaskRequest, SupervisorError> {
+        let ledgers = match self.ledgers.lock() {
+            Ok(ledgers) => ledgers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut owners = ledgers.values().filter_map(|ledger| {
+            let snapshot = ledger.snapshot();
+            let run_id = snapshot.task_runs.get(task_id)?.clone();
+            Some(TaskRequest {
+                goal_id: snapshot.goal_id.clone(),
+                task_id: task_id.into(),
+                run_id,
+                attempt: snapshot
+                    .task_attempts
+                    .get(task_id)
+                    .map_or(0, |attempt| *attempt),
+            })
+        });
+        match (owners.next(), owners.next()) {
+            (Some(request), None) => Ok(request),
+            _ => Err(SupervisorError::UnknownTask(task_id.into())),
+        }
+    }
+}
+
+impl SupervisorActor {
+    fn task_state(&self, request: &TaskRequest) -> Option<(GoalSnapshot, TaskContinuation)> {
+        let snapshot = self.snapshot(&request.goal_id)?;
+        if snapshot.task_runs.get(&request.task_id) != Some(&request.run_id)
+            || snapshot
+                .task_attempts
+                .get(&request.task_id)
+                .map_or(0, |attempt| *attempt)
+                != request.attempt
+        {
+            return None;
+        }
+        let progress = snapshot.task_progress.get(&request.task_id)?.clone();
+        let task = serde_json::from_value(progress).ok()?;
+        Some((snapshot, task))
+    }
+
+    pub(super) fn continue_task(&mut self, request: TaskRequest) {
+        let Some((snapshot, mut task)) = self.task_state(&request) else {
+            return;
+        };
+        match snapshot.state {
+            GoalState::Cancelled | GoalState::Complete => return,
+            GoalState::Active | GoalState::Paused | GoalState::Blocked => {}
+        }
+        // An adopted running generation has no process; it resumes from its durable cursor.
+        if snapshot.detached
+            && !self.progress.contains_key(&request.run_id)
+            && matches!(task.status, TaskStatus::Running | TaskStatus::Retrying)
+        {
+            task.status = TaskStatus::Failed;
+        }
+        task.attempts = request.attempt.max(task.attempts);
+        match continuation::decide_task(&task, self.settings.max_continuations) {
+            ContinuationDecision::Suppress(reason) => {
+                self.suppress(&request.goal_id, snapshot.epoch, reason);
+                return;
+            }
+            ContinuationDecision::Dispatch => {}
+        }
+        let Some(previous) = snapshot
+            .attached_runs
+            .iter()
+            .find(|run| run.run_id == request.run_id)
+        else {
+            return;
+        };
+        let role_name = previous.role.to_lowercase();
+        let Some(role) = [
+            Role::Orchestrator,
+            Role::Worker,
+            Role::Reviewer,
+            Role::Explorer,
+            Role::Librarian,
+            Role::Planner,
+            Role::Oracle,
+            Role::MultimodalLooker,
+        ]
+        .into_iter()
+        .find(|role| role.name().to_lowercase() == role_name) else {
+            return;
+        };
+        let parent = previous
+            .parent_run_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("run-")?.parse::<u64>().ok())
+            .map(RunId::new);
+        let mut run = self.runtime.reserve_run_id();
+        while snapshot
+            .attached_runs
+            .iter()
+            .any(|attached| attached.run_id == run.to_string())
+        {
+            run = self.runtime.reserve_run_id();
+        }
+        if (!snapshot.detached || self.progress.contains_key(&request.run_id))
+            && let Some(old) = self.find_run(&request.run_id)
+        {
+            let _ = self.runtime.cancel(old);
+        }
+        task.attempts += 1;
+        task.status = TaskStatus::Running;
+        let prompt = match serde_json::to_string(&task) {
+            Ok(context) => format!(
+                "Continue the durable task from this saved state, preserving completed work:\n{context}"
+            ),
+            Err(_) => return,
+        };
+        self.emit_for_goal(
+            &request.goal_id,
+            OrchestratorEvent::TaskRetryScheduled {
+                task_id: request.task_id.clone(),
+                attempt: task.attempts,
+                reason: "operator continuation".into(),
+                new_run_id: run.to_string(),
+            },
+        );
+        self.publish_task(&request.goal_id, &request.task_id, &run.to_string(), task);
+        self.runtime.spawn_reserved(
+            run,
+            parent,
+            role,
+            prompt,
+            RunConfig {
+                task_id: Some(request.task_id),
+                name: Some(format!("{}/task{}", request.goal_id, request.attempt + 1)),
+                workspace_branch: snapshot.deliverable_branch,
+                ..RunConfig::default()
+            },
+        );
+        self.progress
+            .insert(run.to_string(), ProgressTrack::new(AgentRunPhase::Pending));
+    }
+
+    pub(super) fn cancel_task(&mut self, request: TaskRequest) {
+        let Some((snapshot, mut task)) = self.task_state(&request) else {
+            return;
+        };
+        match task.status {
+            TaskStatus::Cancelled | TaskStatus::Completed => return,
+            TaskStatus::Pending
+            | TaskStatus::Queued
+            | TaskStatus::Blocked
+            | TaskStatus::Retrying
+            | TaskStatus::Running
+            | TaskStatus::Failed => task.status = TaskStatus::Cancelled,
+        }
+        self.publish_task(&request.goal_id, &request.task_id, &request.run_id, task);
+        if (!snapshot.detached || self.progress.contains_key(&request.run_id))
+            && let Some(run) = self.find_run(&request.run_id)
+        {
+            let _ = self.runtime.cancel(run);
+        }
+    }
+
+    pub(super) fn task_phase(&self, run_id: &str, phase: AgentRunPhase) {
+        let status = match phase {
+            AgentRunPhase::Done => TaskStatus::Completed,
+            AgentRunPhase::Error => TaskStatus::Failed,
+            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return,
+        };
+        for goal in self.goals_for_run(run_id) {
+            let Some(snapshot) = self.snapshot(&goal) else {
+                continue;
+            };
+            for (task_id, current_run) in &snapshot.task_runs {
+                if current_run != run_id {
+                    continue;
+                }
+                let Some(progress) = snapshot.task_progress.get(task_id) else {
+                    continue;
+                };
+                let Ok(mut task) = serde_json::from_value::<TaskContinuation>(progress.clone())
+                else {
+                    continue;
+                };
+                if !matches!(task.status, TaskStatus::Running | TaskStatus::Retrying) {
+                    continue;
+                }
+                task.status = status;
+                if status == TaskStatus::Failed {
+                    task.failure_reason = Some("run failed".into());
+                }
+                self.publish_task(&goal, task_id, run_id, task);
+            }
+        }
+    }
+
+    fn publish_task(&self, goal: &str, task: &str, run: &str, state: TaskContinuation) {
+        if let Ok(progress) = serde_json::to_value(state) {
+            self.emit_for_goal(
+                goal,
+                OrchestratorEvent::TaskProgressed {
+                    task_id: task.into(),
+                    run_id: run.into(),
+                    progress,
+                    reason: "task state transition".into(),
+                },
+            );
+        }
+    }
+}

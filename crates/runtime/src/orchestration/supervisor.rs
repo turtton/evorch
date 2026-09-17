@@ -31,6 +31,8 @@ use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
 
+mod tasks;
+
 /// goal 作成時の不変属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalSpec {
@@ -61,6 +63,8 @@ pub enum SupervisorError {
     /// 指定 goal が存在しない。
     #[error("unknown goal: {0}")]
     UnknownGoal(String),
+    #[error("unknown or ambiguous task: {0}")]
+    UnknownTask(String),
     /// ledger が操作を拒否した。
     #[error(transparent)]
     Ledger(#[from] LedgerError),
@@ -278,6 +282,9 @@ enum GoalCommand {
 }
 
 enum SupervisorCommand {
+    ResumeTask(tasks::TaskRequest),
+    RetryTask(tasks::TaskRequest),
+    CancelTask(tasks::TaskRequest),
     Create {
         goal_id: String,
         spec: Box<GoalSpec>,
@@ -345,6 +352,10 @@ impl SupervisorActor {
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
         match command {
+            SupervisorCommand::ResumeTask(request) | SupervisorCommand::RetryTask(request) => {
+                self.continue_task(request);
+            }
+            SupervisorCommand::CancelTask(request) => self.cancel_task(request),
             SupervisorCommand::Create {
                 goal_id,
                 spec,
@@ -625,6 +636,7 @@ impl SupervisorActor {
     }
 
     async fn on_phase(&mut self, run_id: String, phase: AgentRunPhase) {
+        self.task_phase(&run_id, phase);
         if let Some(track) = self.progress.get_mut(&run_id) {
             track.phase = phase;
             if phase == AgentRunPhase::Running {

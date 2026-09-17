@@ -66,7 +66,7 @@ string_enum!(SessionStatus {
 
 #[path = "entity/task.rs"]
 mod task;
-pub use task::{TaskRecord, TaskStatus};
+pub use task::{TaskContinuation, TaskRecord, TaskStatus};
 
 /// エージェント実行の永続化状態です。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
