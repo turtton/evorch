@@ -127,4 +127,49 @@
   `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` each exited 0.
 - `cargo test --workspace --locked` exited 101 only in pre-existing
   `crates/runtime/tests/background.rs`: `background_start_is_observable_before_wait_and_completion_is_success_only`
-  and `cancel_mid_model_turn_emits_cancelled_and_error` failed; the GUI runtime wiring tests passed.
+   and `cancel_mid_model_turn_emits_cancelled_and_error` failed; the GUI runtime wiring tests passed.
+
+## Background event collection repair — 2026-09-18
+
+- Correction to the earlier "pre-existing" characterization: these two failures
+  are deterministic branch-induced test-collector regressions, not observed flakes.
+  HEAD at diagnosis: `c19152b`. Initial locked background run: 3 passed, 2 failed;
+  a second run with temporary event traces reproduced both assertions.
+- Observed success stream after BackgroundTaskStarted: TaskProgressed, Running,
+  TaskProgressed, TaskProgressed, MessageDelta("done"), TaskProgressed,
+  TaskProgressed(completed), Done, BackgroundTaskCompleted. The old four-event
+  window ended before the message and completion.
+- Observed cancellation: the old four-event startup window ended at the first
+  TaskProgressed. Its next two events were Running and TaskProgressed; the unread
+  tail contained another TaskProgressed, BackgroundTaskCancelled,
+  TaskProgressed(cancelled), and Error(reason="cancelled"). Nothing was lost.
+- Relevant history: `631571f` adds worker progress publication at budget
+  boundaries; `bbac0f5` adds hard-budget boundary checks; `fb3141d` publishes durable
+  progress at state transitions. ScriptedModel inherits requires_admission=false,
+  so the pre-registration admission path from `5e48bfe` is not taken here.
+- Fix is test-only: bounded, run-correlated collection through Started/Running
+  and Completed/Error instead of fixed total event counts. Existing assertions
+  remain; cancellation additionally rejects Completed within the terminal trace.
+  No production/provider/reviewer code or acceptance behavior was changed.
+- GREEN: `cargo test -p runtime --test background --locked -- --nocapture`:
+  5 passed, 0 failed, both before and after simplifying the collector. Both named
+  tests also pass individually with `--exact --nocapture`. Runtime suite reruns
+  likewise pass all five background tests. No sleep or increased event count.
+- Gates: `cargo check -p runtime`, `cargo clippy -p runtime --tests --locked -- -D warnings`,
+  `cargo fmt --check`, and `git diff --check` pass; absolute-path LSP reports no
+  diagnostics for background.rs. Changed Rust file: 136 nonblank/noncomment lines.
+- Full runtime gate is NOT green: `cargo test -p runtime --locked` reaches an
+  additional capability_enforcement failure after 366 library tests pass.
+  `cargo test -p runtime --locked --no-fail-fast` completes and reveals 14 failures
+  in 8 other targets: capability_enforcement (1), catalog_unknown_tools (1),
+  prompt_assembly_golden (1), provider_composition_e2e (2), state_transitions (1),
+  streaming_mock_e2e (3), streaming_switchable_model (1), team_e2e (4).
+  Symptoms include other fixed-count collectors, catalog-admission fixture
+  rejection, request arrays including GET /models, and a reviewer submit_review
+  golden mismatch. These are outside the requested two-test repair; no fixes or
+  flaky classification are claimed for them. Full output was captured by the
+  tool at `tool_0b1b3c602001QdqYvfudYerZuA`.
+- Self-review: local helper owns event collection and has multiple callers;
+  receive errors/timeouts fail loudly. No added unwrap, allow, casts, unsafe,
+  dependencies, production logging, or changes to shared test support. Temporary
+  event prints and debug journal were removed. No push.

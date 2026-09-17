@@ -3,7 +3,9 @@ mod support;
 use std::sync::Arc;
 
 use agents::Role;
-use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, MessageEvent};
+use event_bus::{
+    AgentRunPhase, Event, EventBus, EventKind, EventReceiver, LifecycleEvent, MessageEvent,
+};
 use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig, RunId, RuntimeError};
 use sandbox::DirectSandbox;
@@ -11,7 +13,32 @@ use serde_json::json;
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, collect_events, text_response, tool_response};
+use support::{ScriptedModel, text_response, tool_response};
+
+async fn collect_until(
+    receiver: &mut EventReceiver,
+    reached: impl Fn(&EventKind) -> bool,
+) -> Vec<Event> {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        loop {
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                Err(error) => panic!("event receiver failed: {error:?}"),
+            };
+            let done = reached(&event.kind);
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    })
+    .await;
+    match result {
+        Ok(events) => events,
+        Err(error) => panic!("expected event was not published: {error}"),
+    }
+}
 
 fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(64));
@@ -37,12 +64,12 @@ async fn background_start_is_observable_before_wait_and_completion_is_success_on
     // When
     let run_id =
         runtime.delegate_background(Role::Worker, "work".to_string(), RunConfig::default());
-    let first_three = collect_events(&mut events, 3).await;
+    let started = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())).await;
 
     // Then
-    assert!(first_three.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
+    assert!(started.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskStarted { task_id }) if task_id == &run_id.to_string())));
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let remaining = collect_events(&mut events, 4).await;
+    let remaining = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())).await;
     assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Message(MessageEvent::MessageDelta { delta, .. }) if delta == "done")));
     assert!(remaining.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id }) if task_id == &run_id.to_string())));
 }
@@ -58,16 +85,20 @@ async fn cancel_mid_model_turn_emits_cancelled_and_error() {
     let mut events = bus.subscribe();
     let run_id =
         runtime.delegate_background(Role::Worker, "blocked".to_string(), RunConfig::default());
-    let _started = collect_events(&mut events, 4).await;
+    let _started = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id: id, to: AgentRunPhase::Running, .. }) if id == &run_id.to_string())).await;
 
     // When
     assert_eq!(runtime.cancel(run_id), Ok(()));
 
     // Then
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
-    let events = collect_events(&mut events, 2).await;
+    let events = collect_until(&mut events, |kind| matches!(kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id: id, to: AgentRunPhase::Error, .. }) if id == &run_id.to_string())).await;
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCancelled { task_id }) if task_id == &run_id.to_string())));
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { to: AgentRunPhase::Error, reason: Some(reason), .. }) if reason == "cancelled")));
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { .. })
+    )));
 }
 
 #[tokio::test]
