@@ -79,7 +79,7 @@ impl LearningQueue {
         let reviewer = self.runtime.delegate_background(
             Role::Reviewer,
             format!(
-                "Review the completed task and verify its evidence. Return a fenced json block with verdict (approve or request-update), findings, and criteria (id: exact verified evidence reference, status: met/unmet/unknown, note). Do not mark evidence met without checking it.\nTask: {}\nWorker report:\n{}",
+                "Review the completed task and verify its evidence. Return a JSON object (a fenced json block is also accepted) with verdict (approve or request-update), findings, and criteria (id: exact verified evidence reference, status: met/unmet/unknown, note, evidence). Each evidence object has command, exit_status (integer), target_sha, and optional diff_ref, artifact_path, red_evidence strings. Use null when evidence is unavailable; never invent evidence or mark evidence met without checking it.\nTask: {}\nWorker report:\n{}",
                 task.prompt, worker_report
             ),
             RunConfig {
@@ -115,7 +115,8 @@ impl LearningQueue {
                 reviewer_report: &reviewer_report,
             })
             .await?;
-        if let Ok(review) = crate::orchestration::review::parse_review_result(&reviewer_report)
+        if let Ok(review) =
+            crate::orchestration::review::parse_reviewer_output(None, &reviewer_report)
             && review.verdict == event_bus::ReviewVerdict::Approve
             && !review.criteria.is_empty()
             && review

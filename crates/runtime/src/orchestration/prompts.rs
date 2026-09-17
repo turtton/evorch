@@ -98,7 +98,7 @@ pub fn render_review_prompt(snapshot: &GoalSnapshot, round: u32) -> String {
             .map(|(index, criterion)| format!("- ac-{}: {criterion}", index + 1)),
     );
     prompt.push_str(
-        "\nRespond with a fenced ```json block: {\"verdict\":\"approve\"|\"request-update\",\"findings\":[...],\"criteria\":[{\"id\",\"status\":\"met\"|\"unmet\"|\"unknown\",\"note\"}]}\n",
+        "\nReturn a structured JSON object with verdict (approve or request-update), findings (string array), and criteria (array of id, status: met/unmet/unknown, note, evidence). A fenced ```json block is accepted as fallback. Each criterion's evidence is an object with command (string), exit_status (integer), target_sha (the checked commit SHA), and optional diff_ref, artifact_path, red_evidence strings. Record actual checks and their results, including failures; use null when evidence is unavailable and never invent evidence.\n",
     );
     prompt
 }

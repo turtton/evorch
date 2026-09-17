@@ -11,6 +11,7 @@ struct Model {
     calls: Mutex<Vec<Role>>,
     approve: bool,
     invalid_interview: bool,
+    raw_review: bool,
 }
 
 #[async_trait::async_trait]
@@ -35,7 +36,9 @@ impl AgentModel for Model {
                 r#"{"content":"Bound work","evidence":"test:bound"}"#
             }
         } else if role == Role::Reviewer {
-            if self.approve {
+            if self.approve && self.raw_review {
+                r#"{"verdict":"approve","criteria":[{"id":"test:bound","status":"met","note":"checked","evidence":{"command":"cargo test","exit_status":0,"target_sha":"abc","artifact_path":"test.log"}}]}"#
+            } else if self.approve {
                 "```json\n{\"verdict\":\"approve\",\"criteria\":[{\"id\":\"test:bound\",\"status\":\"met\",\"note\":\"Verified bounded execution\"}]}\n```"
             } else {
                 "```json\n{\"verdict\":\"request-update\",\"findings\":[\"Missing proof\"]}\n```"
@@ -60,6 +63,7 @@ impl AgentModel for Model {
 async fn run(
     approve: bool,
     invalid_interview: bool,
+    raw_review: bool,
 ) -> (
     Vec<storage::memory::MemoryEntry>,
     Vec<Role>,
@@ -75,6 +79,7 @@ async fn run(
         calls: Mutex::new(Vec::new()),
         approve,
         invalid_interview,
+        raw_review,
     });
     let bus = Arc::new(event_bus::EventBus::new(128));
     let executor = Arc::new(tools::ToolExecutor::with_standard_tools(
@@ -117,7 +122,7 @@ async fn run(
 #[tokio::test]
 async fn ordinary_run_automatically_interviews_and_promotes_verified_lessons() {
     // Given / When: run through the ordinary runtime surface with verified evidence.
-    let (entries, calls, outcome) = run(true, false).await;
+    let (entries, calls, outcome) = run(true, false, false).await;
     // Then: both lessons are promoted and learning does not recurse.
     assert!(outcome.is_ok());
     assert_eq!(entries.len(), 2);
@@ -135,7 +140,7 @@ async fn ordinary_run_automatically_interviews_and_promotes_verified_lessons() {
 #[tokio::test]
 async fn rejected_review_keeps_lessons_as_candidates() {
     // Given / When: a completed run whose reviewer rejects the evidence.
-    let (entries, _, outcome) = run(false, false).await;
+    let (entries, _, outcome) = run(false, false, false).await;
     // Then: interview still runs, without bypassing promotion authority.
     assert!(outcome.is_ok());
     assert_eq!(entries.len(), 2);
@@ -149,8 +154,22 @@ async fn rejected_review_keeps_lessons_as_candidates() {
 #[tokio::test]
 async fn invalid_second_interview_does_not_persist_partial_lessons() {
     // Given / When: the second interview has invalid evidence.
-    let (entries, _, outcome) = run(true, true).await;
+    let (entries, _, outcome) = run(true, true, false).await;
     // Then: learning failure is observable without failing the completed task.
     assert!(outcome.is_err());
     assert!(entries.is_empty());
+}
+
+#[tokio::test]
+async fn raw_typed_review_promotes_lessons_with_matching_evidence_reference() {
+    // Given / When: the runtime receives raw JSON with criterion evidence.
+    let (entries, _, outcome) = run(true, false, true).await;
+    // Then: the unchanged lesson reference matching promotes both lessons.
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.status == MemoryStatus::Promoted)
+    );
 }

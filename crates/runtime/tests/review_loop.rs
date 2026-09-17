@@ -1,8 +1,103 @@
+use event_bus::orchestrator::CriterionEvidence;
 use event_bus::{CriterionStatus, GateEvidence, ReviewVerdict};
-use runtime::orchestration::review::{ReviewLoop, ReviewOutcome};
+use runtime::orchestration::review::{
+    ReviewLoop, ReviewOutcome, ReviewResult, parse_reviewer_output,
+};
 
 const HEAD_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const HEAD_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+
+fn evidence() -> CriterionEvidence {
+    CriterionEvidence {
+        command: "cargo test -p runtime --test review_loop".into(),
+        exit_status: 0,
+        target_sha: HEAD_A.into(),
+        diff_ref: Some("HEAD~1..HEAD".into()),
+        artifact_path: Some("artifacts/review.log".into()),
+        red_evidence: Some("before: missing criterion evidence".into()),
+    }
+}
+
+#[test]
+fn typed_criterion_evidence_round_trips_into_gate_evidence() {
+    // Given: structured approval conflicts with the prose fallback.
+    let typed: ReviewResult = serde_json::from_value(serde_json::json!({
+        "verdict": "approve",
+        "criteria": [{"id": "AC1", "status": "met", "note": "checked", "evidence": evidence()}]
+    }))
+    .unwrap();
+    let mut review_loop = ReviewLoop::new(3);
+    // When
+    let parsed = parse_reviewer_output(
+        Some(typed),
+        "```json\n{\"verdict\":\"request-update\",\"findings\":[\"wrong fallback\"]}\n```",
+    )
+    .unwrap();
+    let outcome = review_loop.on_review_result(parsed, HEAD_A, "review-typed");
+    // Then
+    assert!(matches!(outcome, ReviewOutcome::Approve { round: 1, .. }));
+    let expected = GateEvidence::Criteria {
+        head_sha: HEAD_A.into(),
+        reviewer_run_id: "review-typed".into(),
+        round: 1,
+        checklist: vec![event_bus::CriterionCheck {
+            id: "AC1".into(),
+            status: CriterionStatus::Met,
+            note: "checked".into(),
+            evidence: Some(evidence()),
+        }],
+    };
+    assert_eq!(outcome.evidence().criteria, expected);
+    let encoded = serde_json::to_string(&outcome.evidence().criteria).unwrap();
+    assert_eq!(
+        serde_json::from_str::<GateEvidence>(&encoded).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn approve_with_unmet_and_evidence_forces_request_update_with_evidence() {
+    // Given
+    let raw = serde_json::json!({"verdict": "approve", "criteria": [
+        {"id": "AC1", "status": "unmet", "note": "failed", "evidence": evidence()}
+    ]})
+    .to_string();
+    let mut review_loop = ReviewLoop::new(3);
+    // When
+    let outcome = review_loop.on_reviewer_done(&raw, HEAD_A, "review-1");
+    // Then
+    assert!(matches!(&outcome, ReviewOutcome::Repair { findings, .. }
+        if findings == &["acceptance criteria not met: AC1"]));
+    assert!(
+        matches!(&outcome.evidence().criteria, GateEvidence::Criteria { checklist, .. }
+        if checklist[0].evidence == Some(evidence()))
+    );
+    assert!(matches!(&outcome.evidence().review, GateEvidence::Review {
+        verdict: ReviewVerdict::RequestUpdate { findings }, ..
+    } if findings == &["acceptance criteria not met: AC1"]));
+}
+
+#[test]
+fn fallback_to_prose_when_typed_absent() {
+    // Given
+    let prose = format!(
+        "Reviewed the change.\n```json\n{}\n```\nDone.",
+        review("approve", &[], "met")
+    );
+    // When
+    let parsed = parse_reviewer_output(None, &prose).unwrap();
+    // Then
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(
+        parsed.criteria,
+        vec![event_bus::CriterionCheck {
+            id: "AC1".into(),
+            status: CriterionStatus::Met,
+            note: "checked".into(),
+            evidence: None,
+        }]
+    );
+}
 
 fn review(verdict: &str, findings: &[&str], status: &str) -> String {
     serde_json::json!({
