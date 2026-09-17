@@ -25,6 +25,7 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 
 - [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
 - [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
+- [2026-09-17 cache 方針補足: 指標・診断・snapshot の実装語彙と未解決範囲](../../clarifications/cache-policy-2026-09-17.md)
 
 ## Open questions
 
