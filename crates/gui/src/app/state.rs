@@ -55,6 +55,7 @@ pub struct WorkbenchState<S> {
     pub(super) ledger: crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: TelemetryOverlay,
     pub(super) tasks: TasksModel<S>,
+    pub(super) durable_tasks: crate::model::durable_tasks::DurableTasksModel,
     pub(super) terminal: TerminalBuffer,
     pub(super) pty: Option<PtySession>,
     pub(super) dock: DockState<PanelId>,
@@ -134,6 +135,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ledger: crate::model::ledger::LedgerRegistry::default(),
             telemetry: TelemetryOverlay::new(),
             tasks: TasksModel::new(source),
+            durable_tasks: crate::model::durable_tasks::DurableTasksModel::default(),
             terminal: TerminalBuffer::new(10_000),
             pty: None,
             dock,
@@ -183,6 +185,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         state.tasks.refresh();
         state.register_approvals_panel();
+        state.register_durable_tasks_panel();
         Ok(state)
     }
 

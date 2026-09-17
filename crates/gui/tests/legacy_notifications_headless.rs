@@ -58,6 +58,7 @@ fn transcript_opens_in_first_leaf_when_all_fixed_anchors_are_absent() {
             PanelId::new("tasks-main"),
             PanelId::new("approvals-main"),
             PanelId::new("terminal-main"),
+            PanelId::new("durable-tasks-main"),
             PanelId::new("agent-fallback-run")
         ]
     );

@@ -51,6 +51,7 @@ fn with_approval(workspace: &Workspace, neighbor: &str) -> Workspace {
                     if tabs.active > index {
                         tabs.active += 1;
                     }
+                    tabs.panels.push(PanelId::new("durable-tasks-main"));
                 }
             }
         }
@@ -67,6 +68,16 @@ fn with_approval(workspace: &Workspace, neighbor: &str) -> Workspace {
         },
     );
     insert(&mut expected.main.root, &PanelId::new(neighbor));
+    let id = PanelId::new("durable-tasks-main");
+    expected.panels.insert(
+        id.clone(),
+        Panel {
+            id,
+            kind: PanelKind::DurableTasks,
+            title: "Durable Tasks".into(),
+            target: None,
+        },
+    );
     expected
 }
 

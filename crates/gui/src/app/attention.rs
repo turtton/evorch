@@ -48,6 +48,7 @@ pub(super) fn attention_for(
             .and_then(|run_id| inputs.phases.get(run_id))
             .map_or(PaneAttention::None, |phase| thread_phase_attention(*phase)),
         PanelKind::Sidebar
+        | PanelKind::DurableTasks
         | PanelKind::Approvals
         | PanelKind::Notifications
         | PanelKind::Agent
@@ -118,6 +119,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     })
                     .collect(),
                 PanelKind::Sidebar
+                | PanelKind::DurableTasks
                 | PanelKind::Approvals
                 | PanelKind::Notifications
                 | PanelKind::Diff

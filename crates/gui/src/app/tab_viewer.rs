@@ -39,6 +39,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) ledger: &'a crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
     pub(super) tasks: &'a mut TasksModel<S>,
+    pub(super) durable_tasks: &'a crate::model::durable_tasks::DurableTasksModel,
     pub(super) terminal: &'a mut TerminalBuffer,
     pub(super) terminal_input: &'a mut String,
     pub(super) pty: &'a mut Option<PtySession>,
@@ -201,6 +202,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .collect();
         let surface_visible = ui.is_visible() && ui.clip_rect().intersects(ui.max_rect());
         match panel.kind {
+            PanelKind::DurableTasks => {
+                crate::panes::durable_tasks::durable_tasks_pane(ui, self.durable_tasks)
+            }
             PanelKind::Approvals => {
                 if let Some(action) = approvals_pane(ui, self.pending_approvals) {
                     *self.approvals_action = Some(action);

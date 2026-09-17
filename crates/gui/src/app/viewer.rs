@@ -46,6 +46,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,
+                durable_tasks: &self.durable_tasks,
                 terminal: &mut self.terminal,
                 terminal_input: &mut self.terminal_input,
                 pty: &mut self.pty,
