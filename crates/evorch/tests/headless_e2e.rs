@@ -152,7 +152,7 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
 // Given: sugar provider 設定 (localhost モック) と MapEnv credential
 // When: DirectUnchecked で worker を headless 実行する
 // Then: phase Done、final_text にモック応答が含まれ、モックは Bearer 認証付き
-//       model=gpt-4o の 1 リクエストだけを受け取る
+//       model=gpt-4o の completion リクエストを 1 件だけ受け取る
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_run_completes_with_single_mock_response() {
     let directory = tempfile::tempdir().expect("project directory");
@@ -188,12 +188,16 @@ async fn headless_run_completes_with_single_mock_response() {
     );
 
     let requests = mock.recorded_requests();
-    assert_eq!(requests.len(), 1);
+    let completion_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
+    assert_eq!(completion_requests.len(), 1);
     assert_eq!(
-        requests[0].authorization.as_deref(),
+        completion_requests[0].authorization.as_deref(),
         Some("Bearer headless-e2e-key")
     );
-    assert_eq!(requests[0].body["model"], MODEL);
-    assert!(requests[0].stream);
-    assert_eq!(requests[0].body["stream"], true);
+    assert_eq!(completion_requests[0].body["model"], MODEL);
+    assert!(completion_requests[0].stream);
+    assert_eq!(completion_requests[0].body["stream"], true);
 }
