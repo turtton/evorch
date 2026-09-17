@@ -171,10 +171,16 @@ fn tab_cycles_before_focused_composer_and_enter_still_sends() {
         harness.click_label("Message or /command");
         harness.run();
         // When: cycle then send using the retained keyboard focus.
+        let focused_before = harness.focused_id();
         harness.key_press(modifiers, Key::Tab);
         harness.run();
         assert_eq!(harness.state().composer().role, ComposerRole::Orchestrator);
         assert_eq!(harness.state().composer().input, "ship feature");
+        let focused_after = harness.focused_id();
+        assert_eq!(
+            focused_before, focused_after,
+            "Tab must not hand focus to another widget ({modifiers:?})"
+        );
         harness.key_press(Modifiers::NONE, Key::Enter);
         harness.run();
         // Then: Tab neither inserts whitespace nor moves focus away from input.

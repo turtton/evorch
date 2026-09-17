@@ -161,6 +161,11 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.key_press_modifiers(modifiers, key);
     }
 
+    /// 現在フォーカスを持つ egui widget の Id を返します（フォーカス遷移検証用）。
+    pub fn focused_id(&self) -> Option<egui::Id> {
+        self.harness.ctx.memory(|memory| memory.focused())
+    }
+
     /// ポインタを指定座標へ移動します（hover 状態の capture 用）。
     pub fn pointer_move(&self, pos: egui::Pos2) {
         self.harness.hover_at(pos);

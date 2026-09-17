@@ -96,6 +96,10 @@ ui.add(egui::Button::new(egui::RichText::new("Cancel").color(palette().ERROR_FG)
                         ui.add(egui::TextEdit::multiline(&mut model.input)
                             .id_salt("composer-input")
                             .hint_text("Message or /command  (Enter to send, Shift+Enter for newline)")
+                            // Keep egui from turning Tab into focus traversal so the
+                            // role-cycle keybind fires; handle_input strips the event
+                            // before this widget can insert a '\t'.
+                            .lock_focus(true)
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
                             .min_size(egui::vec2(0.0, COMPOSER_MIN_HEIGHT - 2.0 * SP_2))
