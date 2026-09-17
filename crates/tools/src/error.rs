@@ -180,7 +180,6 @@ mod tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 13);
         for (error, expected) in cases {
             assert_eq!(error.to_string(), expected);
         }

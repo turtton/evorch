@@ -55,32 +55,4 @@ mod tests {
         assert!(FONT_QUERY.contains("ja"));
         assert!(FONT_QUERY.starts_with("sans:"));
     }
-
-    #[test]
-    fn prepends_cjk_font_to_both_families() {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            CJK_FONT_NAME.to_owned(),
-            Arc::new(egui::FontData::from_static(&[0])),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts
-                .families
-                .entry(family)
-                .or_insert_with(Vec::new)
-                .insert(0, CJK_FONT_NAME.to_owned());
-        }
-        for family in [
-            &egui::FontFamily::Proportional,
-            &egui::FontFamily::Monospace,
-        ] {
-            let first = fonts
-                .families
-                .get(family)
-                .and_then(|v| v.first())
-                .map(String::as_str);
-            assert_eq!(first, Some(CJK_FONT_NAME));
-        }
-        assert!(fonts.font_data.contains_key(CJK_FONT_NAME));
-    }
 }

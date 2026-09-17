@@ -103,7 +103,20 @@ fn cancelled_is_terminal_and_distinct_from_paused() {
     let mut paused = ledger();
     apply_transition(&mut paused, GoalState::Paused);
     assert_ne!(paused.snapshot().state, GoalState::Cancelled);
-    assert!(paused.transition(GoalState::Active, "resume").is_ok());
+    let resumed = paused
+        .transition(GoalState::Active, "resume")
+        .expect("resume");
+    assert_eq!(
+        resumed,
+        OrchestratorEvent::GoalStateChanged {
+            goal_id: "goal-1".into(),
+            from: GoalState::Paused,
+            to: GoalState::Active,
+            reason: "resume".into(),
+        }
+    );
+    paused.apply(&resumed).expect("apply resume");
+    assert_eq!(paused.snapshot().state, GoalState::Active);
 }
 
 #[test]

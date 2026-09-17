@@ -114,7 +114,11 @@ async fn refresh_success_merges_and_records_history() {
         CatalogSource::ModelsDev,
         "マージ後の供給源は ModelsDev"
     );
-    assert!(cache.load().is_some(), "取得結果がキャッシュに保存される");
+    assert_eq!(
+        cache.load(),
+        Some(vec![test_entry("gemma-3-27b"), test_entry("gpt-4o")]),
+        "取得したモデルの全フィールドがキャッシュに保存される"
+    );
 
     storage.close();
     let records = Database::open(&config)

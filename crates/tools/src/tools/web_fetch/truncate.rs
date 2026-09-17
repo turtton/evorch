@@ -77,8 +77,8 @@ mod tests {
 
         let (output, info) = truncate_model_output(input);
 
-        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
-        assert!(output.len() < MAX_MODEL_OUTPUT_BYTES);
+        assert_eq!(output, "x".repeat(51_199));
+        assert_eq!(info.original_bytes, 51_206);
         assert!(info.truncated);
     }
 

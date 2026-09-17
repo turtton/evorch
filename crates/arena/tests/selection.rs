@@ -51,10 +51,18 @@ proptest! {
         let mut rows = [trace(0,a,b,true), trace(1,b,c,true), trace(2,c,a,true)];
         rows[0].output_tokens = c;
         // When: pairwise comparisons order them.
-        rows.sort_by(arena::pairwise_tiebreak);
-        // Then: the comparator is total and transitive.
-        prop_assert!(arena::pairwise_tiebreak(&rows[0], &rows[2]).is_le());
-        prop_assert_eq!(arena::pairwise_tiebreak(&rows[0], &rows[1]), arena::pairwise_tiebreak(&rows[1], &rows[0]).reverse());
+        // Then: every pair is antisymmetric and every ordered triple is transitive.
+        for left in &rows {
+            for middle in &rows {
+                let order = arena::pairwise_tiebreak(left, middle);
+                prop_assert_eq!(order, arena::pairwise_tiebreak(middle, left).reverse());
+                for right in &rows {
+                    if order.is_le() && arena::pairwise_tiebreak(middle, right).is_le() {
+                        prop_assert!(arena::pairwise_tiebreak(left, right).is_le());
+                    }
+                }
+            }
+        }
     }
 }
 

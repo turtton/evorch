@@ -49,7 +49,6 @@ mod tests {
             ),
         ];
 
-        assert_eq!(schemas.len(), 5);
         for (name, schema) in schemas {
             jsonschema::validator_for(&schema)
                 .unwrap_or_else(|error| panic!("{name} のスキーマのコンパイルに失敗: {error}"));
@@ -68,7 +67,6 @@ mod tests {
             (web_fetch.name(), web_fetch.schema()),
         ];
 
-        assert_eq!(schemas.len(), 2);
         for (name, schema) in schemas {
             jsonschema::validator_for(&schema)
                 .unwrap_or_else(|error| panic!("{name} のスキーマのコンパイルに失敗: {error}"));

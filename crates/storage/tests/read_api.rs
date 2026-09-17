@@ -46,18 +46,29 @@ fn database_read_facade_roundtrips_all_entity_queries() {
 
     // Then: 各問い合わせが seed した対象を返す
     assert_eq!(session.unwrap().id, "s1");
+    assert_eq!(sessions[0].id, "s1");
     assert_eq!(sessions.len(), 1);
     assert_eq!(task.unwrap().id, "t1");
+    assert_eq!(tasks[0].id, "t1");
     assert_eq!(tasks.len(), 1);
     assert_eq!(message.unwrap().id, "m1");
+    assert_eq!(messages[0].id, "m1");
+    assert_eq!(messages[0].content, "hello");
     assert_eq!(messages.len(), 1);
     assert_eq!(run.unwrap().id, "r1");
+    assert_eq!(runs[0].id, "r1");
     assert_eq!(runs.len(), 1);
+    assert_eq!(events[0].event.kind, event.kind);
     assert_eq!(events.len(), 1);
     assert_eq!(all_events, events);
     assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].key.provider, "p");
+    assert_eq!(metrics[0].key.model, "m");
+    assert_eq!(metrics[0].input_tokens, 1);
+    assert_eq!(metrics[0].output_tokens, 2);
     assert_eq!(restored.unwrap().session_id, "s1");
     assert_eq!(restored_all.len(), 1);
+    assert_eq!(restored_all[0].session_id, "s1");
 }
 
 #[test]

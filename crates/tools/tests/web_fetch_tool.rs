@@ -180,7 +180,8 @@ async fn output_over_50kb_truncated_with_hint() -> TestResult {
 
     assert!(!result.is_error);
     assert!(result.content.len() <= 51_200);
-    assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
+    assert!(result.content.contains('あ'));
+    assert!(!result.content.contains('\u{fffd}'));
     let detail = detail(&result);
     assert_eq!(detail["truncated"], true);
     assert!(

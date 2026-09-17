@@ -3,11 +3,11 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use event_bus::{BucketKey, Event, EventMeta, LifecycleEvent, UsageBucket, UsageSink};
-use storage::{CatalogUpdateRecord, Storage, StorageConfig};
+use storage::{CatalogUpdateRecord, Database, Storage, StorageConfig};
 use tempfile::TempDir;
 
 #[test]
-fn public_write_paths_accept_only_typed_records() {
+fn public_typed_write_paths_persist_records() {
     // Given: ADR 0008 credential 非永続化 — 全書き込み経路は型付きレコードのみを受け付け、
     // credential を保持し得る汎用 key/value や生 SQL 経路を公開しない。
     let temp = TempDir::new().expect("temporary directory must be created");
@@ -43,7 +43,7 @@ fn public_write_paths_accept_only_typed_records() {
         db_path: temp.path().join("writer.db"),
         ..StorageConfig::default()
     };
-    let storage = Storage::open(config).expect("storage must open");
+    let storage = Storage::open(config.clone()).expect("storage must open");
     let handle = storage.handle();
     handle
         .append_event(None, &event_value)
@@ -56,9 +56,31 @@ fn public_write_paths_accept_only_typed_records() {
             recorded_at_ns: 60,
         })
         .expect("catalog update must write");
-    <storage::StorageHandle as UsageSink>::submit(&handle, vec![bucket]);
+    <storage::StorageHandle as UsageSink>::submit(&handle, vec![bucket.clone()]);
     handle.flush_usage_now().expect("handle usage must flush");
 
-    // Then: 全公開経路が型検査され、実データベースへの書き込みに成功する
+    // Then: each public write surface preserves its payload after reopening.
     storage.close();
+    let database = Database::open(&config).expect("database must reopen");
+    let events = database.events_all_ordered().expect("events must load");
+    assert_eq!(
+        events
+            .iter()
+            .map(|stored| &stored.event)
+            .collect::<Vec<_>>(),
+        vec![&event_value]
+    );
+    assert_eq!(
+        database.catalog_updates().expect("catalog must load"),
+        vec![CatalogUpdateRecord {
+            source: "models-dev".into(),
+            model_count: 1,
+            detail: "typed".into(),
+            recorded_at_ns: 60,
+        }]
+    );
+    assert_eq!(
+        database.metrics_range(0, 60).expect("usage must load"),
+        vec![bucket]
+    );
 }

@@ -191,10 +191,14 @@ mod tests {
         let mut session = echo_session();
 
         // When: the terminal dimensions change
-        let result = session.resize(40, 120);
+        session.resize(40, 120).expect("resize must succeed");
 
         // Then: portable-pty accepts the resize
-        assert!(result.is_ok());
+        let size = session
+            .master
+            .get_size()
+            .expect("PTY size must be readable");
+        assert_eq!((size.rows, size.cols), (40, 120));
     }
 
     #[test]

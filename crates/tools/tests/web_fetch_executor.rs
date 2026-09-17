@@ -166,7 +166,7 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
     let server = FixtureServer::start(move |_path| identity_response(html)).await?;
     let (executor, mut receiver) = setup_executor(Arc::new(web_fetch(&server)));
 
-    let _result = executor
+    let result = executor
         .execute(
             &ToolExecutionContext {
                 run_id: "run-1".to_string(),
@@ -200,7 +200,13 @@ async fn executor_emits_started_and_completed_with_metadata_detail() -> TestResu
     assert_eq!(call_id, "call-1");
     assert!(!is_error);
     let detail = detail.as_ref().expect("event detail を受信できる");
-    assert!(detail["final_url"].is_string());
-    assert!(detail["extraction_method"].is_string());
+    assert_eq!(detail["final_url"], server.url("/metadata"));
+    assert_eq!(detail["status_code"], 200);
+    assert_eq!(detail["format"], "text");
+    assert!(matches!(
+        detail["extraction_method"].as_str(),
+        Some("readability" | "fallback")
+    ));
+    assert_eq!(Some(detail), result.detail.as_ref());
     Ok(())
 }

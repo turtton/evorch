@@ -120,5 +120,25 @@ fn deltas_split_when_runs_differ() {
         }
         // Then: each speaker has its own entry, including unknown provenance.
         assert_eq!(model.entries().len(), 3);
+        for (entry, expected_run) in
+            model
+                .entries()
+                .iter()
+                .zip([Some("run-1"), Some("run-2"), None])
+        {
+            let (text, run_id) = match entry {
+                gui::model::transcript::TranscriptEntry::Reasoning { text, run_id }
+                    if reasoning =>
+                {
+                    (text, run_id)
+                }
+                gui::model::transcript::TranscriptEntry::Message { text, run_id } if !reasoning => {
+                    (text, run_id)
+                }
+                other => panic!("unexpected transcript entry: {other:?}"),
+            };
+            assert_eq!(text, "text");
+            assert_eq!(run_id.as_deref(), expected_run);
+        }
     }
 }

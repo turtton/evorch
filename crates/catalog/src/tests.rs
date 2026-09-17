@@ -36,7 +36,9 @@ async fn fresh_cache_is_used_without_fetch() {
         .unwrap();
 
     assert!(catalog.refresh.is_none());
-    assert!(catalog.find("openai", "gpt-4o").is_some());
+    let model = catalog.find("openai", "gpt-4o").unwrap();
+    assert_eq!(model.context_window, Some(128_000));
+    assert_eq!(model.input_price, Some(2.5));
 }
 
 #[tokio::test]
@@ -85,7 +87,9 @@ async fn fetch_failure_falls_back_to_stale_cache() {
         .unwrap();
 
     assert_eq!(catalog.fetched_at, 0);
-    assert!(catalog.find("openai", "gpt-4o").is_some());
+    let model = catalog.find("openai", "gpt-4o").unwrap();
+    assert_eq!(model.context_window, Some(128_000));
+    assert_eq!(model.input_price, Some(2.5));
 }
 
 #[tokio::test]

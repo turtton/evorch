@@ -90,8 +90,14 @@ async fn corrupt_cache_is_replaced_by_successful_fetch() {
         .await
         .unwrap();
 
-    assert!(catalog.find("openai", "gpt-4o").is_some());
-    assert!(cache::read(dir.path()).await.unwrap().is_fresh());
+    let model = catalog.find("openai", "gpt-4o").unwrap();
+    assert_eq!(model.context_window, Some(128_000));
+    assert_eq!(model.input_price, Some(2.5));
+    let cached = cache::read(dir.path()).await.unwrap();
+    assert!(cached.is_fresh());
+    let cached_model = cached.find("openai", "gpt-4o").unwrap();
+    assert_eq!(cached_model.context_window, Some(128_000));
+    assert_eq!(cached_model.input_price, Some(2.5));
 }
 
 #[test]

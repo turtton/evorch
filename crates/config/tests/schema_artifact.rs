@@ -63,20 +63,22 @@ fn generated_schema_is_valid_json_schema() {
 // Then: version/providers/routing/panel/diagnostics/permissions/metrics を含む
 #[test]
 fn generated_schema_covers_all_config_sections() {
-    let schema = config::json_schema();
+    let schema: serde_json::Value =
+        serde_json::from_str(&config::json_schema()).expect("valid JSON schema");
+    let properties = schema["properties"].as_object().expect("root properties");
 
     for section in [
-        "\"version\"",
-        "\"providers\"",
-        "\"agents\"",
-        "\"routing\"",
-        "\"panel\"",
-        "\"diagnostics\"",
-        "\"permissions\"",
-        "\"metrics\"",
+        "version",
+        "providers",
+        "agents",
+        "routing",
+        "panel",
+        "diagnostics",
+        "permissions",
+        "metrics",
     ] {
         assert!(
-            schema.contains(section),
+            properties.contains_key(section),
             "生成 schema に {section} が含まれない"
         );
     }

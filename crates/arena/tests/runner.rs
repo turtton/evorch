@@ -111,6 +111,14 @@ async fn exhausted_budget_prevents_http_requests() {
     let report = run(&spec, &runner).await.expect("run");
     // Then: all configurations fail closed without sending a request.
     assert!(server.recorded_requests().is_empty());
+    assert_eq!(
+        report
+            .traces()
+            .iter()
+            .map(|trace| trace.config_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
     assert!(
         report
             .traces()
