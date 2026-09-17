@@ -21,9 +21,30 @@ fn production_catalog_and_triggers_cover_additional_roles() {
     })
     .expect("production catalog");
     let triggers = runtime::prompt::default_role_triggers();
+
+    // Given: the production catalog and its role trigger sources.
+    // When: additional roles resolve their generic prompts.
+    let planner_prompt = catalog
+        .system_prompt_for(Role::Planner, None, "generic")
+        .expect("Planner prompt");
+    let oracle_prompt = catalog
+        .system_prompt_for(Role::Oracle, None, "generic")
+        .expect("Oracle prompt");
+    let looker_prompt = catalog
+        .system_prompt_for(Role::MultimodalLooker, None, "generic")
+        .expect("MultimodalLooker prompt");
+    assert_ne!(planner_prompt, oracle_prompt);
+    assert_ne!(planner_prompt, looker_prompt);
+    assert_ne!(oracle_prompt, looker_prompt);
+
+    // Then: each role selects its own capability-bearing trigger source.
     for role in [Role::Planner, Role::Oracle, Role::MultimodalLooker] {
-        assert!(catalog.system_prompt_for(role, None, "generic").is_ok());
-        assert!(triggers.iter().any(|trigger| trigger.name == role.name()));
+        let trigger = triggers
+            .iter()
+            .find(|trigger| trigger.name == role.name())
+            .expect("role trigger");
+        assert!(trigger.description.contains("許可ツール:"));
+        assert!(trigger.description.contains("ネットワーク:"));
     }
 }
 

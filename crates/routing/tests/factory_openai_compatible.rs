@@ -6,7 +6,7 @@ use providers::{ChatRequest, ContentBlock, Message, ProviderAuth, Role};
 use routing::factory::{FactoryOptions, build_provider_client};
 use routing::{CredentialRef, ProviderProfile, RoutingError};
 use sandbox::credential::{CredentialStore, FileCredentialStore};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const PROFILE: &str = "local";
@@ -112,11 +112,28 @@ fn factory_rejects_wrong_protocol_for_openai_compatible() {
     assert!(matches!(error, RoutingError::InvalidProfile { .. }));
 }
 
-// Given: OpenAI互換typeとkeyring認証 / When: factoryで構築 / Then: clientを構築できる
-#[test]
-fn factory_builds_openai_compatible_client_from_keyring_profile() {
+// Given: keyring認証参照を持つOpenAI互換プロファイル / When: factory clientで送信 / Then: profileのbase URL・Chat Completions protocol・モデルを使いBearer認証を転送する
+#[tokio::test]
+async fn factory_builds_openai_compatible_client_from_keyring_profile() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer keyring-api-key"))
+        .and(body_partial_json(serde_json::json!({"model": MODEL})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-keyring",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     let (_directory, store) = credential_store();
-    let profile = profile(
+    let mut profile = profile(
         model::ProviderType::OpenAiCompatible,
         model::ApiProtocol::OpenAiCompletions,
         CredentialRef::Keyring {
@@ -124,8 +141,14 @@ fn factory_builds_openai_compatible_client_from_keyring_profile() {
             account: PROFILE.to_string(),
         },
     );
+    profile.base_url = server.uri();
 
-    assert!(build_provider_client(&profile, store, None, &FactoryOptions::default()).is_ok());
+    let client = build_provider_client(&profile, store, None, &FactoryOptions::default())
+        .expect("OpenAI互換clientを構築できる");
+    client
+        .send(&ProviderAuth::new("keyring-api-key"), &request())
+        .await
+        .expect("keyringプロファイルのclientが送信できる");
 }
 
 // Given: anthropic type / When: factoryで構築 / Then: UnsupportedProviderTypeを維持する
@@ -150,19 +173,40 @@ fn factory_keeps_anthropic_unsupported() {
     );
 }
 
-#[test]
-fn kimi_subscription_builds_chat_completions_client() {
-    // Given
+// Given: Kimi subscriptionプロファイル / When: factory clientで送信 / Then: Chat Completions protocolとプロファイルのbase URL・モデルを使う
+#[tokio::test]
+async fn kimi_subscription_builds_chat_completions_client() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer kimi-api-key"))
+        .and(body_partial_json(serde_json::json!({"model": MODEL})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-kimi",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     let (_directory, store) = credential_store();
-    let kimi = profile(
+    let mut kimi = profile(
         model::ProviderType::KimiSubscription,
         model::ApiProtocol::OpenAiCompletions,
         env_credential(),
     );
-    // When
-    let client = build_provider_client(&kimi, store, None, &FactoryOptions::default());
-    // Then
-    assert!(client.is_ok());
+    kimi.base_url = server.uri();
+
+    let client = build_provider_client(&kimi, store, None, &FactoryOptions::default())
+        .expect("Kimi subscription clientを構築できる");
+    client
+        .send(&ProviderAuth::new("kimi-api-key"), &request())
+        .await
+        .expect("Kimi subscription clientが送信できる");
 }
 
 #[test]

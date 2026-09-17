@@ -206,6 +206,10 @@ fn sidebar_fixture_types_are_public_and_serializable() {
         ..SidebarState::default()
     };
 
-    // Then: serde accepts the framework-independent shape.
-    assert!(serde_json::to_value(state).is_ok());
+    // When: the fixture shape crosses serde's JSON boundary.
+    let json = serde_json::to_string(&state).expect("fixture must serialize");
+    let restored: SidebarState = serde_json::from_str(&json).expect("fixture must deserialize");
+
+    // Then: project and thread identity, association, and display fields survive.
+    assert_eq!(restored, state);
 }
