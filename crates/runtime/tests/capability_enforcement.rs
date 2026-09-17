@@ -99,7 +99,7 @@ async fn worker_edit_emits_started_and_completed() {
     let run_id =
         runtime.delegate_background(Role::Worker, "edit".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let events = collect_events(&mut events, 7).await;
+    let events = drain_events(&mut events).await;
 
     // Then
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "edit" && call_id == "edit-2")));
