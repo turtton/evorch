@@ -1,0 +1,64 @@
+implementation_issue_packet:
+  issue_title: "Durable execution substrate: 中断・再開・検証可能な長時間 agent 実行"
+  issue_kind: feature
+  source_execution_unit: v07-durable-execution-substrate
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/runtime,crates/gui,crates/event-bus
+  target_part: "GoalSupervisor・OrchestratorEvent・event replay・ReviewLoop の拡張として、durable task continuation / budget & circuit breaker / evidence-first verification gate を実装する"
+  dependencies: []
+  technical_baseline:
+    - "crates/runtime/src/orchestration/review.rs:83 (bounded ReviewLoop)"
+    - "OrchestratorEvent::GoalCreated (thread_id, root_run_id)"
+    - "crates/gui/src/runtime_sink.rs (goal submit/binding)"
+    - "crates/event-bus/src/event.rs:143 (DiagnosticEvent)"
+  intent_references:
+    - "intents/evorch/features/orchestration/overview.md"
+    - "intents/evorch/features/agent-runtime-kernel/overview.md"
+  acceptance_criteria:
+    - "task_id 指定で中断後の goal を resume でき、成果物・失敗理由・再開地点が永続化されていること"
+    - "tool-call 数・時間・token 等の予算超過時に DiagnosticEvent (BudgetExhausted/NoProgress/ProviderUnavailable) が発行され、checkpoint が 50-call ごとに発火すること"
+    - "spawn 前に provider/model が解決・疎通確認され、未検証 fallback で worker が起動しないこと"
+    - "ReviewLoop の verdict が typed tool result (criterion + evidence 紐付け) で返されること"
+    - "既存 gui/providers/event-bus/runtime のテストが回帰しないこと"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  new_intent_needed: false
+  placement_rationale: "GoalSupervisor/orchestration の拡張であり、新規 intent node は不要"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: true
+    target_paths:
+      - "intents/evorch/decisions/00NN-durable-execution-substrate.md"
+    decision_title: "Durable execution substrate as GoalSupervisor extension"
+  diagram:
+    required: true
+    target_paths:
+      - "intents/evorch/features/orchestration/"
+    diagram_type: state
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "durable execution 実装で発見した event replay/binding パターンと予算設計を clarifications/ に書き戻す"
+  write_back_required: true
+  write_back_targets:
+    - "intents/evorch/clarifications/"
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: "gui run status 表示 (queued/running/blocked/retrying/completed)"
