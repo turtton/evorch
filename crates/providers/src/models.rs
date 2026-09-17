@@ -5,6 +5,14 @@ use crate::wire::openai::WireModelList;
 use crate::{ProviderAuth, ProviderError};
 use serde::{Deserialize, de::DeserializeOwned};
 
+/// Verify authenticated catalog connectivity without issuing a completion.
+///
+/// # Errors
+/// Returns the same transport, HTTP and decoding errors as [`list_models`].
+pub async fn verify_connectivity(base_url: &str, auth: &ProviderAuth) -> Result<(), ProviderError> {
+    list_models(base_url, auth).await.map(|_| ())
+}
+
 /// Fetch model identifiers from `{base_url}/models` using Bearer authentication.
 ///
 /// Uses the shared connection and read timeouts without a whole-request timeout.

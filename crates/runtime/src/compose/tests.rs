@@ -121,26 +121,28 @@ fn routed_model(
             auth: ProviderAuth::new("secret-never-rendered"),
         },
     )]);
-    (
-        RoutedModel::new(
-            ComposedProviders { router, providers },
-            config::AgentsConfig {
-                worker: config::WorkerBindingConfig {
-                    base: RoleBindingConfig {
-                        generation: GenerationOverridesConfig {
-                            temperature: Some(0.25),
-                            max_tokens: Some(321),
-                            ..GenerationOverridesConfig::default()
-                        },
-                        ..RoleBindingConfig::default()
+    let model = RoutedModel::new(
+        ComposedProviders { router, providers },
+        config::AgentsConfig {
+            worker: config::WorkerBindingConfig {
+                base: RoleBindingConfig {
+                    generation: GenerationOverridesConfig {
+                        temperature: Some(0.25),
+                        max_tokens: Some(321),
+                        ..GenerationOverridesConfig::default()
                     },
-                    ..config::WorkerBindingConfig::default()
+                    ..RoleBindingConfig::default()
                 },
-                ..config::AgentsConfig::default()
+                ..config::WorkerBindingConfig::default()
             },
-        ),
-        requests,
-    )
+            ..config::AgentsConfig::default()
+        },
+    );
+    model
+        .verification
+        .set(BTreeMap::from([("local".into(), Ok(()))]))
+        .unwrap();
+    (model, requests)
 }
 
 async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, RuntimeError> {
