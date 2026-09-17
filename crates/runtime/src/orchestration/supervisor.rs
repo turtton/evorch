@@ -604,7 +604,13 @@ impl SupervisorActor {
 
     async fn handle_bus_event(&mut self, event: Event) {
         match event.kind {
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to,
+                reason,
+                ..
+            }) => {
+                self.task_phase(&run_id, to, reason.as_deref());
                 self.on_phase(run_id, to).await
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
@@ -639,7 +645,6 @@ impl SupervisorActor {
     }
 
     async fn on_phase(&mut self, run_id: String, phase: AgentRunPhase) {
-        self.task_phase(&run_id, phase);
         if let Some(track) = self.progress.get_mut(&run_id) {
             track.phase = phase;
             if phase == AgentRunPhase::Running {

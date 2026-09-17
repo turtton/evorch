@@ -192,6 +192,7 @@ impl SupervisorActor {
             | TaskStatus::Running
             | TaskStatus::Failed => task.status = TaskStatus::Cancelled,
         }
+        task.failure_reason = Some("cancelled by operator".into());
         self.publish_task(&request.goal_id, &request.task_id, &request.run_id, task);
         if (!snapshot.detached || self.progress.contains_key(&request.run_id))
             && let Some(run) = self.find_run(&request.run_id)
@@ -200,10 +201,13 @@ impl SupervisorActor {
         }
     }
 
-    pub(super) fn task_phase(&self, run_id: &str, phase: AgentRunPhase) {
+    pub(super) fn task_phase(&self, run_id: &str, phase: AgentRunPhase, reason: Option<&str>) {
         let status = match phase {
             AgentRunPhase::Done => TaskStatus::Completed,
-            AgentRunPhase::Error => TaskStatus::Failed,
+            AgentRunPhase::Error => match reason {
+                Some("cancelled") => TaskStatus::Cancelled,
+                Some(_) | None => TaskStatus::Failed,
+            },
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return,
         };
         for goal in self.goals_for_run(run_id) {
@@ -225,8 +229,8 @@ impl SupervisorActor {
                     continue;
                 }
                 task.status = status;
-                if status == TaskStatus::Failed {
-                    task.failure_reason = Some("run failed".into());
+                if let Some(reason) = reason {
+                    task.failure_reason = Some(reason.into());
                 }
                 self.publish_task(&goal, task_id, run_id, task);
             }

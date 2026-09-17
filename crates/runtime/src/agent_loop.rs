@@ -4,6 +4,7 @@
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
 mod budget;
+mod durable;
 mod messages;
 mod snapshots;
 mod team;
@@ -99,6 +100,7 @@ pub(crate) struct LoopState {
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     budget: crate::budget_tracker::BudgetCounters,
+    durable_task: Option<storage::entity::TaskContinuation>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -159,6 +161,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
+        durable_task: None,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
@@ -801,8 +804,9 @@ impl LoopState {
     ) -> Result<(), ()> {
         let event = self
             .run_state
-            .transition(self.task.run_id, phase, reason)
+            .transition(self.task.run_id, phase, reason.clone())
             .map_err(|_| ())?;
+        self.publish_durable_task(phase, reason);
         if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
                 tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");

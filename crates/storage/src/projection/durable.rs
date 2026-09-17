@@ -5,12 +5,13 @@ use rusqlite::{Connection, params};
 
 use crate::StorageError;
 use crate::db::system_time_to_ns;
-use crate::entity::TaskContinuation;
+use crate::entity::{TaskContinuation, TaskStatus};
 use crate::repo::event::StoredEvent;
 
 pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(), StorageError> {
     let mut parents = BTreeMap::new();
     let mut runs = BTreeMap::new();
+    let mut terminal = std::collections::BTreeSet::new();
     for stored in events {
         match &stored.event.kind {
             EventKind::Orchestrator(OrchestratorEvent::RunAttached {
@@ -41,7 +42,9 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                 progress,
                 reason,
             }) => {
-                if runs.get(task_id).is_some_and(|current| current != run_id) {
+                if runs.get(task_id).is_some_and(|current| current != run_id)
+                    || terminal.contains(task_id)
+                {
                     continue;
                 }
                 runs.insert(task_id.clone(), run_id.clone());
@@ -66,6 +69,9 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                 let Ok(task) = serde_json::from_value::<TaskContinuation>(progress.clone()) else {
                     continue;
                 };
+                if matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled) {
+                    terminal.insert(task_id.clone());
+                }
                 let now = system_time_to_ns(stored.event.meta.wall_clock)?;
                 let heartbeat = task
                     .heartbeat_at_ns

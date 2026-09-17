@@ -33,24 +33,7 @@ impl LoopState {
                 return decision;
             }
         }
-        if self.task.role == crate::Role::Worker
-            && let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            && let Ok(heartbeat) = u64::try_from(elapsed.as_nanos())
-        {
-            self.shared.bus.emit(event_bus::Event::new(
-                event_bus::OrchestratorEvent::TaskProgressed {
-                    task_id: task_id.into(),
-                    run_id,
-                    progress: serde_json::json!({
-                        "status": "running", "input": self.task.prompt,
-                        "resume_cursor": null, "last_artifact": null,
-                        "failure_reason": null, "attempts": 0,
-                        "heartbeat_at_ns": heartbeat,
-                    }),
-                    reason: "task heartbeat".into(),
-                },
-            ));
-        }
+        self.publish_durable_task(self.phase(), None);
         decision
     }
 }

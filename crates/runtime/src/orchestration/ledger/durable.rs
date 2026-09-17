@@ -1,4 +1,5 @@
 use event_bus::OrchestratorEvent;
+use storage::entity::{TaskContinuation, TaskStatus};
 
 use super::{GoalLedger, LedgerError, event_goal_id};
 
@@ -66,6 +67,19 @@ impl GoalLedger {
                     .task_runs
                     .get(task_id)
                     .is_some_and(|current| current != run_id)
+                {
+                    return Ok(());
+                }
+                if self
+                    .snapshot
+                    .task_progress
+                    .get(task_id)
+                    .and_then(|progress| {
+                        serde_json::from_value::<TaskContinuation>(progress.clone()).ok()
+                    })
+                    .is_some_and(|task| {
+                        matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled)
+                    })
                 {
                     return Ok(());
                 }
