@@ -1027,7 +1027,41 @@ mod tests {
     }
 
     #[test]
-    fn criteria_decode_legacy_checklist_without_evidence() {
+    fn gate_evidence_criteria_checklist_round_trips_with_full_evidence() {
+        // Given: every structured evidence field is populated in a criteria event.
+        let event = OrchestratorEvent::EvidenceRecorded {
+            goal_id: "goal-full-evidence".into(),
+            evidence: GateEvidence::Criteria {
+                head_sha: "criteria-head-sha".into(),
+                reviewer_run_id: "review-run-full".into(),
+                round: 3,
+                checklist: vec![CriterionCheck {
+                    id: "ac-full".into(),
+                    status: CriterionStatus::Met,
+                    note: "all checks passed".into(),
+                    evidence: Some(CriterionEvidence {
+                        command: "cargo test -p event-bus".into(),
+                        exit_status: 0,
+                        target_sha: "target-commit-sha".into(),
+                        diff_ref: Some("base..target-commit-sha".into()),
+                        artifact_path: Some("artifacts/event-bus-test.log".into()),
+                        red_evidence: Some("artifacts/event-bus-red.log".into()),
+                    }),
+                }],
+            },
+        };
+
+        // When: serializing and deserializing the event.
+        let json = serde_json::to_string(&event).expect("serialize criteria evidence event");
+        let restored: OrchestratorEvent =
+            serde_json::from_str(&json).expect("deserialize criteria evidence event");
+
+        // Then: the checklist and every evidence field survive the round trip.
+        assert_eq!(event, restored);
+    }
+
+    #[test]
+    fn legacy_criterion_without_evidence_decodes() {
         // Given: persisted criteria from before structured evidence existed.
         let json = serde_json::json!({
             "kind": "Criteria",
