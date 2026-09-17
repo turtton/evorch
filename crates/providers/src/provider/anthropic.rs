@@ -105,7 +105,8 @@ impl ProviderClient for AnthropicClient {
             request.model.clone(),
             false,
             request.observation.clone(),
-        );
+        )
+        .with_cache_expectation(request);
         let request_builder = self
             .http_client
             .post(self.messages_url())
@@ -159,7 +160,8 @@ impl ProviderClient for AnthropicClient {
             request.model.clone(),
             true,
             request.observation.clone(),
-        );
+        )
+        .with_cache_expectation(request);
         let http_request = self
             .http_client
             .post(self.messages_url())

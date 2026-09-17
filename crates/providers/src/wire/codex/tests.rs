@@ -3,6 +3,29 @@ use serde_json::json;
 use super::to_wire_request;
 use crate::message::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
 
+#[test]
+fn cache_tools_are_byte_stable_when_registration_order_changes() {
+    // Given: a tool set in opposite registration orders.
+    let mut input = request();
+    input.tools = ["zeta", "alpha"]
+        .map(|name| ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            input_schema: json!({"type":"object"}),
+        })
+        .to_vec();
+    let mut shuffled = input.clone();
+    shuffled.tools.reverse();
+    // When: both permutations are serialized.
+    let first = serde_json::to_value(to_wire_request(&input)).unwrap();
+    let second = serde_json::to_value(to_wire_request(&shuffled)).unwrap();
+    // Then: the wire tool array is byte-identical.
+    assert_eq!(
+        serde_json::to_vec(&first["tools"]).unwrap(),
+        serde_json::to_vec(&second["tools"]).unwrap()
+    );
+}
+
 fn request() -> ChatRequest {
     ChatRequest {
         model: "gpt-5-codex".to_string(),

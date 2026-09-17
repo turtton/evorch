@@ -170,7 +170,8 @@ impl ChatCompletionsClient {
             model.clone(),
             false,
             request.observation.clone(),
-        );
+        )
+        .with_cache_expectation(request);
         let request = self
             .http
             .post(&self.endpoint)
@@ -243,7 +244,8 @@ impl ChatCompletionsClient {
             model.clone(),
             true,
             request.observation.clone(),
-        );
+        )
+        .with_cache_expectation(request);
         let request = self
             .http
             .post(&self.endpoint)

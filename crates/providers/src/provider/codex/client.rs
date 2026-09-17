@@ -129,6 +129,7 @@ impl CodexClient {
             streaming,
             request.observation.clone(),
         )
+        .with_cache_expectation(request)
     }
 
     async fn execute(

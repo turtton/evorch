@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 pub struct WireChatRequest {
     /// モデル識別子。
     pub model: String,
+    /// Run-scoped routing affinity for automatic prompt caching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
     /// OpenAI 形式の会話履歴。
     pub messages: Vec<WireMessage>,
     /// 利用可能な function tool。

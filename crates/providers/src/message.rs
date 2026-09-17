@@ -125,10 +125,11 @@ pub enum FinishReason {
 
 /// 観測相関のためのコンテキスト。
 ///
-/// wire プロトコルには搭載されない内部メタデータであり、プロバイダ
+/// 内部メタデータであり、プロバイダ
 /// リクエスト attempt の観測イベント ([`RequestStarted`] / `FirstTokenObserved`
 /// / `RequestCompleted` / `RequestFailed` — `event_bus` crate 参照) へ
 /// `run_id` を相関させるためのもの。
+/// OpenAI wire では run ID を `prompt_cache_key` にも使用する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationContext {
     /// 相関先の agent run ID。
@@ -165,7 +166,7 @@ pub struct ChatRequest {
     /// サービス階層。未指定なら標準処理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
-    /// 観測相関コンテキスト。wire へは送信されない。
+    /// 観測相関コンテキスト。OpenAI では run ID が cache affinity にも使われる。
     #[serde(default, skip_serializing)]
     pub observation: Option<ObservationContext>,
 }

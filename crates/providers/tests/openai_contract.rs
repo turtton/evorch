@@ -18,6 +18,75 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MODEL: &str = "gpt-contract";
 
+#[tokio::test]
+async fn cache_key_is_serialized_when_run_is_set_and_omitted_otherwise() {
+    // Given: requests with and without an observation run.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let client = client(&server, Duration::from_secs(1), None);
+    for run in [Some("run-cache-affinity"), None] {
+        let mut input = request();
+        input.observation = run.map(|id| providers::ObservationContext { run_id: id.into() });
+        // When: sent through the real HTTP adapter.
+        client
+            .send(&ProviderAuth::new("sk-contract"), &input)
+            .await
+            .unwrap();
+    }
+    // Then: only the configured request contains the exact run ID.
+    let requests = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(bodies[0]["prompt_cache_key"], "run-cache-affinity");
+    assert!(bodies[1].get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn cache_tools_are_byte_stable_when_registration_order_changes() {
+    // Given: the same named tool set in opposite registration orders.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        json_response(200, &fixture("openai", "send_text.json")),
+    )
+    .await;
+    let mut input = request();
+    input.tools = ["zeta", "alpha"]
+        .map(|name| providers::ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            input_schema: json!({"type":"object"}),
+        })
+        .to_vec();
+    let client = client(&server, Duration::from_secs(1), None);
+    // When: both permutations pass through the HTTP surface.
+    client
+        .send(&ProviderAuth::new("sk-contract"), &input)
+        .await
+        .unwrap();
+    input.tools.reverse();
+    client
+        .send(&ProviderAuth::new("sk-contract"), &input)
+        .await
+        .unwrap();
+    // Then: the serialized tool arrays are byte-identical.
+    let requests = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        serde_json::to_vec(&bodies[0]["tools"]).unwrap(),
+        serde_json::to_vec(&bodies[1]["tools"]).unwrap()
+    );
+}
+
 fn request() -> ChatRequest {
     ChatRequest {
         model: MODEL.to_string(),

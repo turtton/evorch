@@ -19,6 +19,98 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 const MODEL: &str = "claude-test";
 const API_KEY: &str = "sk-ant-test";
 
+#[tokio::test]
+async fn cache_breakpoints_cover_system_last_tool_and_last_conversation_block() {
+    // Given: multiple system, tool and conversation blocks.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        json_response(200, &fixture("anthropic", "send_text.json")),
+        false,
+    )
+    .await;
+    let mut input = request();
+    input.messages.insert(
+        0,
+        Message {
+            role: Role::System,
+            content: vec![
+                ContentBlock::Text {
+                    text: "stable-a".into(),
+                },
+                ContentBlock::Text {
+                    text: "stable-b".into(),
+                },
+            ],
+        },
+    );
+    input.messages[1].content.push(ContentBlock::Text {
+        text: "tail".into(),
+    });
+    input.tools = ["zeta", "alpha"]
+        .map(|name| providers::ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            input_schema: json!({"type":"object"}),
+        })
+        .to_vec();
+    // When: the real HTTP client sends the request.
+    client(&server, Duration::from_secs(1))
+        .send(&ProviderAuth::new(API_KEY), &input)
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    // Then: exactly the three prefix boundaries carry ephemeral cache control.
+    let ephemeral = json!({"type":"ephemeral"});
+    assert_eq!(body["system"][0]["cache_control"], ephemeral);
+    assert_eq!(body["tools"][1]["cache_control"], ephemeral);
+    assert_eq!(
+        body["messages"][0]["content"][1]["cache_control"],
+        ephemeral
+    );
+    assert_eq!(body.to_string().matches("\"cache_control\"").count(), 3);
+}
+
+#[tokio::test]
+async fn cache_tools_are_byte_stable_when_registration_order_changes() {
+    // Given: the same named tool set in opposite registration orders.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(json_response(200, &fixture("anthropic", "send_text.json")))
+        .mount(&server)
+        .await;
+    let mut input = request();
+    input.tools = ["zeta", "alpha"]
+        .map(|name| providers::ToolSpec {
+            name: name.into(),
+            description: name.into(),
+            input_schema: json!({"type":"object"}),
+        })
+        .to_vec();
+    let client = client(&server, Duration::from_secs(1));
+    // When: both permutations pass through the HTTP surface.
+    client
+        .send(&ProviderAuth::new(API_KEY), &input)
+        .await
+        .unwrap();
+    input.tools.reverse();
+    client
+        .send(&ProviderAuth::new(API_KEY), &input)
+        .await
+        .unwrap();
+    // Then: the serialized tool arrays are byte-identical.
+    let requests = server.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        serde_json::to_vec(&bodies[0]["tools"]).unwrap(),
+        serde_json::to_vec(&bodies[1]["tools"]).unwrap()
+    );
+}
+
 #[derive(Debug)]
 struct AnthropicBodyMatcher {
     stream: bool,

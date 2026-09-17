@@ -4,8 +4,8 @@ use crate::message::{
 
 use super::DEFAULT_MAX_TOKENS;
 use super::types::{
-    WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse, WireRole, WireTool,
-    WireToolResultContent, WireUsage,
+    CacheControl, WireContentBlock, WireMessage, WireMessagesRequest, WireMessagesResponse,
+    WireRole, WireTool, WireToolResultContent, WireUsage,
 };
 
 /// canonical request を Anthropic Messages API のリクエストへ変換します。
@@ -28,8 +28,13 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
             | ContentBlock::ToolResult { .. } => None,
         })
         .collect::<Vec<_>>();
-    let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
-    let messages = request
+    let system = (!system_parts.is_empty()).then(|| {
+        vec![WireContentBlock::Text {
+            text: system_parts.join("\n\n"),
+            cache_control: Some(CacheControl::Ephemeral),
+        }]
+    });
+    let mut messages: Vec<WireMessage> = request
         .messages
         .iter()
         .filter(|message| message.role != Role::System)
@@ -56,20 +61,35 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
             }
         })
         .collect();
+    for block in messages
+        .iter_mut()
+        .rev()
+        .flat_map(|message| message.content.iter_mut().rev())
+    {
+        if block.mark_cacheable() {
+            break;
+        }
+    }
+    let mut tools: Vec<_> = request
+        .tools
+        .iter()
+        .map(|tool| WireTool {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+            cache_control: None,
+        })
+        .collect();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    if let Some(tool) = tools.last_mut() {
+        tool.cache_control = Some(CacheControl::Ephemeral);
+    }
     WireMessagesRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         system,
         messages,
-        tools: request
-            .tools
-            .iter()
-            .map(|tool| WireTool {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            })
-            .collect(),
+        tools,
         temperature: request.temperature,
         stream,
     }
@@ -117,19 +137,27 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
 fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
     match block {
         ContentBlock::Image { media_type, data } => WireContentBlock::Image {
+            cache_control: None,
             source: super::types::WireImageSource::Base64 {
                 media_type: media_type.clone(),
                 data: data.clone(),
             },
         },
-        ContentBlock::Text { text } => WireContentBlock::Text { text: text.clone() },
+        ContentBlock::Text { text } => WireContentBlock::Text {
+            text: text.clone(),
+            cache_control: None,
+        },
         ContentBlock::Reasoning { text } => match role {
-            WireRole::User => WireContentBlock::Text { text: text.clone() },
+            WireRole::User => WireContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            },
             WireRole::Assistant => WireContentBlock::Thinking {
                 thinking: text.clone(),
             },
         },
         ContentBlock::ToolUse { id, name, input } => WireContentBlock::ToolUse {
+            cache_control: None,
             id: id.clone(),
             name: name.clone(),
             input: input.clone(),
@@ -139,6 +167,7 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
             content,
             is_error,
         } => WireContentBlock::ToolResult {
+            cache_control: None,
             tool_use_id: tool_call_id.clone(),
             content: content
                 .iter()
@@ -157,14 +186,18 @@ fn from_wire_block(block: WireContentBlock) -> ContentBlock {
     match block {
         WireContentBlock::Image {
             source: super::types::WireImageSource::Base64 { media_type, data },
+            ..
         } => ContentBlock::Image { media_type, data },
-        WireContentBlock::Text { text } => ContentBlock::Text { text },
+        WireContentBlock::Text { text, .. } => ContentBlock::Text { text },
         WireContentBlock::Thinking { thinking } => ContentBlock::Reasoning { text: thinking },
-        WireContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
+        WireContentBlock::ToolUse {
+            id, name, input, ..
+        } => ContentBlock::ToolUse { id, name, input },
         WireContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
+            ..
         } => ContentBlock::ToolResult {
             tool_call_id: tool_use_id,
             content: content

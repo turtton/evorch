@@ -45,7 +45,7 @@ fn image_input_serializes_as_anthropic_base64_source() {
     assert_eq!(
         value["messages"][0]["content"],
         json!([
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}, "cache_control": {"type": "ephemeral"}}
         ])
     );
 }

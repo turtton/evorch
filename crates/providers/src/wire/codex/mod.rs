@@ -128,6 +128,8 @@ enum ReasoningSummary {
 /// canonical request を Codex Responses API のリクエストへ変換します。
 #[must_use]
 pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
+    let mut sorted_tools: Vec<_> = request.tools.iter().collect();
+    sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
     let instructions = request
         .messages
         .iter()
@@ -155,9 +157,8 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         model: request.model.clone(),
         instructions,
         input,
-        tools: request
-            .tools
-            .iter()
+        tools: sorted_tools
+            .into_iter()
             .map(|tool| FunctionTool {
                 kind: ToolType::Function,
                 name: tool.name.clone(),

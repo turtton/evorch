@@ -59,15 +59,16 @@ fn canonical_request_converts_to_anthropic_wire_shape() {
         json!({
             "model": "claude-test",
             "max_tokens": 4096,
-            "system": "first\n\nsecond",
+            "system": [{"type": "text", "text": "first\n\nsecond", "cache_control": {"type": "ephemeral"}}],
             "messages": [
                 {"role": "assistant", "content": [{"type": "thinking", "thinking": "考え中"}]},
                 {"role": "user", "content": [{
                     "type": "tool_result", "tool_use_id": "toolu_1",
-                    "content": [{"type": "text", "text": "晴れ"}], "is_error": false
+                    "content": [{"type": "text", "text": "晴れ"}], "is_error": false,
+                    "cache_control": {"type": "ephemeral"}
                 }]}
             ],
-            "tools": [{"name": "weather", "description": "天気を取得", "input_schema": {"type": "object"}}],
+            "tools": [{"name": "weather", "description": "天気を取得", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
             "temperature": 0.2,
             "stream": true
         })
@@ -108,7 +109,7 @@ fn user_only_blocks_follow_anthropic_role_constraints() {
     assert_eq!(wire["messages"][0]["role"], "user");
     assert_eq!(
         wire["messages"][1]["content"][0],
-        json!({"type": "text", "text": "内部メモ"})
+        json!({"type": "text", "text": "内部メモ", "cache_control": {"type": "ephemeral"}})
     );
     assert_eq!(wire["max_tokens"], 32);
     assert_eq!(wire["stream"], false);

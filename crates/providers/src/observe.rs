@@ -11,6 +11,10 @@ use crate::error::ProviderError;
 use crate::message::{FinishReason, ObservationContext, Usage};
 use crate::stream::StreamEvent;
 
+mod cache;
+#[cfg(test)]
+mod cache_tests;
+
 /// プロセス内で一意な request ID を生成する。
 pub(crate) fn next_request_id() -> String {
     static PROCESS_STARTED_AT_MS: LazyLock<u128> = LazyLock::new(|| {
@@ -39,6 +43,7 @@ pub(crate) struct AttemptObserver {
     started_emitted: bool,
     first_token_emitted: bool,
     terminal_emitted: bool,
+    expected_cacheable_tokens: Option<u64>,
 }
 
 impl AttemptObserver {
@@ -65,7 +70,13 @@ impl AttemptObserver {
             started_emitted: false,
             first_token_emitted: false,
             terminal_emitted: false,
+            expected_cacheable_tokens: None,
         }
+    }
+
+    pub(crate) fn with_cache_expectation(mut self, request: &crate::message::ChatRequest) -> Self {
+        self.expected_cacheable_tokens = Some(cache::expected_cacheable_tokens(request));
+        self
     }
 
     /// attempt 開始を発行し、計測時計をこの時点へ合わせる。
@@ -116,6 +127,26 @@ impl AttemptObserver {
     pub(crate) fn emit_completed(&mut self, usage: &Usage, finish_reason: FinishReason) {
         if self.terminal_emitted {
             return;
+        }
+        if let Some(expected_cacheable_tokens) = self.expected_cacheable_tokens {
+            let cache_hit_ratio = u32::try_from(expected_cacheable_tokens)
+                .ok()
+                .filter(|expected| *expected > 0)
+                .zip(u32::try_from(usage.cache_read_tokens).ok())
+                .map(|(expected, actual)| f64::from(actual) / f64::from(expected));
+            tracing::info!(
+                request_id = %self.request_id,
+                run_id = self.observation.as_ref().map(|context| context.run_id.as_str()),
+                provider = %self.provider,
+                profile = self.profile.as_deref(),
+                protocol = self.protocol,
+                model = %self.model,
+                expected_cacheable_tokens,
+                cache_read_tokens = usage.cache_read_tokens,
+                cache_hit_ratio,
+                cache_estimation = "utf8_bytes_div_4",
+                "prompt cache request completed"
+            );
         }
         let finish_reason = match finish_reason {
             FinishReason::Stop => "stop".to_string(),

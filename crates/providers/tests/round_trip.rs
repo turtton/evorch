@@ -1,4 +1,5 @@
 //! プロバイダ間の canonical メッセージ往復契約を検証します。
+// allow: SIZE_OK — Cross-provider contract matrix shares private wire-module fixtures in one test binary.
 
 mod error {
     pub use providers::error::*;
@@ -57,7 +58,7 @@ mod anthropic_wire {
     }
 
     pub use convert::{from_wire_response, to_wire_request};
-    pub use types::{WireContentBlock, WireMessagesResponse, WireRole};
+    pub use types::{CacheControl, WireContentBlock, WireMessagesResponse, WireRole};
 }
 
 use anthropic_wire::{WireContentBlock, WireRole};
@@ -155,14 +156,14 @@ fn canonical_request_round_trips_through_anthropic() {
     let request = representative_request();
     let wire = anthropic_wire::to_wire_request(&request, false);
 
-    assert_eq!(wire.system.as_deref(), Some("安全に回答してください。"));
-    let restored_system = Message {
-        role: Role::System,
-        content: vec![ContentBlock::Text {
-            text: wire.system.clone().expect("system must be hoisted"),
-        }],
+    let system = wire.system.clone().expect("system must be hoisted");
+    let [WireContentBlock::Text { text, .. }] = system.as_slice() else {
+        panic!("system must contain one text block");
     };
-    assert_eq!(restored_system, request.messages[0]);
+    assert_eq!(
+        request.messages[0].content,
+        vec![ContentBlock::Text { text: text.clone() }]
+    );
 
     let user = wire.messages[0].clone();
     let restored = anthropic_wire::from_wire_response(anthropic_wire::WireMessagesResponse {
@@ -272,12 +273,14 @@ fn openai_response_converts_to_anthropic_request_shape() {
         anthropic.messages[0].content,
         vec![
             WireContentBlock::Text {
-                text: "回答".to_string()
+                text: "回答".to_string(),
+                cache_control: None,
             },
             WireContentBlock::ToolUse {
                 id: "call_1".to_string(),
                 name: "weather".to_string(),
                 input: json!({"city": "Tokyo"}),
+                cache_control: Some(anthropic_wire::CacheControl::Ephemeral),
             }
         ]
     );
