@@ -44,6 +44,7 @@ impl Fixture {
                     id: "ac1".into(),
                     status: CriterionStatus::Met,
                     note: "verified".into(),
+                    evidence: None,
                 }],
             }),
             review: Some(ReviewEvidence {

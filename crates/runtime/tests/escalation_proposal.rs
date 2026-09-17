@@ -305,7 +305,7 @@ async fn latch_emits_only_the_first_proposal() {
 // When: run を自然 Stop まで実行する
 // Then: ラッチ境界の call_id に対応する NoProgress 診断が 1 件だけ発行される
 #[tokio::test]
-async fn escalation_latch_also_emits_single_NoProgress_diagnostic() {
+async fn escalation_latch_also_emits_single_no_progress_diagnostic() {
     let directory = tempfile::tempdir().expect("temp directory");
     let missing = directory.path().join("absent.txt");
     let (runtime, bus) = runtime_with(
