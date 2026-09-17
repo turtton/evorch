@@ -156,9 +156,11 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_run_completes_with_single_mock_response() {
     let directory = tempfile::tempdir().expect("project directory");
-    let mock = StreamingMockOpenAi::spawn(vec![
-        ScriptedResponse::text_stream("text", MODEL, ["headless ok"]).with_usage(1, 1),
-    ]);
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![ScriptedResponse::text_stream("text", MODEL, ["headless ok"]).with_usage(1, 1)],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.to_owned()],
+    );
     write_project_config(directory.path(), &mock.base_url());
     let env = MapEnv::from_iter([(KEY_ENV, KEY)]);
 
