@@ -240,6 +240,14 @@ pub(crate) struct EscalationDetector {
 }
 
 impl EscalationDetector {
+    pub(crate) const fn is_no_progress_trigger(trigger: &EscalationTrigger) -> bool {
+        matches!(
+            trigger,
+            EscalationTrigger::ConsecutiveEditFailures { .. }
+                | EscalationTrigger::RepeatedFileRewrite { .. }
+        )
+    }
+
     pub(crate) const fn tool_calls(&self) -> u32 {
         self.tool_calls
     }
