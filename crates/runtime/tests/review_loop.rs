@@ -19,7 +19,7 @@ fn evidence() -> CriterionEvidence {
 }
 
 #[test]
-fn typed_criterion_evidence_round_trips_into_gate_evidence() {
+fn supervisor_prefers_typed_tool_result_over_prose() {
     // Given: structured approval conflicts with the prose fallback.
     let typed: ReviewResult = serde_json::from_value(serde_json::json!({
         "verdict": "approve",

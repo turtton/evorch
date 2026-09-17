@@ -11,6 +11,7 @@ use event_bus::{
     GoalStage, GoalState, InvalidationReason, LifecycleEvent, OrchestratorEvent, ProviderEvent,
     RecvError, RunPurpose, SuppressReason, ToolEvent,
 };
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -26,7 +27,7 @@ use super::prompts::{
     render_continuation_prompt, render_recovery_prompt, render_repair_prompt, render_review_prompt,
 };
 use super::registry::GoalRegistry;
-use super::review::{ReviewLoop, ReviewOutcome};
+use super::review::{ReviewLoop, ReviewOutcome, ReviewResult, parse_reviewer_output};
 use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
@@ -1134,11 +1135,17 @@ impl SupervisorActor {
             .find_run(run_id)
             .and_then(|run| self.runtime.run_result(run).ok().flatten())
             .unwrap_or_default();
-        let outcome = self
+        let typed = serde_json::from_str::<Value>(&result)
+            .ok()
+            .and_then(|value| serde_json::from_value::<ReviewResult>(value).ok());
+        let review_loop = self
             .reviews
             .entry(goal_id.to_string())
-            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds))
-            .on_reviewer_done(&result, &head_sha, run_id);
+            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds));
+        let outcome = match parse_reviewer_output(typed, &result) {
+            Ok(parsed) => review_loop.on_review_result(parsed, &head_sha, run_id),
+            Err(_) => review_loop.on_reviewer_done(&result, &head_sha, run_id),
+        };
         self.record_evidence(goal_id, outcome.evidence().criteria.clone());
         self.record_evidence(goal_id, outcome.evidence().review.clone());
         match outcome {
