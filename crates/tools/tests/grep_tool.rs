@@ -5,6 +5,73 @@ use std::fs;
 use tempfile::tempdir;
 use tools::{Grep, Tool, ToolError};
 
+// Given: invalid UTF-8 after the output cap / When: searching a file / Then: validation still fails.
+#[tokio::test]
+async fn grep_rejects_invalid_utf8_after_cap() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("a");
+    let mut bytes = "hit\n".repeat(1000).into_bytes();
+    bytes.push(0xff);
+    fs::write(&path, bytes).expect("fixture");
+    let error = Grep
+        .execute(serde_json::json!({"pattern": "hit", "path": path}))
+        .await
+        .expect_err("invalid UTF-8 must not be hidden by truncation");
+    assert!(matches!(error, ToolError::Io { .. }));
+}
+
+// Given: prefix paths and double-digit line numbers / When: searching / Then: sorting uses paths only.
+#[tokio::test]
+async fn grep_sorts_paths_without_reordering_line_numbers() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("a:1"), "hit\n").expect("fixture");
+    fs::write(dir.path().join("a"), "hit\n".repeat(12)).expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
+        .await
+        .expect("search");
+    let root = dir.path().display();
+    let mut expected = (1..=12)
+        .map(|n| format!("{root}/a:{n}:hit"))
+        .collect::<Vec<_>>();
+    expected.push(format!("{root}/a:1:1:hit"));
+    assert_eq!(result.content, expected.join("\n"));
+}
+
+// Given: an ignored decoy directory / When: searching / Then: only visible hits remain.
+#[tokio::test]
+async fn grep_respects_gitignore() {
+    let dir = tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join(".git")).expect("git directory");
+    fs::create_dir(dir.path().join("target")).expect("ignored directory");
+    fs::write(dir.path().join(".gitignore"), "target/\n").expect("ignore rule");
+    fs::write(dir.path().join("target/decoy"), "needle decoy\n").expect("decoy");
+    fs::write(dir.path().join(".hidden"), "needle visible\n").expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "needle", "path": dir.path()}))
+        .await
+        .expect("search");
+    assert_eq!(
+        result.content,
+        format!("{}/.hidden:1:needle visible", dir.path().display())
+    );
+}
+
+// Given: far more hits than the cap / When: searching / Then: output stays bounded.
+#[tokio::test]
+async fn grep_many_matches_are_bounded() {
+    let dir = tempdir().expect("tempdir");
+    fs::write(dir.path().join("a"), "hit\n".repeat(100_000)).expect("fixture");
+    let result = Grep
+        .execute(serde_json::json!({"pattern": "hit", "path": dir.path()}))
+        .await
+        .expect("search");
+    assert!(!result.is_error);
+    assert_eq!(result.content.lines().count(), 200);
+    assert!(result.content.len() <= 8192);
+    assert!(result.content.contains("[truncated:"));
+}
+
 // Given: 201 hits / When: searching / Then: the summary fits within 200 lines.
 #[tokio::test]
 async fn grep_output_truncates_over_max_lines() {

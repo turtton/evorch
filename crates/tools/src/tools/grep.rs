@@ -8,7 +8,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use regex::Regex;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::error::ToolError;
@@ -59,8 +59,8 @@ impl Tool for Grep {
         let pattern = string_arg(&args, "pattern")?;
         let path = string_arg(&args, "path")?;
 
-        Regex::new(pattern).map_err(|_| ToolError::InvalidPattern {
-            detail: "invalid regular expression".to_string(),
+        let regex = Regex::new(pattern).map_err(|error| ToolError::InvalidPattern {
+            detail: error.to_string(),
         })?;
 
         let metadata = tokio::fs::metadata(path).await.map_err(|error| {
@@ -77,7 +77,7 @@ impl Tool for Grep {
 
         let search = async {
             if metadata.is_file() {
-                validate_utf8_file(path).await?;
+                return search_file(path, &regex).await.map(ToolResult::success);
             }
             let mut child =
                 grep_command(pattern, path)
@@ -89,7 +89,11 @@ impl Tool for Grep {
             let stdout = child.stdout.take().ok_or_else(|| ToolError::Io {
                 detail: "rg stdout is unavailable".to_string(),
             })?;
-            let output = collect_output(stdout).await.map_err(io_error)?;
+            let (output, capped) = collect_output(stdout).await.map_err(io_error)?;
+            if capped {
+                child.kill().await.map_err(io_error)?;
+                return Ok(ToolResult::success(output));
+            }
             let status = child.wait().await.map_err(io_error)?;
             match status.code() {
                 Some(0 | 1) => Ok(ToolResult::success(output)),
@@ -122,12 +126,10 @@ fn grep_command(pattern: &str, path: &str) -> Command {
     command
         .args([
             "--no-config",
-            "--no-ignore",
             "--hidden",
             "--glob",
             "!.git",
-            "--sort",
-            "path",
+            "--null",
             "--color",
             "never",
             "--no-heading",
@@ -148,13 +150,10 @@ fn grep_command(pattern: &str, path: &str) -> Command {
     command
 }
 
-async fn collect_output(mut reader: impl AsyncRead + Unpin) -> std::io::Result<String> {
-    let mut output = String::with_capacity(MAX_BYTES);
+async fn collect_output(mut reader: impl AsyncRead + Unpin) -> std::io::Result<(String, bool)> {
+    let mut output = Matches::default();
     let mut line = Vec::with_capacity(MAX_BYTES);
     let mut buffer = [0; MAX_BYTES];
-    let mut total = 0_usize;
-    let mut shown = 0;
-    let mut oversized = false;
     loop {
         let count = reader.read(&mut buffer).await?;
         if count == 0 {
@@ -162,63 +161,88 @@ async fn collect_output(mut reader: impl AsyncRead + Unpin) -> std::io::Result<S
         }
         for &byte in &buffer[..count] {
             if byte == b'\n' {
-                total = total.saturating_add(1);
-                if total == shown + 1
-                    && shown < MAX_LINES
-                    && !oversized
-                    && let Ok(text) = std::str::from_utf8(&line)
-                    && output.len() + text.len() < MAX_BYTES - SUMMARY_RESERVE
+                if let Ok(text) = std::str::from_utf8(&line)
+                    && let Some((path, hit)) = text.split_once('\0')
+                    && !output.push(path, hit.trim_end_matches('\r'))
                 {
-                    output.push_str(text.trim_end_matches('\r'));
-                    output.push('\n');
-                    shown += 1;
+                    return Ok((output.finish(true), true));
                 }
                 line.clear();
-                oversized = false;
             } else if line.len() < MAX_BYTES {
                 line.push(byte);
             } else {
-                oversized = true;
+                output.omitted += 1;
+                return Ok((output.finish(true), true));
             }
         }
     }
-    if !line.is_empty() || oversized {
-        total = total.saturating_add(1);
-    }
-    if total > shown {
-        if shown == MAX_LINES {
-            output.pop();
-            output.truncate(output.rfind('\n').map_or(0, |index| index + 1));
-            shown -= 1;
-        }
-        output.push_str(&format!("[truncated: {} more lines]", total - shown));
-    } else {
-        output.pop();
-    }
-    Ok(output)
+    Ok((output.finish(false), false))
 }
 
-async fn validate_utf8_file(path: &str) -> Result<(), ToolError> {
-    let mut file = tokio::fs::File::open(path).await.map_err(io_error)?;
-    let mut buffer = [0; MAX_BYTES];
-    let mut pending = 0;
+async fn search_file(path: &str, regex: &Regex) -> Result<String, ToolError> {
+    let file = tokio::fs::File::open(path).await.map_err(io_error)?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut number = 0;
+    let mut output = Matches::default();
     loop {
-        let count = file.read(&mut buffer[pending..]).await.map_err(io_error)?;
-        let bytes = &buffer[..pending + count];
-        match std::str::from_utf8(bytes) {
-            Ok(_) if count == 0 => return Ok(()),
-            Ok(_) => pending = 0,
-            Err(error) if error.error_len().is_none() && count > 0 => {
-                let start = error.valid_up_to();
-                pending = bytes.len() - start;
-                buffer.copy_within(start..start + pending, 0);
-            }
-            Err(_) => {
-                return Err(ToolError::Io {
-                    detail: "file is not UTF-8".to_string(),
-                });
-            }
+        line.clear();
+        if reader.read_line(&mut line).await.map_err(io_error)? == 0 {
+            return Ok(output.finish(false));
         }
+        number += 1;
+        let text = line.strip_suffix('\n').unwrap_or(&line);
+        if regex.is_match(text) {
+            output.push(path, &format!("{number}:{}", text.trim_end_matches('\r')));
+        }
+    }
+}
+
+#[derive(Default)]
+struct Matches {
+    lines: Vec<(String, String)>,
+    bytes: usize,
+    omitted: usize,
+}
+
+impl Matches {
+    fn push(&mut self, path: &str, hit: &str) -> bool {
+        let bytes = path.len() + 1 + hit.len() + 1;
+        if self.omitted > 0
+            || self.lines.len() == MAX_LINES
+            || self.bytes + bytes > MAX_BYTES - SUMMARY_RESERVE
+        {
+            self.omitted += 1;
+            return false;
+        }
+        self.bytes += bytes;
+        self.lines.push((path.to_owned(), hit.to_owned()));
+        true
+    }
+
+    fn finish(mut self, capped: bool) -> String {
+        if self.omitted > 0 && self.lines.len() == MAX_LINES {
+            self.lines.pop();
+            self.omitted += 1;
+        }
+        self.lines.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut output = self
+            .lines
+            .iter()
+            .map(|(path, hit)| format!("{path}:{hit}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.omitted > 0 {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            let qualifier = if capped { "at least " } else { "" };
+            output.push_str(&format!(
+                "[truncated: {qualifier}{} more lines]",
+                self.omitted
+            ));
+        }
+        output
     }
 }
 
@@ -230,10 +254,27 @@ fn io_error(error: std::io::Error) -> ToolError {
 
 #[cfg(test)]
 mod tests {
-    // Given: a search / When: constructing its command / Then: rg is the only backend.
-    #[test]
-    fn grep_uses_rg_backend() {
-        let command = super::grep_command("needle", ".");
-        assert_eq!(command.as_std().get_program(), "rg");
+    // Given: enough hits and no EOF / When: collecting / Then: no further read is needed.
+    #[tokio::test]
+    async fn collection_stops_before_reading_to_eof() {
+        struct FailAfterHits(std::io::Cursor<Vec<u8>>);
+        impl tokio::io::AsyncRead for FailAfterHits {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let mut bytes = [0; 8192];
+                let count =
+                    std::io::Read::read(&mut self.0, &mut bytes[..buf.remaining().min(8192)])?;
+                assert!(count > 0, "collector read beyond its cap");
+                buf.put_slice(&bytes[..count]);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let reader = FailAfterHits(std::io::Cursor::new(b"a\x001:hit\n".repeat(1000)));
+        super::collect_output(reader)
+            .await
+            .expect("bounded collection");
     }
 }
