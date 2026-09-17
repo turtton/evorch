@@ -8,10 +8,11 @@ use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptMode
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
 use crate::panes::sidebar::SidebarAction;
-use crate::theme::text::h3;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{card, empty_state, pane_root, surface_frame};
+use crate::theme::widgets::{card, empty_state, pane_root};
 
+mod header;
+use header::header_strip;
 mod thinking;
 
 #[derive(Debug, Clone, Copy)]
@@ -28,6 +29,7 @@ pub struct ConversationContext<'a> {
     pub phase_unread: bool,
     pub has_project: bool,
     pub active_thread_title: Option<&'a str>,
+    pub thread_metrics: Option<crate::model::telemetry::ThreadMetrics>,
     pub phase: Option<ThreadRunPhase>,
     pub next_thread_title: String,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
@@ -97,47 +99,6 @@ pub fn agent_pane(
             });
         action
     })
-}
-
-fn header_strip(
-    ui: &mut egui::Ui,
-    identity: &Option<AgentIdentity<'_>>,
-    ctx: &ConversationContext<'_>,
-    action: &mut Option<AgentPaneAction>,
-) {
-    if identity.is_none() && ctx.active_thread_title.is_none() {
-        return;
-    }
-    surface_frame(palette().SURFACE).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
-            if let Some(identity) = identity {
-                let label = match (identity.name, identity.role) {
-                    (Some(name), Some(role)) => {
-                        format!("{} / {name} / {role}", identity.run_id)
-                    }
-                    (Some(name), None) => format!("{} / {name}", identity.run_id),
-                    (None, Some(role)) => format!("{} / {role}", identity.run_id),
-                    (None, None) => identity.run_id.to_owned(),
-                };
-                ui.label(h3(label));
-                if ui.button("← Thread").clicked() {
-                    *action = Some(AgentPaneAction::Agents(AgentsAction::ReturnToThread));
-                }
-            } else if let Some(title) = ctx.active_thread_title {
-                ui.label(h3(format!("Thread: {title}")));
-            }
-            if let Some(phase) = ctx.phase {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    crate::panes::phase_indicator::phase_indicator_with_ack(
-                        ui,
-                        phase,
-                        ctx.phase_unread,
-                    );
-                });
-            }
-        });
-    });
 }
 
 fn empty_state_body(
@@ -414,6 +375,7 @@ mod tests {
                         phase_unread: true,
                         has_project: true,
                         active_thread_title: Some("Chat"),
+                        thread_metrics: None,
                         phase: Some(phase),
                         next_thread_title: String::new(),
                         model_picker: crate::panes::model_picker::ModelPickerContext {

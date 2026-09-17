@@ -108,6 +108,16 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .any(|((id, _), ack)| id == tab && ack.is_unread()),
             has_project: self.sidebar.selected_project.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
+            thread_metrics: active_thread.map(|thread| {
+                let mut metrics = self.telemetry.thread_metrics(&thread.run_ids);
+                if let ConversationFocus::Agent(run_id) = self.focus {
+                    metrics.context_pressure = self
+                        .telemetry
+                        .row(run_id)
+                        .and_then(crate::model::telemetry::TelemetryRow::context_pressure);
+                }
+                metrics
+            }),
             phase: self
                 .attention_acks
                 .iter()

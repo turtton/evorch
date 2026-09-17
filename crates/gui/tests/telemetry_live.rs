@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use egui_kittest::{Harness, kittest::Queryable};
-use event_bus::{AgentRunPhase, Event, MessageEvent, ProviderEvent, UsageEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, MessageEvent, ProviderEvent, UsageEvent};
 
 #[test]
 fn usage_event_without_run_id_is_ignored() {
@@ -103,14 +103,25 @@ fn request_started_records_start_and_elapsed_advances() {
 }
 
 #[test]
-fn first_token_observed_sets_ttft() {
-    // Given: a running request.
+fn first_token_observed_averages_ttft_within_run() {
+    // Given: two first-token observations in the same run.
     let mut telemetry = TelemetryOverlay::new();
     telemetry.apply_event(&started());
-    // When: the provider observes the first token.
-    telemetry.apply_event(&first_token());
-    // Then: the provider's measured TTFT is preserved.
-    assert_eq!(telemetry.row("run-1").expect("row").ttft_ms, Some(800));
+    let mut first = first_token();
+    if let EventKind::Provider(ProviderEvent::FirstTokenObserved { ttft_ms, .. }) = &mut first.kind
+    {
+        *ttft_ms = 100;
+    }
+    telemetry.apply_event(&first);
+    let mut second = first_token();
+    if let EventKind::Provider(ProviderEvent::FirstTokenObserved { ttft_ms, .. }) = &mut second.kind
+    {
+        *ttft_ms = 300;
+    }
+    // When: the provider observes both first tokens.
+    telemetry.apply_event(&second);
+    // Then: the running average is stored for the run.
+    assert_eq!(telemetry.row("run-1").expect("row").ttft_ms, Some(200));
 }
 
 #[test]
@@ -157,7 +168,7 @@ fn new_request_resets_live_metrics_without_resetting_usage() {
     telemetry.apply_event_at(&started(), now);
     // Then: live observations reset, while billed usage remains cumulative.
     let row = telemetry.row("run-1").expect("row");
-    assert_eq!(row.ttft_ms, None);
+    assert_eq!(row.ttft_ms, Some(800));
     assert_eq!(row.tok_s_at(now), None);
     assert_eq!(row.tok_s_at(now + Duration::from_secs(1)), Some(0.0));
     assert_eq!(row.usage.output, 226);

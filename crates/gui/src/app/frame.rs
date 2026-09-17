@@ -209,8 +209,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let active = self.sidebar.active_thread.as_ref().and_then(|active| {
             self.sidebar.threads.iter().position(|thread| {
                 &thread.id == active
-                    && (parent_run_id.is_some()
-                        || self.sidebar.selected_project.as_ref() == Some(&thread.project_id))
+                    && parent_run_id.is_none()
+                    && self.sidebar.threads.len() == 1
+                    && self.sidebar.selected_project.as_ref() == Some(&thread.project_id)
             })
         });
         if let Some(index) = parent.or(active)

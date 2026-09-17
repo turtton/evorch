@@ -91,6 +91,7 @@ impl TelemetryRow {
 
 impl TelemetryOverlay {
     pub fn refresh_costs(&mut self, settings: &ProviderSettingsModel) {
+        self.refresh_context_windows(settings);
         self.costs = self
             .billed
             .keys()

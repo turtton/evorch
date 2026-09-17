@@ -94,6 +94,7 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     phase_unread: false,
                     has_project: true,
                     active_thread_title: Some("Chat"),
+                    thread_metrics: None,
                     phase: None,
                     next_thread_title: String::new(),
                     model_picker: gui::panes::model_picker::ModelPickerContext {

@@ -336,7 +336,15 @@ fn sidebar_with_project_but_no_threads_shows_thread_placeholder() {
 fn sidebar_thread_rows_expose_state_text() {
     // Given: a demo sidebar populated with lifecycle events
     let temp = tempfile::tempdir().expect("temp dir");
-    let sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let mut sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let active = sidebar.active_thread.clone();
+    sidebar
+        .threads
+        .iter_mut()
+        .find(|thread| Some(&thread.id) == active.as_ref())
+        .expect("active demo thread")
+        .run_ids
+        .push("run-1".into());
     let workbench = state(MockSource::default(), sidebar);
     let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
     harness.run();
@@ -352,7 +360,15 @@ fn sidebar_thread_rows_expose_state_text() {
 fn sidebar_rows_are_single_line_dense_rows() {
     // Given: a demo sidebar populated with lifecycle events
     let temp = tempfile::tempdir().expect("temp dir");
-    let sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let mut sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let active = sidebar.active_thread.clone();
+    sidebar
+        .threads
+        .iter_mut()
+        .find(|thread| Some(&thread.id) == active.as_ref())
+        .expect("active demo thread")
+        .run_ids
+        .push("run-1".into());
     let workbench = state(MockSource::default(), sidebar);
     let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
     harness.run();
@@ -391,7 +407,7 @@ fn sidebar_rows_are_single_line_dense_rows() {
 }
 
 #[test]
-fn thread_row_shows_cost_and_cache_metrics() {
+fn thread_row_omits_cost_and_cache_metrics() {
     // Given: a thread whose run billed usage against a provider with known pricing
     let temp = tempfile::tempdir().expect("temp dir");
     std::fs::write(
@@ -459,9 +475,9 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
     ]);
     harness.run();
 
-    // Then: the thread row exposes estimated cost and cache hit rate
+    // Then: without an active conversation, sidebar rows expose no metrics.
     assert!(
-        harness.has_label("$1.000 · cache 17%"),
-        "metrics line label"
+        !harness.has_label("$1.000 · cache 17%"),
+        "metrics must not appear in the sidebar row"
     );
 }

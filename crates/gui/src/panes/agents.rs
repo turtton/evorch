@@ -102,7 +102,7 @@ pub fn agents_pane<S: AgentRunSource>(
                             }
                             ui.label(muted(segment));
                         }
-                        if let Some(ttft) = value.ttft_ms {
+                        if let Some(ttft) = value.average_ttft_ms() {
                             ui.label(muted(format!(
                                 "TTFT {:.1}s",
                                 std::time::Duration::from_millis(ttft).as_secs_f64()
@@ -158,7 +158,7 @@ fn column_widths<S: AgentRunSource>(
                 .max(text_width(value.provider.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
             natural[7] = natural[7]
                 .max(text_width(value.current_tool.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
-            let usage = format!("{} / {}", value.usage.input, value.usage.output);
+            let usage = value.tokens_label();
             natural[8] = natural[8].max(text_width(&usage) + CELL_PAD_X);
         } else {
             natural[5] = natural[5].max(text_width("unknown") + CELL_PAD_X);
@@ -234,10 +234,7 @@ fn render_data_row(
             .and_then(|value| value.current_tool.as_deref())
             .unwrap_or("unknown");
         ui.add_sized([widths[7], ROW_DENSE], Label::new(current_tool).truncate());
-        let usage = row_telemetry.map(|value| value.usage).unwrap_or_default();
-        ui.add_sized(
-            [widths[8], ROW_DENSE],
-            Label::new(format!("{} / {}", usage.input, usage.output)).truncate(),
-        );
+        let usage = row_telemetry.map_or_else(|| "0 / 0".into(), TelemetryRow::tokens_label);
+        ui.add_sized([widths[8], ROW_DENSE], Label::new(usage).truncate());
     });
 }

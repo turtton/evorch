@@ -10,8 +10,16 @@ pub struct MetadataSources<'a> {
 }
 
 impl MetadataSources<'_> {
+    pub fn resolve(
+        &self,
+        entry: &ModelEntryConfig,
+        provider: &str,
+    ) -> runtime::model_resolve::ResolvedModelMetadata {
+        resolve_model_metadata(entry, self.presets, self.catalog, Some(provider))
+    }
+
     pub fn labels(&self, entry: &ModelEntryConfig, provider: &str) -> [String; 4] {
-        let resolved = resolve_model_metadata(entry, self.presets, self.catalog, Some(provider));
+        let resolved = self.resolve(entry, provider);
         let preset = entry
             .preset
             .as_ref()

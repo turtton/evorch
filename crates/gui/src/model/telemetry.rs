@@ -17,6 +17,12 @@ pub mod pricing;
 #[path = "quota.rs"]
 pub mod quota;
 
+#[path = "context_pressure.rs"]
+mod context_pressure;
+
+#[path = "thread_metrics.rs"]
+mod thread_metrics;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u64,
@@ -31,10 +37,15 @@ pub struct TelemetryRow {
     pub model: Option<String>,
     pub current_tool: Option<String>,
     pub usage: TokenUsage,
+    latest_context: Option<context_pressure::RequestContext>,
+    context_order: u64,
+    context_window: Option<u64>,
     pub requests: u32,
     pub last_finish_reason: Option<String>,
     pub request_started_at: Option<Instant>,
     pub ttft_ms: Option<u64>,
+    ttft_sum_ms: u64,
+    ttft_count: u64,
     pub request_duration: Option<Duration>,
     pub output_tokens: u64,
     streamed_chars: u64,
@@ -54,6 +65,10 @@ impl TelemetryRow {
         (!elapsed.is_zero())
             .then(|| Duration::from_secs(self.output_tokens).as_secs_f64() / elapsed.as_secs_f64())
     }
+
+    pub fn average_ttft_ms(&self) -> Option<u64> {
+        self.ttft_ms
+    }
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +79,7 @@ pub struct TelemetryOverlay {
     costs: BTreeMap<String, f64>,
     run_started: BTreeMap<String, Instant>,
     run_wall_time: BTreeMap<String, Duration>,
+    context_order: u64,
 }
 
 /// スレッドに紐づく全 run の累計メトリクス。
@@ -72,6 +88,7 @@ pub struct ThreadMetrics {
     pub cost: Option<f64>,
     pub cache_hit_rate: Option<f64>,
     pub wall_time: Duration,
+    pub context_pressure: Option<u128>,
 }
 
 impl TelemetryOverlay {
@@ -91,13 +108,16 @@ impl TelemetryOverlay {
                 run_id: Some(run_id),
                 ..
             }) => {
+                self.context_order = self.context_order.saturating_add(1);
                 let row = self.rows.entry(run_id.clone()).or_default();
+                row.context_order = self.context_order;
+                row.latest_context = None;
+                row.context_window = None;
                 row.provider = Some(provider.clone());
                 row.model = Some(model.clone());
                 row.requests = row.requests.saturating_add(1);
                 row.request_started_at = Some(now);
                 row.request_duration = None;
-                row.ttft_ms = None;
                 row.output_tokens = 0;
                 row.streamed_chars = 0;
             }
@@ -106,7 +126,10 @@ impl TelemetryOverlay {
                 run_id: Some(run_id),
                 ..
             }) => {
-                self.rows.entry(run_id.clone()).or_default().ttft_ms = Some(*ttft_ms);
+                let row = self.rows.entry(run_id.clone()).or_default();
+                row.ttft_sum_ms = row.ttft_sum_ms.saturating_add(*ttft_ms);
+                row.ttft_count = row.ttft_count.saturating_add(1);
+                row.ttft_ms = Some(row.ttft_sum_ms / row.ttft_count);
             }
             EventKind::Message(
                 MessageEvent::MessageDelta {
@@ -163,6 +186,22 @@ impl TelemetryOverlay {
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);
                 row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
                 row.usage.cache_write = row.usage.cache_write.saturating_add(*cache_write_tokens);
+                self.context_order = self.context_order.saturating_add(1);
+                row.context_order = self.context_order;
+                row.latest_context = Some(context_pressure::RequestContext {
+                    key: pricing::ModelKey {
+                        provider: provider.clone(),
+                        profile: profile.clone(),
+                        model: model.clone(),
+                    },
+                    usage: TokenUsage {
+                        input: *input_tokens,
+                        output: *output_tokens,
+                        cache_read: *cache_read_tokens,
+                        cache_write: *cache_write_tokens,
+                    },
+                });
+                row.context_window = None;
                 row.last_finish_reason = Some(finish_reason.clone());
                 row.output_tokens = *output_tokens;
                 row.request_duration = Some(Duration::from_millis(*duration_ms));
@@ -191,6 +230,10 @@ impl TelemetryOverlay {
                 self.rows.entry(run_id.clone()).or_default().current_tool = None;
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+                let row = self.rows.entry(run_id.clone()).or_default();
+                row.ttft_ms = None;
+                row.ttft_sum_ms = 0;
+                row.ttft_count = 0;
                 self.run_started.entry(run_id.clone()).or_insert(now);
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
@@ -222,210 +265,8 @@ impl TelemetryOverlay {
     pub fn row(&self, run_id: &str) -> Option<&TelemetryRow> {
         self.rows.get(run_id)
     }
-
-    pub fn thread_metrics(&self, run_ids: &[String]) -> ThreadMetrics {
-        self.thread_metrics_at(run_ids, Instant::now())
-    }
-
-    pub fn thread_metrics_at(&self, run_ids: &[String], now: Instant) -> ThreadMetrics {
-        let mut cost_total = 0.0;
-        let mut has_cost = false;
-        let mut usage = TokenUsage::default();
-        let mut wall_time = Duration::ZERO;
-        for run_id in run_ids {
-            if let Some(cost) = self.costs.get(run_id) {
-                cost_total += cost;
-                has_cost = true;
-            }
-            if let Some(billed) = self.billed.get(run_id) {
-                for entry in billed.values() {
-                    usage.input = usage.input.saturating_add(entry.input);
-                    usage.output = usage.output.saturating_add(entry.output);
-                    usage.cache_read = usage.cache_read.saturating_add(entry.cache_read);
-                    usage.cache_write = usage.cache_write.saturating_add(entry.cache_write);
-                }
-            }
-            if let Some(done) = self.run_wall_time.get(run_id) {
-                wall_time += *done;
-            }
-            if let Some(start) = self.run_started.get(run_id) {
-                wall_time += now.saturating_duration_since(*start);
-            }
-        }
-        let billed_tokens = usage.input + usage.cache_read + usage.cache_write;
-        ThreadMetrics {
-            cost: has_cost.then_some(cost_total),
-            cache_hit_rate: (billed_tokens > 0).then(|| usage.cache_hit_rate()),
-            wall_time,
-        }
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use event_bus::{Event, ProviderEvent, ToolEvent};
-
-    fn request_started(run_id: Option<&str>) -> Event {
-        Event::new(ProviderEvent::RequestStarted {
-            request_id: "request-1".into(),
-            provider: "provider-a".into(),
-            profile: None,
-            protocol: "protocol-a".into(),
-            model: "model-a".into(),
-            streaming: true,
-            run_id: run_id.map(str::to_owned),
-        })
-    }
-
-    fn request_completed(run_id: Option<&str>, input: u64, output: u64) -> Event {
-        Event::new(ProviderEvent::RequestCompleted {
-            request_id: "request-1".into(),
-            provider: "provider-a".into(),
-            profile: None,
-            protocol: "protocol-a".into(),
-            model: "model-a".into(),
-            streaming: true,
-            duration_ms: 10,
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: 3,
-            cache_write_tokens: 4,
-            finish_reason: "stop".into(),
-            run_id: run_id.map(str::to_owned),
-        })
-    }
-
-    #[test]
-    fn provider_and_model_come_from_request_started() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&request_started(Some("run-1")));
-
-        let row = overlay.row("run-1").expect("telemetry row");
-        assert_eq!(row.provider.as_deref(), Some("provider-a"));
-        assert_eq!(row.model.as_deref(), Some("model-a"));
-        assert_eq!(row.requests, 1);
-    }
-
-    #[test]
-    fn tokens_accumulate_from_request_completed_only() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&request_completed(Some("run-1"), 10, 20));
-        overlay.apply_event(&request_completed(Some("run-1"), 5, 7));
-
-        assert_eq!(
-            overlay.row("run-1").expect("telemetry row").usage,
-            TokenUsage {
-                input: 15,
-                output: 27,
-                cache_read: 6,
-                cache_write: 8,
-            }
-        );
-    }
-
-    #[test]
-    fn current_tool_set_and_cleared() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&Event::new(ToolEvent::ToolStarted {
-            input: None,
-            tool_name: "read".into(),
-            call_id: "call-1".into(),
-            run_id: Some("run-1".into()),
-        }));
-        assert_eq!(
-            overlay
-                .row("run-1")
-                .expect("telemetry row")
-                .current_tool
-                .as_deref(),
-            Some("read")
-        );
-
-        overlay.apply_event(&Event::new(ToolEvent::ToolCompleted {
-            output: None,
-            tool_name: "read".into(),
-            call_id: "call-1".into(),
-            is_error: false,
-            detail: None,
-            run_id: Some("run-1".into()),
-        }));
-        assert!(
-            overlay
-                .row("run-1")
-                .expect("telemetry row")
-                .current_tool
-                .is_none()
-        );
-    }
-
-    fn agent_run_started(run_id: &str) -> Event {
-        Event::new(LifecycleEvent::AgentRunStarted {
-            run_id: run_id.into(),
-            parent_run_id: None,
-            agent_name: "agent".into(),
-            role: "worker".into(),
-        })
-    }
-
-    fn agent_run_finished(run_id: &str, to: AgentRunPhase) -> Event {
-        Event::new(LifecycleEvent::AgentRunStateChanged {
-            run_id: run_id.into(),
-            from: AgentRunPhase::Running,
-            to,
-            reason: None,
-        })
-    }
-
-    #[test]
-    fn wall_time_accumulates_between_run_start_and_terminal_state() {
-        let mut overlay = TelemetryOverlay::new();
-        let start = Instant::now();
-        overlay.apply_event_at(&agent_run_started("run-1"), start);
-        overlay.apply_event_at(
-            &agent_run_finished("run-1", AgentRunPhase::Done),
-            start + Duration::from_secs(90),
-        );
-
-        let metrics =
-            overlay.thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120));
-        assert_eq!(metrics.wall_time, Duration::from_secs(90));
-    }
-
-    #[test]
-    fn wall_time_includes_in_flight_runs() {
-        let mut overlay = TelemetryOverlay::new();
-        let start = Instant::now();
-        overlay.apply_event_at(&agent_run_started("run-1"), start);
-        overlay.apply_event_at(
-            &agent_run_finished("run-1", AgentRunPhase::Error),
-            start + Duration::from_secs(30),
-        );
-        overlay.apply_event_at(&agent_run_started("run-2"), start + Duration::from_secs(40));
-
-        let metrics = overlay.thread_metrics_at(
-            &["run-1".to_owned(), "run-2".to_owned()],
-            start + Duration::from_secs(100),
-        );
-        assert_eq!(metrics.wall_time, Duration::from_secs(90));
-    }
-
-    #[test]
-    fn thread_metrics_aggregates_cache_hit_rate_across_runs() {
-        let mut overlay = TelemetryOverlay::new();
-        overlay.apply_event(&request_completed(Some("run-1"), 100, 10));
-        overlay.apply_event(&request_completed(Some("run-2"), 100, 10));
-
-        let metrics = overlay.thread_metrics(&["run-1".to_owned(), "run-2".to_owned()]);
-        let rate = metrics.cache_hit_rate.expect("cache hit rate");
-        assert!((rate - (6.0 / 214.0 * 100.0)).abs() < 0.01);
-        assert!(metrics.cost.is_none());
-    }
-
-    #[test]
-    fn thread_metrics_empty_for_unknown_runs() {
-        let overlay = TelemetryOverlay::new();
-        let metrics = overlay.thread_metrics(&["missing".to_owned()]);
-        assert_eq!(metrics, ThreadMetrics::default());
-    }
-}
+#[path = "telemetry_tests.rs"]
+mod tests;

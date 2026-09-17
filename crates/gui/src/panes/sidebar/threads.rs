@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{ProjectRecord, SidebarState, ThreadRunPhase, ThreadState};
 
-use crate::model::telemetry::{TelemetryOverlay, ThreadMetrics};
+use crate::model::telemetry::TelemetryOverlay;
 use crate::theme::text::h4;
 use crate::theme::tokens::state_color;
 use crate::theme::tokens::{ROW_DENSE, SP_2};
@@ -17,7 +16,7 @@ pub fn render(
     sidebar: &SidebarState,
     project: &ProjectRecord,
     phases: &BTreeMap<String, ThreadRunPhase>,
-    telemetry: &TelemetryOverlay,
+    _telemetry: &TelemetryOverlay,
     _pane_state: &mut SidebarUiState,
     action: &mut Option<SidebarAction>,
 ) {
@@ -89,9 +88,6 @@ pub fn render(
                 }
             });
         });
-        if let Some(line) = metrics_line(&telemetry.thread_metrics(&thread.run_ids)) {
-            ui.label(crate::theme::text::muted(line));
-        }
         if let (Some(branch), Some(worktree)) = (&thread.branch, &thread.worktree_path) {
             ui.label(crate::theme::text::muted(format!(
                 "{branch} @ {}",
@@ -101,31 +97,6 @@ pub fn render(
     }
 
     ui.add_space(SP_2);
-}
-
-fn metrics_line(metrics: &ThreadMetrics) -> Option<String> {
-    let mut segments = Vec::new();
-    if let Some(cost) = metrics.cost {
-        segments.push(format!("${cost:.3}"));
-    }
-    if let Some(rate) = metrics.cache_hit_rate {
-        segments.push(format!("cache {rate:.0}%"));
-    }
-    if metrics.wall_time >= Duration::from_secs(1) {
-        segments.push(format_wall_time(metrics.wall_time));
-    }
-    (!segments.is_empty()).then(|| segments.join(" · "))
-}
-
-fn format_wall_time(value: Duration) -> String {
-    let seconds = value.as_secs();
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
-    }
 }
 
 const fn thread_state_label(state: ThreadState) -> &'static str {
