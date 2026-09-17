@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-17T20:45:16.4650253+00:00",
+  "updated_at": "2026-09-17T20:46:05.2546541+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1601,7 +1601,7 @@
     {
       "execution_unit": "v07-durable-execution-substrate",
       "title": "Durable execution substrate: \u4E2D\u65AD\u30FB\u518D\u958B\u30FB\u691C\u8A3C\u53EF\u80FD\u306A\u9577\u6642\u9593 agent \u5B9F\u884C",
-      "state": "queued",
+      "state": "active",
       "dependencies": [],
       "blocked_by": [],
       "clarification_return_path": "intents/evorch/clarifications/open.md",
