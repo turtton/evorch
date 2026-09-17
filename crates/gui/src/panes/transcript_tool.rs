@@ -124,28 +124,6 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     });
 }
 
-pub fn tool_display_summary(entry: &TranscriptEntry) -> String {
-    let TranscriptEntry::Tool {
-        tool_name, input, ..
-    } = entry
-    else {
-        return String::new();
-    };
-    let Some(value) = input
-        .as_ref()
-        .and_then(|input| focused_input(tool_name, input))
-    else {
-        return tool_name.clone();
-    };
-    match tool_name.as_str() {
-        "bash" | "shell" => format!("$ {value}"),
-        "read" => format!("Read: {value}"),
-        "write" => format!("Write: {value}"),
-        "edit" => format!("Edit: {value}"),
-        _ => tool_name.clone(),
-    }
-}
-
 fn focused_input<'a>(tool_name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
     match tool_name {
         "bash" | "shell" => input.get("command").and_then(serde_json::Value::as_str),

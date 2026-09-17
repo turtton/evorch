@@ -43,7 +43,7 @@ pub struct TelemetryRow {
     pub requests: u32,
     pub last_finish_reason: Option<String>,
     pub request_started_at: Option<Instant>,
-    pub ttft_ms: Option<u64>,
+    ttft_ms: Option<u64>,
     ttft_sum_ms: u64,
     ttft_count: u64,
     pub request_duration: Option<Duration>,
