@@ -24,6 +24,8 @@ pub struct TaskContinuation {
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub attempts: u32,
+    #[serde(default)]
+    pub heartbeat_at_ns: Option<u64>,
 }
 
 string_enum!(TaskStatus {

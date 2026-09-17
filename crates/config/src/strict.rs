@@ -83,6 +83,7 @@ const ORCHESTRATION_KEYS: &[&str] = &[
     "max_nudges",
     "stall_after_secs",
     "stall_check_secs",
+    "stale_ttl_secs",
     "in_flight_tool_multiplier",
     "repeated_error_threshold",
     "max_continuations",

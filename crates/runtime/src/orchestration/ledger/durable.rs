@@ -80,21 +80,57 @@ impl GoalLedger {
             {
                 return Ok(());
             }
-            _ => {}
+            OrchestratorEvent::TaskRetryScheduled { .. }
+            | OrchestratorEvent::TaskStaleMarked { .. }
+            | OrchestratorEvent::GoalCreated { .. }
+            | OrchestratorEvent::GoalStateChanged { .. }
+            | OrchestratorEvent::GoalStageChanged { .. }
+            | OrchestratorEvent::RunAttached { .. }
+            | OrchestratorEvent::DeliverableBranchBound { .. }
+            | OrchestratorEvent::EvidenceRecorded { .. }
+            | OrchestratorEvent::FinishRejected { .. }
+            | OrchestratorEvent::FinishAccepted { .. }
+            | OrchestratorEvent::ContinuationDispatched { .. }
+            | OrchestratorEvent::ContinuationSuppressed { .. }
+            | OrchestratorEvent::ReviewRoundStarted { .. }
+            | OrchestratorEvent::RepairDispatched { .. }
+            | OrchestratorEvent::StallDetected { .. }
+            | OrchestratorEvent::NudgeSent { .. }
+            | OrchestratorEvent::MergeApprovalRequested { .. }
+            | OrchestratorEvent::MergeApprovalResolved { .. }
+            | OrchestratorEvent::MergeApprovalInvalidated { .. }
+            | OrchestratorEvent::MergeExecuted { .. }
+            | OrchestratorEvent::CloseoutStepRecorded { .. }
+            | OrchestratorEvent::ShellCommandDenied { .. } => {}
         }
         match event {
             OrchestratorEvent::TaskProgressed {
                 task_id,
                 run_id,
                 progress,
-                ..
+                reason,
             } => {
                 self.snapshot
                     .task_runs
                     .insert(task_id.clone(), run_id.clone());
-                self.snapshot
-                    .task_progress
-                    .insert(task_id.clone(), progress.clone());
+                if reason == "task heartbeat" {
+                    if let Some(saved) = self.snapshot.task_progress.get_mut(task_id) {
+                        if let Some(heartbeat) = progress
+                            .get("heartbeat_at_ns")
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            saved["heartbeat_at_ns"] = heartbeat.into();
+                        }
+                    } else {
+                        self.snapshot
+                            .task_progress
+                            .insert(task_id.clone(), progress.clone());
+                    }
+                } else {
+                    self.snapshot
+                        .task_progress
+                        .insert(task_id.clone(), progress.clone());
+                }
             }
             OrchestratorEvent::TaskCheckpoint {
                 task_id,

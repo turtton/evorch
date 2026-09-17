@@ -3,10 +3,11 @@ use storage::entity::{TaskContinuation, TaskStatus};
 use super::*;
 
 pub(super) struct TaskRequest {
-    goal_id: String,
-    task_id: String,
-    run_id: String,
-    attempt: u32,
+    pub(super) goal_id: String,
+    pub(super) task_id: String,
+    pub(super) run_id: String,
+    pub(super) attempt: u32,
+    pub(super) stale: bool,
 }
 
 impl SupervisorHandle {
@@ -40,6 +41,7 @@ impl SupervisorHandle {
                 goal_id: snapshot.goal_id.clone(),
                 task_id: task_id.into(),
                 run_id,
+                stale: false,
                 attempt: snapshot
                     .task_attempts
                     .get(task_id)
@@ -134,7 +136,12 @@ impl SupervisorActor {
             let _ = self.runtime.cancel(old);
         }
         task.attempts += 1;
-        task.status = TaskStatus::Running;
+        task.status = if request.stale {
+            TaskStatus::Retrying
+        } else {
+            TaskStatus::Running
+        };
+        task.heartbeat_at_ns = None;
         let prompt = match serde_json::to_string(&task) {
             Ok(context) => format!(
                 "Continue the durable task from this saved state, preserving completed work:\n{context}"
@@ -146,7 +153,12 @@ impl SupervisorActor {
             OrchestratorEvent::TaskRetryScheduled {
                 task_id: request.task_id.clone(),
                 attempt: task.attempts,
-                reason: "operator continuation".into(),
+                reason: if request.stale {
+                    "stale-worker"
+                } else {
+                    "operator continuation"
+                }
+                .into(),
                 new_run_id: run.to_string(),
             },
         );
@@ -221,7 +233,7 @@ impl SupervisorActor {
         }
     }
 
-    fn publish_task(&self, goal: &str, task: &str, run: &str, state: TaskContinuation) {
+    pub(super) fn publish_task(&self, goal: &str, task: &str, run: &str, state: TaskContinuation) {
         if let Ok(progress) = serde_json::to_value(state) {
             self.emit_for_goal(
                 goal,

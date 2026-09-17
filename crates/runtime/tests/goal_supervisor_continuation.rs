@@ -3,6 +3,14 @@ mod support;
 #[path = "support/durable_continuation.rs"]
 mod durable_continuation;
 
+#[path = "support/stale_worker.rs"]
+mod stale_worker;
+
+#[tokio::test]
+async fn stale_worker_transitions_to_retrying_with_fresh_run_id() {
+    stale_worker::transitions_to_retrying().await;
+}
+
 #[tokio::test]
 async fn resume_task_after_interruption_replays_from_persisted_cursor() {
     durable_continuation::resume_after_interruption().await;
@@ -56,6 +64,7 @@ impl Fixture {
         let settings = OrchestrationSettings {
             max_continuations,
             stall_after_secs: 86_400,
+            stall_check_secs: 1,
             ..OrchestrationSettings::default()
         };
         let handle = GoalSupervisor::spawn(

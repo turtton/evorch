@@ -32,6 +32,7 @@ use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
 
+mod stale;
 mod tasks;
 
 /// goal 作成時の不変属性。
@@ -1412,6 +1413,7 @@ impl SupervisorActor {
     }
 
     async fn sample_stalls(&mut self) {
+        self.sample_stale_tasks();
         let now = Instant::now();
         let stalled = self
             .progress
