@@ -44,6 +44,82 @@ fn demo_fixture_populates_sidebar_conversation_and_agents() {
 }
 
 #[test]
+fn active_demo_thread_displays_root_message_and_tool() {
+    // Given: the same fixture construction used by the demo binary.
+    let dir = tempfile::tempdir().unwrap();
+    let sidebar = demo_sidebar(dir.path()).unwrap();
+    assert!(
+        sidebar
+            .threads
+            .iter()
+            .all(|thread| thread.run_ids.is_empty()),
+        "demo ownership must be established by production event binding"
+    );
+    let mut state = populate(
+        WorkbenchState::new(DemoSource(demo_runs()), &UiSettings::default()).unwrap(),
+        sidebar,
+    );
+    state
+        .switch_thread(workspace_ui::ThreadId::new("thread-2"))
+        .unwrap();
+    state
+        .switch_thread(workspace_ui::ThreadId::new("thread-1"))
+        .unwrap();
+    let mut workbench = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
+    // When: the active conversation renders (without opening an agent pane).
+    workbench.run();
+    // Then: run-1's message and tool are both in that conversation.
+    assert!(
+        workbench.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
+    );
+    assert!(workbench.has_label("read_file"));
+}
+
+#[test]
+fn goal_binding_is_restored_when_sidebar_has_no_run_ids() {
+    // Given: durable goal events without pre-seeded sidebar ownership.
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    for event in gui::fixture::demo_events() {
+        storage.handle().append_event(Some("demo"), &event).unwrap();
+    }
+    storage.close();
+    let mut state = WorkbenchState::new(DemoSource(demo_runs()), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(demo_sidebar(dir.path()).unwrap());
+    // When: a new GUI replays the persisted events.
+    state
+        .restore_history(&storage::Database::open(&config).unwrap())
+        .unwrap();
+    let mut workbench = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
+    workbench.run();
+    // Then: root/children ownership and the active transcript are reconstructed.
+    assert_eq!(
+        workbench.state().sidebar().threads[0].run_ids,
+        ["run-1", "run-2", "run-3"]
+    );
+    assert!(
+        workbench.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
+    );
+    assert!(
+        workbench
+            .state()
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                gui::model::transcript::TranscriptEntry::Tool { tool_name, .. }
+                    if tool_name == "read_file"
+            ))
+    );
+}
+
+#[test]
 fn demo_sidebar_rejects_missing_root() {
     // Given: a root path that does not exist on disk.
     let dir = tempfile::tempdir().expect("temp dir");

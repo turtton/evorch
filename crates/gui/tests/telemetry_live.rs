@@ -121,7 +121,10 @@ fn first_token_observed_averages_ttft_within_run() {
     // When: the provider observes both first tokens.
     telemetry.apply_event(&second);
     // Then: the running average is stored for the run.
-    assert_eq!(telemetry.row("run-1").expect("row").ttft_ms, Some(200));
+    assert_eq!(
+        telemetry.row("run-1").expect("row").average_ttft_ms(),
+        Some(200)
+    );
 }
 
 #[test]
@@ -168,7 +171,7 @@ fn new_request_resets_live_metrics_without_resetting_usage() {
     telemetry.apply_event_at(&started(), now);
     // Then: live observations reset, while billed usage remains cumulative.
     let row = telemetry.row("run-1").expect("row");
-    assert_eq!(row.ttft_ms, Some(800));
+    assert_eq!(row.average_ttft_ms(), Some(800));
     assert_eq!(row.tok_s_at(now), None);
     assert_eq!(row.tok_s_at(now + Duration::from_secs(1)), Some(0.0));
     assert_eq!(row.usage.output, 226);

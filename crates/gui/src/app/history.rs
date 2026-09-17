@@ -70,6 +70,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
         for stored in events {
+            if let event_bus::EventKind::Orchestrator(event_bus::OrchestratorEvent::GoalCreated {
+                thread_id,
+                root_run_id,
+                ..
+            }) = &stored.event.kind
+            {
+                self.bind_thread_run(thread_id, root_run_id);
+            }
             while messages
                 .peek()
                 .is_some_and(|message| message.at <= stored.event.meta.wall_clock)

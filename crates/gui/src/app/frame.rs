@@ -186,6 +186,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::Snapshot(_) => {}
             // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
             EventKind::Orchestrator(ev) => {
+                if let event_bus::OrchestratorEvent::GoalCreated {
+                    thread_id,
+                    root_run_id,
+                    ..
+                } = ev
+                {
+                    self.bind_thread_run(thread_id, root_run_id);
+                }
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);
             }
         }

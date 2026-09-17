@@ -68,6 +68,5 @@ pub fn demo_sidebar(root: &Path) -> Result<SidebarState, FixtureError> {
     sidebar.set_pinned(&thread_2, true)?;
     sidebar.set_paused(&thread_3, true)?;
     sidebar.switch_thread(&thread_1)?;
-    sidebar.threads[0].run_ids = ["run-1", "run-2", "run-3"].map(str::to_owned).into();
     Ok(sidebar)
 }

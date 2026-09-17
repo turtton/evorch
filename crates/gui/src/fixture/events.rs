@@ -2,12 +2,24 @@
 
 use event_bus::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, DeliveryDisposition, Event,
-    LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
+    LifecycleEvent, MessageEvent, OrchestratorEvent, ProviderEvent, ToolEvent,
 };
 
 /// demo モードで transcript / phases / telemetry を満たす event 列。
 pub fn demo_events() -> Vec<Event> {
     vec![
+        Event::new(OrchestratorEvent::GoalCreated {
+            goal_id: "demo-goal".into(),
+            session_id: "demo".into(),
+            project_id: "evorch".into(),
+            thread_id: "thread-1".into(),
+            goal: "Refine GUI design system".into(),
+            references: Vec::new(),
+            constraints: Vec::new(),
+            repo: "turtton/evorch".into(),
+            base_ref: "main".into(),
+            root_run_id: "run-1".into(),
+        }),
         run_started("run-1", "orchestrator", "orchestrator", None),
         run_state_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
         run_started("run-2", "implementer", "worker", Some("run-1")),
