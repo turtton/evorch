@@ -282,6 +282,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 // the keybind consumes the press without touching the draft.
                 ctx.input_mut(|input| {
                     input.events.retain(|event| {
+                        // Some backends report Tab as a text event in addition to
+                        // the key event. Remove both representations so TextEdit
+                        // cannot insert a literal tab into the draft.
                         !matches!(
                             event,
                             egui::Event::Key {
@@ -290,7 +293,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 modifiers,
                                 ..
                             } if modifiers.is_none() || modifiers.shift_only()
-                        )
+                        ) && !matches!(event, egui::Event::Text(text) if text == "\t")
                     });
                 });
             }
