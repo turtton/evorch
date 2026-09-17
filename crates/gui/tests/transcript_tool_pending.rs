@@ -82,8 +82,8 @@ fn tool_card_pending_is_visible_when_collapsed() {
     registry.apply(&started());
     let harness = harness(registry.thread().clone());
     // Then: the default collapsed view exposes the work immediately.
-    assert!(harness.query_by_label_contains("Running").is_some());
-    assert!(harness.query_by_label_contains("Read: .").is_some());
+    assert!(harness.query_by_label(" read (pending)").is_some());
+    assert!(harness.query_by_label("Input").is_none());
     assert!(spinner_rect(&harness).is_some());
     assert!(harness.query_by_label("Output").is_none());
     registry.apply(&completed());
@@ -103,8 +103,9 @@ fn read_tool_input_shows_path_not_json() {
     // When: expanding its details.
     harness.get_by_label_contains("(pending)").click();
     harness.run_steps(3);
-    // Then: both summary and Input use the path, not JSON.
-    assert!(harness.query_by_label_contains("Read: .").is_some());
+    // Then: the compact title stays input-free; Input uses the path, not JSON.
+    assert!(harness.query_by_label("v read (pending)").is_some());
+    assert!(harness.query_by_label("Input").is_some());
     assert!(harness.query_by_label(".").is_some());
     assert!(harness.query_by_label_contains("\"file\"").is_none());
 }
@@ -122,7 +123,7 @@ fn tool_completed_stops_spinner_and_reveals_result_in_place() {
     // Then: the existing card stops animating and previews its result.
     assert_eq!(harness.state().entries().len(), 1);
     assert!(spinner_rect(&harness).is_none());
-    assert!(harness.query_by_label_contains("OK read").is_some());
+    assert!(harness.query_by_label("> read (pending)").is_some());
     assert!(harness.query_by_label("file contents").is_some());
 }
 

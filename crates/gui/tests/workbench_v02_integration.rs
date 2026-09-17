@@ -462,16 +462,8 @@ fn v02_end_to_end_chained_scenario() {
         &ConversationFocus::Agent("run-2".into())
     );
     assert!(fixture.workbench.has_label("run-2 / implementer / worker"));
-    assert!(
-        fixture
-            .workbench
-            .has_label(" Running tool-run-2 (call-run)")
-    );
-    assert!(
-        !fixture
-            .workbench
-            .has_label(" Running tool-run-1 (call-run)")
-    );
+    assert!(fixture.workbench.has_label(" tool-run-2 (call-run)"));
+    assert!(!fixture.workbench.has_label(" tool-run-1 (call-run)"));
 
     // When: the operator returns to the thread conversation.
     fixture.workbench.click_label("← Thread");

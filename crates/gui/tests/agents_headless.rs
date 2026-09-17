@@ -142,13 +142,9 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
             .workbench
             .has_label("run-2 / reviewer-two / reviewer")
     );
-    assert!(
-        fixture
-            .workbench
-            .has_label(" Running review-two (call-two)")
-    );
+    assert!(fixture.workbench.has_label(" review-two (call-two)"));
     assert!(fixture.workbench.has_label("-> run-1: run-two handoff"));
-    assert!(!fixture.workbench.has_label(" Running read-one (call-one)"));
+    assert!(!fixture.workbench.has_label(" read-one (call-one)"));
 
     // When: the operator returns to the thread conversation.
     fixture.workbench.click_label("← Thread");

@@ -26,42 +26,48 @@ fn expand(harness: &mut Harness<'_>) {
 }
 
 #[test]
-fn tool_card_bash_shows_dollar_command_in_header() {
+fn tool_card_bash_keeps_command_in_expanded_input_only() {
     // Given / When
     for tool in ["bash", "shell"] {
-        let harness = harness(tool, serde_json::json!({"command": "git status"}), "");
+        let mut harness = harness(tool, serde_json::json!({"command": "git status"}), "");
         // Then
-        assert!(harness.query_by_label_contains("$ git status").is_some());
+        assert!(
+            harness
+                .query_by_label(&format!("> {tool} (cli-test)"))
+                .is_some()
+        );
+        assert!(harness.query_by_label_contains("git status").is_none());
+        expand(&mut harness);
+        assert!(harness.query_by_label("Input").is_some());
+        assert!(harness.query_by_label("git status").is_some());
     }
 }
 
 #[test]
-fn tool_card_read_shows_path_in_header() {
+fn tool_card_read_keeps_path_in_expanded_input_only() {
     // Given / When
     for field in ["file_path", "path", "filePath", "file"] {
         let mut harness = harness("read", serde_json::json!({field: "src/main.rs"}), "");
         // Then
-        assert!(
-            harness
-                .query_by_label_contains("Read: src/main.rs")
-                .is_some()
-        );
+        assert!(harness.query_by_label("> read (cli-test)").is_some());
+        assert!(harness.query_by_label_contains("src/main.rs").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("src/main.rs").is_some());
     }
 }
 
 #[test]
-fn tool_card_write_and_edit_show_path() {
+fn tool_card_write_and_edit_keep_path_in_expanded_input_only() {
     // Given / When
-    for (tool, prefix) in [("write", "Write"), ("edit", "Edit")] {
+    for tool in ["write", "edit"] {
         let mut harness = harness(tool, serde_json::json!({"file": "test.txt"}), "");
         // Then
         assert!(
             harness
-                .query_by_label_contains(&format!("{prefix}: test.txt"))
+                .query_by_label(&format!("> {tool} (cli-test)"))
                 .is_some()
         );
+        assert!(harness.query_by_label_contains("test.txt").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("test.txt").is_some());
     }

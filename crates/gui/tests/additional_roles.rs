@@ -48,7 +48,7 @@ fn agents_display_additional_role_names() {
         harness.step();
         harness.run();
         assert!(harness.has_label(&format!("{run_id} / agent-{id} / {role}")));
-        assert!(harness.has_label(&format!(" Running read (image-{id})")));
+        assert!(harness.has_label(&format!(" read (image-{id})")));
         harness.click_label("← Thread");
         harness.run();
     }

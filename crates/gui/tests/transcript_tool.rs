@@ -55,7 +55,9 @@ fn tool_card_collapsed_hides_sections() {
     let harness = harness(false);
     // Then
     assert!(harness.query_by_label_contains("bash (abcdefgh)").is_some());
-    assert!(harness.query_by_label_contains("find missing").is_some());
+    assert!(harness.query_by_label_contains("OK").is_none());
+    assert!(harness.query_by_label_contains("ERROR").is_none());
+    assert!(harness.query_by_label_contains("find missing").is_none());
     assert!(harness.query_by_label("Input").is_none());
     assert!(harness.query_by_label("Output").is_none());
     assert!(harness.query_by_label_contains("**literal**").is_some());
@@ -81,7 +83,8 @@ fn tool_card_error_status_shows_error_label_and_red_output() {
     // When
     expand(&mut harness);
     // Then
-    assert!(harness.query_by_label_contains("ERROR").is_some());
+    assert!(harness.query_by_label_contains("bash (abcdefgh)").is_some());
+    assert!(harness.query_by_label_contains("ERROR").is_none());
     assert!(harness.query_by_label("Error").is_some());
     assert!(
         output_shape(&harness)

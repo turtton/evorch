@@ -22,22 +22,20 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     let id = pane_id.with(("tool-expanded", call_id));
     let running = matches!(status, ToolStatus::Running);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
-    let (indicator, status_color) = match status {
-        ToolStatus::Running => ("Running", palette().INFO),
-        ToolStatus::Succeeded => ("OK", palette().SUCCESS),
-        ToolStatus::Failed => ("ERROR", palette().ERROR_FG),
-        ToolStatus::AwaitingApproval => ("Awaiting approval", palette().WARNING_FG),
-        ToolStatus::Approved => ("Approved", palette().SUCCESS),
-        ToolStatus::Denied { .. } => ("Denied", palette().ERROR_FG),
+    let status_color = match status {
+        ToolStatus::Running => palette().INFO,
+        ToolStatus::Succeeded => palette().SUCCESS,
+        ToolStatus::Failed => palette().ERROR_FG,
+        ToolStatus::AwaitingApproval => palette().WARNING_FG,
+        ToolStatus::Approved => palette().SUCCESS,
+        ToolStatus::Denied { .. } => palette().ERROR_FG,
     };
     let color = if *is_error {
         palette().ERROR_FG
     } else {
         status_color
     };
-    let indicator = if *is_error { "ERROR" } else { indicator };
     let short_id: String = call_id.chars().take(8).collect();
-    let summary = tool_display_summary(entry);
     surface_frame(palette().SURFACE).show(ui, |ui| {
         let arrow = if running {
             ""
@@ -46,11 +44,7 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
         } else {
             ">"
         };
-        let mut header = format!("{arrow} {indicator} {tool_name} ({short_id})");
-        if summary != *tool_name {
-            header.push_str(": ");
-            header.extend(summary.lines().next().unwrap_or_default().chars().take(120));
-        }
+        let header = format!("{arrow} {tool_name} ({short_id})");
         let response = ui.horizontal(|ui| {
             if running {
                 ui.add(
