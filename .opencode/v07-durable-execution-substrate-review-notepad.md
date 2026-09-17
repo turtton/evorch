@@ -52,3 +52,32 @@
   was blocked by concurrent edits in `gui/tests/auto_title_provider.rs` and
   `runtime/src/compose/verification.rs`; all blocker #1 paths pass scoped fmt.
   These unrelated changes are not included in this repair commit.
+
+## Blocker #3 acceptance repair — 2026-09-18
+
+- Scope: ReviewLoop evidence validation and review_loop regression tests only;
+  existing typed-first transport, prose fallback and bounded rounds are preserved.
+  CriterionEvidence already supports every required field; no event-bus change.
+- Initial worktree already contained staged review recovery/shared gate changes
+  and empty-checklist/missing-evidence tests. Those tests already passed. The
+  shared predicate required all three references, contrary to this repair's
+  at-least-one contract. ReviewLoop now validates that contract locally without
+  changing the finish gate or including unrelated staged changes in this commit.
+- RED before production edit: `cargo test -p runtime --test review_loop` exited
+  101: **10 passed, 1 failed**. New
+  `approval_requires_valid_evidence_with_at_least_one_reference` failed for
+  command `test`, exit 0, current HEAD_A, references `[Some("diff"), None, None]`:
+  actual merge permission false, expected true.
+- GREEN: same command exited 0: **11 passed, 0 failed**. Cases cover each single
+  reference, empty/whitespace command, nonzero exit, stale SHA, absent/blank
+  references, absent evidence and empty checklist. Existing contradictory-prose
+  typed-first, prose fallback, repeated findings and bounded-round tests pass.
+- `cargo check -p runtime`: exit 0.
+- `cargo fmt --check`: exit 0.
+- `cargo clippy -p runtime --tests -- -D warnings`: exit 0.
+- LSP diagnostics: no errors in review.rs or review_loop.rs.
+- Self-review: validation stays in the typed review boundary with exhaustive
+  status matching; no new helper, API, dependency, unsafe, production unwrap,
+  logging, or extra parameter. Invalid approval records RequestUpdate with the
+  affected criterion IDs; empty checklist records its own concrete finding.
+- Existing supervisor/recovery and other staged edits are excluded; no push.

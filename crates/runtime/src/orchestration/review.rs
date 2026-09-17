@@ -133,10 +133,27 @@ impl ReviewLoop {
         let unmet_ids = parsed
             .criteria
             .iter()
-            .filter(|check| check.status != CriterionStatus::Met)
+            .filter(|check| match check.status {
+                CriterionStatus::Unmet | CriterionStatus::Unknown => true,
+                CriterionStatus::Met => !check.evidence.as_ref().is_some_and(|evidence| {
+                    !evidence.command.trim().is_empty()
+                        && evidence.exit_status == 0
+                        && evidence.target_sha == head_sha
+                        && [
+                            &evidence.diff_ref,
+                            &evidence.artifact_path,
+                            &evidence.red_evidence,
+                        ]
+                        .into_iter()
+                        .any(|reference| reference.as_ref().is_some_and(|s| !s.trim().is_empty()))
+                }),
+            })
             .map(|check| check.id.clone())
             .collect::<Vec<_>>();
         let verdict = match parsed.verdict {
+            ReviewVerdict::Approve if parsed.criteria.is_empty() => ReviewVerdict::RequestUpdate {
+                findings: vec!["acceptance criteria checklist is empty".into()],
+            },
             ReviewVerdict::Approve if !unmet_ids.is_empty() => ReviewVerdict::RequestUpdate {
                 findings: vec![format!(
                     "acceptance criteria not met: {}",
