@@ -73,16 +73,11 @@ fn fresh_open_applies_latest_schema() {
     let path = database_path(&temp_dir);
 
     // When: データベースを初めて開く
-    drop(Database::open(&config_for(&path)).expect("fresh database must open"));
+    let database = Database::open(&config_for(&path)).expect("fresh database must open");
 
-    // Then: v7 と定義済みテーブル・インデックスが作成される
+    // Then: v8 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(
-        connection
-            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-            .expect("user_version must be readable"),
-        7
-    );
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 8);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -104,13 +99,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v7 のまま維持される
+    // Then: スキーマは重複せず v8 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        7
+        8
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -141,7 +136,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 7,
+            supported: 8,
         }
     );
 }
@@ -186,7 +181,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 7);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 8);
 }
 
 #[test]
@@ -195,6 +190,21 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let connection = Connection::open(&path).unwrap();
+    for migration in include_str!("../src/migrations/sql.rs")
+        .split("r#\"")
+        .skip(1)
+    {
+        connection
+            .execute_batch(migration.split("\"#;").next().unwrap())
+            .unwrap();
+    }
+    for migration in [
+        include_str!("../src/migrations/v3.sql"),
+        include_str!("../src/migrations/v4.sql"),
+        include_str!("../src/migrations/v5.sql"),
+    ] {
+        connection.execute_batch(migration).unwrap();
+    }
     connection
         .execute_batch(include_str!("../src/migrations/v6.sql"))
         .unwrap();
@@ -204,11 +214,11 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
         .unwrap();
     drop(connection);
 
-    // When: opening the existing database applies v7.
+    // When: opening the existing database applies the remaining migrations.
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 7);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 8);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -231,3 +241,59 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
         (1, "a", "original", 10)
     );
 }
+
+#[test]
+fn v8_extends_tasks_with_durable_columns_and_widened_check() {
+    // Given: a fresh database path.
+    let dir = TempDir::new().unwrap();
+    let path = database_path(&dir);
+    // When: opening migrates to the latest schema.
+    let database = Database::open(&config_for(&path)).unwrap();
+    let connection = Connection::open(&path).unwrap();
+    // Then: all durable columns and statuses are supported.
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 8);
+    let columns: BTreeSet<String> = connection
+        .prepare("PRAGMA table_info(tasks)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for column in [
+        "parent_run_id",
+        "input_json",
+        "progress_json",
+        "last_artifact_json",
+        "failure_reason",
+        "resume_cursor_json",
+        "attempts",
+        "heartbeat_at_ns",
+    ] {
+        assert!(columns.contains(column), "missing {column}");
+    }
+    for status in [
+        "pending",
+        "queued",
+        "running",
+        "blocked",
+        "retrying",
+        "completed",
+        "cancelled",
+        "failed",
+    ] {
+        connection
+            .execute(
+                "INSERT INTO tasks(id,status,created_at_ns,updated_at_ns) VALUES(?1,?1,0,0)",
+                [status],
+            )
+            .unwrap();
+        assert_eq!(
+            database.task(status).unwrap().unwrap().status.as_str(),
+            status
+        );
+    }
+    assert!(connection.execute("INSERT INTO tasks(id,status,created_at_ns,updated_at_ns) VALUES('bad','unknown',0,0)", []).is_err());
+}
+
+#[path = "migration/durable.rs"]
+mod durable;

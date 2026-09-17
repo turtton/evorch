@@ -115,10 +115,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
                 state.task(stored, task_id).status = TaskStatus::Completed;
                 let _ = state.session(stored);
             }
-            // tasks.status の CHECK 制約（V1 マイグレーション）が "cancelled" を
-            // 許容しないため、キャンセルは失敗状態へ写像します。
             LifecycleEvent::BackgroundTaskCancelled { task_id } => {
-                state.task(stored, task_id).status = TaskStatus::Failed;
+                state.task(stored, task_id).status = TaskStatus::Cancelled;
                 let _ = state.session(stored);
             }
             // エージェント実行はセッションではないため、セッション射影を変更しません。
@@ -292,7 +290,7 @@ mod tests {
     #[test] fn failed_maps_reason() { /* Given/When: 失敗イベントを適用する */ let state = apply(LifecycleEvent::Failed { session_id: "p".into(), reason: "b".into() }, Some("s1")); /* Then: 状態と理由を写像する */ assert_eq!(session(&state).map(|v| (v.status, v.failure_reason.as_deref())), Some((SessionStatus::Failed, Some("b")))); }
     #[test] fn task_started_maps_running() { /* Given/When: タスク開始を適用する */ let state = apply(LifecycleEvent::BackgroundTaskStarted { task_id: "t".into() }, Some("s1")); /* Then: 状態と帰属を写像する */ assert_eq!(state.tasks.get("t").map(|v| (v.status, v.session_id.as_deref())), Some((TaskStatus::Running, Some("s1")))); assert_eq!(session(&state).map(|v| v.task_ids.as_slice()), Some(["t".into()].as_slice())); }
     #[test] fn task_completed_maps_completed() { /* Given/When: detached タスク完了を適用する */ let state = apply(LifecycleEvent::BackgroundTaskCompleted { task_id: "t".into() }, None); /* Then: 完了状態を保持する */ assert_eq!(state.tasks.get("t").map(|v| v.status), Some(TaskStatus::Completed)); }
-    #[test] fn task_cancelled_maps_failed() { /* Given/When: detached タスクキャンセルを適用する */ let state = apply(LifecycleEvent::BackgroundTaskCancelled { task_id: "t".into() }, None); /* Then: tasks.status の CHECK 制約により失敗状態へ写像される */ assert_eq!(state.tasks.get("t").map(|v| v.status), Some(TaskStatus::Failed)); }
+    #[test] fn task_cancelled_preserves_cancelled_status() { /* Given/When: detached タスクキャンセルを適用する */ let state = apply(LifecycleEvent::BackgroundTaskCancelled { task_id: "t".into() }, None); /* Then: キャンセル状態を保持する */ assert_eq!(state.tasks.get("t").map(|v| v.status), Some(TaskStatus::Cancelled)); }
     #[test] fn message_delta_appends() { /* Given/When: メッセージ差分を適用する */ let state = apply(MessageEvent::MessageDelta { delta: "m".into(), run_id: None }, Some("s1")); /* Then: 保留本文へ追加する */ assert_eq!(session(&state).map(|v| v.pending_message.as_str()), Some("m")); }
     #[test] fn message_delta_with_run_id_appends() { /* Given/When: run_id 付きメッセージ差分を適用する */ let state = apply(MessageEvent::MessageDelta { delta: "m".into(), run_id: Some("run-1".into()) }, Some("s1")); /* Then: run_id を無視して保留本文へ追加する */ assert_eq!(session(&state).map(|v| v.pending_message.as_str()), Some("m")); }
     #[test] fn reasoning_delta_appends() { /* Given/When: 推論差分を適用する */ let state = apply(MessageEvent::ReasoningDelta { delta: "r".into(), run_id: None }, Some("s1")); /* Then: 保留推論へ追加する */ assert_eq!(session(&state).map(|v| v.pending_reasoning.as_str()), Some("r")); }

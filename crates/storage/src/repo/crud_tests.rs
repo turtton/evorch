@@ -104,6 +104,14 @@ fn task_crud_supports_nullable_session_and_lists_by_session() {
         id: "task-detached".into(),
         session_id: None,
         status: TaskStatus::Running,
+        parent_run_id: None,
+        input: None,
+        progress: None,
+        last_artifact: None,
+        failure_reason: None,
+        resume_cursor: None,
+        attempts: 0,
+        heartbeat_at: None,
         created_at: time(1),
         updated_at: time(1),
     };
@@ -127,7 +135,7 @@ fn task_crud_supports_nullable_session_and_lists_by_session() {
     // Then: 更新後の全値が返る
     assert_eq!(
         task::get(&connection, "task-detached").unwrap(),
-        Some(updated)
+        Some(updated.clone())
     );
 
     // When: 作成日時の異なる所属タスクを逆順で登録する
@@ -137,6 +145,7 @@ fn task_crud_supports_nullable_session_and_lists_by_session() {
         status: TaskStatus::Running,
         created_at: time(created),
         updated_at: time(created),
+        ..updated.clone()
     });
     for record in tasks.iter().rev() {
         task::create(&connection, record).expect("task must be created");
