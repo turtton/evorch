@@ -240,18 +240,22 @@ pub(crate) struct EscalationDetector {
 }
 
 impl EscalationDetector {
+    pub(crate) const fn tool_calls(&self) -> u32 {
+        self.tool_calls
+    }
+
     /// 観測値を累積し、設定された条件に達した最初の提案を返す。
     pub(crate) fn observe(
         &mut self,
         obs: &ToolObservation,
         settings: &EscalationSettings,
     ) -> Option<EscalationTrigger> {
-        if self.proposed {
-            return None;
-        }
-
         if !is_meta_op(obs.tool) {
             self.tool_calls = self.tool_calls.saturating_add(1);
+        }
+
+        if self.proposed {
+            return None;
         }
 
         if obs.tool == "edit" {

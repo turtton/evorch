@@ -58,6 +58,9 @@ pub enum MergeMode {
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
+    pub budget: crate::budget_tracker::BudgetSettings,
+    /// Durable task identity when this run is attached to a task.
+    pub task_id: Option<String>,
     pub topology: crate::CoordinationTopology,
     pub team: Option<crate::team_context::TeamContext>,
     pub team_task: Option<crate::team::TaskSpec>,

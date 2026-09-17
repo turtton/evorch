@@ -3,6 +3,7 @@
 // allow: SIZE_OK — select 駆動の単一 AgentRun 実行ループとその状態 (LoopState) が
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
+mod budget;
 mod messages;
 mod snapshots;
 mod team;
@@ -97,6 +98,7 @@ pub(crate) struct LoopState {
     resumed: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
+    budget: crate::budget_tracker::BudgetCounters,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -156,6 +158,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         resumed: is_restored,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
+        budget: crate::budget_tracker::BudgetCounters::default(),
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
@@ -572,6 +575,7 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            self.publish_budget();
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
             let requested_gen = *self.channels.compact_rx.borrow();
@@ -652,6 +656,8 @@ impl LoopState {
                 session.set_last_usage(response.usage);
             }
             self.last_usage = Some(response.usage);
+            self.budget.usage(response.usage);
+            self.publish_budget();
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message
@@ -686,6 +692,8 @@ impl LoopState {
                 return;
             }
             if has_tool_uses {
+                self.budget.finish_round();
+                self.publish_budget();
                 continue;
             }
 

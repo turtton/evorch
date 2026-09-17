@@ -643,6 +643,17 @@ impl LoopState {
                                 trigger,
                             }));
                     }
+                    if observed && !result.is_error {
+                        if name == "read"
+                            && let Some(path) = rule_target.as_deref()
+                        {
+                            self.budget.read(std::path::Path::new(path));
+                        }
+                        if name == "edit" {
+                            self.budget.file_changed();
+                        }
+                    }
+                    self.publish_budget();
                     if observed
                         && !result.is_error
                         && let Some(target) = rule_target
