@@ -32,6 +32,7 @@ use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
 
+mod budget;
 mod stale;
 mod tasks;
 
@@ -614,6 +615,7 @@ impl SupervisorActor {
             }) => self.on_run_started(run_id, parent_run_id, role),
             EventKind::Tool(tool) => self.on_tool(tool),
             EventKind::Provider(provider) => self.on_provider(provider),
+            EventKind::Diagnostic(diagnostic) => self.on_budget_diagnostic(&diagnostic),
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
                 if message.kind != AgentMessageKind::Steering {
                     self.mark_progress(&message.sender_run_id);
@@ -631,7 +633,6 @@ impl SupervisorActor {
             | EventKind::Message(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_)
-            | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
             | EventKind::Snapshot(_) => {}
         }

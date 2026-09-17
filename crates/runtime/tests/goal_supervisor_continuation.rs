@@ -1,5 +1,8 @@
 mod support;
 
+#[path = "support/budget_supervisor.rs"]
+mod budget_supervisor;
+
 #[path = "support/durable_continuation.rs"]
 mod durable_continuation;
 

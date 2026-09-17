@@ -575,7 +575,10 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
-            self.publish_budget();
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
             let requested_gen = *self.channels.compact_rx.borrow();
@@ -625,6 +628,10 @@ impl LoopState {
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
             };
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             let visible_messages = self.context.visible_messages();
             let completion = tokio::select! {
                 biased;
@@ -657,7 +664,10 @@ impl LoopState {
             }
             self.last_usage = Some(response.usage);
             self.budget.usage(response.usage);
-            self.publish_budget();
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message
@@ -693,7 +703,10 @@ impl LoopState {
             }
             if has_tool_uses {
                 self.budget.finish_round();
-                self.publish_budget();
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+                }
                 continue;
             }
 

@@ -353,8 +353,21 @@ impl LoopState {
         let mut rule_targets = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
         while remaining.peek().is_some() {
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+            }
             let mut segment = Vec::new();
-            for call in remaining.by_ref() {
+            let capacity = self
+                .task
+                .config
+                .budget
+                .max_tool_calls
+                .saturating_sub(self.escalation_detector.tool_calls());
+            for call in remaining
+                .by_ref()
+                .take(usize::try_from(capacity).unwrap_or(usize::MAX))
+            {
                 let terminal = matches!(call.1.as_str(), "finish" | "escalate");
                 segment.push(call);
                 if terminal {
@@ -456,6 +469,10 @@ impl LoopState {
                 });
             }
             while let Some(first) = calls.pop_front() {
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                }
                 let mut wave = vec![first];
                 if self.shared_call(&wave[0]) {
                     while calls.front().is_some_and(|call| self.shared_call(call)) {
@@ -515,6 +532,10 @@ impl LoopState {
                     }
                 }
                 for (index, id, name, input, call, guard) in prepared_wave {
+                    match self.publish_budget() {
+                        crate::budget_tracker::BudgetDecision::Continue => {}
+                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                    }
                     let metadata = (index, id.clone(), name.clone(), input.clone());
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
@@ -667,7 +688,6 @@ impl LoopState {
                             self.budget.file_changed();
                         }
                     }
-                    self.publish_budget();
                     if observed
                         && !result.is_error
                         && let Some(target) = rule_target
@@ -676,6 +696,10 @@ impl LoopState {
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
+                    match self.publish_budget() {
+                        crate::budget_tracker::BudgetDecision::Continue => {}
+                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                    }
                 }
                 if self.cancelled() {
                     self.finish_cancelled();

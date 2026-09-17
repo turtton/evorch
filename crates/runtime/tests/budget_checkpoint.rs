@@ -6,56 +6,41 @@ use runtime::{AgentRuntime, Role, RunConfig};
 use std::sync::Arc;
 use support::{ScriptedModel, text_response, tool_response};
 
-async fn run_calls(count: u32, config: RunConfig) -> Vec<Event> {
-    let file = tempfile::NamedTempFile::new().expect("file");
-    std::fs::write(file.path(), "budget fixture").expect("write");
-    let mut script = Vec::new();
-    for index in 0..count {
-        let mut response = tool_response(
-            &index.to_string(),
-            "read",
-            serde_json::json!({"path": file.path()}),
-        );
-        response.usage.input_tokens = 3;
-        response.usage.output_tokens = 2;
-        script.push(Ok(response));
-    }
-    script.push(Ok(text_response("done", FinishReason::Stop)));
-    let bus = Arc::new(EventBus::new(4096));
-    let mut receiver = bus.subscribe();
-    let executor = tools::ToolExecutor::with_standard_tools(
-        bus.clone(),
-        Arc::new(sandbox::DirectSandbox::new_unchecked()),
-    );
-    let runtime = AgentRuntime::new(
-        bus,
-        Arc::new(executor),
-        Arc::new(ScriptedModel::new(script)),
-    );
-    let run = runtime.delegate_background(Role::Worker, "budget".into(), config);
+#[path = "support/budget_fixture.rs"]
+mod budget_fixture;
+use budget_fixture::{run_calls, run_calls_in_batches};
+
+#[tokio::test]
+async fn five_call_budget_rejects_tail_of_shared_batch() {
+    // Given: eight shared reads in one provider response and five permits.
+    let config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_tool_calls: 5,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // When: the real tool executor processes the batch.
+    let events = run_calls_in_batches(8, config, true).await;
+    // Then: only the first five calls execute, with no tail preflight or execution.
+    let mut completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, .. }) => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    completed.sort_unstable();
+    assert_eq!(completed, ["0", "1", "2", "3", "4"]);
     assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(run))
-            .await
-            .expect("completion deadline")
-            .expect("wait"),
-        AgentRunPhase::Done
+        diagnostics(
+            &events,
+            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
+        ),
+        1
     );
-    let mut events = Vec::new();
-    loop {
-        let event = receiver.recv().await.expect("event");
-        let terminal = matches!(
-            &event.kind,
-            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
-                to: AgentRunPhase::Done,
-                ..
-            })
-        );
-        events.push(event);
-        if terminal {
-            break;
-        }
-    }
-    events
 }
 
 #[tokio::test]
@@ -68,8 +53,58 @@ async fn budget_overrun_emits_budget_exhausted_once() {
         },
         ..Default::default()
     };
-    // When: eight calls complete.
+    // When: eight calls are requested.
     let events = run_calls(8, config).await;
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, .. }) => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed, ["0", "1", "2", "3", "4"]);
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {to: AgentRunPhase::Error, reason: Some(reason), ..})
+        if reason.starts_with("BudgetExhausted:"))));
+    let progress = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Orchestrator(OrchestratorEvent::TaskProgressed { progress, .. })
+                if progress.get("status").and_then(serde_json::Value::as_str) == Some("failed") =>
+            {
+                Some(progress)
+            }
+            _ => None,
+        })
+        .expect("persisted exhaustion");
+    let task: storage::entity::TaskContinuation =
+        serde_json::from_value(progress.clone()).expect("typed continuation");
+    let cursor: Vec<providers::Message> =
+        serde_json::from_str(task.resume_cursor.as_deref().expect("cursor")).expect("messages");
+    let results: Vec<_> = cursor
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            providers::ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, ["0", "1", "2", "3", "4"]);
+    let breach = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Diagnostic(diagnostic) if diagnostic.source == "budget_tracker" => {
+                Some(diagnostic)
+            }
+            _ => None,
+        })
+        .expect("breach diagnostic");
+    assert_eq!(
+        task.failure_reason,
+        Some(format!("{}: {}", breach.code, breach.detail))
+    );
     // Then: the threshold is latched for this run.
     assert_eq!(
         diagnostics(
@@ -107,7 +142,7 @@ fn diagnostics(events: &[Event], code: &str) -> usize {
 async fn checkpoint_fires_every_50_tool_calls() {
     // Given: 101 real read calls with known per-response usage.
     // When: the scripted agent completes.
-    let events = run_calls(101, RunConfig::default()).await;
+    let events = run_calls(101, unlimited_progress()).await;
     // Then: only the two exact boundaries emit cumulative checkpoints.
     let checkpoints: Vec<_> = events
         .iter()
@@ -133,7 +168,7 @@ async fn thresholds_do_not_fire_at_the_exact_limit() {
     // Given: eight calls consume exactly forty tokens and seven rereads.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tool_calls: 8,
+            max_tool_calls: 9,
             max_tokens: 40,
             max_file_rereads: 7,
             max_no_progress_rounds: 8,
@@ -170,13 +205,13 @@ async fn token_and_reread_thresholds_each_emit_once() {
     };
     // When: the agent keeps running after both limits.
     let events = run_calls(8, config).await;
-    // Then: each threshold has its own latch.
+    // Then: the first breach stops further work, without a second diagnostic.
     assert_eq!(
         diagnostics(
             &events,
             event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
         ),
-        2
+        1
     );
 }
 
@@ -207,7 +242,7 @@ async fn checkpoints_continue_after_escalation_latches() {
     // Given: the default escalation proposal latches at 200 calls.
     let config = RunConfig {
         task_id: Some("durable-task".into()),
-        ..Default::default()
+        ..unlimited_progress()
     };
     // When: another fifty calls complete.
     let events = run_calls(251, config).await;
@@ -233,4 +268,15 @@ async fn checkpoints_continue_after_escalation_latches() {
             ("durable-task", 250)
         ]
     );
+}
+
+fn unlimited_progress() -> RunConfig {
+    RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_file_rereads: u32::MAX,
+            max_no_progress_rounds: u32::MAX,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }

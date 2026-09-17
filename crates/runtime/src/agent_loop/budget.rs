@@ -1,8 +1,8 @@
 use super::LoopState;
-use crate::budget_tracker::BudgetContext;
+use crate::budget_tracker::{BudgetContext, BudgetDecision};
 
 impl LoopState {
-    pub(super) fn publish_budget(&mut self) {
+    pub(super) fn publish_budget(&mut self) -> BudgetDecision {
         let run_id = self.task.run_id.to_string();
         let task_id = self
             .task
@@ -17,7 +17,7 @@ impl LoopState {
                     .map(|task| task.id.as_str())
             })
             .unwrap_or(&run_id);
-        self.budget.publish(
+        let decision = self.budget.publish(
             self.escalation_detector.tool_calls(),
             &BudgetContext {
                 bus: &self.shared.bus,
@@ -26,6 +26,13 @@ impl LoopState {
                 settings: &self.task.config.budget,
             },
         );
+        match &decision {
+            BudgetDecision::Continue => {}
+            BudgetDecision::Exhausted(breach) => {
+                self.finish_error(format!("{}: {}", breach.code, breach.detail));
+                return decision;
+            }
+        }
         if self.task.role == crate::Role::Worker
             && let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             && let Ok(heartbeat) = u64::try_from(elapsed.as_nanos())
@@ -44,5 +51,6 @@ impl LoopState {
                 },
             ));
         }
+        decision
     }
 }

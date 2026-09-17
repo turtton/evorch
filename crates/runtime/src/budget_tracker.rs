@@ -45,8 +45,20 @@ pub(crate) struct BudgetCounters {
     file_reads: BTreeMap<PathBuf, u32>,
     no_progress_rounds: u32,
     last_checkpoint_at: u32,
-    emitted: [bool; 5],
+    exhausted: Option<BudgetBreach>,
     round_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BudgetBreach {
+    pub code: &'static str,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BudgetDecision {
+    Continue,
+    Exhausted(BudgetBreach),
 }
 
 pub(crate) struct BudgetContext<'a> {
@@ -65,7 +77,7 @@ impl Default for BudgetCounters {
             file_reads: BTreeMap::new(),
             no_progress_rounds: 0,
             last_checkpoint_at: 0,
-            emitted: [false; 5],
+            exhausted: None,
             round_changed: false,
         }
     }
@@ -100,7 +112,14 @@ impl BudgetCounters {
         self.round_changed = false;
     }
 
-    pub(crate) fn publish(&mut self, tool_calls: u32, context: &BudgetContext<'_>) {
+    pub(crate) fn publish(
+        &mut self,
+        tool_calls: u32,
+        context: &BudgetContext<'_>,
+    ) -> BudgetDecision {
+        if let Some(breach) = &self.exhausted {
+            return BudgetDecision::Exhausted(breach.clone());
+        }
         let elapsed = self.started_at.elapsed();
         if tool_calls > self.last_checkpoint_at && tool_calls.is_multiple_of(50) {
             self.last_checkpoint_at = tool_calls;
@@ -125,7 +144,7 @@ impl BudgetCounters {
             .saturating_sub(1);
         let checks = [
             (
-                tool_calls > settings.max_tool_calls,
+                tool_calls >= settings.max_tool_calls,
                 "max_tool_calls",
                 u64::from(settings.max_tool_calls),
             ),
@@ -153,23 +172,31 @@ impl BudgetCounters {
             ),
         ];
         for (index, (exceeded, threshold, limit)) in checks.into_iter().enumerate() {
-            if exceeded && !self.emitted[index] {
-                self.emitted[index] = true;
-                context.bus.emit(Event::new(DiagnosticEvent {
-                    source: "budget_tracker".into(),
-                    severity: DiagnosticSeverity::Error,
+            if exceeded {
+                let breach = BudgetBreach {
                     code: if index == 4 {
                         diagnostic_codes::NO_PROGRESS
                     } else {
                         diagnostic_codes::BUDGET_EXHAUSTED
-                    }
-                    .into(),
-                    detail: format!("task {} exceeded {threshold}={limit}", context.task_id),
+                    },
+                    detail: format!(
+                        "task {} exhausted {threshold}={limit}; tool_call_count={tool_calls}",
+                        context.task_id
+                    ),
+                };
+                context.bus.emit(Event::new(DiagnosticEvent {
+                    source: "budget_tracker".into(),
+                    severity: DiagnosticSeverity::Error,
+                    code: breach.code.into(),
+                    detail: breach.detail.clone(),
                     run_id: Some(context.run_id.into()),
                     thread_id: None,
                     call_id: None,
                 }));
+                self.exhausted = Some(breach.clone());
+                return BudgetDecision::Exhausted(breach);
             }
         }
+        BudgetDecision::Continue
     }
 }
