@@ -161,6 +161,14 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.key_press_modifiers(modifiers, key);
     }
 
+    /// 次フレームに流す [`egui::RawInput`] を可変で返します。
+    ///
+    /// OS backend によっては Tab 押下が Key イベントに加え Text イベントとしても
+    /// 報告されるため、その再現など生の event を直接積む用途に使います。
+    pub fn input_mut(&mut self) -> &mut egui::RawInput {
+        self.harness.input_mut()
+    }
+
     /// 現在フォーカスを持つ egui widget の Id を返します（フォーカス遷移検証用）。
     pub fn focused_id(&self) -> Option<egui::Id> {
         self.harness.ctx.memory(|memory| memory.focused())

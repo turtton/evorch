@@ -172,13 +172,18 @@ fn tab_cycles_before_focused_composer_and_enter_still_sends() {
         harness.run();
         // When: cycle then send using the retained keyboard focus.
         let focused_before = harness.focused_id();
-        harness.key_press(modifiers, Key::Tab);
-        // Some native backends emit a text event for Tab as well as the key
-        // event. Reproduce that input shape to ensure the draft stays clean.
-        harness
-            .input_mut()
-            .events
-            .push(egui::Event::Text("\t".into()));
+        // Some native backends emit a Text event alongside the Key event in the
+        // same frame. Reproduce that input shape so the draft stays clean.
+        harness.input_mut().events.extend([
+            egui::Event::Key {
+                key: Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+            egui::Event::Text("\t".into()),
+        ]);
         harness.run();
         assert_eq!(harness.state().composer().role, ComposerRole::Orchestrator);
         assert_eq!(harness.state().composer().input, "ship feature");
