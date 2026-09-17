@@ -22,10 +22,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
     tools.sort_by(|left, right| left.function.name.cmp(&right.function.name));
     WireChatRequest {
         model: request.model.clone(),
-        prompt_cache_key: request
-            .observation
-            .as_ref()
-            .map(|context| context.run_id.clone()),
+        prompt_cache_key: None,
         messages: request.messages.iter().flat_map(to_wire_messages).collect(),
         tools,
         temperature: request.temperature,

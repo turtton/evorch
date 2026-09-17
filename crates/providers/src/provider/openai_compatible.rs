@@ -41,6 +41,7 @@ impl OpenAiCompatibleClient {
                 timeout,
                 event_bus,
                 profile: None,
+                prompt_cache_key: false,
             })?,
         })
     }

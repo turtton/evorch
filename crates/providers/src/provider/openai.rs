@@ -15,9 +15,9 @@ use crate::message::{ChatRequest, ChatResponse, FinishReason, ProviderCapabiliti
 use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
 use crate::stream::DeltaStream;
-use crate::wire::openai::{
-    OpenAiStreamInterpreter, WireChatResponse, from_wire_response, to_wire_request,
-};
+use crate::wire::openai::{OpenAiStreamInterpreter, WireChatResponse, from_wire_response};
+
+mod request;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_PROVIDER_LABEL: &str = "openai";
@@ -62,6 +62,7 @@ impl OpenAiClient {
                 timeout: config.timeout,
                 event_bus: config.event_bus,
                 profile: None,
+                prompt_cache_key: true,
             })?,
         })
     }
@@ -108,6 +109,7 @@ impl ProviderClient for OpenAiClient {
 
 /// OpenAI形式の送受信処理を共有する内部設定。
 pub(crate) struct ChatCompletionsConfig {
+    pub(crate) prompt_cache_key: bool,
     /// API のベース URL。
     pub(crate) base_url: String,
     /// usage イベントに記録するプロバイダ識別子。
@@ -122,6 +124,7 @@ pub(crate) struct ChatCompletionsConfig {
 
 /// OpenAI wire 形式を共有する Chat Completions HTTP クライアント。
 pub(crate) struct ChatCompletionsClient {
+    prompt_cache_key: bool,
     http: reqwest::Client,
     endpoint: String,
     provider_label: String,
@@ -138,6 +141,7 @@ impl ChatCompletionsClient {
     pub(crate) fn new(config: ChatCompletionsConfig) -> Result<Self, ProviderError> {
         Ok(Self {
             http: build_http_client(None)?,
+            prompt_cache_key: config.prompt_cache_key,
             endpoint: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
             provider_label: config.provider_label,
             timeout: config.timeout,
@@ -161,7 +165,7 @@ impl ChatCompletionsClient {
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
         let model = request.model.clone();
-        let wire_request = to_wire_request(request, false);
+        let wire_request = self.wire_request(request, false);
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             self.provider_label.clone(),
@@ -235,7 +239,7 @@ impl ChatCompletionsClient {
         I: WireStreamInterpreter + 'static,
     {
         let model = request.model.clone();
-        let wire_request = to_wire_request(request, true);
+        let wire_request = self.wire_request(request, true);
         let mut observer = AttemptObserver::new(
             self.event_bus.clone(),
             self.provider_label.clone(),

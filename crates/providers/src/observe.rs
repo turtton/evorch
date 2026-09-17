@@ -44,6 +44,7 @@ pub(crate) struct AttemptObserver {
     first_token_emitted: bool,
     terminal_emitted: bool,
     expected_cacheable_tokens: Option<u64>,
+    cache_warm: bool,
 }
 
 impl AttemptObserver {
@@ -71,11 +72,13 @@ impl AttemptObserver {
             first_token_emitted: false,
             terminal_emitted: false,
             expected_cacheable_tokens: None,
+            cache_warm: false,
         }
     }
 
     pub(crate) fn with_cache_expectation(mut self, request: &crate::message::ChatRequest) -> Self {
         self.expected_cacheable_tokens = Some(cache::expected_cacheable_tokens(request));
+        self.cache_warm = self.cache_is_warm();
         self
     }
 
@@ -128,26 +131,7 @@ impl AttemptObserver {
         if self.terminal_emitted {
             return;
         }
-        if let Some(expected_cacheable_tokens) = self.expected_cacheable_tokens {
-            let cache_hit_ratio = u32::try_from(expected_cacheable_tokens)
-                .ok()
-                .filter(|expected| *expected > 0)
-                .zip(u32::try_from(usage.cache_read_tokens).ok())
-                .map(|(expected, actual)| f64::from(actual) / f64::from(expected));
-            tracing::info!(
-                request_id = %self.request_id,
-                run_id = self.observation.as_ref().map(|context| context.run_id.as_str()),
-                provider = %self.provider,
-                profile = self.profile.as_deref(),
-                protocol = self.protocol,
-                model = %self.model,
-                expected_cacheable_tokens,
-                cache_read_tokens = usage.cache_read_tokens,
-                cache_hit_ratio,
-                cache_estimation = "utf8_bytes_div_4",
-                "prompt cache request completed"
-            );
-        }
+        self.record_cache(usage);
         let finish_reason = match finish_reason {
             FinishReason::Stop => "stop".to_string(),
             FinishReason::Length => "length".to_string(),
