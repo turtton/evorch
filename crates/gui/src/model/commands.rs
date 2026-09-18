@@ -153,6 +153,10 @@ pub enum LoopEvent {
 }
 
 pub trait CommandSink: Send {
+    fn set_default_cwd(&mut self, _cwd: Option<std::path::PathBuf>) -> Result<(), String> {
+        Ok(())
+    }
+
     fn start_background_run(&self, _text: String) -> Option<runtime::RunId> {
         None
     }

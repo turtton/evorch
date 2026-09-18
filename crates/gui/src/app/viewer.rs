@@ -101,6 +101,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     return;
                 }
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),
+                SidebarAction::SetPrimaryProject(project_id) => {
+                    self.set_primary_project(project_id)
+                }
                 SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),

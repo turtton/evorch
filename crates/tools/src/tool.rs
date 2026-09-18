@@ -115,6 +115,9 @@ pub trait Tool: Send + Sync {
     ) -> Result<ToolResult, ToolError> {
         self.execute(args).await
     }
+
+    /// ツールが cwd を持つ場合、既定の作業ディレクトリを更新する。
+    fn set_default_cwd(&self, _cwd: std::path::PathBuf) {}
 }
 
 #[cfg(test)]

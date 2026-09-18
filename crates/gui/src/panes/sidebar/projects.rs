@@ -37,6 +37,23 @@ pub fn render(
                 .filter(|thread| thread.project_id == project.id)
                 .count();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let primary = sidebar.primary_project.as_ref() == Some(&project.id);
+                let star_label = if primary {
+                    "Clear primary project"
+                } else {
+                    "Set as primary project"
+                };
+                let star_response = ui
+                    .small_button(if primary { "★" } else { "☆" })
+                    .on_hover_text(star_label);
+                star_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, star_label)
+                });
+                if star_response.clicked() {
+                    *action = Some(SidebarAction::SetPrimaryProject(
+                        (!primary).then(|| project.id.clone()),
+                    ));
+                }
                 if count > 0 {
                     badge(
                         ui,

@@ -115,12 +115,25 @@ impl ToolExecutor {
     /// スキーマは `tools::tools::tests::all_standard_tool_schemas_compile` で
     /// コンパイル可能を検証済みのため、到達しない経路である。
     pub fn with_standard_tools(event_bus: Arc<EventBus>, sandbox: Arc<dyn Sandbox>) -> Self {
+        Self::with_standard_tools_in(event_bus, sandbox, None)
+    }
+
+    pub fn with_standard_tools_in(
+        event_bus: Arc<EventBus>,
+        sandbox: Arc<dyn Sandbox>,
+        default_cwd: Option<std::path::PathBuf>,
+    ) -> Self {
         let mut executor = Self::new(event_bus);
+        let shell = Shell::new(Arc::clone(&sandbox));
+        let shell = match default_cwd {
+            Some(cwd) => shell.with_default_cwd(cwd),
+            None => shell,
+        };
         let standard: [Arc<dyn Tool>; 5] = [
             Arc::new(Read),
             Arc::new(Edit),
             Arc::new(Grep),
-            Arc::new(Shell::new(Arc::clone(&sandbox))),
+            Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
         ];
         for tool in standard {
@@ -130,6 +143,13 @@ impl ToolExecutor {
                 .expect("標準ツールのスキーマは all_standard_tool_schemas_compile でコンパイル可能を検証済み");
         }
         executor
+    }
+
+    /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
+    pub fn set_default_cwd(&self, cwd: std::path::PathBuf) {
+        for registered in self.tools.values() {
+            registered.tool.set_default_cwd(cwd.clone());
+        }
     }
 
     /// 標準ツールに web_search / web_fetch（production 既定構成）を追加登録する。

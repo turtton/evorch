@@ -12,6 +12,29 @@ use crate::model::commands::{LoopEvent, MergeDecision, WorkbenchCommand};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub(super) fn sync_shell_cwd(&mut self) -> bool {
+        let cwd = self
+            .sidebar
+            .resolved_primary_project()
+            .map(|project| project.repo_root.clone());
+        match self.sink.set_default_cwd(cwd) {
+            Ok(()) => true,
+            Err(error) => {
+                self.push_notice(format!("Failed to configure project shell: {error}"));
+                false
+            }
+        }
+    }
+
+    pub fn set_primary_project(
+        &mut self,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), WorkbenchError> {
+        self.sidebar.set_primary_project(project_id)?;
+        self.save_sidebar();
+        Ok(())
+    }
+
     pub fn select_project(&mut self, project_id: ProjectId) -> Result<(), WorkbenchError> {
         self.sidebar.select_project(&project_id)?;
         Ok(())
@@ -322,6 +345,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn submit_command(&mut self, command: WorkbenchCommand) {
         if !self.thread_writable() {
             self.push_notice("Read-only attach: explicitly Start or Claim before mutating.");
+            return;
+        }
+        if !self.sync_shell_cwd() {
             return;
         }
         self.issued.push(command.clone());

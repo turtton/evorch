@@ -5,7 +5,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sandbox::{CommandSpec, Sandbox, WrappedCommand};
@@ -130,6 +130,7 @@ pub struct Shell {
     sandbox: Arc<dyn Sandbox>,
     contract: ShellCommandContract,
     extra_env: Vec<(String, String)>,
+    default_cwd: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Shell {
@@ -146,6 +147,7 @@ impl Shell {
             sandbox,
             contract,
             extra_env: Vec::new(),
+            default_cwd: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -162,7 +164,16 @@ impl Shell {
             sandbox,
             contract,
             extra_env,
+            default_cwd: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_default_cwd(self, cwd: PathBuf) -> Self {
+        *self
+            .default_cwd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
+        self
     }
 }
 
@@ -224,6 +235,13 @@ impl Tool for Shell {
         ToolExecutionMode::Exclusive
     }
 
+    fn set_default_cwd(&self, cwd: PathBuf) {
+        *self
+            .default_cwd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         let args: ShellArgs =
             serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
@@ -260,7 +278,12 @@ impl Tool for Shell {
             .wrap(CommandSpec {
                 program: "sh".to_string(),
                 args: shell_args,
-                cwd: args.cwd.as_ref().map(PathBuf::from),
+                cwd: args.cwd.as_ref().map(PathBuf::from).or_else(|| {
+                    self.default_cwd
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                }),
                 extra_env: self.extra_env.clone(),
             })
             .map_err(|error| ToolError::SandboxUnavailable {

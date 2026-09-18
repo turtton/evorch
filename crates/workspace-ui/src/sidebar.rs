@@ -16,6 +16,8 @@ pub struct SidebarState {
     pub version: u32,
     pub projects: Vec<ProjectRecord>,
     pub selected_project: Option<ProjectId>,
+    #[serde(default)]
+    pub primary_project: Option<ProjectId>,
     pub threads: Vec<ThreadRecord>,
     pub active_thread: Option<ThreadId>,
 }
@@ -26,6 +28,7 @@ impl Default for SidebarState {
             version: SIDEBAR_SCHEMA_VERSION,
             projects: Vec::new(),
             selected_project: None,
+            primary_project: None,
             threads: Vec::new(),
             active_thread: None,
         }
@@ -33,6 +36,30 @@ impl Default for SidebarState {
 }
 
 impl SidebarState {
+    pub fn set_primary_project(&mut self, id: Option<ProjectId>) -> Result<(), ProjectError> {
+        if id
+            .as_ref()
+            .is_some_and(|id| !self.projects.iter().any(|project| &project.id == id))
+        {
+            return Err(ProjectError::UnknownProject);
+        }
+        self.primary_project = id;
+        Ok(())
+    }
+
+    pub fn resolved_primary_project(&self) -> Option<&ProjectRecord> {
+        self.projects
+            .iter()
+            .find(|project| Some(&project.id) == self.primary_project.as_ref())
+            .or_else(|| match self.projects.as_slice() {
+                [project] => Some(project),
+                _ => self
+                    .projects
+                    .iter()
+                    .find(|project| Some(&project.id) == self.selected_project.as_ref()),
+            })
+    }
+
     pub fn add_project(
         &mut self,
         id: ProjectId,

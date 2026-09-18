@@ -58,6 +58,7 @@ pub struct RuntimeCommandSink {
     team_writer: Option<storage::StorageHandle>,
     memory_config: Option<storage::StorageConfig>,
     runtime: AgentRuntime,
+    shell_cwd: Option<PathBuf>,
     handle: tokio::runtime::Handle,
     supervisor: SupervisorHandle,
     accepted_goals: u64,
@@ -95,6 +96,7 @@ impl RuntimeCommandSink {
             team_writer: None,
             memory_config: None,
             runtime,
+            shell_cwd: None,
             handle,
             supervisor,
             accepted_goals: 0,
@@ -155,6 +157,22 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
+        // cwd 未指定時は起動済み executor を維持し、不要な sandbox 構築を避ける。
+        let Some(root) = cwd else {
+            self.shell_cwd = None;
+            return Ok(());
+        };
+        if self.shell_cwd.as_ref() == Some(&root) {
+            return Ok(());
+        }
+        self.runtime
+            .set_default_cwd(root.clone())
+            .map_err(|error| error.to_string())?;
+        self.shell_cwd = Some(root);
+        Ok(())
+    }
+
     fn start_background_run(&self, text: String) -> Option<RunId> {
         Some(RuntimeCommandSink::start_background_run(self, text))
     }

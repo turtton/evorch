@@ -44,6 +44,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_composer(&mut self) {
+        if !self.sync_shell_cwd() {
+            return;
+        }
         self.refresh_image_capability();
         let raw = self.composer.input.clone();
         let parsed = if raw.trim().is_empty() && !self.composer.attachments.is_empty() {

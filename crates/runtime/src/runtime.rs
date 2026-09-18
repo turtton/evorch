@@ -56,7 +56,7 @@ pub(crate) struct Shared {
     pub(crate) learning_runs: LearningRunReceivers,
     topology: OnceLock<crate::CoordinationTopology>,
     pub(crate) bus: Arc<EventBus>,
-    pub(crate) executor: Arc<ToolExecutor>,
+    pub(crate) executor: Mutex<Arc<ToolExecutor>>,
     pub(crate) snapshots: OnceLock<Arc<crate::snapshot::SnapshotService>>,
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
@@ -136,6 +136,15 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
+    pub fn set_default_cwd(&self, root: PathBuf) -> Result<(), RuntimeError> {
+        self.shared
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_default_cwd(root);
+        Ok(())
+    }
+
     pub fn team_tasks(&self) -> Vec<(RunId, Vec<crate::team::TeamTask>)> {
         lock_runs(&self.shared.runs)
             .iter()
@@ -212,7 +221,7 @@ impl AgentRuntime {
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
                 bus,
-                executor,
+                executor: Mutex::new(executor),
                 snapshots: OnceLock::new(),
                 model,
                 system_prompts: OnceLock::new(),
@@ -426,7 +435,7 @@ impl AgentRuntime {
             shared: Arc::new(Shared {
                 admissions: Mutex::new(HashMap::new()),
                 bus,
-                executor,
+                executor: Mutex::new(executor),
                 model,
                 topology: OnceLock::new(),
                 system_prompts: OnceLock::new(),
@@ -1397,12 +1406,13 @@ pub fn production_executor(
     policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
-    let sandbox = crate::network::build_sandbox(policy, workspace_root).map_err(|error| {
-        RuntimeError::Sandbox {
-            detail: error.to_string(),
-        }
-    })?;
-    ToolExecutor::with_standard_tools(bus, sandbox)
+    let sandbox =
+        crate::network::build_sandbox(policy, workspace_root.clone()).map_err(|error| {
+            RuntimeError::Sandbox {
+                detail: error.to_string(),
+            }
+        })?;
+    ToolExecutor::with_standard_tools_in(bus, sandbox, Some(workspace_root))
         .with_web_tools()
         .map(Arc::new)
         .map_err(|error| RuntimeError::NetworkGuard {
@@ -1437,7 +1447,12 @@ fn lock_runs(runs: &Mutex<HashMap<RunId, RunEntry>>) -> MutexGuard<'_, HashMap<R
 pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
     shared.upgrade().map(|shared| LoopShared {
         bus: Arc::clone(&shared.bus),
-        executor: Arc::clone(&shared.executor),
+        executor: Arc::clone(
+            &shared
+                .executor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ),
         model: Arc::clone(&shared.model),
         system_prompts: shared.system_prompts.get().cloned(),
         skills: shared.skills.get().cloned(),

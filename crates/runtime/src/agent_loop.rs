@@ -389,10 +389,14 @@ async fn attach_worktree_executor(
         .factory
         .build(&state.policy, &mounts)
         .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
-    ToolExecutor::with_standard_tools(Arc::clone(&runtime_shared.bus), sandbox)
-        .with_web_tools()
-        .map(Arc::new)
-        .map_err(|error| format!("workspace web tool setup failed: {error}"))
+    ToolExecutor::with_standard_tools_in(
+        Arc::clone(&runtime_shared.bus),
+        sandbox,
+        Some(owned.path.clone()),
+    )
+    .with_web_tools()
+    .map(Arc::new)
+    .map_err(|error| format!("workspace web tool setup failed: {error}"))
 }
 
 fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {

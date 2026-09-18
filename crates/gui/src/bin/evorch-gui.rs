@@ -552,6 +552,10 @@ fn run() -> Result<(), GuiError> {
         std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
     }
     let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
+    let sidebar = match demo_directory.as_ref() {
+        Some(directory) => demo_sidebar(&repo_root, directory.path())?,
+        None => load_sidebar(state_path.as_ref())?,
+    };
     let loaded_config: Option<Result<config::Config, config::ConfigError>> = if arguments.demo {
         None
     } else {
@@ -647,7 +651,9 @@ fn run() -> Result<(), GuiError> {
             let executor = production_executor(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                repo_root.clone(),
+                sidebar
+                    .resolved_primary_project()
+                    .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
             )?;
             let ComposedRuntime {
                 runtime,
@@ -858,10 +864,6 @@ fn run() -> Result<(), GuiError> {
             state = state.with_production_model(context, model);
         }
     }
-    let sidebar = match demo_directory.as_ref() {
-        Some(directory) => demo_sidebar(&repo_root, directory.path())?,
-        None => load_sidebar(state_path.as_ref())?,
-    };
     state = state.with_sidebar(sidebar);
     if let Some(executable) = std::env::var_os("EVORCH_SLASH_COMMAND_EXECUTABLE") {
         state.load_external_commands(executable.into());
