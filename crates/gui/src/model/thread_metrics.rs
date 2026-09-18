@@ -31,10 +31,9 @@ impl TelemetryOverlay {
                 wall_time += now.saturating_duration_since(*start);
             }
         }
-        let billed_tokens = usage.input + usage.cache_read + usage.cache_write;
         ThreadMetrics {
             cost: has_cost.then_some(cost_total),
-            cache_hit_rate: (billed_tokens > 0).then(|| usage.cache_hit_rate()),
+            cache_hit_rate: (usage.input > 0).then(|| usage.cache_hit_rate()),
             wall_time,
             context_pressure: run_ids
                 .iter()

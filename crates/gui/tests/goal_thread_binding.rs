@@ -190,8 +190,8 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
     gui.state_mut().switch_thread(ThreadId::new("B")).unwrap();
     gui.run();
     let metrics = gui.state().telemetry().thread_metrics(&runs);
-    assert!(metrics.cost.is_some_and(|cost| cost > 0.0));
-    let mut cost_label = format!("${:.3} · cache 50%", metrics.cost.unwrap());
+    assert_eq!(metrics.cost, Some(0.0));
+    let mut cost_label = format!("${:.3} · cache 100%", metrics.cost.unwrap());
     if let Some(pressure) = metrics.context_pressure {
         cost_label.push_str(&format!(" · ctx {pressure}%"));
     }

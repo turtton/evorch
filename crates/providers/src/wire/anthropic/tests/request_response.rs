@@ -160,7 +160,7 @@ fn wire_response_converts_to_canonical_response() {
                 ]
             },
             usage: Usage {
-                input_tokens: 11,
+                input_tokens: 14,
                 output_tokens: 7,
                 cache_read_tokens: 3,
                 cache_write_tokens: 5

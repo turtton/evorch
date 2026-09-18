@@ -19,11 +19,11 @@ fn tokens(value: u64) -> f64 {
 
 impl TokenUsage {
     pub fn cache_hit_rate(&self) -> f64 {
-        let total = tokens(self.input) + tokens(self.cache_read) + tokens(self.cache_write);
+        let total = tokens(self.input);
         if total == 0.0 {
             0.0
         } else {
-            tokens(self.cache_read) / total * 100.0
+            (tokens(self.cache_read) / total * 100.0).min(100.0)
         }
     }
 
@@ -35,7 +35,7 @@ impl TokenUsage {
         let mut cost = 0.0;
         let mut has_known_price = false;
         for (count, price) in [
-            (self.input, pricing.input),
+            (self.input.saturating_sub(self.cache_read), pricing.input),
             (self.output, pricing.output),
             (self.cache_read, pricing.cache_read),
             (self.cache_write, pricing.cache_write),

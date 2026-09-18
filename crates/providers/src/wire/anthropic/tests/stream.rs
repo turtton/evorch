@@ -93,7 +93,7 @@ fn interpreter_maps_scripted_stream_and_merges_result() {
         interpreter.take_result(),
         (
             Usage {
-                input_tokens: 10,
+                input_tokens: 12,
                 output_tokens: 8,
                 cache_read_tokens: 2,
                 cache_write_tokens: 4

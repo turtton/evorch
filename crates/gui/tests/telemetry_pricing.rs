@@ -7,7 +7,7 @@ use std::sync::Arc;
 fn cost_includes_known_prices_when_cache_prices_are_unknown() {
     // Given: input/output prices without cache prices.
     let usage = gui::model::telemetry::TokenUsage {
-        input: 20_000,
+        input: 98_300,
         output: 15_400,
         cache_read: 78_300,
         cache_write: 1_700,
@@ -33,7 +33,7 @@ fn completed(model: &str) -> Event {
         model: model.into(),
         streaming: true,
         duration_ms: 5_000,
-        input_tokens: 20_000,
+        input_tokens: 98_300,
         output_tokens: 15_400,
         cache_read_tokens: 78_300,
         cache_write_tokens: 1_700,
@@ -178,7 +178,7 @@ fn telemetry_cost_renders_in_agents_pane() {
         gui::panes::agents::agents_pane(ui, &tasks, &overlay);
     });
     harness.run();
-    for label in ["$0.042", "115.4K tok", "3080.0 tok/s", "cache 78.3%"] {
+    for label in ["$0.042", "193.7K tok", "3080.0 tok/s", "cache 79.7%"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }
@@ -209,7 +209,7 @@ fn capture_telemetry_cost_png() {
     let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     harness.run();
     assert!(harness.has_label("$0.042"));
-    assert!(harness.has_label("cache 78.3%"));
+    assert!(harness.has_label("cache 79.7%"));
     if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
         let path = std::env::var_os("EVORCH_TELEMETRY_PNG")
             .map(std::path::PathBuf::from)

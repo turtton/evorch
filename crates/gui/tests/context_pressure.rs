@@ -247,9 +247,9 @@ fn conversation_header_shows_context_when_window_is_known() {
     // When: the conversation renders.
     gui.run();
     // Then: context is visible alongside existing thread metadata.
-    assert!(gui.has_label("cache 27% · ctx 40%"));
+    assert!(gui.has_label("cache 44% · ctx 40%"));
     let title = gui.label_rects("Thread: one")[0];
-    let metrics = gui.label_rects("cache 27% · ctx 40%")[0];
+    let metrics = gui.label_rects("cache 44% · ctx 40%")[0];
     assert!(metrics.left() >= title.right());
     assert!((metrics.center().y - title.center().y).abs() < 4.0);
     if let Some(path) = std::env::var_os("CONTEXT_PRESSURE_CAPTURE") {

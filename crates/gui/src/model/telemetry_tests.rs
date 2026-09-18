@@ -146,7 +146,7 @@ fn thread_metrics_aggregates_cache_hit_rate_across_runs() {
     overlay.apply_event(&request_completed(Some("run-2"), 100, 10));
     let metrics = overlay.thread_metrics(&["run-1".to_owned(), "run-2".to_owned()]);
     let rate = metrics.cache_hit_rate.expect("cache hit rate");
-    assert!((rate - (6.0 / 214.0 * 100.0)).abs() < 0.01);
+    assert_eq!(rate, 3.0);
     assert!(metrics.cost.is_none());
 }
 
@@ -155,4 +155,15 @@ fn thread_metrics_empty_for_unknown_runs() {
     let overlay = TelemetryOverlay::new();
     let metrics = overlay.thread_metrics(&["missing".to_owned()]);
     assert_eq!(metrics, ThreadMetrics::default());
+}
+
+#[test]
+fn thread_metrics_hides_cache_rate_when_input_is_zero() {
+    // Given: cache counters without an input denominator.
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&request_completed(Some("run-1"), 0, 10));
+    // When: aggregating the thread's completed usage.
+    let metrics = overlay.thread_metrics(&["run-1".to_owned()]);
+    // Then: an absent denominator is not displayed as a rate.
+    assert_eq!(metrics.cache_hit_rate, None);
 }
