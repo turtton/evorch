@@ -27,6 +27,32 @@ fn apply(model: &mut PendingApprovalsModel, event: &Event) {
 }
 
 #[test]
+fn pending_approval_shows_escalation_command_and_justification_when_requested() {
+    // Given: the runtime's escalation request, without a ToolStarted event.
+    let mut model = PendingApprovalsModel::default();
+    let input = json!({
+        "command": "pwd",
+        "justification": "inspect host directory",
+        "kind": "shell_escalation",
+    });
+    let event = Event::new(ToolEvent::ApprovalRequested {
+        tool_name: "shell".into(),
+        call_id: "run-2:call-review:1".into(),
+        input: Some(input.clone()),
+    });
+    // When: the pending-approvals model receives the request.
+    apply(&mut model, &event);
+    // Then: the displayed item retains correlation and all review input fields.
+    let item = model.items().next().expect("pending approval");
+    assert_eq!(item.tool_name, "shell");
+    assert_eq!(item.run_id.as_deref(), Some("run-2"));
+    let surfaced = item.input.as_ref().expect("review input");
+    for field in ["command", "justification", "kind"] {
+        assert_eq!(surfaced[field], input[field]);
+    }
+}
+
+#[test]
 fn pending_approvals_removes_only_exact_resolved_key() {
     // Given: 同じ run の別々の承認要求。
     let mut model = PendingApprovalsModel::default();

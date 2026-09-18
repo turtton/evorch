@@ -44,6 +44,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let mut save = false;
         let mut cancel = false;
+        let busy = self.settings_save_in_progress();
         egui::Modal::new(egui::Id::new("sandbox-settings"))
             .backdrop_color(palette().OVERLAY)
             .frame(surface_frame(palette().SURFACE_RAISED))
@@ -51,14 +52,27 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ui.set_width((ctx.viewport_rect().width() * 0.6).min(PROVIDER_MODAL_MAX_WIDTH) - SP_4 * 4.0);
                 ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
                 ui.label(h3("Sandbox"));
-                ui.checkbox(&mut self.sandbox_settings.config.allow_network, "Allow network inside sandbox");
-                ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.checkbox(&mut self.sandbox_settings.config.allow_network, "Allow network inside sandbox");
+                    ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
+                    ui.label("エスカレーション審査");
+                    for (value, label) in [
+                        (config::EscalationApproval::Quick, "quick モデル審査 (既定)"),
+                        (config::EscalationApproval::User, "ユーザー承認"),
+                        (config::EscalationApproval::Off, "無効"),
+                    ] {
+                        ui.radio_value(&mut self.sandbox_settings.config.escalation_approval, value, label);
+                    }
+                    ui.checkbox(&mut self.sandbox_settings.config.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
+                });
                 if let Some(error) = &self.sandbox_settings.error {
                     ui.colored_label(palette().ERROR_FG, error);
                 }
-                ui.horizontal(|ui| {
-                    save = primary_button(ui, "Save sandbox").clicked();
-                    cancel = ui.button("Cancel").clicked();
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.horizontal(|ui| {
+                        save = primary_button(ui, "Save sandbox").clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
                 });
             });
         if cancel {
@@ -77,6 +91,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Ok(()) => {
                     if let Some(runtime) = &self.sandbox_settings.runtime {
                         runtime.set_sandbox_network(self.sandbox_settings.config.allow_network);
+                        runtime.set_sandbox_escalation(
+                            self.sandbox_settings.config.escalation_approval,
+                            self.sandbox_settings.config.escalate_to_user_on_deny,
+                        );
                     }
                     self.sandbox_settings.error = None;
                     self.push_notice("Sandbox settings updated");
