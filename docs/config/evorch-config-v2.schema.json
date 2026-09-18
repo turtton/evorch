@@ -137,6 +137,12 @@
         "response_headroom_tokens": 16384
       }
     },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxConfig",
+      "default": {
+        "allow_network": false
+      }
+    },
     "team": {
       "$ref": "#/$defs/TeamConfig",
       "default": {
@@ -950,6 +956,16 @@
           "format": "uint64",
           "default": 16384,
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "allow_network": {
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false

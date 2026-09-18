@@ -66,6 +66,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_routing_settings();
                     ui.close();
                 }
+                if ui.button("Sandbox").clicked() {
+                    self.open_sandbox_settings();
+                    ui.close();
+                }
             })
             .response
             .on_hover_text("Workbench settings");

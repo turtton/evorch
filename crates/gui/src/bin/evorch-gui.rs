@@ -624,7 +624,8 @@ fn run() -> Result<(), GuiError> {
             let seam = WorkspaceSeam::production(demo_repo.clone())?;
             let executor = production_executor(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator),
+                &ExecutionPolicy::for_role(Role::Orchestrator)
+                    .with_sandbox_network(composition_config.sandbox.allow_network),
                 seam.repo_root().to_path_buf(),
             )?;
             let demo_model: Arc<dyn AgentModel> =
@@ -650,7 +651,8 @@ fn run() -> Result<(), GuiError> {
         None => {
             let executor = production_executor(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator),
+                &ExecutionPolicy::for_role(Role::Orchestrator)
+                    .with_sandbox_network(composition_config.sandbox.allow_network),
                 sidebar
                     .resolved_primary_project()
                     .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
@@ -678,6 +680,16 @@ fn run() -> Result<(), GuiError> {
         }
     };
 
+    let runtime = if arguments.demo {
+        runtime
+    } else {
+        runtime.with_sandbox_root(
+            sidebar
+                .resolved_primary_project()
+                .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
+        )
+    };
+    let sandbox_runtime = runtime.clone();
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
     let snapshot_directory = tempfile::tempdir()?;
     let snapshot_root = match demo_directory.as_ref() {
@@ -835,6 +847,7 @@ fn run() -> Result<(), GuiError> {
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
         .with_provider_settings_path(provider_settings_path)
+        .with_sandbox_runtime(sandbox_runtime)
         .with_codex_auth(codex_auth_model(
             loaded_config.as_ref(),
             settings_store.clone(),

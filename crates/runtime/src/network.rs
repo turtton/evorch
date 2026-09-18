@@ -45,12 +45,9 @@ pub fn sandbox_network_mode(access: NetworkAccess, explicit_opt_in: bool) -> San
 impl ExecutionPolicy {
     /// このポリシーのネットワーク要件をサンドボックスモードへ解決する。
     ///
-    /// v0.1 のポリシーにはオプトイン経路が存在しないため `explicit_opt_in` は
-    /// 常に `false` で委譲する。したがって [`NetworkAccess::OptIn`] のロール
-    /// (Explorer / Orchestrator) は [`SandboxNetworkMode::Unshared`] に解決される
-    /// (fail-closed)。
+    /// Global opt-in affects only OptIn roles; Denied remains isolated.
     pub fn sandbox_network_mode(&self) -> SandboxNetworkMode {
-        sandbox_network_mode(self.capabilities.network, false)
+        sandbox_network_mode(self.capabilities.network, self.sandbox_allow_network)
     }
 }
 

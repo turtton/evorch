@@ -33,6 +33,7 @@ pub mod network;
 pub mod orchestration;
 pub mod ownership;
 pub mod policy;
+mod sandbox_settings;
 pub mod prompt;
 pub mod restore;
 pub mod rules;

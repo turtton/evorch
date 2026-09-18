@@ -16,6 +16,8 @@ Use SP_1 through SP_4 (4/8/12/16). Panels own their scrolling.
 ## 5. Primitives
 Reuse egui TextEdit, ComboBox, Button, ScrollArea, Grid and collapsing headers.
 Keep native keyboard focus and selected/hover/disabled states.
+Sandbox settings reuse the settings modal and native labeled Checkbox with
+unchecked/checked/focused states, Save/Cancel, inline errors and explicit scope text.
 Conversation message/reasoning cards show a small TEXT_MUTED `[role]` label
 above the body, resolved from the entry's run ID and current task rows.
 Unknown runs and legacy entries omit the label; no role is inferred from focus.

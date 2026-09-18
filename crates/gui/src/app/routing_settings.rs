@@ -16,7 +16,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.provider_save_rx.is_some()
     }
 
-    fn routing_load_options(&self) -> config::LoadOptions {
+    pub(super) fn routing_load_options(&self) -> config::LoadOptions {
         self.production_model.as_ref().map_or_else(
             || config::LoadOptions {
                 project_dir: self
@@ -40,6 +40,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
         }
         self.provider_settings.open = false;
+        self.sandbox_settings.open = false;
         self.close_theme_settings();
         self.role_settings.open = false;
         self.routing_settings.open = true;

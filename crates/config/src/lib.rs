@@ -16,6 +16,7 @@ pub mod save;
 mod save_agents;
 mod save_codex;
 mod save_routing;
+mod save_sandbox;
 mod schema;
 mod strict;
 pub mod types;
@@ -31,6 +32,8 @@ pub use save::{
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use save_routing::save_routing;
+pub use save_sandbox::save_sandbox;
+pub use types::SandboxConfig;
 pub use schema::json_schema;
 pub use types::OwnershipConfig;
 pub use types::{

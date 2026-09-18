@@ -144,7 +144,8 @@ pub async fn run_headless(
     let executor: Arc<ToolExecutor> = match sandbox {
         SandboxChoice::Production => production_executor(
             Arc::clone(&bus),
-            &ExecutionPolicy::for_role(args.role),
+            &ExecutionPolicy::for_role(args.role)
+                .with_sandbox_network(config.sandbox.allow_network),
             args.project_dir.clone(),
         )?,
         SandboxChoice::DirectUnchecked => Arc::new(ToolExecutor::with_standard_tools(
@@ -166,11 +167,13 @@ pub async fn run_headless(
         workspace: None,
     })?;
 
-    let run_id = composed
-        .runtime
-        .delegate_background(args.role, args.prompt, RunConfig::default());
-    let phase = composed.runtime.wait(run_id).await?;
-    let final_text = composed.runtime.run_result(run_id)?;
+    let runtime = match sandbox {
+        SandboxChoice::Production => composed.runtime.with_sandbox_root(args.project_dir),
+        SandboxChoice::DirectUnchecked => composed.runtime,
+    };
+    let run_id = runtime.delegate_background(args.role, args.prompt, RunConfig::default());
+    let phase = runtime.wait(run_id).await?;
+    let final_text = runtime.run_result(run_id)?;
 
     Ok(HeadlessOutcome {
         run_id,

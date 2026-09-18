@@ -12,6 +12,7 @@ mod ownership;
 mod provider_settings;
 mod role_settings;
 mod routing_settings;
+mod sandbox_settings;
 mod state;
 mod tab_viewer;
 mod theme_settings;

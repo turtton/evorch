@@ -43,6 +43,7 @@ pub struct ExecutionPolicy {
     pub capabilities: RoleCapabilities,
     /// 判定結果に載せるロール名。
     pub role_name: String,
+    pub sandbox_allow_network: bool,
 }
 
 impl ExecutionPolicy {
@@ -51,7 +52,13 @@ impl ExecutionPolicy {
         Self {
             capabilities: role.capabilities(),
             role_name: role.name().to_owned(),
+            sandbox_allow_network: false,
         }
+    }
+
+    pub const fn with_sandbox_network(mut self, allow_network: bool) -> Self {
+        self.sandbox_allow_network = allow_network;
+        self
     }
 
     /// ツール使用を認可する。

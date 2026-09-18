@@ -65,6 +65,8 @@ pub(crate) struct Shared {
     pub(crate) compaction: OnceLock<CompactionSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
+    pub(crate) sandbox_allow_network: AtomicBool,
+    pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
@@ -137,6 +139,15 @@ struct SentRecord {
 
 impl AgentRuntime {
     pub fn set_default_cwd(&self, root: PathBuf) -> Result<(), RuntimeError> {
+        if let Some(current) = self
+            .shared
+            .sandbox_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            *current = root.clone();
+        }
         self.shared
             .executor
             .lock()
@@ -230,6 +241,8 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
+                sandbox_allow_network: AtomicBool::new(false),
+                sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
@@ -266,6 +279,7 @@ impl AgentRuntime {
     }
 
     pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
+        self.set_sandbox_network(config.sandbox.allow_network);
         let _ = self
             .shared
             .topology
@@ -444,6 +458,8 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
+                sandbox_allow_network: AtomicBool::new(false),
+                sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),

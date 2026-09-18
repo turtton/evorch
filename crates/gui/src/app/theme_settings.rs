@@ -61,6 +61,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.provider_settings.open = false;
         self.role_settings.open = false;
         self.routing_settings.open = false;
+        self.sandbox_settings.open = false;
         self.theme_settings.open = true;
     }
 

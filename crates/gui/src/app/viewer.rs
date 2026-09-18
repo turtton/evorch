@@ -130,6 +130,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.render_theme_settings(ui.ctx());
+        self.render_sandbox_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {

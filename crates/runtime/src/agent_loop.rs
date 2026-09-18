@@ -112,7 +112,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     {
         resolution.apply(&mut loop_shared.compaction).await;
     }
-    let policy = ExecutionPolicy::for_role(task.role);
+    let Some(runtime) = crate::AgentRuntime::from_weak(&shared) else {
+        return;
+    };
+    let policy = runtime.execution_policy(task.role);
+    drop(runtime);
+    let sandbox_root = shared.upgrade().and_then(|runtime| {
+        runtime
+            .sandbox_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
     let restored = task.restored.take();
     let is_restored = restored.is_some();
     let context = match restored {
@@ -163,6 +174,17 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         budget: crate::budget_tracker::BudgetCounters::default(),
         durable_task: None,
     };
+    if state.task.config.workspace_mode == WorkspaceMode::Shared
+        && let Some(root) = sandbox_root
+    {
+        match crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root) {
+            Ok(executor) => state.shared.executor = executor,
+            Err(error) => {
+                state.finish_error(error.to_string());
+                return;
+            }
+        }
+    }
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
     let selected_model = state
