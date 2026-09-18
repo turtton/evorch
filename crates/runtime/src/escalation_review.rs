@@ -41,6 +41,7 @@ pub struct QuickModelReviewer {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireVerdict {
     approve: bool,
     reason: Option<String>,
@@ -90,18 +91,16 @@ impl QuickModelReviewer {
         .await
         .map_err(|_| ReviewError::Timeout)?
         .map_err(|_| ReviewError::Model)?;
-        let text: String = response
-            .message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. } => None,
-            })
-            .collect();
+        match response.finish_reason {
+            providers::FinishReason::Stop => {}
+            providers::FinishReason::Length
+            | providers::FinishReason::ToolUse
+            | providers::FinishReason::ContentFilter
+            | providers::FinishReason::Other(_) => return Err(ReviewError::InvalidVerdict),
+        }
+        let [ContentBlock::Text { text }] = response.message.content.as_slice() else {
+            return Err(ReviewError::InvalidVerdict);
+        };
         let verdict: WireVerdict =
             serde_json::from_str(text.trim()).map_err(|_| ReviewError::InvalidVerdict)?;
         Ok(if verdict.approve {

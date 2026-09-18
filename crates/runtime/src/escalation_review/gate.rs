@@ -111,6 +111,19 @@ impl ShellEscalationGate for SandboxEscalationGate {
                 }
             }
         };
+        let decision = match decision {
+            EscalationDecision::Approve => {
+                let current = self.settings.lock().ok().map(|settings| *settings);
+                if current.is_some() && current == settings {
+                    EscalationDecision::Approve
+                } else {
+                    EscalationDecision::Deny {
+                        reason: "shell escalation settings changed during review".into(),
+                    }
+                }
+            }
+            EscalationDecision::Deny { reason } => EscalationDecision::Deny { reason },
+        };
         match &decision {
             EscalationDecision::Approve => self.diagnose(ctx, DiagnosticSeverity::Info, "approved"),
             EscalationDecision::Deny { reason } => {

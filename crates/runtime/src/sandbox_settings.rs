@@ -17,15 +17,6 @@ impl AgentRuntime {
     }
 
     pub(crate) fn configure_shell_escalation(&self, executor: &tools::ToolExecutor) {
-        let settings = self
-            .shared
-            .sandbox_escalation
-            .lock()
-            .ok()
-            .map(|settings| *settings);
-        if matches!(settings, Some((config::EscalationApproval::Off, _)) | None) {
-            return;
-        }
         executor.set_shell_escalation(
             self.shell_escalation_gate(),
             sandbox::composition::unsandboxed(),
