@@ -5,16 +5,18 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use sandbox::{CommandSpec, Sandbox, WrappedCommand};
 use serde::Deserialize;
 
 use crate::error::ToolError;
+use crate::executor::ToolExecutionContext;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
+use crate::tools::shell_escalation::{EscalationDecision, ShellEscalation, ShellEscalationGate};
 
 #[cfg(test)]
 mod tests {
@@ -131,6 +133,7 @@ pub struct Shell {
     contract: ShellCommandContract,
     extra_env: Vec<(String, String)>,
     default_cwd: Arc<Mutex<Option<PathBuf>>>,
+    escalation: Arc<RwLock<Option<ShellEscalation>>>,
 }
 
 impl Shell {
@@ -148,6 +151,7 @@ impl Shell {
             contract,
             extra_env: Vec::new(),
             default_cwd: Arc::new(Mutex::new(None)),
+            escalation: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -165,6 +169,7 @@ impl Shell {
             contract,
             extra_env,
             default_cwd: Arc::new(Mutex::new(None)),
+            escalation: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -191,6 +196,10 @@ struct ShellArgs {
     /// 擬似端末（PTY）上で実行するかどうか。
     #[serde(default)]
     interactive: bool,
+    #[serde(default)]
+    require_escalated: bool,
+    #[serde(default)]
+    justification: String,
     /// 作業ディレクトリ。
     cwd: Option<String>,
     /// 制限時間（ミリ秒）。
@@ -219,6 +228,8 @@ impl Tool for Shell {
                     "description": "Deprecated: put arguments in command instead. Joined with spaces without quoting and interpreted as shell syntax."
                 },
                 "interactive": { "type": "boolean", "default": false },
+                "require_escalated": { "type": "boolean", "default": false },
+                "justification": { "type": "string" },
                 "cwd": { "type": "string" },
                 "timeout_ms": { "type": "integer", "minimum": 1 }
             },
@@ -242,7 +253,35 @@ impl Tool for Shell {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
     }
 
+    fn set_shell_escalation(
+        &self,
+        gate: Arc<dyn ShellEscalationGate>,
+        unsandboxed: Arc<dyn Sandbox>,
+    ) {
+        *self
+            .escalation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(ShellEscalation { gate, unsandboxed });
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+        self.execute_with_context(
+            &ToolExecutionContext {
+                run_id: String::new(),
+                thread_id: None,
+                call_id: None,
+            },
+            args,
+        )
+        .await
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &ToolExecutionContext,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
         let args: ShellArgs =
             serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
                 detail: error.to_string(),
@@ -273,8 +312,31 @@ impl Tool for Shell {
                 )));
             }
         }
-        let wrapped = self
-            .sandbox
+        let sandbox = if args.require_escalated {
+            if args.justification.trim().is_empty() {
+                return Ok(ToolResult::error(
+                    "shell escalation denied: justification is required",
+                ));
+            }
+            // 審査中にロックを保持せず、gate と実行経路を同じスナップショットから使う。
+            let escalation = self.escalation.read().ok().and_then(|slot| slot.clone());
+            let Some(escalation) = escalation else {
+                return Ok(ToolResult::error(
+                    "shell escalation denied: no escalation gate configured",
+                ));
+            };
+            match escalation
+                .gate
+                .decide(ctx, &shell_args[1], &args.justification)
+                .await
+            {
+                EscalationDecision::Approve => escalation.unsandboxed,
+                EscalationDecision::Deny { reason } => return Ok(ToolResult::error(reason)),
+            }
+        } else {
+            Arc::clone(&self.sandbox)
+        };
+        let wrapped = sandbox
             .wrap(CommandSpec {
                 program: "sh".to_string(),
                 args: shell_args,

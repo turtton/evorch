@@ -118,6 +118,14 @@ pub trait Tool: Send + Sync {
 
     /// ツールが cwd を持つ場合、既定の作業ディレクトリを更新する。
     fn set_default_cwd(&self, _cwd: std::path::PathBuf) {}
+
+    /// shell の呼び出し単位の隔離解除を構成する。他のツールでは何もしない。
+    fn set_shell_escalation(
+        &self,
+        _gate: std::sync::Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>,
+        _unsandboxed: std::sync::Arc<dyn sandbox::Sandbox>,
+    ) {
+    }
 }
 
 #[cfg(test)]

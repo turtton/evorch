@@ -3,14 +3,14 @@
 //! ADR 0021 の方針に基づき、このモジュールは fail-closed として振る舞います。
 //! bwrap の検出に失敗した場合はその場で呼び出し元へエラーを伝播し、
 //! サンドボックスなしでの実行へのフォールバックは一切行いません。
-//! 構築される実行方式は常に `BwrapSandbox` です。
+//! 通常の構築は常に `BwrapSandbox`、明示的に審査された例外だけが非隔離です。
 
 use std::sync::Arc;
 
 use crate::{
     bwrap::{BwrapConfig, BwrapSandbox},
     error::SandboxError,
-    exec::Sandbox,
+    exec::{DirectSandbox, Sandbox},
 };
 
 /// ツール実行に用いる本番用サンドボックスを構築します。
@@ -19,6 +19,14 @@ use crate::{
 /// (fail-closed)。
 pub fn production_sandbox(config: BwrapConfig) -> Result<Arc<dyn Sandbox>, SandboxError> {
     compose_with(|| BwrapSandbox::detect(config))
+}
+
+/// ADR 0021 の承認済みエスカレーション例外として非隔離経路を構築します。
+///
+/// 呼び出しごとの明示的な審査・承認を経た opt-out 専用です。
+/// `production_sandbox` の検出失敗時のフォールバックには使いません。
+pub fn unsandboxed() -> Arc<dyn Sandbox> {
+    Arc::new(DirectSandbox::new_unchecked())
 }
 
 /// bwrap 検出を注入できる、テスト用の非公開シームです。
@@ -39,6 +47,22 @@ mod tests {
     use super::*;
     use crate::exec::CommandSpec;
     use tempfile::tempdir;
+
+    // Given: an explicit opt-out / When: wrapping / Then: command, cwd and extra env are preserved.
+    #[test]
+    fn command_is_passed_through_when_unsandboxed_is_requested() {
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "printf approved".into()],
+            cwd: Some(PathBuf::from("/workspace")),
+            extra_env: vec![("ESCALATION_TEST".into(), "yes".into())],
+        };
+        let wrapped = unsandboxed().wrap(spec.clone()).expect("wrap");
+        assert_eq!(wrapped.program, spec.program);
+        assert_eq!(wrapped.args, spec.args);
+        assert_eq!(wrapped.cwd, spec.cwd);
+        assert!(wrapped.env.contains(&spec.extra_env[0]));
+    }
 
     // Given: 失敗する検出シーム / When: サンドボックスを構築する / Then: エラーがそのまま伝播する
     #[test]

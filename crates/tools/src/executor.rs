@@ -152,6 +152,17 @@ impl ToolExecutor {
         }
     }
 
+    /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。
+    pub fn set_shell_escalation(
+        &self,
+        gate: Arc<dyn crate::tools::shell_escalation::ShellEscalationGate>,
+        unsandboxed: Arc<dyn Sandbox>,
+    ) {
+        if let Some(registered) = self.tools.get("shell") {
+            registered.tool.set_shell_escalation(gate, unsandboxed);
+        }
+    }
+
     /// 標準ツールに web_search / web_fetch（production 既定構成）を追加登録する。
     ///
     /// # Errors

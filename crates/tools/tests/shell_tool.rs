@@ -16,6 +16,33 @@ fn shell() -> Shell {
     Shell::new(Arc::new(DirectSandbox::new_unchecked()))
 }
 
+// Given: shell / When: schema is requested / Then: escalation fields are optional and typed.
+#[test]
+fn shell_schema_exposes_require_escalated_and_justification_when_requested() {
+    let schema = shell().schema();
+    assert_eq!(schema["properties"]["require_escalated"]["type"], "boolean");
+    assert_eq!(schema["properties"]["justification"]["type"], "string");
+    assert_eq!(schema["required"], json!(["command"]));
+    assert_eq!(schema["additionalProperties"], false);
+}
+
+// Given: no gate / When: escalation is requested / Then: execution is denied.
+#[tokio::test]
+async fn escalated_call_is_denied_when_gate_is_absent() {
+    let result = shell()
+        .execute(json!({
+            "command": "printf forbidden", "require_escalated": true,
+            "justification": "needs host access"
+        }))
+        .await
+        .expect("tool result");
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        "shell escalation denied: no escalation gate configured"
+    );
+}
+
 /// PTY テスト全体の安全網。
 ///
 /// Given: 任意の PTY テスト本体 / When: 30 秒で待機する / Then: 超過時はデッドロックを疑うメッセージで即座に失敗する

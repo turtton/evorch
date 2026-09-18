@@ -9,6 +9,7 @@ pub mod grep;
 pub mod read;
 pub mod shell;
 pub mod shell_contract;
+pub mod shell_escalation;
 pub mod web_fetch;
 pub mod web_search;
 

@@ -31,7 +31,8 @@ pub trait Sandbox: Send + Sync {
 ///
 /// この型は公開 API 上の unit-like な value として構築できません。隔離の
 /// 無効化は [`DirectSandbox::new_unchecked`] による明示的な opt-out
-/// （非 production / テスト専用）のみで行えます。これは ADR 0021 の
+/// （非 production / テスト専用）、または審査済みの
+/// [`crate::composition::unsandboxed`] 経由でのみ行えます。これは ADR 0021 の
 /// fail-closed 方針を construction API に適用したもので、policy 明示なしの
 /// permissive な構築経路を module visibility で構造的に塞ぐ invariant です
 /// （trybuild 等の compile-fail テストに代わり、本 doc と移行済みの
