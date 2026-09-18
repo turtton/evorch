@@ -53,6 +53,18 @@ pub fn agent_pane(
     composer: &mut ComposerModel,
     picker_state: &mut crate::model::model_picker::ModelPickerState,
 ) -> Option<AgentPaneAction> {
+    agent_pane_with_repo_root(ui, model, identity, ctx, composer, picker_state, None)
+}
+
+pub fn agent_pane_with_repo_root(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    identity: Option<AgentIdentity<'_>>,
+    ctx: ConversationContext<'_>,
+    composer: &mut ComposerModel,
+    picker_state: &mut crate::model::model_picker::ModelPickerState,
+    repo_root: Option<&std::path::Path>,
+) -> Option<AgentPaneAction> {
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
@@ -94,7 +106,7 @@ pub fn agent_pane(
                 {
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
-                    run_detail_body(ui, model, (identity, ctx.task_rows));
+                    run_detail_body(ui, model, (identity, ctx.task_rows), repo_root);
                 }
             });
         action
@@ -137,13 +149,22 @@ fn empty_state_body(
 }
 
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
-    run_detail_body(ui, model, (None, &[]));
+    transcript_body_with_repo_root(ui, model, None);
+}
+
+pub fn transcript_body_with_repo_root(
+    ui: &mut egui::Ui,
+    model: &TranscriptModel,
+    repo_root: Option<&std::path::Path>,
+) {
+    run_detail_body(ui, model, (None, &[]), repo_root);
 }
 
 fn run_detail_body(
     ui: &mut egui::Ui,
     model: &TranscriptModel,
     context: (Option<AgentIdentity<'_>>, &[crate::model::tasks::TaskRow]),
+    repo_root: Option<&std::path::Path>,
 ) {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
@@ -153,7 +174,9 @@ fn run_detail_body(
         .show(ui, |ui| {
             for (entry_idx, entry) in model.visible_entries().iter().enumerate() {
                 if matches!(entry, TranscriptEntry::Tool { .. }) {
-                    crate::panes::transcript_tool::tool_card(ui, entry, pane_id);
+                    crate::panes::transcript_tool::tool_card_with_repo_root(
+                        ui, entry, pane_id, repo_root,
+                    );
                     continue;
                 }
                 let accent = entry_accent(entry);
@@ -314,6 +337,7 @@ mod tests {
                         }),
                         &[],
                     ),
+                    None,
                 );
             });
         harness.run_steps(2);
@@ -353,6 +377,7 @@ mod tests {
                     }),
                     &[],
                 ),
+                None,
             );
         });
         // Then: no ledger header is exposed.

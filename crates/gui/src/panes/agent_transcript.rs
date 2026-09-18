@@ -1,5 +1,7 @@
 use crate::model::transcript::TranscriptModel;
-use crate::panes::agent::transcript_body;
+use std::path::Path;
+
+use crate::panes::agent::transcript_body_with_repo_root;
 use crate::theme::text::h3;
 use crate::theme::widgets::empty_state;
 
@@ -8,9 +10,18 @@ pub fn agent_transcript_pane(
     run_id: &str,
     transcript: Option<&TranscriptModel>,
 ) {
+    agent_transcript_pane_with_repo_root(ui, run_id, transcript, None);
+}
+
+pub fn agent_transcript_pane_with_repo_root(
+    ui: &mut egui::Ui,
+    run_id: &str,
+    transcript: Option<&TranscriptModel>,
+    repo_root: Option<&Path>,
+) {
     ui.label(h3(format!("Transcript: {run_id}")));
     match transcript.filter(|model| !model.entries().is_empty()) {
-        Some(model) => transcript_body(ui, model),
+        Some(model) => transcript_body_with_repo_root(ui, model, repo_root),
         None => {
             empty_state(
                 ui,

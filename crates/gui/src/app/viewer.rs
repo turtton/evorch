@@ -31,6 +31,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut focus_request = None;
         let mut preference_action = None;
         let profiles = self.available_profiles();
+        let active_repo_root = self.active_repo_root();
         let dock_style = crate::theme::dock::dock_style(ui.style());
         let tab_style = dock_style.tab.clone();
         {
@@ -65,6 +66,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 profiles: &profiles,
                 picker_state: &mut self.model_picker,
                 preference_action: &mut preference_action,
+                repo_root: active_repo_root.as_deref(),
             };
             DockArea::new(&mut self.dock)
                 .style(dock_style)

@@ -2,6 +2,7 @@ use egui::{FontFamily, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{Event, ToolEvent};
 use gui::model::transcript::TranscriptModel;
+use gui::panes::agent::transcript_body_with_repo_root;
 
 fn transcript(is_error: bool) -> TranscriptModel {
     let mut model = TranscriptModel::new();
@@ -27,6 +28,30 @@ fn harness(is_error: bool) -> Harness<'static> {
     let mut harness = Harness::new_ui(move |ui| {
         gui::theme::install(ui.ctx());
         gui::panes::agent::transcript_body(ui, &model);
+    });
+    harness.run_steps(2);
+    harness
+}
+
+fn grep_harness(input: serde_json::Value) -> Harness<'static> {
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "grep".into(),
+        call_id: "grep-1234".into(),
+        input: Some(input),
+        run_id: None,
+    }));
+    model.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "grep".into(),
+        call_id: "grep-1234".into(),
+        is_error: false,
+        output: Some(String::new()),
+        detail: None,
+        run_id: None,
+    }));
+    let mut harness = Harness::new_ui(move |ui| {
+        gui::theme::install(ui.ctx());
+        transcript_body_with_repo_root(ui, &model, Some(std::path::Path::new("/repo")));
     });
     harness.run_steps(2);
     harness
@@ -62,6 +87,22 @@ fn tool_card_collapsed_hides_sections() {
     assert!(harness.query_by_label("Input").is_none());
     assert!(harness.query_by_label("Output").is_none());
     assert!(harness.query_by_label_contains("**literal**").is_none());
+}
+
+#[test]
+fn grep_tool_card_header_shows_pattern_and_root_relative_path() {
+    // Given
+    let harness = grep_harness(serde_json::json!({"pattern": "foo", "path": "/repo/src/main.rs"}));
+    // When / Then
+    assert!(harness.query_by_label("✓ grep foo src/main.rs").is_some());
+}
+
+#[test]
+fn grep_tool_card_header_shows_pattern_when_path_is_absent() {
+    // Given
+    let harness = grep_harness(serde_json::json!({"pattern": "foo"}));
+    // When / Then
+    assert!(harness.query_by_label("✓ grep foo").is_some());
 }
 
 #[test]

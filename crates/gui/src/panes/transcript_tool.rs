@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::Path;
 
 use egui::{Color32, RichText, Ui};
 
@@ -7,6 +8,15 @@ use crate::theme::tokens::{FONT_SMALL, R_SM, SP_2, palette};
 use crate::theme::widgets::surface_frame;
 
 pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
+    tool_card_with_repo_root(ui, entry, pane_id, None);
+}
+
+pub fn tool_card_with_repo_root(
+    ui: &mut Ui,
+    entry: &TranscriptEntry,
+    pane_id: egui::Id,
+    repo_root: Option<&Path>,
+) {
     let TranscriptEntry::Tool {
         tool_name,
         call_id,
@@ -35,9 +45,7 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     } else {
         status_color
     };
-    let summary = input
-        .as_ref()
-        .and_then(|input| focused_input(tool_name, input))
+    let summary = compact_summary(tool_name, input.as_ref(), repo_root)
         .unwrap_or_default()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -134,6 +142,34 @@ fn focused_input<'a>(tool_name: &str, input: &'a serde_json::Value) -> Option<&'
             .iter()
             .find_map(|key| input.get(key).and_then(serde_json::Value::as_str)),
         _ => None,
+    }
+}
+
+pub fn compact_summary(
+    tool_name: &str,
+    input: Option<&serde_json::Value>,
+    repo_root: Option<&Path>,
+) -> Option<String> {
+    let input = input?;
+    match tool_name {
+        "grep" => {
+            let pattern = input.get("pattern").and_then(serde_json::Value::as_str)?;
+            let path = input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(|path| {
+                    repo_root
+                        .and_then(|root| Path::new(path).strip_prefix(root).ok())
+                        .unwrap_or_else(|| Path::new(path))
+                        .display()
+                        .to_string()
+                });
+            Some(match path {
+                Some(path) => format!("{pattern} {path}"),
+                None => pattern.to_owned(),
+            })
+        }
+        _ => focused_input(tool_name, input).map(str::to_owned),
     }
 }
 

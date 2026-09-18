@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use egui_dock::TabViewer;
 use workspace_ui::{Panel, PanelId, PanelKind, SidebarState};
@@ -14,8 +15,8 @@ use crate::model::telemetry::TelemetryOverlay;
 use crate::model::terminal::TerminalBuffer;
 use crate::model::transcript_registry::TranscriptRegistry;
 use crate::panes::{
-    agent::{AgentIdentity, AgentPaneAction, ConversationContext, agent_pane},
-    agent_transcript::agent_transcript_pane,
+    agent::{AgentIdentity, AgentPaneAction, ConversationContext, agent_pane_with_repo_root},
+    agent_transcript::agent_transcript_pane_with_repo_root,
     agents::{AgentsAction, agents_pane},
     approvals::{ApprovalsAction, approvals_pane},
     composer::ComposerAction,
@@ -58,6 +59,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) profiles: &'a [runtime::compose::ProfileSummary],
     pub(super) picker_state: &'a mut crate::model::model_picker::ModelPickerState,
     pub(super) preference_action: &'a mut Option<Option<workspace_ui::ModelPreference>>,
+    pub(super) repo_root: Option<&'a Path>,
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
@@ -131,13 +133,14 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 enabled: active_thread.is_some(),
             },
         };
-        if let Some(action) = agent_pane(
+        if let Some(action) = agent_pane_with_repo_root(
             ui,
             transcript,
             identity,
             ctx,
             self.composer,
             self.picker_state,
+            self.repo_root,
         ) {
             match action {
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
@@ -236,7 +239,12 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         ack.is_unread(),
                     );
                 }
-                agent_transcript_pane(ui, run_id, self.transcripts.run(run_id));
+                agent_transcript_pane_with_repo_root(
+                    ui,
+                    run_id,
+                    self.transcripts.run(run_id),
+                    self.repo_root,
+                );
             }
             PanelKind::Diff => {
                 if let Some(mode) = diff_pane(ui, self.diff) {
