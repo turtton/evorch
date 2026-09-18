@@ -165,6 +165,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
+    let selected_model = state
+        .shared
+        .model
+        .selected_model(state.task.role, state.task.config.category.as_deref());
     state.tool_specs = visible_tool_specs(
         standard_tool_specs(&state.shared.executor),
         &state.policy,
@@ -173,6 +177,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     if !is_restored {
         state.add_team_tools();
     }
+    // Family-scoped description variation keeps the request prefix stable within a model family,
+    // so prompt-cache hit rates are unaffected.
+    tool_calls::append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
     let mut owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {

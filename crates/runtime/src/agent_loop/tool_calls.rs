@@ -840,6 +840,20 @@ pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpe
     specs
 }
 
+pub(super) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate::ModelFamily) {
+    if !matches!(
+        family,
+        crate::ModelFamily::Gpt5 | crate::ModelFamily::OpenAiReasoning
+    ) {
+        return;
+    }
+    for spec in specs {
+        if matches!(spec.name.as_str(), "delegate" | "delegate_background") {
+            spec.description.push_str(crate::SUBAGENT_CONTEXT_NOTE);
+        }
+    }
+}
+
 /// モデルに見せるツール定義を決定する。
 ///
 /// role の capability filter を適用した上で、skill レジストリが未接続の
@@ -1026,5 +1040,40 @@ mod tests {
         let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
 
         assert!(!names(&specs).contains(&"skill_load"));
+    }
+
+    // Given: GPT-family モデル
+    // When: delegate 系のツール定義を組み立てる
+    // Then: subagent context note が含まれる
+    #[test]
+    fn delegate_specs_include_context_note_for_gpt_family() {
+        for family in [
+            crate::ModelFamily::Gpt5,
+            crate::ModelFamily::OpenAiReasoning,
+        ] {
+            let mut specs = standard_tool_specs();
+            append_subagent_context_note(&mut specs, family);
+
+            for name in ["delegate", "delegate_background"] {
+                let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+                assert!(spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
+            }
+        }
+    }
+
+    // Given: Claude と Kimi モデル
+    // When: delegate 系のツール定義を組み立てる
+    // Then: subagent context note は含まれない
+    #[test]
+    fn delegate_specs_exclude_context_note_for_non_gpt_families() {
+        for family in [crate::ModelFamily::Claude, crate::ModelFamily::Kimi] {
+            let mut specs = standard_tool_specs();
+            append_subagent_context_note(&mut specs, family);
+
+            for name in ["delegate", "delegate_background"] {
+                let spec = specs.iter().find(|spec| spec.name == name).unwrap();
+                assert!(!spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
+            }
+        }
     }
 }

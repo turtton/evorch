@@ -77,6 +77,8 @@ pub use orchestration::{
     SupervisorHandle,
 };
 pub use policy::{ExecutionPolicy, META_OPS, is_meta_op};
+/// GPT-family delegate tool descriptions append this instruction for spawned subagents.
+pub const SUBAGENT_CONTEXT_NOTE: &str = " Subagents receive no shared memory or context from the caller: the task prompt you pass is their entire world. Include the goal, context, constraints, and expected output.";
 pub use prompt::{
     AvailableAgent, AvailableSkill, CatalogBuildInput, ModelFamily, PromptCompositionError,
     SystemPromptCatalog, SystemPromptCatalogError, TriggerSource, build_catalog,
