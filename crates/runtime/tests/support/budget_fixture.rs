@@ -1,5 +1,77 @@
 use super::*;
 
+#[tokio::test]
+async fn budget_overrun_emits_budget_exhausted_once() {
+    // Given: a five-call budget, independent of reread and progress limits.
+    let config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_tool_calls: 5,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // When: eight calls are requested.
+    let events = run_calls(8, config).await;
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, .. }) => {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed, ["0", "1", "2", "3", "4"]);
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {to: AgentRunPhase::Error, reason: Some(reason), ..})
+        if reason.starts_with("BudgetExhausted:"))));
+    let progress = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Orchestrator(OrchestratorEvent::TaskProgressed { progress, .. })
+                if progress.get("status").and_then(serde_json::Value::as_str) == Some("failed") =>
+            {
+                Some(progress)
+            }
+            _ => None,
+        })
+        .expect("persisted exhaustion");
+    let task: storage::entity::TaskContinuation =
+        serde_json::from_value(progress.clone()).expect("typed continuation");
+    let cursor: Vec<providers::Message> =
+        serde_json::from_str(task.resume_cursor.as_deref().expect("cursor")).expect("messages");
+    let results: Vec<_> = cursor
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            providers::ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, ["0", "1", "2", "3", "4"]);
+    let breach = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "BudgetExhausted" => {
+                Some(diagnostic)
+            }
+            _ => None,
+        })
+        .expect("breach diagnostic");
+    assert_eq!(
+        task.failure_reason,
+        Some(format!("{}: {}", breach.code, breach.detail))
+    );
+    // Then: the threshold is latched for this run.
+    assert_eq!(
+        diagnostics(
+            &events,
+            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
+        ),
+        1
+    );
+}
+
 pub(super) async fn run_calls(count: u32, config: RunConfig) -> Vec<Event> {
     run_calls_in_batches(count, config, false).await
 }
@@ -59,7 +131,7 @@ pub(super) async fn run_calls_in_batches(count: u32, config: RunConfig, batch: b
     assert_eq!(
         phase,
         if events.iter().any(
-            |event| matches!(&event.kind, EventKind::Diagnostic(d) if d.source == "budget_tracker")
+            |event| matches!(&event.kind, EventKind::Diagnostic(d) if d.source == "budget_tracker" && d.severity == event_bus::DiagnosticSeverity::Error)
         ) {
             AgentRunPhase::Error
         } else {

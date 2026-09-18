@@ -44,78 +44,6 @@ async fn five_call_budget_rejects_tail_of_shared_batch() {
 }
 
 #[tokio::test]
-async fn budget_overrun_emits_budget_exhausted_once() {
-    // Given: a five-call budget, independent of reread and progress limits.
-    let config = RunConfig {
-        budget: runtime::budget_tracker::BudgetSettings {
-            max_tool_calls: 5,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    // When: eight calls are requested.
-    let events = run_calls(8, config).await;
-    let completed: Vec<_> = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, .. }) => {
-                Some(call_id.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(completed, ["0", "1", "2", "3", "4"]);
-    assert!(events.iter().any(|event| matches!(&event.kind,
-        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {to: AgentRunPhase::Error, reason: Some(reason), ..})
-        if reason.starts_with("BudgetExhausted:"))));
-    let progress = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::Orchestrator(OrchestratorEvent::TaskProgressed { progress, .. })
-                if progress.get("status").and_then(serde_json::Value::as_str) == Some("failed") =>
-            {
-                Some(progress)
-            }
-            _ => None,
-        })
-        .expect("persisted exhaustion");
-    let task: storage::entity::TaskContinuation =
-        serde_json::from_value(progress.clone()).expect("typed continuation");
-    let cursor: Vec<providers::Message> =
-        serde_json::from_str(task.resume_cursor.as_deref().expect("cursor")).expect("messages");
-    let results: Vec<_> = cursor
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(|block| match block {
-            providers::ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(results, ["0", "1", "2", "3", "4"]);
-    let breach = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::Diagnostic(diagnostic) if diagnostic.source == "budget_tracker" => {
-                Some(diagnostic)
-            }
-            _ => None,
-        })
-        .expect("breach diagnostic");
-    assert_eq!(
-        task.failure_reason,
-        Some(format!("{}: {}", breach.code, breach.detail))
-    );
-    // Then: the threshold is latched for this run.
-    assert_eq!(
-        diagnostics(
-            &events,
-            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
-        ),
-        1
-    );
-}
-
-#[tokio::test]
 async fn no_progress_rounds_emits_no_progress_once() {
     // Given: three consecutive rounds without a file change are permitted.
     let config = RunConfig {
@@ -161,6 +89,65 @@ async fn checkpoint_fires_every_50_tool_calls() {
         })
         .collect();
     assert_eq!(checkpoints, [(50, 150, 100), (100, 300, 200)]);
+}
+
+#[tokio::test]
+async fn checkpoint_precedes_one_shot_remaining_budget_warning_before_exhaustion() {
+    // Given: 125 tool permits and independently ample progress/token budgets.
+    let mut config = unlimited_progress();
+    config.budget.max_tool_calls = 125;
+    config.budget.max_tokens = 10_000;
+    // When: the real runtime is asked to execute beyond the hard limit.
+    let events = run_calls(130, config).await;
+    // Then: checkpoints precede one correlated warning, followed by hard exhaustion.
+    let milestones: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Orchestrator(OrchestratorEvent::TaskCheckpoint {
+                tool_call_count, ..
+            }) => Some(format!("checkpoint:{tool_call_count}")),
+            EventKind::Diagnostic(d) if d.source == "budget_tracker" => {
+                assert!(d.run_id.is_some());
+                Some(format!("{}:{}", d.severity.as_str(), d.code))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        milestones,
+        [
+            "checkpoint:50",
+            "checkpoint:100",
+            "warning:BudgetWarning",
+            "error:BudgetExhausted"
+        ]
+    );
+    let warning = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Diagnostic(d) if d.code == "BudgetWarning" => Some(d),
+            _ => None,
+        })
+        .expect("remaining budget warning");
+    assert!(warning.detail.contains("remaining_tool_calls=25"));
+    assert!(warning.detail.contains("remaining_tokens=9500"));
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, .. }) => {
+                Some(call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completed,
+        (0..125).map(|id| id.to_string()).collect::<Vec<_>>()
+    );
+    assert!(matches!(&events.last().expect("terminal event").kind,
+        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Error, reason: Some(reason), ..
+        }) if reason.starts_with("BudgetExhausted:")));
 }
 
 #[tokio::test]

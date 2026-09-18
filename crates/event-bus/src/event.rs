@@ -153,6 +153,7 @@ pub struct DiagnosticEvent {
 
 /// Stable diagnostic codes shared by execution producers and consumers.
 pub mod diagnostic_codes {
+    pub const BUDGET_WARNING: &str = "BudgetWarning";
     /// Execution stopped because its budget was exhausted.
     pub const BUDGET_EXHAUSTED: &str = "BudgetExhausted";
     /// Execution stopped making progress.

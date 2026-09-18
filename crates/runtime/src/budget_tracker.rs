@@ -45,6 +45,7 @@ pub(crate) struct BudgetCounters {
     file_reads: BTreeMap<PathBuf, u32>,
     no_progress_rounds: u32,
     last_checkpoint_at: u32,
+    warned: bool,
     exhausted: Option<BudgetBreach>,
     round_changed: bool,
 }
@@ -77,6 +78,7 @@ impl Default for BudgetCounters {
             file_reads: BTreeMap::new(),
             no_progress_rounds: 0,
             last_checkpoint_at: 0,
+            warned: false,
             exhausted: None,
             round_changed: false,
         }
@@ -196,6 +198,29 @@ impl BudgetCounters {
                 self.exhausted = Some(breach.clone());
                 return BudgetDecision::Exhausted(breach);
             }
+        }
+        let remaining_tool_calls = settings.max_tool_calls.saturating_sub(tool_calls);
+        let remaining_tokens = settings.max_tokens.saturating_sub(
+            self.cumulative_input_tokens
+                .saturating_add(self.cumulative_output_tokens),
+        );
+        if !self.warned
+            && (remaining_tool_calls <= settings.max_tool_calls / 5
+                || remaining_tokens <= settings.max_tokens / 5)
+        {
+            self.warned = true;
+            context.bus.emit(Event::new(DiagnosticEvent {
+                source: "budget_tracker".into(),
+                severity: DiagnosticSeverity::Warning,
+                code: diagnostic_codes::BUDGET_WARNING.into(),
+                detail: format!(
+                    "task {} remaining_tool_calls={remaining_tool_calls}; remaining_tokens={remaining_tokens}",
+                    context.task_id
+                ),
+                run_id: Some(context.run_id.into()),
+                thread_id: None,
+                call_id: None,
+            }));
         }
         BudgetDecision::Continue
     }
