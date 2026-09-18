@@ -38,10 +38,16 @@ impl ModelFamily {
 
 /// model id を [`ModelFamily`] に分類する純粋関数。
 ///
-/// 判定は小文字化した id に対して行う。どの規則にも一致しない場合は
+/// 判定は小文字化した id の最終パスセグメントに対して行う。runtime が選択した
+/// model id は `profile/model` 形式 (例: `openai/gpt-5`) で、profile 名で
+/// 前方一致を外さないため。どの規則にも一致しない場合は
 /// [`ModelFamily::Unknown`] を返す (fail-safe)。
 pub fn classify(model_id: &str) -> ModelFamily {
-    let id = model_id.to_ascii_lowercase();
+    let id = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
     if id.contains("claude") {
         ModelFamily::Claude
     } else if id.starts_with("gpt-5") {
@@ -79,6 +85,25 @@ mod tests {
             ("GEMINI-2.0-flash", ModelFamily::Gemini),
             ("kimi-k2", ModelFamily::Kimi),
             ("kimi-latest", ModelFamily::Kimi),
+        ];
+        for (model_id, expected) in cases {
+            assert_eq!(classify(model_id), expected, "model_id = {model_id}");
+        }
+    }
+
+    // Given: profile 接頭辞付きの model id (runtime が選択する実際の形式)
+    // When: classify する
+    // Then: 最終パスセグメントで判定され正しいファミリに分類される
+    #[test]
+    fn classify_ignores_profile_prefix_in_composed_model_ids() {
+        let cases = [
+            ("openai/gpt-5", ModelFamily::Gpt5),
+            ("openai/gpt-5-codex", ModelFamily::Gpt5),
+            ("openai/o3-mini", ModelFamily::OpenAiReasoning),
+            ("cli-proxy-api/kimi-k3", ModelFamily::Kimi),
+            ("google/gemini-2.5-pro", ModelFamily::Gemini),
+            ("anthropic/claude-opus-4-1", ModelFamily::Claude),
+            ("unknown/deepseek-v3", ModelFamily::Unknown),
         ];
         for (model_id, expected) in cases {
             assert_eq!(classify(model_id), expected, "model_id = {model_id}");
