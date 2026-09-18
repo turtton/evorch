@@ -62,6 +62,9 @@ pub enum WireMessage {
         /// assistant が要求した function call。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<WireToolCall>,
+        /// Kimi 系モデルへ再送する assistant の思考内容。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
     },
     /// tool 実行結果メッセージ。
     Tool {

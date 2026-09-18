@@ -4,6 +4,9 @@ use crate::message::{ChatRequest, ContentBlock, Message, Role, ToolResultContent
 #[path = "request_content.rs"]
 mod content;
 use content::{content_blocks, tool_result_content};
+#[path = "request_reasoning.rs"]
+mod reasoning;
+use reasoning::ReasoningReplay;
 
 use super::types::{
     WireChatRequest, WireContent, WireFunction, WireFunctionDefinition, WireMessage,
@@ -12,18 +15,23 @@ use super::types::{
 
 /// canonical リクエストを OpenAI Chat Completions リクエストへ変換します。
 ///
-/// Chat Completions に reasoning 入力フィールドはないため、
-/// [`ContentBlock::Reasoning`] は送信時に失われます。tool result の `is_error` も
+/// Kimi 系モデルでは assistant の [`ContentBlock::Reasoning`] を
+/// `reasoning_content` として再送し、それ以外のモデルでは省略します。tool result の `is_error` は
 /// 対応フィールドがないため失われます。`stream` が真なら usage-only 最終 chunk を
 /// 受け取るため `stream_options.include_usage` も有効にします。
 #[must_use]
 pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
+    let reasoning = ReasoningReplay::for_model(&request.model);
     let mut tools: Vec<_> = request.tools.iter().map(to_wire_tool).collect();
     tools.sort_by(|left, right| left.function.name.cmp(&right.function.name));
     WireChatRequest {
         model: request.model.clone(),
         prompt_cache_key: None,
-        messages: request.messages.iter().flat_map(to_wire_messages).collect(),
+        messages: request
+            .messages
+            .iter()
+            .flat_map(|message| to_wire_messages(message, reasoning))
+            .collect(),
         tools,
         temperature: request.temperature,
         max_tokens: request.max_tokens,
@@ -58,6 +66,7 @@ pub fn from_wire_messages(messages: &[WireMessage]) -> Result<Vec<Message>, Prov
             WireMessage::Assistant {
                 content: wire_content,
                 tool_calls,
+                reasoning_content: _,
             } => {
                 let mut content = wire_content
                     .as_ref()
@@ -119,7 +128,7 @@ pub fn from_wire_messages(messages: &[WireMessage]) -> Result<Vec<Message>, Prov
     Ok(canonical)
 }
 
-fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
+fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMessage> {
     let text = message
         .content
         .iter()
@@ -201,9 +210,13 @@ fn to_wire_messages(message: &Message) -> Vec<WireMessage> {
             content: WireContent::Text(text),
         }),
         Role::Assistant => {
-            (!text.is_empty() || !tool_calls.is_empty()).then(|| WireMessage::Assistant {
-                content: (!text.is_empty()).then_some(WireContent::Text(text)),
-                tool_calls,
+            let reasoning_content = reasoning.content(&message.content);
+            (!text.is_empty() || !tool_calls.is_empty() || reasoning_content.is_some()).then(|| {
+                WireMessage::Assistant {
+                    content: (!text.is_empty()).then_some(WireContent::Text(text)),
+                    tool_calls,
+                    reasoning_content,
+                }
             })
         }
     };
