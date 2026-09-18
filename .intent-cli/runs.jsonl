@@ -297,3 +297,4 @@
 {"ts":"2026-09-17T20:45:07.2450025+00:00","execution_unit":"v07-durable-execution-substrate","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v07-durable-execution-substrate/"}
 {"ts":"2026-09-17T20:45:16.4650253+00:00","execution_unit":"v07-durable-execution-substrate","event":"issue-created","by":"issue-publish-flow","linked_issue":"turtton/evorch#118","reason":"https://github.com/turtton/evorch/issues/118"}
 {"ts":"2026-09-17T20:46:05.2546541+00:00","execution_unit":"v07-durable-execution-substrate","event":"activated","by":"intent-cli"}
+{"ts":"2026-09-18T00:40:01.3279135+00:00","execution_unit":"v07-durable-execution-substrate","event":"review-started","by":"intent-cli"}
