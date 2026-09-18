@@ -13,7 +13,38 @@ use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 pub(crate) struct RestoredState {
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
-    pub(crate) trigger: event_bus::AgentMessage,
+    pub(crate) trigger: Option<event_bus::AgentMessage>,
+}
+
+impl RestoredState {
+    pub(crate) fn attach_to(self, mut task: crate::agent_loop::RunTask) -> crate::agent_loop::RunTask {
+        task.restored = Some(self);
+        task
+    }
+
+    pub(crate) fn from_record(record: &RunContextRecord) -> Result<Self, crate::RuntimeError> {
+        let fail = |reason| crate::RuntimeError::RunRestoreFailed {
+            run_id: record.run_id.clone(),
+            reason: crate::RunRestoreFailure::CorruptContext(reason),
+        };
+        let messages: Vec<providers::Message> =
+            serde_json::from_str(&record.messages_json).map_err(|error| fail(error.to_string()))?;
+        let checkpoints: Vec<crate::CompactionCheckpoint> =
+            serde_json::from_str(&record.checkpoints_json)
+                .map_err(|error| fail(error.to_string()))?;
+        if messages.is_empty()
+            || checkpoints.iter().any(|checkpoint| {
+                checkpoint.range.0 >= checkpoint.range.1 || checkpoint.range.1 > messages.len()
+            })
+        {
+            return Err(fail("context range".into()));
+        }
+        Ok(Self {
+            messages,
+            checkpoints,
+            trigger: None,
+        })
+    }
 }
 
 /// 非直列化の実行権限を含まない復元用設定。拒否理由も snapshot に残す。

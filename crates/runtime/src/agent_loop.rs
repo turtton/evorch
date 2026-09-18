@@ -152,7 +152,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     }
                 }
             }
-            context.push_user(&messages::format_agent_message(&restored.trigger));
+            match restored.trigger {
+                Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
+                None => {
+                    context.push_user(&task.prompt);
+                    if let Some(message) = context.messages.last_mut() {
+                        message
+                            .content
+                            .extend(task.config.images.iter().map(|image| ContentBlock::Image {
+                                media_type: image.media_type.clone(),
+                                data: image.data.clone(),
+                            }));
+                    }
+                }
+            }
             context
         }
         None => AgentContext::new(task.run_id, task.role),

@@ -123,20 +123,7 @@ impl AgentRuntime {
             }
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
-            let messages: Vec<providers::Message> = serde_json::from_str(&record.messages_json)
-                .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-            let checkpoints: Vec<crate::CompactionCheckpoint> =
-                serde_json::from_str(&record.checkpoints_json)
-                    .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-            if messages.is_empty()
-                || checkpoints.iter().any(|checkpoint| {
-                    checkpoint.range.0 >= checkpoint.range.1 || checkpoint.range.1 > messages.len()
-                })
-            {
-                return Err(fail(RunRestoreFailure::CorruptContext(
-                    "context range".into(),
-                )));
-            }
+            let mut restored = RestoredState::from_record(&record)?;
             let next_id = recipient.get().checked_add(1).ok_or_else(|| {
                 fail(RunRestoreFailure::UnsupportedConfig(
                     "run ID overflow".into(),
@@ -196,15 +183,12 @@ impl AgentRuntime {
                 "msg-{}",
                 self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
             );
-            let restored = RestoredState {
-                messages,
-                checkpoints,
-                trigger: message.clone(),
-            };
+            restored.trigger = Some(message.clone());
             self.register_restored(
                 &mut runs,
                 (recipient, parent, role, config, sender),
                 restored,
+                &message,
             );
             return Ok((
                 message.message_id.clone(),

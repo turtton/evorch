@@ -27,8 +27,6 @@ pub const STORAGE_SESSION_ID: &str = "evorch-gui";
 const MISSING_TOKEN_REASON: &str =
     "merge decision requires an approval token issued by MergeApprovalRequested";
 
-const CHAT_ROLE: Role = Role::Worker;
-
 pub fn finish_chat_start(
     host: &runtime::ownership::OwnerHost,
     thread: &str,
@@ -455,8 +453,8 @@ impl RuntimeCommandSink {
                     }
                 }
                 let _guard = self.handle.enter();
-                let run_id = self.runtime.delegate_background(
-                    CHAT_ROLE,
+                let run_id = self.runtime.delegate_chat(
+                    &thread_id,
                     submission.text,
                     RunConfig {
                         name: Some(format!("chat:{thread_id}")),
@@ -468,6 +466,15 @@ impl RuntimeCommandSink {
                         ..RunConfig::default()
                     },
                 );
+                let run_id = match run_id {
+                    Ok(run_id) => run_id,
+                    Err(error) => {
+                        return vec![LoopEvent::ChatRejected {
+                            thread_id,
+                            reason: error.to_string(),
+                        }];
+                    }
+                };
                 self.chat_runs.insert(thread_id.clone(), run_id);
                 vec![LoopEvent::ChatAccepted {
                     thread_id,

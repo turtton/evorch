@@ -6,6 +6,7 @@ impl AgentRuntime {
         runs: &mut HashMap<RunId, RunEntry>,
         identity: (RunId, Option<RunId>, Role, RunConfig, RunId),
         restored: RestoredState,
+        trigger: &AgentMessage,
     ) {
         let (run_id, parent, role, config, sender) = identity;
         let name = runs.get(&run_id).map_or_else(
@@ -41,7 +42,6 @@ impl AgentRuntime {
             compaction_busy: Arc::clone(&compaction_busy),
             result_tx,
         };
-        let trigger = &restored.trigger;
         if trigger.kind != AgentMessageKind::Reply {
             self.shared
                 .sent
@@ -60,7 +60,7 @@ impl AgentRuntime {
             restored_by: trigger.sender_run_id.clone(),
             message_id: trigger.message_id.clone(),
         };
-        let task = RunTask {
+        let task = restored.attach_to(RunTask {
             run_id,
             role,
             prompt: String::new(),
@@ -68,8 +68,8 @@ impl AgentRuntime {
             parent,
             mailbox: Arc::clone(&mailbox),
             handoff: None,
-            restored: Some(restored),
-        };
+            restored: None,
+        });
         runs.insert(
             run_id,
             RunEntry {

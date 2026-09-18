@@ -19,6 +19,25 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
+    /// Latest terminal snapshot for an exact run name, ordered by persistence time and numeric ID.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn latest_terminal_run_context(
+        &self,
+        name: &str,
+    ) -> Result<Option<RunContextRecord>, StorageError> {
+        use rusqlite::OptionalExtension;
+        let id: Option<String> = self.conn.query_row(
+            "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error') \
+             ORDER BY updated_at_ns DESC, CAST(substr(run_id, 5) AS INTEGER) DESC LIMIT 1",
+            [name], |row| row.get(0),
+        ).optional()?;
+        id.map(|id| self.run_context(&id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     /// Read only the identity needed to authorize access to a run's context.
     ///
     /// # Errors

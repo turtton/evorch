@@ -53,6 +53,8 @@ impl AgentModel for ScriptedModel {
 }
 
 struct Fixture {
+    _storage: storage::Storage,
+    _directory: tempfile::TempDir,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
     rt: tokio::runtime::Runtime,
     sink: RuntimeCommandSink,
@@ -63,6 +65,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let storage_config = storage::StorageConfig {
+            db_path: directory.path().join("chat.sqlite3"),
+            ..storage::StorageConfig::default()
+        };
+        let storage = storage::Storage::open(storage_config.clone()).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -93,6 +101,8 @@ impl Fixture {
                 preferences: preferences.clone(),
             }),
         );
+        let runtime = runtime
+            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -103,6 +113,8 @@ impl Fixture {
         });
         let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
         Self {
+            _storage: storage,
+            _directory: directory,
             messages,
             rt,
             sink,
@@ -180,6 +192,39 @@ impl Fixture {
             .find(|agent| agent.run_id.to_string() == id)
             .expect("accepted run exists")
             .run_id
+    }
+}
+
+#[test]
+fn sink_followup_restores_terminal_chat_context() {
+    // Given: the sink still remembers a chat run that has terminated.
+    let mut fixture = Fixture::new();
+    let first = fixture.send("thread", "turn-1");
+    fixture.wait_for_reply(&first, "reply-1");
+    let first_id = fixture.run_id(&first);
+    fixture.runtime.cancel(first_id).unwrap();
+    fixture.rt.block_on(fixture.runtime.wait(first_id)).unwrap();
+    // When: send fails on the old run and the sink creates a replacement.
+    let second = fixture.send("thread", "turn-2");
+    fixture.wait_for_reply(&second, "reply-2");
+    // Then: the replacement provider request preserves the prior user/assistant turn.
+    assert_ne!(first, second);
+    let messages = fixture.messages.lock().unwrap();
+    let conversational: Vec<_> = messages[1]
+        .iter()
+        .filter(|message| message.role != MessageRole::System)
+        .collect();
+    assert_eq!(conversational.len(), 3);
+    for (message, role, text) in [
+        (conversational[0], MessageRole::User, "turn-1"),
+        (conversational[1], MessageRole::Assistant, "reply-1"),
+        (conversational[2], MessageRole::User, "turn-2"),
+    ] {
+        assert_eq!(message.role, role);
+        assert_eq!(
+            message.content,
+            vec![ContentBlock::Text { text: text.into() }]
+        );
     }
 }
 

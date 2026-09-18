@@ -18,6 +18,16 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn latest_terminal_named(
+        &self,
+        name: &str,
+    ) -> Result<Option<RunContextRecord>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|error| StorageError::Io(error.to_string()))?
+            .latest_terminal_run_context(name)
+    }
+
     /// 同じ DB を使用する writer handle と読み取り接続を束ねる。
     ///
     /// # Errors

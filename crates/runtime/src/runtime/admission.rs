@@ -16,7 +16,7 @@ impl AgentRuntime {
         role: Role,
         prompt: String,
         config: RunConfig,
-        handoff: Option<RunHandoff>,
+        continuation: RunContinuation,
     ) -> RunId {
         let (result, receiver) = watch::channel(None);
         self.shared
@@ -53,7 +53,7 @@ impl AgentRuntime {
                 });
             }
             if admitted.is_ok() {
-                runtime.register_run(run_id, parent, role, prompt, config, handoff);
+                runtime.register_run(run_id, parent, role, prompt, config, continuation);
             }
             result.send_replace(Some(admitted));
         });

@@ -1,7 +1,9 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 mod admission;
+mod chat_restore;
 mod restore_delivery;
+use chat_restore::RunContinuation;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -588,7 +590,14 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> RunId {
-        self.spawn_run_with_handoff(run_id, parent, role, prompt.into(), config, None)
+        self.spawn_run_with_handoff(
+            run_id,
+            parent,
+            role,
+            prompt.into(),
+            config,
+            RunContinuation::Fresh,
+        )
     }
 
     /// [`AgentRuntime::reserve_child_run_id`] で事前採番した ID を使って
@@ -613,7 +622,7 @@ impl AgentRuntime {
         config: RunConfig,
     ) -> RunId {
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
-        self.spawn_run_with_handoff(run_id, parent, role, prompt, config, None)
+        self.spawn_run_with_handoff(run_id, parent, role, prompt, config, RunContinuation::Fresh)
     }
 
     fn spawn_run_with_handoff(
@@ -623,12 +632,12 @@ impl AgentRuntime {
         role: Role,
         prompt: String,
         config: RunConfig,
-        handoff: Option<RunHandoff>,
+        continuation: RunContinuation,
     ) -> RunId {
         if self.shared.model.requires_admission() {
-            return self.admit_run(run_id, parent, role, prompt, config, handoff);
+            return self.admit_run(run_id, parent, role, prompt, config, continuation);
         }
-        self.register_run(run_id, parent, role, prompt, config, handoff)
+        self.register_run(run_id, parent, role, prompt, config, continuation)
     }
 
     fn register_run(
@@ -638,8 +647,13 @@ impl AgentRuntime {
         role: Role,
         prompt: String,
         mut config: RunConfig,
-        handoff: Option<RunHandoff>,
+        continuation: RunContinuation,
     ) -> RunId {
+        let (handoff, restored) = match continuation {
+            RunContinuation::Fresh => (None, None),
+            RunContinuation::Handoff(handoff) => (Some(handoff), None),
+            RunContinuation::Restored(restored) => (None, Some(restored)),
+        };
         if let Some(parent) = parent {
             if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
                 config.topology = entry.config.topology;
@@ -740,6 +754,10 @@ impl AgentRuntime {
             mailbox: Arc::clone(&mailbox),
             handoff,
             restored: None,
+        };
+        let task = match restored {
+            Some(restored) => restored.attach_to(task),
+            None => task,
         };
         let channels = LoopChannels {
             phase_tx,
@@ -860,7 +878,7 @@ impl AgentRuntime {
             Role::Orchestrator,
             crate::escalation::prompt::render_escalation_prompt(&memo),
             config,
-            Some(RunHandoff {
+            RunContinuation::Handoff(RunHandoff {
                 source_run_id,
                 worktree,
             }),
