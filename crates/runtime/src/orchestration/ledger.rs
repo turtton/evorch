@@ -718,6 +718,7 @@ pub(super) fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::GoalStateChanged { goal_id, .. }
         | OrchestratorEvent::GoalStageChanged { goal_id, .. }
         | OrchestratorEvent::RunAttached { goal_id, .. }
+        | OrchestratorEvent::TaskRetryScheduled { goal_id, .. }
         | OrchestratorEvent::DeliverableBranchBound { goal_id, .. }
         | OrchestratorEvent::EvidenceRecorded { goal_id, .. }
         | OrchestratorEvent::FinishRejected { goal_id, .. }
@@ -736,7 +737,6 @@ pub(super) fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
         OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
         OrchestratorEvent::TaskProgressed { .. }
         | OrchestratorEvent::TaskCheckpoint { .. }
-        | OrchestratorEvent::TaskRetryScheduled { .. }
         | OrchestratorEvent::TaskStaleMarked { .. } => None,
     }
 }

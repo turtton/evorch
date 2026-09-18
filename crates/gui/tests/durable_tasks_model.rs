@@ -17,6 +17,7 @@ fn old_generation_cannot_replace_retry_state_or_last_valid_artifact() {
     let mut model = DurableTasksModel::default();
     model.apply_event(&progress("run-1", "running", Some("good.txt")));
     model.apply_event(&Event::new(OrchestratorEvent::TaskRetryScheduled {
+        goal_id: "goal-1".into(),
         task_id: "task-1".into(),
         attempt: 2,
         reason: "retry".into(),
@@ -34,6 +35,7 @@ fn old_generation_cannot_replace_retry_state_or_last_valid_artifact() {
             task_id: "run-1".into(),
         }),
         Event::new(OrchestratorEvent::TaskRetryScheduled {
+            goal_id: "goal-1".into(),
             task_id: "task-1".into(),
             attempt: 1,
             reason: "old".into(),

@@ -56,6 +56,7 @@ async fn recover_starts_new_run_with_snapshot_and_transcript_context() {
             elapsed_ms: 500,
         },
         OrchestratorEvent::TaskRetryScheduled {
+            goal_id: "goal-recover".into(),
             task_id: "task-recover".into(),
             attempt: 1,
             reason: "retry".into(),

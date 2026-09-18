@@ -462,6 +462,8 @@ pub enum OrchestratorEvent {
     },
     /// task の再試行を予約した。
     TaskRetryScheduled {
+        /// 再試行する task が所属する goal の ID。
+        goal_id: String,
         /// task の永続識別子。
         task_id: String,
         /// 再試行番号。
@@ -759,6 +761,7 @@ mod tests {
             (
                 "TaskRetryScheduled",
                 OrchestratorEvent::TaskRetryScheduled {
+                    goal_id: "goal-1".into(),
                     task_id: "task-1".into(),
                     attempt: 2,
                     reason: "provider unavailable".into(),

@@ -151,6 +151,7 @@ impl SupervisorActor {
         self.emit_for_goal(
             &request.goal_id,
             OrchestratorEvent::TaskRetryScheduled {
+                goal_id: request.goal_id.clone(),
                 task_id: request.task_id.clone(),
                 attempt: task.attempts,
                 reason: if request.stale {

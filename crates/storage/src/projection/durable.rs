@@ -22,6 +22,7 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                 parents.insert(run_id.clone(), parent_run_id.clone());
             }
             EventKind::Orchestrator(OrchestratorEvent::TaskRetryScheduled {
+                goal_id: _,
                 task_id,
                 new_run_id,
                 attempt,

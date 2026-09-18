@@ -85,6 +85,7 @@ impl DurableTasksModel {
                 }
             }
             OrchestratorEvent::TaskRetryScheduled {
+                goal_id: _,
                 task_id,
                 attempt,
                 reason,

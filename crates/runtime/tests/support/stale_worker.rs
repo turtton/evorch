@@ -71,8 +71,8 @@ pub async fn transitions_to_retrying() {
             .orchestrator_events()
             .iter()
             .any(|event| matches!(event,
-        OrchestratorEvent::TaskRetryScheduled { task_id, attempt: 2, reason, new_run_id }
-        if task_id == "stale-task" && reason == "stale-worker" && new_run_id == new_run))
+        OrchestratorEvent::TaskRetryScheduled { goal_id, task_id, attempt: 2, reason, new_run_id }
+        if goal_id == &fixture.goal_id && task_id == "stale-task" && reason == "stale-worker" && new_run_id == new_run))
     );
     let temp = tempfile::tempdir().expect("temporary database");
     let config = storage::StorageConfig {

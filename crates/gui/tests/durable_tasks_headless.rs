@@ -45,6 +45,7 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
         ),
         (
             Event::new(OrchestratorEvent::TaskRetryScheduled {
+                goal_id: "goal-1".into(),
                 task_id: "task-1".into(),
                 attempt: 2,
                 reason: "provider unavailable".into(),

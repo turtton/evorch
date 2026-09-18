@@ -1692,6 +1692,7 @@ impl SupervisorActor {
                 attempt,
                 reason,
                 new_run_id,
+                ..
             } => snapshot
                 .task_retries
                 .iter()

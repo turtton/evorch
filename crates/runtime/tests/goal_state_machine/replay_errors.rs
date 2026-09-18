@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn replay_routes_retry_to_goal_id_when_task_ids_overlap() {
+    // Given: both goals own the same task ID through distinct attached runs.
+    let mut other = created();
+    if let OrchestratorEvent::GoalCreated {
+        goal_id,
+        root_run_id,
+        ..
+    } = &mut other
+    {
+        *goal_id = "goal-2".into();
+        *root_run_id = "other-run".into();
+    }
+    let events = [
+        created(),
+        other,
+        OrchestratorEvent::TaskProgressed {
+            task_id: "shared-task".into(),
+            run_id: "run-root".into(),
+            progress: serde_json::json!({"done": 1}),
+            reason: "advanced".into(),
+        },
+        OrchestratorEvent::TaskProgressed {
+            task_id: "shared-task".into(),
+            run_id: "other-run".into(),
+            progress: serde_json::json!({"done": 2}),
+            reason: "advanced".into(),
+        },
+        OrchestratorEvent::TaskRetryScheduled {
+            goal_id: "goal-2".into(),
+            task_id: "shared-task".into(),
+            attempt: 2,
+            reason: "transient".into(),
+            new_run_id: "retry-run".into(),
+        },
+    ];
+    let before = GoalLedger::replay_checked(events[..4].iter()).expect("valid setup");
+    // When: replaying a retry addressed only to goal-2.
+    let ledgers = GoalLedger::replay_checked(events.iter()).expect("no unresolved event");
+    // Then: goal-1 is unchanged and goal-2 owns the retry and new run.
+    assert_eq!(ledgers["goal-1"].snapshot(), before["goal-1"].snapshot());
+    let goal = ledgers["goal-2"].snapshot();
+    assert_eq!(goal.task_runs["shared-task"], "retry-run");
+    assert_eq!(goal.task_attempts["shared-task"], 2);
+    assert_eq!(
+        goal.task_retries,
+        vec![(
+            "shared-task".into(),
+            2,
+            "transient".into(),
+            "retry-run".into()
+        )]
+    );
+    let mut retry = before["goal-2"].snapshot().attached_runs[0].clone();
+    retry.run_id = "retry-run".into();
+    assert_eq!(goal.attached_runs.last(), Some(&retry));
+}
+
+#[test]
 fn replay_rejects_duplicate_creation() {
     // Given: a duplicate creation would reset already-applied state.
     let events = [created(), created()];

@@ -14,19 +14,8 @@ impl GoalLedger {
                 .attached_runs
                 .iter()
                 .any(|run| run.run_id == *run_id),
-            OrchestratorEvent::TaskRetryScheduled {
-                task_id,
-                new_run_id,
-                ..
-            } => {
-                self.snapshot.task_runs.contains_key(task_id)
-                    || self
-                        .snapshot
-                        .attached_runs
-                        .iter()
-                        .any(|run| run.run_id == *new_run_id)
-            }
             OrchestratorEvent::GoalCreated { .. }
+            | OrchestratorEvent::TaskRetryScheduled { .. }
             | OrchestratorEvent::GoalStateChanged { .. }
             | OrchestratorEvent::GoalStageChanged { .. }
             | OrchestratorEvent::RunAttached { .. }
@@ -173,6 +162,7 @@ impl GoalLedger {
                 attempt,
                 reason,
                 new_run_id,
+                ..
             } => {
                 if !self
                     .snapshot

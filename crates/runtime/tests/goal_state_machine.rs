@@ -94,6 +94,7 @@ fn replay_after_task_lifecycle_events_reconstructs_durable_state() {
             elapsed_ms: 80,
         },
         OrchestratorEvent::TaskRetryScheduled {
+            goal_id: "goal-1".into(),
             task_id: "task-1".into(),
             attempt: 1,
             reason: "transient".into(),
