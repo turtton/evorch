@@ -22,6 +22,7 @@ pub mod context;
 pub mod entry_routing;
 pub mod error;
 pub mod escalation;
+pub mod escalation_review;
 pub mod mailbox;
 pub mod memory;
 mod memory_lifecycle;

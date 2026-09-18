@@ -14,6 +14,9 @@ use event_bus::{Event, EventBus, EventKind, EventReceiver, ToolEvent};
 use providers::{
     ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolSpec, Usage,
 };
+// Unit-test inclusion supplies the runtime alias; integration tests use the extern crate.
+#[allow(unused_imports)]
+use super::*;
 use runtime::{
     AgentInvocationContext, AgentModel, ExecutionPolicy, IsolatedMounts, RuntimeError,
     SandboxFactory,
