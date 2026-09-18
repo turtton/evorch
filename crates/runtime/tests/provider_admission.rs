@@ -123,6 +123,57 @@ async fn assert_rejected(urls: &[(&str, String)], preference: Option<ModelPrefer
 }
 
 #[tokio::test]
+async fn unknown_profile_emits_one_correlated_provider_unavailable_without_starting_run() {
+    // Given: a healthy configured provider and an explicit absent profile.
+    let server =
+        StreamingMockOpenAi::spawn_with_models(vec![], WriteMode::default(), vec!["gpt-4o".into()]);
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = runtime(&[("primary", server.base_url())], &bus);
+    let mut events = bus.subscribe();
+    // When: admission runs through the public runtime with a reserved run ID.
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "hello".into(),
+        RunConfig {
+            model_preference: Some(ModelPreference {
+                profile: "absent".into(),
+                model: Some("gpt-4o".into()),
+            }),
+            ..Default::default()
+        },
+    );
+    let result = runtime.wait(run).await;
+    // Then: one correlated error is emitted without registration or lifecycle/completion.
+    assert!(matches!(result, Err(RuntimeError::Model { .. })));
+    assert!(runtime.list_agents().is_empty());
+    bus.emit(Event::new(MessageEvent::MessageDelta {
+        delta: String::new(),
+        run_id: None,
+    }));
+    let mut diagnostics = Vec::new();
+    loop {
+        match events.recv().await.unwrap().kind {
+            EventKind::Message(_) => break,
+            EventKind::Diagnostic(event) => diagnostics.push(event),
+            EventKind::Lifecycle(event) => panic!("admission emitted lifecycle: {event:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(diagnostics.len(), 1);
+    let event = &diagnostics[0];
+    assert_eq!(event.severity, event_bus::DiagnosticSeverity::Error);
+    assert_eq!(
+        event.code,
+        event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE
+    );
+    assert_eq!(event.run_id.as_deref(), Some(run.to_string().as_str()));
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/v1/models");
+}
+
+#[tokio::test]
 async fn unavailable_selected_provider_creates_no_worker_or_completion() {
     // Given: an unavailable catalog endpoint.
     let server = StreamingMockOpenAi::spawn(vec![]);

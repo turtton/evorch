@@ -69,12 +69,14 @@ impl RoutedModel {
         let selected = match &invocation.model_preference {
             Some(preference) => {
                 let provider = self.providers.get(&preference.profile).ok_or_else(|| {
-                    crate::RuntimeError::Model {
-                        reason: format!(
+                    self.provider_unavailable(
+                        &preference.profile,
+                        format!(
                             "selected provider profile `{}` is not configured",
                             preference.profile
                         ),
-                    }
+                        invocation,
+                    )
                 })?;
                 routing::ResolvedRoute {
                     profile: preference.profile.clone(),
@@ -134,7 +136,16 @@ impl RoutedModel {
             "profile={} model={}: {failure}",
             route.profile, route.model_id
         );
-        let detail = match self.providers.get(&route.profile) {
+        Err(self.provider_unavailable(&route.profile, detail, invocation))
+    }
+
+    fn provider_unavailable(
+        &self,
+        profile: &str,
+        detail: String,
+        invocation: &crate::AgentInvocationContext,
+    ) -> crate::RuntimeError {
+        let detail = match self.providers.get(profile) {
             Some(provider) if !provider.auth.api_key.is_empty() => {
                 detail.replace(&provider.auth.api_key, "***")
             }
@@ -152,7 +163,7 @@ impl RoutedModel {
                 call_id: None,
             }));
         }
-        Err(crate::RuntimeError::Model { reason: detail })
+        crate::RuntimeError::Model { reason: detail }
     }
 
     fn verification_auth(
