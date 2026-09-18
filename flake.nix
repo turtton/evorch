@@ -42,8 +42,9 @@
           buildInputs = guiLibraries ++ [ pkgs.wayland-protocols ];
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-        evorch = craneLib.buildPackage (commonArgs // {
+        tests = craneLib.cargoTest (commonArgs // {
           inherit cargoArtifacts;
+          cargoExtraArgs = "--workspace";
           nativeCheckInputs = [ pkgs.git pkgs.ripgrep ];
           # These PTY tests hard-code /bin/sh, which is absent in the Linux sandbox.
           cargoTestExtraArgs = pkgs.lib.concatStringsSep " " ([ "--" ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -110,6 +111,11 @@
             # PRE-EXISTING: local workspace_runtime fails the fixture's initial git commit.
             "--skip=worktree_removed_on_done_and_on_cancel"
           ]);
+        });
+        evorch = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          cargoExtraArgs = "-p evorch -p gui";
+          doCheck = false;
           postFixup = ''
             wrapProgram "$out/bin/evorch-gui" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
@@ -123,6 +129,7 @@
           inherit evorch;
           evorch-gui = evorch;
         };
+        checks.tests = tests;
         apps = {
           default = {
             type = "app";
