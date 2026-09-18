@@ -136,8 +136,16 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             }
         }
     };
+    let runtime = composed.runtime.with_model_resolution(input.config);
+    runtime.configure_shell_escalation(
+        &runtime
+            .shared
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
     Ok(ComposedRuntime {
-        runtime: composed.runtime.with_model_resolution(input.config),
+        runtime,
         model_identity: composed.model_identity,
     })
 }

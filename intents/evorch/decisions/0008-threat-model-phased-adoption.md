@@ -41,3 +41,4 @@ Accepted（2026-08-29、grill による全体構想レビューから確定）
 - mvp-roadmap v0.1 に sandbox / credential 隔離 / network deny / marker エスケープを追加、v0.2 の sandbox 項目は ContentOrigin 実装 + project trust に置き換え
 - tools-sandbox feature の acceptance criteria に二層分離と credential 非露出を追加
 - 既存 harness が「防げない」とする injection については「低減するが根除しない」ことを product/overview.md の non-goals に明記
+- 2026-09-19 追記: 呼び出し単位の非隔離 shell エスカレーション（quick category モデルによる審査、人間へのフォールバックは opt-in）は審査済み sandbox 例外とし、role capability 行列は変更しない。

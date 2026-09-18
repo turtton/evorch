@@ -127,6 +127,7 @@ fn hand_built_policy_with_allowed_network_maps_to_parent_netns() {
         capabilities: RoleCapabilities::new(["read"], NetworkAccess::Allowed, false),
         role_name: "Worker".to_string(),
         sandbox_allow_network: false,
+        ..ExecutionPolicy::for_role(Role::Worker)
     };
 
     assert_eq!(
@@ -177,6 +178,7 @@ fn denied_role_cannot_connect_but_allowed_policy_can() {
         capabilities: RoleCapabilities::new(["read"], NetworkAccess::Allowed, false),
         role_name: "Worker".to_string(),
         sandbox_allow_network: false,
+        ..ExecutionPolicy::for_role(Role::Worker)
     };
     // When: build_sandbox でサンドボックスを構築して同じ bash の接続コマンドを包む
     let sandbox =

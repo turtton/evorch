@@ -24,6 +24,7 @@ Role を personality ではなく capability boundary とする。
 ## Consequences
 
 - 自己正当化による品質低下を抑えられる。
+- 2026-09-19 追記: 呼び出し単位の非隔離 shell エスカレーション（quick category モデルによる審査、人間へのフォールバックは opt-in）は審査済み sandbox 例外とし、role capability 行列は変更しない。
 - Orchestrator が「何でも自分でやる」問題を capability 制限で防げる。
 - 各 Role に対応する sandbox policy との整合が必要。
 

@@ -68,6 +68,7 @@ pub(crate) struct Shared {
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) sandbox_allow_network: AtomicBool,
+    pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
@@ -244,6 +245,10 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
+                sandbox_escalation: Arc::new(Mutex::new((
+                    config::EscalationApproval::Quick,
+                    false,
+                ))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
@@ -282,6 +287,10 @@ impl AgentRuntime {
 
     pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
         self.set_sandbox_network(config.sandbox.allow_network);
+        self.set_sandbox_escalation(
+            config.sandbox.escalation_approval,
+            config.sandbox.escalate_to_user_on_deny,
+        );
         let _ = self
             .shared
             .topology
@@ -461,6 +470,10 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
+                sandbox_escalation: Arc::new(Mutex::new((
+                    config::EscalationApproval::Quick,
+                    false,
+                ))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),

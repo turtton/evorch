@@ -9,6 +9,7 @@ fn composed_runtime_uses_global_config_and_live_updates() {
     let config = config::Config {
         sandbox: config::SandboxConfig {
             allow_network: true,
+            ..Default::default()
         },
         ..Default::default()
     };

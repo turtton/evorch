@@ -44,6 +44,8 @@ pub struct ExecutionPolicy {
     /// 判定結果に載せるロール名。
     pub role_name: String,
     pub sandbox_allow_network: bool,
+    pub escalation_approval: config::EscalationApproval,
+    pub escalate_to_user_on_deny: bool,
 }
 
 impl ExecutionPolicy {
@@ -53,11 +55,23 @@ impl ExecutionPolicy {
             capabilities: role.capabilities(),
             role_name: role.name().to_owned(),
             sandbox_allow_network: false,
+            escalation_approval: config::EscalationApproval::Quick,
+            escalate_to_user_on_deny: false,
         }
     }
 
     pub const fn with_sandbox_network(mut self, allow_network: bool) -> Self {
         self.sandbox_allow_network = allow_network;
+        self
+    }
+
+    pub const fn with_escalation_approval(mut self, approval: config::EscalationApproval) -> Self {
+        self.escalation_approval = approval;
+        self
+    }
+
+    pub const fn with_escalate_to_user_on_deny(mut self, enabled: bool) -> Self {
+        self.escalate_to_user_on_deny = enabled;
         self
     }
 

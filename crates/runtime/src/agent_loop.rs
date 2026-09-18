@@ -191,7 +191,12 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         && let Some(root) = sandbox_root
     {
         match crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root) {
-            Ok(executor) => state.shared.executor = executor,
+            Ok(executor) => {
+                if let Some(runtime) = state.runtime() {
+                    runtime.configure_shell_escalation(&executor);
+                }
+                state.shared.executor = executor;
+            }
             Err(error) => {
                 state.finish_error(error.to_string());
                 return;
@@ -437,7 +442,13 @@ async fn attach_worktree_executor(
         Some(owned.path.clone()),
     )
     .with_web_tools()
-    .map(Arc::new)
+    .map(|executor| {
+        crate::AgentRuntime {
+            shared: runtime_shared.clone(),
+        }
+        .configure_shell_escalation(&executor);
+        Arc::new(executor)
+    })
     .map_err(|error| format!("workspace web tool setup failed: {error}"))
 }
 
