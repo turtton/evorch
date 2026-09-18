@@ -22,6 +22,13 @@
 - Remaining blocker: GUI `demo_loop` fixture returns legacy approval without complete evidence, so the strengthened gate correctly requests repair and the scripted demo times out.
 - Required next repair: update `crates/gui/src/model/demo.rs` reviewer fixture to submit typed complete evidence and rerun workspace locked tests.
 
+## Final re-review
+- Verdict: APPROVED
+- Blockers: 0
+- Notes: 0
+- Evidence: `cargo fmt --check`, `cargo check --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked --no-fail-fast`, and `git diff --check` passed.
+- Targeted reviewer, provider admission, GUI, durable continuation, storage, and visual QA evidence passed.
+
 ## Blocker #3 minimal retry — RED not reproducible
 
 - Inspected only review.rs, supervisor finish_review, and review_loop.rs.
