@@ -1,5 +1,6 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
+mod admission;
 mod restore_delivery;
 
 use std::collections::HashMap;
@@ -49,6 +50,8 @@ pub struct AgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
+    admissions: admission::Admissions,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) learning_runs: LearningRunReceivers,
     topology: OnceLock<crate::CoordinationTopology>,
@@ -203,6 +206,8 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                reviewer_results: Mutex::new(HashMap::new()),
+                admissions: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
@@ -419,6 +424,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                admissions: Mutex::new(HashMap::new()),
                 bus,
                 executor,
                 model,
@@ -433,6 +439,7 @@ impl AgentRuntime {
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
+                reviewer_results: Mutex::new(HashMap::new()),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
@@ -585,6 +592,21 @@ impl AgentRuntime {
     }
 
     fn spawn_run_with_handoff(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        role: Role,
+        prompt: String,
+        config: RunConfig,
+        handoff: Option<RunHandoff>,
+    ) -> RunId {
+        if self.shared.model.requires_admission() {
+            return self.admit_run(run_id, parent, role, prompt, config, handoff);
+        }
+        self.register_run(run_id, parent, role, prompt, config, handoff)
+    }
+
+    fn register_run(
         &self,
         run_id: RunId,
         parent: Option<RunId>,
@@ -856,6 +878,7 @@ impl AgentRuntime {
 
     /// run が終端位相になるまで待機し、最終位相を返す。
     pub async fn wait(&self, run_id: RunId) -> Result<AgentRunPhase, RuntimeError> {
+        self.wait_admission(run_id).await?;
         let mut phase_rx = self.entry(run_id)?.phase_rx.clone();
         loop {
             let phase = *phase_rx.borrow_and_update();
@@ -880,13 +903,6 @@ impl AgentRuntime {
     pub fn run_result(&self, run_id: RunId) -> Result<Option<String>, RuntimeError> {
         let entry = self.entry(run_id)?;
         Ok(entry.result_rx.borrow().clone())
-    }
-
-    /// run へキャンセルを通知する。複数回の通知は同じ結果となる。
-    pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let sender = self.entry(run_id)?.cancel_tx.clone();
-        sender.send_replace(true);
-        Ok(())
     }
 
     /// Changes the next completion's selection without interrupting an in-flight request.
@@ -932,6 +948,7 @@ impl AgentRuntime {
         config: RunConfig,
     ) -> Result<AgentRunPhase, RuntimeError> {
         let run_id = self.delegate_background(role, prompt, config);
+        self.wait_admission(run_id).await?;
         self.shared.bus.emit(Event::new(LifecycleEvent::Delegated {
             session_id: "runtime".to_string(),
             target: run_id.to_string(),

@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use event_bus::{Event, LifecycleEvent};
+use event_bus::{
+    DiagnosticEvent, DiagnosticSeverity, Event, LifecycleEvent, event::diagnostic_codes,
+};
 use providers::ToolSpec;
 use sandbox::{ApprovalGate, ApprovalOutcome, PolicyDecision};
 use serde_json::Value;
@@ -13,7 +15,7 @@ use tools::executor::PreparedToolCall;
 use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 
 use super::LoopState;
-use crate::escalation::detector::ToolObservation;
+use crate::escalation::detector::{EscalationDetector, ToolObservation};
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
@@ -351,8 +353,21 @@ impl LoopState {
         let mut rule_targets = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
         while remaining.peek().is_some() {
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+            }
             let mut segment = Vec::new();
-            for call in remaining.by_ref() {
+            let capacity = self
+                .task
+                .config
+                .budget
+                .max_tool_calls
+                .saturating_sub(self.escalation_detector.tool_calls());
+            for call in remaining
+                .by_ref()
+                .take(usize::try_from(capacity).unwrap_or(usize::MAX))
+            {
                 let terminal = matches!(call.1.as_str(), "finish" | "escalate");
                 segment.push(call);
                 if terminal {
@@ -454,6 +469,10 @@ impl LoopState {
                 });
             }
             while let Some(first) = calls.pop_front() {
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                }
                 let mut wave = vec![first];
                 if self.shared_call(&wave[0]) {
                     while calls.front().is_some_and(|call| self.shared_call(call)) {
@@ -513,6 +532,10 @@ impl LoopState {
                     }
                 }
                 for (index, id, name, input, call, guard) in prepared_wave {
+                    match self.publish_budget() {
+                        crate::budget_tracker::BudgetDecision::Continue => {}
+                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                    }
                     let metadata = (index, id.clone(), name.clone(), input.clone());
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
@@ -636,12 +659,34 @@ impl LoopState {
                             &self.shared.escalation,
                         )
                     {
+                        let run_id = self.caller_run_id().to_string();
+                        if EscalationDetector::is_no_progress_trigger(&trigger) {
+                            self.shared.bus.emit(Event::new(DiagnosticEvent {
+                                source: "escalation_detector".into(),
+                                severity: DiagnosticSeverity::Warning,
+                                code: diagnostic_codes::NO_PROGRESS.into(),
+                                detail: format!("escalation latched for tool call {id}"),
+                                run_id: Some(run_id.clone()),
+                                thread_id: None,
+                                call_id: Some(id.clone()),
+                            }));
+                        }
                         self.shared
                             .bus
                             .emit(Event::new(LifecycleEvent::EscalationProposed {
-                                run_id: self.caller_run_id().to_string(),
+                                run_id,
                                 trigger,
                             }));
+                    }
+                    if observed && !result.is_error {
+                        if name == "read"
+                            && let Some(path) = rule_target.as_deref()
+                        {
+                            self.budget.read(std::path::Path::new(path));
+                        }
+                        if name == "edit" {
+                            self.budget.file_changed();
+                        }
                     }
                     if observed
                         && !result.is_error
@@ -651,6 +696,10 @@ impl LoopState {
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
+                    match self.publish_budget() {
+                        crate::budget_tracker::BudgetDecision::Continue => {}
+                        crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
+                    }
                 }
                 if self.cancelled() {
                     self.finish_cancelled();

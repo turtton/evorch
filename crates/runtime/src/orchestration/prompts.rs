@@ -98,7 +98,7 @@ pub fn render_review_prompt(snapshot: &GoalSnapshot, round: u32) -> String {
             .map(|(index, criterion)| format!("- ac-{}: {criterion}", index + 1)),
     );
     prompt.push_str(
-        "\nRespond with a fenced ```json block: {\"verdict\":\"approve\"|\"request-update\",\"findings\":[...],\"criteria\":[{\"id\",\"status\":\"met\"|\"unmet\"|\"unknown\",\"note\"}]}\n",
+        "\nCall submit_review with a structured JSON object containing verdict (approve or request-update), findings (string array), and criteria (array of id, status: met/unmet/unknown, note, evidence). Final text JSON or a fenced ```json block is compatibility fallback only. Approval requires a non-empty checklist and every criterion met with evidence: non-empty command, exit_status 0, target_sha matching the reviewed head, and non-empty diff_ref, artifact_path, red_evidence strings. Record actual checks and their results, including failures; use null when evidence is unavailable and never invent evidence.\n",
     );
     prompt
 }

@@ -152,6 +152,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
         self.ledger.apply(event);
         self.tasks.apply_event(event);
+        self.durable_tasks.apply_event(event);
         self.telemetry.apply_event(event);
     }
 
@@ -336,6 +337,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.dock = dock;
                 self.panels = workspace.panels;
                 self.register_approvals_panel();
+                self.register_durable_tasks_panel();
                 ctx.request_repaint();
             }
             Err(error) => tracing::warn!(%error, "failed to reset layout"),

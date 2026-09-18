@@ -85,6 +85,7 @@
         "max_nudges": 2,
         "max_review_rounds": 3,
         "repeated_error_threshold": 5,
+        "stale_ttl_secs": 1800,
         "stall_after_secs": 600,
         "stall_check_secs": 30
       }
@@ -670,6 +671,13 @@
           "type": "integer",
           "format": "uint32",
           "default": 5,
+          "minimum": 0
+        },
+        "stale_ttl_secs": {
+          "description": "Durable worker heartbeat の有効期間 (秒)。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
           "minimum": 0
         },
         "stall_after_secs": {

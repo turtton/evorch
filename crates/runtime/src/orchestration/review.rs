@@ -1,12 +1,14 @@
 //! reviewer の構造化出力を証跡へ変換する bounded review loop。
 
+use event_bus::orchestrator::CriterionEvidence;
 use event_bus::{CriterionCheck, CriterionStatus, GateEvidence, ReviewVerdict};
 use serde::Deserialize;
 
 const UNPARSABLE_FINDING: &str = "reviewer output unparsable";
 
 /// reviewer final text から復元した構造化結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "ReviewResultWire")]
 pub struct ReviewResult {
     /// reviewer の判定。
     pub verdict: ReviewVerdict,
@@ -89,6 +91,30 @@ pub struct ReviewLoop {
 }
 
 impl ReviewLoop {
+    /// Restores consumed rounds and the last repair findings from durable state.
+    pub const fn restore(
+        max_rounds: u32,
+        rounds_used: u32,
+        previous_findings: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            max_rounds,
+            rounds_used,
+            previous_findings,
+        }
+    }
+
+    pub(super) fn from_snapshot(max_rounds: u32, snapshot: &super::ledger::GoalSnapshot) -> Self {
+        let findings = snapshot
+            .review
+            .as_ref()
+            .and_then(|review| match &review.verdict {
+                ReviewVerdict::Approve => None,
+                ReviewVerdict::RequestUpdate { findings } => Some(findings.clone()),
+            });
+        Self::restore(max_rounds, snapshot.review_rounds, findings)
+    }
+
     /// 最大 round 数を指定して初期化する。
     pub const fn new(max_rounds: u32) -> Self {
         Self {
@@ -110,21 +136,51 @@ impl ReviewLoop {
         head_sha: &str,
         reviewer_run_id: &str,
     ) -> ReviewOutcome {
-        self.rounds_used = self.rounds_used.saturating_add(1);
-        let round = self.rounds_used;
-        let parsed = parse_review_result(result).unwrap_or_else(|_| ReviewResult {
+        let parsed = parse_reviewer_output(None, result).unwrap_or_else(|_| ReviewResult {
             verdict: ReviewVerdict::RequestUpdate {
                 findings: vec![UNPARSABLE_FINDING.to_string()],
             },
             criteria: Vec::new(),
         });
+        self.on_review_result(parsed, head_sha, reviewer_run_id)
+    }
+
+    /// 型付き reviewer 結果を同じ bounded loop と SHA-bound 証跡へ渡す。
+    pub fn on_review_result(
+        &mut self,
+        parsed: ReviewResult,
+        head_sha: &str,
+        reviewer_run_id: &str,
+    ) -> ReviewOutcome {
+        self.rounds_used = self.rounds_used.saturating_add(1);
+        let round = self.rounds_used;
         let unmet_ids = parsed
             .criteria
             .iter()
-            .filter(|check| check.status != CriterionStatus::Met)
+            .filter(|check| match check.status {
+                CriterionStatus::Unmet | CriterionStatus::Unknown => true,
+                CriterionStatus::Met => !check.evidence.as_ref().is_some_and(|evidence| {
+                    !evidence.command.trim().is_empty()
+                        && evidence.exit_status == 0
+                        && evidence.target_sha == head_sha
+                        && [
+                            &evidence.diff_ref,
+                            &evidence.artifact_path,
+                            &evidence.red_evidence,
+                        ]
+                        .into_iter()
+                        .all(|reference| reference.as_ref().is_some_and(|s| !s.trim().is_empty()))
+                }),
+            })
             .map(|check| check.id.clone())
             .collect::<Vec<_>>();
         let verdict = match parsed.verdict {
+            _ if round > self.max_rounds => ReviewVerdict::RequestUpdate {
+                findings: vec!["review rounds exhausted".into()],
+            },
+            ReviewVerdict::Approve if parsed.criteria.is_empty() => ReviewVerdict::RequestUpdate {
+                findings: vec!["acceptance criteria checklist is empty".into()],
+            },
             ReviewVerdict::Approve if !unmet_ids.is_empty() => ReviewVerdict::RequestUpdate {
                 findings: vec![format!(
                     "acceptance criteria not met: {}",
@@ -148,6 +204,13 @@ impl ReviewLoop {
             },
         };
 
+        if round > self.max_rounds {
+            return ReviewOutcome::Blocked {
+                round,
+                reason: "review rounds exhausted".into(),
+                evidence,
+            };
+        }
         match verdict {
             ReviewVerdict::Approve => ReviewOutcome::Approve { round, evidence },
             ReviewVerdict::RequestUpdate { findings } => {
@@ -177,6 +240,20 @@ impl ReviewLoop {
     }
 }
 
+/// 型付き結果を優先し、なければ raw JSON、最後に prose 内の fenced JSON を読む。
+///
+/// # Errors
+/// 型付き結果がなく、どちらの JSON 形式も解析できない場合に失敗する。
+pub fn parse_reviewer_output(
+    typed: Option<ReviewResult>,
+    text: &str,
+) -> Result<ReviewResult, ParseError> {
+    match typed {
+        Some(result) => Ok(result),
+        None => serde_json::from_str(text).or_else(|_| parse_review_result(text)),
+    }
+}
+
 /// final text 内の最初の fenced `json` block を parse する。
 ///
 /// # Errors
@@ -185,25 +262,31 @@ pub fn parse_review_result(text: &str) -> Result<ReviewResult, ParseError> {
     let start = text.find("```json").ok_or(ParseError::MissingJsonFence)? + "```json".len();
     let remainder = &text[start..];
     let end = remainder.find("```").ok_or(ParseError::MissingJsonFence)?;
-    let wire: ReviewResultWire = serde_json::from_str(remainder[..end].trim())
-        .map_err(|error| ParseError::InvalidJson(error.to_string()))?;
-    Ok(ReviewResult {
-        verdict: match wire.verdict {
-            VerdictWire::Approve => ReviewVerdict::Approve,
-            VerdictWire::RequestUpdate => ReviewVerdict::RequestUpdate {
-                findings: wire.findings,
+    serde_json::from_str(remainder[..end].trim())
+        .map_err(|error| ParseError::InvalidJson(error.to_string()))
+}
+
+impl From<ReviewResultWire> for ReviewResult {
+    fn from(wire: ReviewResultWire) -> Self {
+        Self {
+            verdict: match wire.verdict {
+                VerdictWire::Approve => ReviewVerdict::Approve,
+                VerdictWire::RequestUpdate => ReviewVerdict::RequestUpdate {
+                    findings: wire.findings,
+                },
             },
-        },
-        criteria: wire
-            .criteria
-            .into_iter()
-            .map(|check| CriterionCheck {
-                id: check.id,
-                status: check.status.into(),
-                note: check.note,
-            })
-            .collect(),
-    })
+            criteria: wire
+                .criteria
+                .into_iter()
+                .map(|check| CriterionCheck {
+                    id: check.id,
+                    status: check.status.into(),
+                    note: check.note,
+                    evidence: check.evidence,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +312,8 @@ struct CriterionWire {
     id: String,
     status: CriterionStatusWire,
     note: String,
+    #[serde(default)]
+    evidence: Option<CriterionEvidence>,
 }
 
 #[derive(Debug, Deserialize)]

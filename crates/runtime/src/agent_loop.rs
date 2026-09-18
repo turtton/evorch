@@ -3,6 +3,8 @@
 // allow: SIZE_OK — select 駆動の単一 AgentRun 実行ループとその状態 (LoopState) が
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
+mod budget;
+mod durable;
 mod messages;
 mod snapshots;
 mod team;
@@ -97,6 +99,8 @@ pub(crate) struct LoopState {
     resumed: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
+    budget: crate::budget_tracker::BudgetCounters,
+    durable_task: Option<storage::entity::TaskContinuation>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -156,6 +160,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         resumed: is_restored,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
+        budget: crate::budget_tracker::BudgetCounters::default(),
+        durable_task: None,
     };
     // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
     // 決まるため、LoopState 構築後に確定させる。
@@ -572,6 +578,10 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             self.compaction.turn_counter = self.compaction.turn_counter.saturating_add(1);
             self.compaction.compacted_this_boundary = false;
             let requested_gen = *self.channels.compact_rx.borrow();
@@ -621,6 +631,10 @@ impl LoopState {
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
             };
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             let visible_messages = self.context.visible_messages();
             let completion = tokio::select! {
                 biased;
@@ -652,6 +666,11 @@ impl LoopState {
                 session.set_last_usage(response.usage);
             }
             self.last_usage = Some(response.usage);
+            self.budget.usage(response.usage);
+            match self.publish_budget() {
+                crate::budget_tracker::BudgetDecision::Continue => {}
+                crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+            }
             let finish_reason = response.finish_reason;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response
                 .message
@@ -686,6 +705,11 @@ impl LoopState {
                 return;
             }
             if has_tool_uses {
+                self.budget.finish_round();
+                match self.publish_budget() {
+                    crate::budget_tracker::BudgetDecision::Continue => {}
+                    crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
+                }
                 continue;
             }
 
@@ -780,8 +804,9 @@ impl LoopState {
     ) -> Result<(), ()> {
         let event = self
             .run_state
-            .transition(self.task.run_id, phase, reason)
+            .transition(self.task.run_id, phase, reason.clone())
             .map_err(|_| ())?;
+        self.publish_durable_task(phase, reason);
         if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
                 tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");

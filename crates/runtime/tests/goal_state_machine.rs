@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
 
 use event_bus::{CloseoutStep, GoalStage, GoalState, OrchestratorEvent, RunPurpose};
-use evorch_runtime::orchestration::ledger::{GoalLedger, OrchestrationSettings};
+use evorch_runtime::orchestration::ledger::{GoalLedger, LedgerError, OrchestrationSettings};
 use runtime as evorch_runtime;
+
+#[path = "goal_state_machine/replay_errors.rs"]
+mod replay_errors;
 
 fn created() -> OrchestratorEvent {
     OrchestratorEvent::GoalCreated {
@@ -21,6 +24,114 @@ fn created() -> OrchestratorEvent {
 
 fn ledger() -> GoalLedger {
     GoalLedger::new(&created())
+}
+
+#[test]
+fn replay_propagates_ledger_errors_instead_of_swallowing() {
+    // Given: two invalid transitions in an otherwise created goal.
+    let events = [
+        created(),
+        OrchestratorEvent::GoalStateChanged {
+            goal_id: "goal-1".into(),
+            from: GoalState::Paused,
+            to: GoalState::Active,
+            reason: "conflicting source".into(),
+        },
+        OrchestratorEvent::GoalStateChanged {
+            goal_id: "goal-1".into(),
+            from: GoalState::Active,
+            to: GoalState::Complete,
+            reason: "missing closeout".into(),
+        },
+    ];
+    // When: replay validates every event.
+    let errors = GoalLedger::replay_checked(events.iter()).expect_err("invalid history");
+    // Then: both failures survive in input order.
+    assert_eq!(
+        errors,
+        vec![
+            LedgerError::StateConflict {
+                current: GoalState::Active,
+                event_from: GoalState::Paused,
+            },
+            LedgerError::CloseoutIncomplete
+        ]
+    );
+}
+
+#[test]
+fn replay_after_task_lifecycle_events_reconstructs_durable_state() {
+    // Given: an attached worker reports progress, budget, retry and staleness.
+    let events = [
+        created(),
+        OrchestratorEvent::RunAttached {
+            goal_id: "goal-1".into(),
+            run_id: "worker-1".into(),
+            parent_run_id: Some("run-root".into()),
+            role: "worker".into(),
+            purpose: RunPurpose::Implement,
+        },
+        OrchestratorEvent::TaskProgressed {
+            task_id: "task-1".into(),
+            run_id: "worker-1".into(),
+            progress: serde_json::json!({"done": 3}),
+            reason: "advanced".into(),
+        },
+        OrchestratorEvent::TaskCheckpoint {
+            task_id: "task-1".into(),
+            run_id: "worker-1".into(),
+            tool_call_count: 2,
+            cumulative_input_tokens: 100,
+            cumulative_output_tokens: 20,
+            elapsed_ms: 30,
+        },
+        OrchestratorEvent::TaskCheckpoint {
+            task_id: "task-1".into(),
+            run_id: "worker-1".into(),
+            tool_call_count: 4,
+            cumulative_input_tokens: 250,
+            cumulative_output_tokens: 50,
+            elapsed_ms: 80,
+        },
+        OrchestratorEvent::TaskRetryScheduled {
+            goal_id: "goal-1".into(),
+            task_id: "task-1".into(),
+            attempt: 1,
+            reason: "transient".into(),
+            new_run_id: "worker-2".into(),
+        },
+        OrchestratorEvent::TaskStaleMarked {
+            task_id: "task-1".into(),
+            run_id: "worker-2".into(),
+            last_heartbeat_ns: 123,
+        },
+    ];
+    // When: reconstructing the durable history.
+    let replayed = GoalLedger::replay_checked(events.iter()).expect("valid history");
+    let snapshot = replayed["goal-1"].snapshot();
+    // Then: all task state and retry linkage are preserved.
+    assert_eq!(
+        snapshot.task_progress["task-1"],
+        serde_json::json!({"done": 3})
+    );
+    assert_eq!(
+        snapshot.task_checkpoints["task-1"],
+        vec![(2, 100, 20, 30), (4, 250, 50, 80)]
+    );
+    assert_eq!(snapshot.task_attempts["task-1"], 1);
+    assert_eq!(
+        snapshot.task_retries,
+        vec![("task-1".into(), 1, "transient".into(), "worker-2".into())]
+    );
+    assert_eq!(
+        snapshot.stale_marks,
+        vec![("task-1".into(), "worker-2".into(), 123)]
+    );
+    let retry = snapshot.attached_runs.last().expect("retry run");
+    assert_eq!(retry.run_id, "worker-2");
+    assert_eq!(retry.parent_run_id.as_deref(), Some("run-root"));
+    assert_eq!(retry.role, "worker");
+    assert_eq!(retry.purpose, RunPurpose::Implement);
 }
 
 fn ledger_in(state: GoalState) -> GoalLedger {
@@ -209,7 +320,7 @@ fn replay_rebuilds_identical_snapshot() {
         incremental.apply(event).expect("incremental apply");
     }
 
-    let replayed = GoalLedger::replay(events.iter());
+    let replayed = GoalLedger::replay_checked(events.iter()).expect("valid history");
     assert_eq!(
         replayed.get("goal-1").expect("replayed goal").snapshot(),
         incremental.snapshot()

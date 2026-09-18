@@ -4905,6 +4905,7 @@ dependencies = [
  "tokio-rustls",
  "tools",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

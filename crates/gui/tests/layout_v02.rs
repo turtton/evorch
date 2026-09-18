@@ -44,7 +44,12 @@ fn assert_content_layout(root: &LayoutNode, approvals: bool) {
         })
     );
     let right_tabs: &[&str] = if approvals {
-        &["agents-main", "notifications-main", "approvals-main"]
+        &[
+            "agents-main",
+            "notifications-main",
+            "approvals-main",
+            "durable-tasks-main",
+        ]
     } else {
         &["agents-main", "notifications-main"]
     };
@@ -129,6 +134,16 @@ fn reset_layout_restores_v02_default() {
             id,
             kind: workspace_ui::PanelKind::Approvals,
             title: "Approvals".into(),
+            target: None,
+        },
+    );
+    let id = PanelId::new("durable-tasks-main");
+    panels.insert(
+        id.clone(),
+        workspace_ui::Panel {
+            id,
+            kind: workspace_ui::PanelKind::DurableTasks,
+            title: "Durable Tasks".into(),
             target: None,
         },
     );

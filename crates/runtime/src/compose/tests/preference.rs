@@ -16,6 +16,10 @@ fn fixture() -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
             auth: ProviderAuth::new("secret-b"),
         },
     );
+    model.verification = tokio::sync::OnceCell::new_with(Some(BTreeMap::from([
+        ("local".into(), Ok(Vec::new())),
+        ("profile-b".into(), Ok(Vec::new())),
+    ])));
     (model, requests)
 }
 

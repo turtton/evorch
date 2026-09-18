@@ -1,14 +1,196 @@
+use event_bus::orchestrator::CriterionEvidence;
 use event_bus::{CriterionStatus, GateEvidence, ReviewVerdict};
-use runtime::orchestration::review::{ReviewLoop, ReviewOutcome};
+use runtime::orchestration::review::{
+    ReviewLoop, ReviewOutcome, ReviewResult, parse_reviewer_output,
+};
 
 const HEAD_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const HEAD_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+
+fn evidence() -> CriterionEvidence {
+    CriterionEvidence {
+        command: "cargo test -p runtime --test review_loop".into(),
+        exit_status: 0,
+        target_sha: HEAD_A.into(),
+        diff_ref: Some("HEAD~1..HEAD".into()),
+        artifact_path: Some("artifacts/review.log".into()),
+        red_evidence: Some("before: missing criterion evidence".into()),
+    }
+}
+
+#[test]
+fn approval_requires_complete_evidence_references() {
+    // Given: every evidence reference is required for an approval.
+    let all = [Some("diff"), Some("log"), Some("red")];
+    for (command, exit_status, sha, references, approved) in [
+        ("test", 0, HEAD_A, all, true),
+        ("", 0, HEAD_A, all, false),
+        (" \t", 0, HEAD_A, all, false),
+        ("test", 1, HEAD_A, all, false),
+        ("test", 0, HEAD_B, all, false),
+        ("test", 0, HEAD_A, [None, None, None], false),
+        (
+            "test",
+            0,
+            HEAD_A,
+            [Some(""), Some(" \t"), Some("\n")],
+            false,
+        ),
+    ] {
+        let [diff_ref, artifact_path, red_evidence] =
+            references.map(|value| value.map(str::to_owned));
+        let result = ReviewResult {
+            verdict: ReviewVerdict::Approve,
+            criteria: vec![event_bus::CriterionCheck {
+                id: "AC1".into(),
+                status: CriterionStatus::Met,
+                note: "checked".into(),
+                evidence: Some(CriterionEvidence {
+                    command: command.into(),
+                    exit_status,
+                    target_sha: sha.into(),
+                    diff_ref,
+                    artifact_path,
+                    red_evidence,
+                }),
+            }],
+        };
+        // When: the actual review loop evaluates the typed evidence.
+        let outcome = ReviewLoop::new(3).on_review_result(result, HEAD_A, "review-1");
+        // Then: only valid current-head evidence permits approval.
+        assert_eq!(
+            outcome.can_issue_merge_binding(),
+            approved,
+            "{command:?}, {exit_status}, {sha}, {references:?}"
+        );
+        if !approved {
+            assert!(matches!(outcome, ReviewOutcome::Repair { .. }));
+            assert!(matches!(&outcome.evidence().review, GateEvidence::Review {
+                verdict: ReviewVerdict::RequestUpdate { findings }, ..
+            } if findings.iter().any(|finding| finding.contains("AC1"))));
+        }
+    }
+}
+
+#[test]
+fn approve_with_missing_evidence_requests_update() {
+    // Given: a Met criterion without execution evidence.
+    let result = ReviewResult {
+        verdict: ReviewVerdict::Approve,
+        criteria: vec![event_bus::CriterionCheck {
+            id: "AC1".into(),
+            status: CriterionStatus::Met,
+            note: "checked".into(),
+            evidence: None,
+        }],
+    };
+    // When: the typed result enters the existing review loop.
+    let outcome = ReviewLoop::new(3).on_review_result(result, HEAD_A, "review-1");
+    // Then: the missing evidence produces a concrete repair finding.
+    assert!(matches!(outcome, ReviewOutcome::Repair { findings, .. }
+        if findings == ["acceptance criteria not met: AC1"]));
+}
+
+#[test]
+fn approve_with_empty_checklist_requests_update() {
+    // Given: an approval with no acceptance criteria.
+    let result = ReviewResult {
+        verdict: ReviewVerdict::Approve,
+        criteria: vec![],
+    };
+    // When: the typed result enters the existing review loop.
+    let outcome = ReviewLoop::new(3).on_review_result(result, HEAD_A, "review-1");
+    // Then: an empty checklist cannot authorize approval.
+    assert!(matches!(outcome, ReviewOutcome::Repair { findings, .. }
+        if findings == ["acceptance criteria checklist is empty"]));
+}
+
+#[test]
+fn supervisor_prefers_typed_tool_result_over_prose() {
+    // Given: structured approval conflicts with the prose fallback.
+    let typed: ReviewResult = serde_json::from_value(serde_json::json!({
+        "verdict": "approve",
+        "criteria": [{"id": "AC1", "status": "met", "note": "checked", "evidence": evidence()}]
+    }))
+    .unwrap();
+    let mut review_loop = ReviewLoop::new(3);
+    // When
+    let parsed = parse_reviewer_output(
+        Some(typed),
+        "```json\n{\"verdict\":\"request-update\",\"findings\":[\"wrong fallback\"]}\n```",
+    )
+    .unwrap();
+    let outcome = review_loop.on_review_result(parsed, HEAD_A, "review-typed");
+    // Then
+    assert!(matches!(outcome, ReviewOutcome::Approve { round: 1, .. }));
+    let expected = GateEvidence::Criteria {
+        head_sha: HEAD_A.into(),
+        reviewer_run_id: "review-typed".into(),
+        round: 1,
+        checklist: vec![event_bus::CriterionCheck {
+            id: "AC1".into(),
+            status: CriterionStatus::Met,
+            note: "checked".into(),
+            evidence: Some(evidence()),
+        }],
+    };
+    assert_eq!(outcome.evidence().criteria, expected);
+    let encoded = serde_json::to_string(&outcome.evidence().criteria).unwrap();
+    assert_eq!(
+        serde_json::from_str::<GateEvidence>(&encoded).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn approve_with_unmet_and_evidence_forces_request_update_with_evidence() {
+    // Given
+    let raw = serde_json::json!({"verdict": "approve", "criteria": [
+        {"id": "AC1", "status": "unmet", "note": "failed", "evidence": evidence()}
+    ]})
+    .to_string();
+    let mut review_loop = ReviewLoop::new(3);
+    // When
+    let outcome = review_loop.on_reviewer_done(&raw, HEAD_A, "review-1");
+    // Then
+    assert!(matches!(&outcome, ReviewOutcome::Repair { findings, .. }
+        if findings == &["acceptance criteria not met: AC1"]));
+    assert!(
+        matches!(&outcome.evidence().criteria, GateEvidence::Criteria { checklist, .. }
+        if checklist[0].evidence == Some(evidence()))
+    );
+    assert!(matches!(&outcome.evidence().review, GateEvidence::Review {
+        verdict: ReviewVerdict::RequestUpdate { findings }, ..
+    } if findings == &["acceptance criteria not met: AC1"]));
+}
+
+#[test]
+fn fallback_to_prose_when_typed_absent() {
+    // Given
+    let prose = format!(
+        "Reviewed the change.\n```json\n{}\n```\nDone.",
+        review("approve", &[], "met")
+    );
+    // When
+    let parsed = parse_reviewer_output(None, &prose).unwrap();
+    // Then
+    assert_eq!(parsed.verdict, ReviewVerdict::Approve);
+    assert_eq!(
+        parsed.criteria,
+        vec![event_bus::CriterionCheck {
+            id: "AC1".into(),
+            status: CriterionStatus::Met,
+            note: "checked".into(),
+            evidence: Some(evidence()),
+        }]
+    );
+}
 
 fn review(verdict: &str, findings: &[&str], status: &str) -> String {
     serde_json::json!({
         "verdict": verdict,
         "findings": findings,
-        "criteria": [{"id": "AC1", "status": status, "note": "checked"}]
+        "criteria": [{"id": "AC1", "status": status, "note": "checked", "evidence": evidence()}]
     })
     .to_string()
 }
@@ -26,7 +208,10 @@ fn request_update_then_approve_converges_in_two_rounds() {
         "review-1",
     );
     let second = review_loop.on_reviewer_done(
-        &format!("```json\n{}\n```", review("approve", &[], "met")),
+        &format!(
+            "```json\n{}\n```",
+            review("approve", &[], "met").replace(HEAD_A, HEAD_B)
+        ),
         HEAD_B,
         "review-2",
     );

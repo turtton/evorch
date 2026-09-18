@@ -1,5 +1,34 @@
 mod support;
 
+#[path = "support/budget_supervisor.rs"]
+mod budget_supervisor;
+
+#[path = "support/durable_continuation.rs"]
+mod durable_continuation;
+
+#[path = "support/stale_worker.rs"]
+mod stale_worker;
+
+#[tokio::test]
+async fn stale_worker_transitions_to_retrying_with_fresh_run_id() {
+    stale_worker::transitions_to_retrying().await;
+}
+
+#[tokio::test]
+async fn resume_task_after_interruption_replays_from_persisted_cursor() {
+    durable_continuation::resume_after_interruption().await;
+}
+
+#[tokio::test]
+async fn retry_till_attempt_cap_then_suppress() {
+    durable_continuation::retry_to_cap().await;
+}
+
+#[tokio::test]
+async fn cancel_task_persists_cancelled_status() {
+    durable_continuation::cancel_persisted().await;
+}
+
 use std::sync::Arc;
 
 use event_bus::{
@@ -17,6 +46,7 @@ use tools::ToolExecutor;
 use support::ScriptedModel;
 
 struct Fixture {
+    model: Arc<ScriptedModel>,
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     handle: runtime::orchestration::supervisor::SupervisorHandle,
@@ -32,14 +62,12 @@ impl Fixture {
             Arc::clone(&bus),
             Arc::new(DirectSandbox::new_unchecked()),
         ));
-        let runtime = AgentRuntime::new(
-            Arc::clone(&bus),
-            executor,
-            Arc::new(ScriptedModel::gated([], Arc::new(Notify::new()))),
-        );
+        let model = Arc::new(ScriptedModel::gated([], Arc::new(Notify::new())));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
         let settings = OrchestrationSettings {
             max_continuations,
             stall_after_secs: 86_400,
+            stall_check_secs: 1,
             ..OrchestrationSettings::default()
         };
         let handle = GoalSupervisor::spawn(
@@ -80,6 +108,7 @@ impl Fixture {
             root,
         );
         let fixture = Self {
+            model,
             runtime,
             bus,
             handle,

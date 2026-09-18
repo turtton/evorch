@@ -9,7 +9,9 @@ mod support;
 use std::sync::Arc;
 
 use agents::Role;
-use event_bus::{EscalationTrigger, Event, EventBus, EventKind, LifecycleEvent};
+use event_bus::{
+    EscalationTrigger, Event, EventBus, EventKind, LifecycleEvent, event::diagnostic_codes,
+};
 use providers::FinishReason;
 use runtime::{AgentRunPhase, AgentRuntime, EscalationSettings, RunConfig};
 use sandbox::DirectSandbox;
@@ -297,4 +299,51 @@ async fn latch_emits_only_the_first_proposal() {
         proposals[0].1,
         EscalationTrigger::ConsecutiveEditFailures { count: 2 }
     );
+}
+
+// Given: 連続編集失敗でラッチする Worker run
+// When: run を自然 Stop まで実行する
+// Then: ラッチ境界の call_id に対応する NoProgress 診断が 1 件だけ発行される
+#[tokio::test]
+async fn escalation_latch_also_emits_single_no_progress_diagnostic() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let missing = directory.path().join("absent.txt");
+    let (runtime, bus) = runtime_with(
+        Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "edit-1",
+                "edit",
+                json!({ "path": missing, "old_string": "x", "new_string": "y" }),
+            )),
+            Ok(tool_response(
+                "edit-2",
+                "edit",
+                json!({ "path": missing, "old_string": "x", "new_string": "y" }),
+            )),
+            Ok(text_response("done", FinishReason::Stop)),
+        ])),
+        Some(settings()),
+    );
+    let mut receiver = bus.subscribe();
+
+    let run_id =
+        runtime.delegate_background(Role::Worker, "DIAGNOSTIC".to_string(), RunConfig::default());
+    wait_until_done(&runtime, run_id).await;
+
+    let events = drain_events(&mut receiver).await;
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.code == diagnostic_codes::NO_PROGRESS
+                    && diagnostic.run_id.as_deref() == Some(run_id.to_string().as_str()) =>
+            {
+                Some(diagnostic)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 1, "NoProgress は 1 件だけ: {events:?}");
+    assert_eq!(diagnostics[0].call_id.as_deref(), Some("edit-2"));
+    assert_eq!(proposals(&events).len(), 1, "提案も維持される: {events:?}");
 }

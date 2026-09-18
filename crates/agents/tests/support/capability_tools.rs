@@ -37,7 +37,14 @@ pub const WORKER_TOOLS: &[&str] = &[
     "ledger_read",
 ];
 
-pub const REVIEWER_TOOLS: &[&str] = &["read", "grep", "git_diff", "ledger_append", "ledger_read"];
+pub const REVIEWER_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "git_diff",
+    "submit_review",
+    "ledger_append",
+    "ledger_read",
+];
 
 pub const LIBRARIAN_TOOLS: &[&str] = &[
     "read",

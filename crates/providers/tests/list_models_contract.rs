@@ -6,6 +6,23 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
+async fn rejects_oversized_catalog_response() {
+    // Given: a catalog exceeding the discovery response bound.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "{{\"data\":[],\"padding\":\"{}\"}}",
+            "x".repeat(1024 * 1024)
+        )))
+        .mount(&server)
+        .await;
+    // When: reading the catalog.
+    let result = providers::list_models(&server.uri(), &ProviderAuth::new("key")).await;
+    // Then: the response is rejected rather than buffered without a bound.
+    assert!(matches!(result, Err(ProviderError::Request(_))));
+}
+
+#[tokio::test]
 async fn lists_ids_when_authenticated_get_succeeds() {
     // Given: an OpenAI fixture serving ordered model IDs and a trailing-slash URL.
     let server = StreamingMockOpenAi::spawn_with_models(

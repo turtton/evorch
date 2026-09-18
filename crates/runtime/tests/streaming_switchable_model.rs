@@ -120,6 +120,7 @@ default_model = "gpt-4o"
     let wire_streaming: Vec<_> = mock
         .recorded_requests()
         .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
         .map(|request| request.stream)
         .collect();
     assert_eq!(

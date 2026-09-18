@@ -18,6 +18,8 @@ pub struct OrchestrationConfig {
     pub stall_after_secs: u64,
     /// stall 観測サンプラの実行間隔秒数。
     pub stall_check_secs: u64,
+    /// Durable worker heartbeat の有効期間 (秒)。
+    pub stale_ttl_secs: u64,
     /// ツール in-flight 中に stall 窓へ掛ける倍率。
     pub in_flight_tool_multiplier: u32,
     /// stall と判定する連続ツールエラー回数のしきい値。
@@ -37,6 +39,7 @@ impl Default for OrchestrationConfig {
             max_nudges: 2,
             stall_after_secs: 600,
             stall_check_secs: 30,
+            stale_ttl_secs: 1800,
             in_flight_tool_multiplier: 3,
             repeated_error_threshold: 5,
             max_continuations: 8,

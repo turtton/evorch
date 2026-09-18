@@ -16,32 +16,51 @@ fn production_title_uses_quick_route_or_explicit_thread_model() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 4096];
+            let mut paths = Vec::new();
             loop {
-                let size = socket.read(&mut buffer).unwrap();
-                assert!(size > 0);
-                request.extend_from_slice(&buffer[..size]);
-                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&request[..end]);
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (key, value) = line.split_once(':')?;
-                            key.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse().unwrap())
-                        })
-                        .unwrap();
-                    if request.len() >= end + 4 + length {
-                        let body: serde_json::Value =
-                            serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                        let response = r#"{"id":"title","object":"chat.completion","created":0,"model":"fast","choices":[{"index":0,"message":{"role":"assistant","content":"Provider title"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
-                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
-                        return body;
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let size = socket.read(&mut buffer).unwrap();
+                    assert!(size > 0);
+                    request.extend_from_slice(&buffer[..size]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let path = headers
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap()
+                            .to_owned();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            paths.push(path.clone());
+                            if path == "/v1/models" {
+                                let response = r#"{"object":"list","data":[{"id":"base"},{"id":"fast"},{"id":"chosen"}]}"#;
+                                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+                                break;
+                            }
+                            assert_eq!(path, "/v1/chat/completions");
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[end + 4..end + 4 + length])
+                                    .unwrap();
+                            let response = r#"{"id":"title","object":"chat.completion","created":0,"model":"fast","choices":[{"index":0,"message":{"role":"assistant","content":"Provider title"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
+                            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+                            return (paths, body);
+                        }
                     }
                 }
             }
@@ -113,9 +132,8 @@ title-route = [{{ profile = "local", model = "fast" }}]
         }
         h.run();
         assert_eq!(h.state().sidebar().threads[0].title, "Provider title");
-        assert_eq!(
-            server.join().unwrap()["model"],
-            if quick { "fast" } else { "chosen" }
-        );
+        let (paths, completion) = server.join().unwrap();
+        assert_eq!(paths, ["/v1/models", "/v1/chat/completions"]);
+        assert_eq!(completion["model"], if quick { "fast" } else { "chosen" });
     }
 }

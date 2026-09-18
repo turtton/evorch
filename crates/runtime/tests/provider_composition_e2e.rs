@@ -67,7 +67,12 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
         .await
         .expect("text-only completion");
     // Then: the serialized provider request preserves the requested tool.
-    let requests = mock.recorded_requests();
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["model"], "unknown");
     assert_eq!(requests[0].body["tools"][0]["function"]["name"], "read");
@@ -136,20 +141,24 @@ fn composition<'a>(
 async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() {
     let directory = tempfile::tempdir().expect("project directory");
     let edited = directory.path().join("worker-output.txt");
-    let mock = StreamingMockOpenAi::spawn(vec![
-        openai_tool_response(
-            "delegate-1",
-            "delegate",
-            json!({ "role": "worker", "prompt": "WORKER-EDIT" }),
-        ),
-        openai_tool_response(
-            "edit-1",
-            "edit",
-            json!({ "path": edited, "new_string": "written by worker" }),
-        ),
-        openai_text_response("worker final text"),
-        openai_text_response("orchestrator final text"),
-    ]);
+    let mock = StreamingMockOpenAi::spawn_with_models(
+        vec![
+            openai_tool_response(
+                "delegate-1",
+                "delegate",
+                json!({ "role": "worker", "prompt": "WORKER-EDIT" }),
+            ),
+            openai_tool_response(
+                "edit-1",
+                "edit",
+                json!({ "path": edited, "new_string": "written by worker" }),
+            ),
+            openai_text_response("worker final text"),
+            openai_text_response("orchestrator final text"),
+        ],
+        mock_openai::WriteMode::default(),
+        vec![MODEL.into()],
+    );
     let config = load_config(directory.path(), &mock.base_url());
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
@@ -213,7 +222,12 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     );
     assert!(message_deltas.contains(&("orchestrator final text", Some(root.to_string()))));
 
-    let requests = mock.recorded_requests();
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
     assert_eq!(requests.len(), 4);
     let initial_prompts = requests
         .iter()

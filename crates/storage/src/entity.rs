@@ -64,28 +64,9 @@ string_enum!(SessionStatus {
     Failed => "failed",
 });
 
-/// タスクの永続化状態です。
-///
-/// キャンセルイベントは射影で [`TaskStatus::Failed`] へ写像されます。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStatus {
-    Pending,
-    Blocked,
-    /// 実行中です。
-    Running,
-    /// 正常に完了しました。
-    Completed,
-    /// 失敗しました。
-    Failed,
-}
-
-string_enum!(TaskStatus {
-    Pending => "pending",
-    Blocked => "blocked",
-    Running => "running",
-    Completed => "completed",
-    Failed => "failed",
-});
+#[path = "entity/task.rs"]
+mod task;
+pub use task::{TaskContinuation, TaskRecord, TaskStatus};
 
 /// エージェント実行の永続化状態です。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,21 +120,6 @@ pub struct SessionRecord {
     pub delegated_to: Option<String>,
     /// 保存済みイベントの累積バイト数です。
     pub total_event_bytes: u64,
-    /// 作成日時です。
-    pub created_at: SystemTime,
-    /// 更新日時です。
-    pub updated_at: SystemTime,
-}
-
-/// タスクの永続化レコードです。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskRecord {
-    /// タスク識別子です。
-    pub id: String,
-    /// 所属セッション識別子です。
-    pub session_id: Option<String>,
-    /// タスク状態です。
-    pub status: TaskStatus,
     /// 作成日時です。
     pub created_at: SystemTime,
     /// 更新日時です。

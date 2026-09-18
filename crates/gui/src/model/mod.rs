@@ -5,6 +5,7 @@ pub mod codex_auth_backend;
 pub mod commands;
 pub mod composer;
 pub mod demo;
+pub mod durable_tasks;
 pub mod folder_picker;
 pub mod ledger;
 pub mod model_catalog;

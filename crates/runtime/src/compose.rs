@@ -164,6 +164,11 @@ pub struct RoutedModel {
     providers: BTreeMap<String, routing::ComposedProvider>,
     affinity: Mutex<SessionAffinity>,
     agents: config::AgentsConfig,
+    admission_routes: Vec<routing::ResolvedRoute>,
+    verification:
+        tokio::sync::OnceCell<BTreeMap<String, Result<Vec<String>, providers::ProviderError>>>,
+    event_bus: Option<Arc<EventBus>>,
+    credential_store: Option<Arc<dyn CredentialStore>>,
 }
 
 impl RoutedModel {
@@ -190,6 +195,10 @@ impl RoutedModel {
             providers: composed.providers,
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
+            admission_routes: Vec::new(),
+            verification: tokio::sync::OnceCell::new(),
+            event_bus: None,
+            credential_store: None,
         }
     }
 
@@ -280,6 +289,39 @@ impl RoutedModel {
             .ok_or_else(|| RuntimeError::Model {
                 reason: "resolved provider profile is unavailable".to_string(),
             })?;
+        if !self.verify_candidates().await.contains(&route.profile) {
+            let failure = self
+                .verification
+                .get()
+                .and_then(|results| results.get(&route.profile))
+                .and_then(|result| result.as_ref().err())
+                .map_or_else(
+                    || "profile was not verified".to_owned(),
+                    ToString::to_string,
+                );
+            let detail = format!(
+                "profile={} model={}: {failure}",
+                route.profile, route.model_id
+            );
+            let detail = if provider.auth.api_key.is_empty() {
+                detail
+            } else {
+                detail.replace(&provider.auth.api_key, "***")
+            };
+            let detail: String = detail.chars().take(500).collect();
+            if let Some(bus) = bus.or(self.event_bus.as_deref()) {
+                bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                    source: "runtime::compose".into(),
+                    severity: event_bus::DiagnosticSeverity::Error,
+                    code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
+                    detail: detail.clone(),
+                    run_id: Some(invocation.run_id.clone()),
+                    thread_id: None,
+                    call_id: None,
+                }));
+            }
+            return Err(RuntimeError::Model { reason: detail });
+        }
         let model_allows_tools = match self
             .router
             .catalog()
@@ -339,6 +381,18 @@ impl RoutedModel {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn requires_admission(&self) -> bool {
+        true
+    }
+
+    async fn admit(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+    ) -> Result<(), RuntimeError> {
+        self.admit_candidates(invocation, role).await
+    }
+
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,
@@ -418,15 +472,37 @@ const fn role_key(role: Role) -> &'static str {
 mod tests;
 
 mod live;
+mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};
 
 pub fn compose_routed_model(
     config: &config::Config,
     deps: ComposeDeps,
 ) -> Result<Arc<RoutedModel>, CompositionError> {
+    let event_bus = deps.event_bus.clone();
+    let credential_store = Arc::clone(&deps.credential_store);
     let composed = routing::compose_providers(config, deps).map_err(|error| match error {
         RoutingError::NoProviders => CompositionError::NoProvidersConfigured,
         other => CompositionError::Routing(other),
     })?;
-    Ok(Arc::new(RoutedModel::new(composed, config.agents.clone())))
+    let mut model = RoutedModel::new(composed, config.agents.clone());
+    model.admission_routes = config
+        .routing
+        .routes
+        .values()
+        .flatten()
+        .filter_map(|candidate| {
+            let provider = model.providers.get(&candidate.profile)?;
+            Some(routing::ResolvedRoute {
+                profile: candidate.profile.clone(),
+                model_id: candidate
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| provider.profile.default_model.clone()),
+            })
+        })
+        .collect();
+    model.event_bus = event_bus;
+    model.credential_store = Some(credential_store);
+    Ok(Arc::new(model))
 }

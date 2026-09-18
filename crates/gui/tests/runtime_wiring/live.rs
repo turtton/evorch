@@ -85,12 +85,16 @@ account = "live"
         }]
     );
     let requests = server.recorded_requests();
-    assert_eq!(requests.len(), 1);
+    let completion_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
+    assert_eq!(completion_requests.len(), 1);
     assert_eq!(
-        requests[0].authorization.as_deref(),
+        completion_requests[0].authorization.as_deref(),
         Some("Bearer test-secret")
     );
-    assert_eq!(requests[0].body["model"], "live-model");
+    assert_eq!(completion_requests[0].body["model"], "live-model");
 }
 
 #[test]

@@ -70,6 +70,13 @@ pub(crate) async fn dispatch(
         "skill_load" => skills::skill_load(state, input),
         "compact" => compaction::compact(state, input).await,
         "finish" => finish(state, &runtime, input).await,
+        "submit_review" => match parse(input) {
+            Ok(result) => {
+                runtime.submit_review(state.caller_run_id(), result);
+                success("review submitted")
+            }
+            Err(message) => error(message),
+        },
         "escalate" => escalation::escalate(state, &runtime, input).await,
         _ => error(format!("unknown meta-op: {name}")),
     }

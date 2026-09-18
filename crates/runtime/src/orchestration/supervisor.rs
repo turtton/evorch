@@ -26,10 +26,15 @@ use super::prompts::{
     render_continuation_prompt, render_recovery_prompt, render_repair_prompt, render_review_prompt,
 };
 use super::registry::GoalRegistry;
-use super::review::{ReviewLoop, ReviewOutcome};
+use super::review::{ReviewLoop, ReviewOutcome, parse_reviewer_output};
 use super::stall::{self, ProgressTrack};
 
 static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
+
+mod budget;
+mod stale;
+mod task_admission;
+mod tasks;
 
 /// goal 作成時の不変属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +66,8 @@ pub enum SupervisorError {
     /// 指定 goal が存在しない。
     #[error("unknown goal: {0}")]
     UnknownGoal(String),
+    #[error("unknown or ambiguous task: {0}")]
+    UnknownTask(String),
     /// ledger が操作を拒否した。
     #[error(transparent)]
     Ledger(#[from] LedgerError),
@@ -278,6 +285,13 @@ enum GoalCommand {
 }
 
 enum SupervisorCommand {
+    ResumeTask(tasks::TaskRequest),
+    RetryTask(tasks::TaskRequest),
+    CancelTask(tasks::TaskRequest),
+    TaskAdmission {
+        request: tasks::TaskRequest,
+        result: Result<(), crate::RuntimeError>,
+    },
     Create {
         goal_id: String,
         spec: Box<GoalSpec>,
@@ -345,6 +359,13 @@ impl SupervisorActor {
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
         match command {
+            SupervisorCommand::ResumeTask(request) | SupervisorCommand::RetryTask(request) => {
+                self.continue_task(request);
+            }
+            SupervisorCommand::CancelTask(request) => self.cancel_task(request),
+            SupervisorCommand::TaskAdmission { request, result } => {
+                self.task_admission(request, result)
+            }
             SupervisorCommand::Create {
                 goal_id,
                 spec,
@@ -475,15 +496,13 @@ impl SupervisorActor {
             let goal_id = snapshot.goal_id.clone();
             let active = snapshot.state == GoalState::Active;
             snapshot.detached = true;
+            let review_loop = ReviewLoop::from_snapshot(self.settings.max_review_rounds, &snapshot);
             self.transcripts.insert(goal_id.clone(), transcript);
             self.ledgers
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(goal_id.clone(), GoalLedger::from_snapshot(snapshot));
-            self.reviews.insert(
-                goal_id.clone(),
-                ReviewLoop::new(self.settings.max_review_rounds),
-            );
+            self.reviews.insert(goal_id.clone(), review_loop);
             if active {
                 let _ = self.transition(&goal_id, GoalState::Paused, "recovered-after-restart");
             }
@@ -553,9 +572,9 @@ impl SupervisorActor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(goal_id.clone(), GoalLedger::from_snapshot(snapshot.clone()));
         }
-        self.reviews
-            .entry(goal_id.clone())
-            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds));
+        self.reviews.entry(goal_id.clone()).or_insert_with(|| {
+            ReviewLoop::from_snapshot(self.settings.max_review_rounds, &snapshot)
+        });
         self.emit_for_goal(
             &goal_id,
             OrchestratorEvent::RunAttached {
@@ -590,7 +609,13 @@ impl SupervisorActor {
 
     async fn handle_bus_event(&mut self, event: Event) {
         match event.kind {
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to,
+                reason,
+                ..
+            }) => {
+                self.task_phase(&run_id, to, reason.as_deref());
                 self.on_phase(run_id, to).await
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
@@ -601,6 +626,7 @@ impl SupervisorActor {
             }) => self.on_run_started(run_id, parent_run_id, role),
             EventKind::Tool(tool) => self.on_tool(tool),
             EventKind::Provider(provider) => self.on_provider(provider),
+            EventKind::Diagnostic(diagnostic) => self.on_budget_diagnostic(&diagnostic),
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
                 if message.kind != AgentMessageKind::Steering {
                     self.mark_progress(&message.sender_run_id);
@@ -618,7 +644,6 @@ impl SupervisorActor {
             | EventKind::Message(_)
             | EventKind::Usage(_)
             | EventKind::Fault(_)
-            | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
             | EventKind::Snapshot(_) => {}
         }
@@ -818,7 +843,20 @@ impl SupervisorActor {
     }
 
     async fn on_external_orchestrator(&mut self, event: OrchestratorEvent) {
-        let Some(goal_id) = orchestrator_goal_id(&event).map(str::to_string) else {
+        let goal_id = {
+            let ledgers = self
+                .ledgers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut owners = ledgers
+                .iter()
+                .filter(|(_, ledger)| ledger.owns_event(&event));
+            match (owners.next(), owners.next()) {
+                (Some((goal_id, _)), None) => Some(goal_id.clone()),
+                (None, _) | (Some(_), Some(_)) => None,
+            }
+        };
+        let Some(goal_id) = goal_id else {
             return;
         };
         if !self.event_is_applied(&goal_id, &event)
@@ -1109,11 +1147,17 @@ impl SupervisorActor {
             .find_run(run_id)
             .and_then(|run| self.runtime.run_result(run).ok().flatten())
             .unwrap_or_default();
-        let outcome = self
+        let typed = self
+            .find_run(run_id)
+            .and_then(|run| self.runtime.reviewer_result(run));
+        let review_loop = self
             .reviews
             .entry(goal_id.to_string())
-            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds))
-            .on_reviewer_done(&result, &head_sha, run_id);
+            .or_insert_with(|| ReviewLoop::new(self.settings.max_review_rounds));
+        let outcome = match parse_reviewer_output(typed, &result) {
+            Ok(parsed) => review_loop.on_review_result(parsed, &head_sha, run_id),
+            Err(_) => review_loop.on_reviewer_done(&result, &head_sha, run_id),
+        };
         self.record_evidence(goal_id, outcome.evidence().criteria.clone());
         self.record_evidence(goal_id, outcome.evidence().review.clone());
         match outcome {
@@ -1380,6 +1424,7 @@ impl SupervisorActor {
     }
 
     async fn sample_stalls(&mut self) {
+        self.sample_stale_tasks();
         let now = Instant::now();
         let stalled = self
             .progress
@@ -1623,6 +1668,52 @@ impl SupervisorActor {
         };
         match event {
             OrchestratorEvent::GoalCreated { .. } => true,
+            OrchestratorEvent::TaskProgressed {
+                task_id,
+                run_id,
+                progress,
+                ..
+            } => {
+                snapshot.task_progress.get(task_id) == Some(progress)
+                    && snapshot.task_runs.get(task_id) == Some(run_id)
+            }
+            OrchestratorEvent::TaskCheckpoint {
+                task_id,
+                tool_call_count,
+                cumulative_input_tokens,
+                cumulative_output_tokens,
+                elapsed_ms,
+                ..
+            } => snapshot
+                .task_checkpoints
+                .get(task_id)
+                .is_some_and(|checkpoints| {
+                    checkpoints.contains(&(
+                        *tool_call_count,
+                        *cumulative_input_tokens,
+                        *cumulative_output_tokens,
+                        *elapsed_ms,
+                    ))
+                }),
+            OrchestratorEvent::TaskRetryScheduled {
+                task_id,
+                attempt,
+                reason,
+                new_run_id,
+                ..
+            } => snapshot
+                .task_retries
+                .iter()
+                .any(|(task, number, why, run)| {
+                    task == task_id && number == attempt && why == reason && run == new_run_id
+                }),
+            OrchestratorEvent::TaskStaleMarked {
+                task_id,
+                run_id,
+                last_heartbeat_ns,
+            } => snapshot.stale_marks.iter().any(|(task, run, heartbeat)| {
+                task == task_id && run == run_id && heartbeat == last_heartbeat_ns
+            }),
             OrchestratorEvent::GoalStateChanged { to, .. } => snapshot.state == *to,
             OrchestratorEvent::GoalStageChanged { to, .. } => snapshot.stage == *to,
             OrchestratorEvent::RunAttached { run_id, .. } => snapshot
@@ -1653,30 +1744,5 @@ impl SupervisorActor {
             | OrchestratorEvent::CloseoutStepRecorded { .. }
             | OrchestratorEvent::ShellCommandDenied { .. } => false,
         }
-    }
-}
-
-fn orchestrator_goal_id(event: &OrchestratorEvent) -> Option<&str> {
-    match event {
-        OrchestratorEvent::GoalCreated { goal_id, .. }
-        | OrchestratorEvent::GoalStateChanged { goal_id, .. }
-        | OrchestratorEvent::GoalStageChanged { goal_id, .. }
-        | OrchestratorEvent::RunAttached { goal_id, .. }
-        | OrchestratorEvent::DeliverableBranchBound { goal_id, .. }
-        | OrchestratorEvent::EvidenceRecorded { goal_id, .. }
-        | OrchestratorEvent::FinishRejected { goal_id, .. }
-        | OrchestratorEvent::FinishAccepted { goal_id, .. }
-        | OrchestratorEvent::ContinuationDispatched { goal_id, .. }
-        | OrchestratorEvent::ContinuationSuppressed { goal_id, .. }
-        | OrchestratorEvent::ReviewRoundStarted { goal_id, .. }
-        | OrchestratorEvent::RepairDispatched { goal_id, .. }
-        | OrchestratorEvent::StallDetected { goal_id, .. }
-        | OrchestratorEvent::NudgeSent { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalRequested { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalResolved { goal_id, .. }
-        | OrchestratorEvent::MergeApprovalInvalidated { goal_id, .. }
-        | OrchestratorEvent::MergeExecuted { goal_id, .. }
-        | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
-        OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
     }
 }

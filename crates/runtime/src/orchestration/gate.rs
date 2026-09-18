@@ -146,14 +146,12 @@ pub fn evaluate(inputs: &GateInputs<'_>) -> GateVerdict {
     }
 
     match inputs.criteria {
-        Some(criteria) if criteria.head_sha == current_head => {
+        Some(criteria) if criteria.head_sha == current_head && !criteria.checklist.is_empty() => {
             let ids = criteria
                 .checklist
                 .iter()
-                .filter_map(|check| match check.status {
-                    CriterionStatus::Met => None,
-                    CriterionStatus::Unmet | CriterionStatus::Unknown => Some(check.id.clone()),
-                })
+                .filter(|check| !criterion_verified(check, current_head))
+                .map(|check| check.id.clone())
                 .collect::<Vec<_>>();
             if !ids.is_empty() {
                 rejections.push(GateRejection::CriteriaUnmet {
@@ -212,4 +210,23 @@ pub fn evaluate(inputs: &GateInputs<'_>) -> GateVerdict {
         review_round: review.round,
         reviewer_run_id: review.reviewer_run_id.clone(),
     })
+}
+
+pub(super) fn criterion_verified(check: &CriterionCheck, head: &str) -> bool {
+    match check.status {
+        CriterionStatus::Unmet | CriterionStatus::Unknown => false,
+        CriterionStatus::Met => check.evidence.as_ref().is_some_and(|evidence| {
+            !evidence.command.trim().is_empty()
+                && evidence.exit_status == 0
+                && !head.trim().is_empty()
+                && evidence.target_sha == head
+                && [
+                    &evidence.diff_ref,
+                    &evidence.artifact_path,
+                    &evidence.red_evidence,
+                ]
+                .into_iter()
+                .all(|reference| reference.as_ref().is_some_and(|s| !s.trim().is_empty()))
+        }),
+    }
 }

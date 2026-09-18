@@ -11,6 +11,14 @@ use std::{
 };
 use tools::ToolExecutor;
 
+fn mock_provider(responses: Vec<ScriptedResponse>) -> StreamingMockOpenAi {
+    StreamingMockOpenAi::spawn_with_models(
+        responses,
+        mock_openai::WriteMode::default(),
+        vec!["gpt-4o".into()],
+    )
+}
+
 fn configured(root: &tempfile::TempDir, mock: &StreamingMockOpenAi) -> runtime::AgentRuntime {
     std::fs::write(
         root.path().join("evorch.toml"),
@@ -58,7 +66,7 @@ enabled = true
 
 async fn execute(parallel: bool) -> Duration {
     let root = tempfile::tempdir().unwrap();
-    let mock = StreamingMockOpenAi::spawn(
+    let mock = mock_provider(
         (0..4)
             .map(|id| {
                 ScriptedResponse::text_stream(&id.to_string(), "mock-model", ["done"])
@@ -94,6 +102,18 @@ async fn execute(parallel: bool) -> Duration {
         workers.push(worker);
     }
     if parallel {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !workers.iter().all(|worker| {
+                runtime
+                    .list_agents()
+                    .iter()
+                    .any(|agent| agent.run_id == *worker)
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first three workers admitted before testing the capacity limit");
         let rejected = runtime
             .delegate_background_as_child(coordinator, Role::Worker, "fourth", RunConfig::default())
             .unwrap();
@@ -104,7 +124,12 @@ async fn execute(parallel: bool) -> Duration {
     }
     let elapsed = start.elapsed();
     drop(writer);
-    let requests = mock.recorded_requests();
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded[0].path, "/v1/models");
+    let requests: Vec<_> = recorded
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .collect();
     assert_eq!(requests.len(), 4);
     assert!(
         !requests[0].body["tools"]
@@ -139,7 +164,7 @@ async fn worker_claims_appends_finding_and_completes_over_mock_openai() {
     let call = |name: &str, args: &str| {
         ScriptedResponse::tool_call(name, "mock-model", 0, name, name, [args])
     };
-    let mock = StreamingMockOpenAi::spawn(vec![
+    let mock = mock_provider(vec![
         ScriptedResponse::text_stream("root", "mock-model", ["ready"]),
         call("task_claim", r#"{"task_id":"task-a"}"#),
         call(
@@ -196,7 +221,7 @@ async fn worker_claims_appends_finding_and_completes_over_mock_openai() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
     let root = tempfile::tempdir().unwrap();
-    let mock = StreamingMockOpenAi::spawn(vec![
+    let mock = mock_provider(vec![
         ScriptedResponse::text_stream("root", "mock-model", ["waiting"]),
         ScriptedResponse::tool_call(
             "claim",
@@ -225,7 +250,11 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
     );
     // CI の負荷が高い runner でも待機に入る時間を確保するため余裕を持たせる。
     tokio::time::timeout(Duration::from_secs(15), async {
-        while runtime.inspect_agent(coordinator).unwrap().phase != AgentRunPhase::Waiting {
+        while !runtime
+            .list_agents()
+            .iter()
+            .any(|agent| agent.run_id == coordinator && agent.phase == AgentRunPhase::Waiting)
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -248,17 +277,22 @@ async fn abandoned_claim_expires_and_notifies_waiting_coordinator() {
     runtime.wait(worker).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if mock.recorded_requests().iter().any(|request| {
-                request.body["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| {
-                        message["content"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("Team leases expired"))
-                    })
-            }) {
+            if mock
+                .recorded_requests()
+                .iter()
+                .filter(|request| request.path == "/v1/chat/completions")
+                .any(|request| {
+                    request.body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|message| {
+                            message["content"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("Team leases expired"))
+                        })
+                })
+            {
                 break;
             }
             tokio::task::yield_now().await;
@@ -290,7 +324,7 @@ fn team_storage(root: &tempfile::TempDir) -> (storage::Storage, runtime::team_co
 #[tokio::test]
 async fn team_requires_explicit_delegation_value() {
     let root = tempfile::tempdir().unwrap();
-    let mock = StreamingMockOpenAi::spawn(vec![]);
+    let mock = mock_provider(vec![]);
     let runtime = configured(&root, &mock);
     let (_writer, store) = team_storage(&root);
     for value in [None, Some("  ".into())] {
@@ -306,5 +340,8 @@ async fn team_requires_explicit_delegation_value() {
         );
         assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
     }
-    assert!(mock.recorded_requests().is_empty());
+    let recorded = mock.recorded_requests();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].method, "GET");
+    assert_eq!(recorded[0].path, "/v1/models");
 }

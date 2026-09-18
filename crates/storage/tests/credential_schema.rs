@@ -59,8 +59,8 @@ fn column(name: &str, data_type: &str, not_null: i64, default: Option<&str>, pk:
 }
 
 #[test]
-fn migration_v1_columns_match_the_credential_free_schema() {
-    // Given: v1 migration を適用したデータベース
+fn latest_columns_match_the_credential_free_schema() {
+    // Given: 最新 migration を適用したデータベース
     let (_temp, connection) = open_schema();
     let expected = [
         (
@@ -84,6 +84,14 @@ fn migration_v1_columns_match_the_credential_free_schema() {
                 column("status", "TEXT", 1, None, 0),
                 column("created_at_ns", "INTEGER", 1, None, 0),
                 column("updated_at_ns", "INTEGER", 1, None, 0),
+                column("parent_run_id", "TEXT", 0, None, 0),
+                column("input_json", "TEXT", 0, None, 0),
+                column("progress_json", "TEXT", 0, None, 0),
+                column("last_artifact_json", "TEXT", 0, None, 0),
+                column("failure_reason", "TEXT", 0, None, 0),
+                column("resume_cursor_json", "TEXT", 0, None, 0),
+                column("attempts", "INTEGER", 1, Some("0"), 0),
+                column("heartbeat_at_ns", "INTEGER", 0, None, 0),
             ],
         ),
         (

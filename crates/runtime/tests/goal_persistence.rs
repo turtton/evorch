@@ -196,7 +196,8 @@ async fn goal_events_round_trip_and_resume_dispatches_continuation() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let replayed = GoalLedger::replay(orchestrator.into_iter());
+    let replayed =
+        GoalLedger::replay_checked(orchestrator.into_iter()).expect("valid persisted history");
     let restored = replayed.get(&goal_id).expect("restored").snapshot().clone();
     assert_eq!(restored, expected);
 

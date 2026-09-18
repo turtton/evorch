@@ -395,7 +395,11 @@ fn orchestrator_goal_id(ev: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::MergeApprovalInvalidated { goal_id, .. }
         | OrchestratorEvent::MergeExecuted { goal_id, .. }
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
-        OrchestratorEvent::ShellCommandDenied { .. } => None,
+        OrchestratorEvent::TaskProgressed { .. }
+        | OrchestratorEvent::TaskCheckpoint { .. }
+        | OrchestratorEvent::TaskRetryScheduled { .. }
+        | OrchestratorEvent::TaskStaleMarked { .. }
+        | OrchestratorEvent::ShellCommandDenied { .. } => None,
     }
 }
 

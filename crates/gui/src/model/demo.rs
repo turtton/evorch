@@ -167,7 +167,7 @@ impl DemoScriptModel {
                             "```json\n{\"verdict\":\"request-update\",\"findings\":[\"demo finding: apply the fixture commit\"],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"unmet\",\"note\":\"commit missing\"}]}\n```",
                         ),
                         text_response(
-                            "```json\n{\"verdict\":\"approve\",\"findings\":[],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"met\",\"note\":\"ok\"}]}\n```",
+                            &"```json\n{\"verdict\":\"approve\",\"findings\":[],\"criteria\":[{\"id\":\"ac-1\",\"status\":\"met\",\"note\":\"ok\",\"evidence\":{\"command\":\"cargo test --workspace --locked\",\"exit_status\":0,\"target_sha\":\"__DEMO_HEAD_SHA__\",\"diff_ref\":\"main...evorch/task/run-2\",\"artifact_path\":\"artifacts/demo-review-green.log\",\"red_evidence\":\"artifacts/demo-review-red.log\"}}]}\n```".replace("__DEMO_HEAD_SHA__", &"a2".repeat(20)),
                         ),
                     ]),
                 ),

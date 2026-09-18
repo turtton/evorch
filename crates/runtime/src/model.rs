@@ -39,6 +39,18 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    fn requires_admission(&self) -> bool {
+        false
+    }
+
+    async fn admit(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     /// ロールの会話履歴に対して補完を要求する。
     ///
     /// `invocation` は呼び出し元 run の相関文脈である。実装側は観測相関

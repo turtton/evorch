@@ -116,7 +116,9 @@ fn spawn_collector(
                                 ..
                             }
                         );
-                        lock(&sink).push(orchestrator);
+                        if !matches!(orchestrator, OrchestratorEvent::TaskProgressed { .. }) {
+                            lock(&sink).push(orchestrator);
+                        }
                         if is_done {
                             let _ = done_tx.send(());
                         }

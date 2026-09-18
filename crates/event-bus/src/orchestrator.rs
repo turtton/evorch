@@ -124,6 +124,29 @@ pub struct CriterionCheck {
     pub status: CriterionStatus,
     /// 判定の短い注記。
     pub note: String,
+    /// 検査コマンドと対象リビジョンの証跡 (旧 payload では `None`)。
+    #[serde(default)]
+    pub evidence: Option<CriterionEvidence>,
+}
+
+/// 受け入れ基準の検査を再現するための構造化証跡。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CriterionEvidence {
+    /// 実行した検査コマンド。
+    pub command: String,
+    /// コマンドの終了ステータス。
+    pub exit_status: i32,
+    /// 検査対象のコミット SHA。
+    pub target_sha: String,
+    /// 検査対象の差分参照。
+    #[serde(default)]
+    pub diff_ref: Option<String>,
+    /// 検査結果の生成物パス。
+    #[serde(default)]
+    pub artifact_path: Option<String>,
+    /// 実装前の失敗を示す証跡。
+    #[serde(default)]
+    pub red_evidence: Option<String>,
 }
 
 /// reviewer run の構造化判定。
@@ -411,6 +434,54 @@ pub enum CloseoutStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum OrchestratorEvent {
+    /// task の進捗を記録した。
+    TaskProgressed {
+        /// task の永続識別子。
+        task_id: String,
+        /// 進捗を報告した run の ID。
+        run_id: String,
+        /// task 固有の構造化進捗。
+        progress: serde_json::Value,
+        /// 進捗更新の理由。
+        reason: String,
+    },
+    /// task の実行予算チェックポイントを記録した。
+    TaskCheckpoint {
+        /// task の永続識別子。
+        task_id: String,
+        /// 計測対象の run の ID。
+        run_id: String,
+        /// 累積ツール呼び出し回数。
+        tool_call_count: u32,
+        /// 累積入力トークン数。
+        cumulative_input_tokens: u64,
+        /// 累積出力トークン数。
+        cumulative_output_tokens: u64,
+        /// 経過ミリ秒。
+        elapsed_ms: u64,
+    },
+    /// task の再試行を予約した。
+    TaskRetryScheduled {
+        /// 再試行する task が所属する goal の ID。
+        goal_id: String,
+        /// task の永続識別子。
+        task_id: String,
+        /// 再試行番号。
+        attempt: u32,
+        /// 再試行の理由。
+        reason: String,
+        /// 再試行に使用する新しい run の ID。
+        new_run_id: String,
+    },
+    /// task の worker が stale になったことを記録した。
+    TaskStaleMarked {
+        /// task の永続識別子。
+        task_id: String,
+        /// stale と判定した run の ID。
+        run_id: String,
+        /// 最後に記録された heartbeat 時刻 (ナノ秒)。
+        last_heartbeat_ns: u64,
+    },
     /// goal を登録した。
     GoalCreated {
         /// goal の永続識別子 (`goal-{wall_ms}-{seq}`)。
@@ -668,6 +739,68 @@ mod tests {
 
         let cases: Vec<(&'static str, OrchestratorEvent)> = vec![
             (
+                "TaskProgressed",
+                OrchestratorEvent::TaskProgressed {
+                    task_id: "task-1".into(),
+                    run_id: "run-worker-1".into(),
+                    progress: serde_json::json!({"completed": ["ac1"], "remaining": 2}),
+                    reason: "criterion completed".into(),
+                },
+            ),
+            (
+                "TaskCheckpoint",
+                OrchestratorEvent::TaskCheckpoint {
+                    task_id: "task-1".into(),
+                    run_id: "run-worker-1".into(),
+                    tool_call_count: u32::MAX,
+                    cumulative_input_tokens: u64::MAX,
+                    cumulative_output_tokens: 4_294_967_296,
+                    elapsed_ms: 4_294_967_297,
+                },
+            ),
+            (
+                "TaskRetryScheduled",
+                OrchestratorEvent::TaskRetryScheduled {
+                    goal_id: "goal-1".into(),
+                    task_id: "task-1".into(),
+                    attempt: 2,
+                    reason: "provider unavailable".into(),
+                    new_run_id: "run-retry-2".into(),
+                },
+            ),
+            (
+                "TaskStaleMarked",
+                OrchestratorEvent::TaskStaleMarked {
+                    task_id: "task-1".into(),
+                    run_id: "run-worker-1".into(),
+                    last_heartbeat_ns: u64::MAX,
+                },
+            ),
+            (
+                "EvidenceRecorded",
+                OrchestratorEvent::EvidenceRecorded {
+                    goal_id: "goal-1".into(),
+                    evidence: GateEvidence::Criteria {
+                        head_sha: "a1b2c3".into(),
+                        reviewer_run_id: "run-review-1".into(),
+                        round: 1,
+                        checklist: vec![CriterionCheck {
+                            id: "ac1".into(),
+                            status: CriterionStatus::Met,
+                            note: "tests passed".into(),
+                            evidence: Some(CriterionEvidence {
+                                command: "cargo test -p event-bus".into(),
+                                exit_status: 0,
+                                target_sha: "a1b2c3".into(),
+                                diff_ref: Some("base..a1b2c3".into()),
+                                artifact_path: Some("artifacts/test.log".into()),
+                                red_evidence: Some("artifacts/red.log".into()),
+                            }),
+                        }],
+                    },
+                },
+            ),
+            (
                 "GoalCreated",
                 OrchestratorEvent::GoalCreated {
                     goal_id: "goal-1".into(),
@@ -865,6 +998,13 @@ mod tests {
         ];
 
         for (inner_tag, event) in cases {
+            let has_criteria = matches!(
+                &event,
+                OrchestratorEvent::EvidenceRecorded {
+                    evidence: GateEvidence::Criteria { .. },
+                    ..
+                }
+            );
             let outer = Event::new(event);
             let json = serde_json::to_string(&outer).expect("serialize Event");
             let restored: Event = serde_json::from_str(&json).expect("deserialize Event");
@@ -879,7 +1019,101 @@ mod tests {
                 value["kind"]["payload"]["kind"], inner_tag,
                 "inner tag mismatch"
             );
+            if has_criteria {
+                let evidence = &value["kind"]["payload"]["payload"]["evidence"]["payload"]["checklist"]
+                    [0]["evidence"];
+                assert_eq!(evidence["exit_status"], 0);
+                assert_eq!(evidence["target_sha"], "a1b2c3");
+                assert_eq!(evidence["artifact_path"], "artifacts/test.log");
+            }
         }
+    }
+
+    #[test]
+    fn gate_evidence_criteria_checklist_round_trips_with_full_evidence() {
+        // Given: every structured evidence field is populated in a criteria event.
+        let event = OrchestratorEvent::EvidenceRecorded {
+            goal_id: "goal-full-evidence".into(),
+            evidence: GateEvidence::Criteria {
+                head_sha: "criteria-head-sha".into(),
+                reviewer_run_id: "review-run-full".into(),
+                round: 3,
+                checklist: vec![CriterionCheck {
+                    id: "ac-full".into(),
+                    status: CriterionStatus::Met,
+                    note: "all checks passed".into(),
+                    evidence: Some(CriterionEvidence {
+                        command: "cargo test -p event-bus".into(),
+                        exit_status: 0,
+                        target_sha: "target-commit-sha".into(),
+                        diff_ref: Some("base..target-commit-sha".into()),
+                        artifact_path: Some("artifacts/event-bus-test.log".into()),
+                        red_evidence: Some("artifacts/event-bus-red.log".into()),
+                    }),
+                }],
+            },
+        };
+
+        // When: serializing and deserializing the event.
+        let json = serde_json::to_string(&event).expect("serialize criteria evidence event");
+        let restored: OrchestratorEvent =
+            serde_json::from_str(&json).expect("deserialize criteria evidence event");
+
+        // Then: the checklist and every evidence field survive the round trip.
+        assert_eq!(event, restored);
+    }
+
+    #[test]
+    fn legacy_criterion_without_evidence_decodes() {
+        // Given: persisted criteria from before structured evidence existed.
+        let json = serde_json::json!({
+            "kind": "Criteria",
+            "payload": {
+                "head_sha": "legacy-sha",
+                "reviewer_run_id": "review-1",
+                "round": 1,
+                "checklist": [{"id": "ac1", "status": "met", "note": "passed"}]
+            }
+        });
+        // When: replaying the legacy payload.
+        let restored: GateEvidence = serde_json::from_value(json).expect("legacy criteria");
+        // Then: the checklist survives with no evidence synthesized.
+        assert_eq!(
+            restored,
+            GateEvidence::Criteria {
+                head_sha: "legacy-sha".into(),
+                reviewer_run_id: "review-1".into(),
+                round: 1,
+                checklist: vec![CriterionCheck {
+                    id: "ac1".into(),
+                    status: CriterionStatus::Met,
+                    note: "passed".into(),
+                    evidence: None,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn criterion_evidence_defaults_optional_references_when_absent() {
+        // Given: minimal evidence with a signed failure status.
+        let json = serde_json::json!({
+            "command": "cargo test", "exit_status": -1, "target_sha": "failed-sha"
+        });
+        // When: decoding evidence without optional references.
+        let restored: CriterionEvidence = serde_json::from_value(json).expect("minimal evidence");
+        // Then: required values survive and optional references default to None.
+        assert_eq!(
+            restored,
+            CriterionEvidence {
+                command: "cargo test".into(),
+                exit_status: -1,
+                target_sha: "failed-sha".into(),
+                diff_ref: None,
+                artifact_path: None,
+                red_evidence: None,
+            }
+        );
     }
 
     // Given: GateRejection のデータ付きバリアントと unit バリアント
@@ -938,6 +1172,7 @@ mod tests {
             id: "ac1".into(),
             status: CriterionStatus::Unmet,
             note: "not implemented".into(),
+            evidence: None,
         }];
         let round_trips: Vec<(serde_json::Value, serde_json::Value)> = vec![
             // snake_case の unit enum は文字列へ直列化される。
@@ -999,11 +1234,13 @@ mod tests {
                     id: "ac1".into(),
                     status: CriterionStatus::Unmet,
                     note: "not implemented".into(),
+                    evidence: None,
                 }),
                 serde_json::json!({
                     "id": "ac1",
                     "status": "unmet",
-                    "note": "not implemented"
+                    "note": "not implemented",
+                    "evidence": null
                 }),
             ),
             (sv(&ReviewVerdict::Approve), serde_json::json!("approve")),
@@ -1104,7 +1341,7 @@ mod tests {
                         "reviewer_run_id": "r",
                         "round": 1,
                         "checklist": [
-                            { "id": "ac1", "status": "unmet", "note": "not implemented" }
+                            { "id": "ac1", "status": "unmet", "note": "not implemented", "evidence": null }
                         ]
                     }
                 }),

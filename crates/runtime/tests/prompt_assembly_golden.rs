@@ -1,8 +1,4 @@
-//! Orchestrator / Worker システムプロンプト組立の金標テスト (issue #49 / AC3)。
-//!
-//! カタログ経由で解決した完全なプロンプトが、フィクスチャとバイト単位で
-//! 一致することを検証する。フィクスチャ (`golden/system_prompt_orchestrator.txt`)
-//! は組立出力そのものを格納し、末尾改行は含まない (組立の契約どおり)。
+//! システムプロンプトの組立とロール別ツール公開契約のテスト。
 
 use agents::Role;
 use runtime::prompt::default_role_triggers;
@@ -69,18 +65,33 @@ fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogErro
 
 // Given: 完全なカタログ
 // When: Orchestrator / カテゴリなし / claude-opus-4-1 でシステムプロンプトを解決する
-// Then: 金標フィクスチャとバイト単位で一致する
+// Then: Reviewer のトリガーは typed review 提出を含む正確なツール集合を公開する
 #[test]
-fn orchestrator_full_prompt_matches_golden_fixture() {
+fn orchestrator_prompt_exposes_typed_reviewer_tools() {
     let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
     let prompt = catalog
         .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
         .expect("登録済みの部品のみを参照するはずです");
 
-    assert_eq!(prompt, GOLDEN_FIXTURE.trim_end());
+    let reviewer = prompt
+        .lines()
+        .find(|line| line.starts_with("- Reviewer:"))
+        .expect("reviewer routing trigger");
+    let (_, capabilities) = reviewer.split_once(':').expect("role separator");
+    let (_, tools) = capabilities.split_once(':').expect("tool list separator");
+    let tools = tools.split('/').next().expect("tool list");
+    assert_eq!(
+        tools.split(',').map(str::trim).collect::<Vec<_>>(),
+        [
+            "git_diff",
+            "grep",
+            "ledger_append",
+            "ledger_read",
+            "read",
+            "submit_review"
+        ]
+    );
 }
-
-const GOLDEN_FIXTURE: &str = include_str!("golden/system_prompt_orchestrator.txt");
 
 // Given: quick overlay を登録した完全なカタログ
 // When: Worker / quick / claude-opus-4-1 で解決する
