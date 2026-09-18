@@ -17,7 +17,10 @@ pub(crate) struct RestoredState {
 }
 
 impl RestoredState {
-    pub(crate) fn attach_to(self, mut task: crate::agent_loop::RunTask) -> crate::agent_loop::RunTask {
+    pub(crate) fn attach_to(
+        self,
+        mut task: crate::agent_loop::RunTask,
+    ) -> crate::agent_loop::RunTask {
         task.restored = Some(self);
         task
     }
