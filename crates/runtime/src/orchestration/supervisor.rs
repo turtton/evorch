@@ -33,6 +33,7 @@ static NEXT_GOAL_ID: AtomicU64 = AtomicU64::new(1);
 
 mod budget;
 mod stale;
+mod task_admission;
 mod tasks;
 
 /// goal 作成時の不変属性。
@@ -287,6 +288,10 @@ enum SupervisorCommand {
     ResumeTask(tasks::TaskRequest),
     RetryTask(tasks::TaskRequest),
     CancelTask(tasks::TaskRequest),
+    TaskAdmission {
+        request: tasks::TaskRequest,
+        result: Result<(), crate::RuntimeError>,
+    },
     Create {
         goal_id: String,
         spec: Box<GoalSpec>,
@@ -358,6 +363,9 @@ impl SupervisorActor {
                 self.continue_task(request);
             }
             SupervisorCommand::CancelTask(request) => self.cancel_task(request),
+            SupervisorCommand::TaskAdmission { request, result } => {
+                self.task_admission(request, result)
+            }
             SupervisorCommand::Create {
                 goal_id,
                 spec,

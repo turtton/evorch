@@ -56,22 +56,6 @@ impl SupervisorHandle {
 }
 
 impl SupervisorActor {
-    fn task_state(&self, request: &TaskRequest) -> Option<(GoalSnapshot, TaskContinuation)> {
-        let snapshot = self.snapshot(&request.goal_id)?;
-        if snapshot.task_runs.get(&request.task_id) != Some(&request.run_id)
-            || snapshot
-                .task_attempts
-                .get(&request.task_id)
-                .map_or(0, |attempt| *attempt)
-                != request.attempt
-        {
-            return None;
-        }
-        let progress = snapshot.task_progress.get(&request.task_id)?.clone();
-        let task = serde_json::from_value(progress).ok()?;
-        Some((snapshot, task))
-    }
-
     pub(super) fn continue_task(&mut self, request: TaskRequest) {
         let Some((snapshot, mut task)) = self.task_state(&request) else {
             return;
@@ -170,7 +154,7 @@ impl SupervisorActor {
             role,
             prompt,
             RunConfig {
-                task_id: Some(request.task_id),
+                task_id: Some(request.task_id.clone()),
                 name: Some(format!("{}/task{}", request.goal_id, request.attempt + 1)),
                 workspace_branch: snapshot.deliverable_branch,
                 ..RunConfig::default()
@@ -178,6 +162,14 @@ impl SupervisorActor {
         );
         self.progress
             .insert(run.to_string(), ProgressTrack::new(AgentRunPhase::Pending));
+        self.watch_task_admission(
+            TaskRequest {
+                run_id: run.to_string(),
+                attempt: request.attempt + 1,
+                ..request
+            },
+            run,
+        );
     }
 
     pub(super) fn cancel_task(&mut self, request: TaskRequest) {
@@ -194,12 +186,16 @@ impl SupervisorActor {
             | TaskStatus::Failed => task.status = TaskStatus::Cancelled,
         }
         task.failure_reason = Some("cancelled by operator".into());
-        self.publish_task(&request.goal_id, &request.task_id, &request.run_id, task);
         if (!snapshot.detached || self.progress.contains_key(&request.run_id))
-            && let Some(run) = self.find_run(&request.run_id)
+            && let Some(run) = request
+                .run_id
+                .strip_prefix("run-")
+                .and_then(|id| id.parse::<u64>().ok())
+                .map(RunId::new)
         {
             let _ = self.runtime.cancel(run);
         }
+        self.publish_task(&request.goal_id, &request.task_id, &request.run_id, task);
     }
 
     pub(super) fn task_phase(&self, run_id: &str, phase: AgentRunPhase, reason: Option<&str>) {

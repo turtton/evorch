@@ -905,13 +905,6 @@ impl AgentRuntime {
         Ok(entry.result_rx.borrow().clone())
     }
 
-    /// run へキャンセルを通知する。複数回の通知は同じ結果となる。
-    pub fn cancel(&self, run_id: RunId) -> Result<(), RuntimeError> {
-        let sender = self.entry(run_id)?.cancel_tx.clone();
-        sender.send_replace(true);
-        Ok(())
-    }
-
     /// Changes the next completion's selection without interrupting an in-flight request.
     /// `None` restores normal routing and its existing session affinity.
     ///
