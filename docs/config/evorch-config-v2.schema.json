@@ -140,7 +140,9 @@
     "sandbox": {
       "$ref": "#/$defs/SandboxConfig",
       "default": {
-        "allow_network": false
+        "allow_network": false,
+        "escalate_to_user_on_deny": false,
+        "escalation_approval": "quick"
       }
     },
     "team": {
@@ -426,6 +428,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "EscalationApproval": {
+      "type": "string",
+      "enum": [
+        "quick",
+        "user",
+        "off"
+      ]
     },
     "GenerationOverridesConfig": {
       "description": "生成パラメータの上書き指定。指定したフィールドのみ反映する。",
@@ -966,6 +976,14 @@
         "allow_network": {
           "type": "boolean",
           "default": false
+        },
+        "escalate_to_user_on_deny": {
+          "type": "boolean",
+          "default": false
+        },
+        "escalation_approval": {
+          "$ref": "#/$defs/EscalationApproval",
+          "default": "quick"
         }
       },
       "additionalProperties": false

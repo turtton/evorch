@@ -38,25 +38,10 @@ fn checked_in_artifact_matches_generated_schema() {
     let checked_in = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("artifact を読み取れない: {}: {e}", path.display()));
 
-    let mut checked_in: serde_json::Value =
+    let checked_in: serde_json::Value =
         serde_json::from_str(&checked_in).expect("artifact は有効な JSON");
-    let mut generated: serde_json::Value =
+    let generated: serde_json::Value =
         serde_json::from_str(&config::json_schema()).expect("生成 schema は有効な JSON");
-    for schema in [&mut checked_in, &mut generated] {
-        if let Some(properties) = schema
-            .get_mut("properties")
-            .and_then(|value| value.as_object_mut())
-        {
-            properties.remove("sandbox");
-        }
-        if let Some(definitions) = schema
-            .get_mut("$defs")
-            .and_then(|value| value.as_object_mut())
-        {
-            definitions.remove("SandboxConfig");
-            definitions.remove("EscalationApproval");
-        }
-    }
 
     assert_eq!(
         checked_in,
@@ -94,6 +79,7 @@ fn generated_schema_covers_all_config_sections() {
         "diagnostics",
         "permissions",
         "metrics",
+        "sandbox",
     ] {
         assert!(
             properties.contains_key(section),
