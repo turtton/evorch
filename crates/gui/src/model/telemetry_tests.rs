@@ -99,44 +99,129 @@ fn agent_run_started(run_id: &str) -> Event {
     })
 }
 
-fn agent_run_finished(run_id: &str, to: AgentRunPhase) -> Event {
+fn agent_run_changed(run_id: &str, from: AgentRunPhase, to: AgentRunPhase) -> Event {
     Event::new(LifecycleEvent::AgentRunStateChanged {
         run_id: run_id.into(),
-        from: AgentRunPhase::Running,
+        from,
         to,
         reason: None,
     })
 }
 
 #[test]
-fn wall_time_accumulates_between_run_start_and_terminal_state() {
+fn wall_time_accumulates_between_running_and_terminal_state() {
+    // Given: a run that spends 10 seconds Pending before Running.
     let mut overlay = TelemetryOverlay::new();
     let start = Instant::now();
     overlay.apply_event_at(&agent_run_started("run-1"), start);
     overlay.apply_event_at(
-        &agent_run_finished("run-1", AgentRunPhase::Done),
+        &agent_run_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
+        start + Duration::from_secs(10),
+    );
+    overlay.apply_event_at(
+        &agent_run_changed("run-1", AgentRunPhase::Running, AgentRunPhase::Done),
         start + Duration::from_secs(90),
     );
+    // When: reading metrics after completion.
     let metrics =
         overlay.thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120));
-    assert_eq!(metrics.wall_time, Duration::from_secs(90));
+    // Then: only the 80 Running seconds remain.
+    assert_eq!(metrics.wall_time, Duration::from_secs(80));
 }
 
 #[test]
 fn wall_time_includes_in_flight_runs() {
+    // Given: one failed run and another still Running, both initially Pending.
     let mut overlay = TelemetryOverlay::new();
     let start = Instant::now();
     overlay.apply_event_at(&agent_run_started("run-1"), start);
     overlay.apply_event_at(
-        &agent_run_finished("run-1", AgentRunPhase::Error),
+        &agent_run_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
+        start + Duration::from_secs(10),
+    );
+    overlay.apply_event_at(
+        &agent_run_changed("run-1", AgentRunPhase::Running, AgentRunPhase::Error),
         start + Duration::from_secs(30),
     );
     overlay.apply_event_at(&agent_run_started("run-2"), start + Duration::from_secs(40));
+    overlay.apply_event_at(
+        &agent_run_changed("run-2", AgentRunPhase::Pending, AgentRunPhase::Running),
+        start + Duration::from_secs(50),
+    );
+    // When: reading both runs at 100 seconds.
     let metrics = overlay.thread_metrics_at(
         &["run-1".to_owned(), "run-2".to_owned()],
         start + Duration::from_secs(100),
     );
-    assert_eq!(metrics.wall_time, Duration::from_secs(90));
+    // Then: the completed 20 seconds and in-flight 50 seconds are summed.
+    assert_eq!(metrics.wall_time, Duration::from_secs(70));
+}
+
+fn wall_time_after_phases(phases: &[(AgentRunPhase, u64)]) -> Duration {
+    let mut overlay = TelemetryOverlay::new();
+    let start = Instant::now();
+    overlay.apply_event_at(&agent_run_started("run-1"), start);
+    let mut from = AgentRunPhase::Pending;
+    for &(to, seconds) in phases {
+        overlay.apply_event_at(
+            &agent_run_changed("run-1", from, to),
+            start + Duration::from_secs(seconds),
+        );
+        from = to;
+    }
+    overlay
+        .thread_metrics_at(&["run-1".to_owned()], start + Duration::from_secs(120))
+        .wall_time
+}
+
+#[test]
+fn wall_time_is_zero_when_waiting_until_done() {
+    // Given: an immediate Running -> Waiting transition, then Done much later.
+    use AgentRunPhase::{Done, Running, Waiting};
+    // When: replaying the lifecycle with no elapsed Running interval.
+    let elapsed = wall_time_after_phases(&[(Running, 0), (Waiting, 0), (Done, 90)]);
+    // Then: user Waiting contributes nothing.
+    assert_eq!(elapsed, Duration::ZERO);
+}
+
+#[test]
+fn wall_time_accumulates_running_intervals_across_waiting() {
+    // Given: Running intervals [10, 30] and [80, 90].
+    use AgentRunPhase::{Done, Running, Waiting};
+    // When: the run resumes and completes.
+    let elapsed =
+        wall_time_after_phases(&[(Running, 10), (Waiting, 30), (Running, 80), (Done, 90)]);
+    // Then: only those two intervals count.
+    assert_eq!(elapsed, Duration::from_secs(30));
+}
+
+#[test]
+fn wall_time_is_frozen_while_waiting() {
+    // Given: a run paused after 20 Running seconds.
+    use AgentRunPhase::{Running, Waiting};
+    // When: reading at 120 seconds without resuming.
+    let elapsed = wall_time_after_phases(&[(Running, 10), (Waiting, 30)]);
+    // Then: the waiting interval is excluded even before completion.
+    assert_eq!(elapsed, Duration::from_secs(20));
+}
+
+#[test]
+fn wall_time_is_zero_when_run_stays_pending() {
+    // Given: a registered run with no phase transitions.
+    // When: reading at 120 seconds.
+    let elapsed = wall_time_after_phases(&[]);
+    // Then: registration alone does not start the clock.
+    assert_eq!(elapsed, Duration::ZERO);
+}
+
+#[test]
+fn wall_time_preserves_active_start_on_duplicate_running_events() {
+    // Given: a repeated Running notification before an error.
+    use AgentRunPhase::{Error, Running};
+    // When: replaying duplicate Running and terminal notifications.
+    let elapsed = wall_time_after_phases(&[(Running, 10), (Running, 20), (Error, 30), (Error, 40)]);
+    // Then: neither the start nor the completed duration is counted twice.
+    assert_eq!(elapsed, Duration::from_secs(20));
 }
 
 #[test]

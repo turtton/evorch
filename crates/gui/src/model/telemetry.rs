@@ -77,8 +77,8 @@ pub struct TelemetryOverlay {
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
     costs: BTreeMap<String, f64>,
-    run_started: BTreeMap<String, Instant>,
-    run_wall_time: BTreeMap<String, Duration>,
+    active_running_start: BTreeMap<String, Instant>,
+    accumulated_running: BTreeMap<String, Duration>,
     context_order: u64,
 }
 
@@ -234,16 +234,22 @@ impl TelemetryOverlay {
                 row.ttft_ms = None;
                 row.ttft_sum_ms = 0;
                 row.ttft_count = 0;
-                self.run_started.entry(run_id.clone()).or_insert(now);
+                self.accumulated_running.entry(run_id.clone()).or_default();
             }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                run_id,
-                to: AgentRunPhase::Done | AgentRunPhase::Error,
-                ..
-            }) => {
-                if let Some(start) = self.run_started.remove(run_id) {
-                    *self.run_wall_time.entry(run_id.clone()).or_default() +=
-                        now.saturating_duration_since(start);
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+                match to {
+                    AgentRunPhase::Running => {
+                        self.active_running_start
+                            .entry(run_id.clone())
+                            .or_insert(now);
+                    }
+                    AgentRunPhase::Waiting | AgentRunPhase::Done | AgentRunPhase::Error => {
+                        if let Some(start) = self.active_running_start.remove(run_id) {
+                            *self.accumulated_running.entry(run_id.clone()).or_default() +=
+                                now.saturating_duration_since(start);
+                        }
+                    }
+                    AgentRunPhase::Pending => {}
                 }
             }
             EventKind::Lifecycle(_)

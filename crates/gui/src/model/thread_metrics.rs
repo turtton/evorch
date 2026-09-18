@@ -24,10 +24,10 @@ impl TelemetryOverlay {
                     usage.cache_write = usage.cache_write.saturating_add(entry.cache_write);
                 }
             }
-            if let Some(done) = self.run_wall_time.get(run_id) {
-                wall_time += *done;
+            if let Some(accumulated) = self.accumulated_running.get(run_id) {
+                wall_time += *accumulated;
             }
-            if let Some(start) = self.run_started.get(run_id) {
+            if let Some(start) = self.active_running_start.get(run_id) {
                 wall_time += now.saturating_duration_since(*start);
             }
         }
