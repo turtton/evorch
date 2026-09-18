@@ -264,6 +264,28 @@ fn nested_typo_rejected_with_path() {
     );
 }
 
+#[test]
+fn rejecting_unknown_sandbox_key_still_rejects_but_accepts_escalation_fields() {
+    // Given: a sandbox section containing only the supported escalation fields.
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let accepted = load_project(
+        &tmp,
+        "[sandbox]\nescalation_approval = \"user\"\nescalate_to_user_on_deny = true\n",
+    )
+    .expect("エスカレーション設定は受理される");
+
+    // When: loading a sandbox section with a typo instead.
+    let rejected = load_project(&tmp, "[sandbox]\nescalation_aproval = \"user\"\n");
+
+    // Then: supported fields load and the unknown field is still rejected.
+    assert_eq!(
+        accepted.sandbox.escalation_approval,
+        config::EscalationApproval::User
+    );
+    assert!(accepted.sandbox.escalate_to_user_on_deny);
+    assert_error_contains(rejected, &["sandbox.escalation_aproval", "unknown field"]);
+}
+
 // Given: provider の未知の非秘密フィールド / When: 読み込む
 // Then: unknown field エラーとして拒否される
 #[test]

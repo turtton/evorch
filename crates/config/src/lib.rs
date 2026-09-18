@@ -33,13 +33,13 @@ pub use save_agents::save_agent_bindings;
 pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
 pub use save_routing::save_routing;
 pub use save_sandbox::save_sandbox;
-pub use types::SandboxConfig;
 pub use schema::json_schema;
 pub use types::OwnershipConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
-    Config, CredentialRefConfig, DiagnosticsConfig, GenerationOverridesConfig, MetadataSource,
-    MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig, PermissionConfig,
-    ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding, RoleBindingConfig,
-    RouteCandidateConfig, RoutingConfig, RulesConfig, SummarizerKind, WorkerBindingConfig,
+    Config, CredentialRefConfig, DiagnosticsConfig, EscalationApproval, GenerationOverridesConfig,
+    MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
+    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
+    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
+    SummarizerKind, WorkerBindingConfig,
 };

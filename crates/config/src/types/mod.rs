@@ -34,7 +34,7 @@ pub use provider::{
 };
 pub use routing::{RouteCandidateConfig, RoutingConfig};
 pub use rules::RulesConfig;
-pub use sandbox::SandboxConfig;
+pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use team::TeamConfig;
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
