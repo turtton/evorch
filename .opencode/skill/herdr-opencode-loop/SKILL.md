@@ -78,6 +78,11 @@ description: "herdr 経由で opencode ワーカーを駆動する跨ハーネ�
     -   `git log origin/main --oneline -1` が squash commit（`... (#<n>)`）と一致
     -   `git diff <base-sha>..origin/main --stat` に想定 diff が出る（`<base-sha>` は手順 2 で控えた base SHA）
 6.  ADR / backlog writeback は host 側で実施し、host repo へ commit/push する（host repo ポリシー: 変更前に `git pull --ff-only`、変更後は commit → push。workflow ラベル遷移は intent-cli 経由のみ）。
+7.  **作業資産を畳む**（closeout 完了の定義に含める）:
+    -   worktree 削除: `git worktree remove <path> --force`
+    -   ローカル branch 削除: `git branch -D <feature-branch> <worker-branch>`
+    -   リモート branch 削除: `git push origin --delete <worker-branch>`（PR 本体はsquash merge 済みで不要）
+    -   **herdr pane / workspace 削除**: `herdr pane list` で worker pane（`w2B` 等の委譲用 workspace の pane）を特定し、`herdr workspace close <id>`（workspace 単位）または `herdr pane close <pane_id>` で削除。**cleanup は pane 削除までをもって完了とする。これを飛ばすと worktree 削除後も pane が "(deleted)" cwd のまま残り、herdr の pane 一覧が stale になる**（2026-09-18、v07-durable-execution-substrate / PR #119 でユーザー指摘により運用として確定）。
 
 ### 4. sandbox 内で commit/push できない場合（bundle 運用）
 
@@ -191,6 +196,7 @@ Fix review comments in PR #2. In src/lib.rs, remove the unused import flagged by
 -    差し戻し時は `request-update` ラベル + 具体的な repair notes を必ず送信
 -    worker 停滞時は追加プロンプトで促し、直接手を出すのは最後の手段
 -    closeout 後は squash merge 対応の実マージ検証を実施
+-    作業資産の畳込みは **pane 削除まで**を完了とする（作業 worktree 削除・ローカル/リモート branch 削除・`herdr pane list` / `herdr workspace close` または `herdr pane close` で委譲用 pane を削除）
 
 ## 未検証事項・制約
 
