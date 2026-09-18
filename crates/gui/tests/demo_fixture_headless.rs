@@ -72,7 +72,7 @@ fn active_demo_thread_displays_root_message_and_tool() {
     assert!(
         workbench.has_label("Analysing t3code design language and mapping tokens to egui Visuals…")
     );
-    assert!(workbench.has_label("read_file"));
+    assert!(workbench.count_labels("read_file") >= 1);
 }
 
 #[test]

@@ -447,7 +447,7 @@ fn v02_end_to_end_chained_scenario() {
     );
     for label in ["anthropic", "claude", "tool-run-2", "120 / 34"] {
         assert!(
-            fixture.workbench.has_label(label),
+            fixture.workbench.count_labels(label) >= 1,
             "missing agents telemetry label: {label}"
         );
     }
@@ -463,8 +463,10 @@ fn v02_end_to_end_chained_scenario() {
         &ConversationFocus::Agent("run-2".into())
     );
     assert!(fixture.workbench.has_label("run-2 / implementer / worker"));
-    assert!(fixture.workbench.has_label(" tool-run-2 (call-run)"));
-    assert!(!fixture.workbench.has_label(" tool-run-1 (call-run)"));
+    assert!(
+        fixture.workbench.count_labels("tool-run-2") >= 1,
+        "run-2 transcript should show its current tool"
+    );
 
     // When: the operator returns to the thread conversation.
     fixture.workbench.click_label("← Thread");

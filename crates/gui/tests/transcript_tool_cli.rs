@@ -21,22 +21,22 @@ fn harness(tool: &str, input: serde_json::Value, output: &str) -> Harness<'stati
 }
 
 fn expand(harness: &mut Harness<'_>) {
-    harness.get_by_label_contains("(cli-test)").click();
+    harness.get_by_label_contains("✓ ").click();
     harness.run_steps(3);
 }
 
 #[test]
-fn tool_card_bash_keeps_command_in_expanded_input_only() {
+fn tool_card_bash_shows_command_inline_and_in_expanded_input() {
     // Given / When
     for tool in ["bash", "shell"] {
         let mut harness = harness(tool, serde_json::json!({"command": "git status"}), "");
         // Then
         assert!(
             harness
-                .query_by_label(&format!("> {tool} (cli-test)"))
+                .query_by_label(&format!("✓ {tool} git status"))
                 .is_some()
         );
-        assert!(harness.query_by_label_contains("git status").is_none());
+        assert!(harness.query_by_label_contains("cli-test").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("Input").is_some());
         assert!(harness.query_by_label("git status").is_some());
@@ -44,30 +44,30 @@ fn tool_card_bash_keeps_command_in_expanded_input_only() {
 }
 
 #[test]
-fn tool_card_read_keeps_path_in_expanded_input_only() {
+fn tool_card_read_shows_path_inline_and_in_expanded_input() {
     // Given / When
     for field in ["file_path", "path", "filePath", "file"] {
         let mut harness = harness("read", serde_json::json!({field: "src/main.rs"}), "");
         // Then
-        assert!(harness.query_by_label("> read (cli-test)").is_some());
-        assert!(harness.query_by_label_contains("src/main.rs").is_none());
+        assert!(harness.query_by_label("✓ read src/main.rs").is_some());
+        assert!(harness.query_by_label_contains("cli-test").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("src/main.rs").is_some());
     }
 }
 
 #[test]
-fn tool_card_write_and_edit_keep_path_in_expanded_input_only() {
+fn tool_card_write_and_edit_show_path_inline_and_in_expanded_input() {
     // Given / When
     for tool in ["write", "edit"] {
         let mut harness = harness(tool, serde_json::json!({"file": "test.txt"}), "");
         // Then
         assert!(
             harness
-                .query_by_label(&format!("> {tool} (cli-test)"))
+                .query_by_label(&format!("✓ {tool} test.txt"))
                 .is_some()
         );
-        assert!(harness.query_by_label_contains("test.txt").is_none());
+        assert!(harness.query_by_label_contains("cli-test").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("test.txt").is_some());
     }
@@ -123,7 +123,7 @@ fn tool_card_unknown_input_keeps_pretty_json() {
 }
 
 #[test]
-fn tool_card_collapsed_shows_compact_preview() {
+fn tool_card_collapsed_hides_all_output_until_expanded() {
     // Given / When
     let mut harness = harness(
         "bash",
@@ -134,11 +134,51 @@ fn tool_card_collapsed_shows_compact_preview() {
     assert!(
         harness
             .query_by_label("one\ntwo\nthree\nfour\nfive")
-            .is_some()
+            .is_none()
     );
     assert!(harness.query_by_label_contains("six").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("expand for full output")
+            .is_none()
+    );
     expand(&mut harness);
     assert!(harness.query_by_label_contains("six\nseven").is_some());
+}
+
+#[test]
+fn tool_card_summary_is_single_line_and_unicode_bounded() {
+    // Given / When
+    let command = format!("echo\n\t{}", "界".repeat(130));
+    let harness = harness("bash", serde_json::json!({"command": command}), "hidden");
+    // Then
+    let expected = format!("✓ bash echo {}…", "界".repeat(115));
+    assert!(harness.query_by_label(&expected).is_some());
+    let text = harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            Shape::Text(text) if text.galley.text() == expected => Some(text),
+            _ => None,
+        })
+        .expect("painted compact header");
+    assert_eq!(text.galley.rows.len(), 1);
+    assert!(harness.query_by_label("hidden").is_none());
+}
+
+#[test]
+fn tool_card_omits_empty_or_unfocused_summary() {
+    // Given / When
+    for (tool, input) in [
+        ("bash", serde_json::json!({"command": " \n\t"})),
+        ("read", serde_json::json!({})),
+        ("custom", serde_json::json!({"command": "not focused"})),
+    ] {
+        let harness = harness(tool, input, "");
+        // Then
+        assert!(harness.query_by_label(&format!("✓ {tool}")).is_some());
+    }
 }
 
 #[test]

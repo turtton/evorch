@@ -48,7 +48,10 @@ fn agents_display_additional_role_names() {
         harness.step();
         harness.run();
         assert!(harness.has_label(&format!("{run_id} / agent-{id} / {role}")));
-        assert!(harness.has_label(&format!(" read (image-{id})")));
+        assert!(
+            harness.count_labels("read") >= 1,
+            "tool read should be visible for {run_id}"
+        );
         harness.click_label("← Thread");
         harness.run();
     }

@@ -33,7 +33,7 @@ fn harness(is_error: bool) -> Harness<'static> {
 }
 
 fn expand<State>(harness: &mut Harness<'_, State>) {
-    harness.get_by_label_contains("bash (abcdefgh)").click();
+    harness.get_by_label_contains("bash find missing").click();
     harness.run_steps(3);
 }
 
@@ -54,13 +54,14 @@ fn tool_card_collapsed_hides_sections() {
     // Given / When
     let harness = harness(false);
     // Then
-    assert!(harness.query_by_label_contains("bash (abcdefgh)").is_some());
+    assert!(harness.query_by_label("✓ bash find missing").is_some());
+    assert!(harness.query_by_label_contains("abcdefgh").is_none());
     assert!(harness.query_by_label_contains("OK").is_none());
     assert!(harness.query_by_label_contains("ERROR").is_none());
-    assert!(harness.query_by_label_contains("find missing").is_none());
+    assert!(harness.query_by_label("find missing").is_none());
     assert!(harness.query_by_label("Input").is_none());
     assert!(harness.query_by_label("Output").is_none());
-    assert!(harness.query_by_label_contains("**literal**").is_some());
+    assert!(harness.query_by_label_contains("**literal**").is_none());
 }
 
 #[test]
@@ -83,7 +84,7 @@ fn tool_card_error_status_shows_error_label_and_red_output() {
     // When
     expand(&mut harness);
     // Then
-    assert!(harness.query_by_label_contains("bash (abcdefgh)").is_some());
+    assert!(harness.query_by_label("✗ bash find missing").is_some());
     assert!(harness.query_by_label_contains("ERROR").is_none());
     assert!(harness.query_by_label("Error").is_some());
     assert!(
@@ -103,7 +104,7 @@ fn tool_card_toggle_click_changes_expanded_state() {
     expand(&mut harness);
     assert!(harness.query_by_label("Output").is_some());
     // When
-    harness.get_by_label_contains("bash (abcdefgh)").click();
+    harness.get_by_label("✓ bash find missing").click();
     harness.run_steps(3);
     // Then
     assert!(harness.query_by_label("Output").is_none());

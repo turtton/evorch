@@ -56,7 +56,7 @@ fn tool_card_pending_shows_spinner_and_no_output() {
     model.apply(&started());
     let mut harness = harness(model);
     // When: attempting to expand a running card.
-    harness.get_by_label_contains("(pending)").click();
+    harness.get_by_label("read .").click();
     harness.run_steps(3);
     // Then: only the header and an inline spinner are shown.
     assert!(harness.query_by_label("Input").is_none());
@@ -67,7 +67,7 @@ fn tool_card_pending_shows_spinner_and_no_output() {
         .shapes
         .iter()
         .find_map(|shape| match &shape.shape {
-            Shape::Text(text) if text.galley.text().contains("(pending)") => Some(text),
+            Shape::Text(text) if text.galley.text() == "read ." => Some(text),
             _ => None,
         })
         .expect("painted header");
@@ -82,7 +82,8 @@ fn tool_card_pending_is_visible_when_collapsed() {
     registry.apply(&started());
     let harness = harness(registry.thread().clone());
     // Then: the default collapsed view exposes the work immediately.
-    assert!(harness.query_by_label(" read (pending)").is_some());
+    assert!(harness.query_by_label("read .").is_some());
+    assert!(harness.query_by_label_contains("pending").is_none());
     assert!(harness.query_by_label("Input").is_none());
     assert!(spinner_rect(&harness).is_some());
     assert!(harness.query_by_label("Output").is_none());
@@ -90,7 +91,8 @@ fn tool_card_pending_is_visible_when_collapsed() {
     assert_eq!(registry.thread().entries().len(), 1);
     let harness = self::harness(registry.thread().clone());
     assert!(spinner_rect(&harness).is_none());
-    assert!(harness.query_by_label("file contents").is_some());
+    assert!(harness.query_by_label("file contents").is_none());
+    assert!(harness.query_by_label("✓ read .").is_some());
 }
 
 #[test]
@@ -101,10 +103,10 @@ fn read_tool_input_shows_path_not_json() {
     model.apply(&completed());
     let mut harness = harness(model);
     // When: expanding its details.
-    harness.get_by_label_contains("(pending)").click();
+    harness.get_by_label("✓ read .").click();
     harness.run_steps(3);
-    // Then: the compact title stays input-free; Input uses the path, not JSON.
-    assert!(harness.query_by_label("v read (pending)").is_some());
+    // Then: both the title and Input use the path, not JSON.
+    assert!(harness.query_by_label("✓ read .").is_some());
     assert!(harness.query_by_label("Input").is_some());
     assert!(harness.query_by_label(".").is_some());
     assert!(harness.query_by_label_contains("\"file\"").is_none());
@@ -120,11 +122,42 @@ fn tool_completed_stops_spinner_and_reveals_result_in_place() {
     // When: completion arrives on a later frame.
     harness.state_mut().apply(&completed());
     harness.run_steps(3);
-    // Then: the existing card stops animating and previews its result.
+    // Then: the existing card stops animating without revealing output.
     assert_eq!(harness.state().entries().len(), 1);
     assert!(spinner_rect(&harness).is_none());
-    assert!(harness.query_by_label("> read (pending)").is_some());
-    assert!(harness.query_by_label("file contents").is_some());
+    assert!(harness.query_by_label("✓ read .").is_some());
+    assert!(harness.query_by_label("file contents").is_none());
+}
+
+#[test]
+fn approval_states_expose_status_without_output_until_expanded() {
+    use gui::model::transcript::ToolStatus;
+    // Given
+    for (status, label) in [
+        (ToolStatus::AwaitingApproval, "? read"),
+        (ToolStatus::Approved, "✓ read"),
+        (
+            ToolStatus::Denied {
+                reason: "not permitted".into(),
+            },
+            "✗ read",
+        ),
+    ] {
+        let mut model = TranscriptModel::new();
+        model.push_tool("read", "approval-call", status);
+        let mut harness = harness(model);
+        assert!(harness.query_by_label(label).is_some());
+        assert!(harness.query_by_label_contains("approval-call").is_none());
+        assert!(harness.query_by_label("not permitted").is_none());
+        // When
+        harness.get_by_label(label).click();
+        harness.run_steps(3);
+        // Then
+        assert_eq!(
+            harness.query_by_label("not permitted").is_some(),
+            label == "✗ read"
+        );
+    }
 }
 
 #[test]
@@ -154,7 +187,7 @@ fn capture_tool_pending_states_when_evidence_directory_is_set() {
         .expect("render completed")
         .save(directory.join("completed.png"))
         .expect("save completed");
-    harness.get_by_label_contains("(pending)").click();
+    harness.get_by_label("✓ read .").click();
     harness.run_steps(3);
     harness
         .render()

@@ -35,16 +35,35 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     } else {
         status_color
     };
-    let short_id: String = call_id.chars().take(8).collect();
+    let summary = input
+        .as_ref()
+        .and_then(|input| focused_input(tool_name, input))
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut summary_chars = summary.chars();
+    let mut compact_summary: String = summary_chars.by_ref().take(120).collect();
+    if summary_chars.next().is_some() {
+        compact_summary.push('…');
+    }
+    let icon = match status {
+        ToolStatus::Running => "",
+        ToolStatus::Succeeded | ToolStatus::Approved => "✓ ",
+        ToolStatus::Failed | ToolStatus::Denied { .. } => "✗ ",
+        ToolStatus::AwaitingApproval => "? ",
+    };
+    let mut header = format!("{icon}{tool_name}");
+    if !compact_summary.is_empty() {
+        header.push(' ');
+        header.push_str(&compact_summary);
+    }
+    let tooltip = if summary.is_empty() {
+        call_id.clone()
+    } else {
+        format!("{call_id}\n{summary}")
+    };
     surface_frame(palette().SURFACE).show(ui, |ui| {
-        let arrow = if running {
-            ""
-        } else if expanded {
-            "v"
-        } else {
-            ">"
-        };
-        let header = format!("{arrow} {tool_name} ({short_id})");
         let response = ui.horizontal(|ui| {
             if running {
                 ui.add(
@@ -57,9 +76,10 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
                 !running,
                 egui::Button::new(RichText::new(header).color(color))
                     .frame(false)
-                    .wrap(),
+                    .truncate(),
             )
-            .on_hover_text(call_id)
+            .on_hover_text(&tooltip)
+            .on_disabled_hover_text(&tooltip)
         });
         if running {
             return;
@@ -102,23 +122,6 @@ pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
             }
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, palette().ERROR_FG);
-            }
-        } else if let Some(output) = output {
-            let output = display_output(tool_name, output);
-            let preview = output.lines().take(5).collect::<Vec<_>>().join("\n");
-            if !preview.is_empty() {
-                code(
-                    ui,
-                    &preview,
-                    if *is_error {
-                        palette().ERROR_FG
-                    } else {
-                        palette().TEXT
-                    },
-                );
-            }
-            if output.lines().nth(5).is_some() {
-                ui.label("... expand for full output");
             }
         }
     });
