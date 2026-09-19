@@ -6,12 +6,29 @@ const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 
 impl LoopState {
     pub(super) fn flush_aside(&mut self) -> bool {
+        let mut received = false;
+        while let Ok((text, images)) = self.channels.inbox_rx.try_recv() {
+            self.context.push_user(&text);
+            if let Some(message) = self.context.messages.last_mut() {
+                message.content.extend(images.into_iter().map(|image| {
+                    providers::ContentBlock::Image {
+                        media_type: image.media_type,
+                        data: image.data,
+                    }
+                }));
+            }
+            received = true;
+        }
+        if received {
+            self.publish_message_count();
+            self.resumed = true;
+        }
         if self.task.mailbox.is_empty() {
-            return false;
+            return received;
         }
         let messages = self.task.mailbox.drain_where(|_| true);
         if messages.is_empty() {
-            return false;
+            return received;
         }
         self.inject_messages(messages);
         // Aside は turn 境界で新しい入力となり、次の clean Stop で完了する。

@@ -62,6 +62,7 @@ pub struct RuntimeCommandSink {
     accepted_goals: u64,
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
+    goal_runs: BTreeMap<String, RunId>,
     chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     events_tx: std::sync::mpsc::Sender<LoopEvent>,
@@ -100,6 +101,7 @@ impl RuntimeCommandSink {
             accepted_goals: 0,
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
+            goal_runs: BTreeMap::new(),
             chat_permits: BTreeMap::new(),
             ownership: None,
             events_tx,
@@ -354,12 +356,13 @@ impl RuntimeCommandSink {
                     .memory_config
                     .as_ref()
                     .map(|config| config.db_path.clone());
+                let root_run = runtime.reserve_run_id();
+                self.goal_runs.insert(thread_id.clone(), root_run);
                 self.handle.spawn(async move {
                     let decision = runtime.entry_router().classify(&goal_for_log).await;
                     // issue #83: root run の起動より先に goal を登録する。
                     // 先に起動すると root の delegate / finish 評価が goal 未登録の
                     // ledger に到達しうるため、reserved id で順序を組む。
-                    let root_run = runtime.reserve_run_id();
                     supervisor.create_goal(spec, root_run);
                     runtime.spawn_reserved(
                         root_run,
@@ -416,6 +419,31 @@ impl RuntimeCommandSink {
             }
             WorkbenchCommand::SendChat(submission) => {
                 let thread_id = submission.thread_id;
+                if let Some(&run_id) = self.goal_runs.get(&thread_id) {
+                    let _guard = self.handle.enter();
+                    return match self.runtime.continue_goal(
+                        run_id,
+                        submission.text,
+                        RunConfig {
+                            ownership: permit,
+                            images: submission.images,
+                            model_preference: submission.model_preference,
+                            ..RunConfig::default()
+                        },
+                    ) {
+                        Ok(run_id) => {
+                            self.chat_runs.insert(thread_id.clone(), run_id);
+                            vec![LoopEvent::ChatAccepted {
+                                thread_id,
+                                run_id: run_id.to_string(),
+                            }]
+                        }
+                        Err(error) => vec![LoopEvent::ChatRejected {
+                            thread_id,
+                            reason: error.to_string(),
+                        }],
+                    };
+                }
                 if let Some(permit) = &permit {
                     if self.chat_permits.get(&thread_id).is_some_and(|previous| {
                         previous.registry_path != permit.registry_path
