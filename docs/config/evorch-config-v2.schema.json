@@ -475,11 +475,19 @@
       "additionalProperties": false
     },
     "EscalationApproval": {
-      "type": "string",
-      "enum": [
-        "auto",
-        "user",
-        "off"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "user",
+            "off"
+          ]
+        },
+        {
+          "description": "`quick` is a load-time migration alias only; the generated schema intentionally\nlists only `auto`, `user`, and `off`. Runtime compatibility is not schema compatibility.",
+          "type": "string",
+          "const": "auto"
+        }
       ]
     },
     "GenerationOverridesConfig": {
