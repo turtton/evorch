@@ -1,6 +1,7 @@
 //! 設定ファイルのルート構造と各セクション型の再エクスポートを行います。
 
 pub mod agents;
+pub mod budget;
 pub mod compaction;
 pub mod misc;
 pub mod model_preset;
@@ -22,6 +23,7 @@ pub use agents::{
     AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, ResolvedAgentBinding,
     RoleBindingConfig, WorkerBindingConfig,
 };
+pub use budget::BudgetConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
 pub use model_preset::ModelPresetConfig;
@@ -70,6 +72,8 @@ pub struct Config {
     pub rules: RulesConfig,
     /// コンテキスト圧縮設定。
     pub compaction: CompactionConfig,
+    /// run ごとのツール実行予算。
+    pub budget: BudgetConfig,
     /// オーケストレーションループ設定。
     pub orchestration: OrchestrationConfig,
     pub ownership: OwnershipConfig,
@@ -91,6 +95,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             rules: RulesConfig::default(),
             compaction: CompactionConfig::default(),
+            budget: BudgetConfig::default(),
             orchestration: OrchestrationConfig::default(),
             ownership: OwnershipConfig::default(),
             team: TeamConfig::default(),

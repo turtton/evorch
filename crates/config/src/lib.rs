@@ -36,6 +36,7 @@ pub use save_codex::{
 pub use save_routing::save_routing;
 pub use save_sandbox::save_sandbox;
 pub use schema::json_schema;
+pub use types::BudgetConfig;
 pub use types::OwnershipConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,

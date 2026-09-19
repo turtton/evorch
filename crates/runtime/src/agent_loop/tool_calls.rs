@@ -128,7 +128,17 @@ mod rework_tests {
         }
         let model = Arc::new(ScriptedModel::new([batch]));
         let runtime = AgentRuntime::new(bus, Arc::new(executor), model);
-        let run = runtime.delegate_background(Role::Worker, "cancel".into(), RunConfig::default());
+        let run = runtime.delegate_background(
+            Role::Worker,
+            "cancel".into(),
+            RunConfig {
+                budget: crate::budget_tracker::BudgetSettings {
+                    max_identical_tool_call_repeats: 257,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
         loop {
             if matches!(
                 events.recv().await.expect("event").kind,

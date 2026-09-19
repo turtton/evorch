@@ -158,6 +158,7 @@ pub mod diagnostic_codes {
     pub const BUDGET_EXHAUSTED: &str = "BudgetExhausted";
     /// Execution stopped making progress.
     pub const NO_PROGRESS: &str = "NoProgress";
+    pub const IDENTICAL_TOOL_CALLS: &str = "IdenticalToolCalls";
     /// No verified provider is available for execution.
     pub const PROVIDER_UNAVAILABLE: &str = "ProviderUnavailable";
 }

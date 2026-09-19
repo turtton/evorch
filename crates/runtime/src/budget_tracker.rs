@@ -24,6 +24,7 @@ pub struct BudgetSettings {
     /// Reads after the first read of the same path.
     pub max_file_rereads: u32,
     pub max_no_progress_rounds: u32,
+    pub max_identical_tool_call_repeats: u32,
 }
 
 impl Default for BudgetSettings {
@@ -34,6 +35,19 @@ impl Default for BudgetSettings {
             max_tokens: 2_000_000,
             max_file_rereads: 20,
             max_no_progress_rounds: 20,
+            max_identical_tool_call_repeats: 5,
+        }
+    }
+}
+
+impl From<&config::BudgetConfig> for BudgetSettings {
+    fn from(config: &config::BudgetConfig) -> Self {
+        Self {
+            max_tool_calls: config.max_tool_calls,
+            max_no_progress_rounds: config.max_no_progress_rounds,
+            max_file_rereads: config.max_file_rereads,
+            max_identical_tool_call_repeats: config.max_identical_tool_call_repeats,
+            ..Self::default()
         }
     }
 }

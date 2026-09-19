@@ -18,6 +18,7 @@ const ROOT_KEYS: &[&str] = &[
     "agents",
     "rules",
     "compaction",
+    "budget",
     "orchestration",
     "ownership",
     "team",
@@ -151,6 +152,16 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "metrics", METRICS_KEYS)?;
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
+    validate_section(
+        root,
+        "budget",
+        &[
+            "max_tool_calls",
+            "max_no_progress_rounds",
+            "max_file_rereads",
+            "max_identical_tool_call_repeats",
+        ],
+    )?;
     validate_section(root, "ownership", &["heartbeat_ms", "lease_ms", "grace_ms"])?;
     validate_section(root, "team", &["enabled", "max_workers"])?;
     validate_section(

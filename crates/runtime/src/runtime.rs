@@ -65,6 +65,7 @@ pub(crate) struct Shared {
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
+    budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
     pub(crate) sandbox_allow_network: AtomicBool,
@@ -242,6 +243,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
@@ -286,6 +288,7 @@ impl AgentRuntime {
     }
 
     pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
+        let _ = self.shared.budget.set((&config.budget).into());
         self.set_sandbox_network(config.sandbox.allow_network);
         self.set_sandbox_escalation(
             config.sandbox.escalation_approval,
@@ -467,6 +470,7 @@ impl AgentRuntime {
                 skills: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
+                budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
@@ -667,6 +671,11 @@ impl AgentRuntime {
             RunContinuation::Handoff(handoff) => (Some(handoff), None),
             RunContinuation::Restored(restored) => (None, Some(restored)),
         };
+        if config.budget == crate::budget_tracker::BudgetSettings::default()
+            && let Some(budget) = self.shared.budget.get()
+        {
+            config.budget = budget.clone();
+        }
         if let Some(parent) = parent {
             if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
                 config.topology = entry.config.topology;

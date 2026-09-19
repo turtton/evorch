@@ -5,6 +5,7 @@
 
 mod budget;
 mod durable;
+mod identical_calls;
 mod messages;
 mod snapshots;
 mod team;
@@ -100,6 +101,7 @@ pub(crate) struct LoopState {
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     budget: crate::budget_tracker::BudgetCounters,
+    identical_calls: identical_calls::IdenticalCalls,
     durable_task: Option<storage::entity::TaskContinuation>,
 }
 
@@ -185,6 +187,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
+        identical_calls: identical_calls::IdenticalCalls::default(),
         durable_task: None,
     };
     if state.task.config.workspace_mode == WorkspaceMode::Shared
@@ -746,6 +749,9 @@ impl LoopState {
                 })
                 .collect();
             let has_tool_uses = !tool_uses.is_empty();
+            if !self.guard_identical_calls(&tool_uses) {
+                return;
+            }
             if let Some(permit) = &self.task.config.ownership
                 && let Err(error) = permit.validate_mutation()
             {

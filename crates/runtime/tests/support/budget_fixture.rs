@@ -81,6 +81,8 @@ pub(super) async fn run_calls_in_batches(
     mut config: RunConfig,
     batch: bool,
 ) -> Vec<Event> {
+    // Isolate budget/checkpoint contracts from the independent identical-call guard.
+    config.budget.max_identical_tool_call_repeats = count.saturating_add(1);
     // durable 境界イベントは task 識別子を持たない run では発行されないため、
     // checkpoint を観測する fixture には明示的な identity を持たせる。
     if config.task_id.is_none() && config.team_task.is_none() {
