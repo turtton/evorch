@@ -6,7 +6,6 @@ use event_bus::{EventBus, EventKind, EventReceiver, LifecycleEvent, RoutingSourc
 use gui::app::WorkbenchState;
 use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
-use gui::model::tasks::TaskRow;
 use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{
@@ -64,7 +63,6 @@ struct Fixture {
     runtime: tokio::runtime::Runtime,
     _temp_dir: tempfile::TempDir,
     bus: Arc<EventBus>,
-    repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
 }
 
@@ -102,12 +100,14 @@ impl Fixture {
                 supervisor,
             )));
         let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
+        // Agents タブはサブエージェントのみ表示に変わったため、ルート run の
+        // 行待機は行わずイベント駆動の repaint 通知も不要になった。
+        drop(repaint_rx);
         harness.run();
         Self {
             runtime: rt,
             _temp_dir: temp_dir,
             bus,
-            repaint_rx,
             harness,
         }
     }
@@ -118,32 +118,6 @@ fn submit_goal(fixture: &mut Fixture, goal: &str) {
     fixture.harness.run();
     fixture.harness.click_label("Send");
     fixture.harness.run();
-}
-
-/// Runs frames until a task row matching the predicate appears, or panics with
-/// the current row dump after the 5s deadline.
-fn wait_for_row_matching(
-    fixture: &mut Fixture,
-    predicate: impl Fn(&TaskRow) -> bool,
-    description: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !fixture
-        .harness
-        .state()
-        .tasks()
-        .rows()
-        .iter()
-        .any(&predicate)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "{description} did not appear within 5s: {:?}",
-            fixture.harness.state().tasks().rows()
-        );
-        let _ = fixture.repaint_rx.recv_timeout(Duration::from_millis(200));
-        fixture.harness.run();
-    }
 }
 
 /// Skips unrelated events until the RoutingDecision lifecycle event arrives and
