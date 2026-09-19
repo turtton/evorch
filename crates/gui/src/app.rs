@@ -16,6 +16,7 @@ mod sandbox_settings;
 mod state;
 mod tab_viewer;
 mod theme_settings;
+mod thread_archive;
 mod viewer;
 
 pub use attention::ack::{AttentionAck, DisplayRevision};

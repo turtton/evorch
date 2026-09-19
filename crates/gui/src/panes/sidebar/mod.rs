@@ -28,6 +28,7 @@ pub enum SidebarAction {
     ForkThread(ThreadId),
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
+    ToggleArchive(ThreadId),
     TogglePause(ThreadId),
     SetTrust { path: PathBuf, trust: TrustState },
 }

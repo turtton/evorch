@@ -111,6 +111,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
+                SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
                 SidebarAction::TogglePause(thread_id) => self.toggle_pause(thread_id),
                 SidebarAction::SetTrust { path, trust } => self.set_allowed_trust(path, trust),
             };

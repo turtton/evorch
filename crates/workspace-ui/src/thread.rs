@@ -57,6 +57,10 @@ pub struct ThreadRecord {
     pub project_id: ProjectId,
     pub title: String,
     pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub created_at: i64,
     pub paused: bool,
     pub run_ids: Vec<String>,
     pub branch: Option<String>,
@@ -76,6 +80,11 @@ impl ThreadRecord {
             project_id,
             title: title.into(),
             pinned: false,
+            archived: false,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+                .unwrap_or_default(),
             paused: false,
             run_ids: Vec::new(),
             branch: None,
@@ -84,6 +93,31 @@ impl ThreadRecord {
             parent_thread_id: None,
             fork_event_id: None,
         }
+    }
+
+    pub fn partition_for_project<'a>(
+        threads: &'a [Self],
+        project: &ProjectId,
+    ) -> (Vec<&'a Self>, Vec<&'a Self>) {
+        let (mut archived, mut main): (Vec<_>, Vec<_>) = threads
+            .iter()
+            .filter(|thread| &thread.project_id == project)
+            .partition(|thread| thread.archived);
+        let newest_first = |left: &&Self, right: &&Self| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.title.cmp(&right.title))
+                .then_with(|| left.id.cmp(&right.id))
+        };
+        main.sort_by(|left, right| {
+            right
+                .pinned
+                .cmp(&left.pinned)
+                .then_with(|| newest_first(left, right))
+        });
+        archived.sort_by(newest_first);
+        (main, archived)
     }
 
     pub fn state(&self, phases: &BTreeMap<String, ThreadRunPhase>) -> ThreadState {

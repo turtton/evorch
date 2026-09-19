@@ -106,7 +106,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             source,
             self.sidebar.threads.len() + 1
         ));
-        let mut fork = original;
+        let mut fork = workspace_ui::ThreadRecord {
+            pinned: original.pinned,
+            paused: original.paused,
+            model_preference: original.model_preference,
+            ..workspace_ui::ThreadRecord::new(id.clone(), original.project_id, original.title)
+        };
         fork.id = id.clone();
         fork.title = format!("{} (fork)", fork.title);
         fork.parent_thread_id = Some(source);
