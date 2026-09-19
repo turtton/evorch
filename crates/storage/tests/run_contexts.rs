@@ -80,3 +80,39 @@ fn suspended_writer_rejects_context_upsert() {
         None
     );
 }
+
+#[test]
+fn snapshot_secret_diagnostics_omit_values_and_decode_json_escapes() {
+    // Given: escaped provider reasoning and checkpoint text containing a key.
+    let temp = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: temp.path().join("contexts.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+    for checkpoint in [false, true] {
+        let mut snapshot = record();
+        let payload = format!(r#"[{{"text":"{}"}}]"#, secret.replace('s', "\\u0073"));
+        if checkpoint {
+            snapshot.checkpoints_json = payload;
+        } else {
+            snapshot.messages_json = payload;
+        }
+        // When: the public writer receives the snapshot.
+        let error = storage.handle().upsert_run_context(&snapshot).unwrap_err();
+        // Then: a typed secret rejection reveals no offending value and persists nothing.
+        assert!(matches!(
+            error,
+            storage::StorageError::SecretDetected { .. }
+        ));
+        assert!(!format!("{error:?} {error}").contains(secret));
+        assert!(
+            Database::open(&config)
+                .unwrap()
+                .run_context("run")
+                .unwrap()
+                .is_none()
+        );
+    }
+}

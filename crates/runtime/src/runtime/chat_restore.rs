@@ -2,6 +2,9 @@ use super::*;
 use crate::RunRestoreFailure;
 use crate::restore::{RestoredState, RunRestoreDescriptor};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) enum RunContinuation {
     Fresh,
     Handoff(RunHandoff),
@@ -27,9 +30,9 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
-        let (role, mut config, phase) = {
+        let (role, phase) = {
             let entry = self.entry(run_id)?;
-            (entry.role, entry.config.clone(), *entry.phase_rx.borrow())
+            (entry.role, *entry.phase_rx.borrow())
         };
         match phase {
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
@@ -43,16 +46,58 @@ impl AgentRuntime {
         if store.snapshot_failed(run_id) {
             return Err(fail(RunRestoreFailure::MissingContext));
         }
-        let record = store
+        let mut record = store
             .restore_record(run_id)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
+        let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
+            .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+        if !record.restorable || !descriptor.restorable {
+            return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                descriptor
+                    .non_restorable_reason
+                    .unwrap_or_else(|| "実行設定".into()),
+            )));
+        }
+        if descriptor.role != role.name()
+            || record.role != descriptor.role
+            || descriptor.parent_run_id.is_some()
+            || record.parent_run_id.is_some()
+        {
+            return Err(fail(RunRestoreFailure::CorruptContext(
+                "goal identity".into(),
+            )));
+        }
         let restored = RestoredState::from_record(&record)?;
-        config.ownership = authority.ownership;
-        config.images = authority.images;
-        config.model_preference = authority.model_preference;
-        config.interactive = true;
-        config.keep_alive = true;
+        descriptor.restorable = false;
+        descriptor.non_restorable_reason = Some("snapshot_consumed".into());
+        record.restorable = false;
+        record.config_json = serde_json::to_string(&descriptor)
+            .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+        store
+            .handle
+            .upsert_run_context(&record)
+            .map_err(|error| fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string())))?;
+        let restored_by = authority
+            .ownership
+            .as_ref()
+            .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone());
+        let config = RunConfig {
+            name: descriptor.name,
+            interactive: true,
+            keep_alive: true,
+            ..authority
+        };
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::AgentRunRestored {
+                run_id: run_id.to_string(),
+                restored_by,
+                message_id: format!(
+                    "msg-{}",
+                    self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
+                ),
+            }));
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

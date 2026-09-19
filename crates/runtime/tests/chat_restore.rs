@@ -1,5 +1,8 @@
 mod support;
 
+#[path = "chat_restore/secrets.rs"]
+mod secrets;
+
 use event_bus::{AgentRunPhase, EventBus};
 use providers::{ContentBlock, FinishReason, Message};
 use runtime::{AgentRuntime, Role, RunConfig, RunStore};

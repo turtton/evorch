@@ -3,6 +3,16 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{RunContextRecord, StorageError};
 
 pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), StorageError> {
+    let guard = crate::entity::SecretGuard::from_env();
+    for (field, json) in [
+        ("messages_json", &record.messages_json),
+        ("checkpoints_json", &record.checkpoints_json),
+    ] {
+        match serde_json::from_str(json) {
+            Ok(value) => check_strings(&guard, field, &value)?,
+            Err(_) => guard.check_text("run_context", field, json)?,
+        }
+    }
     conn.execute(
         "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
          checkpoints_json, terminal_phase, restorable, updated_at_ns) \
@@ -26,6 +36,31 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
         ],
     )?;
     Ok(())
+}
+
+fn check_strings(
+    guard: &crate::entity::SecretGuard,
+    field: &'static str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
+    match value {
+        serde_json::Value::String(text) => guard.check_text("run_context", field, text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                check_strings(guard, field, value)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                check_strings(guard, field, value)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
 }
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {

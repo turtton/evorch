@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum EscalationApproval {
+    /// `quick` is a load-time migration alias only; the generated schema intentionally
+    /// lists only `auto`, `user`, and `off`. Runtime compatibility is not schema compatibility.
     #[default]
     #[serde(alias = "quick")]
     Auto,

@@ -17,6 +17,9 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 mod goal_capture_model;
 use goal_capture_model::CaptureModel;
 
+#[path = "support/goal_restore_contract.rs"]
+mod goal_restore_contract;
+
 struct Fixture {
     state: WorkbenchState<DemoSource>,
     sink: RuntimeCommandSink,
