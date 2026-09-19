@@ -37,6 +37,16 @@
         }
       }
     },
+    "budget": {
+      "description": "run ごとのツール実行予算。",
+      "$ref": "#/$defs/BudgetConfig",
+      "default": {
+        "max_file_rereads": 20,
+        "max_identical_tool_call_repeats": 5,
+        "max_no_progress_rounds": 20,
+        "max_tool_calls": 400
+      }
+    },
     "compaction": {
       "description": "コンテキスト圧縮設定。",
       "$ref": "#/$defs/CompactionConfig",
@@ -269,6 +279,41 @@
           "const": "openai-codex-responses"
         }
       ]
+    },
+    "BudgetConfig": {
+      "description": "ツール実行と停滞検出の上限。",
+      "type": "object",
+      "properties": {
+        "max_file_rereads": {
+          "description": "同じファイルの初回以降の再読込の許容回数 (既定: 20)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "max_identical_tool_call_repeats": {
+          "description": "同一の名前・引数の連続呼び出しがこの回数に達すると停止 (既定: 5)。\nID は比較対象外。0 でも最初の呼び出しで停止する。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "max_no_progress_rounds": {
+          "description": "ファイル変更のないラウンドの許容回数 (既定: 20)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "description": "1 run あたりのツール実行回数の上限 (既定: 400)。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 400,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "CategoryBindingConfig": {
       "description": "カテゴリ 1 件分のバインディング設定。",
