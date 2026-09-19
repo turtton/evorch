@@ -60,6 +60,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) picker_state: &'a mut crate::model::model_picker::ModelPickerState,
     pub(super) preference_action: &'a mut Option<Option<workspace_ui::ModelPreference>>,
     pub(super) repo_root: Option<&'a Path>,
+    pub(super) sandbox_picker: crate::panes::composer::SandboxPickerContext,
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
@@ -104,6 +105,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .as_ref()
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
         let ctx = ConversationContext {
+            sandbox_picker: self.sandbox_picker,
             task_rows: self.tasks.rows(),
             phase_unread: self
                 .attention_acks

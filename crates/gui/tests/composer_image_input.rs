@@ -39,6 +39,7 @@ fn paste_and_drop_render_real_thumbnails_without_pasting_base64_into_text() {
                     },
                     &mut ModelPickerState::default(),
                     None,
+                    Default::default(),
                 );
             },
             ComposerModel {

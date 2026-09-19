@@ -369,10 +369,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => &mut self.codex_auth,
         }
     }
-    pub fn with_provider_settings_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.provider_settings_path = Some(path.into());
-        self
-    }
     pub const fn provider_settings(&self) -> &ProviderSettingsModel {
         &self.provider_settings
     }

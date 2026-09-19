@@ -140,22 +140,25 @@ fn sandbox_settings_persist_escalation_approval_fields_when_saved() {
     // Given: defaults on disk and the real settings modal.
     let dir = tempfile::tempdir().expect("temp");
     let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
-    // When: selecting every approval mode and saving the fallback setting.
+    // When: saving the fallback setting, then selecting modes in the composer.
     harness.click_label("審査で拒否された場合はユーザー承認へ昇格");
     harness.run();
+    harness.click_label("Save sandbox");
+    harness.run();
+    harness.click_label("Cancel");
+    harness.run();
+    let mut current = "quick";
     for (label, mode, serialized) in [
-        ("ユーザー承認", config::EscalationApproval::User, "user"),
-        ("無効", config::EscalationApproval::Off, "off"),
-        (
-            "quick モデル審査 (既定)",
-            config::EscalationApproval::Quick,
-            "quick",
-        ),
+        ("user", config::EscalationApproval::User, "user"),
+        ("off", config::EscalationApproval::Off, "off"),
+        ("quick", config::EscalationApproval::Quick, "quick"),
     ] {
+        harness.click_label(&format!("Sandbox: {current}"));
+        harness.run();
         harness.click_label(label);
         harness.run();
-        harness.click_label("Save sandbox");
-        harness.run();
+        current = serialized;
+        assert!(harness.has_label(&format!("Sandbox: {current}")));
         // Then: both explicit keys and typed values survive reloading.
         let saved = reload_sandbox(dir.path());
         assert_eq!(saved.escalation_approval, mode);
@@ -178,11 +181,15 @@ fn sandbox_settings_apply_live_updates_runtime_escalation_when_saved() {
     let dir = tempfile::tempdir().expect("temp");
     let (mut harness, runtime) = escalation_fixture(dir.path(), config::SandboxConfig::default());
     // When: applying a non-default approval mode and fallback.
-    harness.click_label("ユーザー承認");
-    harness.run();
     harness.click_label("審査で拒否された場合はユーザー承認へ昇格");
     harness.run();
     harness.click_label("Save sandbox");
+    harness.run();
+    harness.click_label("Cancel");
+    harness.run();
+    harness.click_label("Sandbox: quick");
+    harness.run();
+    harness.click_label("user");
     harness.run();
     // Then: the same runtime exposes both updated settings immediately.
     let policy = runtime.execution_policy(runtime::Role::Worker);
@@ -200,9 +207,7 @@ fn sandbox_settings_cancel_keeps_escalation_unchanged_when_reopened() {
         ..Default::default()
     };
     let (mut harness, runtime) = escalation_fixture(dir.path(), initial);
-    // When: editing both fields, cancelling, then reopening and saving untouched.
-    harness.click_label("無効");
-    harness.run();
+    // When: editing the fallback, cancelling, then reopening and saving untouched.
     harness.click_label("審査で拒否された場合はユーザー承認へ昇格");
     harness.run();
     harness.click_label("Cancel");

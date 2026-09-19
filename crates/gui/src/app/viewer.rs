@@ -34,8 +34,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let active_repo_root = self.active_repo_root();
         let dock_style = crate::theme::dock::dock_style(ui.style());
         let tab_style = dock_style.tab.clone();
+        let sandbox_picker = crate::panes::composer::SandboxPickerContext {
+            mode: self.sandbox_settings.config.escalation_approval,
+            enabled: !self.settings_save_in_progress(),
+        };
         {
             let mut viewer = WorkbenchTabViewer {
+                sandbox_picker,
                 pending_approvals: &self.pending_approvals,
                 approvals_action: &mut approvals_action,
                 notifications: &mut self.notifications,
@@ -122,6 +127,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Cancel => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
+                ComposerAction::SandboxEscalation(mode) => self.set_sandbox_escalation(mode),
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }

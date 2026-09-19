@@ -15,6 +15,35 @@ pub(super) struct SandboxSettings {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    pub fn with_provider_settings_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.provider_settings_path = Some(path.into());
+        self.load_sandbox_settings();
+        self
+    }
+
+    fn load_sandbox_settings(&mut self) {
+        match config::Config::load(&self.routing_load_options()) {
+            Ok(config) => {
+                self.sandbox_settings.config = config.sandbox;
+                self.sandbox_settings.error = None;
+            }
+            Err(error) => self.sandbox_settings.error = Some(error.to_string()),
+        }
+    }
+
+    pub(super) fn set_sandbox_escalation(&mut self, mode: config::EscalationApproval) {
+        if self.settings_save_in_progress() {
+            return;
+        }
+        let previous = self.sandbox_settings.config;
+        self.sandbox_settings.config.escalation_approval = mode;
+        self.save_sandbox_settings();
+        if self.sandbox_settings.error.is_some() {
+            self.sandbox_settings.config = previous;
+            self.sandbox_settings.open = true;
+        }
+    }
+
     pub fn with_sandbox_runtime(mut self, runtime: runtime::AgentRuntime) -> Self {
         self.sandbox_settings.runtime = Some(runtime);
         self
@@ -24,13 +53,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.settings_save_in_progress() {
             return;
         }
-        match config::Config::load(&self.routing_load_options()) {
-            Ok(config) => {
-                self.sandbox_settings.config = config.sandbox;
-                self.sandbox_settings.error = None;
-            }
-            Err(error) => self.sandbox_settings.error = Some(error.to_string()),
-        }
+        self.load_sandbox_settings();
         self.provider_settings.open = false;
         self.routing_settings.open = false;
         self.role_settings.open = false;
@@ -55,14 +78,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.checkbox(&mut self.sandbox_settings.config.allow_network, "Allow network inside sandbox");
                     ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
-                    ui.label("エスカレーション審査");
-                    for (value, label) in [
-                        (config::EscalationApproval::Quick, "quick モデル審査 (既定)"),
-                        (config::EscalationApproval::User, "ユーザー承認"),
-                        (config::EscalationApproval::Off, "無効"),
-                    ] {
-                        ui.radio_value(&mut self.sandbox_settings.config.escalation_approval, value, label);
-                    }
                     ui.checkbox(&mut self.sandbox_settings.config.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
                 });
                 if let Some(error) = &self.sandbox_settings.error {
@@ -76,31 +91,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 });
             });
         if cancel {
+            self.load_sandbox_settings();
             self.sandbox_settings.open = false;
         }
         if save {
-            let result = self
-                .provider_settings_path
-                .as_ref()
-                .ok_or_else(|| "No project config path is configured".to_owned())
-                .and_then(|path| {
-                    config::save_sandbox(path, self.sandbox_settings.config)
-                        .map_err(|error| error.to_string())
-                });
-            match result {
-                Ok(()) => {
-                    if let Some(runtime) = &self.sandbox_settings.runtime {
-                        runtime.set_sandbox_network(self.sandbox_settings.config.allow_network);
-                        runtime.set_sandbox_escalation(
-                            self.sandbox_settings.config.escalation_approval,
-                            self.sandbox_settings.config.escalate_to_user_on_deny,
-                        );
-                    }
-                    self.sandbox_settings.error = None;
-                    self.push_notice("Sandbox settings updated");
+            self.save_sandbox_settings();
+        }
+    }
+
+    fn save_sandbox_settings(&mut self) {
+        let result = self
+            .provider_settings_path
+            .as_ref()
+            .ok_or_else(|| "No project config path is configured".to_owned())
+            .and_then(|path| {
+                config::save_sandbox(path, self.sandbox_settings.config)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                if let Some(runtime) = &self.sandbox_settings.runtime {
+                    runtime.set_sandbox_network(self.sandbox_settings.config.allow_network);
+                    runtime.set_sandbox_escalation(
+                        self.sandbox_settings.config.escalation_approval,
+                        self.sandbox_settings.config.escalate_to_user_on_deny,
+                    );
                 }
-                Err(error) => self.sandbox_settings.error = Some(error),
+                self.sandbox_settings.error = None;
+                self.push_notice("Sandbox settings updated");
             }
+            Err(error) => self.sandbox_settings.error = Some(error),
         }
     }
 }

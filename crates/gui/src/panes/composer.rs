@@ -9,6 +9,13 @@ use workspace_ui::ThreadRunPhase;
 
 #[path = "composer_images.rs"]
 mod images;
+mod selectors;
+
+#[derive(Clone, Copy, Default)]
+pub struct SandboxPickerContext {
+    pub mode: config::EscalationApproval,
+    pub enabled: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {
@@ -17,6 +24,7 @@ pub enum ComposerAction {
     Complete(&'static str),
     CompleteExternal(String),
     ModelPreference(Option<workspace_ui::ModelPreference>),
+    SandboxEscalation(config::EscalationApproval),
 }
 
 pub fn composer_strip(
@@ -25,6 +33,7 @@ pub fn composer_strip(
     picker: crate::panes::model_picker::ModelPickerContext<'_>,
     picker_state: &mut crate::model::model_picker::ModelPickerState,
     phase: Option<ThreadRunPhase>,
+    sandbox: SandboxPickerContext,
 ) -> Option<ComposerAction> {
     let mut action = None;
     surface_frame(palette().SURFACE_RAISED)
@@ -53,10 +62,8 @@ pub fn composer_strip(
                     }
                 });
             }
-            if let Some(preference) =
-                crate::panes::model_picker::model_picker(ui, picker, picker_state)
-            {
-                action = Some(ComposerAction::ModelPreference(preference));
+            if let Some(selected) = selectors::row(ui, sandbox, (picker, picker_state)) {
+                action = Some(selected);
             }
             images::render(ui, model);
             ui.label(egui::RichText::new(format!("送信先: {}  (Tab で切替)", model.role.label()))
@@ -173,6 +180,7 @@ mod tests {
                     },
                     &mut state.picker_state,
                     state.phase,
+                    SandboxPickerContext::default(),
                 ) {
                     state.action = Some(action);
                 }

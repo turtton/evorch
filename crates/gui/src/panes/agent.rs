@@ -33,6 +33,7 @@ pub struct ConversationContext<'a> {
     pub phase: Option<ThreadRunPhase>,
     pub next_thread_title: String,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
+    pub sandbox_picker: crate::panes::composer::SandboxPickerContext,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -80,7 +81,14 @@ pub fn agent_pane_with_repo_root(
             .show(ui, |ui| {
                 let strip = ui.scope(|ui| {
                     ui.push_id("composer-strip", |ui| {
-                        composer_strip(ui, composer, ctx.model_picker, picker_state, ctx.phase)
+                        composer_strip(
+                            ui,
+                            composer,
+                            ctx.model_picker,
+                            picker_state,
+                            ctx.phase,
+                            ctx.sandbox_picker,
+                        )
                     })
                     .inner
                 });
@@ -403,6 +411,7 @@ mod tests {
                         thread_metrics: None,
                         phase: Some(phase),
                         next_thread_title: String::new(),
+                        sandbox_picker: Default::default(),
                         model_picker: crate::panes::model_picker::ModelPickerContext {
                             profiles: &[],
                             preference: None,
