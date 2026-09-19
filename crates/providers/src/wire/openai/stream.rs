@@ -56,6 +56,11 @@ impl OpenAiStreamInterpreter {
             if let Some(reason) = choice.finish_reason.as_deref() {
                 self.finish_reason = Some(to_finish_reason(reason));
             }
+            if let Some(text) = choice.delta.reasoning_content.or(choice.delta.reasoning)
+                && !text.is_empty()
+            {
+                events.push(StreamEvent::ReasoningDelta { text });
+            }
             if let Some(text) = choice.delta.content
                 && !text.is_empty()
             {

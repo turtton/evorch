@@ -104,6 +104,12 @@ pub struct WireStreamDelta {
     /// 平文の追記差分。
     #[serde(default)]
     pub content: Option<String>,
+    /// Full thinking emitted by Kimi and compatible backends.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    /// Alternate full-thinking field used by compatible proxies.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// function tool call の追記差分。
     #[serde(default)]
     pub tool_calls: Vec<WireStreamToolCall>,

@@ -4,6 +4,53 @@ use gui::model::transcript::TranscriptModel;
 
 const THOUGHT: &str = "Checking the constraints before choosing an approach.";
 
+#[test]
+fn thinking_renders_markdown_emphasis_without_literal_asterisks() {
+    // Given: live thinking containing both emphasis forms and plain text.
+    let mut model = TranscriptModel::new();
+    reasoning(&mut model, "run-1", "**Title** *detail* plain");
+    // When: the actual thinking body is expanded and rendered.
+    let mut pane = harness(model);
+    pane.run_steps(3);
+    // Then: Markdown is parsed and the thinking style survives on every span.
+    for text in ["Title", "detail", "plain"] {
+        let shape = pane
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(shape) if shape.galley.text().contains(text) => {
+                    Some(shape)
+                }
+                _ => None,
+            })
+            .expect("visible thinking text");
+        assert!(!shape.galley.text().contains('*'));
+        assert!(
+            shape
+                .galley
+                .job
+                .sections
+                .iter()
+                .all(|section| section.format.italics)
+        );
+        assert!(
+            shape
+                .galley
+                .job
+                .sections
+                .iter()
+                .all(|section| section.format.color == gui::theme::tokens::palette().TEXT_MUTED)
+        );
+    }
+    if let Some(dir) = std::env::var_os("THINKING_EVIDENCE_DIR") {
+        pane.render()
+            .unwrap()
+            .save(std::path::PathBuf::from(dir).join("thinking-markdown.png"))
+            .unwrap();
+    }
+}
+
 fn reasoning(model: &mut TranscriptModel, run: &str, text: &str) {
     model.apply(&Event::new(MessageEvent::ReasoningDelta {
         run_id: Some(run.into()),

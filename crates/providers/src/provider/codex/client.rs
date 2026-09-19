@@ -137,6 +137,16 @@ impl CodexClient {
         request: &ChatRequest,
         streaming: bool,
     ) -> Result<DeltaStream, ProviderError> {
+        let model_name = request.model.rsplit('/').next().unwrap_or_default();
+        if ["kimi", "moonshot"].iter().any(|prefix| {
+            model_name
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        }) {
+            return Err(ProviderError::Request(
+                "Kimi full thinking requires an openai-compatible or kimi-subscription provider using openai-completions, not Codex reasoning summaries".into(),
+            ));
+        }
         let token = self.session.current().await?;
         let wire_request = to_wire_request(request);
         let turn_id = Uuid::new_v4().to_string();
