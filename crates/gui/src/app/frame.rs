@@ -274,28 +274,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        for _ in 0..std::mem::take(&mut self.pending_role_toggles) {
+            self.dispatch(KeyAction::CycleAgentRole, ctx);
+        }
         if let Some(action) = ctx.input(|input| self.keymap.action_for_input(input)) {
-            if action == KeyAction::CycleAgentRole {
-                // The composer locks Tab via `lock_focus(true)`, which keeps egui's
-                // focus traversal away but would also make the TextEdit insert a
-                // '\t' character. Remove the key event from this frame entirely so
-                // the keybind consumes the press without touching the draft.
-                ctx.input_mut(|input| {
-                    input.events.retain(|event| {
-                        // Some backends report Tab as a text event in addition to
-                        // the key event. Remove both representations so TextEdit
-                        // cannot insert a literal tab into the draft.
-                        !matches!(
-                            event,
-                            egui::Event::Key {
-                                key: egui::Key::Tab,
-                                pressed: true,
-                                modifiers,
-                                ..
-                            } if modifiers.is_none() || modifiers.shift_only()
-                        ) && !matches!(event, egui::Event::Text(text) if text == "\t")
-                    });
-                });
+            if action == KeyAction::CycleAgentRole && self.settings_owns_input() {
+                return;
             }
             self.dispatch(action, ctx);
         }

@@ -1,6 +1,7 @@
 //! GUI ウィンドウを生成せず Workbench を実行・描画する API です。
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, PanicHookInfo, catch_unwind};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -64,6 +65,7 @@ pub enum OffscreenError {
 /// `egui_kittest` を backend とするウィンドウ不要の Workbench です。
 pub struct HeadlessWorkbench<S: AgentRunSource + 'static> {
     harness: Harness<'static, WorkbenchState<S>>,
+    key_events: RefCell<Vec<egui::Event>>,
 }
 
 impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
@@ -88,7 +90,10 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
                 },
                 state,
             );
-        Self { harness }
+        Self {
+            harness,
+            key_events: RefCell::default(),
+        }
     }
 
     /// 現在の論理ポイントあたりのピクセル数を返します。
@@ -104,11 +109,21 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
     /// アニメーション中も停止を待たずに固定フレームを実行します。
     pub fn run(&mut self) {
         // Nested modal and scroll-area sizing needs multiple passes before click coordinates settle.
-        self.harness.run_steps(16);
+        for _ in 0..16 {
+            self.step();
+        }
     }
 
     /// 1 フレームだけ実行します。
     pub fn step(&mut self) {
+        self.harness
+            .input_mut()
+            .events
+            .extend(self.key_events.take());
+        // kittest 0.36 does not invoke eframe's raw_input_hook, even in build_eframe.
+        let mut raw = std::mem::take(self.harness.input_mut());
+        self.harness.state_mut().raw_input_hook(&mut raw);
+        *self.harness.input_mut() = raw;
         self.harness.step();
     }
 
@@ -158,7 +173,22 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
 
     /// modifier 付きキー入力を次フレームへ送ります。
     pub fn key_press(&self, modifiers: Modifiers, key: Key) {
-        self.harness.key_press_modifiers(modifiers, key);
+        if key != Key::Tab {
+            self.harness.key_press_modifiers(modifiers, key);
+            return;
+        }
+        let mut events = self.key_events.borrow_mut();
+        events.push(egui::Event::ModifiersChanged(modifiers));
+        for pressed in [true, false] {
+            events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            });
+        }
+        events.push(egui::Event::ModifiersChanged(Modifiers::NONE));
     }
 
     /// 次フレームに流す [`egui::RawInput`] を可変で返します。

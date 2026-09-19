@@ -948,6 +948,10 @@ struct GuiApp {
 }
 
 impl eframe::App for GuiApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.workbench.raw_input_hook(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(feature = "browser")]
         self.browser.render(ui);

@@ -8,6 +8,7 @@ mod durable_tasks;
 mod external_commands;
 mod frame;
 mod history;
+mod input;
 mod ownership;
 mod provider_settings;
 mod role_settings;
@@ -46,6 +47,10 @@ pub enum WorkbenchError {
 pub struct WorkbenchApp<S>(pub WorkbenchState<S>);
 
 impl<S: AgentRunSource> eframe::App for WorkbenchApp<S> {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.0.raw_input_hook(raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.0.ui(ui, frame);
     }
