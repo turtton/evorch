@@ -364,6 +364,7 @@ fn kind_name_maps_compaction_events() {
             reason: CompactionReason::Manual,
             threshold: 0.8,
             context_window_tokens: 200_000,
+            window_source: event_bus::WindowSource::Default,
             estimated_tokens_before: 180_000,
             estimated_tokens_after: 60_000,
             compacted_range_start: 0,

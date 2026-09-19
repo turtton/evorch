@@ -18,6 +18,7 @@ pub use event::{
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
     RoutingSource, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
+    WindowSource,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

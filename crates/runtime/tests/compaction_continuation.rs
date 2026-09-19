@@ -503,6 +503,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         run_id: event_run_id,
         reason,
         threshold,
+        window_source: _,
         context_window_tokens,
         estimated_tokens_before,
         estimated_tokens_after,

@@ -106,12 +106,12 @@ async fn compaction_window_uses_resolved_metadata() {
 
     apply_model_windows(&config, Some(&catalog), &mut settings);
 
-    assert_eq!(resolve_window(&settings, MODEL), 64000);
+    assert_eq!(resolve_window(&settings, MODEL, None).0, 64000);
     assert_eq!(
-        resolve_window(&settings, &format!("custom-profile/{MODEL}")),
+        resolve_window(&settings, &format!("custom-profile/{MODEL}"), None).0,
         64000
     );
-    assert_eq!(resolve_window(&settings, "unknown"), 200000);
+    assert_eq!(resolve_window(&settings, "unknown", None).0, 200000);
 }
 
 #[tokio::test]
@@ -125,8 +125,8 @@ async fn catalog_fetch_failure_keeps_existing_behavior() {
     apply_model_windows(&config, catalog.as_ref(), &mut settings);
 
     assert!(catalog.is_none());
-    assert_eq!(resolve_window(&settings, MODEL), 48000);
-    assert_eq!(resolve_window(&settings, "unknown"), 200000);
+    assert_eq!(resolve_window(&settings, MODEL, None).0, 48000);
+    assert_eq!(resolve_window(&settings, "unknown", None).0, 200000);
 }
 
 #[tokio::test]

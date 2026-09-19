@@ -93,12 +93,19 @@ impl From<&CompactionConfig> for CompactionSettings {
     }
 }
 
-pub(crate) fn resolve_window(settings: &CompactionSettings, model_id: &str) -> u64 {
-    settings
-        .model_overrides
-        .get(model_id)
-        .copied()
-        .unwrap_or(settings.context_window_tokens)
+pub(crate) fn resolve_window(
+    settings: &CompactionSettings,
+    model_id: &str,
+    catalog_window: Option<u64>,
+) -> (u64, event_bus::WindowSource) {
+    match (settings.model_overrides.get(model_id), catalog_window) {
+        (Some(window), _) => (*window, event_bus::WindowSource::Override),
+        (None, Some(window)) => (window, event_bus::WindowSource::Catalog),
+        (None, None) => (
+            settings.context_window_tokens,
+            event_bus::WindowSource::Default,
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,8 +383,11 @@ mod tests {
             model_overrides: BTreeMap::from([(String::from("claude-sonnet-4-5"), 180_000)]),
             ..CompactionSettings::default()
         };
-        assert_eq!(resolve_window(&settings, "claude-sonnet-4-5"), 180_000);
-        assert_eq!(resolve_window(&settings, "unknown-model"), 128_000);
+        assert_eq!(
+            resolve_window(&settings, "claude-sonnet-4-5", None).0,
+            180_000
+        );
+        assert_eq!(resolve_window(&settings, "unknown-model", None).0, 128_000);
     }
 
     // Given: window=0 の override を含む config
@@ -394,8 +404,8 @@ mod tests {
             ..CompactionConfig::default()
         };
         let settings = CompactionSettings::from(&config);
-        assert_eq!(resolve_window(&settings, "model-zero"), 128_000);
-        assert_eq!(resolve_window(&settings, "model-kept"), 99_000);
+        assert_eq!(resolve_window(&settings, "model-zero", None).0, 128_000);
+        assert_eq!(resolve_window(&settings, "model-kept", None).0, 99_000);
     }
 
     // Given: 全項目を既定値と異なる値にした config

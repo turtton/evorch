@@ -26,6 +26,7 @@ fn compaction_survives_replay_without_loss_or_duplication() {
             reason,
             threshold: 0.8,
             context_window_tokens: 200_000,
+            window_source: event_bus::WindowSource::Default,
             estimated_tokens_before: 180_000,
             estimated_tokens_after: 60_000,
             compacted_range_start: index,

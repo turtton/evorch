@@ -437,6 +437,16 @@ impl AgentModel for RoutedModel {
     fn available_profiles(&self) -> Vec<ProfileSummary> {
         RoutedModel::available_profiles(self)
     }
+
+    fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
+        let (_, model_id) = selected_model.split_once('/')?;
+        let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
+        self.router
+            .catalog()
+            .get(base_model_id)
+            .map(|entry| entry.context_window)
+            .filter(|window| *window > 0)
+    }
 }
 
 /// Public, credential-free provider metadata for model pickers.

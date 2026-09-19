@@ -113,6 +113,11 @@ pub trait AgentModel: Send + Sync {
     /// (lib.rs の「ルーティングの委譲」契約と一貫)。
     fn selected_model(&self, role: Role, category: Option<&str>) -> String;
 
+    /// Catalog window for an identity returned by `selected_model`, if known.
+    fn catalog_context_window(&self, _selected_model: &str) -> Option<u64> {
+        None
+    }
+
     /// Configured picker entries; fixed models expose no provider profiles.
     fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
         Vec::new()

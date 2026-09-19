@@ -81,6 +81,10 @@ impl AgentModel for SwitchableModel {
         self.current().selected_model(role, category)
     }
 
+    fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
+        self.current().catalog_context_window(selected_model)
+    }
+
     fn available_profiles(&self) -> Vec<super::ProfileSummary> {
         SwitchableModel::available_profiles(self)
     }

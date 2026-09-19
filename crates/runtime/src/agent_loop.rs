@@ -651,12 +651,14 @@ impl LoopState {
                 let visible = self.context.visible_messages();
                 let estimated =
                     compaction::estimator::estimate_visible(&visible, self.last_usage.as_ref());
-                let window = compaction::policy::resolve_window(
+                let selected_model = self
+                    .shared
+                    .model
+                    .selected_model(self.task.role, self.task.config.category.as_deref());
+                let (window, _) = compaction::policy::resolve_window(
                     &self.shared.compaction,
-                    &self
-                        .shared
-                        .model
-                        .selected_model(self.task.role, self.task.config.category.as_deref()),
+                    &selected_model,
+                    self.shared.model.catalog_context_window(&selected_model),
                 );
                 // 閾値未満の境界を観測したら自動トリガを再武装する (ラチェット解除)。
                 if (estimated as f64) < window as f64 * self.shared.compaction.threshold {

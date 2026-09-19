@@ -3,6 +3,9 @@ pub(crate) mod estimator;
 pub(crate) mod policy;
 pub(crate) mod summary;
 
+#[cfg(test)]
+mod window_tests;
+
 use std::sync::atomic::Ordering;
 
 use event_bus::{CompactionEvent, CompactionReason, Event};
@@ -62,12 +65,14 @@ pub(crate) async fn compact_now(
 
     let visible = state.context.visible_messages();
     let estimated_before = estimate_visible(&visible, state.last_usage.as_ref());
-    let window = resolve_window(
+    let selected_model = state
+        .shared
+        .model
+        .selected_model(state.run_role(), state.task.config.category.as_deref());
+    let (window, window_source) = resolve_window(
         &settings,
-        &state
-            .shared
-            .model
-            .selected_model(state.run_role(), state.task.config.category.as_deref()),
+        &selected_model,
+        state.shared.model.catalog_context_window(&selected_model),
     );
     if reason == CompactionReason::Automatic {
         // 圧縮成功直後は閾値未満の境界を一度観測するまで自動発火しない (ラチェット)。
@@ -180,6 +185,7 @@ pub(crate) async fn compact_now(
             reason,
             threshold: settings.threshold,
             context_window_tokens: window,
+            window_source,
             estimated_tokens_before: estimated_before,
             estimated_tokens_after: estimated_after,
             compacted_range_start: plan.start,

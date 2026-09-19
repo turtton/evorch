@@ -878,6 +878,16 @@ pub enum CompactionReason {
     Agent,
 }
 
+/// Provenance of the context window used for compaction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSource {
+    Override,
+    Catalog,
+    #[default]
+    Default,
+}
+
 /// コンテキスト圧縮に関するイベントです。
 ///
 /// 圧縮はトランスクリプトの語彙を差し替えるため、リプレイ時には
@@ -895,6 +905,8 @@ pub enum CompactionEvent {
         threshold: f64,
         /// コンテキストウィンドウのトークン数。
         context_window_tokens: u64,
+        #[serde(default)]
+        window_source: WindowSource,
         /// 圧縮前の推定トークン数。
         estimated_tokens_before: u64,
         /// 圧縮後の推定トークン数。
@@ -2250,6 +2262,7 @@ mod tests {
             reason: CompactionReason::Automatic,
             threshold: 0.8,
             context_window_tokens: 200_000,
+            window_source: WindowSource::Default,
             estimated_tokens_before: 180_000,
             estimated_tokens_after: 60_000,
             compacted_range_start: 0,
@@ -2277,6 +2290,7 @@ mod tests {
                 "reason": "automatic",
                 "threshold": 0.8,
                 "context_window_tokens": 200_000,
+                "window_source": "default",
                 "estimated_tokens_before": 180_000,
                 "estimated_tokens_after": 60_000,
                 "compacted_range_start": 0,

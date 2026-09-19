@@ -376,6 +376,7 @@ async fn compaction_is_auditable_in_storage() {
         run_id: event_run_id,
         reason,
         threshold,
+        window_source: _,
         context_window_tokens,
         estimated_tokens_before,
         estimated_tokens_after,

@@ -324,7 +324,7 @@ mod tests {
     let base = [stored(LifecycleEvent::Started { session_id: "p".into() }, Some("s1")), stored(MessageEvent::MessageDelta { delta: "m".into(), run_id: None }, Some("s1")), stored(ToolEvent::ToolStarted { tool_name: "x".into(), call_id: "c".into(), run_id: None, input: None }, Some("s1"))];
         // When: 同一列の末尾へ Compaction イベントを追加する
         let mut with_compaction = base.to_vec();
-        with_compaction.push(stored(CompactionEvent::Compacted { run_id: "run-1".into(), reason: CompactionReason::Automatic, threshold: 0.8, context_window_tokens: 200_000, estimated_tokens_before: 180_000, estimated_tokens_after: 60_000, compacted_range_start: 0, compacted_range_end: 42, checkpoint_id: "checkpoint-1".into(), summary: "s".into() }, Some("s1")));
+        with_compaction.push(stored(CompactionEvent::Compacted { run_id: "run-1".into(), reason: CompactionReason::Automatic, threshold: 0.8, context_window_tokens: 200_000, window_source: event_bus::WindowSource::Default, estimated_tokens_before: 180_000, estimated_tokens_after: 60_000, compacted_range_start: 0, compacted_range_end: 42, checkpoint_id: "checkpoint-1".into(), summary: "s".into() }, Some("s1")));
         // Then: 射影状態は追加前後で等しい（fold は no-op）
         assert_eq!(fold(&with_compaction), fold(&base));
     }

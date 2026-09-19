@@ -15,6 +15,7 @@ use super::*;
 mod additional_roles;
 mod capabilities;
 mod category;
+mod compaction_window;
 mod live;
 mod preference;
 mod speed;
