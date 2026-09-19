@@ -114,6 +114,13 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         }
     }
 
+    /// Dispatch queued clicks and wait for the provider-save worker without spinning frames.
+    pub fn wait_provider_save(&mut self, timeout: std::time::Duration) {
+        self.run();
+        self.harness.state_mut().receive_provider_save(timeout);
+        self.run();
+    }
+
     /// 1 フレームだけ実行します。
     pub fn step(&mut self) {
         self.harness

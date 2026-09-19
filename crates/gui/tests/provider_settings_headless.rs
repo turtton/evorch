@@ -27,6 +27,9 @@ mod profiles;
 #[path = "provider_settings/edit_save.rs"]
 mod edit_save;
 
+#[path = "provider_settings/save_wait.rs"]
+mod save_wait;
+
 #[test]
 fn saves_existing_keyring_profile_without_typing_token() {
     // Given
@@ -175,17 +178,12 @@ fn load_config(root: &std::path::Path) -> config::Config {
 }
 
 fn finish_save(harness: &mut HeadlessWorkbench<DemoSource>) {
-    for _ in 0..1000 {
-        harness.step();
-        if harness.state().provider_settings().editor.is_none()
-            || harness.state().provider_settings().error.is_some()
-        {
-            harness.run();
-            return;
-        }
-        std::thread::yield_now();
-    }
-    panic!("save did not finish");
+    harness.wait_provider_save(std::time::Duration::from_secs(10));
+    assert!(
+        harness.state().provider_settings().editor.is_none()
+            || harness.state().provider_settings().error.is_some(),
+        "save did not finish: click was not dispatched or worker exceeded 10 seconds"
+    );
 }
 
 #[test]

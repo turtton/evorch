@@ -198,10 +198,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn poll_provider_save(&mut self) {
+        self.receive_provider_save(std::time::Duration::ZERO);
+    }
+
+    pub(crate) fn receive_provider_save(&mut self, timeout: std::time::Duration) {
         let Some(rx) = self.provider_save_rx.take() else {
             return;
         };
-        match rx.try_recv() {
+        match rx.recv_timeout(timeout) {
             Ok(result) => {
                 if let Err(error) = result {
                     self.provider_settings.error = Some(error);
@@ -231,8 +235,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 self.push_notice("Provider settings updated");
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => self.provider_save_rx = Some(rx),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => self.provider_save_rx = Some(rx),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 self.provider_settings.error =
                     Some("Credential worker stopped without a result".into())
             }
