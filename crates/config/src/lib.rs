@@ -30,7 +30,9 @@ pub use save::{
     validate_openai_compatible_provider_input,
 };
 pub use save_agents::save_agent_bindings;
-pub use save_codex::{CodexProviderInput, delete_provider, save_codex_provider};
+pub use save_codex::{
+    CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
+};
 pub use save_routing::save_routing;
 pub use save_sandbox::save_sandbox;
 pub use schema::json_schema;

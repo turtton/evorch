@@ -1,5 +1,5 @@
 use super::WorkbenchState;
-use crate::model::provider_settings::{CredentialMode, ProfileEditor, ProviderSettingsModel};
+use crate::model::provider_settings::{ProfileEditor, ProviderSettingsModel};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -86,34 +86,57 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.provider_settings.error = Some(error.to_string());
                     return;
                 }
-                let mode = editor.credential_mode;
+                let original_name = editor.original_name.clone();
+                let original_credential = editor.original_credential.clone();
                 let secret = sandbox::Secret::from(editor.api_key_input.clone());
                 self.provider_operation(move || {
-                    match mode {
-                        CredentialMode::Env => {}
-                        CredentialMode::Keyring => {
-                            let store = store.ok_or_else(|| {
+                    let mut migrated_account = None;
+                    match &input.credential {
+                        config::ProviderCredentialInput::Env { .. } => {}
+                        config::ProviderCredentialInput::Keyring { account, .. } => {
+                            let store = store.as_ref().ok_or_else(|| {
                                 "Credential store unavailable; use environment-variable mode"
                                     .to_owned()
                             })?;
-                            if secret.expose().is_empty() {
-                                if store
-                                    .get(&input.name)
-                                    .map_err(|e| e.to_string())?
-                                    .is_none_or(|value| value.expose().trim().is_empty())
-                                {
-                                    return Err("Enter an API key before saving".into());
+                            let original_account = match &original_credential {
+                                Some(config::CredentialRefConfig::Keyring { account, .. }) => {
+                                    Some(account)
                                 }
+                                Some(config::CredentialRefConfig::Env { .. }) | None => None,
+                            };
+                            let secret = if secret.expose().is_empty() {
+                                let source = original_account
+                                    .filter(|_| original_name.is_some())
+                                    .ok_or_else(|| {
+                                    "Enter an API key before saving".to_owned()
+                                })?;
+                                store
+                                    .get(source)
+                                    .map_err(|e| e.to_string())?
+                                    .filter(|value| !value.expose().trim().is_empty())
+                                    .ok_or_else(|| "Enter an API key before saving".to_owned())?
                             } else {
-                                store.set(&input.name, &secret).map_err(|e| e.to_string())?;
-                            }
+                                secret
+                            };
+                            store.set(account, &secret).map_err(|e| e.to_string())?;
+                            migrated_account =
+                                original_account.filter(|original| *original != account);
                         }
                     }
-                    config::save_openai_compatible_provider(&path, &input)
-                        .map_err(|e| e.to_string())
+                    config::save::save_openai_compatible_provider_edit(
+                        &path,
+                        &input,
+                        original_name.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if let (Some(store), Some(account)) = (store, migrated_account) {
+                        store.delete(account).map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
                 });
             }
             Some(ProfileEditor::Codex(editor)) => {
+                let original_name = editor.original_name.clone();
                 let input = config::CodexProviderInput {
                     name: editor.name.clone(),
                     account: editor.account.clone(),
@@ -121,7 +144,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     default_model: editor.default_model.clone(),
                 };
                 self.provider_operation(move || {
-                    config::save_codex_provider(&path, &input).map_err(|e| e.to_string())
+                    config::save_codex_provider_edit(&path, &input, original_name.as_deref())
+                        .map_err(|e| e.to_string())
                 });
             }
         }

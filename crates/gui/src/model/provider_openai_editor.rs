@@ -45,6 +45,8 @@ pub struct ProviderSettingsModel {
     pub api_key_input: String,
     pub api_key_stored: bool,
     pub name: String,
+    pub original_name: Option<String>,
+    pub original_credential: Option<config::CredentialRefConfig>,
     pub provider_type: config::ProviderTypeConfig,
     pub base_url: String,
     pub api_key_env: String,
@@ -69,6 +71,8 @@ impl Default for ProviderSettingsModel {
             api_key_input: String::new(),
             api_key_stored: false,
             name: "openai-compat".into(),
+            original_name: None,
+            original_credential: None,
             provider_type: config::ProviderTypeConfig::OpenAiCompatible,
             base_url: String::new(),
             api_key_env: String::new(),
@@ -91,6 +95,8 @@ impl std::fmt::Debug for ProviderSettingsModel {
         f.debug_struct("ProviderSettingsModel")
             .field("open", &self.open)
             .field("name", &self.name)
+            .field("original_name", &self.original_name)
+            .field("original_credential", &self.original_credential)
             .field("provider_type", &self.provider_type)
             .field("base_url", &self.base_url)
             .field("api_key_env", &self.api_key_env)
@@ -117,6 +123,8 @@ impl Clone for ProviderSettingsModel {
             api_key_input: String::new(),
             api_key_stored: self.api_key_stored,
             name: self.name.clone(),
+            original_name: self.original_name.clone(),
+            original_credential: self.original_credential.clone(),
             provider_type: self.provider_type,
             base_url: self.base_url.clone(),
             api_key_env: self.api_key_env.clone(),
@@ -141,6 +149,8 @@ impl PartialEq for ProviderSettingsModel {
             && self.credential_mode == other.credential_mode
             && self.api_key_stored == other.api_key_stored
             && self.name == other.name
+            && self.original_name == other.original_name
+            && self.original_credential == other.original_credential
             && self.provider_type == other.provider_type
             && self.base_url == other.base_url
             && self.api_key_env == other.api_key_env
@@ -187,6 +197,8 @@ impl ProviderSettingsModel {
         };
         Self {
             name: name.clone(),
+            original_name: Some(name.clone()),
+            original_credential: Some(profile.credential.clone()),
             provider_type: profile.provider_type,
             credential_mode: match &profile.credential {
                 config::CredentialRefConfig::Env { .. } => CredentialMode::Env,
@@ -246,10 +258,22 @@ impl ProviderSettingsModel {
                 CredentialMode::Env => config::ProviderCredentialInput::Env {
                     var: self.api_key_env.clone(),
                 },
-                CredentialMode::Keyring => config::ProviderCredentialInput::Keyring {
-                    service: "evorch".into(),
-                    account: self.name.clone(),
-                },
+                CredentialMode::Keyring => {
+                    let (service, account) = match &self.original_credential {
+                        Some(config::CredentialRefConfig::Keyring { service, account }) => (
+                            service.clone(),
+                            if self.original_name.as_ref() == Some(&self.name) {
+                                account.clone()
+                            } else {
+                                self.name.clone()
+                            },
+                        ),
+                        Some(config::CredentialRefConfig::Env { .. }) | None => {
+                            ("evorch".into(), self.name.clone())
+                        }
+                    };
+                    config::ProviderCredentialInput::Keyring { service, account }
+                }
             },
             models: self.models.clone(),
             excluded_models: self.parsed_excluded_models(),

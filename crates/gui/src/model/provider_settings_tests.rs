@@ -2,6 +2,33 @@ use super::*;
 use config::{Config, CredentialRefConfig, ProviderProfileConfig, ProviderTypeConfig};
 
 #[test]
+fn preserves_original_account_when_editing_keyring_profile() {
+    // Given
+    let mut config = Config::default();
+    config.providers.insert(
+        "A".into(),
+        compatible(CredentialRefConfig::Keyring {
+            service: "evorch".into(),
+            account: "acct-A".into(),
+        }),
+    );
+    let mut settings =
+        crate::model::provider_settings::ProviderSettingsModel::seed_from_config(&config);
+    // When
+    settings.edit("A");
+    let input = settings.openai().unwrap().to_input();
+    // Then
+    assert_eq!(input.name, "A");
+    assert_eq!(
+        input.credential,
+        config::ProviderCredentialInput::Keyring {
+            service: "evorch".into(),
+            account: "acct-A".into(),
+        }
+    );
+}
+
+#[test]
 fn seed_from_config_selects_codex_tab_when_only_codex_profile() {
     // Given
     let mut config = Config::default();
@@ -76,6 +103,10 @@ fn seed_from_config_picks_first_openai_compatible_env_provider() {
         ProviderSettingsModel {
             open: false,
             name: "b-compatible".into(),
+            original_name: Some("b-compatible".into()),
+            original_credential: Some(CredentialRefConfig::Env {
+                var: "FIRST_KEY".into()
+            }),
             base_url: "https://example.com/v1".into(),
             api_key_env: "FIRST_KEY".into(),
             models: vec![

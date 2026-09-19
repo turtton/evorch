@@ -2,7 +2,8 @@
 
 use crate::ConfigError;
 use crate::save::{
-    insert_profile, invalid_field, normalized_models, read_document, write_document,
+    insert_profile, invalid_field, normalized_models, read_document, remove_original_profile,
+    write_document,
 };
 use crate::types::provider::ModelEntryConfig;
 use std::path::Path;
@@ -20,6 +21,18 @@ pub struct CodexProviderInput {
 /// # Errors
 /// Returns invalid input, unsupported config versions, or I/O errors.
 pub fn save_codex_provider(path: &Path, input: &CodexProviderInput) -> Result<(), ConfigError> {
+    save_codex_provider_edit(path, input, None)
+}
+
+/// Save a Codex profile, replacing its original name in the same atomic write.
+///
+/// # Errors
+/// Returns invalid input, unsupported config versions, or I/O errors.
+pub fn save_codex_provider_edit(
+    path: &Path,
+    input: &CodexProviderInput,
+    original_name: Option<&str>,
+) -> Result<(), ConfigError> {
     if input.name.is_empty()
         || !input
             .name
@@ -67,6 +80,7 @@ pub fn save_codex_provider(path: &Path, input: &CodexProviderInput) -> Result<()
         profile.insert("default_model", value(input.default_model.as_str()));
     }
     insert_profile(&mut doc, &input.name, profile)?;
+    remove_original_profile(&mut doc, original_name, &input.name);
     write_document(path, &doc)
 }
 

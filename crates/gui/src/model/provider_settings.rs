@@ -30,6 +30,7 @@ pub struct ProfileSummary {
 #[derive(Debug)]
 pub struct CodexEditorModel {
     pub name: String,
+    pub original_name: Option<String>,
     pub account: String,
     pub auth: CodexAuthModel,
     pub models: Vec<String>,
@@ -114,6 +115,7 @@ impl ProviderSettingsModel {
                 ..Default::default()
             }),
             ProviderKind::CodexSubscription => ProfileEditor::Codex(CodexEditorModel {
+                original_name: None,
                 account: name.clone(),
                 auth: CodexAuthModel::for_account(name.clone()),
                 name,
@@ -153,6 +155,7 @@ impl ProviderSettingsModel {
                 };
                 ProfileEditor::Codex(CodexEditorModel {
                     name: name.into(),
+                    original_name: Some(name.into()),
                     auth: CodexAuthModel::for_account(account.clone()),
                     account,
                     models: profile

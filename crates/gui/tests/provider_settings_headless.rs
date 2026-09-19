@@ -24,6 +24,27 @@ mod codex_auth;
 #[path = "provider_settings/profiles.rs"]
 mod profiles;
 
+#[path = "provider_settings/edit_save.rs"]
+mod edit_save;
+
+#[test]
+fn saves_existing_keyring_profile_without_typing_token() {
+    // Given
+    let temp = tempfile::tempdir().unwrap();
+    let (mut harness, _) = edit_save::keyring_editor(temp.path());
+    // When
+    harness.click_label("Save");
+    finish_save(&mut harness);
+    // Then
+    assert!(
+        harness.state().provider_settings().error.is_none(),
+        "{:?}",
+        harness.state().provider_settings().error
+    );
+    assert!(harness.state().provider_settings().editor.is_none());
+    assert_eq!(load_config(temp.path()).providers.len(), 1);
+}
+
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("demo");

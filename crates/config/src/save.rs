@@ -118,6 +118,18 @@ pub fn save_openai_compatible_provider(
     path: &Path,
     input: &OpenAiCompatibleProviderInput,
 ) -> Result<(), ConfigError> {
+    save_openai_compatible_provider_edit(path, input, None)
+}
+
+/// Save a profile, replacing its original name in the same atomic write.
+///
+/// # Errors
+/// Returns invalid input, invalid configuration, or I/O errors.
+pub fn save_openai_compatible_provider_edit(
+    path: &Path,
+    input: &OpenAiCompatibleProviderInput,
+    original_name: Option<&str>,
+) -> Result<(), ConfigError> {
     validate_openai_compatible_provider_input(input)?;
     let mut doc = read_document(path)?;
 
@@ -219,7 +231,20 @@ pub fn save_openai_compatible_provider(
     }
     profile.insert("default_model", value(input.default_model.as_str()));
     insert_profile(&mut doc, &input.name, profile)?;
+    remove_original_profile(&mut doc, original_name, &input.name);
     write_document(path, &doc)
+}
+
+pub(crate) fn remove_original_profile(
+    doc: &mut DocumentMut,
+    original_name: Option<&str>,
+    name: &str,
+) {
+    if let Some(original) = original_name.filter(|original| *original != name) {
+        if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
+            providers.remove(original);
+        }
+    }
 }
 
 pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
