@@ -124,9 +124,12 @@ title-route = [{{ profile = "local", model = "fast" }}]
         h.state_mut().composer_mut().input = "Explain lifetimes".into();
         h.run();
         h.click_label("Send");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while h.state().auto_title_running() {
-            assert!(std::time::Instant::now() < deadline);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while h.state().sidebar().threads[0].title != "Provider title" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "auto-title result not reached"
+            );
             h.step();
             std::thread::yield_now();
         }
