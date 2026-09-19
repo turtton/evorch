@@ -374,9 +374,10 @@ fn spawn_storage_bridge(
 
 /// 前セッションの goal 状態を永続化イベントから復元し、supervisor へ移管する。
 ///
-/// `Database::events_all_ordered()` → `GoalLedger::replay` で goal ごとの
+/// `Database::events_all_ordered()` → `GoalLedger::replay_partial` で goal ごとの
 /// snapshot を再構築し、transcript を `agent_messages_by_session` で付与して
-/// `adopt` する。Active goal は supervisor 側で Paused
+/// `adopt` する。永続データは外部入力なので解決不能なイベントは警告して読み飛
+/// ばす。Active goal は supervisor 側で Paused
 /// (`recovered-after-restart`) として採用される (計画 Clarification B)。
 fn restore_goals(storage_config: &StorageConfig, supervisor: &SupervisorHandle) {
     let database = match Database::open(storage_config) {
@@ -397,7 +398,14 @@ fn restore_goals(storage_config: &StorageConfig, supervisor: &SupervisorHandle) 
         EventKind::Orchestrator(event) => Some(event),
         _ => None,
     });
-    let goals = GoalLedger::replay(orchestrator_events)
+    let (goals_map, replay_errors) = GoalLedger::replay_partial(orchestrator_events);
+    if !replay_errors.is_empty() {
+        tracing::warn!(
+            count = replay_errors.len(),
+            "goal replay skipped unresolvable durable events"
+        );
+    }
+    let goals = goals_map
         .into_values()
         .map(|ledger| {
             let snapshot = ledger.snapshot().clone();

@@ -22,6 +22,21 @@ impl GoalLedger {
     pub fn replay_checked<'a>(
         events: impl Iterator<Item = &'a OrchestratorEvent>,
     ) -> Result<BTreeMap<String, Self>, Vec<LedgerError>> {
+        let (ledgers, errors) = Self::replay_partial(events);
+        if errors.is_empty() {
+            Ok(ledgers)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// 解決可能な goal だけを再構築し、解決不能なイベントはエラーとして集めるだけに留める。
+    ///
+    /// ユーザー所有の永続データからの起動時復元など、外部入力に使う。
+    #[must_use]
+    pub fn replay_partial<'a>(
+        events: impl Iterator<Item = &'a OrchestratorEvent>,
+    ) -> (BTreeMap<String, Self>, Vec<LedgerError>) {
         let mut ledgers = BTreeMap::<String, Self>::new();
         let mut errors = Vec::new();
         for event in events {
@@ -56,10 +71,6 @@ impl GoalLedger {
                 }
             }
         }
-        if errors.is_empty() {
-            Ok(ledgers)
-        } else {
-            Err(errors)
-        }
+        (ledgers, errors)
     }
 }

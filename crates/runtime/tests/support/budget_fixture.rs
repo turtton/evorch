@@ -76,7 +76,16 @@ pub(super) async fn run_calls(count: u32, config: RunConfig) -> Vec<Event> {
     run_calls_in_batches(count, config, false).await
 }
 
-pub(super) async fn run_calls_in_batches(count: u32, config: RunConfig, batch: bool) -> Vec<Event> {
+pub(super) async fn run_calls_in_batches(
+    count: u32,
+    mut config: RunConfig,
+    batch: bool,
+) -> Vec<Event> {
+    // durable 境界イベントは task 識別子を持たない run では発行されないため、
+    // checkpoint を観測する fixture には明示的な identity を持たせる。
+    if config.task_id.is_none() && config.team_task.is_none() {
+        config.task_id = Some("budget-checkpoint".into());
+    }
     let file = tempfile::NamedTempFile::new().expect("file");
     std::fs::write(file.path(), "budget fixture").expect("write");
     let mut script = Vec::new();

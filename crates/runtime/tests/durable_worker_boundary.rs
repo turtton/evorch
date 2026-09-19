@@ -231,3 +231,46 @@ async fn real_worker_failure_survives_sqlite_and_resumes_with_saved_work() {
     assert_eq!(progress.last_artifact, record.last_artifact);
     assert_eq!(progress.attempts, 1);
 }
+
+#[tokio::test]
+async fn boundary_events_are_not_published_for_runs_without_durable_task_identity() {
+    // Given: an identity-less worker run, like the chat completion path — no
+    // task_id / team_task, never RunAttached to any goal. Its boundary events
+    // used to be persisted and crashed GUI startup replay as UnresolvedEvent.
+    let bus = Arc::new(EventBus::new(512));
+    let mut events = bus.subscribe();
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "",
+        FinishReason::Stop,
+    ))]));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(DirectSandbox::new_unchecked()),
+        )),
+        model,
+    );
+    let run = runtime.delegate_background(Role::Worker, "prompt".into(), RunConfig::default());
+    runtime.wait(run).await.expect("run terminates");
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    // When: draining everything the run emitted.
+    // Then: no TaskProgressed boundary was published — it could never be owned
+    // by a goal ledger and would poison startup replay.
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await {
+            Ok(Ok(event)) => assert!(
+                !matches!(
+                    event.kind,
+                    EventKind::Orchestrator(OrchestratorEvent::TaskProgressed { .. })
+                ),
+                "identity-less run leaked a boundary event: {event:?}"
+            ),
+            Ok(Err(_)) => continue,
+            Err(_) => break,
+        }
+    }
+}

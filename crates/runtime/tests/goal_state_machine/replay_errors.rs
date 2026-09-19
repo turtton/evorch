@@ -90,6 +90,30 @@ fn replay_rejects_unattached_task_events() {
 }
 
 #[test]
+fn replay_partial_keeps_valid_goals_and_collects_unresolvable_events() {
+    // Given: one valid goal plus a chat-run boundary progression that no goal can
+    // own (identity-less worker runs emit task_id == run_id and never get
+    // RunAttached; such rows already exist in real user databases).
+    let events = [
+        created(),
+        OrchestratorEvent::TaskProgressed {
+            task_id: "run-chat".into(),
+            run_id: "run-chat".into(),
+            progress: serde_json::json!({"status": "running", "attempts": 0}),
+            reason: "task execution boundary".into(),
+        },
+    ];
+    // When: replaying tolerantly over external, user-owned durable input.
+    let (ledgers, errors) = GoalLedger::replay_partial(events.iter());
+    // Then: the valid goal survives and the stray event is reported, not fatal.
+    assert!(ledgers.contains_key("goal-1"));
+    assert_eq!(errors.len(), 1);
+    assert!(matches!(errors[0], LedgerError::UnresolvedEvent(_)));
+    // And: the strict API still rejects the same history (contract unchanged).
+    assert!(GoalLedger::replay_checked(events.iter()).is_err());
+}
+
+#[test]
 fn replay_routes_task_progress_to_only_its_attached_goal() {
     // Given: two goals with disjoint root runs.
     let mut other = created();
