@@ -147,11 +147,11 @@ fn sandbox_settings_persist_escalation_approval_fields_when_saved() {
     harness.run();
     harness.click_label("Cancel");
     harness.run();
-    let mut current = "quick";
+    let mut current = "auto";
     for (label, mode, serialized) in [
         ("user", config::EscalationApproval::User, "user"),
         ("off", config::EscalationApproval::Off, "off"),
-        ("quick", config::EscalationApproval::Quick, "quick"),
+        ("auto", config::EscalationApproval::Auto, "auto"),
     ] {
         harness.click_label(&format!("Sandbox: {current}"));
         harness.run();
@@ -187,7 +187,7 @@ fn sandbox_settings_apply_live_updates_runtime_escalation_when_saved() {
     harness.run();
     harness.click_label("Cancel");
     harness.run();
-    harness.click_label("Sandbox: quick");
+    harness.click_label("Sandbox: auto");
     harness.run();
     harness.click_label("user");
     harness.run();

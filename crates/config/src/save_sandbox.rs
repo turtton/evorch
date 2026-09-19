@@ -11,7 +11,7 @@ pub fn save_sandbox(path: &Path, sandbox: SandboxConfig) -> Result<(), ConfigErr
     let mut section = toml_edit::Table::new();
     section.insert("allow_network", toml_edit::value(sandbox.allow_network));
     let escalation_approval = match sandbox.escalation_approval {
-        crate::EscalationApproval::Quick => "quick",
+        crate::EscalationApproval::Auto => "auto",
         crate::EscalationApproval::User => "user",
         crate::EscalationApproval::Off => "off",
     };

@@ -250,10 +250,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
-                sandbox_escalation: Arc::new(Mutex::new((
-                    config::EscalationApproval::Quick,
-                    false,
-                ))),
+                sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
@@ -478,10 +475,7 @@ impl AgentRuntime {
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 sandbox_allow_network: AtomicBool::new(false),
-                sandbox_escalation: Arc::new(Mutex::new((
-                    config::EscalationApproval::Quick,
-                    false,
-                ))),
+                sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),

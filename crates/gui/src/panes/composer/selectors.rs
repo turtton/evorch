@@ -11,7 +11,7 @@ pub(super) fn row(
     ui.horizontal_top(|ui| {
         ui.add_enabled_ui(sandbox.enabled, |ui| {
             let label = match sandbox.mode {
-                config::EscalationApproval::Quick => "Sandbox: quick",
+                config::EscalationApproval::Auto => "Sandbox: auto",
                 config::EscalationApproval::User => "Sandbox: user",
                 config::EscalationApproval::Off => "Sandbox: off",
             };
@@ -19,7 +19,7 @@ pub(super) fn row(
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     for (mode, label) in [
-                        (config::EscalationApproval::Quick, "quick"),
+                        (config::EscalationApproval::Auto, "auto"),
                         (config::EscalationApproval::User, "user"),
                         (config::EscalationApproval::Off, "off"),
                     ] {

@@ -91,7 +91,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
                 reason: "shell escalation is disabled".into(),
             },
             Some((EscalationApproval::User, _)) => self.human(ctx, command, justification).await,
-            Some((EscalationApproval::Quick, fallback)) => {
+            Some((EscalationApproval::Auto, fallback)) => {
                 let verdict = match &self.reviewer {
                     Some(reviewer) => reviewer.review(&ctx.run_id, command, justification).await,
                     None => Err(super::ReviewError::Model),

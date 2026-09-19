@@ -23,12 +23,12 @@ fn workbench(
 fn composer_exposes_sandbox_left_and_model_right_when_rendered() {
     // Given: a closed settings modal and the composer.
     let dir = tempfile::tempdir().expect("temp");
-    let mut harness = workbench(dir.path(), config::EscalationApproval::Quick);
+    let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     // When: rendering the app.
     harness.run();
     // Then: both selectors occupy the same row, above the input, at opposite edges.
-    assert!(harness.has_label("Sandbox: quick"));
-    let sandbox = harness.label_rects("Sandbox: quick")[0];
+    assert!(harness.has_label("Sandbox: auto"));
+    let sandbox = harness.label_rects("Sandbox: auto")[0];
     let model = harness.label_rects("Select model")[0];
     let input = harness.label_rects("Message or /command")[0];
     assert!(
@@ -57,7 +57,7 @@ fn composer_loads_persisted_mode_when_modal_was_never_opened() {
 fn modal_keeps_checkboxes_without_escalation_radios_when_opened() {
     // Given: a configured workbench.
     let dir = tempfile::tempdir().expect("temp");
-    let mut harness = workbench(dir.path(), config::EscalationApproval::Quick);
+    let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     // When: opening the sandbox modal.
     harness.state_mut().open_sandbox_settings();
     harness.run();
@@ -66,7 +66,7 @@ fn modal_keeps_checkboxes_without_escalation_radios_when_opened() {
     assert!(harness.has_label("審査で拒否された場合はユーザー承認へ昇格"));
     for label in [
         "エスカレーション審査",
-        "quick モデル審査 (既定)",
+        "auto モデル審査 (既定)",
         "ユーザー承認",
         "無効",
     ] {
@@ -81,13 +81,13 @@ fn modal_keeps_checkboxes_without_escalation_radios_when_opened() {
 fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable() {
     // Given: the config path becomes a directory after startup.
     let dir = tempfile::tempdir().expect("temp");
-    let mut harness = workbench(dir.path(), config::EscalationApproval::Quick);
+    let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
     let path = dir.path().join("evorch.toml");
     std::fs::remove_file(&path).expect("remove fixture");
     std::fs::create_dir(&path).expect("block config path");
     // When: selecting a mode that cannot be persisted.
-    harness.click_label("Sandbox: quick");
+    harness.click_label("Sandbox: auto");
     harness.run();
     harness.click_label("user");
     harness.run();
@@ -95,7 +95,7 @@ fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable()
     assert!(harness.has_label("Save sandbox"));
     harness.click_label("Cancel");
     harness.run();
-    assert!(harness.has_label("Sandbox: quick"));
+    assert!(harness.has_label("Sandbox: auto"));
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn capture_sandbox_composer_states() {
     // Given: the real composer at two desktop viewport sizes.
     let dir = tempfile::tempdir().expect("temp");
     for size in [[960.0, 600.0], [1280.0, 800.0]] {
-        let mut harness = workbench(dir.path(), config::EscalationApproval::Quick);
+        let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
         harness.input_mut().screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(size[0], size[1]),
@@ -113,7 +113,7 @@ fn capture_sandbox_composer_states() {
         // When: rendering closed, expanded and selected states.
         for state in ["closed", "expanded", "selected"] {
             match state {
-                "expanded" => harness.click_label("Sandbox: quick"),
+                "expanded" => harness.click_label("Sandbox: auto"),
                 "selected" => harness.click_label("user"),
                 _ => {}
             }

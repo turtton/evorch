@@ -84,7 +84,7 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
     .expect("review completes");
     let result = result.expect("execute");
     // Then: only an unchanged snapshot may reach unsandboxed execution.
-    let changed = next != (EscalationApproval::Quick, false);
+    let changed = next != (EscalationApproval::Auto, false);
     assert_eq!(result.is_error, changed);
     assert_eq!(*host.0.lock().expect("probe"), usize::from(!changed));
     let diagnostic = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -123,18 +123,18 @@ async fn escalation_approved_with_mode_changed_during_review_is_denied() {
 
 #[tokio::test]
 async fn escalation_approve_with_unchanged_settings_still_approves() {
-    review_with_settings((EscalationApproval::Quick, false)).await;
+    review_with_settings((EscalationApproval::Auto, false)).await;
 }
 
 #[tokio::test]
 async fn escalation_approved_with_fallback_changed_during_review_is_denied() {
-    review_with_settings((EscalationApproval::Quick, true)).await;
+    review_with_settings((EscalationApproval::Auto, true)).await;
 }
 
 #[tokio::test]
 async fn escalation_is_denied_when_settings_change_during_human_approval() {
-    // Given: User approval or Quick denial followed by human fallback.
-    for mode in [EscalationApproval::User, EscalationApproval::Quick] {
+    // Given: User approval or Auto denial followed by human fallback.
+    for mode in [EscalationApproval::User, EscalationApproval::Auto] {
         let bus = Arc::new(EventBus::new(32));
         let mut events = bus.subscribe();
         let executor = Arc::new(ToolExecutor::with_standard_tools(

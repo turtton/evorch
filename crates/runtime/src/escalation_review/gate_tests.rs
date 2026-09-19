@@ -43,12 +43,8 @@ async fn escalation_off_denies_without_calling_reviewer() {
 
 // Given: a structured approval / When: deciding / Then: escalation is granted.
 #[tokio::test]
-async fn quick_approve_grants_escalation() {
-    let (gate, _) = fixture(
-        EscalationApproval::Quick,
-        false,
-        Some(r#"{"approve":true}"#),
-    );
+async fn auto_approve_grants_escalation() {
+    let (gate, _) = fixture(EscalationApproval::Auto, false, Some(r#"{"approve":true}"#));
     assert!(matches!(
         gate.decide(&context(), "pwd", "inspect").await,
         EscalationDecision::Approve
@@ -57,9 +53,9 @@ async fn quick_approve_grants_escalation() {
 
 // Given: a denial / When: fallback is disabled / Then: its reason is preserved.
 #[tokio::test]
-async fn quick_deny_without_fallback_denies_with_reason() {
+async fn auto_deny_without_fallback_denies_with_reason() {
     let (gate, _) = fixture(
-        EscalationApproval::Quick,
+        EscalationApproval::Auto,
         false,
         Some(r#"{"approve":false,"reason":"unsafe"}"#),
     );
@@ -70,8 +66,8 @@ async fn quick_deny_without_fallback_denies_with_reason() {
 
 // Given: a failed provider / When: deciding / Then: failure cannot approve.
 #[tokio::test]
-async fn quick_error_without_fallback_denies_fail_closed() {
-    let (gate, _) = fixture(EscalationApproval::Quick, false, None);
+async fn auto_error_without_fallback_denies_fail_closed() {
+    let (gate, _) = fixture(EscalationApproval::Auto, false, None);
     assert!(matches!(
         gate.decide(&context(), "pwd", "inspect").await,
         EscalationDecision::Deny { .. }
@@ -80,8 +76,8 @@ async fn quick_error_without_fallback_denies_fail_closed() {
 
 // Given: invalid JSON / When: deciding / Then: parsing fails closed.
 #[tokio::test]
-async fn quick_invalid_verdict_denies_fail_closed() {
-    let (gate, _) = fixture(EscalationApproval::Quick, false, Some("invalid"));
+async fn auto_invalid_verdict_denies_fail_closed() {
+    let (gate, _) = fixture(EscalationApproval::Auto, false, Some("invalid"));
     assert!(matches!(
         gate.decide(&context(), "pwd", "inspect").await,
         EscalationDecision::Deny { .. }
@@ -117,12 +113,12 @@ async fn respond(gate: &SandboxEscalationGate, approved: bool) -> tokio::task::J
     })
 }
 
-// Given: quick non-approval and fallback / When: human responds / Then: human outcome is final.
+// Given: auto non-approval and fallback / When: human responds / Then: human outcome is final.
 #[tokio::test]
-async fn quick_non_approve_with_fallback_asks_user_then_applies_outcome() {
+async fn auto_non_approve_with_fallback_asks_user_then_applies_outcome() {
     for text in [Some(r#"{"approve":false}"#), Some("invalid"), None] {
         for approved in [false, true] {
-            let (gate, _) = fixture(EscalationApproval::Quick, true, text);
+            let (gate, _) = fixture(EscalationApproval::Auto, true, text);
             let responder = respond(&gate, approved).await;
             let decision = gate.decide(&context(), "pwd", "inspect").await;
             assert_eq!(matches!(decision, EscalationDecision::Approve), approved);
@@ -165,7 +161,7 @@ async fn approved_and_denied_decisions_emit_escalation_diagnostics() {
             event_bus::DiagnosticSeverity::Warning,
         ),
     ] {
-        let (gate, _) = fixture(EscalationApproval::Quick, false, Some(text));
+        let (gate, _) = fixture(EscalationApproval::Auto, false, Some(text));
         let mut rx = gate.bus.subscribe();
         gate.decide(&context(), "pwd", "inspect").await;
         let EventKind::Diagnostic(event) = rx.recv().await.expect("diagnostic").kind else {
@@ -183,7 +179,7 @@ async fn approved_and_denied_decisions_emit_escalation_diagnostics() {
 #[test]
 fn execution_policy_escalation_defaults_and_builders() {
     let policy = crate::ExecutionPolicy::for_role(agents::Role::Worker);
-    assert_eq!(policy.escalation_approval, EscalationApproval::Quick);
+    assert_eq!(policy.escalation_approval, EscalationApproval::Auto);
     assert!(!policy.escalate_to_user_on_deny);
     let policy = policy
         .with_escalation_approval(EscalationApproval::User)

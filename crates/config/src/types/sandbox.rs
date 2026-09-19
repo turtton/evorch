@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum EscalationApproval {
     #[default]
-    Quick,
+    #[serde(alias = "quick")]
+    Auto,
     User,
     Off,
 }

@@ -42,16 +42,36 @@ fn sandbox_allow_network_round_trips_when_true() {
 }
 
 #[test]
-fn escalation_approval_defaults_to_quick_when_section_absent() {
+fn escalation_approval_defaults_to_auto_when_section_absent() {
     // Given: a configuration without a sandbox section.
     let config: Config = toml::from_str("version = 2").expect("config");
 
     // When: inspecting the default sandbox settings.
     let sandbox = config.sandbox;
 
-    // Then: escalation approval is Quick and deny escalation is disabled.
-    assert_eq!(sandbox.escalation_approval, EscalationApproval::Quick);
+    // Then: escalation approval is Auto and deny escalation is disabled.
+    assert_eq!(sandbox.escalation_approval, EscalationApproval::Auto);
     assert!(!sandbox.escalate_to_user_on_deny);
+}
+
+#[test]
+fn approval_mode_deserializes_auto_and_legacy_quick_alias() {
+    // Given: current and legacy on-disk approval values.
+    let auto: Config = toml::from_str("[sandbox]\nescalation_approval = \"auto\"").expect("auto");
+    let legacy: Config =
+        toml::from_str("[sandbox]\nescalation_approval = \"quick\"").expect("legacy quick");
+
+    // When: serializing the parsed values.
+    let serialized = toml::to_string(&auto).expect("serialize");
+
+    // Then: both values select Auto and serialization emits the current name.
+    assert_eq!(auto.sandbox.escalation_approval, EscalationApproval::Auto);
+    assert_eq!(legacy.sandbox.escalation_approval, EscalationApproval::Auto);
+    let serialized_config: Config = toml::from_str(&serialized).expect("serialized TOML");
+    assert_eq!(
+        serialized_config.sandbox.escalation_approval,
+        EscalationApproval::Auto
+    );
 }
 
 #[test]

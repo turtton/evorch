@@ -55,7 +55,7 @@ impl ExecutionPolicy {
             capabilities: role.capabilities(),
             role_name: role.name().to_owned(),
             sandbox_allow_network: false,
-            escalation_approval: config::EscalationApproval::Quick,
+            escalation_approval: config::EscalationApproval::Auto,
             escalate_to_user_on_deny: false,
         }
     }

@@ -152,7 +152,7 @@
       "default": {
         "allow_network": false,
         "escalate_to_user_on_deny": false,
-        "escalation_approval": "quick"
+        "escalation_approval": "auto"
       }
     },
     "team": {
@@ -477,7 +477,7 @@
     "EscalationApproval": {
       "type": "string",
       "enum": [
-        "quick",
+        "auto",
         "user",
         "off"
       ]
@@ -1028,7 +1028,7 @@
         },
         "escalation_approval": {
           "$ref": "#/$defs/EscalationApproval",
-          "default": "quick"
+          "default": "auto"
         }
       },
       "additionalProperties": false

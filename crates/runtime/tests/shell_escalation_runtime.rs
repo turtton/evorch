@@ -73,7 +73,7 @@ impl Fixture {
 // Given: approving reviewer and two probes / When: shell executes / Then: only host path runs.
 #[tokio::test]
 async fn escalated_shell_approved_runs_via_unsandboxed_and_returns_output() {
-    let fixture = Fixture::new(EscalationApproval::Quick, r#"{"approve":true}"#);
+    let fixture = Fixture::new(EscalationApproval::Auto, r#"{"approve":true}"#);
     let result = fixture.execute().await;
     assert!(!result.is_error);
     assert_eq!(result.content, "exit_code: 0\napproved");
@@ -84,7 +84,7 @@ async fn escalated_shell_approved_runs_via_unsandboxed_and_returns_output() {
 #[tokio::test]
 async fn escalated_shell_denied_returns_reason_and_spawn_never_happens() {
     let fixture = Fixture::new(
-        EscalationApproval::Quick,
+        EscalationApproval::Auto,
         r#"{"approve":false,"reason":"unsafe"}"#,
     );
     let result = fixture.execute().await;
@@ -114,7 +114,7 @@ async fn escalated_shell_user_mode_uses_scoped_approval_responder() {
 // Given: an already wired executor / When: settings switch Off / Then: no reviewer or host execution.
 #[tokio::test]
 async fn escalated_shell_live_setting_change_takes_effect_without_rebuild() {
-    let fixture = Fixture::new(EscalationApproval::Quick, r#"{"approve":true}"#);
+    let fixture = Fixture::new(EscalationApproval::Auto, r#"{"approve":true}"#);
     fixture
         .runtime
         .set_sandbox_escalation(EscalationApproval::Off, false);
@@ -133,7 +133,7 @@ async fn escalated_shell_live_setting_change_takes_effect_without_rebuild() {
 
 // Given: fixed model composition / When: using its supplied executor / Then: composition installs the gate.
 #[tokio::test]
-async fn composed_executor_escalates_when_quick_reviewer_approves() {
+async fn composed_executor_escalates_when_auto_reviewer_approves() {
     let bus = Arc::new(EventBus::new(64));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         bus.clone(),

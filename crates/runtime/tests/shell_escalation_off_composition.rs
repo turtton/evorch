@@ -62,7 +62,7 @@ impl Tool for ObservedShell {
 }
 
 #[tokio::test]
-async fn off_mode_composes_gate_anyway_and_quick_enable_takes_effect_without_rebuild() {
+async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebuild() {
     // Given: real composition starting Off, observing the unsandboxed path without replacing the gate.
     let bus = Arc::new(EventBus::new(64));
     let wraps = Arc::new(Mutex::new(0));
@@ -104,10 +104,10 @@ async fn off_mode_composes_gate_anyway_and_quick_enable_takes_effect_without_reb
         thread_id: None,
         call_id: None,
     };
-    // When: Off -> Quick -> Off is applied to the same executor.
+    // When: Off -> Auto -> Off is applied to the same executor.
     for (mode, expected_wraps) in [
         (EscalationApproval::Off, 0),
-        (EscalationApproval::Quick, 1),
+        (EscalationApproval::Auto, 1),
         (EscalationApproval::Off, 1),
     ] {
         runtime.set_sandbox_escalation(mode, false);
@@ -128,7 +128,7 @@ async fn off_mode_composes_gate_anyway_and_quick_enable_takes_effect_without_reb
                 assert!(result.is_error);
                 assert_eq!(result.content, "shell escalation is disabled");
             }
-            EscalationApproval::Quick => {
+            EscalationApproval::Auto => {
                 assert!(!result.is_error);
                 assert_eq!(result.content, "exit_code: 0\ncomposed");
             }
