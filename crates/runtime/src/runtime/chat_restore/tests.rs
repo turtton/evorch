@@ -1,5 +1,8 @@
 use super::*;
 
+mod invalidation;
+mod registration;
+
 struct CompletingModel;
 
 #[async_trait::async_trait]
@@ -36,6 +39,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_model(Arc::new(CompletingModel))
+    }
+
+    fn with_model(model: Arc<dyn AgentModel>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("goal.sqlite3"),
@@ -43,12 +50,8 @@ impl Fixture {
         };
         let storage = storage::Storage::open(config.clone()).unwrap();
         let bus = Arc::new(EventBus::new(128));
-        let runtime = AgentRuntime::new(
-            bus.clone(),
-            Arc::new(ToolExecutor::new(bus)),
-            Arc::new(CompletingModel),
-        )
-        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
         Self {
             runtime,
             storage,
@@ -218,6 +221,7 @@ async fn goal_restore_fails_closed_when_consumed_marker_cannot_be_persisted() {
     let fixture = Fixture::new();
     let run = fixture.terminal().await;
     drop(fixture.storage);
+    let mut events = fixture.runtime.shared.bus.subscribe();
     // When: a follow-up attempts to consume the snapshot.
     let result = fixture
         .runtime
@@ -233,5 +237,10 @@ async fn goal_restore_fails_closed_when_consumed_marker_cannot_be_persisted() {
     assert_eq!(
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), events.recv())
+            .await
+            .is_err()
     );
 }

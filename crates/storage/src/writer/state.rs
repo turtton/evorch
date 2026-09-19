@@ -90,6 +90,9 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::InvalidateRunContext(run_id, reply)) => {
+                let _ = reply.send(crate::repo::run_context::invalidate(&state.conn, &run_id));
+            }
             Ok(Command::Memory(mutation, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

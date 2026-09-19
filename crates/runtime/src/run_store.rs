@@ -59,19 +59,7 @@ impl RunStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(run_id);
-        if let Some(mut record) = self.restore_record(run_id)? {
-            // Retain prior messages for diagnosis, but never accept them as current history.
-            let mut descriptor: crate::restore::RunRestoreDescriptor =
-                serde_json::from_str(&record.config_json)
-                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
-            descriptor.restorable = false;
-            descriptor.non_restorable_reason = Some("persist_failed".into());
-            record.restorable = false;
-            record.config_json = serde_json::to_string(&descriptor)
-                .map_err(|error| StorageError::Serialization(error.to_string()))?;
-            self.handle.upsert_run_context(&record)?;
-        }
-        Ok(())
+        self.handle.invalidate_run_context(&run_id.to_string())
     }
 
     pub(crate) fn restore_record(

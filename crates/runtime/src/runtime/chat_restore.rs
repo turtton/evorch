@@ -78,26 +78,12 @@ impl AgentRuntime {
             .handle
             .upsert_run_context(&record)
             .map_err(|error| fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string())))?;
-        let restored_by = authority
-            .ownership
-            .as_ref()
-            .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone());
         let config = RunConfig {
             name: descriptor.name,
             interactive: true,
             keep_alive: true,
             ..authority
         };
-        self.shared
-            .bus
-            .emit(Event::new(LifecycleEvent::AgentRunRestored {
-                run_id: run_id.to_string(),
-                restored_by,
-                message_id: format!(
-                    "msg-{}",
-                    self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
-                ),
-            }));
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

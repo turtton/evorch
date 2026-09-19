@@ -55,7 +55,7 @@ async fn secret_blocks_invalidate_snapshot_when_terminal_context_is_saved() {
         // When: cancellation persists the accumulated terminal context.
         runtime.cancel(run).unwrap();
         runtime.wait(run).await.unwrap();
-        // Then: old context is invalidated, and no secret reaches storage or diagnostics.
+        // Then: old context is invalidated, and no secret reaches the stored history.
         let record = database.run_context(&run.to_string()).unwrap().unwrap();
         assert!(!record.restorable);
         assert!(

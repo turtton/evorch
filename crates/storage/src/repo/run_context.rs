@@ -52,7 +52,8 @@ fn check_strings(
             Ok(())
         }
         serde_json::Value::Object(values) => {
-            for value in values.values() {
+            for (key, value) in values {
+                guard.check_text("run_context", field, key)?;
                 check_strings(guard, field, value)?;
             }
             Ok(())
@@ -86,4 +87,14 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, 
             },
         )
         .optional()?)
+}
+
+pub fn invalidate(conn: &Connection, run_id: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE run_contexts SET restorable = 0, \
+         config_json = json_set(config_json, '$.restorable', json('false'), \
+         '$.non_restorable_reason', 'persist_failed') WHERE run_id = ?1",
+        [run_id],
+    )?;
+    Ok(())
 }

@@ -837,6 +837,21 @@ impl AgentRuntime {
                 _join: None,
             },
         );
+        if task.restored.is_some() {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::AgentRunRestored {
+                    run_id: run_id.to_string(),
+                    restored_by: config
+                        .ownership
+                        .as_ref()
+                        .map_or_else(|| "user".into(), |permit| permit.lease.owner_id.clone()),
+                    message_id: format!(
+                        "msg-{}",
+                        self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
+                    ),
+                }));
+        }
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::AgentRunStarted {

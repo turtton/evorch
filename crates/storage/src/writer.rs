@@ -28,6 +28,7 @@ enum Command {
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
     AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
     UpsertRunContext(crate::RunContextRecord, ReplyTx),
+    InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
@@ -113,6 +114,14 @@ impl StorageHandle {
     /// Returns an error for suspended writes, SQLite failure or a closed writer.
     pub fn upsert_run_context(&self, record: &crate::RunContextRecord) -> Result<(), StorageError> {
         self.request(|reply| Command::UpsertRunContext(record.clone(), reply))
+    }
+
+    /// Disable restore atomically without reading or rewriting legacy history payloads.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn invalidate_run_context(&self, run_id: &str) -> Result<(), StorageError> {
+        self.request(|reply| Command::InvalidateRunContext(run_id.into(), reply))
     }
 
     pub fn append_fenced_event(
