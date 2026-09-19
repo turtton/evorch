@@ -240,10 +240,10 @@ pub(crate) fn remove_original_profile(
     original_name: Option<&str>,
     name: &str,
 ) {
-    if let Some(original) = original_name.filter(|original| *original != name) {
-        if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut) {
-            providers.remove(original);
-        }
+    if let Some(original) = original_name.filter(|original| *original != name)
+        && let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_like_mut)
+    {
+        providers.remove(original);
     }
 }
 

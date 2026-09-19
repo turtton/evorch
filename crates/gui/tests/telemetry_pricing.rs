@@ -190,7 +190,7 @@ fn capture_telemetry_cost_png() {
     use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
     let source = DemoSource(vec![runtime::AgentSummary {
         run_id: runtime::RunId::new(1),
-        parent_run_id: None,
+        parent_run_id: Some(runtime::RunId::new(0)),
         name: "worker".into(),
         role_name: "worker".into(),
         phase: event_bus::AgentRunPhase::Running,
