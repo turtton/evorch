@@ -17,11 +17,33 @@ mod tests {
     fn summary(id: u64, phase: AgentRunPhase) -> AgentSummary {
         AgentSummary {
             run_id: RunId::new(id),
+            parent_run_id: (id != 1).then(|| RunId::new(1)),
             name: "custom-name".into(),
             role_name: "Reviewer".into(),
             phase,
             model: "model-y".to_string(),
         }
+    }
+
+    #[test]
+    fn update_keeps_only_subagent_runs() {
+        // Given: a mixed list containing a root run and a child run
+        let source = Source(vec![
+            summary(1, AgentRunPhase::Running),
+            summary(2, AgentRunPhase::Running),
+        ]);
+        let mut model = TasksModel::new(source);
+        // When: the Agents tab rows are refreshed
+        model.refresh();
+        // Then: only the child run is listed
+        assert_eq!(
+            model
+                .rows()
+                .iter()
+                .map(|row| row.run_id)
+                .collect::<Vec<_>>(),
+            [RunId::new(2)]
+        );
     }
 
     #[test]
@@ -47,12 +69,12 @@ mod tests {
     #[test]
     fn state_change_updates_known_row_and_unknown_refreshes() {
         // Given: a refreshed row built from a summary with distinct identity values
-        let source = Source(vec![summary(1, AgentRunPhase::Running)]);
+        let source = Source(vec![summary(2, AgentRunPhase::Running)]);
         let mut model = TasksModel::new(source);
         model.refresh();
         // When: a state-change event marks the run as Done
         model.apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
-            run_id: "run-1".into(),
+            run_id: "run-2".into(),
             from: AgentRunPhase::Running,
             to: AgentRunPhase::Done,
             reason: None,
@@ -137,6 +159,7 @@ impl<S: AgentRunSource> TasksModel<S> {
     pub fn update(&mut self, summaries: &[AgentSummary]) {
         self.rows = summaries
             .iter()
+            .filter(|summary| summary.parent_run_id.is_some())
             .map(|summary| TaskRow {
                 run_id: summary.run_id,
                 name: summary.name.clone(),

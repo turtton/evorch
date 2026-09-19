@@ -171,6 +171,36 @@ async fn continuation_dispatched_exactly_once_per_terminal_epoch() {
 }
 
 #[tokio::test]
+async fn agent_summaries_expose_parent_run_ids() {
+    // Given: a registered root run and a child run
+    let fixture = Fixture::new(8).await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(fixture.root, Role::Worker, "CHILD", RunConfig::default())
+        .expect("child run registration");
+    fixture.settle().await;
+
+    // When: the runtime summaries are listed
+    let summaries = fixture.runtime.list_agents();
+
+    // Then: the root has no parent and the child points to the root
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.run_id == fixture.root)
+            .and_then(|summary| summary.parent_run_id),
+        None
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.run_id == child)
+            .and_then(|summary| summary.parent_run_id),
+        Some(fixture.root)
+    );
+}
+
+#[tokio::test]
 async fn duplicate_terminal_event_is_suppressed_as_duplicate() {
     let fixture = Fixture::new(8).await;
     fixture.terminal(fixture.root);

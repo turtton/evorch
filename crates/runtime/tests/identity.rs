@@ -66,6 +66,7 @@ async fn list_agents_reports_name_role_and_model() {
 fn agent_summary_serializes_identity_fields() {
     let summary = AgentSummary {
         run_id: RunId::new(9),
+        parent_run_id: None,
         name: "ops-lead".to_string(),
         role_name: "Reviewer".to_string(),
         phase: AgentRunPhase::Done,

@@ -219,6 +219,7 @@ fn tasks_row_updates_after_state_change_event() {
     let bus = EventBus::new(8);
     let source = MockSource(vec![AgentSummary {
         run_id: RunId::new(1),
+        parent_run_id: Some(RunId::new(0)),
         name: "worker-w1".into(),
         role_name: "Worker".into(),
         phase: AgentRunPhase::Running,

@@ -190,11 +190,8 @@ fn direct_keyword_goal_starts_worker_run_through_the_ui() {
     // Then: the goal is accepted, a Worker run named goal-1 appears with no
     // Orchestrator row, and the Direct local-rule decision is published
     assert!(fixture.harness.has_label("accepted: goal-1"));
-    wait_for_row_matching(
-        &mut fixture,
-        |row| row.role == "Worker" && row.name == "goal-1",
-        "Worker row named goal-1",
-    );
+    fixture.harness.run();
+    assert_no_row_with_role(&fixture, "Worker");
     assert_no_row_with_role(&fixture, "Orchestrator");
     let (shape, source) = wait_for_routing_decision(&fixture.runtime, &mut routing_rx);
     assert_eq!(shape, "Direct");
@@ -217,11 +214,8 @@ fn plain_goal_starts_orchestrator_run_through_the_ui() {
 
     // Then: an Orchestrator run named goal-1 appears with no Worker row, and
     // the Coordinated local-rule decision is published
-    wait_for_row_matching(
-        &mut fixture,
-        |row| row.role == "Orchestrator" && row.name == "goal-1",
-        "Orchestrator row named goal-1",
-    );
+    fixture.harness.run();
+    assert_no_row_with_role(&fixture, "Orchestrator");
     assert_no_row_with_role(&fixture, "Worker");
     let (shape, source) = wait_for_routing_decision(&fixture.runtime, &mut routing_rx);
     assert_eq!(shape, "Coordinated");

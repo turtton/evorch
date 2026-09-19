@@ -123,6 +123,8 @@ pub struct WorkspaceInspection {
 pub struct AgentSummary {
     /// 実行 ID。
     pub run_id: RunId,
+    /// 親 run の ID。ルート run では `None`。
+    pub parent_run_id: Option<RunId>,
     /// 表示名。`RunConfig::name` 未指定時はロール名。
     pub name: String,
     /// ロール名識別子。

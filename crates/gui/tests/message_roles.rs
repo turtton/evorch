@@ -8,6 +8,7 @@ impl gui::model::tasks::AgentRunSource for Source {
         [(1, "orchestrator"), (2, "worker")]
             .map(|(id, role)| runtime::AgentSummary {
                 run_id: runtime::RunId::new(id),
+                parent_run_id: Some(runtime::RunId::new(0)),
                 name: "custom-name".into(),
                 role_name: role.into(),
                 phase: event_bus::AgentRunPhase::Running,

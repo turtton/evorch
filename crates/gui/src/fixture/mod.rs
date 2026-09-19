@@ -61,6 +61,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
     vec![
         AgentSummary {
             run_id: RunId::new(1),
+            parent_run_id: Some(RunId::new(0)),
             name: "orchestrator".into(),
             role_name: "orchestrator".into(),
             phase: AgentRunPhase::Running,
@@ -68,6 +69,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
         },
         AgentSummary {
             run_id: RunId::new(2),
+            parent_run_id: Some(RunId::new(0)),
             name: "implementer".into(),
             role_name: "worker".into(),
             phase: AgentRunPhase::Done,
@@ -75,6 +77,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
         },
         AgentSummary {
             run_id: RunId::new(3),
+            parent_run_id: Some(RunId::new(0)),
             name: "reviewer".into(),
             role_name: "reviewer".into(),
             phase: AgentRunPhase::Waiting,

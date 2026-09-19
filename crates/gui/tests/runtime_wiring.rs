@@ -168,24 +168,14 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
         AgentRunPhase::Done
     );
 
-    // Then: the tasks rows converge to exactly the two runs with direct
-    // identity mapping, sorted by run id
-    let expected = vec![
-        TaskRow {
-            run_id: RunId::new(1),
-            name: "Orchestrator".into(),
-            role: "Orchestrator".into(),
-            status: AgentRunPhase::Done,
-            model: "test-orchestrator".into(),
-        },
-        TaskRow {
+    // Then: the tasks rows converge to the delegated child run only
+    let expected = vec![TaskRow {
             run_id: RunId::new(2),
             name: "worker-w1".into(),
             role: "Worker".into(),
             status: AgentRunPhase::Done,
             model: "test-worker".into(),
-        },
-    ];
+        }];
     let deadline = Instant::now() + Duration::from_secs(5);
     while harness.state().tasks().rows() != expected.as_slice() {
         if Instant::now() > deadline {

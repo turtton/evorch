@@ -186,6 +186,7 @@ fn workbench(window: Option<u64>) -> HeadlessWorkbench<DemoSource> {
     sidebar.switch_thread(&ThreadId::new("one")).unwrap();
     let source = DemoSource(vec![runtime::AgentSummary {
         run_id: runtime::RunId::new(1),
+        parent_run_id: Some(runtime::RunId::new(0)),
         name: "chat:one".into(),
         role_name: "worker".into(),
         phase: AgentRunPhase::Running,
@@ -220,6 +221,7 @@ fn agents_cell_shows_pressure_when_window_is_known() {
         let mut tasks = gui::model::tasks::TasksModel::new(DemoSource(vec![]));
         tasks.update(&[runtime::AgentSummary {
             run_id: runtime::RunId::new(1),
+            parent_run_id: Some(runtime::RunId::new(0)),
             name: "worker".into(),
             role_name: "worker".into(),
             phase: AgentRunPhase::Done,

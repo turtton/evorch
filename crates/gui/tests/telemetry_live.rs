@@ -198,6 +198,7 @@ impl AgentRunSource for Source {
     fn list(&self) -> Vec<AgentSummary> {
         vec![AgentSummary {
             run_id: RunId::new(1),
+            parent_run_id: Some(RunId::new(0)),
             name: "worker".into(),
             role_name: "worker".into(),
             phase: AgentRunPhase::Running,

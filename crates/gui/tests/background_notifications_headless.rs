@@ -107,6 +107,7 @@ fn multiple_concurrent_runs_display_states() {
         .zip(phases)
         .map(|((id, name), phase)| AgentSummary {
             run_id: RunId::new(id),
+            parent_run_id: Some(RunId::new(0)),
             name: name.into(),
             role_name: "worker".into(),
             phase,

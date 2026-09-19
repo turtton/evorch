@@ -20,6 +20,7 @@ fn agents_display_additional_role_names() {
             .iter()
             .map(|(id, role)| AgentSummary {
                 run_id: RunId::new(*id),
+                parent_run_id: Some(RunId::new(0)),
                 name: format!("agent-{id}"),
                 role_name: (*role).into(),
                 phase: AgentRunPhase::Running,

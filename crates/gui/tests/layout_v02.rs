@@ -262,6 +262,7 @@ fn undock_to_floating_and_reload_preserves_v02_panels() {
 fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
     AgentSummary {
         run_id: RunId::new(id),
+        parent_run_id: Some(RunId::new(0)),
         name: name.into(),
         role_name: role.into(),
         phase: event_bus::AgentRunPhase::Running,

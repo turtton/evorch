@@ -1028,6 +1028,7 @@ impl AgentRuntime {
             .iter()
             .map(|(run_id, entry)| AgentSummary {
                 run_id: *run_id,
+                parent_run_id: entry.parent,
                 name: entry.name.clone(),
                 role_name: entry.role.name().to_string(),
                 phase: *entry.phase_rx.borrow(),

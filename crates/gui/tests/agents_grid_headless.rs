@@ -150,6 +150,7 @@ fn agents_grid_telemetry_is_reachable_when_scrolled() {
 fn long_summary() -> AgentSummary {
     AgentSummary {
         run_id: RunId::new(1),
+        parent_run_id: Some(RunId::new(0)),
         name: "worker-with-a-really-long-agent-name".into(),
         role_name: "reviewer-with-long-role".into(),
         phase: AgentRunPhase::Running,

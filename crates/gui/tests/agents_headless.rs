@@ -464,6 +464,7 @@ fn close_and_reopen_pane_does_not_duplicate_entries() {
 fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
     AgentSummary {
         run_id: RunId::new(id),
+        parent_run_id: Some(RunId::new(0)),
         name: name.into(),
         role_name: role.into(),
         phase: AgentRunPhase::Running,

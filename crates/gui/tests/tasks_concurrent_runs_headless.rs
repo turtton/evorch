@@ -15,6 +15,7 @@ impl AgentRunSource for FixtureSource {
 fn run(id: u64, name: &'static str, phase: AgentRunPhase) -> AgentSummary {
     AgentSummary {
         run_id: RunId::new(id),
+        parent_run_id: Some(RunId::new(0)),
         name: name.into(),
         role_name: "worker".into(),
         phase,
