@@ -16,6 +16,14 @@ impl AgentRunSource for EmptySource {
 }
 
 fn fixture(root: &std::path::Path, archived: bool) -> HeadlessWorkbench<EmptySource> {
+    fixture_with_pinned(root, archived, false)
+}
+
+fn fixture_with_pinned(
+    root: &std::path::Path,
+    archived: bool,
+    pinned: bool,
+) -> HeadlessWorkbench<EmptySource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("p");
     sidebar
@@ -29,12 +37,45 @@ fn fixture(root: &std::path::Path, archived: bool) -> HeadlessWorkbench<EmptySou
     // Use the persisted shape so the pre-implementation UI test can run.
     let mut json = serde_json::to_value(sidebar).unwrap();
     json["threads"][0]["archived"] = archived.into();
+    json["threads"][0]["pinned"] = pinned.into();
     json["threads"][0]["created_at"] = 0.into();
     let state = WorkbenchState::new(EmptySource, &UiSettings::default())
         .unwrap()
         .with_sidebar(serde_json::from_value(json).unwrap())
         .with_sidebar_path(root.join("sidebar.json"));
     HeadlessWorkbench::new(state, [1000.0, 700.0])
+}
+
+#[test]
+fn pinned_thread_archive_button_disabled_noop() {
+    // Given: one visible pinned thread.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = fixture_with_pinned(temp.path(), false, true);
+    harness.run();
+
+    // When: attempting to click its archive control.
+    harness.click_label("Archive");
+    harness.run();
+
+    // Then: the pinned thread remains visible and unarchived.
+    assert!(harness.has_label("Target"));
+    assert!(!harness.state().sidebar().threads[0].archived);
+}
+
+#[test]
+fn unpinned_thread_archive_still_works() {
+    // Given: one visible unpinned thread.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = fixture_with_pinned(temp.path(), false, false);
+    harness.run();
+
+    // When: clicking its archive control.
+    harness.click_label("Archive");
+    harness.run();
+
+    // Then: the thread is archived through the real dispatch path.
+    assert!(!harness.has_label("Target"));
+    assert!(harness.state().sidebar().threads[0].archived);
 }
 
 #[test]

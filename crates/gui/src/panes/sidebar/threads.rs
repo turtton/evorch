@@ -58,7 +58,9 @@ pub fn render(
                 *action = Some(SidebarAction::TogglePin(thread.id.clone()));
             }
             status_dot(ui, state_color(state));
-            let archive = ui.small_button("↓").on_hover_text("アーカイブ");
+            let archive = ui
+                .add_enabled(!thread.pinned, egui::Button::new("▣").small())
+                .on_hover_text("アーカイブ");
             archive.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Archive")
             });
