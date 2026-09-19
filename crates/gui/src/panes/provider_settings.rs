@@ -42,6 +42,8 @@ pub fn provider_settings_modal(
                     egui::ScrollArea::vertical()
                         .id_salt("openai-editor")
                         .auto_shrink([false, false])
+                        // Break the sizing feedback loop with the modal's previous-frame height.
+                        .min_scrolled_height((ctx.viewport_rect().height() - 160.0).max(100.0))
                         .max_height((ctx.viewport_rect().height() - 160.0).max(100.0))
                         .show(ui, |ui| {
                             action = openai_body(ui, editor, &sources);

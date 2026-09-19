@@ -32,9 +32,11 @@ mod save_wait;
 
 #[test]
 fn saves_existing_keyring_profile_without_typing_token() {
+    use sandbox::CredentialStore;
+
     // Given
     let temp = tempfile::tempdir().unwrap();
-    let (mut harness, _) = edit_save::keyring_editor(temp.path());
+    let (mut harness, store) = edit_save::keyring_editor(temp.path());
     // When
     harness.click_label("Save");
     finish_save(&mut harness);
@@ -46,6 +48,7 @@ fn saves_existing_keyring_profile_without_typing_token() {
     );
     assert!(harness.state().provider_settings().editor.is_none());
     assert_eq!(load_config(temp.path()).providers.len(), 1);
+    assert_eq!(store.get("acct-A").unwrap().unwrap().expose(), "old-token");
 }
 
 fn workbench(root: &std::path::Path, provider: ProviderStatus) -> HeadlessWorkbench<DemoSource> {
