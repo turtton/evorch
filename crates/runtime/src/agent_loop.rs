@@ -190,6 +190,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         identical_calls: identical_calls::IdenticalCalls::default(),
         durable_task: None,
     };
+    if state.cancelled()
+        || state
+            .runtime()
+            .is_some_and(|runtime| runtime.spawn_cancelled(state.task.run_id))
+    {
+        state.finish_cancelled();
+        return;
+    }
     if state.task.config.workspace_mode == WorkspaceMode::Shared
         && let Some(root) = sandbox_root
     {
@@ -230,7 +238,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 return;
             };
             let Some(workspace) = runtime_shared.workspace.as_ref() else {
-                state.finish_error("workspace isolation requires workspace context".to_string());
+                state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
                 return;
             };
             let adopted = state

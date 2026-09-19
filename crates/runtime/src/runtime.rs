@@ -1,6 +1,7 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 mod admission;
+mod cancellation;
 mod chat_restore;
 mod restore_delivery;
 use chat_restore::RunContinuation;
@@ -54,6 +55,7 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 pub(crate) struct Shared {
     pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     admissions: admission::Admissions,
+    spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
     pub(crate) learning_runs: LearningRunReceivers,
     topology: OnceLock<crate::CoordinationTopology>,
@@ -232,6 +234,7 @@ impl AgentRuntime {
             shared: Arc::new(Shared {
                 reviewer_results: Mutex::new(HashMap::new()),
                 admissions: Mutex::new(HashMap::new()),
+                spawn_intents: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),
@@ -462,6 +465,7 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 admissions: Mutex::new(HashMap::new()),
+                spawn_intents: Mutex::new(HashMap::new()),
                 bus,
                 executor: Mutex::new(executor),
                 model,
@@ -651,10 +655,35 @@ impl AgentRuntime {
         config: RunConfig,
         continuation: RunContinuation,
     ) -> RunId {
-        if self.shared.model.requires_admission() {
-            return self.admit_run(run_id, parent, role, prompt, config, continuation);
+        let mut intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cancelled = intents.get(&run_id).is_some_and(|intent| intent.cancelled)
+            || parent
+                .and_then(|parent| intents.get(&parent))
+                .is_some_and(|intent| intent.cancelled);
+        let owner = intents
+            .get(&run_id)
+            .and_then(|intent| intent.parent)
+            .or(parent);
+        intents.insert(
+            run_id,
+            cancellation::SpawnIntent {
+                parent: owner,
+                cancelled,
+            },
+        );
+        let run = if self.shared.model.requires_admission() {
+            self.admit_run(run_id, parent, role, prompt, config, continuation)
+        } else {
+            self.register_run(run_id, parent, role, prompt, config, continuation)
+        };
+        if cancelled {
+            let _ = self.cancel(run);
         }
-        self.register_run(run_id, parent, role, prompt, config, continuation)
+        run
     }
 
     fn register_run(

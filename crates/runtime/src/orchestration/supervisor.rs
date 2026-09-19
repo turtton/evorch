@@ -133,6 +133,22 @@ impl SupervisorHandle {
 
     /// goal を取り消す。
     pub fn cancel(&self, goal_id: &str) -> Result<(), SupervisorError> {
+        let snapshot = {
+            let mut ledgers = self
+                .ledgers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ledger = ledgers
+                .get_mut(goal_id)
+                .ok_or_else(|| SupervisorError::UnknownGoal(goal_id.into()))?;
+            if ledger.snapshot().state != GoalState::Cancelled {
+                let event = ledger.transition(GoalState::Cancelled, "cancelled by operator")?;
+                ledger.apply(&event)?;
+                self.bus.emit(Event::new(event));
+            }
+            ledger.snapshot().clone()
+        };
+        self.runtime.cancel_goal_runs(&snapshot);
         self.send_goal(goal_id, GoalCommand::Cancel)
     }
 
@@ -464,8 +480,9 @@ impl SupervisorActor {
                 let _ = self.transition(goal_id, GoalState::Paused, "paused by operator");
             }
             GoalCommand::Cancel => {
-                self.cancel_attached(&snapshot);
                 let _ = self.transition(goal_id, GoalState::Cancelled, "cancelled by operator");
+                self.deferred.remove(goal_id);
+                self.cancel_attached(&snapshot);
             }
             GoalCommand::Stop => {
                 self.cancel_attached(&snapshot);
@@ -616,6 +633,19 @@ impl SupervisorActor {
                 ..
             }) => {
                 self.task_phase(&run_id, to, reason.as_deref());
+                if reason
+                    .as_deref()
+                    .is_some_and(continuation::is_configuration_failure)
+                {
+                    for goal in self.goals_for_run(&run_id) {
+                        let _ = self.transition(
+                            &goal,
+                            GoalState::Blocked,
+                            "non-retryable workspace configuration",
+                        );
+                        self.deferred.remove(&goal);
+                    }
+                }
                 self.on_phase(run_id, to).await
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
@@ -664,6 +694,28 @@ impl SupervisorActor {
             let Some(snapshot) = self.snapshot(&goal_id) else {
                 continue;
             };
+            if snapshot.state == GoalState::Active
+                && phase == AgentRunPhase::Error
+                && self
+                    .find_run(&run_id)
+                    .is_some_and(|run| self.runtime.workspace_configuration_failed(run))
+            {
+                let _ = self.transition(
+                    &goal_id,
+                    GoalState::Blocked,
+                    "non-retryable workspace configuration",
+                );
+                self.deferred.remove(&goal_id);
+                self.suppress(&goal_id, snapshot.epoch, SuppressReason::Blocked);
+                continue;
+            }
+            if matches!(
+                snapshot.state,
+                GoalState::Cancelled | GoalState::Blocked | GoalState::Complete
+            ) {
+                self.try_dispatch(&goal_id).await;
+                continue;
+            }
             let purpose = snapshot
                 .attached_runs
                 .iter()
@@ -939,6 +991,12 @@ impl SupervisorActor {
         let Some(parent) = self.find_run(&snapshot.root_run_id) else {
             return;
         };
+        if self
+            .snapshot(&snapshot.goal_id)
+            .is_none_or(|current| current.state != GoalState::Active)
+        {
+            return;
+        }
         // issue #83: continuation child の起動より先に RunAttached /
         // ContinuationDispatched を emit して happens-before を張る。
         // spawn 後に emit すると、即座に finish する child が registry 経由で
@@ -1623,11 +1681,7 @@ impl SupervisorActor {
     }
 
     fn cancel_attached(&self, snapshot: &GoalSnapshot) {
-        for attached in &snapshot.attached_runs {
-            if let Some(run) = self.find_run(&attached.run_id) {
-                let _ = self.runtime.cancel(run);
-            }
-        }
+        self.runtime.cancel_goal_runs(snapshot);
     }
 
     fn mark_progress(&mut self, run_id: &str) {

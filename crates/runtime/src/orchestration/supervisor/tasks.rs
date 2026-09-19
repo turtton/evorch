@@ -132,6 +132,12 @@ impl SupervisorActor {
             ),
             Err(_) => return,
         };
+        self.runtime.track_goal_run(run, &request.run_id);
+        if self.snapshot(&request.goal_id).is_none_or(|current| {
+            matches!(current.state, GoalState::Cancelled | GoalState::Complete)
+        }) {
+            return;
+        }
         self.emit_for_goal(
             &request.goal_id,
             OrchestratorEvent::TaskRetryScheduled {

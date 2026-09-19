@@ -657,6 +657,11 @@ fn run() -> Result<(), GuiError> {
             runtime
         }
         None => {
+            let seam = WorkspaceSeam::production(
+                sidebar
+                    .resolved_primary_project()
+                    .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
+            )?;
             let executor = production_executor(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator)
@@ -678,7 +683,7 @@ fn run() -> Result<(), GuiError> {
                     Some((_, model)) => model.clone(),
                     None => Arc::new(runtime::compose::UnconfiguredModel),
                 }),
-                workspace: None,
+                workspace: Some(seam),
             })?;
             tracing::debug!(
                 ?model_identity,

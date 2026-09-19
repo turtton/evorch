@@ -27,10 +27,21 @@ pub fn decide_task(
     if let Some(reason) = reason {
         return ContinuationDecision::Suppress(reason);
     }
+    if task
+        .failure_reason
+        .as_deref()
+        .is_some_and(is_configuration_failure)
+    {
+        return ContinuationDecision::Suppress(SuppressReason::Blocked);
+    }
     if task.attempts >= max_attempts {
         return ContinuationDecision::Suppress(SuppressReason::LimitReached { max: max_attempts });
     }
     ContinuationDecision::Dispatch
+}
+
+pub(crate) fn is_configuration_failure(reason: &str) -> bool {
+    reason == crate::RuntimeError::WorkspaceContextRequired.to_string()
 }
 
 /// 現在の epoch を dispatch できるかを副作用なしで判定する。

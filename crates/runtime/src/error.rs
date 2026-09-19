@@ -7,6 +7,8 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("workspace isolation requires workspace context")]
+    WorkspaceContextRequired,
     #[error("実行 {run_id} の復元に失敗しました: {reason}")]
     RunRestoreFailed {
         run_id: String,
