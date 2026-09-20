@@ -1,5 +1,11 @@
 {
   description = "A basic flake with a shell";
+
+  nixConfig = {
+    extra-substituters = [ "https://attic.taile2777.ts.net/home" ];
+    extra-trusted-public-keys = [ "home:00byWMpTTw/3xTntv8EF6LQmlWlR9RU5Tl0GVG5Vwn8=" ];
+  };
+
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.systems.url = "github:nix-systems/default";
   inputs.flake-utils = {
