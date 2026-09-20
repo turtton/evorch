@@ -54,27 +54,49 @@ fn composer_loads_persisted_mode_when_modal_was_never_opened() {
 }
 
 #[test]
-fn modal_keeps_network_toggle_without_approval_controls_when_opened() {
+fn chatbox_button_opens_modal_with_approval_controls() {
     // Given: a configured workbench.
     let dir = tempfile::tempdir().expect("temp");
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
-    // When: opening the sandbox modal.
-    harness.state_mut().open_sandbox_settings();
     harness.run();
-    // Then: only networking remains; approval controls live in the composer selector.
+    // When: clicking the chatbox sandbox button.
+    harness.click_label("Sandbox: auto");
+    harness.run();
+    // Then: networking and approval controls are available together in the modal.
     assert!(harness.has_label("Allow network inside sandbox"));
     for label in [
         "審査で拒否された場合はユーザー承認へ昇格",
-        "エスカレーション審査",
-        "auto モデル審査 (既定)",
-        "ユーザー承認",
-        "無効",
+        "auto",
+        "user",
+        "off",
     ] {
-        assert!(
-            !harness.has_label(label),
-            "unexpected modal control: {label}"
-        );
+        assert!(harness.has_label(label), "missing modal control: {label}");
     }
+}
+
+#[test]
+fn sandbox_button_label_tracks_saved_mode() {
+    // Given: the composer initially reflects auto approval.
+    let dir = tempfile::tempdir().expect("temp");
+    let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
+    harness.run();
+    // When: saving user approval through the modal and closing it.
+    harness.click_label("Sandbox: auto");
+    harness.run();
+    harness.click_label("user");
+    harness.run();
+    harness.click_label("Save sandbox");
+    harness.run();
+    harness.click_label("Cancel");
+    harness.run();
+    // Then: the button and a fresh workbench both reflect the saved mode.
+    assert!(harness.has_label("Sandbox: user"));
+    let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
+        .expect("state")
+        .with_provider_settings_path(dir.path().join("evorch.toml"));
+    let mut reopened = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    reopened.run();
+    assert!(reopened.has_label("Sandbox: user"));
 }
 
 #[test]
@@ -83,13 +105,15 @@ fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable()
     let dir = tempfile::tempdir().expect("temp");
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
+    harness.click_label("Sandbox: auto");
+    harness.run();
     let path = dir.path().join("evorch.toml");
     std::fs::remove_file(&path).expect("remove fixture");
     std::fs::create_dir(&path).expect("block config path");
-    // When: selecting a mode that cannot be persisted.
-    harness.click_label("Sandbox: auto");
-    harness.run();
+    // When: saving a mode that cannot be persisted.
     harness.click_label("user");
+    harness.run();
+    harness.click_label("Save sandbox");
     harness.run();
     // Then: the existing error surface opens and the selection is rolled back.
     assert!(harness.has_label("Save sandbox"));

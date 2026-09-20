@@ -10,6 +10,7 @@ use crate::theme::{
 pub(super) struct SandboxSettings {
     pub open: bool,
     pub config: config::SandboxConfig,
+    draft: config::SandboxConfig,
     error: Option<String>,
     runtime: Option<runtime::AgentRuntime>,
 }
@@ -25,22 +26,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match config::Config::load(&self.routing_load_options()) {
             Ok(config) => {
                 self.sandbox_settings.config = config.sandbox;
+                self.sandbox_settings.draft = config.sandbox;
                 self.sandbox_settings.error = None;
             }
             Err(error) => self.sandbox_settings.error = Some(error.to_string()),
-        }
-    }
-
-    pub(super) fn set_sandbox_escalation(&mut self, mode: config::EscalationApproval) {
-        if self.settings_save_in_progress() {
-            return;
-        }
-        let previous = self.sandbox_settings.config;
-        self.sandbox_settings.config.escalation_approval = mode;
-        self.save_sandbox_settings();
-        if self.sandbox_settings.error.is_some() {
-            self.sandbox_settings.config = previous;
-            self.sandbox_settings.open = true;
         }
     }
 
@@ -54,6 +43,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         self.load_sandbox_settings();
+        self.sandbox_settings.draft = self.sandbox_settings.config;
         self.provider_settings.open = false;
         self.routing_settings.open = false;
         self.role_settings.open = false;
@@ -76,7 +66,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
                 ui.label(h3("Sandbox"));
                 ui.add_enabled_ui(!busy, |ui| {
-                    ui.checkbox(&mut self.sandbox_settings.config.allow_network, "Allow network inside sandbox");
+                    ui.label("エスカレーション審査");
+                    ui.horizontal(|ui| {
+                        for (mode, label) in [
+                            (config::EscalationApproval::Auto, "auto"),
+                            (config::EscalationApproval::User, "user"),
+                            (config::EscalationApproval::Off, "off"),
+                        ] {
+                            ui.radio_value(&mut self.sandbox_settings.draft.escalation_approval, mode, label);
+                        }
+                    });
+                    ui.checkbox(&mut self.sandbox_settings.draft.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
+                    ui.checkbox(&mut self.sandbox_settings.draft.allow_network, "Allow network inside sandbox");
                     ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
                 });
                 if let Some(error) = &self.sandbox_settings.error {
@@ -104,11 +105,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_ref()
             .ok_or_else(|| "No project config path is configured".to_owned())
             .and_then(|path| {
-                config::save_sandbox(path, self.sandbox_settings.config)
+                config::save_sandbox(path, self.sandbox_settings.draft)
                     .map_err(|error| error.to_string())
             });
         match result {
             Ok(()) => {
+                self.sandbox_settings.config = self.sandbox_settings.draft;
                 if let Some(runtime) = &self.sandbox_settings.runtime {
                     runtime.set_sandbox_network(self.sandbox_settings.config.allow_network);
                     runtime.set_sandbox_escalation(

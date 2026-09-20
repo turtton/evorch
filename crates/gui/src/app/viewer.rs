@@ -143,7 +143,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Cancel => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
-                ComposerAction::SandboxEscalation(mode) => self.set_sandbox_escalation(mode),
+                ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }

@@ -24,7 +24,7 @@ pub enum ComposerAction {
     Complete(&'static str),
     CompleteExternal(String),
     ModelPreference(Option<workspace_ui::ModelPreference>),
-    SandboxEscalation(config::EscalationApproval),
+    OpenSandboxSettings,
 }
 
 pub fn composer_strip(

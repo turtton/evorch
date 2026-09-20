@@ -2,7 +2,7 @@ use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench}
 
 #[test]
 fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
-    // Given: an existing project configuration and the settings menu.
+    // Given: an existing project configuration and the chatbox sandbox button.
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("evorch.toml");
     std::fs::write(&path, "version = 2\n[metrics]\nenabled = false\n").expect("fixture");
@@ -22,9 +22,7 @@ fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
     // When: enabling sandbox networking through the real checkbox and saving.
-    harness.click_label("⚙");
-    harness.run();
-    harness.click_label("Sandbox");
+    harness.click_label("Sandbox: auto");
     harness.run();
     harness.click_label("Allow network inside sandbox");
     harness.run();
@@ -136,26 +134,64 @@ fn reload_sandbox(dir: &std::path::Path) -> config::SandboxConfig {
 }
 
 #[test]
-fn sandbox_settings_modal_shows_network_toggle_without_escalation_checkbox() {
+fn chatbox_sandbox_button_opens_restored_modal() {
     // Given: defaults on disk and the real settings modal.
     let dir = tempfile::tempdir().expect("temp");
     let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
-    // When: closing and reopening the modal.
     harness.click_label("Cancel");
     harness.run();
     assert!(!harness.has_label("Allow network inside sandbox"));
-    harness.state_mut().open_sandbox_settings();
+    // When: opening settings from the chatbox.
+    harness.click_label("Sandbox: auto");
     harness.run();
-    // Then: only the network setting is exposed by the modal.
-    assert!(harness.has_label("Allow network inside sandbox"));
+    // Then: the modal exposes all sandbox settings.
     for label in [
+        "Allow network inside sandbox",
         "審査で拒否された場合はユーザー承認へ昇格",
-        "escalation",
-        "Escalation",
-        "承認",
+        "auto",
+        "user",
+        "off",
     ] {
-        assert_eq!(harness.count_labels(label), 0, "unexpected label: {label}");
+        assert!(harness.has_label(label), "missing control: {label}");
     }
+}
+
+#[test]
+fn settings_menu_no_longer_offers_sandbox() {
+    // Given: the workbench with no modal open.
+    let dir = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
+    harness.click_label("Cancel");
+    harness.run();
+    // When: opening the settings menu.
+    harness.click_label("⚙");
+    harness.run();
+    // Then: sandbox settings have moved, while other settings remain available.
+    assert!(!harness.has_label("Sandbox"));
+    for label in ["Theme", "Providers", "Agent roles", "Routing"] {
+        assert!(harness.has_label(label), "missing settings entry: {label}");
+    }
+}
+
+#[test]
+fn modal_escalation_change_applies_live_when_saved() {
+    // Given: auto approval on disk and in the live runtime.
+    let dir = tempfile::tempdir().expect("temp");
+    let (mut harness, runtime) = escalation_fixture(dir.path(), config::SandboxConfig::default());
+    // When: changing approval and deny escalation in the modal, then saving.
+    harness.click_label("user");
+    harness.run();
+    harness.click_label("審査で拒否された場合はユーザー承認へ昇格");
+    harness.run();
+    harness.click_label("Save sandbox");
+    harness.run();
+    // Then: both values are persisted and applied to the existing runtime.
+    let saved = reload_sandbox(dir.path());
+    assert_eq!(saved.escalation_approval, config::EscalationApproval::User);
+    assert!(saved.escalate_to_user_on_deny);
+    let policy = runtime.execution_policy(runtime::Role::Worker);
+    assert_eq!(policy.escalation_approval, config::EscalationApproval::User);
+    assert!(policy.escalate_to_user_on_deny);
 }
 
 #[test]

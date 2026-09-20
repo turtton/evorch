@@ -15,30 +15,13 @@ pub(super) fn row(
                 config::EscalationApproval::User => "Sandbox: user",
                 config::EscalationApproval::Off => "Sandbox: off",
             };
-            let response = egui::ComboBox::from_id_salt("sandbox-escalation")
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    for (mode, label) in [
-                        (config::EscalationApproval::Auto, "auto"),
-                        (config::EscalationApproval::User, "user"),
-                        (config::EscalationApproval::Off, "off"),
-                    ] {
-                        if ui
-                            .selectable_label(
-                                sandbox.mode == mode,
-                                egui::RichText::new(label)
-                                    .color(crate::theme::tokens::palette().TEXT),
-                            )
-                            .clicked()
-                            && sandbox.mode != mode
-                        {
-                            action = Some(ComposerAction::SandboxEscalation(mode));
-                        }
-                    }
-                });
-            response.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, sandbox.enabled, label)
+            let response = ui.button(label);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, sandbox.enabled, label)
             });
+            if response.clicked() {
+                action = Some(ComposerAction::OpenSandboxSettings);
+            }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             if let Some(preference) = model_picker(ui, picker.0, picker.1) {
