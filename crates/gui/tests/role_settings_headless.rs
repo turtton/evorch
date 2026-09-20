@@ -1,404 +1,220 @@
-use std::sync::Arc;
-
-use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
-use runtime::compose::{SwitchableModel, UnconfiguredModel};
-use runtime::{AgentModel, Role};
-
-fn fixture(root: &std::path::Path) -> (HeadlessWorkbench<DemoSource>, Arc<SwitchableModel>) {
-    std::fs::write(
-        root.join("evorch.toml"),
-        r#"
-[providers.local]
-type = "openai-compatible"
-base_url = "https://example.invalid/v1"
-api_key_env = "TEST_KEY"
-models = ["base", "fast"]
-default_model = "base"
-[providers.accelerated]
-type = "openai-compatible"
-base_url = "https://example.invalid/v1"
-api_key_env = "TEST_KEY"
-models = ["fast"]
-default_model = "fast"
-[routing.routes]
-worker = [{ profile = "local", model = "base" }]
-fast = [{ profile = "accelerated", model = "fast" }]
-"#,
-    )
-    .expect("fixture config");
-    let context = gui::model::production::ProductionModel {
-        load_options: config::LoadOptions {
-            project_dir: Some(root.into()),
-            user_config_dir: Some(root.join("user")),
-            read_env: false,
-            ..Default::default()
-        },
-        credential_store: Arc::new(
-            sandbox::credential::FileCredentialStore::open(root.join("credentials"))
-                .expect("store"),
-        ),
-        bus: Arc::new(event_bus::EventBus::new(32)),
-        env: Arc::new(routing::MapEnv::new(
-            [("TEST_KEY".into(), "test-secret".into())].into(),
-        )),
-    };
-    let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
-    let mut state =
-        WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-            .expect("state")
-            .with_provider_settings_path(root.join("evorch.toml"))
-            .with_production_model(context, model.clone());
-    state.open_role_settings();
-    (HeadlessWorkbench::new(state, [1200.0, 900.0]), model)
-}
-
-fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while harness.state().role_settings().is_saving() {
-        assert!(std::time::Instant::now() < deadline, "save timeout");
-        harness.step();
-        std::thread::yield_now();
-    }
-    harness.run();
-}
+#[path = "role_settings_headless/effort.rs"]
+mod effort;
+#[path = "role_settings_headless/evidence.rs"]
+mod evidence;
+#[path = "role_settings_headless/legacy.rs"]
+mod legacy;
+#[path = "role_settings_headless/support.rs"]
+mod support;
+use support::{finish, fixture};
 
 #[test]
-fn role_binding_edit_saves_toml_and_reloads_runtime() {
-    // Given: a production reload context and two distinct routes.
+fn logical_model_options_come_from_routing_routes() {
+    // Given: explicit routes, provider IDs and legacy bindings.
     let temp = tempfile::tempdir().expect("temp");
-    let (mut harness, model) = fixture(temp.path());
-    harness
-        .state_mut()
-        .role_settings_mut()
-        .agents
-        .worker
-        .base
-        .logical_model = Some("fast".into());
-    harness.run();
-    // When: saving through the actual modal.
-    harness.click_label("Save role settings");
-    harness.step();
-    finish(&mut harness);
-    // Then: persisted, reseeded and live runtime values agree.
-    assert_eq!(harness.state().role_settings().error, None);
-    let saved = config::Config::load(&config::LoadOptions {
+    let (mut harness, _) = fixture(temp.path());
+    let mut config = config::Config::load(&config::LoadOptions {
         project_dir: Some(temp.path().into()),
         user_config_dir: Some(temp.path().join("user")),
         read_env: false,
         ..Default::default()
     })
-    .expect("saved config");
-    assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("fast"));
-    assert_eq!(harness.state().role_settings().agents, saved.agents);
-    assert_eq!(model.selected_model(Role::Worker, None), "accelerated/fast");
-}
-
-#[test]
-fn category_override_editable_per_role() {
-    // Given: the worker category editor.
-    let temp = tempfile::tempdir().expect("temp");
-    let (mut harness, _) = fixture(temp.path());
-    harness.run();
-    harness.click_label("Worker");
-    harness.run();
-    harness.click_label("quick");
-    harness.run();
-    // When: a category-specific model is selected and saved.
-    harness.click_label("quick logical model");
-    harness.run();
-    harness.click_label("fast");
-    harness.run();
-    harness.click_label("Save role settings");
-    harness.step();
-    finish(&mut harness);
-    // Then: only the worker quick binding changes.
-    let agents = &harness.state().role_settings().agents;
-    assert_eq!(
-        agents.worker.categories["quick"].logical_model.as_deref(),
-        Some("fast")
-    );
-    assert_eq!(agents.worker.logical_model, None);
-    assert_eq!(agents.explorer, config::RoleBindingConfig::default());
-}
-
-#[test]
-fn category_ui_is_scoped_to_worker_row() {
-    for role in ["Explorer", "Librarian", "Worker"] {
-        // Given: a fresh modal with every role row collapsed.
-        let temp = tempfile::tempdir().expect("temp");
-        let (mut harness, _) = fixture(temp.path());
-        harness.run();
-        // When: only the selected role row is opened.
-        harness.click_label(role);
-        harness.run();
-        // Then: the category section and all six headers belong only to Worker.
-        for label in [
-            "Category overrides",
-            "quick",
-            "deep",
-            "high-reasoning",
-            "visual",
-            "writing",
-            "research",
-        ] {
-            assert_eq!(
-                harness.has_label(label),
-                role == "Worker",
-                "{role}: {label}"
-            );
-        }
+    .expect("config");
+    config.agents.explorer.logical_model = Some("legacy".into());
+    config.routing.routes.clear();
+    for name in ["X", "Y"] {
+        config
+            .routing
+            .routes
+            .insert(name.into(), vec![config::RouteCandidateConfig::default()]);
     }
-}
-
-#[test]
-fn librarian_row_saves_when_model_selected() {
-    // Given: the real role settings modal with distinct routes.
-    let temp = tempfile::tempdir().expect("temp");
-    let (mut harness, model) = fixture(temp.path());
+    // When: opening the seeded dropdown.
+    let mut model = gui::model::role_settings::RoleSettingsModel::seed_from_config(&config);
+    model.open = true;
+    *harness.state_mut().role_settings_mut() = model;
     harness.run();
-    // When: editing the librarian row and saving through its controls.
-    harness.click_label("Librarian");
+    harness.click_label("Explorer");
     harness.run();
     harness.click_label("Role logical model");
     harness.run();
-    harness.click_label("fast");
-    harness.run();
-    harness.click_label("Save role settings");
-    harness.step();
-    finish(&mut harness);
-    // Then: the saved binding is reseeded and used by the live runtime.
-    assert_eq!(harness.state().role_settings().error, None);
+    // Then: route keys and the legacy binding appear, not provider model IDs.
     assert_eq!(
-        harness
-            .state()
-            .role_settings()
-            .agents
-            .binding_for("librarian", None)
-            .expect("saved librarian")
-            .logical_model,
-        "fast"
+        harness.state().role_settings().logical_models,
+        ["X", "Y", "legacy"]
     );
-    assert_eq!(
-        model.selected_model(Role::Librarian, None),
-        "accelerated/fast"
-    );
+    for label in ["X", "Y", "legacy"] {
+        assert!(harness.has_label(label));
+    }
+    for label in ["base", "fast"] {
+        assert!(!harness.has_label(label));
+    }
 }
 
 #[test]
-fn effort_choices_follow_selected_model_levels() {
-    // Given: a config where route "fast" maps to a model with restricted effort levels.
+fn empty_routes_options_keep_only_explicit_bindings() {
+    // Given: a provider config without routes and with a legacy category binding.
     let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = fixture(temp.path());
+    let path = temp.path().join("evorch.toml");
+    let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
-        temp.path().join("evorch.toml"),
-        r#"
-[providers.local]
-type = "openai-compatible"
-base_url = "https://example.invalid/v1"
-api_key_env = "TEST_KEY"
-default_model = "base"
-models = [
-  { id = "base", enabled = true },
-  { id = "fast", enabled = true, effort_levels = ["minimal", "high"] },
-]
-[routing.routes]
-worker = [{ profile = "local", model = "base" }]
-fast = [{ profile = "local", model = "fast" }]
-"#,
-    )
-    .expect("fixture config");
-    let context = gui::model::production::ProductionModel {
-        load_options: config::LoadOptions {
-            project_dir: Some(temp.path().into()),
-            user_config_dir: Some(temp.path().join("user")),
-            read_env: false,
-            ..Default::default()
-        },
-        credential_store: Arc::new(
-            sandbox::credential::FileCredentialStore::open(temp.path().join("credentials"))
-                .expect("store"),
+        &path,
+        format!(
+            "{}\n[agents.worker.categories.quick]\nlogical_model = 'legacy'",
+            text.split("[routing.routes]").next().expect("profiles")
         ),
-        bus: Arc::new(event_bus::EventBus::new(32)),
-        env: Arc::new(routing::MapEnv::new(
-            [("TEST_KEY".into(), "test-secret".into())].into(),
-        )),
-    };
-    let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
-    let mut state =
-        WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-            .expect("state")
-            .with_provider_settings_path(temp.path().join("evorch.toml"))
-            .with_production_model(context, model);
-    state.open_role_settings();
-    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
-    harness.run();
-    // When: the worker role points at the restricted model.
+    )
+    .expect("write");
+    // When: reopening from disk.
+    harness.state_mut().open_role_settings();
+    // Then: raw provider IDs and implicit role names are not offered.
+    assert_eq!(harness.state().role_settings().logical_models, ["legacy"]);
+}
+
+#[test]
+fn undefined_binding_shows_warning_and_route_create_button() {
+    // Given: an unknown explicit binding.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = fixture(temp.path());
     harness
         .state_mut()
         .role_settings_mut()
         .agents
-        .worker
-        .base
-        .logical_model = Some("fast".into());
+        .explorer
+        .logical_model = Some("unknown".into());
     harness.run();
-    harness.click_label("Worker");
+    // When: opening the binding's row.
+    harness.click_label("Explorer");
     harness.run();
-    harness.click_label("Generation overrides");
-    harness.run();
-    harness.click_label("Reasoning effort");
-    harness.run();
-    // Then: only the model's levels are offered, and the default route keeps common levels.
-    assert!(harness.has_label("minimal"));
-    assert!(harness.has_label("high"));
-    assert!(!harness.has_label("xhigh"));
-    assert_eq!(
-        gui::model::role_settings::effort_options(
-            &harness.state().role_settings().effort_choices,
-            Some("worker"),
-        ),
-        gui::model::role_settings::DEFAULT_EFFORT_LEVELS
-            .map(str::to_owned)
-            .into_iter()
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn save_success_closes_modal() {
-    // Given: an open role editor with a valid change.
-    let temp = tempfile::tempdir().expect("temp");
-    let (mut harness, _) = fixture(temp.path());
-    harness.run();
-    assert!(harness.has_label("Agent role settings"));
-    // When: saving through the actual modal.
+    // Then: the warning is actionable without blocking save.
+    assert!(harness.has_label("未定義 (route なし)"));
+    assert!(harness.has_label("route を作成"));
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);
-    // Then: the modal closes without an error.
     assert_eq!(harness.state().role_settings().error, None);
     assert!(!harness.state().role_settings().open);
-    assert!(!harness.has_label("Agent role settings"));
-}
-
-#[test]
-fn validation_error_blocks_save() {
-    // Given: unknown and empty explicit model assignments.
-    for name in ["unknown", ""] {
-        let temp = tempfile::tempdir().expect("temp");
-        let (mut harness, _) = fixture(temp.path());
-        let before = std::fs::read(temp.path().join("evorch.toml")).expect("read");
+    harness.state_mut().open_role_settings();
+    assert_eq!(
         harness
-            .state_mut()
-            .role_settings_mut()
-            .agents
-            .worker
-            .base
-            .logical_model = Some(name.into());
-        harness.run();
-        // When: saving is requested.
-        harness.click_label("Save role settings");
-        harness.run();
-        // Then: validation is visible and disk remains untouched.
-        let error = harness
             .state()
             .role_settings()
-            .error
-            .as_deref()
-            .expect("error");
-        assert!(harness.has_label(error));
-        assert_eq!(
-            std::fs::read(temp.path().join("evorch.toml")).expect("read"),
-            before
-        );
-    }
+            .agents
+            .explorer
+            .logical_model
+            .as_deref(),
+        Some("unknown")
+    );
 }
 
 #[test]
-fn role_settings_geometry_matrix() {
-    // Given: supported viewport sizes and DPI scales.
-    for size in [[960.0, 600.0], [1200.0, 900.0]] {
-        for dpi in [1.0, 1.5, 2.0] {
-            let temp = tempfile::tempdir().expect("temp");
-            let (mut original, _) = fixture(temp.path());
-            original.state_mut().role_settings_mut().open = false;
-            let mut state =
-                WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-                    .expect("state")
-                    .with_provider_settings_path(temp.path().join("evorch.toml"));
-            state.open_role_settings();
-            let mut harness = HeadlessWorkbench::with_pixels_per_point(state, size, dpi);
-            harness.run();
-            // When: the deepest category controls are expanded.
-            harness.click_label("Worker");
-            harness.run();
+fn resolved_preview_shows_profile_model_per_role() {
+    // Given: actual runtime bindings with distinct worker and category routes.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = fixture(temp.path());
+    let agents = &mut harness.state_mut().role_settings_mut().agents;
+    agents.orchestrator.logical_model = Some("fast".into());
+    agents.explorer.logical_model = Some("fast".into());
+    agents.reviewer.logical_model = Some("fast".into());
+    agents.roles.librarian.logical_model = Some("fast".into());
+    agents.roles.planner.logical_model = Some("fast".into());
+    agents.roles.oracle.logical_model = Some("fast".into());
+    agents.roles.multimodal_looker.logical_model = Some("fast".into());
+    agents.worker.categories.insert(
+        "quick".into(),
+        config::CategoryBindingConfig {
+            logical_model: Some("fast".into()),
+            ..Default::default()
+        },
+    );
+    harness.state_mut().submit_role_settings();
+    finish(&mut harness);
+    // When: reopening each fixed role and the worker category.
+    for role in [
+        "Orchestrator",
+        "Explorer",
+        "Worker",
+        "Reviewer",
+        "Librarian",
+        "Planner",
+        "Oracle",
+        "Multimodal Looker",
+    ] {
+        harness.state_mut().open_role_settings();
+        harness.run();
+        harness.click_label(role);
+        harness.run();
+        // Then: every row displays the runtime resolution, with categories only on worker.
+        let expected = if role == "Worker" {
+            "→ local/base"
+        } else {
+            "→ accelerated/fast"
+        };
+        assert!(harness.has_label(expected), "{role}");
+        if role == "Worker" {
             harness.click_label("quick");
             harness.run();
-            // Then: save stays visible and category controls are scroll reachable.
-            for label in ["Save role settings", "Cancel", "quick logical model"] {
-                harness.scroll_label_into_view(label);
-                harness.run();
-                let rects = harness.label_rects(label);
-                assert!(!rects.is_empty(), "{label}");
-                assert!(
-                    rects
-                        .iter()
-                        .all(|rect| harness.screen_rect().contains_rect(*rect)),
-                    "{label}: {rects:?}"
-                );
-            }
+            assert!(harness.has_label("→ accelerated/fast"));
         }
+        harness.click_label(role);
+        harness.run();
     }
 }
 
 #[test]
-fn menu_opens_role_settings_and_cancel_discards_edits() {
-    // Given: a closed role editor with an unsaved change.
+fn empty_routes_banner_in_role_settings_explains_implicit_resolution() {
+    // Given: two profiles and no routes.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _) = fixture(temp.path());
+    let path = temp.path().join("evorch.toml");
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        text.split("[routing.routes]").next().expect("profiles"),
+    )
+    .expect("write");
+    // When: opening settings from the changed config.
+    harness.state_mut().open_role_settings();
+    harness.run();
+    // Then: the alphabetically first profile and its default are explained.
+    assert!(harness.has_label(
+        "No explicit routes: all logical models implicitly resolve to accelerated/fast."
+    ));
+}
+
+#[test]
+fn route_create_from_role_settings_opens_prefilled_routing_modal() {
+    // Given: a binding without a route.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
     harness
         .state_mut()
         .role_settings_mut()
         .agents
-        .worker
-        .base
-        .logical_model = Some("fast".into());
+        .explorer
+        .logical_model = Some("legacy".into());
     harness.run();
-    harness.click_label("Cancel");
+    harness.click_label("Explorer");
     harness.run();
-    // When: reopening through the settings menu.
-    harness.click_label("⚙");
+    // When: using the actual cross-modal action.
+    harness.click_label("route を作成");
     harness.run();
-    harness.click_label("Agent roles");
-    harness.run();
-    // Then: disk values replace discarded edits.
-    assert!(harness.has_label("Agent role settings"));
+    // Then: only routing is open and the logical name is preserved in its new row.
+    assert!(!harness.state().role_settings().open);
+    assert!(!harness.has_label("Agent role settings"));
+    assert!(harness.state().routing_settings().open);
+    assert!(harness.has_label("Routing settings"));
     assert_eq!(
-        harness.state().role_settings().agents.worker.logical_model,
-        None
+        harness
+            .state()
+            .routing_settings()
+            .pending_new_route
+            .as_deref(),
+        Some("legacy")
     );
-}
-
-#[test]
-#[ignore = "writes PNG review evidence using an offscreen GPU adapter"]
-fn capture_role_settings_png_evidence() {
-    // Given: an isolated editor with the category section expanded.
-    let temp = tempfile::tempdir().expect("temp");
-    let (mut harness, _) = fixture(temp.path());
-    harness.run();
-    harness.click_label("Worker");
-    harness.run();
-    harness.click_label("research");
-    harness.run();
-    // When: capturing the real egui surface offscreen.
-    let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
-        return;
-    };
-    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/role-settings");
-    std::fs::create_dir_all(&output).expect("evidence directory");
-    frame
-        .save_png(&output.join("role-settings.png"))
-        .expect("PNG");
-    // Then: the new screen and primary action are present at the expected dimensions.
-    assert_eq!((frame.width, frame.height), (1200, 900));
-    assert!(harness.has_label("Save role settings"));
+    assert_eq!(
+        harness.state().routing_settings().routes["legacy"][0].profile,
+        "accelerated"
+    );
+    assert!(harness.has_label("New route (not saved)"));
 }

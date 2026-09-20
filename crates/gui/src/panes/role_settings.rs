@@ -1,13 +1,16 @@
 use crate::model::role_settings::{CATEGORIES, RoleSettingsModel, effort_options};
+mod binding_status;
 use crate::theme::{
     text::{badge, h3, muted},
     tokens::*,
     widgets::{primary_button, surface_frame},
 };
+use binding_status::binding_status;
 
 pub enum RoleSettingsAction {
     Save,
     Cancel,
+    CreateRoute(String),
 }
 
 pub fn role_settings_modal(
@@ -34,6 +37,15 @@ pub fn role_settings_modal(
                     .id_salt("role-bindings")
                     .max_height((ctx.viewport_rect().height() - TOPBAR * 4.0).max(TOPBAR))
                     .show(ui, |ui| {
+                        if model.routes_empty {
+                            surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {
+                                let message = model.implicit_resolution.as_ref().map_or_else(
+                                    || "No explicit routes and no provider profile: logical models cannot resolve.".into(),
+                                    |resolved| format!("No explicit routes: all logical models implicitly resolve to {resolved}."),
+                                );
+                                ui.colored_label(palette().WARNING_FG, message);
+                            });
+                        }
                         let agents = &mut model.agents;
                         for (name, binding, categories) in [
                             ("Orchestrator", &mut agents.orchestrator, None),
@@ -56,6 +68,12 @@ pub fn role_settings_modal(
                                         &mut binding.logical_model,
                                         (&model.logical_models, "Role logical model"),
                                     );
+                                    if let Some(logical) = binding_status(ui, binding.logical_model.as_deref(), &model.route_names) {
+                                        action = Some(RoleSettingsAction::CreateRoute(logical));
+                                    }
+                                    if let Some(Some(resolved)) = model.resolved_previews.get(name) {
+                                        ui.label(muted(format!("→ {resolved}")));
+                                    }
                                     optional_text(ui, "Preset reference", &mut binding.preset);
                                     ui.collapsing(badge("Generation overrides"), |ui| {
                                         generation(
@@ -80,6 +98,12 @@ pub fn role_settings_modal(
                                                         &format!("{category} logical model"),
                                                     ),
                                                 );
+                                                if let Some(logical) = binding_status(ui, draft.logical_model.as_deref(), &model.route_names) {
+                                                    action = Some(RoleSettingsAction::CreateRoute(logical));
+                                                }
+                                                if let Some(Some(resolved)) = model.resolved_previews.get(category) {
+                                                    ui.label(muted(format!("→ {resolved}")));
+                                                }
                                                 optional_text(
                                                     ui,
                                                     "Category preset reference",

@@ -1,5 +1,6 @@
 use super::WorkbenchState;
 use crate::model::{role_settings::RoleSettingsModel, tasks::AgentRunSource};
+use crate::panes::role_settings::{RoleSettingsAction, role_settings_modal};
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub const fn role_settings(&self) -> &RoleSettingsModel {
@@ -29,7 +30,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         match config::Config::load(&self.role_load_options()) {
-            Ok(config) => self.role_settings = RoleSettingsModel::seed_from_config(&config),
+            Ok(config) => self.seed_role_settings(&config),
             Err(error) => self.role_settings.error = Some(error.to_string()),
         }
         self.provider_settings.open = false;
@@ -37,6 +38,58 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.open = false;
         self.sandbox_settings.open = false;
         self.role_settings.open = true;
+    }
+
+    pub(super) fn render_role_settings(&mut self, ctx: &egui::Context) {
+        if self.role_settings.open && !self.routing_settings.open {
+            match role_settings_modal(ctx, &mut self.role_settings) {
+                Some(RoleSettingsAction::Save) => self.submit_role_settings(),
+                Some(RoleSettingsAction::Cancel) => self.role_settings.open = false,
+                Some(RoleSettingsAction::CreateRoute(logical)) => {
+                    self.open_routing_settings_prefill(&logical)
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn seed_role_settings(&mut self, config: &config::Config) {
+        use runtime::Role;
+        self.role_settings = RoleSettingsModel::seed_from_config(config);
+        self.role_settings.implicit_resolution = config
+            .providers
+            .first_key_value()
+            .map(|(name, profile)| format!("{name}/{}", profile.default_model));
+        let roles = [
+            ("Orchestrator", Role::Orchestrator),
+            ("Explorer", Role::Explorer),
+            ("Worker", Role::Worker),
+            ("Reviewer", Role::Reviewer),
+            ("Librarian", Role::Librarian),
+            ("Planner", Role::Planner),
+            ("Oracle", Role::Oracle),
+            ("Multimodal Looker", Role::MultimodalLooker),
+        ];
+        let rows = roles
+            .into_iter()
+            .map(|(name, role)| (name, role, None))
+            .chain(
+                crate::model::role_settings::CATEGORIES
+                    .into_iter()
+                    .map(|category| (category, Role::Worker, Some(category))),
+            );
+        self.role_settings.resolved_previews = rows
+            .map(|(name, role, category)| {
+                let resolved = self
+                    .production_model
+                    .as_ref()
+                    .map(|(_, model)| {
+                        runtime::AgentModel::selected_model(model.as_ref(), role, category)
+                    })
+                    .filter(|selected| !selected.starts_with("unresolved:"));
+                (name.into(), resolved)
+            })
+            .collect();
     }
 
     pub fn submit_role_settings(&mut self) {
@@ -79,7 +132,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         match rx.try_recv() {
             Ok(Ok(config)) => {
-                self.role_settings = RoleSettingsModel::seed_from_config(&config);
+                self.seed_role_settings(&config);
                 self.role_settings.open = false;
                 self.push_notice("Agent role settings updated");
             }

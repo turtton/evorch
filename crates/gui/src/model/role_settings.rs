@@ -19,6 +19,10 @@ pub struct RoleSettingsModel {
     pub open: bool,
     pub agents: config::AgentsConfig,
     pub logical_models: Vec<String>,
+    pub route_names: BTreeSet<String>,
+    pub routes_empty: bool,
+    pub implicit_resolution: Option<String>,
+    pub resolved_previews: BTreeMap<String, Option<String>>,
     pub effort_choices: BTreeMap<String, Vec<String>>,
     pub error: Option<String>,
     pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
@@ -66,30 +70,20 @@ fn effort_choices_for(config: &config::Config, name: &str) -> Vec<String> {
 impl RoleSettingsModel {
     pub fn seed_from_config(config: &config::Config) -> Self {
         let mut names: BTreeSet<String> = config.routing.routes.keys().cloned().collect();
-        if config.routing.routes.is_empty() {
-            for profile in config.providers.values() {
-                names.extend(
-                    profile
-                        .models
-                        .iter()
-                        .filter(|entry| entry.enabled)
-                        .map(|entry| entry.id.clone()),
-                );
-            }
-            names.extend(["orchestrator", "explorer", "worker", "reviewer"].map(String::from));
-            for (_, binding) in bindings(&config.agents) {
-                names.extend(binding.logical_model.clone());
-            }
-            names.extend(
-                config
-                    .agents
-                    .worker
-                    .categories
-                    .values()
-                    .filter_map(|binding| binding.logical_model.clone()),
-            );
+        for (_, binding) in bindings(&config.agents) {
+            names.extend(binding.logical_model.clone());
         }
+        names.extend(
+            config
+                .agents
+                .worker
+                .categories
+                .values()
+                .filter_map(|binding| binding.logical_model.clone()),
+        );
         Self {
+            route_names: config.routing.routes.keys().cloned().collect(),
+            routes_empty: config.routing.routes.is_empty(),
             agents: config.agents.clone(),
             logical_models: names.iter().cloned().collect(),
             effort_choices: names
@@ -106,7 +100,7 @@ impl RoleSettingsModel {
 
     pub fn validate(&self) -> Result<(), config::ConfigError> {
         for (role, binding) in bindings(&self.agents) {
-            self.validate_model(
+            Self::validate_model(
                 &format!("agents.{role}.logical_model"),
                 binding.logical_model.as_deref(),
             )?;
@@ -119,7 +113,7 @@ impl RoleSettingsModel {
                     category: category.clone(),
                 });
             }
-            self.validate_model(
+            Self::validate_model(
                 &format!("agents.worker.categories.{category}.logical_model"),
                 binding.logical_model.as_deref(),
             )?;
@@ -131,13 +125,13 @@ impl RoleSettingsModel {
         Ok(())
     }
 
-    fn validate_model(&self, path: &str, value: Option<&str>) -> Result<(), config::ConfigError> {
+    fn validate_model(path: &str, value: Option<&str>) -> Result<(), config::ConfigError> {
         if let Some(value) = value
-            && (value.trim().is_empty() || !self.logical_models.iter().any(|name| name == value))
+            && value.trim().is_empty()
         {
             return Err(config::ConfigError::InvalidField {
                 path: path.into(),
-                message: "Select a known logical model or inherit the default".into(),
+                message: "Enter a non-blank logical model or inherit the default".into(),
             });
         }
         Ok(())

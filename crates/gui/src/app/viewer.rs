@@ -162,14 +162,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 None => {}
             }
         }
-        if self.role_settings.open && !self.routing_settings.open {
-            use crate::panes::role_settings::{RoleSettingsAction, role_settings_modal};
-            match role_settings_modal(ui.ctx(), &mut self.role_settings) {
-                Some(RoleSettingsAction::Save) => self.submit_role_settings(),
-                Some(RoleSettingsAction::Cancel) => self.role_settings.open = false,
-                None => {}
-            }
-        }
+        self.render_role_settings(ui.ctx());
         if self.provider_settings.open
             && !self.role_settings.open
             && !self.routing_settings.open
