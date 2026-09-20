@@ -27,14 +27,9 @@ pub(super) fn candidate_picker(
         .selected_text(candidate.model.as_deref().unwrap_or("(profile default)"))
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut candidate.model, None, "(profile default)");
-            let mut seen = std::collections::BTreeSet::new();
-            for profile in choices.0 {
-                if let Some(models) = choices.1.get(profile) {
-                    for name in models {
-                        if seen.insert(name) {
-                            ui.selectable_value(&mut candidate.model, Some(name.clone()), name);
-                        }
-                    }
+            if let Some(models) = choices.1.get(&candidate.profile) {
+                for name in models {
+                    ui.selectable_value(&mut candidate.model, Some(name.clone()), name);
                 }
             }
         })

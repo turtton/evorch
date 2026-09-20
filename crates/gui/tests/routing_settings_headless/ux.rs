@@ -170,6 +170,21 @@ fn enter_model(harness: &mut HeadlessWorkbench<DemoSource>, route: &str, text: &
 }
 
 #[test]
+fn routing_model_dropdown_lists_only_selected_profile_models() {
+    // Given: custom-a selected among profiles with distinct and shared models.
+    let mut harness = model_fixture();
+    harness.run();
+    // When: opening the model override dropdown.
+    harness.click_label("candidate candidate 1 model override");
+    harness.run();
+    // Then: only the selected profile's models are offered.
+    assert!(harness.has_label("mA"));
+    assert!(harness.has_label("shared"));
+    assert!(!harness.has_label("mB"));
+    assert!(!harness.has_label("mZ"));
+}
+
+#[test]
 fn routing_profiles_order_subscriptions_before_alphabetical_api_profiles() {
     // Given: a mix of all three subscription types and API profiles.
     let mut harness = model_fixture();
