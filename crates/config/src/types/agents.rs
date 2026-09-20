@@ -1,6 +1,6 @@
 //! agents セクション (ロール・カテゴリ単位のバインディング) の設定型を定義します。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,31 @@ pub struct AgentsConfig {
     /// reviewer ロールのバインディング。
     pub reviewer: RoleBindingConfig,
     pub roles: AdditionalRoleBindings,
+}
+
+/// 指定した論理モデルを明示的に使用するロールと worker カテゴリを返す。
+pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
+    let mut roles = BTreeSet::new();
+    for (display_name, binding) in [
+        ("orchestrator", &agents.orchestrator),
+        ("explorer", &agents.explorer),
+        ("worker", &agents.worker.base),
+        ("reviewer", &agents.reviewer),
+        ("roles.librarian", &agents.roles.librarian),
+        ("roles.planner", &agents.roles.planner),
+        ("roles.oracle", &agents.roles.oracle),
+        ("roles.multimodal_looker", &agents.roles.multimodal_looker),
+    ] {
+        if binding.logical_model.as_deref() == Some(logical) {
+            roles.insert(display_name.to_string());
+        }
+    }
+    for (category, binding) in &agents.worker.categories {
+        if binding.logical_model.as_deref() == Some(logical) {
+            roles.insert(format!("worker.categories.{category}"));
+        }
+    }
+    roles.into_iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
@@ -414,5 +439,62 @@ temperature = 0.9
             Err(ConfigError::UnknownAgentRole { role }) => assert_eq!(role, "typo"),
             other => panic!("UnknownAgentRole を期待した: {other:?}"),
         }
+    }
+
+    #[test]
+    fn roles_using_finds_base_roles_and_worker_categories() {
+        // Given: 複数の固定ロールと worker カテゴリが同じ論理モデルを明示的に指定する。
+        let doc = r#"
+[agents.orchestrator]
+logical_model = "shared"
+[agents.explorer]
+logical_model = "shared"
+[agents.worker]
+logical_model = "shared"
+[agents.worker.categories.quick]
+logical_model = "shared"
+[agents.reviewer]
+logical_model = "shared"
+[agents.roles.librarian]
+logical_model = "shared"
+[agents.roles.planner]
+logical_model = "shared"
+[agents.roles.oracle]
+logical_model = "shared"
+[agents.roles.multimodal_looker]
+logical_model = "shared"
+"#;
+        let config: Config = toml::from_str(doc).expect("agents 設定をパースできる");
+
+        // When: 論理モデルを使用する明示的なロールとカテゴリを検索する。
+        let result = roles_using("shared", &config.agents);
+
+        // Then: 表示名がソート済みで重複なく返る。
+        assert_eq!(
+            result,
+            vec![
+                "explorer",
+                "orchestrator",
+                "reviewer",
+                "roles.librarian",
+                "roles.multimodal_looker",
+                "roles.oracle",
+                "roles.planner",
+                "worker",
+                "worker.categories.quick",
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_using_returns_empty_for_unused_logical() {
+        // Given: 論理モデルを明示的に指定していない既定の agents 設定。
+        let agents = AgentsConfig::default();
+
+        // When: 未使用の論理モデルを検索する。
+        let result = roles_using("unused", &agents);
+
+        // Then: binding_for のロール名フォールバックを数えず空を返す。
+        assert!(result.is_empty());
     }
 }
