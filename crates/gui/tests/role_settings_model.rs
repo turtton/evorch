@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use gui::model::role_settings::{RoleSettingsModel, effort_options};
 
 #[test]
-fn librarian_model_is_validated_when_binding_changes() {
+fn librarian_unknown_binding_is_allowed_but_unrouted() {
     // Given: a librarian assignment discovered during editor seeding.
     let mut config = config::Config::default();
     config.agents.roles.librarian.logical_model = Some("research-model".into());
@@ -14,13 +14,11 @@ fn librarian_model_is_validated_when_binding_changes() {
             .iter()
             .any(|name| name == "research-model")
     );
-    // When: the assignment is changed to an unknown model.
+    // When: the assignment is changed to a name that has no route yet.
     editor.agents.roles.librarian.logical_model = Some("unknown".into());
-    // Then: validation prevents persisting the invalid librarian binding.
-    assert!(
-        matches!(editor.validate(), Err(config::ConfigError::InvalidField { path, .. })
-        if path == "agents.roles.librarian.logical_model")
-    );
+    // Then: validation accepts it (UI warns and offers route creation) while no route claims it.
+    assert!(editor.validate().is_ok());
+    assert!(!editor.route_names.contains("unknown"));
 }
 
 #[test]
@@ -46,8 +44,8 @@ fn seed_preserves_all_bindings_when_config_has_overrides() {
 }
 
 #[test]
-fn picker_uses_enabled_provider_models_when_routes_are_automatic() {
-    // Given: enabled and disabled provider models.
+fn picker_uses_route_keys_and_explicit_bindings_only() {
+    // Given: provider profile with enabled/disabled concrete model ids and one explicit binding.
     let mut config = config::Config::default();
     let mut disabled = config::ModelEntryConfig::enabled("disabled");
     disabled.enabled = false;
@@ -58,10 +56,30 @@ fn picker_uses_enabled_provider_models_when_routes_are_automatic() {
             ..Default::default()
         },
     );
+    config.agents.roles.librarian.logical_model = Some("explicit-binding".into());
+    config.routing.routes.insert(
+        "declared-route".into(),
+        vec![config::RouteCandidateConfig {
+            profile: "local".into(),
+            model: None,
+        }],
+    );
     // When: seeding picker options.
     let editor = RoleSettingsModel::seed_from_config(&config);
-    // Then: only enabled provider models appear.
-    assert!(editor.logical_models.iter().any(|name| name == "enabled"));
+    // Then: options come from route keys plus explicit bindings, never raw provider model ids.
+    assert!(
+        editor
+            .logical_models
+            .iter()
+            .any(|name| name == "declared-route")
+    );
+    assert!(
+        editor
+            .logical_models
+            .iter()
+            .any(|name| name == "explicit-binding")
+    );
+    assert!(!editor.logical_models.iter().any(|name| name == "enabled"));
     assert!(!editor.logical_models.iter().any(|name| name == "disabled"));
 }
 
