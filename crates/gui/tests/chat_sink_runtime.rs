@@ -135,6 +135,7 @@ impl Fixture {
         model_preference: Option<runtime::ModelPreference>,
     ) -> String {
         let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+            composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: thread.into(),
             text: text.into(),
@@ -204,11 +205,11 @@ fn sink_followup_restores_terminal_chat_context() {
     let first_id = fixture.run_id(&first);
     fixture.runtime.cancel(first_id).unwrap();
     fixture.rt.block_on(fixture.runtime.wait(first_id)).unwrap();
-    // When: send fails on the old run and the sink creates a replacement.
+    // When: the terminated run is continued in place with restored history.
     let second = fixture.send("thread", "turn-2");
     fixture.wait_for_reply(&second, "reply-2");
-    // Then: the replacement provider request preserves the prior user/assistant turn.
-    assert_ne!(first, second);
+    // Then: the same run continues and its provider request keeps the prior turns.
+    assert_eq!(first, second);
     let messages = fixture.messages.lock().unwrap();
     let conversational: Vec<_> = messages[1]
         .iter()
@@ -328,7 +329,7 @@ fn first_chat_spawns_keep_alive_worker_run() {
         .iter()
         .find(|agent| agent.run_id.to_string() == id)
         .expect("chat run");
-    assert_eq!(agent.name, "chat:thread-1");
+    assert_eq!(agent.name, "chat:Worker:thread-1");
     assert_eq!(agent.role_name, "Worker");
 }
 
@@ -346,7 +347,7 @@ fn second_chat_reuses_same_run_and_run_survives_resume() {
 }
 
 #[test]
-fn chat_to_terminated_run_respawns() {
+fn chat_to_terminated_run_continues_same_run() {
     // Given
     let mut fixture = Fixture::new();
     let first = fixture.send("thread-1", "hello");
@@ -363,7 +364,7 @@ fn chat_to_terminated_run_respawns() {
     // When
     let second = fixture.send("thread-1", "again");
     // Then
-    assert_ne!(second, first);
+    assert_eq!(second, first);
     fixture.wait_for_reply(&second, "reply-2");
 }
 

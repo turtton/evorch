@@ -149,13 +149,10 @@ fn plain_submission_routes_by_target_role() {
         // When: send through the real composer button.
         harness.click_label("Send");
         harness.run();
-        // Then: only the corresponding command path is used.
-        match role {
-            ComposerRole::Worker => assert!(matches!(harness.state().issued(),
-                [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature")),
-            ComposerRole::Orchestrator => assert!(matches!(harness.state().issued(),
-                [WorkbenchCommand::SubmitGoal(goal)] if goal.goal == "ship feature")),
-        }
+        // Then: plain input always issues a chat request carrying the selected
+        // role; only explicit /goal creates a goal regardless of role.
+        assert!(matches!(harness.state().issued(),
+            [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature" && chat.composer_role == role));
         assert!(harness.state().composer().input.is_empty());
     }
 }
@@ -194,8 +191,9 @@ fn tab_cycles_before_focused_composer_and_enter_still_sends() {
         );
         harness.key_press(Modifiers::NONE, Key::Enter);
         harness.run();
-        // Then: Tab neither inserts whitespace nor moves focus away from input.
+        // Then: Tab neither inserts whitespace nor moves focus away from input,
+        // and Enter sends a chat request for the toggled orchestrator role.
         assert!(matches!(harness.state().issued(),
-            [WorkbenchCommand::SubmitGoal(goal)] if goal.goal == "ship feature"));
+            [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature" && chat.composer_role == ComposerRole::Orchestrator));
     }
 }

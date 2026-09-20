@@ -102,10 +102,11 @@ impl AgentRuntime {
     pub fn delegate_chat(
         &self,
         thread_id: &str,
+        role: Role,
         prompt: String,
         mut config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
-        let name = format!("chat:{thread_id}");
+        let name = format!("chat:{}:{thread_id}", role.name());
         let restored = match self.shared.run_store.get() {
             None => None,
             Some(store) => {
@@ -132,7 +133,8 @@ impl AgentRuntime {
                             || descriptor.non_restorable_reason.as_deref()
                                 == Some("復元対象外の実行状態: ownership");
                         if !supported
-                            || record.role != Role::Worker.name()
+                            || record.role != role.name()
+                            || descriptor.role != role.name()
                             || record.parent_run_id.is_some()
                         {
                             return Err(fail(RunRestoreFailure::UnsupportedConfig(
@@ -149,6 +151,6 @@ impl AgentRuntime {
         config.name = Some(name);
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
         let continuation = restored.map_or(RunContinuation::Fresh, RunContinuation::Restored);
-        Ok(self.spawn_run_with_handoff(run_id, None, Role::Worker, prompt, config, continuation))
+        Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
     }
 }

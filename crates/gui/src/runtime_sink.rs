@@ -455,37 +455,36 @@ impl RuntimeCommandSink {
                     self.chat_permits.insert(thread_id.clone(), permit.clone());
                 }
                 if let Some(&run_id) = self.chat_runs.get(&thread_id) {
-                    if let Err(error) = self
-                        .runtime
-                        .set_model_preference(run_id, submission.model_preference.clone())
-                    {
-                        return vec![LoopEvent::ChatRejected {
+                    let _guard = self.handle.enter();
+                    return match self.runtime.continue_goal(
+                        run_id,
+                        submission.text,
+                        RunConfig {
+                            ownership: permit,
+                            images: submission.images,
+                            model_preference: submission.model_preference,
+                            ..RunConfig::default()
+                        },
+                    ) {
+                        Ok(run_id) => vec![LoopEvent::ChatAccepted {
+                            thread_id,
+                            run_id: run_id.to_string(),
+                        }],
+                        Err(error) => vec![LoopEvent::ChatRejected {
                             thread_id,
                             reason: error.to_string(),
-                        }];
-                    }
-                    match self.runtime.send_message_with_images(
-                        run_id,
-                        submission.text.clone(),
-                        submission.images.clone(),
-                    ) {
-                        Ok(()) => {
-                            return vec![LoopEvent::ChatAccepted {
-                                thread_id,
-                                run_id: run_id.to_string(),
-                            }];
-                        }
-                        Err(_) => {
-                            self.chat_runs.remove(&thread_id);
-                        }
-                    }
+                        }],
+                    };
                 }
                 let _guard = self.handle.enter();
                 let run_id = self.runtime.delegate_chat(
                     &thread_id,
+                    match submission.composer_role {
+                        crate::model::composer::ComposerRole::Worker => Role::Worker,
+                        crate::model::composer::ComposerRole::Orchestrator => Role::Orchestrator,
+                    },
                     submission.text,
                     RunConfig {
-                        name: Some(format!("chat:{thread_id}")),
                         images: submission.images,
                         ownership: permit,
                         interactive: true,
@@ -777,6 +776,7 @@ mod tests {
         // Given: a model that holds the run until cancellation.
         let (rt, mut sink, runtime, _) = build_sink();
         let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            composer_role: crate::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "chat-thread".into(),
             text: "hello".into(),

@@ -240,6 +240,7 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello".into(),

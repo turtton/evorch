@@ -1,4 +1,4 @@
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComposerRole {
     #[default]
     Worker,
@@ -23,14 +23,6 @@ impl super::ComposerModel {
     }
 
     pub fn parse_submission<'a>(&self, raw: &'a str) -> super::ComposerInput<'a> {
-        match (super::parse_input(raw), self.role) {
-            (super::ComposerInput::Chat(args), ComposerRole::Orchestrator) => {
-                super::ComposerInput::Command {
-                    spec: &super::GOAL_COMMAND,
-                    args,
-                }
-            }
-            (parsed, _) => parsed,
-        }
+        super::parse_input(raw)
     }
 }

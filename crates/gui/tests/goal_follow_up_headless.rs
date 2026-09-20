@@ -243,6 +243,55 @@ fn plain_chat_never_increments_accepted_goals() {
 }
 
 #[test]
+fn orchestrator_role_chat_after_error_continues_same_run() {
+    // Given: an orchestrator chat failed after the provider consumed its context.
+    let mut fixture = Fixture::new();
+    fixture.state.composer_mut().toggle_role();
+    fixture.submit("hello");
+    let original_run = fixture.terminal();
+    let original = fixture.messages.lock().unwrap()[0].clone();
+    // When: a continuation is submitted from the same orchestrator composer.
+    let events = fixture.submit("続けて");
+    let continued = fixture.terminal();
+    // Then: the same run keeps its role and context without creating a goal.
+    assert_eq!(
+        continued, original_run,
+        "chat continuation must preserve run ID"
+    );
+    assert!(
+        matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == original_run.to_string())
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .list_agents()
+            .iter()
+            .find(|run| run.run_id == original_run)
+            .unwrap()
+            .role_name,
+        runtime::Role::Orchestrator.name()
+    );
+    assert_eq!(fixture.created, 0);
+    let requests = fixture.messages.lock().unwrap();
+    assert!(requests[1].starts_with(&original));
+    assert_eq!(
+        requests[1].last().unwrap().content,
+        vec![providers::ContentBlock::Text {
+            text: "続けて".into()
+        }]
+    );
+    drop(requests);
+    fixture.state.composer_mut().toggle_role();
+    fixture.submit("keep the same role");
+    assert_eq!(fixture.terminal(), original_run);
+    assert_eq!(fixture.created, 0);
+    assert!(
+        matches!(fixture.submit("/goal explicit").as_slice(), [LoopEvent::GoalAccepted { goal_id, .. }] if goal_id == "goal-1")
+    );
+    fixture.terminal();
+}
+
+#[test]
 fn explicit_goal_submission_increments_goal_counter() {
     // Given: a fresh GUI composer and real runtime sink.
     let mut fixture = Fixture::new();

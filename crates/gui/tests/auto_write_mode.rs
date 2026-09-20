@@ -202,6 +202,7 @@ fn sink_rejects_old_permit_even_after_same_host_reclaims() {
     // When
     let events = sink.submit_chat_with_permit(
         ChatSubmission {
+            composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread".into(),
             text: "hello".into(),
@@ -238,6 +239,7 @@ fn renewed_generation_does_not_reuse_previous_chat_run() {
     let first = owner.start("thread").unwrap();
     let (_rt, mut sink, _) = runtime_sink(owner.clone());
     let chat = ChatSubmission {
+        composer_role: gui::model::composer::ComposerRole::Worker,
         images: Vec::new(),
         thread_id: "thread".into(),
         text: "hello".into(),

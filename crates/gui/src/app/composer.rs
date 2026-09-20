@@ -78,6 +78,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                     ProviderStatus::Configured => {
                         let submission = ChatSubmission {
+                            composer_role: self.composer.role,
                             images: self
                                 .composer
                                 .attachments

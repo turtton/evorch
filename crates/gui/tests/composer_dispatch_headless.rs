@@ -36,6 +36,46 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn orchestrator_role_plain_chat_issues_send_chat_not_goal() {
+    // Given: the composer is toggled to orchestrator.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    // When: ordinary text is submitted.
+    submit(&mut harness, "hello");
+    // Then: chat is dispatched without consuming a goal ID.
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::SendChat(_)]),
+        "orchestrator plain text must issue SendChat, got {:?}",
+        harness.state().issued()
+    );
+    assert_eq!(harness.state().goal_form().last_accepted, None);
+    submit(&mut harness, "/goal explicit");
+    assert_eq!(
+        harness.state().goal_form().last_accepted.as_deref(),
+        Some("goal-1")
+    );
+}
+
+#[test]
+fn explicit_goal_command_still_creates_goal_in_orchestrator_role() {
+    // Given: the composer is toggled to orchestrator.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    // When: an explicit goal is submitted.
+    submit(&mut harness, "/goal explicit");
+    // Then: the explicit command retains the goal flow.
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::SubmitGoal(goal)] if goal.goal == "explicit")
+    );
+    assert_eq!(
+        harness.state().goal_form().last_accepted.as_deref(),
+        Some("goal-1")
+    );
+}
+
+#[test]
 fn image_only_send_button_carries_attachment() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
@@ -204,6 +244,7 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),
             text: "hello agent".into(),

@@ -51,6 +51,8 @@ pub struct MergeCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatSubmission {
     #[serde(default)]
+    pub composer_role: super::composer::ComposerRole,
+    #[serde(default)]
     pub images: Vec<runtime::DelegateImage>,
     pub thread_id: String,
     pub text: String,
@@ -495,6 +497,7 @@ mod tests {
         // When: both chats are submitted in order.
         let events = ["t1", "t2"].map(|thread_id| {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                composer_role: crate::model::composer::ComposerRole::Worker,
                 images: Vec::new(),
                 thread_id: thread_id.into(),
                 text: "hi".into(),
