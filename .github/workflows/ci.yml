@@ -29,25 +29,54 @@ jobs:
       # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+      # 同じ runner 上で並列実行するため、Cargo の build lock を target dir ごとに分離する。
+      # rust-cache / Cargo registry は共有し、全検査の完了を末尾の wait-all で待つ。
       - run: cargo fmt --all --check
+        background: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/workspace-clippy
       - run: cargo nextest run --workspace
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/workspace-nextest
       - run: cargo test --workspace --doc
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/workspace-doc
       - name: Check gui browser feature with clippy
         run: cargo clippy -p gui --all-targets --features browser -- -D warnings
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/gui-browser-clippy
       - name: Test gui browser feature
         run: cargo test -p gui --features browser
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/gui-browser-test
       # event-bus の otel-exporter feature (opt-in 既定 off) は既定 job では
       # コンパイルされないため、feature on の clippy / test を別途走らせる
       # (issue #55 / ADR 0023 決定7: 最小 OTLP E2E は CI に 1 本入れる)。
       - run: cargo clippy -p event-bus --all-targets --features otel-exporter -- -D warnings
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/event-bus-otel-clippy
       - run: cargo test -p event-bus --features otel-exporter
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/event-bus-otel-test
       # Config 型を変更したら versioned schema artifact も再生成が必要 (issue #33)。
       # 再生成結果と checked-in artifact が一致しない場合は drift として失敗する。
       - name: Check config schema artifact is up to date
+        background: true
+        env:
+          CARGO_TARGET_DIR: target/config-schema
         run: |
           cargo run -q -p config --example dump_schema -- docs/config/evorch-config-v2.schema.json
           git diff --exit-code docs/config/evorch-config-v2.schema.json
+      - name: Wait for all checks
+        wait-all:
 
   # nix run / nix build が cargo test では拾えない sandbox 固有の失敗
   # (DNS resolver 初期化等) で壊れたまま main に入るのを防ぐ (2026-09-14 事象)。
@@ -55,10 +84,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:nix
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Setup attic client
+        run: |
+          nix profile install nixpkgs#attic-client
+          attic login --set-default home https://attic.taile2777.ts.net "$ATTIC_TOKEN"
+          attic use home
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+      # checkPhase のテストは pure 前提。cache hit 時はビルド済み結果を使い再実行しない。
       - name: Build flake package (runs checkPhase tests in the Nix sandbox)
         run: nix build -L .#evorch
+      - name: Push to attic
+        if: success()
+        run: |
+          # tailscaled ingress stalls under concurrent large uploads (issue #72); retry with backoff
+          for attempt in 1 2 3 4; do
+            if attic push home ./result; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              delay=$((attempt * 120 + RANDOM % 60))
+              echo "attic push failed (attempt $attempt/4); retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          exit 1
 
   # v0.1: offscreen 描画検証。wgpu の software Vulkan (lavapipe) で実 render し、
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
