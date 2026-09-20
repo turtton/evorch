@@ -18,6 +18,9 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      # gui/wgpu 系の linking が重いため mold で短縮する (feature 差分の
+      # 再ビルド自体は cargo の fingerprint で避けられないため linker を速くする)。
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - name: Free runner disk space
@@ -26,14 +29,17 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt,clippy
+      - name: Install mold linker and ripgrep
+        # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
+        # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
+        run: sudo apt-get update && sudo apt-get install -y mold ripgrep
+      # 3 ジョブで cargo cache を共有して feature 差分の再ビルドを減らす。
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-cargo
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      # crates/tools の grep テストが rg を必要とするが、ubuntu-latest から
-      # ripgrep が外れたため明示インストールする (2026-09-11 欠落確認)。
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: cargo fmt --all --check
       # clippy と test binary のビルドは共通の target dir で直列に温め、
       # feature 差分 (gui browser / event-bus otel) 含めて compile cache を再利用する。
@@ -126,14 +132,18 @@ jobs:
   # 生成 PNG を artifact として保存する（ADR 0009 / issue #9 の受理基準）。
   offscreen-gate:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.0
       - uses: Swatinem/rust-cache@v2
-      - name: Install headless rendering deps (Vulkan lavapipe / GL)
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0
+        with:
+          shared-key: ${{ runner.os }}-cargo
+      - name: Install headless rendering deps (Vulkan lavapipe / GL / mold)
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - name: Run all ignored GUI tests (required real render)
@@ -158,12 +168,18 @@ jobs:
 
   browser-e2e:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.97.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-cargo
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
       - name: Locate Chrome/Chromium executable
         run: |
           CHROME_PATH="$(which google-chrome || which chromium || which chromium-browser)"
