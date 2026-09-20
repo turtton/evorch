@@ -1,5 +1,3 @@
-use crate::theme::tokens::palette;
-
 pub(super) fn candidate_picker(
     ui: &mut egui::Ui,
     candidate: &mut config::RouteCandidateConfig,
@@ -30,7 +28,6 @@ pub(super) fn candidate_picker(
     {
         candidate.model = None;
     }
-    let previous_model = candidate.model.clone();
     let label = ui.label(format!("{} model override", choices.2));
     egui::ComboBox::from_id_salt("model")
         .width(ui.available_width())
@@ -45,33 +42,4 @@ pub(super) fn candidate_picker(
         })
         .response
         .labelled_by(label.id);
-    let label = ui.label(format!("{} custom model ID", choices.2));
-    let mut text = candidate.model.clone().unwrap_or_default();
-    if ui
-        .add(
-            egui::TextEdit::singleline(&mut text)
-                .desired_width(ui.available_width())
-                .background_color(palette().INPUT)
-                .hint_text("(profile default)"),
-        )
-        .labelled_by(label.id)
-        .changed()
-    {
-        candidate.model = (!text.trim().is_empty()).then_some(text);
-    }
-    if candidate.model != previous_model
-        && let Some(model) = &candidate.model
-    {
-        let contains = |profile: &String| {
-            choices
-                .1
-                .get(profile)
-                .is_some_and(|models| models.contains(model))
-        };
-        if !contains(&candidate.profile)
-            && let Some(profile) = choices.0.iter().find(|profile| contains(profile))
-        {
-            candidate.profile.clone_from(profile);
-        }
-    }
 }

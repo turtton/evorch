@@ -22,7 +22,10 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     // When: create the missing route through the role modal and save its candidate.
     harness.click_label("route を作成");
     harness.run();
-    enter_model(&mut harness, "legacy", "fast");
+    harness.click_label("legacy candidate 1 model override");
+    harness.run();
+    harness.click_label("fast");
+    harness.run();
     harness.click_label("Save routing");
     harness.step();
     finish(&mut harness);
@@ -66,7 +69,7 @@ fn routing_registered_routes_start_collapsed() {
     harness.run();
     // Then: the route name remains visible but its candidate editor is absent.
     assert!(harness.has_label("registered"));
-    assert!(!harness.has_label("registered candidate 1 custom model ID"));
+    assert!(!harness.has_label("registered candidate 1 model override"));
     assert!(!harness.has_label("Add candidate"));
 }
 
@@ -88,7 +91,10 @@ fn routing_expanded_route_can_edit_save_and_stays_expanded() {
     // When: expand, edit and save through the real controls.
     harness.click_label("registered");
     harness.run();
-    enter_model(&mut harness, "registered", "custom");
+    harness.click_label("registered candidate 1 model override");
+    harness.run();
+    harness.click_label("fast");
+    harness.run();
     harness.click_label("Save routing");
     harness.step();
     finish(&mut harness);
@@ -99,9 +105,9 @@ fn routing_expanded_route_can_edit_save_and_stays_expanded() {
         harness.state().routing_settings().routes["registered"][0]
             .model
             .as_deref(),
-        Some("custom")
+        Some("fast")
     );
-    assert!(harness.has_label("registered candidate 1 custom model ID"));
+    assert!(harness.has_label("registered candidate 1 model override"));
 }
 
 fn model_fixture() -> HeadlessWorkbench<DemoSource> {
@@ -156,17 +162,20 @@ fn model_fixture() -> HeadlessWorkbench<DemoSource> {
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
-fn enter_model(harness: &mut HeadlessWorkbench<DemoSource>, route: &str, text: &str) {
-    let label = format!("{route} candidate 1 custom model ID");
-    harness.scroll_label_into_view(&label);
-    harness.run();
-    harness.click_label(&label);
-    harness.run();
+#[test]
+fn routing_candidate_editor_has_no_custom_model_text_input() {
+    // Given: an expanded candidate editor.
+    let mut harness = model_fixture();
     harness
-        .input_mut()
-        .events
-        .push(egui::Event::Text(text.into()));
+        .state_mut()
+        .routing_settings_mut()
+        .expanded
+        .insert("candidate".into());
+    // When: rendering the route rows.
     harness.run();
+    // Then: model selection is dropdown-only.
+    assert!(harness.has_label("candidate candidate 1 model override"));
+    assert!(!harness.has_label("candidate candidate 1 custom model ID"));
 }
 
 #[test]
@@ -222,32 +231,4 @@ fn routing_profiles_order_subscriptions_before_alphabetical_api_profiles() {
         harness.state().routing_settings().profile_names,
         ["a-kimi", "sandbox-sub", "z-codex", "api-z", "custom-a"]
     );
-}
-
-#[test]
-fn routing_model_input_selects_first_matching_profile_in_both_directions() {
-    for (profile, model, expected) in [
-        ("custom-a", "mB", "a-kimi"),
-        ("sandbox-sub", "mA", "custom-a"),
-        ("sandbox-sub", "mB", "sandbox-sub"),
-        ("custom-a", "shared", "custom-a"),
-        ("sandbox-sub", "unknown", "sandbox-sub"),
-    ] {
-        // Given: a candidate with the requested current profile and empty override.
-        let mut harness = model_fixture();
-        harness
-            .state_mut()
-            .routing_settings_mut()
-            .routes
-            .get_mut("candidate")
-            .expect("route")[0]
-            .profile = profile.into();
-        harness.run();
-        // When: typing an exact model ID into the actual editor.
-        enter_model(&mut harness, "candidate", model);
-        // Then: keep compatible profiles or choose the first match without losing text.
-        let candidate = &harness.state().routing_settings().routes["candidate"][0];
-        assert_eq!(candidate.profile, expected, "{profile}/{model}");
-        assert_eq!(candidate.model.as_deref(), Some(model));
-    }
 }

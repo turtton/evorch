@@ -64,21 +64,18 @@ fn prefilled_route_row_from_role_settings_is_editable() {
     assert!(!state.provider_settings().open);
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
-    // When: プリフィルされた候補のモデルを実際の入力欄で編集する。
-    harness.scroll_label_into_view("new-role-model candidate 1 custom model ID");
+    // When: プリフィルされた候補のモデルをドロップダウンで選択する。
+    harness.scroll_label_into_view("new-role-model candidate 1 model override");
     harness.run();
-    harness.click_label("new-role-model candidate 1 custom model ID");
+    harness.click_label("new-role-model candidate 1 model override");
     harness.run();
-    harness
-        .input_mut()
-        .events
-        .push(egui::Event::Text("custom-model".into()));
+    harness.click_label("fast");
     harness.run();
     // Then: 編集可能な候補と新規ルートマーカーが存在する。
     let model = harness.state().routing_settings();
     assert_eq!(
         model.routes["new-role-model"][0].model.as_deref(),
-        Some("custom-model")
+        Some("fast")
     );
     assert_eq!(model.pending_new_route.as_deref(), Some("new-role-model"));
 }
