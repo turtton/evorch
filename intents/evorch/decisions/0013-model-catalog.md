@@ -30,3 +30,7 @@ Accepted（2026-08-29、grill による全体構想レビューから確定）
 
 - provider-routing feature に「モデルカタログ」節を追加
 - v0.1 config の model routing 設定がカタログ参照になる
+
+## 追記（2026-09-20: 解決順序条項の撤回）
+
+コミット `9a6bf9f` および `82ea6d4` により、項目3の「属性未確定フラグ付きで、価格・capability が判明するまでは Logical Model 解決の優先度が下がる」という条項を撤回する。属性未確定の検出モデルも解決候補として **ELIGIBLE** のままとし、優先度を下げない。`routing.routes.<logical>` の候補配列の宣言順を権威とし、カタログ適格な最初の候補を採用する。セッションアフィニティの pin は `(profile, concrete model)` を保持して具体モデルへの override を維持し（従来は profile の `default_model` に畳み込まれていた）、pin が不適格になった場合のみ宣言順の候補走査へフォールバックする。
