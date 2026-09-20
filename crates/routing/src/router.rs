@@ -210,9 +210,8 @@ impl Router {
     /// 利用可否の判定は [`Router::resolve`] と同じく、concrete model
     /// (= `model` 上書き指定時はその値、それ以外はプロファイルの `default_model`)
     /// がカタログ上で存在かつ Available であることです。
-    /// [`Router::resolve`] と異なり、`attributes_confirmed` による属性未確定候補の
-    /// 後回しは行いません。フォールバック時は属性の確定度よりも可用性の復旧を
-    /// 優先するためです。
+    /// 宣言順の尊重・属性の確定度による並べ替えを行わない点も
+    /// [`Router::resolve`] と同じ方針です。
     ///
     /// 勝者を見つけた場合は `session_id` と `logical` を勝者プロファイルへ再ピンして
     /// [`ResolvedRoute`] を返します。別の論理モデルの候補で勝った場合も、
