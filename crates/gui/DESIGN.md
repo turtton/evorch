@@ -16,6 +16,10 @@ Use SP_1 through SP_4 (4/8/12/16). Panels own their scrolling.
 ## 5. Primitives
 Reuse egui TextEdit, ComboBox, Button, ScrollArea, Grid and collapsing headers.
 Keep native keyboard focus and selected/hover/disabled states.
+Thread archive uses a Painter-drawn box at Small text height, a 1.2pt stroke,
+a wider lid with a centered handle slit, and native interaction text color.
+Its native small Button reserves Small text height + SP_2 on each axis;
+pinned threads use egui's disabled painting and cannot activate Archive.
 Sandbox settings reuse the settings modal and native labeled Checkbox with
 unchecked/checked/focused states, Save/Cancel, inline errors and explicit scope text.
 Conversation message/reasoning cards show a small TEXT_MUTED `[role]` label

@@ -59,10 +59,10 @@ pub fn render(
             }
             status_dot(ui, state_color(state));
             let archive = ui
-                .add_enabled(!thread.pinned, egui::Button::new("▣").small())
+                .add_enabled(!thread.pinned, archive_button)
                 .on_hover_text("アーカイブ");
             archive.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Archive")
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, !thread.pinned, "Archive")
             });
             if archive.clicked() {
                 *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
@@ -133,6 +133,37 @@ pub fn render(
             }
         });
     ui.add_space(SP_2);
+}
+
+fn archive_button(ui: &mut Ui) -> egui::Response {
+    let size = ui.text_style_height(&egui::TextStyle::Small);
+    let response = ui.add(
+        egui::Button::new("")
+            .small()
+            .min_size(egui::vec2(size + SP_2, size + SP_2)),
+    );
+    let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(size, size));
+    let color = ui.style().interact(&response).text_color();
+    paint_archive_box_icon(ui.painter(), rect, color);
+    response
+}
+
+fn paint_archive_box_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.2, color);
+    let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+    painter.rect_stroke(
+        egui::Rect::from_min_max(point(0.12, 0.36), point(0.88, 0.94)),
+        0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_stroke(
+        egui::Rect::from_min_max(point(0.0, 0.06), point(1.0, 0.36)),
+        0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment([point(0.38, 0.21), point(0.62, 0.21)], stroke);
 }
 
 const fn thread_state_label(state: ThreadState) -> &'static str {

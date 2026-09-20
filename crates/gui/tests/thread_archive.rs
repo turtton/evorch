@@ -24,6 +24,14 @@ fn fixture_with_pinned(
     archived: bool,
     pinned: bool,
 ) -> HeadlessWorkbench<EmptySource> {
+    HeadlessWorkbench::new(fixture_state(root, archived, pinned), [1000.0, 700.0])
+}
+
+fn fixture_state(
+    root: &std::path::Path,
+    archived: bool,
+    pinned: bool,
+) -> WorkbenchState<EmptySource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("p");
     sidebar
@@ -39,11 +47,22 @@ fn fixture_with_pinned(
     json["threads"][0]["archived"] = archived.into();
     json["threads"][0]["pinned"] = pinned.into();
     json["threads"][0]["created_at"] = 0.into();
-    let state = WorkbenchState::new(EmptySource, &UiSettings::default())
+    WorkbenchState::new(EmptySource, &UiSettings::default())
         .unwrap()
         .with_sidebar(serde_json::from_value(json).unwrap())
-        .with_sidebar_path(root.join("sidebar.json"));
-    HeadlessWorkbench::new(state, [1000.0, 700.0])
+        .with_sidebar_path(root.join("sidebar.json"))
+}
+
+#[test]
+fn archive_control_keeps_a_comfortable_hitbox() {
+    // Given: a visible unpinned thread.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = fixture(temp.path(), false);
+    // When: laying out its icon-only archive control.
+    harness.run();
+    // Then: the accessible control has at least a 20-point square hitbox.
+    let rect = harness.label_rects("Archive")[0];
+    assert!(rect.width() >= 20.0 && rect.height() >= 20.0, "{rect:?}");
 }
 
 #[test]
@@ -231,4 +250,25 @@ fn capture_archive_states() {
         .unwrap()
         .save_png(std::path::Path::new("/tmp/opencode/archive-open.png"))
         .unwrap();
+}
+
+#[test]
+#[ignore = "writes native offscreen icon evidence"]
+fn capture_archive_icons() {
+    for (pinned, name) in [(false, "enabled"), (true, "disabled")] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut capture = HeadlessWorkbench::with_pixels_per_point(
+            fixture_state(temp.path(), false, pinned),
+            [1000.0, 700.0],
+            3.0,
+        );
+        capture.run();
+        capture
+            .capture()
+            .unwrap()
+            .save_png(std::path::Path::new(&format!(
+                "/tmp/opencode/archive-icon-{name}.png"
+            )))
+            .unwrap();
+    }
 }
