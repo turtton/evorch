@@ -243,7 +243,7 @@ impl RoutedModel {
         tools: &[ToolSpec],
         bus: Option<&EventBus>,
     ) -> Result<ChatResponse, RuntimeError> {
-        let (route, generation) = match &invocation.model_preference {
+        let (mut route, generation) = match &invocation.model_preference {
             Some(preference) => {
                 // Explicit user selection is authoritative: never apply ADR 0004 fallback.
                 let provider =
@@ -290,100 +290,169 @@ impl RoutedModel {
                 (route, binding.generation)
             }
         };
-        let (base_model_id, speed) = config::types::provider::parse_model_speed(&route.model_id);
-        let provider = self
-            .providers
-            .get(&route.profile)
-            .ok_or_else(|| RuntimeError::Model {
-                reason: "resolved provider profile is unavailable".to_string(),
-            })?;
-        if !self.verify_candidates().await.contains(&route.profile) {
-            let failure = self
-                .verification
-                .get()
-                .and_then(|results| results.get(&route.profile))
-                .and_then(|result| result.as_ref().err())
-                .map_or_else(
-                    || "profile was not verified".to_owned(),
-                    ToString::to_string,
-                );
-            let detail = format!(
-                "profile={} model={}: {failure}",
-                route.profile, route.model_id
-            );
-            let detail = if provider.auth.api_key.is_empty() {
-                detail
-            } else {
-                detail.replace(&provider.auth.api_key, "***")
-            };
-            let detail: String = detail.chars().take(500).collect();
-            if let Some(bus) = bus.or(self.event_bus.as_deref()) {
-                bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-                    source: "runtime::compose".into(),
-                    severity: event_bus::DiagnosticSeverity::Error,
-                    code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
-                    detail: detail.clone(),
-                    run_id: Some(invocation.run_id.clone()),
-                    thread_id: None,
-                    call_id: None,
-                }));
-            }
-            return Err(RuntimeError::Model { reason: detail });
-        }
-        let model_allows_tools = match self
-            .router
-            .catalog()
-            .capability_support(base_model_id, Capability::ToolCalling)
-        {
-            CapabilitySupport::Unsupported => false,
-            CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
+        let logical = match &invocation.model_preference {
+            Some(_) => None,
+            None => Some(LogicalModelId::from(
+                self.agents
+                    .binding_for(role_key(role), invocation.category.as_deref())
+                    .map_err(model_error)?
+                    .logical_model,
+            )),
         };
-        let tools = if model_allows_tools && provider.client.capabilities().tool_use {
-            tools.to_vec()
+        let mut fallback_router = if tools.is_empty() {
+            &self.router
         } else {
-            Vec::new()
-        };
-        let request = ChatRequest {
-            model: base_model_id.to_owned(),
-            messages: messages.to_vec(),
-            tools,
-            temperature: generation.temperature,
-            max_tokens: generation.max_tokens.map(u64::from),
-            reasoning_effort: generation.reasoning_effort.clone(),
-            service_tier: match speed {
-                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
-                config::types::provider::ModelSpeed::Standard => None,
-            },
-            observation: Some(ObservationContext {
-                run_id: invocation.run_id.clone(),
-            }),
-        };
-        let result = match bus {
-            Some(bus) => {
-                provider
-                    .client
-                    .send_streaming(&provider.auth, &request, bus)
-                    .await
-            }
-            None => provider.client.send(&provider.auth, &request).await,
-        };
-        result.map_err(|error| {
-                let detail = error.to_string();
-                let scrub = |text: &str| {
-                    if provider.auth.api_key.is_empty() {
-                        text.to_owned()
-                    } else {
-                        text.replace(&provider.auth.api_key, "***")
-                    }
+            &self.tool_router
+        }
+        .clone()
+        .with_event_bus(None);
+        let mut failures = Vec::new();
+        loop {
+            let (base_model_id, speed) =
+                config::types::provider::parse_model_speed(&route.model_id);
+            let provider =
+                self.providers
+                    .get(&route.profile)
+                    .ok_or_else(|| RuntimeError::Model {
+                        reason: "resolved provider profile is unavailable".to_string(),
+                    })?;
+            if !self.verify_candidates().await.contains(&route.profile) {
+                let failure = self
+                    .verification
+                    .get()
+                    .and_then(|results| results.get(&route.profile))
+                    .and_then(|result| result.as_ref().err())
+                    .map_or_else(
+                        || "profile was not verified".to_owned(),
+                        ToString::to_string,
+                    );
+                let detail = format!(
+                    "profile={} model={}: {failure}",
+                    route.profile, route.model_id
+                );
+                let detail = if provider.auth.api_key.is_empty() {
+                    detail
+                } else {
+                    detail.replace(&provider.auth.api_key, "***")
                 };
-                let provider_error: String = scrub(&detail).chars().take(500).collect();
-                let profile_name = scrub(&route.profile);
-                let model_id = scrub(&request.model);
-                tracing::warn!(profile = %profile_name, model = %model_id, error = %provider_error, "provider request failed");
-                RuntimeError::Model {
-                    reason: format!("profile={profile_name} model={model_id}: {provider_error}"),
+                let detail: String = detail.chars().take(500).collect();
+                if let Some(bus) = bus.or(self.event_bus.as_deref()) {
+                    bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                        source: "runtime::compose".into(),
+                        severity: event_bus::DiagnosticSeverity::Error,
+                        code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
+                        detail: detail.clone(),
+                        run_id: Some(invocation.run_id.clone()),
+                        thread_id: None,
+                        call_id: None,
+                    }));
                 }
-            })
+                failures.push(detail);
+                return Err(RuntimeError::Model {
+                    reason: failures.join("; fell back to "),
+                });
+            }
+            let model_allows_tools = match self
+                .router
+                .catalog()
+                .capability_support(base_model_id, Capability::ToolCalling)
+            {
+                CapabilitySupport::Unsupported => false,
+                CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
+            };
+            let tools = if model_allows_tools && provider.client.capabilities().tool_use {
+                tools.to_vec()
+            } else {
+                Vec::new()
+            };
+            let request = ChatRequest {
+                model: base_model_id.to_owned(),
+                messages: messages.to_vec(),
+                tools,
+                temperature: generation.temperature,
+                max_tokens: generation.max_tokens.map(u64::from),
+                reasoning_effort: generation.reasoning_effort.clone(),
+                service_tier: match speed {
+                    config::types::provider::ModelSpeed::Fast => {
+                        Some(providers::ServiceTier::Priority)
+                    }
+                    config::types::provider::ModelSpeed::Standard => None,
+                },
+                observation: Some(ObservationContext {
+                    run_id: invocation.run_id.clone(),
+                }),
+            };
+            let result = match bus {
+                Some(bus) => {
+                    provider
+                        .client
+                        .send_streaming(&provider.auth, &request, bus)
+                        .await
+                }
+                None => provider.client.send(&provider.auth, &request).await,
+            };
+            let error = match result {
+                Ok(response) => return Ok(response),
+                Err(error) => error,
+            };
+            let detail = error.to_string();
+            let scrub = |text: &str| {
+                if provider.auth.api_key.is_empty() {
+                    text.to_owned()
+                } else {
+                    text.replace(&provider.auth.api_key, "***")
+                }
+            };
+            let provider_error: String = scrub(&detail).chars().take(500).collect();
+            let profile_name = scrub(&route.profile);
+            let model_id = scrub(&request.model);
+            tracing::warn!(profile = %profile_name, model = %model_id, error = %provider_error, "provider request failed");
+            failures.push(format!(
+                "profile={profile_name} model={model_id}: {provider_error}"
+            ));
+            let next = logical
+                .as_ref()
+                .filter(|_| fallback::eligible(&error))
+                .and_then(|logical| {
+                    fallback_router.exclude_attempt(logical, &route);
+                    fallback_router.next_fallback(
+                        &mut self
+                            .affinity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        &invocation.run_id,
+                        logical,
+                        &route,
+                        routing::FailureKind::from(&error),
+                        None,
+                    )
+                });
+            let Some(next) = next else {
+                return Err(RuntimeError::Model {
+                    reason: failures.join("; fell back to "),
+                });
+            };
+            tracing::warn!(run_id = %invocation.run_id, from_provider = %route.profile,
+            from_model = %route.model_id, to_provider = %next.profile, to_model = %next.model_id,
+            "provider fallback triggered");
+            if let (Some(bus), Some(logical)) =
+                (bus.or(self.event_bus.as_deref()), logical.as_ref())
+            {
+                bus.emit(event_bus::Event::new(
+                    event_bus::ProviderEvent::FallbackTriggered {
+                        from_provider: route.profile.clone(),
+                        from_model: Some(route.model_id.clone()),
+                        to_provider: next.profile.clone(),
+                        to_model: next.model_id.clone(),
+                        logical_model: logical.as_str().to_owned(),
+                        session_id: invocation.run_id.clone(),
+                        failure: routing::FailureKind::from(&error).into(),
+                        request_id: None,
+                    },
+                ));
+            }
+            route = next;
+        }
     }
 }
 
@@ -489,6 +558,7 @@ const fn role_key(role: Role) -> &'static str {
 #[cfg(test)]
 mod tests;
 
+mod fallback;
 mod live;
 mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};

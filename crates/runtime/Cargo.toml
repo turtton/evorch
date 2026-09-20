@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+futures-util = { workspace = true }
 wiremock = { workspace = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }

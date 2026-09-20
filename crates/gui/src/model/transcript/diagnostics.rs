@@ -19,6 +19,18 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
                 }
             })
         }
+        EventKind::Provider(ProviderEvent::FallbackTriggered {
+            from_provider,
+            from_model,
+            to_provider,
+            to_model,
+            ..
+        }) => Some(TranscriptEntry::Notice {
+            text: format!(
+                "Fallback: {from_provider}/{} → {to_provider}/{to_model} (previous provider failed)",
+                from_model.as_deref().unwrap_or("unknown")
+            ),
+        }),
         EventKind::Provider(ProviderEvent::RequestFailed {
             provider,
             model,
@@ -83,5 +95,40 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::Ownership(_)
         | EventKind::Orchestrator(_)
         | EventKind::Snapshot(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_renders_selected_provider_as_notice() {
+        // Given
+        let event = EventKind::Provider(ProviderEvent::FallbackTriggered {
+            from_provider: "kimi".into(),
+            from_model: Some("k3".into()),
+            to_provider: "neuralwatt".into(),
+            to_model: "kimi-k3".into(),
+            logical_model: "worker".into(),
+            session_id: "session".into(),
+            failure: ProviderFailureKind::Timeout,
+            request_id: None,
+        });
+        // When
+        let mut registry = crate::model::transcript_registry::TranscriptRegistry::default();
+        registry.bind_run("session", "owner");
+        registry.select_thread(Some("other".into()));
+        registry.apply(&event_bus::Event::new(event));
+        // Then
+        assert_eq!(
+            registry.run("session").unwrap().entries(),
+            &[TranscriptEntry::Notice {
+                text: "Fallback: kimi/k3 → neuralwatt/kimi-k3 (previous provider failed)".into(),
+            }]
+        );
+        assert!(registry.thread().entries().is_empty());
+        registry.select_thread(Some("owner".into()));
+        assert_eq!(registry.thread().entries().len(), 1);
     }
 }

@@ -8,6 +8,8 @@ use event_bus::{Event, EventBus, ProviderEvent};
 use crate::{FailureKind, ProviderProfile, RoutingError, SessionAffinity};
 use model::{Capability, LogicalModelId, ModelCatalog};
 
+mod attempts;
+
 /// 解決済みのルート。
 ///
 /// どのプロバイダプロファイルで、どの実モデル ID を使用するかを表します。
