@@ -31,6 +31,16 @@ Failed / Cancelled）は shared orchestration vocabulary で、storage・supervi
 replay・GUI が同一の typed representation を共有する。goal レベルの状態とは別物
 （goal と durable task の scope が異なるため混同しない）。
 
+## 復元可否 (restorable) は実行状態列挙とは別軸
+
+`restorable` フラグと `non_restorable_reason` は Pending / Running / Waiting / Done の
+ような実行状態列挙の一部ではなく、終端スナップショットの設定フィールドごとの
+性質（renewable / blocking / security）を記録する独立した軸である。同じ実行状態の
+間でも run の設定内容によって復元可否は変化する。ownership のみの記録は
+continue/delegate 入口で権限を再発行して継続できる一方、構造的・安全系の理由を含む
+記録はどの入口でも拒否される。詳細な分類と surface ごとの適否は
+[ADR 0027: 復元契約と実行状態の分離](../../decisions/0027-restore-contract.md) を参照。
+
 ## フェンス
 
 - **terminal fence**: Completed / Failed / Cancelled 到達後の遅延更新を拒否。

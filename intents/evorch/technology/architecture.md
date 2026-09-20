@@ -23,25 +23,33 @@ Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造�
 
 **v0.1 実 crate（2026-08-29 確定、ADR 0016）**: `runtime` / `event-bus` / `storage` / `providers` / `tools` / `sandbox` / `routing` / `model` / `config` / `gui` + バイナリ `evorch`。外部依存ゼロの骨格で、依存は各 slice の実装に応じて `[workspace.dependencies]` へ集約する。
 
-以下は v0.1 完了後の再編で目指す目標構成（未配置 crate を含む）:
+現在の workspace member（2026-09-20 時点、ルート `Cargo.toml` の `members = ["crates/*"]` が権威）:
 
-```text
-crates/
-  runtime/        agent, session, task, event
-  orchestration/  intent, coordinator, delegation, policy
-  agents/         role, category, skills
-  context/        prompt, cache, compaction, memory
-  model/          registry, capabilities
-  providers/      anthropic, openai, openai-codex, github-copilot, openrouter, openai-compatible
-  routing/        profile, fallback, affinity, health
-  tools/          filesystem, shell, pty, git, search, code-intel
-  sandbox/        policy, macos, linux, windows
-  storage/        sqlite, events
-  diagnostics/    fault-bus, crash-spool, issue-reporter
-  workspace-ui/   panel, layout, action, semantic-tree
-  gui/            egui_dock        (第一候補。ADR 0007)
-  gui-floem-proto/ floem           (docking 評価用 prototype。必須ではない)
-```
+| crate | 責務 |
+|---|---|
+| `runtime` | agent / session / task / event の実行基盤。orchestration を内部モジュールとして保持 |
+| `event-bus` | in-process tokio broadcast の event bus（ADR 0017） |
+| `storage` | SQLite / events 永続化 |
+| `providers` | anthropic / openai / openai-codex / github-copilot / openrouter / openai-compatible |
+| `tools` | filesystem / shell / pty / git / search / code-intel |
+| `sandbox` | policy / macos / linux / windows の実行隔離 |
+| `routing` | profile / fallback / affinity / health |
+| `model` | registry / capabilities |
+| `config` | 設定読み込み・管理 |
+| `agents` | role / category / skills の定義 |
+| `arena` | role-eval 実験基盤（comparison / selection / promotion） |
+| `catalog` | model catalog（ADR 0013） |
+| `mock-openai` | OpenAI-compatible テスト用 provider |
+| `workspace-ui` | panel / layout / action / semantic-tree |
+| `gui` | egui + egui_dock（ADR 0007） |
+| `evorch` | エントリポイント。lib + バイナリ `evorch` |
+
+構想上存在したが独立 crate としては未配置のもの:
+
+- `orchestration`（intent / coordinator / delegation / policy）: 現状 runtime 内モジュール（`crates/runtime/src/orchestration/`）として実装。独立 crate 化は将来判断
+- `context`（prompt / cache / compaction / memory）: 現状 runtime および関連 crate に分散実装。独立 crate 化は将来判断
+- `diagnostics`（fault-bus / crash-spool / issue-reporter）: 現状 event-bus / runtime に分散実装。独立 crate 化は将来判断
+- `gui-floem-proto`: floem docking 評価用 prototype。現行 workspace member としては存在しない（必須ではない）
 
 ## 想定技術スタック
 

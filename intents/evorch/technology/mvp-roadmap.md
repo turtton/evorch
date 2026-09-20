@@ -1,8 +1,10 @@
-# MVP Roadmap（v0.1 – v0.5）
+# MVP Roadmap（v0.1 – v0.9）
 
 [architecture](architecture.md) / [product overview](../product/overview.md)
 
 最初から全機能を作らない。段階的に拡張する。
+
+**ステータス（2026-09-18 queue-state 時点）**: 本ロードマップは v0.1 から v0.9 までを対象とし、全 wave（v0.1 – v0.9）の 68/68 unit が完了済み。
 
 ## v0.1 — 最小構成の動くもの
 
