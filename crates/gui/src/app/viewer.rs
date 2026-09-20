@@ -16,6 +16,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll_role_save();
         self.refresh_image_capability();
+        self.composer.resolved_model = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+            .filter(|thread| thread.model_preference.is_none())
+            .and(self.production_model.as_ref())
+            .map(|(_, model)| {
+                let role = match self.composer.role {
+                    crate::model::composer::ComposerRole::Worker => runtime::Role::Worker,
+                    crate::model::composer::ComposerRole::Orchestrator => {
+                        runtime::Role::Orchestrator
+                    }
+                };
+                runtime::AgentModel::selected_model(model.as_ref(), role, None)
+            });
         self.ownership_ui(ui);
         self.panels.retain(|panel_id, _| {
             !panel_id.as_str().starts_with("agent-run-") || self.dock.find_tab(panel_id).is_some()

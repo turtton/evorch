@@ -210,6 +210,7 @@ impl Default for ProviderStatus {
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
     pub role: ComposerRole,
+    pub resolved_model: Option<String>,
     pub registry: SlashCommandRegistry,
     pub input: String,
     pub completions_dismissed_for: Option<String>,

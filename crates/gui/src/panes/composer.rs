@@ -66,7 +66,11 @@ pub fn composer_strip(
                 action = Some(selected);
             }
             images::render(ui, model);
-            ui.label(egui::RichText::new(format!("送信先: {}  (Tab で切替)", model.role.label()))
+            let target = match model.resolved_model.as_deref() {
+                Some(resolved) => format!("{} · {resolved}", model.role.label()),
+                None => model.role.label().to_owned(),
+            };
+            ui.label(egui::RichText::new(format!("送信先: {target}  (Tab で切替)"))
                 .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
