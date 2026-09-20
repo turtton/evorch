@@ -139,11 +139,10 @@ impl Router {
     ///    利用可能なら、そのルートを再ピンせずに返します。
     ///    ピンはプロファイル名のみを保持するため、モデル上書き付き候補でピンされた
     ///    場合でも、再解決時の concrete model は `default_model` に寄せられます。
-    /// 2. 以外の場合、ルートテーブルの候補を評価します。候補の concrete model は
+    /// 2. 以外の場合、ルートテーブルの候補を宣言順に評価します。候補の concrete model は
     ///    `model` 上書き (指定時) またはプロファイルの `default_model` で、
-    ///    カタログ上利用可能 (存在かつ Available) な候補のみが選択されます。
-    ///    カタログ項目が属性未確定 (`attributes_confirmed == false`) の候補は
-    ///    確定済み候補の後に回され、各グループ内では宣言順を維持します。
+    ///    カタログ上利用可能で要求された capability を満たす最初の候補を選択します。
+    ///    属性の確定状態による並べ替えは行いません。
     /// 3. 選ばれた候補は返却前にアフィニティへピンされます。
     ///
     /// # Errors
@@ -173,8 +172,6 @@ impl Router {
             .get(logical_name)
             .ok_or_else(|| RoutingError::UnknownLogicalModel(logical_name.to_string()))?;
 
-        let mut confirmed: Vec<(&str, &str)> = Vec::new();
-        let mut unconfirmed: Vec<(&str, &str)> = Vec::new();
         for candidate in candidates {
             let Some(profile) = self.profiles.get(&candidate.profile) else {
                 continue; // new() で検証済みのため通常は到達しない
@@ -183,31 +180,14 @@ impl Router {
             if !self.is_eligible(model_id) {
                 continue;
             }
-            // fast variant は base モデルの属性を継承する (is_eligible と同じ規約)
-            let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
-            let attributes_confirmed = self
-                .catalog
-                .get(base_model_id)
-                .is_some_and(|entry| entry.attributes_confirmed);
-            let group = if attributes_confirmed {
-                &mut confirmed
-            } else {
-                &mut unconfirmed
-            };
-            group.push((profile.name.as_str(), model_id));
+            affinity.pin(session_id, logical_name, &profile.name);
+            return Ok(ResolvedRoute {
+                profile: profile.name.clone(),
+                model_id: model_id.to_string(),
+            });
         }
 
-        let (profile_name, model_id) = confirmed
-            .into_iter()
-            .chain(unconfirmed)
-            .next()
-            .ok_or_else(|| RoutingError::NoAvailableCandidate(logical_name.to_string()))?;
-
-        affinity.pin(session_id, logical_name, profile_name);
-        Ok(ResolvedRoute {
-            profile: profile_name.to_string(),
-            model_id: model_id.to_string(),
-        })
+        Err(RoutingError::NoAvailableCandidate(logical_name.to_string()))
     }
 
     /// 障害の発生したルートの次のフォールバック先を解決します。
@@ -573,9 +553,9 @@ mod tests {
 
     // Given: 先頭候補のカタログ項目が属性未確定、次候補が属性確定済みのルート
     // When: 解決する
-    // Then: 宣言順後位の属性確定済み候補が選ばれる
+    // Then: 属性の確定状態に関係なく宣言順先頭の候補が選ばれる
     #[test]
-    fn resolve_deprioritizes_unconfirmed_catalog_entries() {
+    fn resolve_keeps_declared_order_when_first_candidate_is_unconfirmed() {
         let profiles = vec![
             profile("unconfirmed-first", "model-unconfirmed"),
             profile("confirmed-second", "model-confirmed"),
@@ -597,20 +577,50 @@ mod tests {
         let mut affinity = SessionAffinity::default();
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
-            .expect("属性確定済み候補から解決できる");
+            .expect("宣言順の候補から解決できる");
 
         assert_eq!(
             resolved,
             ResolvedRoute {
-                profile: "confirmed-second".to_string(),
-                model_id: "model-confirmed".to_string(),
+                profile: "unconfirmed-first".to_string(),
+                model_id: "model-unconfirmed".to_string(),
             }
         );
     }
 
+    // Given: 先頭候補が利用不可、次候補が利用可能なルート
+    // When: 宣言順に解決する
+    // Then: 利用不可の先頭を飛ばして次候補が選ばれる
+    #[test]
+    fn resolve_skips_ineligible_first_candidate_to_second_declared() {
+        let profiles = vec![
+            profile("first", "model-first"),
+            profile("second", "model-second"),
+        ];
+        let routing = routing_config(&[(
+            "summary",
+            vec![candidate("first", None), candidate("second", None)],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-first", Availability::Unavailable),
+                ("model-second", Availability::Available),
+            ],
+            &[],
+        );
+        let router = Router::new(profiles, &routing, catalog).expect("有効な構成");
+        let mut affinity = SessionAffinity::default();
+
+        let resolved = router
+            .resolve(&mut affinity, "session-1", &logical("summary"))
+            .expect("次候補から解決できる");
+
+        assert_eq!(resolved, failed_route("second", "model-second"));
+    }
+
     // Given: base が属性確定済みの fast variant を先頭に、別の確定済み候補を後位に宣言したルート
     // When: 解決する
-    // Then: fast variant は base の属性を継承して確定済み扱いとなり、宣言順どおり先頭が選ばれる
+    // Then: fast variant は base の適格性で判定され、宣言順どおり先頭が選ばれる
     #[test]
     fn resolve_treats_fast_variant_as_confirmed_via_base_model() {
         let profiles = vec![
