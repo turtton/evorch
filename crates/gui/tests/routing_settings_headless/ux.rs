@@ -170,6 +170,33 @@ fn enter_model(harness: &mut HeadlessWorkbench<DemoSource>, route: &str, text: &
 }
 
 #[test]
+fn routing_profile_change_resets_model_override_not_in_new_profile() {
+    for (model, expected) in [("mA", None), ("shared", Some("shared"))] {
+        // Given: custom-a with a profile-specific or shared model override.
+        let mut harness = model_fixture();
+        harness
+            .state_mut()
+            .routing_settings_mut()
+            .routes
+            .get_mut("candidate")
+            .expect("route")[0]
+            .model = Some(model.into());
+        harness.run();
+        // When: selecting another profile through the real dropdown.
+        harness.scroll_label_into_view("candidate candidate 1 profile");
+        harness.run();
+        harness.click_label("candidate candidate 1 profile");
+        harness.run();
+        harness.click_label("sandbox-sub");
+        harness.run();
+        // Then: clear only incompatible overrides and keep shared models.
+        let candidate = &harness.state().routing_settings().routes["candidate"][0];
+        assert_eq!(candidate.profile, "sandbox-sub");
+        assert_eq!(candidate.model.as_deref(), expected, "{model}");
+    }
+}
+
+#[test]
 fn routing_model_dropdown_lists_only_selected_profile_models() {
     // Given: custom-a selected among profiles with distinct and shared models.
     let mut harness = model_fixture();

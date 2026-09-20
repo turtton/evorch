@@ -9,6 +9,7 @@ pub(super) fn candidate_picker(
         &str,
     ),
 ) {
+    let previous_profile = candidate.profile.clone();
     let label = ui.label(format!("{} profile", choices.2));
     egui::ComboBox::from_id_salt("profile")
         .width(ui.available_width())
@@ -20,6 +21,15 @@ pub(super) fn candidate_picker(
         })
         .response
         .labelled_by(label.id);
+    if candidate.profile != previous_profile
+        && let Some(model) = &candidate.model
+        && !choices
+            .1
+            .get(&candidate.profile)
+            .is_some_and(|models| models.contains(model))
+    {
+        candidate.model = None;
+    }
     let previous_model = candidate.model.clone();
     let label = ui.label(format!("{} model override", choices.2));
     egui::ComboBox::from_id_salt("model")
