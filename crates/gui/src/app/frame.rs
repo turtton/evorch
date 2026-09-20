@@ -164,7 +164,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 agent_name,
                 ..
             }) => {
-                if let Some(thread) = agent_name.strip_prefix("chat:") {
+                if let Some(chat) = agent_name.strip_prefix("chat:") {
+                    let thread = chat.split_once(':').map_or(chat, |(_, thread)| thread);
                     self.bind_thread_run(thread, run_id);
                 } else {
                     self.attach_run(run_id, parent_run_id.as_deref());

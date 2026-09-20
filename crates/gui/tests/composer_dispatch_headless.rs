@@ -1,3 +1,4 @@
+// allow: SIZE_OK — Existing dispatch contract suite; this task is restricted to this test file.
 use event_bus::{Event, MessageEvent};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
@@ -50,6 +51,13 @@ fn orchestrator_role_plain_chat_issues_send_chat_not_goal() {
         harness.state().issued()
     );
     assert_eq!(harness.state().goal_form().last_accepted, None);
+    let WorkbenchCommand::SendChat(chat) = &harness.state().issued()[0] else {
+        panic!("expected orchestrator chat");
+    };
+    assert_eq!(
+        chat.composer_role,
+        gui::model::composer::ComposerRole::Orchestrator
+    );
     submit(&mut harness, "/goal explicit");
     assert_eq!(
         harness.state().goal_form().last_accepted.as_deref(),
