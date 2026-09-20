@@ -79,6 +79,23 @@ pub struct WireStreamChunk {
     /// `include_usage` による最終 chunk の使用量。
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// ストリーム内で provider が返したエラー。
+    #[serde(default)]
+    pub error: Option<WireStreamError>,
+}
+
+/// ストリーミング応答のエラー情報。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct WireStreamError {
+    /// エラーの原因メッセージ。
+    #[serde(default)]
+    pub message: String,
+    /// エラー種別。
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// provider 固有のエラーコード。
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 /// ストリーミング応答の候補差分。

@@ -136,15 +136,81 @@ fn malformed_stream_chunk_returns_invalid_json() {
     assert!(matches!(error, ProviderError::InvalidJson { .. }));
 }
 
-// Given: JSON だが chunk 必須構造を持たない frame / When: 解釈 / Then: InvalidJson を返す
+// Given: 未知フィールドのみの chunk / When: 解釈して通常の差分を続ける / Then: 状態を変えずスキップし TextDelta を返す
 #[test]
-fn structurally_unknown_stream_chunk_returns_invalid_json() {
+fn structurally_unknown_stream_chunk_is_skipped_without_state_change() {
+    assert_chunk_is_skipped_without_state_change(json!({"unexpected": true}));
+}
+
+// Given: choices が空の metadata chunk / When: 解釈して通常の差分を続ける / Then: 状態を変えずスキップし TextDelta を返す
+#[test]
+fn metadata_stream_chunk_is_skipped_without_state_change() {
+    assert_chunk_is_skipped_without_state_change(json!({
+        "id": "chatcmpl-x",
+        "model": "kimi-k3",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "choices": []
+    }));
+}
+
+fn assert_chunk_is_skipped_without_state_change(chunk: serde_json::Value) {
     let mut interpreter = OpenAiStreamInterpreter::new();
-    let frame = frame(json!({"unexpected": true}));
+    let seed = frame(json!({
+        "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": 2}}
+    }));
+    assert!(
+        interpreter
+            .interpret(&seed)
+            .expect("seed must parse")
+            .is_empty()
+    );
+
+    let events = interpreter
+        .interpret(&frame(chunk))
+        .expect("inactive chunk must be skipped");
+    let content = interpreter
+        .interpret(&frame(json!({"choices": [{"delta": {"content": "Hi"}}]})))
+        .expect("content after skip must parse");
+
+    assert!(events.is_empty());
+    assert!(!interpreter.is_done());
+    assert_eq!(
+        content,
+        vec![StreamEvent::TextDelta {
+            text: "Hi".to_string()
+        }]
+    );
+    assert_eq!(
+        interpreter.take_result(),
+        (
+            Some(Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cache_read_tokens: 2,
+                cache_write_tokens: 0,
+            }),
+            Some(FinishReason::ToolUse)
+        )
+    );
+}
+
+// Given: provider の error payload / When: 解釈 / Then: 原因メッセージを含む Request エラーを返す
+#[test]
+fn error_stream_chunk_returns_request_with_provider_message() {
+    let mut interpreter = OpenAiStreamInterpreter::new();
+    let frame = frame(json!({"error": {
+        "message": "context length exceeded",
+        "type": "invalid_request_error",
+        "code": "context_length_exceeded"
+    }}));
 
     let error = interpreter
         .interpret(&frame)
-        .expect_err("unknown chunk shape must fail");
+        .expect_err("provider error chunk must fail");
 
-    assert!(matches!(error, ProviderError::InvalidJson { .. }));
+    assert!(error.to_string().contains("context length exceeded"));
+    assert!(matches!(error, ProviderError::Request(_)));
 }

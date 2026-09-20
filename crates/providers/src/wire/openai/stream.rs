@@ -30,10 +30,14 @@ impl OpenAiStreamInterpreter {
     ///
     /// usage-only chunk は内部へ保存し、`[DONE]` は完了状態だけを更新するため、
     /// いずれも空のイベント列を返します。
+    /// choices が空で usage もない chunk は keep-alive・メタデータとして、
+    /// 内部状態を変更せず空のイベント列を返します。
     ///
     /// # Errors
     /// frame の data が Chat Completions chunk JSON として解析できない場合に
     /// [`ProviderError::InvalidJson`] を返します。
+    /// provider の error payload を受信した場合は原因メッセージを含む
+    /// [`ProviderError::Request`] を返します。
     pub fn interpret(&mut self, frame: &SseFrame) -> Result<Vec<StreamEvent>, ProviderError> {
         if frame.data.trim() == "[DONE]" {
             self.done = true;
@@ -43,10 +47,15 @@ impl OpenAiStreamInterpreter {
             serde_json::from_str(&frame.data).map_err(|error| ProviderError::InvalidJson {
                 detail: format!("OpenAI stream chunk の解析に失敗しました: {error}"),
             })?;
+        if let Some(error) = chunk.error {
+            return Err(ProviderError::Request(format!(
+                "provider がストリーム内でエラーを返しました: {}",
+                error.message
+            )));
+        }
         if chunk.choices.is_empty() && chunk.usage.is_none() {
-            return Err(ProviderError::InvalidJson {
-                detail: "OpenAI stream chunk に choices と usage のどちらもありません".to_string(),
-            });
+            tracing::debug!(chunk_id = ?chunk.id, "keep-alive・メタデータ chunk をスキップします");
+            return Ok(Vec::new());
         }
         if let Some(usage) = chunk.usage.as_ref() {
             self.usage = Some(to_usage(usage));
