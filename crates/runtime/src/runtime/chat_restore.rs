@@ -52,7 +52,11 @@ impl AgentRuntime {
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-        if !record.restorable || !descriptor.restorable {
+        // Ownership はスナップショットから復元せず呼び出し側の現在の permit で
+        // 再付与するため、ownership のみを理由とする復元不可記録は受け入れる
+        // (delegate_chat と同一の規則)。
+        if (!record.restorable || !descriptor.restorable) && !descriptor.renewable_ownership_only()
+        {
             return Err(fail(RunRestoreFailure::UnsupportedConfig(
                 descriptor
                     .non_restorable_reason
@@ -129,9 +133,8 @@ impl AgentRuntime {
                                 fail(RunRestoreFailure::CorruptContext(error.to_string()))
                             })?;
                         // Ownership is deliberately renewed by the GUI, never restored from disk.
-                        let supported = descriptor.restorable
-                            || descriptor.non_restorable_reason.as_deref()
-                                == Some("復元対象外の実行状態: ownership");
+                        let supported =
+                            descriptor.restorable || descriptor.renewable_ownership_only();
                         if !supported
                             || record.role != role.name()
                             || descriptor.role != role.name()

@@ -138,6 +138,115 @@ async fn goal_restore_rejects_disabled_record_or_descriptor() {
 }
 
 #[tokio::test]
+async fn goal_restore_accepts_renewable_ownership_only_snapshot() {
+    // Given: a terminal goal whose snapshot is blocked only by thread ownership.
+    let fixture = Fixture::new();
+    let registry_path = fixture._dir.path().join("owners.db");
+    let owner = crate::ownership::ThreadOwner::new(
+        "thread".into(),
+        crate::ownership::Lease {
+            owner_id: "owner-1".into(),
+            generation: 1,
+            expires_at: u64::MAX,
+        },
+    );
+    let mut registry = crate::ownership::Registry::open(&registry_path).unwrap();
+    registry.start(&owner).unwrap();
+    let permit = crate::ownership::OwnerPermit {
+        registry_path,
+        thread_id: owner.thread_id.clone(),
+        lease: owner.lease.clone(),
+        run_id: None,
+    };
+    let run = fixture.runtime.delegate_background(
+        Role::Worker,
+        "goal".into(),
+        RunConfig {
+            name: Some("goal-1".into()),
+            ownership: Some(permit.clone()),
+            ..RunConfig::default()
+        },
+    );
+    assert_eq!(fixture.runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let record = store.restore_record(run).unwrap().unwrap();
+    let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    assert!(!record.restorable && !descriptor.restorable);
+    assert!(descriptor.renewable_ownership_only());
+    // When: a follow-up continues the goal with a freshly granted permit.
+    let mut events = fixture.runtime.shared.bus.subscribe();
+    let continued = fixture
+        .runtime
+        .continue_goal(
+            run,
+            "continue".into(),
+            RunConfig {
+                ownership: Some(permit),
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(continued, run);
+    // Then: the snapshot is consumed synchronously before the run resumes.
+    let record = store.restore_record(run).unwrap().unwrap();
+    let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    assert!(!record.restorable && !descriptor.restorable);
+    assert_eq!(
+        descriptor.non_restorable_reason.as_deref(),
+        Some("snapshot_consumed")
+    );
+    // Then: the current authority, not the descriptor, supplies ownership.
+    let entry = fixture.runtime.entry(run).unwrap();
+    let ownership = entry.config.ownership.as_ref().unwrap();
+    assert_eq!(ownership.lease.owner_id, "owner-1");
+    assert_eq!(ownership.run_id.as_deref(), Some(run.to_string().as_str()));
+    drop(entry);
+    // Then: the interactive continuation parks at Waiting like any live chat run.
+    loop {
+        let event = events.recv().await.unwrap();
+        if matches!(
+            event.kind,
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Waiting,
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+    fixture.runtime.cancel(run).unwrap();
+    fixture.runtime.wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_restore_rejects_ownership_combined_with_other_blockers() {
+    // Given: a terminal goal snapshot blocked by ownership plus another field.
+    let fixture = Fixture::new();
+    let run = fixture.terminal().await;
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let mut record = store.restore_record(run).unwrap().unwrap();
+    let mut descriptor: RunRestoreDescriptor =
+        serde_json::from_str(&record.config_json).unwrap();
+    descriptor.restorable = false;
+    descriptor.non_restorable_reason = Some("復元対象外の実行状態: team_task, ownership".into());
+    record.restorable = false;
+    record.config_json = serde_json::to_string(&descriptor).unwrap();
+    fixture
+        .storage
+        .handle()
+        .upsert_run_context(&record)
+        .unwrap();
+    // When: a follow-up tries to restore the same run.
+    let result = fixture
+        .runtime
+        .continue_goal(run, "continue".into(), RunConfig::default());
+    // Then: it fails closed with the recorded reason.
+    assert!(
+        matches!(result, Err(RuntimeError::RunRestoreFailed { reason: RunRestoreFailure::UnsupportedConfig(ref reason), .. }) if reason == "復元対象外の実行状態: team_task, ownership")
+    );
+}
+
+#[tokio::test]
 async fn goal_snapshot_consumed_synchronously_before_spawn() {
     // Given: a restorable terminal snapshot on a current-thread executor.
     let fixture = Fixture::new();

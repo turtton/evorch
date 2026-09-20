@@ -50,6 +50,14 @@ impl RestoredState {
     }
 }
 
+/// ownership だけを理由に復元不可とした記録へ書き込むマーカー。
+///
+/// GUI の chat 系入口 (`delegate_chat` / `continue_goal`) はスナップショットから
+/// ownership を復元せず、呼び出し側の現在の permit を常に再付与するため、
+/// このマーカーを持つ記録は history 復元を許可する。復元判定の両ゲートと
+/// `write_terminal_snapshot` は必ずこの定数を経由して文字列を一致させること。
+pub(crate) const OWNERSHIP_ONLY_UNRESTORABLE_REASON: &str = "復元対象外の実行状態: ownership";
+
 /// 非直列化の実行権限を含まない復元用設定。拒否理由も snapshot に残す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +74,17 @@ pub struct RunRestoreDescriptor {
     pub model_preference: Option<ModelPreference>,
     pub restorable: bool,
     pub non_restorable_reason: Option<String>,
+}
+
+impl RunRestoreDescriptor {
+    /// ownership のみが復元不可の理由である記録かを返す。
+    ///
+    /// chat 系入口は ownership をスナップショットから復元しないため、
+    /// この条件を満たす記録は `restorable` / `non_restorable_reason` に
+    /// かかわらず history 復元を許可してよい。
+    pub(crate) fn renewable_ownership_only(&self) -> bool {
+        self.non_restorable_reason.as_deref() == Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +144,11 @@ fn write_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
             unsupported.push(field);
         }
     }
+    let non_restorable_reason = match unsupported.as_slice() {
+        [] => None,
+        ["ownership"] => Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON.to_owned()),
+        _ => Some(format!("復元対象外の実行状態: {}", unsupported.join(", "))),
+    };
     let descriptor = RunRestoreDescriptor {
         role: state.run_role().name().to_string(),
         name: config.name.clone(),
@@ -137,8 +161,7 @@ fn write_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
         network_access: config.network_access,
         model_preference: state.channels.model_preference_rx.borrow().clone(),
         restorable: unsupported.is_empty(),
-        non_restorable_reason: (!unsupported.is_empty())
-            .then(|| format!("復元対象外の実行状態: {}", unsupported.join(", "))),
+        non_restorable_reason,
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
