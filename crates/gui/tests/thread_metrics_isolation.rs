@@ -134,7 +134,7 @@ fn child_metrics_follow_parent_when_another_thread_is_active() {
 }
 
 #[test]
-fn metrics_render_between_conversation_title_and_phase() {
+fn metrics_render_in_status_line_below_composer() {
     // Given: a completed conversation with known cost.
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
@@ -151,17 +151,14 @@ fn metrics_render_between_conversation_title_and_phase() {
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
     // When: the real workbench renders.
     gui.run();
-    // Then: metrics occupy the same header row, after title and before status.
+    // Then: cost lives in the status line below the composer; header keeps only the title.
     let title = gui.label_rects("Thread: one")[0];
-    let metrics = gui.label_rects("$1.000 · cache 0%");
+    let metrics = gui.label_rects("$1.000");
     assert_eq!(metrics.len(), 1);
     let metrics = metrics[0];
+    let composer = gui.label_rects("Message or /command")[0];
     assert!(
-        metrics.min.x >= title.max.x,
-        "title={title:?}, metrics={metrics:?}"
+        metrics.min.y > composer.max.y && title.max.y < composer.min.y,
+        "title={title:?}, composer={composer:?}, metrics={metrics:?}"
     );
-    assert!((metrics.center().y - title.center().y).abs() < 4.0);
-    assert!(gui.label_rects("done").iter().any(|phase| {
-        phase.min.x >= metrics.max.x && (phase.center().y - metrics.center().y).abs() < 4.0
-    }));
 }

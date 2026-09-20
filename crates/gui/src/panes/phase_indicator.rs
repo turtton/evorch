@@ -6,6 +6,27 @@ use crate::theme::tokens::{
 };
 use crate::theme::widgets::badge;
 
+pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
+    let response = match phase {
+        Some(ThreadRunPhase::Running) => ui.add(
+            egui::Spinner::new()
+                .size(FONT_SMALL)
+                .color(palette().RUNNING),
+        ),
+        Some(phase) => crate::theme::widgets::status_dot(ui, phase_color(phase)),
+        None => crate::theme::widgets::status_dot(ui, palette().TEXT_MUTED),
+    };
+    let label = match phase {
+        Some(ThreadRunPhase::Running) => "Running",
+        Some(ThreadRunPhase::Pending) => "Pending",
+        Some(ThreadRunPhase::Waiting) => "Waiting for input",
+        Some(ThreadRunPhase::Done) => "Done",
+        Some(ThreadRunPhase::Error) => "Error",
+        None => "Idle",
+    };
+    response.on_hover_text(label);
+}
+
 pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
     phase_indicator_with_ack(ui, phase, true);
 }
@@ -18,42 +39,34 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
         ThreadRunPhase::Done => "done",
         ThreadRunPhase::Error => "error",
     };
-    ui.horizontal(|ui| {
-        if phase == ThreadRunPhase::Running {
-            ui.add(
-                egui::Spinner::new()
-                    .size(FONT_SMALL)
-                    .color(palette().RUNNING),
-            );
+    ui.horizontal(|ui| match phase {
+        ThreadRunPhase::Running => phase_circle(ui, Some(phase)),
+        ThreadRunPhase::Pending => {
+            badge(ui, label, phase_color(phase), palette().SURFACE_RAISED);
         }
-        match phase {
-            ThreadRunPhase::Pending | ThreadRunPhase::Running => {
-                badge(ui, label, phase_color(phase), palette().SURFACE_RAISED);
-            }
-            ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
-                let accent = match phase {
-                    ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
-                        phase_color(phase)
-                    }
-                    ThreadRunPhase::Waiting | ThreadRunPhase::Done => palette().INFO,
-                };
-                egui::Frame::new()
-                    .fill(if unread {
-                        accent
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(egui::Stroke::new(STATUS_STROKE, accent))
-                    .corner_radius(egui::CornerRadius::same(R_SM))
-                    .inner_margin(egui::Margin::symmetric(SP_1 as i8, 0))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .size(FONT_BADGE)
-                                .color(if unread { palette().CANVAS } else { accent }),
-                        );
-                    });
-            }
+        ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
+            let accent = match phase {
+                ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
+                    phase_color(phase)
+                }
+                ThreadRunPhase::Waiting | ThreadRunPhase::Done => palette().INFO,
+            };
+            egui::Frame::new()
+                .fill(if unread {
+                    accent
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .stroke(egui::Stroke::new(STATUS_STROKE, accent))
+                .corner_radius(egui::CornerRadius::same(R_SM))
+                .inner_margin(egui::Margin::symmetric(SP_1 as i8, 0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(FONT_BADGE)
+                            .color(if unread { palette().CANVAS } else { accent }),
+                    );
+                });
         }
     });
 }
@@ -101,13 +114,13 @@ if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == p
     }
 
     #[test]
-    fn phase_indicator_running_shows_spinner_and_badge() {
+    fn phase_indicator_running_shows_spinner_without_badge() {
         // Given / When
         let harness = harness(Some(ThreadRunPhase::Running));
         // Then
-        assert!(harness.query_by_label("running").is_some());
+        assert!(harness.query_by_label("running").is_none());
         assert_eq!(spinner_count(&harness), 1);
-        assert_eq!(pill_count(&harness), 1);
+        assert_eq!(pill_count(&harness), 0);
     }
 
     #[test]

@@ -243,17 +243,19 @@ fn agents_cell_shows_pressure_when_window_is_known() {
 }
 
 #[test]
-fn conversation_header_shows_context_when_window_is_known() {
+fn conversation_status_line_shows_context_when_window_is_known() {
     // Given: a thread owns the run with 40% pressure.
     let mut gui = workbench(Some(1000));
     // When: the conversation renders.
     gui.run();
-    // Then: context is visible alongside existing thread metadata.
-    assert!(gui.has_label("cache 44% · ctx 40%"));
-    let title = gui.label_rects("Thread: one")[0];
-    let metrics = gui.label_rects("cache 44% · ctx 40%")[0];
-    assert!(metrics.left() >= title.right());
-    assert!((metrics.center().y - title.center().y).abs() < 4.0);
+    // Then: context lives in the status line below the composer, not the header.
+    let status = gui.label_rects("ctx 40%")[0];
+    let composer = gui.label_rects("Message or /command")[0];
+    assert!(
+        status.min.y > composer.max.y,
+        "status={status:?} composer={composer:?}"
+    );
+    assert!(gui.label_rects("ctx 40%").len() == 1);
     if let Some(path) = std::env::var_os("CONTEXT_PRESSURE_CAPTURE") {
         gui.capture()
             .unwrap()

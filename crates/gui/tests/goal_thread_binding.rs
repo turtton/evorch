@@ -191,15 +191,15 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
     gui.run();
     let metrics = gui.state().telemetry().thread_metrics(&runs);
     assert_eq!(metrics.cost, Some(0.0));
-    let mut cost_label = format!("${:.3} · cache 100%", metrics.cost.unwrap());
-    if let Some(pressure) = metrics.context_pressure {
-        cost_label.push_str(&format!(" · ctx {pressure}%"));
-    }
-    let seconds = metrics.wall_time.as_secs();
-    if seconds > 0 {
-        cost_label.push_str(&format!(" · {seconds}s"));
-    }
-    assert!(gui.has_label(&cost_label), "missing header {cost_label}");
+    let cost_label = format!("${:.3}", metrics.cost.unwrap());
+    assert!(
+        gui.has_label(&cost_label),
+        "missing status line {cost_label}"
+    );
+    assert!(
+        gui.has_label("cache 100%"),
+        "missing status line cache 100%"
+    );
     for run in &runs {
         assert!(gui.has_label(&format!("content-{run}")));
         assert!(

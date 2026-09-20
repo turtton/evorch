@@ -12,7 +12,7 @@ use crate::theme::tokens::*;
 use crate::theme::widgets::{card, empty_state, pane_root};
 
 mod header;
-use header::header_strip;
+use header::{header_strip, status_strip};
 mod thinking;
 
 #[derive(Debug, Clone, Copy)]
@@ -80,17 +80,20 @@ pub fn agent_pane_with_repo_root(
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let strip = ui.scope(|ui| {
-                    ui.push_id("composer-strip", |ui| {
-                        composer_strip(
-                            ui,
-                            composer,
-                            ctx.model_picker,
-                            picker_state,
-                            ctx.phase,
-                            ctx.sandbox_picker,
-                        )
-                    })
-                    .inner
+                    let result = ui
+                        .push_id("composer-strip", |ui| {
+                            composer_strip(
+                                ui,
+                                composer,
+                                ctx.model_picker,
+                                picker_state,
+                                ctx.phase,
+                                ctx.sandbox_picker,
+                            )
+                        })
+                        .inner;
+                    status_strip(ui, &ctx);
+                    result
                 });
                 let height = strip.response.rect.height();
                 if height != composer_height {
@@ -393,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_header_shows_phase_pill_without_clipping() {
+    fn thread_header_omits_phase_pill() {
         for (phase, label) in [
             (ThreadRunPhase::Running, "running"),
             (ThreadRunPhase::Waiting, "waiting (input)"),
@@ -421,9 +424,8 @@ mod tests {
                     header_strip(ui, &None, &ctx, &mut None);
                 });
             harness.run_steps(2);
-            let pill = harness.get_by_label(label).rect();
-            assert!(pill.left() > harness.get_by_label("Thread: Chat").rect().right());
-            assert!(pill.right() < 400.0 && pill.bottom() < 80.0);
+            assert!(harness.query_by_label(label).is_none());
+            assert!(harness.get_by_label("Thread: Chat").rect().right() < 400.0);
         }
     }
 }

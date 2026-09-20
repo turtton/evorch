@@ -89,6 +89,8 @@ pub struct ThreadMetrics {
     pub cache_hit_rate: Option<f64>,
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
+    pub ttft: Option<Duration>,
+    pub tok_s: Option<f64>,
 }
 
 impl TelemetryOverlay {

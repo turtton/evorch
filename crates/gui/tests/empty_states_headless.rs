@@ -171,9 +171,14 @@ fn composer_is_docked_at_bottom_in_empty_state() {
         .max
         .y;
     let send = harness.label_rects("Send")[0];
+    let wall = harness.label_rects("wall 0s")[0];
     assert!(
-        send.max.y >= bottom - gui::theme::tokens::SP_4 - gui::theme::tokens::SP_3 - 1.0,
-        "send={send:?}, bottom={bottom}"
+        wall.max.y >= bottom - gui::theme::tokens::SP_4 - gui::theme::tokens::SP_3 - 1.0,
+        "status={wall:?}, bottom={bottom}"
+    );
+    assert!(
+        send.max.y < wall.max.y,
+        "status line must sit below the composer"
     );
     assert!(harness.label_rects("No messages yet")[0].center().y < send.min.y);
 }

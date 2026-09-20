@@ -28,40 +28,45 @@ pub(super) fn header_strip(
             } else if let Some(title) = ctx.active_thread_title {
                 ui.label(h3(format!("Thread: {title}")));
             }
-            if let Some(metrics) = &ctx.thread_metrics {
-                let mut segments = Vec::new();
-                if let Some(cost) = metrics.cost {
-                    segments.push(format!("${cost:.3}"));
-                }
-                if let Some(rate) = metrics.cache_hit_rate {
-                    segments.push(format!("cache {rate:.0}%"));
-                }
-                if let Some(pressure) = metrics.context_pressure {
-                    segments.push(format!("ctx {pressure}%"));
-                }
-                let seconds = metrics.wall_time.as_secs();
-                if seconds > 0 {
-                    segments.push(if seconds < 60 {
-                        format!("{seconds}s")
-                    } else if seconds < 3600 {
-                        format!("{}m", seconds / 60)
-                    } else {
-                        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
-                    });
-                }
-                if !segments.is_empty() {
-                    ui.label(crate::theme::text::muted(segments.join(" · ")));
-                }
-            }
-            if let Some(phase) = ctx.phase {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    crate::panes::phase_indicator::phase_indicator_with_ack(
-                        ui,
-                        phase,
-                        ctx.phase_unread,
-                    );
-                });
-            }
         });
+    });
+}
+
+pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
+    use crate::theme::text::muted;
+    let metrics = ctx.thread_metrics.unwrap_or_default();
+    let seconds = metrics.wall_time.as_secs();
+    let wall = if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SP_1;
+        crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
+        for segment in [
+            metrics
+                .cost
+                .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
+            metrics
+                .cache_hit_rate
+                .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.0}%")),
+            metrics.ttft.map_or_else(
+                || "TTFT —".into(),
+                |ttft| format!("TTFT {}ms", ttft.as_millis()),
+            ),
+            metrics
+                .tok_s
+                .map_or_else(|| "— tok/s".into(), |rate| format!("{rate:.1} tok/s")),
+            metrics
+                .context_pressure
+                .map_or_else(|| "ctx —".into(), |pressure| format!("ctx {pressure}%")),
+            format!("wall {wall}"),
+        ] {
+            ui.label(muted("·"));
+            ui.add(egui::Label::new(muted(segment)).extend());
+        }
     });
 }
