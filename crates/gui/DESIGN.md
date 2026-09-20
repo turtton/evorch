@@ -16,6 +16,10 @@ Use SP_1 through SP_4 (4/8/12/16). Panels own their scrolling.
 ## 5. Primitives
 Reuse egui TextEdit, ComboBox, Button, ScrollArea, Grid and collapsing headers.
 Keep native keyboard focus and selected/hover/disabled states.
+Routing uses named collapsing headers: registered routes start closed, new routes
+start open, and expansion persists through saves within the modal session.
+Usage labels remain visible when collapsed. Candidate models span declared profiles;
+subscription profiles precede alphabetically ordered API profiles.
 Thread archive uses a Painter-drawn box at Small text height, a 1.2pt stroke,
 a wider lid with a centered handle slit, and native interaction text color.
 Its native small Button reserves Small text height + SP_2 on each axis;

@@ -35,6 +35,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.settings_save_in_progress() {
             return;
         }
+        self.routing_settings.origin_role_settings = false;
         match config::Config::load(&self.routing_load_options()) {
             Ok(config) => self.routing_settings = RoutingSettingsModel::seed_from_config(&config),
             Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
@@ -50,6 +51,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.settings_save_in_progress() {
             return;
         }
+        self.routing_settings.origin_role_settings = true;
         match config::Config::load(&self.routing_load_options()) {
             Ok(config) => {
                 self.routing_settings =
@@ -107,8 +109,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         match rx.try_recv() {
             Ok(Ok(config)) => {
+                let return_to_roles = self.routing_settings.origin_role_settings;
+                let expanded = self
+                    .routing_settings
+                    .expanded
+                    .iter()
+                    .map(|name| {
+                        self.routing_settings
+                            .route_name_edits
+                            .get(name)
+                            .unwrap_or(name)
+                            .clone()
+                    })
+                    .collect();
                 self.routing_settings = RoutingSettingsModel::seed_from_config(&config);
+                self.routing_settings.expanded = expanded;
                 self.routing_settings.open = true;
+                if return_to_roles {
+                    self.open_role_settings();
+                }
                 self.push_notice("Routing settings updated");
             }
             Ok(Err(error)) => self.routing_settings.validation_error = Some(error),

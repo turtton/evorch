@@ -1,6 +1,6 @@
 //! フォールバック順を保持するルーティング編集状態。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
 use config::{Config, ConfigError, RouteCandidateConfig, RoutingConfig};
@@ -12,6 +12,8 @@ pub struct RoutingSettingsModel {
     pub route_users: BTreeMap<String, Vec<String>>,
     pub routes_empty: bool,
     pub pending_new_route: Option<String>,
+    pub origin_role_settings: bool,
+    pub expanded: BTreeSet<String>,
     pub profile_names: Vec<String>,
     pub profile_defaults: BTreeMap<String, String>,
     pub profile_models: BTreeMap<String, Vec<String>>,
@@ -23,6 +25,21 @@ pub struct RoutingSettingsModel {
 
 impl RoutingSettingsModel {
     pub fn seed_from_config(config: &Config) -> Self {
+        let mut profiles: Vec<_> = config.providers.iter().collect();
+        profiles.sort_by_key(|(name, profile)| {
+            use config::ProviderTypeConfig as Provider;
+            let group = match profile.provider_type {
+                Provider::AnthropicSubscription
+                | Provider::OpenAiCodex
+                | Provider::KimiSubscription => 0,
+                Provider::Anthropic
+                | Provider::OpenAi
+                | Provider::GithubCopilot
+                | Provider::Openrouter
+                | Provider::OpenAiCompatible => 1,
+            };
+            (group, *name)
+        });
         Self {
             routes: config.routing.routes.clone(),
             route_users: config
@@ -37,7 +54,7 @@ impl RoutingSettingsModel {
                 })
                 .collect(),
             routes_empty: config.routing.routes.is_empty(),
-            profile_names: config.providers.keys().cloned().collect(),
+            profile_names: profiles.into_iter().map(|(name, _)| name.clone()).collect(),
             profile_defaults: config
                 .providers
                 .iter()
@@ -52,7 +69,6 @@ impl RoutingSettingsModel {
                         profile
                             .models
                             .iter()
-                            .filter(|model| model.enabled)
                             .map(|model| model.id.clone())
                             .collect(),
                     )
@@ -68,6 +84,7 @@ impl RoutingSettingsModel {
 
     pub fn seed_from_config_prefill(config: &Config, logical: &str) -> Self {
         let mut model = Self::seed_from_config(config);
+        model.origin_role_settings = true;
         match model.add_route(logical) {
             Ok(()) => {
                 model.pending_new_route = Some(logical.into());
@@ -90,6 +107,7 @@ impl RoutingSettingsModel {
                 model: None,
             }],
         );
+        self.expanded.insert(name.into());
         Ok(())
     }
 
@@ -100,6 +118,9 @@ impl RoutingSettingsModel {
         self.validate_name(name)?;
         if let Some(candidates) = self.routes.remove(old) {
             self.routes.insert(name.into(), candidates);
+            if self.expanded.remove(old) {
+                self.expanded.insert(name.into());
+            }
         }
         Ok(())
     }
