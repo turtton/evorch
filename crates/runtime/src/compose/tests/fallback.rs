@@ -130,7 +130,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
 
 #[tokio::test]
 async fn fallback_classifies_direct_and_exhausted_failures() {
-    for status in [400, 401, 403, 404, 408, 429, 500, 503, 599] {
+    for status in [400, 401, 402, 403, 404, 408, 429, 500, 503, 599] {
         for wrapped in [false, true] {
             // Given
             let error = ProviderError::Http {
@@ -149,7 +149,8 @@ async fn fallback_classifies_direct_and_exhausted_failures() {
             // When
             let result = complete(&model, "session").await;
             // Then
-            let eligible = matches!(status, 408 | 429 | 500..=599);
+            // Auth failures and exhausted quota leave this candidate unusable, so try another.
+            let eligible = matches!(status, 401 | 402 | 403 | 408 | 429 | 500..=599);
             assert_eq!(
                 result.is_ok(),
                 eligible,

@@ -47,22 +47,20 @@ fn router(models: &[&str]) -> Router {
 }
 
 #[test]
-fn resolve_degrades_when_tool_support_is_unknown_or_unsupported() {
-    // Given: only unknown or explicitly unsupported tool calling candidates.
-    for id in ["unknown", "unsupported"] {
-        let router = router(&[id]).requiring_capability(Capability::ToolCalling);
-        // When: resolving a tool-calling flow.
-        let result = router.resolve(
-            &mut SessionAffinity::default(),
-            "run",
-            &LogicalModelId::from("worker"),
-        );
-        // Then: no optimistic selection.
-        assert_eq!(
-            result,
-            Err(RoutingError::NoAvailableCandidate("worker".into()))
-        );
-    }
+fn resolve_degrades_when_tool_support_is_explicitly_unsupported() {
+    // Given: an explicitly unsupported tool calling candidate.
+    let router = router(&["unsupported"]).requiring_capability(Capability::ToolCalling);
+    // When: resolving a tool-calling flow.
+    let result = router.resolve(
+        &mut SessionAffinity::default(),
+        "run",
+        &LogicalModelId::from("worker"),
+    );
+    // Then: no optimistic selection.
+    assert_eq!(
+        result,
+        Err(RoutingError::NoAvailableCandidate("worker".into()))
+    );
 }
 
 #[test]
@@ -80,7 +78,7 @@ fn supported_route_is_unchanged_when_tools_are_required() {
 }
 
 #[test]
-fn pin_is_skipped_when_tool_support_is_unknown() {
+fn pin_is_preserved_when_tool_support_is_unknown() {
     // Given: a text-only flow previously pinned an unknown model.
     let router = router(&["unknown", "gpt-4o"]).requiring_capability(Capability::ToolCalling);
     let mut affinity = SessionAffinity::default();
@@ -89,14 +87,14 @@ fn pin_is_skipped_when_tool_support_is_unknown() {
     let route = router
         .resolve(&mut affinity, "run", &LogicalModelId::from("worker"))
         .expect("supported candidate");
-    // Then: the pin cannot bypass the requirement.
-    assert_eq!(route.model_id, "gpt-4o");
+    // Then: unknown support does not invalidate the pin.
+    assert_eq!(route.model_id, "unknown");
 }
 
 #[test]
-fn fallback_skips_models_when_tool_support_is_not_supported() {
+fn fallback_skips_explicitly_unsupported_models_but_accepts_unknown() {
     // Given: unsupported candidates between two supported models.
-    let router = router(&["gpt-4o", "unknown", "unsupported", "gpt-4o-mini"])
+    let router = router(&["gpt-4o", "unsupported", "unknown", "gpt-4o-mini"])
         .requiring_capability(Capability::ToolCalling);
     // When: the first model fails.
     let route = router.next_fallback(
@@ -110,15 +108,12 @@ fn fallback_skips_models_when_tool_support_is_not_supported() {
         FailureKind::Server,
         None,
     );
-    // Then: only a supported fallback is selected.
-    assert_eq!(
-        route.map(|route| route.model_id),
-        Some("gpt-4o-mini".into())
-    );
+    // Then: the unsupported candidate is skipped and the unknown one is selected.
+    assert_eq!(route.map(|route| route.model_id), Some("unknown".into()));
 }
 
 #[test]
-fn fallback_degrades_when_only_unknown_models_remain() {
+fn fallback_accepts_when_only_unknown_models_remain() {
     // Given: a supported model followed by an unknown model.
     let router = router(&["gpt-4o", "unknown"]).requiring_capability(Capability::ToolCalling);
     // When: the supported model fails.
@@ -133,6 +128,6 @@ fn fallback_degrades_when_only_unknown_models_remain() {
         FailureKind::Server,
         None,
     );
-    // Then: no optimistic fallback.
-    assert_eq!(route, None);
+    // Then: the unknown fallback remains eligible.
+    assert_eq!(route.map(|route| route.model_id), Some("unknown".into()));
 }

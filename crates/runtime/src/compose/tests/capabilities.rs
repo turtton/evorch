@@ -52,7 +52,7 @@ async fn tools_follow_declaration_when_preferred_model_support_is_unknown_or_uns
 }
 
 #[tokio::test]
-async fn automatic_tool_flow_fails_when_model_support_is_unknown() {
+async fn automatic_tool_flow_proceeds_when_model_support_is_unknown() {
     // Given: a discovered model is the only routed candidate.
     let (model, requests) = routed_model(Ok(response()), "custom", None);
     // When: tools are required by an automatic flow.
@@ -68,9 +68,9 @@ async fn automatic_tool_flow_fails_when_model_support_is_unknown() {
             &specs(),
         )
         .await;
-    // Then: routing fails before any provider call.
-    assert!(matches!(result, Err(RuntimeError::Model { .. })));
-    assert!(requests.lock().expect("requests").is_empty());
+    // Then: unknown capability is treated as eligible and the provider is called.
+    result.expect("unknown capability must not fail routing");
+    assert_eq!(requests.lock().expect("requests").len(), 1);
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use event_bus::{Event, EventBus, ProviderEvent};
 
 use crate::{FailureKind, ProviderProfile, RoutingError, SessionAffinity};
-use model::{Capability, LogicalModelId, ModelCatalog};
+use model::{Capability, CapabilitySupport, LogicalModelId, ModelCatalog};
 
 mod attempts;
 
@@ -64,7 +64,9 @@ impl PartialEq for Router {
 }
 
 impl Router {
-    /// Requires explicit canonical support for both resolution and fallback.
+    /// Rejects only explicitly unsupported capabilities during resolution and fallback.
+    /// Unconfirmed discovered/config-declared models are assumed to support tool calling;
+    /// unknown capability knowledge does not exclude them from routing.
     pub fn requiring_capability(mut self, capability: Capability) -> Self {
         self.required_capabilities.push(capability);
         self
@@ -78,10 +80,12 @@ impl Router {
     fn is_eligible(&self, model_id: &str) -> bool {
         let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
         self.catalog.is_available(model_id)
-            && self
-                .required_capabilities
-                .iter()
-                .all(|capability| self.catalog.supports(base_model_id, *capability))
+            && self.required_capabilities.iter().all(|capability| {
+                match self.catalog.capability_support(base_model_id, *capability) {
+                    CapabilitySupport::Unsupported => false,
+                    CapabilitySupport::Supported | CapabilitySupport::Unknown => true,
+                }
+            })
     }
 
     /// 検証済みプロファイル・ルーティング設定・モデルカタログからルーターを構築します。
