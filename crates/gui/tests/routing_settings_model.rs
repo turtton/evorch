@@ -28,6 +28,23 @@ fn fixture() -> Config {
 }
 
 #[test]
+fn seed_profile_models_excludes_disabled_entries() {
+    // Given: a profile declaring an enabled model followed by a disabled model.
+    let mut config = fixture();
+    config.providers.get_mut("local").expect("profile").models = vec![
+        config::ModelEntryConfig::enabled("enabled-model"),
+        config::ModelEntryConfig {
+            enabled: false,
+            ..config::ModelEntryConfig::enabled("disabled-model")
+        },
+    ];
+    // When: seeding the routing editor choices.
+    let model = RoutingSettingsModel::seed_from_config(&config);
+    // Then: only enabled IDs remain in declaration order.
+    assert_eq!(model.profile_models["local"], ["enabled-model"]);
+}
+
+#[test]
 fn seed_preserves_all_routes_and_candidates() {
     // Given: 複数ルートと任意モデル。
     let config = fixture();

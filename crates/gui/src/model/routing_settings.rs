@@ -63,16 +63,7 @@ impl RoutingSettingsModel {
             profile_models: config
                 .providers
                 .iter()
-                .map(|(name, profile)| {
-                    (
-                        name.clone(),
-                        profile
-                            .models
-                            .iter()
-                            .map(|model| model.id.clone())
-                            .collect(),
-                    )
-                })
+                .map(|(name, profile)| (name.clone(), profile.enabled_model_ids()))
                 .collect(),
             ..Self::default()
         }
