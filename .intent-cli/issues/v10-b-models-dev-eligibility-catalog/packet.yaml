@@ -1,0 +1,68 @@
+implementation_issue_packet:
+  issue_title: "v10-b: models.dev キャッシュを Router eligibility catalog に統合"
+  issue_kind: feature
+  source_execution_unit: v10-b-models-dev-eligibility-catalog
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/catalog/ crates/model/ crates/routing/ crates/gui/ crates/runtime/"
+  target_part: "models.dev キャッシュを起動時に読み込み、provider を考慮して eligibility catalog にマージし、GUI 表示と Runner に注入する属性情報を整合させる"
+  dependencies: []
+  technical_baseline:
+    - "背景（ユーザー確認済み）: Router 用 model::ModelCatalog は GUI の crates/gui/src/model/production.rs:23 と runtime の crates/runtime/src/compose.rs:124 の両経路で ModelCatalog::builtin() のみが渡される。~/.cache/evorch/models-dev.json は eligibility 判定へ反映されない"
+    - "config 宣言モデルは attributes_confirmed=false の placeholder となり capability が Unknown になる。main push 済みの 81f2b91 に関連する暫定対応では routing の is_eligible が Unknown を eligible とし、明示的 Unsupported のみ除外するが、これは catalog 統合の代替ではない"
+    - "本来設計: 起動時に models.dev キャッシュをロードし、builtin とマージした model::ModelCatalog を eligibility 判定へ注入する"
+    - "変換層: models.dev ローダの catalog::ModelCatalog は provider 単位の構造であり、model::CatalogEntry への変換で model ID だけに潰さず provider ごとの属性差を扱う"
+    - "provider 差の扱いは実装時に方針を明文化してテストで固定する。第一候補は route candidate の profile provider に対応する provider 値の優先であり、同名 model の他 provider 値を無条件で上書きしない。例として kimi-k3 の context は neuralwatt が1048560、moonshot が1048576"
+    - "注入点は GUI production.rs と runtime compose.rs の2箇所。builtin 直渡しを builtin+models.dev マージ済み catalog に置き換える"
+    - "属性不明時の既存 Unknown fail-open はフォールバック保証として維持する。キャッシュ未取得や未知モデルによって実行を不当に拒否せず、明示的 Unsupported は引き続き除外する"
+    - "時刻同期: GUI snackbar の models.dev 整合性 UI と Runner catalog の参照世代・反映タイミングを整合させる。画面だけ models.dev 属性を表示して Runner は builtin のままという不整合を解消し、更新時の反映契機を明文化する"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  acceptance_criteria:
+    - "GUI と runtime の両起動経路で models.dev キャッシュを読み込み、builtin とマージした eligibility catalog を Router/Runner に渡す"
+    - "catalog::ModelCatalog から model::CatalogEntry への変換をテストし、キャッシュに既知属性がある config 宣言モデルが placeholder の Unknown のままにならない"
+    - "同じ model ID の provider 別属性差について選択規則を記録し、kimi-k3 の context 1048560/1048576 のような値が provider を無視した上書きで混同されないことをテストする"
+    - "キャッシュなし・キャッシュ読込失敗・属性不明モデルでも既存 builtin/Unknown フォールバックを保ち、Unknown は eligible、明示的 Unsupported は ineligible の回帰テストを通す"
+    - "GUI snackbar の models.dev 整合性表示と Runner が判定に使う catalog の反映タイミングを一致させ、起動時およびキャッシュ更新時の表示と実行の整合性を検証する"
+    - "GUI/runtime の両注入点を通る統合テストで、models.dev 由来の属性が実際の eligibility 判定に反映されることを確認する"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  new_intent_needed: false
+  placement_rationale: "provider-routing の eligibility 属性解決を既存 models.dev catalog と接続し、GUI と runtime の composition root で同じ情報を使用する"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "provider 別属性の競合解決方針、Unknown フォールバックの保証、GUI 表示と Runner catalog の更新タイミングの整合方法"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: "provider-aware eligibility catalog、GUI 整合性表示と Runner 注入経路"

@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "updated_at": "2026-09-18T02:24:32.1645741+00:00",
+  "updated_at": "2026-09-20T14:31:01.4626753+00:00",
   "items": [
     {
       "execution_unit": "v01-scaffold",
@@ -1453,8 +1453,6 @@
         "review_context": ".intent-cli/issues/v08-verification-matrix/review-context.md",
         "yaml": ".intent-cli/issues/v08-verification-matrix/packet.yaml"
       },
-      "linked_issue": null,
-      "linked_pr": null,
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",
@@ -1616,6 +1614,40 @@
         "url": "https://github.com/turtton/evorch/issues/118"
       },
       "linked_pr": "https://github.com/turtton/evorch/pull/119",
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v10-a-config-routing-profile",
+      "title": "v10-a: user \u5C64\u306E\u30EB\u30FC\u30C6\u30A3\u30F3\u30B0\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3068 project \u8A2D\u5B9A\u306E\u5206\u96E2",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v10-a-config-routing-profile/implementation.md",
+        "review_context": ".intent-cli/issues/v10-a-config-routing-profile/review-context.md",
+        "yaml": ".intent-cli/issues/v10-a-config-routing-profile/packet.yaml"
+      },
+      "worker_role": "implementation",
+      "review_role": "review",
+      "priority": "high",
+      "priority_revision": 0
+    },
+    {
+      "execution_unit": "v10-b-models-dev-eligibility-catalog",
+      "title": "v10-b: models.dev \u30AD\u30E3\u30C3\u30B7\u30E5\u3092 Router eligibility catalog \u306B\u7D71\u5408",
+      "state": "queued",
+      "dependencies": [],
+      "blocked_by": [],
+      "clarification_return_path": "intents/evorch/clarifications/open.md",
+      "packet_paths": {
+        "implementation": ".intent-cli/issues/v10-b-models-dev-eligibility-catalog/implementation.md",
+        "review_context": ".intent-cli/issues/v10-b-models-dev-eligibility-catalog/review-context.md",
+        "yaml": ".intent-cli/issues/v10-b-models-dev-eligibility-catalog/packet.yaml"
+      },
       "worker_role": "implementation",
       "review_role": "review",
       "priority": "high",

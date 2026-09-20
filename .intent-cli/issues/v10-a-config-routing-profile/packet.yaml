@@ -1,0 +1,65 @@
+implementation_issue_packet:
+  issue_title: "v10-a: user 層のルーティングプロファイルと project 設定の分離"
+  issue_kind: feature
+  source_execution_unit: v10-a-config-routing-profile
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/config/ crates/gui/ crates/runtime/ crates/routing/"
+  target_part: "routing.routes と全 role の agents.*.logical_model を一組のルーティングプロファイルとして user 層で管理し、project 層は選択した profile ID を ./.evorch/evorch.toml に保存する"
+  dependencies: []
+  technical_baseline:
+    - "背景（ユーザー確認済み）: GUI は repo_root = current_dir() を固定で使用して ./evorch.toml を読み書きしている（crates/gui/src/bin/evorch-gui.rs:557,800）。dogfooding 中の誤コミット懸念と dogfooding 用 routing/profile の実プロジェクトへの混入がある"
+    - "確定設計: ~/.config/evorch/ の user 層で複数のルーティングプロファイルを管理する。profile 粒度は routing.routes と全 role への logical_model 割当の1セットとし、role ごとに独立した profile にはしない"
+    - "GUI は user 層（グローバル設定）と project 層の操作対象を明示的に区別する。profile の編集は user 層で行い、project 画面の routing 設定は profiles 一覧からの profile picker のみとする"
+    - "project に保存する routing 設定は選択した profile ID のみとし、routes や全 role の割当を project 設定へ複製しない"
+    - "project 設定保存先を cwd 直下の ./evorch.toml から ./.evorch/evorch.toml に変更し、GUI と runtime の設定解決で同じ選択 profile を使う"
+    - "migration 方針: 開発中システムのため旧形式の互換コードや自動移行コードは実装しない。手元の設定ファイルは手動マイグレーションする運用とする"
+  intent_references:
+    - intents/evorch/features/provider-routing/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "user 層で複数 profile を保存・読み込みでき、各 profile は routes と全 role の logical_model 割当を一括で保持する"
+    - "GUI で user 層と project 層を判別でき、project 画面は profile picker のみで選択できる"
+    - "project の routing 設定として保存されるのは profile ID のみであり、dogfooding 用 profile 本体は実プロジェクトに書き込まれない"
+    - "project 設定を ./.evorch/evorch.toml から読み書きし、cwd 直下の ./evorch.toml を新規作成・更新しない"
+    - "選択 profile の routes と全 role 割当が GUI/runtime の実行時設定に反映されることをテストする"
+    - "異なる project が別々の profile ID を保持し、user 層と project 層の保存対象が混ざらないことを回帰テストする"
+    - "旧設定の自動移行・互換読み込みは追加せず、手動マイグレーションの操作手順を説明する"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/provider-routing/overview.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+  new_intent_needed: false
+  placement_rationale: "既存の provider-routing における設定所有層と profile 粒度の再設計であり、GUI は層別の設定操作を提供する"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "user/profile と project/profile ID の分離による dogfooding 設定混入の解消、および手動移行時の注意点"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: "user 層の routing profile 管理、project profile picker、手動マイグレーション手順"

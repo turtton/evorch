@@ -300,3 +300,5 @@
 {"ts":"2026-09-18T00:40:01.3279135+00:00","execution_unit":"v07-durable-execution-substrate","event":"review-started","by":"intent-cli"}
 {"ts":"2026-09-18T02:24:32.1547328+00:00","execution_unit":"v07-durable-execution-substrate","event":"pr-merged","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":119}
 {"ts":"2026-09-18T02:24:32.1547328+00:00","execution_unit":"v07-durable-execution-substrate","event":"closeout-recorded","by":"intent-cli closeout pr","repo":"turtton/evorch","pr":119}
+{"ts":"2026-09-20T14:30:54.894817+00:00","execution_unit":"v10-a-config-routing-profile","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v10-a-config-routing-profile/"}
+{"ts":"2026-09-20T14:31:01.4816654+00:00","execution_unit":"v10-b-models-dev-eligibility-catalog","event":"queue_seeded_from_packet","by":"automation queue-seed-from-packet (G363)","packet_ref":".intent-cli/issues/v10-b-models-dev-eligibility-catalog/"}
