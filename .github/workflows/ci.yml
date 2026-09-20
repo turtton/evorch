@@ -111,13 +111,17 @@ jobs:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       # checkPhase のテストは pure 前提。cache hit 時はビルド済み結果を使い再実行しない。
       - name: Build flake package (runs checkPhase tests in the Nix sandbox)
-        run: nix build -L .#evorch
+        run: nix build -L .#evorch .#evorch-deps
       - name: Push to attic
         if: success()
         run: |
+          # 最終 out のみでは build-time 依存 (crane cargoArtifacts / fenix toolchain /
+          # vendored crate sources) が attic に入らず毎回再 build になるため、
+          # 出力の runtime closure ごと push して次回 run で substitute させる。
           # tailscaled ingress stalls under concurrent large uploads (issue #72); retry with backoff
+          CLOSURE=$(nix path-info --recursive ./result ./result-2)
           for attempt in 1 2 3 4; do
-            if attic push home ./result; then
+            if echo "$CLOSURE" | xargs -r attic push home; then
               exit 0
             fi
             if [ "$attempt" -lt 4 ]; then

@@ -134,6 +134,10 @@
           default = evorch;
           inherit evorch;
           evorch-gui = evorch;
+          # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
+          # Cargo.lock が変わらない限りこの derivation hash は安定し、CI では最終
+          # バイナリとセットで push することで次回 run の deps build を skip させる。
+          evorch-deps = cargoArtifacts;
         };
         checks.tests = tests;
         apps = {
