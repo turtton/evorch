@@ -167,7 +167,10 @@ async fn goal_restore_accepts_renewable_ownership_only_snapshot() {
             ..RunConfig::default()
         },
     );
-    assert_eq!(fixture.runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(
+        fixture.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
     let store = fixture.runtime.shared.run_store.get().unwrap();
     let record = store.restore_record(run).unwrap().unwrap();
     let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
@@ -225,8 +228,7 @@ async fn goal_restore_rejects_ownership_combined_with_other_blockers() {
     let run = fixture.terminal().await;
     let store = fixture.runtime.shared.run_store.get().unwrap();
     let mut record = store.restore_record(run).unwrap().unwrap();
-    let mut descriptor: RunRestoreDescriptor =
-        serde_json::from_str(&record.config_json).unwrap();
+    let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
     descriptor.restorable = false;
     descriptor.non_restorable_reason = Some("復元対象外の実行状態: team_task, ownership".into());
     record.restorable = false;

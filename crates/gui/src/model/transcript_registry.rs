@@ -89,8 +89,13 @@ impl TranscriptRegistry {
             | EventKind::Fault(_) => {
                 vec![TranscriptKey::Thread]
             }
-            EventKind::Provider(event_bus::ProviderEvent::FallbackTriggered { session_id, .. }) => {
-                vec![TranscriptKey::Thread, TranscriptKey::Run(session_id.clone())]
+            EventKind::Provider(event_bus::ProviderEvent::FallbackTriggered {
+                session_id, ..
+            }) => {
+                vec![
+                    TranscriptKey::Thread,
+                    TranscriptKey::Run(session_id.clone()),
+                ]
             }
             EventKind::Provider(event_bus::ProviderEvent::RequestFailed { run_id, .. }) => {
                 match run_id {
