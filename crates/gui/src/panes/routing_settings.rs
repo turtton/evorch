@@ -51,6 +51,23 @@ ui.colored_label(palette().ERROR_FG, error);
 }
 
 fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
+    if model.routes_empty {
+        surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {
+            let message = model
+                .profile_names
+                .first()
+                .and_then(|name| {
+                    model.profile_defaults.get(name).map(|default| format!(
+                    "No explicit routes: all logical models implicitly resolve to {name}/{default}."
+                ))
+                })
+                .unwrap_or_else(|| {
+                    "No explicit routes and no provider profile: logical models cannot resolve."
+                        .into()
+                });
+            ui.colored_label(palette().WARNING_FG, message);
+        });
+    }
     let mut remove = None;
     for (name, candidates) in &mut model.routes {
         ui.push_id(name, |ui| {
@@ -66,6 +83,17 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     .background_color(palette().INPUT),
             )
             .labelled_by(label.id);
+            if model.pending_new_route.as_deref() == Some(name) {
+                ui.label(muted("New route (not saved)"));
+            }
+            let users = model
+                .route_users
+                .get(draft)
+                .filter(|users| !users.is_empty());
+            ui.label(muted(users.map_or_else(
+                || "Used by: none".into(),
+                |users| format!("Used by: {}", users.join(", ")),
+            )));
             if ui.button("Remove route").clicked() {
                 remove = Some(name.clone());
             }
@@ -129,6 +157,9 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
     if let Some(name) = remove {
         model.routes.remove(&name);
         model.route_name_edits.remove(&name);
+        if model.pending_new_route.as_deref() == Some(&name) {
+            model.pending_new_route = None;
+        }
     }
     ui.separator();
     let label = ui.label("New logical model name");

@@ -9,7 +9,11 @@ use config::{Config, ConfigError, RouteCandidateConfig, RoutingConfig};
 pub struct RoutingSettingsModel {
     pub open: bool,
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
+    pub route_users: BTreeMap<String, Vec<String>>,
+    pub routes_empty: bool,
+    pub pending_new_route: Option<String>,
     pub profile_names: Vec<String>,
+    pub profile_defaults: BTreeMap<String, String>,
     pub profile_models: BTreeMap<String, Vec<String>>,
     pub new_route_name: String,
     pub route_name_edits: BTreeMap<String, String>,
@@ -21,7 +25,24 @@ impl RoutingSettingsModel {
     pub fn seed_from_config(config: &Config) -> Self {
         Self {
             routes: config.routing.routes.clone(),
+            route_users: config
+                .routing
+                .routes
+                .keys()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        config::types::agents::roles_using(name, &config.agents),
+                    )
+                })
+                .collect(),
+            routes_empty: config.routing.routes.is_empty(),
             profile_names: config.providers.keys().cloned().collect(),
+            profile_defaults: config
+                .providers
+                .iter()
+                .map(|(name, profile)| (name.clone(), profile.default_model.clone()))
+                .collect(),
             profile_models: config
                 .providers
                 .iter()
@@ -43,6 +64,21 @@ impl RoutingSettingsModel {
 
     pub const fn is_saving(&self) -> bool {
         self.save_rx.is_some()
+    }
+
+    pub fn seed_from_config_prefill(config: &Config, logical: &str) -> Self {
+        let mut model = Self::seed_from_config(config);
+        match model.add_route(logical) {
+            Ok(()) => {
+                model.pending_new_route = Some(logical.into());
+                model.route_users.insert(
+                    logical.into(),
+                    config::types::agents::roles_using(logical, &config.agents),
+                );
+            }
+            Err(error) => model.validation_error = Some(error.to_string()),
+        }
+        model
     }
 
     pub fn add_route(&mut self, name: &str) -> Result<(), ConfigError> {
@@ -121,5 +157,73 @@ impl RoutingSettingsModel {
             }
         }
         Ok(RoutingConfig { routes: renamed })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefill_inserts_named_route_with_first_profile_candidate() {
+        // Given: 先頭プロファイルと明示的なロール使用先。
+        let mut config = Config::default();
+        config
+            .providers
+            .insert("first".into(), config::ProviderProfileConfig::default());
+        config.agents.explorer.logical_model = Some("role-model".into());
+        // When: 新しい論理名で設定を初期化する。
+        let model = RoutingSettingsModel::seed_from_config_prefill(&config, "role-model");
+        // Then: 既定モデルに委譲する候補が1件だけ追加される。
+        assert_eq!(
+            model.routes["role-model"],
+            vec![RouteCandidateConfig {
+                profile: "first".into(),
+                model: None
+            }]
+        );
+        assert_eq!(model.pending_new_route.as_deref(), Some("role-model"));
+        assert_eq!(model.route_users["role-model"], vec!["explorer"]);
+        assert_eq!(
+            model.validated_routing().expect("routing").routes,
+            model.routes
+        );
+    }
+
+    #[test]
+    fn seed_lists_roles_for_existing_routes() {
+        // Given: 既存ルートとその論理名を使用するロール。
+        let mut config = Config::default();
+        config
+            .routing
+            .routes
+            .insert("shared".into(), vec![RouteCandidateConfig::default()]);
+        config.agents.explorer.logical_model = Some("shared".into());
+        // When: 設定を初期化する。
+        let model = RoutingSettingsModel::seed_from_config(&config);
+        // Then: 使用ロールと明示ルートの存在が反映される。
+        assert_eq!(model.route_users["shared"], vec!["explorer"]);
+        assert!(!model.routes_empty);
+    }
+
+    #[test]
+    fn prefill_rejects_blank_and_preserves_existing_route() {
+        // Given: 既存ルートを持つ設定。
+        let mut config = Config::default();
+        config.routing.routes.insert(
+            "existing".into(),
+            vec![RouteCandidateConfig {
+                profile: "original".into(),
+                model: Some("custom".into()),
+            }],
+        );
+        // When: 重複名または空白名をプリフィルする。
+        for name in ["existing", " "] {
+            let model = RoutingSettingsModel::seed_from_config_prefill(&config, name);
+            // Then: 既存ルートを壊さず検証エラーを表示する。
+            assert_eq!(model.routes, config.routing.routes);
+            assert_eq!(model.pending_new_route, None);
+            assert!(model.validation_error.is_some());
+        }
     }
 }

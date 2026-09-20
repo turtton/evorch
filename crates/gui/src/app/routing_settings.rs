@@ -46,6 +46,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.open = true;
     }
 
+    pub fn open_routing_settings_prefill(&mut self, logical: &str) {
+        if self.settings_save_in_progress() {
+            return;
+        }
+        match config::Config::load(&self.routing_load_options()) {
+            Ok(config) => {
+                self.routing_settings =
+                    RoutingSettingsModel::seed_from_config_prefill(&config, logical);
+            }
+            Err(error) => self.routing_settings.validation_error = Some(error.to_string()),
+        }
+        self.provider_settings.open = false;
+        self.sandbox_settings.open = false;
+        self.close_theme_settings();
+        self.role_settings.open = false;
+        self.routing_settings.open = true;
+    }
+
     pub fn submit_routing_settings(&mut self) {
         if self.settings_save_in_progress() {
             return;

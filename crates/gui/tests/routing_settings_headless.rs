@@ -58,6 +58,82 @@ fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {
 }
 
 #[test]
+fn route_row_lists_roles_using_that_name() {
+    // Given: ロール使用先を注入した論理モデルの行。
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    state.open_routing_settings();
+    state
+        .routing_settings_mut()
+        .add_route("shared")
+        .expect("route");
+    state.routing_settings_mut().route_users.insert(
+        "shared".into(),
+        vec!["explorer".into(), "worker.categories.quick".into()],
+    );
+    // When: ルーティング画面を描画する。
+    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    harness.run();
+    // Then: この名前の使用先を表示する。
+    assert!(harness.has_label("Used by: explorer, worker.categories.quick"));
+}
+
+#[test]
+fn empty_routes_banner_in_routing_pane() {
+    // Given: codex が先頭で既定モデルが一覧の先頭と異なる設定。
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    std::fs::write(
+        temp.path().join("evorch.toml"),
+        r#"
+[providers.codex]
+type = "openai-codex"
+models = ["gpt-5.2", "gpt-5.3-codex"]
+default_model = "gpt-5.3-codex"
+"#,
+    )
+    .expect("config");
+    state.open_routing_settings();
+    // When: 明示ルートのない画面を描画する。
+    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    harness.run();
+    // Then: 全論理モデルの暗黙解決先を表示する。
+    assert!(harness.has_label(
+        "No explicit routes: all logical models implicitly resolve to codex/gpt-5.3-codex."
+    ));
+}
+
+#[test]
+fn prefilled_route_row_from_role_settings_is_editable() {
+    // Given: ロール設定が開いている状態。
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    state.open_role_settings();
+    state.open_routing_settings_prefill("new-role-model");
+    assert!(!state.role_settings().open);
+    assert!(!state.provider_settings().open);
+    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    harness.run();
+    // When: プリフィルされた候補のモデルを実際の入力欄で編集する。
+    harness.scroll_label_into_view("new-role-model candidate 1 custom model ID");
+    harness.run();
+    harness.click_label("new-role-model candidate 1 custom model ID");
+    harness.run();
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text("custom-model".into()));
+    harness.run();
+    // Then: 編集可能な候補と新規ルートマーカーが存在する。
+    let model = harness.state().routing_settings();
+    assert_eq!(
+        model.routes["new-role-model"][0].model.as_deref(),
+        Some("custom-model")
+    );
+    assert_eq!(model.pending_new_route.as_deref(), Some("new-role-model"));
+}
+
+#[test]
 fn menu_add_reorder_save_rebuilds_runtime() {
     // Given: 実運用の再構成コンテキストと閉じた設定画面。
     let temp = tempfile::tempdir().expect("temp");
@@ -74,9 +150,13 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     harness.run();
     harness.click_label("Add candidate");
     harness.run();
+    harness.scroll_label_into_view("worker candidate 2 profile");
+    harness.run();
     harness.click_label("worker candidate 2 profile");
     harness.run();
     harness.click_label("local");
+    harness.run();
+    harness.scroll_label_into_view("Move candidate 2 up");
     harness.run();
     harness.click_label("Move candidate 2 up");
     harness.run();
