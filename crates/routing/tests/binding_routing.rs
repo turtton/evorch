@@ -129,7 +129,7 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
     );
     assert_eq!(
         affinity.pinned("session-1", "worker-quick"),
-        Some("profile-a"),
+        Some(("profile-a", "model-quick")),
         "解決勝者のプロファイルがピンされる"
     );
 }
@@ -139,7 +139,7 @@ fn agents_binding_logical_model_resolves_via_router_to_profile_and_model() {
 //        振るルーティング構成
 // When: 解決して先頭候補を得た後、それを失敗ルートとしてフォールバックする
 // Then: 次候補 (profile-b, model-shared) が返り実モデルは同一のまま、
-//       セッションのピンはプロファイル名のみ profile-b へ張り替わる
+//       セッションのピンは (profile-b, model-shared) へ張り替わる
 #[test]
 fn binding_driven_fallback_keeps_same_model_other_profile_as_next_candidate() {
     let agents = worker_quick_binding();
@@ -192,7 +192,7 @@ fn binding_driven_fallback_keeps_same_model_other_profile_as_next_candidate() {
     );
     assert_eq!(
         affinity.pinned("session-1", logical.as_str()),
-        Some("profile-b"),
-        "フォールバック先プロファイル名のみが再ピンされる"
+        Some(("profile-b", "model-shared")),
+        "フォールバック先プロファイルとモデルが再ピンされる"
     );
 }

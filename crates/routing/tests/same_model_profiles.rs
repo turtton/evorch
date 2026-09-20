@@ -92,12 +92,12 @@ fn resolve_treats_same_model_different_profiles_as_separate_candidates() {
     );
     assert_eq!(
         affinity.pinned("session-1", "summary"),
-        Some("a"),
+        Some(("a", "model-shared")),
         "解決勝者のプロファイルがピンされる"
     );
 
     let mut affinity = SessionAffinity::default();
-    affinity.pin("session-2", "summary", "b");
+    affinity.pin("session-2", "summary", "b", "model-shared");
     let resolved = router
         .resolve(&mut affinity, "session-2", &LogicalModelId::from("summary"))
         .expect("ピン先プロファイルでも同一実モデルで解決できる");
@@ -141,7 +141,7 @@ fn next_fallback_advances_to_same_model_on_other_profile_in_declared_order() {
     );
     assert_eq!(
         affinity.pinned("session-1", "summary"),
-        Some("b"),
+        Some(("b", "model-shared")),
         "フォールバック先が再ピンされる"
     );
 }

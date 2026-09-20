@@ -84,7 +84,7 @@ fn pin_is_skipped_when_tool_support_is_unknown() {
     // Given: a text-only flow previously pinned an unknown model.
     let router = router(&["unknown", "gpt-4o"]).requiring_capability(Capability::ToolCalling);
     let mut affinity = SessionAffinity::default();
-    affinity.pin("run", "worker", "unknown");
+    affinity.pin("run", "worker", "unknown", "unknown");
     // When: resolving a tool-calling flow with that pin.
     let route = router
         .resolve(&mut affinity, "run", &LogicalModelId::from("worker"))

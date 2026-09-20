@@ -274,7 +274,7 @@ fn selected_model_formats_profile_and_model() {
 
 // Given: route candidate の model override と別 default model を持つ profile
 // When: 同じ run を二度、別 run を一度 complete する
-// Then: 同一 run は profile pin 後の default model、別 run は未 pin の override を使う
+// Then: 同一 run はピンした override を維持し、別 run も候補の override を使う
 #[tokio::test]
 async fn complete_keeps_affinity_per_run_id() {
     let (model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
@@ -289,5 +289,5 @@ async fn complete_keeps_affinity_per_run_id() {
         .iter()
         .map(|request| request.model.clone())
         .collect::<Vec<_>>();
-    assert_eq!(models, ["route-model", "default-model", "route-model"]);
+    assert_eq!(models, ["route-model", "route-model", "route-model"]);
 }

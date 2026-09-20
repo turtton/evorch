@@ -135,10 +135,8 @@ impl Router {
     ///
     /// 解決手順:
     /// 1. セッションが論理モデルをピンしていて、ピン先プロファイルが存在し、
-    ///    その concrete model (= ピン先プロファイルの `default_model`) がカタログ上
-    ///    利用可能なら、そのルートを再ピンせずに返します。
-    ///    ピンはプロファイル名のみを保持するため、モデル上書き付き候補でピンされた
-    ///    場合でも、再解決時の concrete model は `default_model` に寄せられます。
+    ///    ピンした concrete model が利用可能で要求された capability を満たすなら、
+    ///    そのルートを再ピンせずに返します。ピンはモデル上書きも維持します。
     /// 2. 以外の場合、ルートテーブルの候補を宣言順に評価します。候補の concrete model は
     ///    `model` 上書き (指定時) またはプロファイルの `default_model` で、
     ///    カタログ上利用可能で要求された capability を満たす最初の候補を選択します。
@@ -157,13 +155,13 @@ impl Router {
     ) -> Result<ResolvedRoute, RoutingError> {
         let logical_name = logical.as_str();
 
-        if let Some(pinned_name) = affinity.pinned(session_id, logical_name)
-            && let Some(profile) = self.profiles.get(pinned_name)
-            && self.is_eligible(&profile.default_model)
+        if let Some((pinned_profile, pinned_model)) = affinity.pinned(session_id, logical_name)
+            && self.profiles.contains_key(pinned_profile)
+            && self.is_eligible(pinned_model)
         {
             return Ok(ResolvedRoute {
-                profile: pinned_name.to_string(),
-                model_id: profile.default_model.clone(),
+                profile: pinned_profile.to_string(),
+                model_id: pinned_model.to_string(),
             });
         }
 
@@ -180,7 +178,7 @@ impl Router {
             if !self.is_eligible(model_id) {
                 continue;
             }
-            affinity.pin(session_id, logical_name, &profile.name);
+            affinity.pin(session_id, logical_name, &profile.name, model_id);
             return Ok(ResolvedRoute {
                 profile: profile.name.clone(),
                 model_id: model_id.to_string(),
@@ -255,7 +253,7 @@ impl Router {
                 .map_or(candidates.as_slice(), |index| &candidates[index + 1..]);
             for candidate in remaining_after_failed {
                 if let Some(route) = self.available_route(candidate) {
-                    affinity.pin(session_id, logical_name, &route.profile);
+                    affinity.pin(session_id, logical_name, &route.profile, &route.model_id);
                     self.emit_fallback_triggered(
                         session_id, logical, failed, failure, request_id, &route,
                     );
@@ -270,7 +268,7 @@ impl Router {
             }
             for candidate in candidates {
                 if let Some(route) = self.available_route(candidate) {
-                    affinity.pin(session_id, logical_name, &route.profile);
+                    affinity.pin(session_id, logical_name, &route.profile, &route.model_id);
                     self.emit_fallback_triggered(
                         session_id, logical, failed, failure, request_id, &route,
                     );
@@ -459,7 +457,7 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary");
+        affinity.pin("session-1", "summary", "primary", "model-a");
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -474,7 +472,7 @@ mod tests {
         );
         assert_eq!(
             affinity.pinned("session-1", "summary"),
-            Some("primary"),
+            Some(("primary", "model-a")),
             "既にピン済みのため再ピンされない"
         );
     }
@@ -499,7 +497,7 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary");
+        affinity.pin("session-1", "summary", "primary", "model-pinned");
 
         let resolved = router
             .resolve(&mut affinity, "session-1", &logical("summary"))
@@ -511,6 +509,69 @@ mod tests {
                 profile: "secondary".to_string(),
                 model_id: "model-b".to_string(),
             }
+        );
+    }
+
+    // Given: default と異なる利用可能な override をピンしたセッション
+    // When: 同じ論理モデルを再解決する
+    // Then: ピンしたプロファイルと override が維持される
+    #[test]
+    fn resolve_pin_preserves_model_override_when_still_eligible() {
+        let profiles = vec![profile("primary", "model-default")];
+        let routing = routing_config(&[(
+            "summary",
+            vec![candidate("primary", Some("model-override"))],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-default", Availability::Available),
+                ("model-override", Availability::Available),
+            ],
+            &[],
+        );
+        let router = Router::new(profiles, &routing, catalog).expect("有効な構成");
+        let mut affinity = SessionAffinity::default();
+        affinity.pin("session-1", "summary", "primary", "model-override");
+
+        let resolved = router
+            .resolve(&mut affinity, "session-1", &logical("summary"))
+            .expect("ピンしたモデルで解決できる");
+
+        assert_eq!(resolved, failed_route("primary", "model-override"));
+    }
+
+    // Given: ピンした override が利用不可で、同じプロファイルの default は利用可能
+    // When: 同じ論理モデルを再解決する
+    // Then: 宣言された default 候補を選択し、そのモデルへ再ピンする
+    #[test]
+    fn resolve_repins_after_pinned_model_becomes_ineligible() {
+        let profiles = vec![profile("primary", "model-default")];
+        let routing = routing_config(&[(
+            "summary",
+            vec![
+                candidate("primary", Some("model-override")),
+                candidate("primary", None),
+            ],
+        )]);
+        let catalog = build_catalog(
+            &[
+                ("model-default", Availability::Available),
+                ("model-override", Availability::Unavailable),
+            ],
+            &[],
+        );
+        let router = Router::new(profiles, &routing, catalog).expect("有効な構成");
+        let mut affinity = SessionAffinity::default();
+        affinity.pin("session-1", "summary", "primary", "model-override");
+
+        let resolved = router
+            .resolve(&mut affinity, "session-1", &logical("summary"))
+            .expect("利用可能な default 候補へ解決できる");
+
+        assert_eq!(resolved, failed_route("primary", "model-default"));
+        assert_eq!(
+            affinity.pinned("session-1", "summary"),
+            Some(("primary", "model-default"))
         );
     }
 
@@ -708,7 +769,7 @@ mod tests {
         assert_eq!(resolved.profile, "primary");
         assert_eq!(
             affinity.pinned("session-1", "summary"),
-            Some("primary"),
+            Some(("primary", "model-a")),
             "勝者がピンされる"
         );
     }
@@ -1022,7 +1083,7 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "only");
+        affinity.pin("session-1", "summary", "only", "model-only");
 
         let resolved = router.next_fallback(
             &mut affinity,
@@ -1036,7 +1097,7 @@ mod tests {
         assert!(resolved.is_none(), "利用可能候補がどこにもないなら None");
         assert_eq!(
             affinity.pinned("session-1", "summary"),
-            Some("only"),
+            Some(("only", "model-only")),
             "使い切り時はピンが変化しない"
         );
     }
@@ -1059,7 +1120,7 @@ mod tests {
         let router =
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "a");
+        affinity.pin("session-1", "summary", "a", "model-a");
 
         let resolved = router
             .next_fallback(
@@ -1075,7 +1136,7 @@ mod tests {
         assert_eq!(resolved.profile, "b");
         assert_eq!(
             affinity.pinned("session-1", "summary"),
-            Some("b"),
+            Some(("b", "model-b")),
             "勝者が再ピンされる"
         );
     }
@@ -1293,7 +1354,7 @@ mod tests {
         );
         assert_eq!(
             affinity.pinned("session-1", "summary"),
-            Some("a"),
+            Some(("a", "model-default")),
             "同一プロファイル内のフォールバックでも再ピンされる"
         );
     }

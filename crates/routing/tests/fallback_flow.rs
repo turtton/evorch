@@ -84,7 +84,7 @@ fn fallback_after_pin_resolve_roundtrip() {
     assert_eq!(resolved.profile, "primary");
     assert_eq!(
         affinity.pinned("session-1", "summary"),
-        Some("primary"),
+        Some(("primary", "model-a")),
         "解決勝者がピンされる"
     );
 
@@ -101,7 +101,7 @@ fn fallback_after_pin_resolve_roundtrip() {
     assert_eq!(fallback.profile, "secondary");
     assert_eq!(
         affinity.pinned("session-1", "summary"),
-        Some("secondary"),
+        Some(("secondary", "model-b")),
         "フォールバック先が再ピンされる"
     );
 

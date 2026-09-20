@@ -1,27 +1,30 @@
-//! セッションアフィニティ (プロバイダのピン留め) を管理します。
+//! セッションアフィニティ (プロファイルと具体モデルのピン留め) を管理します。
 
 use std::collections::BTreeMap;
 
-/// セッションごとに、論理モデルからプロバイダプロファイルへのピンを管理します。
+/// セッションごとに、論理モデルからプロファイルと具体モデルへのピンを管理します。
 ///
-/// 同一セッション内で一度選択されたプロバイダプロファイルを論理モデル単位で
-/// 固定しておき、以降の解決で同じプロファイルを使い続けることを可能にします。
+/// 同一セッション内で一度選択されたプロファイルとモデルを論理モデル単位で
+/// 固定しておき、以降の解決でもモデル上書きを維持します。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionAffinity {
-    /// セッション ID → (論理モデル名 → プロファイル名)。
-    sessions: BTreeMap<String, BTreeMap<String, String>>,
+    /// セッション ID → (論理モデル名 → (プロファイル名, 具体モデル))。
+    sessions: BTreeMap<String, BTreeMap<String, (String, String)>>,
 }
 
 impl SessionAffinity {
-    /// セッションの論理モデルを指定したプロバイダプロファイルにピンします。
+    /// セッションの論理モデルを指定したプロファイルと具体モデルにピンします。
     ///
     /// 同じセッション・論理モデルの組み合わせが既にピンされている場合は
     /// 上書きします。
-    pub fn pin(&mut self, session_id: &str, logical: &str, profile: &str) {
+    pub fn pin(&mut self, session_id: &str, logical: &str, profile: &str, model: &str) {
         self.sessions
             .entry(session_id.to_string())
             .or_default()
-            .insert(logical.to_string(), profile.to_string());
+            .insert(
+                logical.to_string(),
+                (profile.to_string(), model.to_string()),
+            );
     }
 
     /// セッションの論理モデルのピンを解除します。
@@ -33,14 +36,14 @@ impl SessionAffinity {
         }
     }
 
-    /// セッションの論理モデルがピンしているプロバイダプロファイル名を返します。
+    /// セッションの論理モデルがピンしている (プロファイル名, 具体モデル) を返します。
     ///
     /// ピンされていない場合は `None` を返します。
-    pub fn pinned(&self, session_id: &str, logical: &str) -> Option<&str> {
+    pub fn pinned(&self, session_id: &str, logical: &str) -> Option<(&str, &str)> {
         self.sessions
             .get(session_id)
             .and_then(|pinned| pinned.get(logical))
-            .map(String::as_str)
+            .map(|(profile, model)| (profile.as_str(), model.as_str()))
     }
 }
 
@@ -52,14 +55,20 @@ mod tests {
     // When: 同一セッションに 2 つの論理モデルをピンする
     // Then: それぞれのプロファイル名を参照でき、別セッションは影響を受けない
     #[test]
-    fn pin_then_pinned_returns_profile_name() {
+    fn pin_then_pinned_returns_profile_and_model() {
         let mut affinity = SessionAffinity::default();
 
-        affinity.pin("session-1", "summary", "primary");
-        affinity.pin("session-1", "review", "secondary");
+        affinity.pin("session-1", "summary", "primary", "model-a");
+        affinity.pin("session-1", "review", "secondary", "model-b");
 
-        assert_eq!(affinity.pinned("session-1", "summary"), Some("primary"));
-        assert_eq!(affinity.pinned("session-1", "review"), Some("secondary"));
+        assert_eq!(
+            affinity.pinned("session-1", "summary"),
+            Some(("primary", "model-a"))
+        );
+        assert_eq!(
+            affinity.pinned("session-1", "review"),
+            Some(("secondary", "model-b"))
+        );
         assert_eq!(
             affinity.pinned("session-2", "summary"),
             None,
@@ -78,11 +87,14 @@ mod tests {
     #[test]
     fn pin_overwrites_existing_pin() {
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary");
+        affinity.pin("session-1", "summary", "primary", "model-a");
 
-        affinity.pin("session-1", "summary", "secondary");
+        affinity.pin("session-1", "summary", "secondary", "model-b");
 
-        assert_eq!(affinity.pinned("session-1", "summary"), Some("secondary"));
+        assert_eq!(
+            affinity.pinned("session-1", "summary"),
+            Some(("secondary", "model-b"))
+        );
     }
 
     // Given: ピン済みのアフィニティ
@@ -91,7 +103,7 @@ mod tests {
     #[test]
     fn forget_removes_pin_and_is_noop_when_absent() {
         let mut affinity = SessionAffinity::default();
-        affinity.pin("session-1", "summary", "primary");
+        affinity.pin("session-1", "summary", "primary", "model-a");
 
         affinity.forget("session-1", "summary");
         assert_eq!(
