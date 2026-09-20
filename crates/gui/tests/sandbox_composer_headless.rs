@@ -54,17 +54,17 @@ fn composer_loads_persisted_mode_when_modal_was_never_opened() {
 }
 
 #[test]
-fn modal_keeps_checkboxes_without_escalation_radios_when_opened() {
+fn modal_keeps_network_toggle_without_approval_controls_when_opened() {
     // Given: a configured workbench.
     let dir = tempfile::tempdir().expect("temp");
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     // When: opening the sandbox modal.
     harness.state_mut().open_sandbox_settings();
     harness.run();
-    // Then: networking and deny fallback remain, but mode selection is absent.
+    // Then: only networking remains; approval controls live in the composer selector.
     assert!(harness.has_label("Allow network inside sandbox"));
-    assert!(harness.has_label("審査で拒否された場合はユーザー承認へ昇格"));
     for label in [
+        "審査で拒否された場合はユーザー承認へ昇格",
         "エスカレーション審査",
         "auto モデル審査 (既定)",
         "ユーザー承認",

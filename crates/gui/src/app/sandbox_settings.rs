@@ -78,7 +78,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.checkbox(&mut self.sandbox_settings.config.allow_network, "Allow network inside sandbox");
                     ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
-                    ui.checkbox(&mut self.sandbox_settings.config.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
                 });
                 if let Some(error) = &self.sandbox_settings.error {
                     ui.colored_label(palette().ERROR_FG, error);
