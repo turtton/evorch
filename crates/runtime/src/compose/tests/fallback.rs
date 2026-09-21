@@ -208,7 +208,7 @@ async fn explicit_preference_never_falls_back_on_timeout() {
 }
 
 #[tokio::test]
-async fn fallback_exhausts_cross_logical_routes_without_cycles() {
+async fn fallback_exhausts_without_attempting_other_logical_routes() {
     // Given
     let (mut model, requests) = fixture(vec![
         Some(ProviderError::Timeout),
@@ -249,17 +249,15 @@ async fn fallback_exhausts_cross_logical_routes_without_cycles() {
     )
     .unwrap();
     // When
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        complete(&model, "session"),
-    )
-    .await
-    .unwrap();
+    let error = complete(&model, "session").await.unwrap_err().to_string();
     // Then
-    assert!(result.is_err());
     assert!(
-        requests
-            .iter()
-            .all(|requests| requests.lock().unwrap().len() == 1)
+        error.contains("profile=profile-0 model=model-0:"),
+        "{error}"
     );
+    assert_eq!(requests[0].lock().unwrap().len(), 1);
+    for index in [1, 2] {
+        assert!(requests[index].lock().unwrap().is_empty());
+        assert!(!error.contains(&format!("profile-{index}")), "{error}");
+    }
 }

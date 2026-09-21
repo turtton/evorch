@@ -196,8 +196,7 @@ impl Router {
 
     /// 障害の発生したルートの次のフォールバック先を解決します。
     ///
-    /// ADR 0004 のフォールバック順 (現在のルート → 同一論理モデルの後続候補 →
-    /// 別の論理モデル) に従い、次の順で候補を走査します。
+    /// 同一論理モデルの候補内だけで、次の順で候補を走査します。
     ///
     /// 1. 同一論理モデル: 失敗ルート `failed` と (プロファイル, concrete model)
     ///    の組が一致する先頭候補の位置より厳密に後続する候補を宣言順に走査し、
@@ -207,11 +206,7 @@ impl Router {
     ///    失敗した実モデルそのものを再選択しません。
     ///    `failed` の組が候補に存在しない場合は失敗位置を先頭より前とみなし、
     ///    全候補を走査対象にします。
-    /// 2. 別の論理モデル: (1) で候補が見つからない場合、ルートテーブル上の他の全
-    ///    論理モデルを走査します。各論理モデルでは宣言順に最初の利用可能候補を
-    ///    採ります。v0.1 のルートテーブルは [`BTreeMap`] のため、論理モデル間の
-    ///    走査順は宣言順ではなく辞書順になる点に注意してください。
-    /// 3. いずれでも利用可能候補が見つからない場合は `None` を返します。
+    /// 2. 利用可能候補が見つからない場合は `None` を返します。
     ///
     /// 利用可否の判定は [`Router::resolve`] と同じく、concrete model
     /// (= `model` 上書き指定時はその値、それ以外はプロファイルの `default_model`)
@@ -220,8 +215,7 @@ impl Router {
     /// [`Router::resolve`] と同じ方針です。
     ///
     /// 勝者を見つけた場合は `session_id` と `logical` を勝者プロファイルへ再ピンして
-    /// [`ResolvedRoute`] を返します。別の論理モデルの候補で勝った場合も、
-    /// 再ピン先はあくまで元の `logical` に対してです。
+    /// [`ResolvedRoute`] を返します。
     /// 見つからなかった場合はアフィニティを変更せず `None` を返します。
     ///
     /// `failure` は障害種別の観測と将来の順序付け改善のために受け取りますが、
@@ -257,21 +251,6 @@ impl Router {
                 .failed_candidate_position(candidates, failed)
                 .map_or(candidates.as_slice(), |index| &candidates[index + 1..]);
             for candidate in remaining_after_failed {
-                if let Some(route) = self.available_route(candidate) {
-                    affinity.pin(session_id, logical_name, &route.profile, &route.model_id);
-                    self.emit_fallback_triggered(
-                        session_id, logical, failed, failure, request_id, &route,
-                    );
-                    return Some(route);
-                }
-            }
-        }
-
-        for (other_logical, candidates) in &self.routes {
-            if other_logical == logical_name {
-                continue;
-            }
-            for candidate in candidates {
                 if let Some(route) = self.available_route(candidate) {
                     affinity.pin(session_id, logical_name, &route.profile, &route.model_id);
                     self.emit_fallback_triggered(
@@ -1019,10 +998,9 @@ mod tests {
     // Given: 同一論理モデルの候補を使い切る構成。他論理モデルとして
     //        "aaa-other" と "zzz-other" を持つ (設定上は zzz を先に宣言)
     // When: 同一論理モデルの失敗プロファイルでフォールバックする
-    // Then: ルートテーブルは BTreeMap のため辞書順で走査され、
-    //       "aaa-other" の最初の利用可能候補が (宣言順ではなく) 選ばれる
+    // Then: 他の論理モデルが利用可能でも None を返す
     #[test]
-    fn fallback_crosses_to_next_logical_model_lexicographic() {
+    fn fallback_never_crosses_to_other_logical_models() {
         let profiles = vec![
             profile("first", "model-first"),
             profile("aaa-profile", "model-aaa"),
@@ -1045,24 +1023,16 @@ mod tests {
             Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
 
         let mut affinity = SessionAffinity::default();
-        let resolved = router
-            .next_fallback(
-                &mut affinity,
-                "session-1",
-                &logical("summary"),
-                &failed_route("first", "model-first"),
-                FailureKind::Server,
-                None,
-            )
-            .expect("別の論理モデルの候補へフォールバックできる");
-
-        assert_eq!(
-            resolved,
-            ResolvedRoute {
-                profile: "aaa-profile".to_string(),
-                model_id: "model-aaa".to_string(),
-            }
+        let resolved = router.next_fallback(
+            &mut affinity,
+            "session-1",
+            &logical("summary"),
+            &failed_route("first", "model-first"),
+            FailureKind::Server,
+            None,
         );
+
+        assert_eq!(resolved, None);
     }
 
     // Given: 同一論理モデルに後続候補がなく、他の論理モデルの候補も利用不可な構成
