@@ -1,4 +1,4 @@
-use egui_dock::{Node, NodeIndex, TabIndex};
+use egui_dock::{Node, NodeIndex, NodePath, SurfaceIndex, TabIndex};
 use workspace_ui::{Panel, PanelId, PanelKind};
 
 use super::WorkbenchState;
@@ -163,19 +163,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn subagent_focus_snapshot(&self) -> Option<Vec<PanelId>> {
-        let tree = self.dock.main_surface();
-        tree.focused_leaf()
-            .and_then(|node| tree[node].tabs().map(<[PanelId]>::to_vec))
+        self.dock
+            .focused_leaf()
+            .or_else(|| {
+                self.dock
+                    .main_surface()
+                    .focused_leaf()
+                    .map(|node| NodePath {
+                        surface: SurfaceIndex::main(),
+                        node,
+                    })
+            })
+            .and_then(|path| self.dock.leaf(path).ok())
+            .map(|leaf| leaf.tabs.clone())
     }
 
     fn restore_subagent_focus(&mut self, focus: Option<Vec<PanelId>>) {
-        // Tree::focused_node is private in 0.21.1. This setter is used ONLY to
-        // restore saved focus; tab identity survives split/prune index changes.
+        // Resolve saved tab identities after reindexing; a vanished leaf stays
+        // unfocused rather than transferring focus to a new or parked pane.
         match focus {
-            None => self
-                .dock
-                .main_surface_mut()
-                .set_focused_node(NodeIndex(usize::MAX)),
+            None => self.dock.set_focused_node_and_surface(NodePath {
+                surface: SurfaceIndex::main(),
+                node: NodeIndex(usize::MAX),
+            }),
             Some(tabs) => {
                 if let Some(path) =
                     tabs.iter()
@@ -186,7 +196,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         })
                         .find_map(|id| self.dock.find_tab(id))
                 {
-                    self.dock.main_surface_mut().set_focused_node(path.node);
+                    self.dock.set_focused_node_and_surface(path.node_path());
+                } else {
+                    self.dock.set_focused_node_and_surface(NodePath {
+                        surface: SurfaceIndex::main(),
+                        node: NodeIndex(usize::MAX),
+                    });
                 }
             }
         }
