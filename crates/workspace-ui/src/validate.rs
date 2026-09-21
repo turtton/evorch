@@ -24,15 +24,26 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             });
         }
         match (&panel.kind, &panel.target) {
-            (PanelKind::AgentTranscript, None) => {
+            (
+                PanelKind::AgentTranscript
+                | PanelKind::SubagentTranscript
+                | PanelKind::ParkedAgentTranscript(_),
+                None,
+            ) => {
                 return Err(LayoutError::MissingTarget {
                     panel_id: panel.id.to_string(),
                 });
             }
-            (PanelKind::AgentTranscript, Some(_))
+            (
+                PanelKind::AgentTranscript
+                | PanelKind::SubagentTranscript
+                | PanelKind::ParkedAgentTranscript(_),
+                Some(_),
+            )
             | (PanelKind::Agent, None)
             | (PanelKind::Sidebar, None)
             | (PanelKind::Agents, None)
+            | (PanelKind::SubagentRegion, None)
             | (PanelKind::Notifications, None)
             | (PanelKind::Approvals, None)
             | (PanelKind::Diff, None)
@@ -43,6 +54,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             (PanelKind::Agent, Some(_))
             | (PanelKind::Sidebar, Some(_))
             | (PanelKind::Agents, Some(_))
+            | (PanelKind::SubagentRegion, Some(_))
             | (PanelKind::Notifications, Some(_))
             | (PanelKind::Approvals, Some(_))
             | (PanelKind::Diff, Some(_))

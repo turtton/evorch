@@ -207,6 +207,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .collect();
         let surface_visible = ui.is_visible() && ui.clip_rect().intersects(ui.max_rect());
         match panel.kind {
+            PanelKind::SubagentRegion => {
+                ui.label("Completed subagent logs are available in the tabs above.");
+            }
             PanelKind::DurableTasks => {
                 crate::panes::durable_tasks::durable_tasks_pane(ui, self.durable_tasks)
             }
@@ -232,7 +235,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     *self.notifications_action = Some(action);
                 }
             }
-            PanelKind::AgentTranscript => {
+            PanelKind::AgentTranscript
+            | PanelKind::SubagentTranscript
+            | PanelKind::ParkedAgentTranscript(_) => {
                 let run_id = panel.target.as_deref().unwrap_or_default();
                 if let Some(ack) = self.attention_acks.get(&(tab.clone(), run_id.to_owned())) {
                     crate::panes::phase_indicator::phase_indicator_with_ack(

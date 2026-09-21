@@ -34,6 +34,10 @@ pub enum PanelKind {
     Sidebar,
     Agents,
     AgentTranscript,
+    SubagentTranscript,
+    /// Completion sequence is durable and independent of the selected tab.
+    ParkedAgentTranscript(u64),
+    SubagentRegion,
     Diff,
     Terminal,
     Tasks,
@@ -51,7 +55,10 @@ impl PanelKind {
             Self::Agent => "Agent",
             Self::Sidebar => "Projects",
             Self::Agents => "Agents",
-            Self::AgentTranscript => "Transcript",
+            Self::AgentTranscript | Self::SubagentTranscript | Self::ParkedAgentTranscript(_) => {
+                "Transcript"
+            }
+            Self::SubagentRegion => "Subagents",
             Self::Diff => "Diff",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",

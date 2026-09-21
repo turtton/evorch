@@ -406,6 +406,9 @@ fn v02_end_to_end_chained_scenario() {
     assert_eq!(sidebar.selected_project.as_ref(), Some(&project_id));
     assert_eq!(sidebar.active_thread.as_ref(), Some(&thread_id));
 
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(fixture.workbench.state_mut(), "run-1");
     // When: lifecycle, provider, tool, and agent-message events flow through the pump.
     for (id, name, role) in [
         (1, "orchestrator", "orchestrator"),
@@ -458,22 +461,34 @@ fn v02_end_to_end_chained_scenario() {
     fixture.workbench.step();
     fixture.workbench.run();
 
-    // Then: the center pane focuses the run-2 transcript only.
+    // Then: the existing run surface is selected without duplicating it in Conversation.
     assert_eq!(
         fixture.workbench.state().focus(),
-        &ConversationFocus::Agent("run-2".into())
+        &ConversationFocus::Thread
     );
-    assert!(fixture.workbench.has_label("run-2 / implementer / worker"));
+    let path = fixture
+        .workbench
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("agent-run-2"))
+        .expect("existing run pane");
+    assert_eq!(
+        fixture
+            .workbench
+            .state()
+            .dock()
+            .leaf(path.node_path())
+            .unwrap()
+            .active,
+        path.tab
+    );
+    assert_eq!(fixture.workbench.count_labels("Transcript: run-2"), 1);
     assert!(
         fixture.workbench.count_labels("tool-run-2") >= 1,
         "run-2 transcript should show its current tool"
     );
 
-    // When: the operator returns to the thread conversation.
-    fixture.workbench.click_label("← Thread");
-    fixture.workbench.run();
-
-    // Then: the center pane renders the thread transcript again.
+    // Then: the center pane still renders the thread transcript.
     assert_eq!(
         fixture.workbench.state().focus(),
         &ConversationFocus::Thread
@@ -621,7 +636,7 @@ fn v02_end_to_end_chained_scenario() {
     let saved_sidebar =
         workspace_ui::load_sidebar(&fixture.sidebar_path).expect("saved sidebar loads");
 
-    // Then: the saved tree keeps the five default leaves plus the dynamic tabs.
+    // Then: the saved tree keeps default leaves and separate running subagent leaves.
     let mut leaves = Vec::new();
     leaf_panels(&saved_workspace.main.root, &mut leaves);
     let leaf_sets = leaves
@@ -644,10 +659,10 @@ fn v02_end_to_end_chained_scenario() {
                 "approvals-main".to_string(),
                 "durable-tasks-main".to_string(),
                 "agent-run-1".to_string(),
-                "agent-run-2".to_string(),
-                "agent-run-3".to_string(),
             ]),
             BTreeSet::from(["diff-main".to_string()]),
+            BTreeSet::from(["agent-run-2".to_string()]),
+            BTreeSet::from(["agent-run-3".to_string()]),
         ],
         "saved tree must keep the v0.2 regions and dynamic transcript tabs"
     );
@@ -656,7 +671,14 @@ fn v02_end_to_end_chained_scenario() {
             .panels
             .get(&PanelId::new(format!("agent-{run_id}")))
             .expect("dynamic transcript panel saved");
-        assert_eq!(panel.kind, PanelKind::AgentTranscript);
+        assert_eq!(
+            panel.kind,
+            if run_id == "run-1" {
+                PanelKind::AgentTranscript
+            } else {
+                PanelKind::SubagentTranscript
+            }
+        );
         assert_eq!(panel.target.as_deref(), Some(run_id));
     }
 

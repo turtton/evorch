@@ -1,3 +1,4 @@
+// allow: SIZE_OK - T5 confines dock lifecycle changes to this existing action module; broader action extraction is separate work.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,6 +159,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn drill_down(&mut self, run_id: &str) {
+        if self
+            .dock
+            .find_tab(&PanelId::new(format!("agent-{run_id}")))
+            .is_some()
+        {
+            self.focus_panel(&format!("agent-{run_id}"));
+            return;
+        }
         self.focus = ConversationFocus::Agent(run_id.to_owned());
     }
     pub fn return_to_thread(&mut self) {
@@ -227,6 +236,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for run_id in selected {
             self.open_agent_pane(&run_id);
         }
+    }
+
+    pub(super) fn is_conversation_run(&self, run_id: &str) -> bool {
+        self.transcripts
+            .route(&event_bus::Event::new(
+                event_bus::MessageEvent::MessageDelta {
+                    delta: String::new(),
+                    run_id: Some(run_id.to_owned()),
+                },
+            ))
+            .contains(&crate::model::transcript_registry::TranscriptKey::Thread)
     }
 
     pub fn request_diff(&mut self, mode: DiffMode) {

@@ -95,11 +95,12 @@ fn agent_focus_header_keeps_identity_label_and_return_button() {
         .with_sidebar(sidebar);
     let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
     harness.run();
-    harness.state_mut().apply_events(demo_events());
-    harness.run();
-
     harness.click_label("run-2");
     harness.run();
+    assert_eq!(
+        harness.state().focus(),
+        &ConversationFocus::Agent("run-2".into())
+    );
     assert!(harness.has_label("run-2 / implementer / worker"));
 
     harness.click_label("← Thread");

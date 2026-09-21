@@ -77,14 +77,21 @@ fn run_done_event_surfaces_unread_notification_and_read_after_display() {
 
 #[test]
 fn notification_click_opens_run_transcript() {
-    // Given: a displayed completion notification with no transcript panel open.
+    // Given: a displayed completion notification with an inactive parked transcript.
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
     state.apply_events([transition("run-X", AgentRunPhase::Done)]);
     activate(&mut state, "notifications-main");
     let mut harness = harness(state);
     harness.run_steps(3);
     let panel = PanelId::new("agent-run-X");
-    assert!(harness.state().dock().find_tab(&panel).is_none());
+    let parked = harness
+        .state()
+        .dock()
+        .find_tab(&panel)
+        .expect("parked transcript");
+    let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
+    assert_ne!(leaf.active, parked.tab);
+    assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
     // When: the actual notification row is clicked.
     harness.get_by_label("Run run-X completed").click();
     harness.run_steps(3);
@@ -244,7 +251,7 @@ fn background_run_then_completion_notification_end_to_end() {
                 .apply_events([transition(&run_id, AgentRunPhase::Done)]);
             harness.run();
         }
-        // Then: neither launch nor completion steals conversation focus or changes tabs.
+        // Then: completion adds an inactive tab without stealing conversation focus.
         assert_eq!(harness.state().focus(), &focus);
         let current: Vec<_> = harness
             .state()
@@ -252,8 +259,36 @@ fn background_run_then_completion_notification_end_to_end() {
             .iter_all_tabs()
             .map(|(path, panel)| (path, panel.clone()))
             .collect();
-        assert_eq!(current, panels);
-        for ((path, _), active) in panels.iter().zip(&active_tabs) {
+        if completed {
+            let id = PanelId::new(format!("agent-{run_id}"));
+            let parked = harness
+                .state()
+                .dock()
+                .find_tab(&id)
+                .expect("parked transcript");
+            let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
+            assert_ne!(leaf.active, parked.tab);
+            assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
+            assert_eq!(
+                current
+                    .iter()
+                    .filter(|(_, panel)| panel != &id && panel.as_str() != "subagents-home")
+                    .map(|(_, panel)| panel.clone())
+                    .collect::<Vec<_>>(),
+                panels
+                    .iter()
+                    .map(|(_, panel)| panel.clone())
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            assert_eq!(current, panels);
+        }
+        for ((_, panel), active) in panels.iter().zip(&active_tabs) {
+            let path = harness
+                .state()
+                .dock()
+                .find_tab(panel)
+                .expect("original panel retained");
             assert_eq!(
                 &harness
                     .state()

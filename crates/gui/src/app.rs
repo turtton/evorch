@@ -15,6 +15,7 @@ mod role_settings;
 mod routing_settings;
 mod sandbox_settings;
 mod state;
+mod subagent_dock;
 mod tab_viewer;
 mod theme_settings;
 mod thread_archive;

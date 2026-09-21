@@ -44,10 +44,13 @@ pub(super) fn attention_for(
             .iter()
             .map(|row| agent_run_attention(row.status))
             .fold(PaneAttention::None, PaneAttention::max),
-        PanelKind::AgentTranscript => target
+        PanelKind::AgentTranscript
+        | PanelKind::SubagentTranscript
+        | PanelKind::ParkedAgentTranscript(_) => target
             .and_then(|run_id| inputs.phases.get(run_id))
             .map_or(PaneAttention::None, |phase| thread_phase_attention(*phase)),
         PanelKind::Sidebar
+        | PanelKind::SubagentRegion
         | PanelKind::DurableTasks
         | PanelKind::Approvals
         | PanelKind::Notifications
@@ -97,7 +100,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .into_iter()
                         .collect(),
                 },
-                PanelKind::AgentTranscript => panel
+                PanelKind::AgentTranscript
+                | PanelKind::SubagentTranscript
+                | PanelKind::ParkedAgentTranscript(_) => panel
                     .target
                     .as_ref()
                     .and_then(|run| self.phases.get(run).map(|phase| (run.clone(), *phase)))
@@ -119,6 +124,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     })
                     .collect(),
                 PanelKind::Sidebar
+                | PanelKind::SubagentRegion
                 | PanelKind::DurableTasks
                 | PanelKind::Approvals
                 | PanelKind::Notifications
