@@ -100,6 +100,25 @@ fn orchestrator_prompt_structure_matches_golden_fixture() {
 }
 
 #[test]
+fn orchestrator_prompt_disambiguates_role_purposes_before_delegation() {
+    // Given: an orchestrator prompt assembled from the role preset.
+    let catalog = orchestrator_catalog().expect("catalog");
+    // When: resolving the Delegation Policy section.
+    let prompt = catalog
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+        .expect("prompt");
+    // Then: the preset states a use/avoid pair per role, not just role names.
+    assert!(
+        prompt.contains("ロールの使い分け"),
+        "role-use guidance marker missing"
+    );
+    assert!(
+        prompt.contains("explorer=ローカルの探索・調査"),
+        "explorer guidance missing"
+    );
+}
+
+#[test]
 fn orchestrator_prompt_exposes_typed_reviewer_tools() {
     let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
     let prompt = catalog
