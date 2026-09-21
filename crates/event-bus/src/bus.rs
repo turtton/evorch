@@ -206,7 +206,12 @@ impl EventReceiver {
 
 #[cfg(test)]
 mod tests {
-    use super::LagGate;
+    use std::sync::{Arc, atomic::AtomicUsize};
+
+    use tokio::sync::broadcast;
+
+    use super::{EventBus, EventReceiver, LagGate, RecvError};
+    use crate::event::{Event, EventKind, FaultEvent, LifecycleEvent};
 
     #[test]
     fn lag_gate_warns_and_faults_once_per_episode() {
@@ -220,13 +225,79 @@ mod tests {
         assert_eq!(gate.note_lag(), (true, true));
     }
 
-    #[test]
-    fn lag_gate_resets_on_raw_ok_before_fencing() {
-        let mut gate = LagGate::default();
+    #[tokio::test]
+    async fn lag_gate_resets_on_raw_ok_before_fencing() {
+        // Given: a lagged receiver and a buffered event that a newly registered
+        // fence will reject.
+        let bus = EventBus::new(16);
+        let (event_tx, event_rx) = broadcast::channel(2);
+        let fences = Arc::clone(&bus.fences);
+        let mut receiver = EventReceiver {
+            fences: Arc::clone(&fences),
+            rx: event_rx,
+            tx: bus.tx.clone(),
+            subscriber_id: 0,
+            lag_gate: LagGate::default(),
+        };
+        let rejected = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let rejected_for_fence = Arc::clone(&rejected);
+        let notify_for_fence = Arc::clone(&notify);
+        assert!(fences.register(
+            "blocked".into(),
+            Arc::new(move || {
+                if rejected_for_fence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
+                    notify_for_fence.notify_one();
+                }
+                false
+            }),
+        ));
+        let events = [
+            Event::new(LifecycleEvent::Started {
+                session_id: "session-1".into(),
+            }),
+            Event::new(LifecycleEvent::Started {
+                session_id: "blocked".into(),
+            }),
+            Event::new(LifecycleEvent::Started {
+                session_id: "blocked".into(),
+            }),
+            Event::new(LifecycleEvent::Started {
+                session_id: "blocked".into(),
+            }),
+        ];
+        for event in events {
+            event_tx.send(event).unwrap();
+        }
+        let mut observer = bus.subscribe();
 
-        assert_eq!(gate.note_lag(), (true, true));
-        gate.note_ok();
+        // When: the receiver enters its first lag episode.
+        assert_eq!(receiver.recv().await, Err(RecvError::Lagged(2)));
+        assert!(matches!(
+            observer.recv().await.unwrap().kind,
+            EventKind::Fault(FaultEvent::SubscriberLagged { .. })
+        ));
 
-        assert_eq!(gate.note_lag(), (true, true));
+        // Then: fence-rejected raw Ok events reset the gate before filtering;
+        // the following lag therefore emits a second fault.
+        let sender = async {
+            notify.notified().await;
+            for _ in 0..4 {
+                event_tx
+                    .send(Event::new(LifecycleEvent::Started {
+                        session_id: "blocked".into(),
+                    }))
+                    .unwrap();
+            }
+        };
+        let (result, ()) = tokio::join!(receiver.recv(), sender);
+        assert_eq!(result, Err(RecvError::Lagged(2)));
+        assert!(matches!(
+            observer.rx.try_recv(),
+            Ok(Event {
+                kind: EventKind::Fault(FaultEvent::SubscriberLagged { .. }),
+                ..
+            })
+        ));
     }
 }
