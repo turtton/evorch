@@ -34,7 +34,7 @@ impl Default for BudgetSettings {
             max_elapsed: Duration::from_secs(2 * 60 * 60),
             max_tokens: 2_000_000,
             max_file_rereads: 20,
-            max_no_progress_rounds: 20,
+            max_no_progress_rounds: 100,
             max_identical_tool_call_repeats: 5,
         }
     }
@@ -115,7 +115,7 @@ impl BudgetCounters {
         *count = count.saturating_add(1);
     }
 
-    pub(crate) fn file_changed(&mut self) {
+    pub(crate) const fn mark_progress(&mut self) {
         self.round_changed = true;
     }
 

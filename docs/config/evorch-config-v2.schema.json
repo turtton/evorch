@@ -43,7 +43,7 @@
       "default": {
         "max_file_rereads": 20,
         "max_identical_tool_call_repeats": 5,
-        "max_no_progress_rounds": 20,
+        "max_no_progress_rounds": 100,
         "max_tool_calls": 400
       }
     },
@@ -299,10 +299,10 @@
           "minimum": 0
         },
         "max_no_progress_rounds": {
-          "description": "ファイル変更のないラウンドの許容回数 (既定: 20)。",
+          "description": "成功した非メタツール結果のないラウンドの許容回数 (既定: 100)。",
           "type": "integer",
           "format": "uint32",
-          "default": 20,
+          "default": 100,
           "minimum": 0
         },
         "max_tool_calls": {

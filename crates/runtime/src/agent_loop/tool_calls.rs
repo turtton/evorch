@@ -694,8 +694,8 @@ impl LoopState {
                         {
                             self.budget.read(std::path::Path::new(path));
                         }
-                        if name == "edit" {
-                            self.budget.file_changed();
+                        if !is_meta_op(&name) {
+                            self.budget.mark_progress();
                         }
                     }
                     if observed

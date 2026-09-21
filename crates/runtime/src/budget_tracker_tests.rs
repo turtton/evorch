@@ -81,17 +81,37 @@ async fn warning_is_suppressed_when_exhaustion_is_already_observed() {
 }
 
 #[test]
-fn successful_change_resets_consecutive_no_progress_rounds() {
-    // Given: two rounds without a file change.
+fn successful_tool_progress_resets_consecutive_no_progress_rounds() {
+    // Given: two rounds without successful tool activity.
     let mut counters = BudgetCounters::default();
     counters.finish_round();
     counters.finish_round();
     assert_eq!(counters.no_progress_rounds, 2);
-    // When: a round records a successful file change.
-    counters.file_changed();
+    // When: a round records successful tool progress.
+    counters.mark_progress();
     counters.finish_round();
     // Then: the consecutive counter resets.
     assert_eq!(counters.no_progress_rounds, 0);
+}
+
+#[test]
+fn no_activity_after_progress_increments_again() {
+    // Given: a previous round made progress.
+    let mut counters = BudgetCounters::default();
+    counters.mark_progress();
+    counters.finish_round();
+    // When: the next round has no successful activity.
+    counters.finish_round();
+    // Then: progress is not carried into subsequent rounds.
+    assert_eq!(counters.no_progress_rounds, 1);
+}
+
+#[test]
+fn runtime_default_allows_one_hundred_no_progress_rounds() {
+    // Given/When: runtime defaults are constructed independently of config.
+    let settings = BudgetSettings::default();
+    // Then: the runtime uses the same hundred-round allowance.
+    assert_eq!(settings.max_no_progress_rounds, 100);
 }
 
 #[test]

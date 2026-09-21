@@ -76,11 +76,15 @@ pub(super) async fn run_calls(count: u32, config: RunConfig) -> Vec<Event> {
     run_calls_in_batches(count, config, false).await
 }
 
-pub(super) async fn run_calls_in_batches(
-    count: u32,
-    mut config: RunConfig,
-    batch: bool,
-) -> Vec<Event> {
+pub(super) async fn run_failing_calls(count: u32, config: RunConfig) -> Vec<Event> {
+    run_script(count, config, None).await
+}
+
+pub(super) async fn run_calls_in_batches(count: u32, config: RunConfig, batch: bool) -> Vec<Event> {
+    run_script(count, config, Some(batch)).await
+}
+
+async fn run_script(count: u32, mut config: RunConfig, batch: Option<bool>) -> Vec<Event> {
     // Isolate budget/checkpoint contracts from the independent identical-call guard.
     config.budget.max_identical_tool_call_repeats = count.saturating_add(1);
     // durable 境界イベントは task 識別子を持たない run では発行されないため、
@@ -90,18 +94,23 @@ pub(super) async fn run_calls_in_batches(
     }
     let file = tempfile::NamedTempFile::new().expect("file");
     std::fs::write(file.path(), "budget fixture").expect("write");
+    let path = if batch.is_some() {
+        file.path().to_path_buf()
+    } else {
+        file.path().join("missing")
+    };
     let mut script = Vec::new();
     for index in 0..count {
         let mut response = tool_response(
             &index.to_string(),
             "read",
-            serde_json::json!({"path": file.path()}),
+            serde_json::json!({"path": path}),
         );
         response.usage.input_tokens = 3;
         response.usage.output_tokens = 2;
         script.push(Ok(response));
     }
-    if batch {
+    if batch == Some(true) {
         let content = script
             .iter()
             .flat_map(|response| response.as_ref().expect("response").message.content.clone())
@@ -152,7 +161,10 @@ pub(super) async fn run_calls_in_batches(
     );
     let tool_limit = events.iter().any(|event| matches!(&event.kind, EventKind::Diagnostic(d) if d.source == "budget_tracker" && d.detail.contains("max_tool_calls=5")));
     if tool_limit {
-        assert_eq!(model.observed().await.len(), if batch { 1 } else { 5 });
+        assert_eq!(
+            model.observed().await.len(),
+            if batch == Some(true) { 1 } else { 5 }
+        );
     }
     events
 }

@@ -8,7 +8,7 @@ use support::{ScriptedModel, text_response, tool_response};
 
 #[path = "support/budget_fixture.rs"]
 mod budget_fixture;
-use budget_fixture::{run_calls, run_calls_in_batches};
+use budget_fixture::{run_calls, run_calls_in_batches, run_failing_calls};
 
 #[tokio::test]
 async fn five_call_budget_rejects_tail_of_shared_batch() {
@@ -45,7 +45,7 @@ async fn five_call_budget_rejects_tail_of_shared_batch() {
 
 #[tokio::test]
 async fn no_progress_rounds_emits_no_progress_once() {
-    // Given: three consecutive rounds without a file change are permitted.
+    // Given: three consecutive failed rounds are permitted.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
             max_no_progress_rounds: 3,
@@ -53,13 +53,61 @@ async fn no_progress_rounds_emits_no_progress_once() {
         },
         ..Default::default()
     };
-    // When: eight read-only rounds complete.
-    let events = run_calls(8, config).await;
+    // When: read calls target a missing path.
+    let events = run_failing_calls(8, config).await;
     // Then: only one no-progress diagnostic is emitted.
     assert_eq!(
         diagnostics(&events, event_bus::event::diagnostic_codes::NO_PROGRESS),
         1
     );
+}
+
+#[tokio::test]
+async fn successful_reads_keep_run_42_progressing() {
+    // Given: an active read-only run with a low no-progress limit.
+    let mut config = unlimited_progress();
+    config.task_id = Some("run-42".into());
+    config.budget.max_no_progress_rounds = 3;
+    // When: more than twenty successful non-edit rounds execute.
+    let events = run_calls(68, config).await;
+    // Then: every call completes without a no-progress stop.
+    assert_eq!(
+        diagnostics(&events, event_bus::event::diagnostic_codes::NO_PROGRESS),
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                EventKind::Tool(event_bus::ToolEvent::ToolCompleted { .. })
+            ))
+            .count(),
+        68
+    );
+}
+
+#[tokio::test]
+async fn failing_rounds_exhaust_only_above_the_limit() {
+    // Given: both a small limit and the default hundred-round allowance.
+    for limit in [3, 100] {
+        for extra in [0, 1] {
+            let config = RunConfig {
+                budget: runtime::budget_tracker::BudgetSettings {
+                    max_no_progress_rounds: limit,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            // When: exactly N or N+1 failing rounds execute.
+            let events = run_failing_calls(limit + extra, config).await;
+            // Then: equality is allowed and the first excess emits exactly once.
+            assert_eq!(
+                diagnostics(&events, event_bus::event::diagnostic_codes::NO_PROGRESS),
+                usize::try_from(extra).unwrap()
+            );
+        }
+    }
 }
 
 fn diagnostics(events: &[Event], code: &str) -> usize {
