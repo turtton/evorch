@@ -72,7 +72,7 @@ impl EventBus {
             rx: self.tx.subscribe(),
             tx: self.tx.clone(),
             subscriber_id,
-            fault_suppressed: false,
+            lag_gate: LagGate::default(),
             fences: std::sync::Arc::clone(&self.fences),
         }
     }
@@ -104,9 +104,28 @@ pub struct EventReceiver {
     /// fault 再 emit 用の送信者クローン。
     tx: broadcast::Sender<Event>,
     subscriber_id: u64,
-    /// フィードバックループ防止フラグ。直近の lag エピソードで fault を
-    /// emit 済みの場合に true となる。役割の詳細は [`EventReceiver::recv`]。
-    fault_suppressed: bool,
+    /// lag エピソードごとの warn と fault の発行を制御するゲート。
+    lag_gate: LagGate,
+}
+
+#[derive(Default)]
+struct LagGate {
+    episode_active: bool,
+}
+
+impl LagGate {
+    fn note_lag(&mut self) -> (bool, bool) {
+        if self.episode_active {
+            (false, false)
+        } else {
+            self.episode_active = true;
+            (true, true)
+        }
+    }
+
+    fn note_ok(&mut self) {
+        self.episode_active = false;
+    }
 }
 
 impl EventReceiver {
@@ -122,58 +141,92 @@ impl EventReceiver {
     ///
     /// # 戻り値
     ///
-    /// - `Ok(event)`: 受信成功。lag 抑制フラグをリセットする。
+    /// - `Ok(event)`: 受信成功。lag エピソードをリセットする。
     /// - `Err(RecvError::Lagged(n))`: 受信者が `n` 件のイベントを読み飛ばした。
-    ///   常に `tracing::warn!` を発火する。さらに、直近の `Ok` 受信以降に
-    ///   fault を emit していない場合（`fault_suppressed == false`）は
-    ///   [`FaultEvent::SubscriberLagged`] をバスへ emit してフラグを立てる。
-    ///   フラグが立っている場合は warn のみで fault の再 emit は行わない。
+    ///   lag エピソードの最初だけ `tracing::warn!` を発火し、
+    ///   [`FaultEvent::SubscriberLagged`] をバスへ emit する。同じエピソード中の
+    ///   後続 lag は `tracing::debug!` のみ発火する。
     /// - `Err(RecvError::Closed)`: 全ての送信者（[`EventReceiver`] 内部の
     ///   クローンを含む）が drop された後。
     ///
     /// # Lag ポリシーと fault 抑制フラグについて
     ///
     /// 受信者がチャネル容量を超えて取り残されると、tokio は `Lagged(n)` を返し、
-    /// 受信者を「最も古い保持中メッセージ」へ再配置する。本メソッドはその都度
-    /// `tracing::warn!` を発火し、加えて 1 つの lag エピソード（次に `Ok` で
-    /// 受信できるまで）につき 1 回だけ [`FaultEvent::SubscriberLagged`] をバスへ
-    /// emit する。
+    /// 受信者を「最も古い保持中メッセージ」へ再配置する。本メソッドは 1 つの lag
+    /// エピソード（次に raw `Ok` を受信するまで）につき 1 回だけ
+    /// `tracing::warn!` と [`FaultEvent::SubscriberLagged`] の emit を行う。同じ
+    /// エピソード中の後続 `Lagged` は `tracing::debug!` のみ発火する。
     ///
     /// fault の再 emit を無条件に行うとフィードバックループが発生する。`Lagged`
     /// 後に受信者は最も古い保持中メッセージへ再配置されるが、その直後に fault を
     /// emit するとバスの head が進み、容量一杯のチャネルからちょうどその
     /// メッセージが押し出される。結果として受信者は再び `Lagged(1)` を受け取り、
-    /// また fault を emit するという無限ループに陥る。`fault_suppressed` フラグ
-    /// は、`Ok` で正常に受信できるまで fault の再 emit を止めることで、この
+    /// また fault を emit するという無限ループに陥る。`LagGate` は、`Ok` で
+    /// 正常に受信できるまで fault の再 emit を止めることで、この
     /// fault 再 emit が自らの lag を誘発するループを防ぐために存在する。
     pub async fn recv(&mut self) -> Result<Event, RecvError> {
         loop {
             match self.rx.recv().await {
                 Ok(event) => {
-                    self.fault_suppressed = false;
+                    self.lag_gate.note_ok();
                     if self.fences.accepts(&event) {
                         return Ok(event);
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        subscriber_id = self.subscriber_id,
-                        skipped = skipped,
-                        "event subscriber lagged; dropped events"
-                    );
-                    if !self.fault_suppressed {
+                    let (warn, fault) = self.lag_gate.note_lag();
+                    if warn {
+                        tracing::warn!(
+                            subscriber_id = self.subscriber_id,
+                            skipped = skipped,
+                            "event subscriber lagged; dropped events"
+                        );
+                    } else {
+                        tracing::debug!(
+                            subscriber_id = self.subscriber_id,
+                            skipped = skipped,
+                            "event subscriber lagged; dropped events"
+                        );
+                    }
+                    if fault {
                         // 受信者がゼロの場合 fault は届かないが、それは観測者が
                         // 存在しないことと同義であるため送信結果は無視してよい。
                         let _ = self.tx.send(Event::new(FaultEvent::SubscriberLagged {
                             subscriber_id: self.subscriber_id,
                             skipped,
                         }));
-                        self.fault_suppressed = true;
                     }
                     return Err(RecvError::Lagged(skipped));
                 }
                 Err(broadcast::error::RecvError::Closed) => return Err(RecvError::Closed),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LagGate;
+
+    #[test]
+    fn lag_gate_warns_and_faults_once_per_episode() {
+        let mut gate = LagGate::default();
+
+        assert_eq!(gate.note_lag(), (true, true));
+        assert_eq!(gate.note_lag(), (false, false));
+
+        gate.note_ok();
+
+        assert_eq!(gate.note_lag(), (true, true));
+    }
+
+    #[test]
+    fn lag_gate_resets_on_raw_ok_before_fencing() {
+        let mut gate = LagGate::default();
+
+        assert_eq!(gate.note_lag(), (true, true));
+        gate.note_ok();
+
+        assert_eq!(gate.note_lag(), (true, true));
     }
 }

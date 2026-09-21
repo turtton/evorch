@@ -16,7 +16,7 @@ v0.1 の transport は **in-process の tokio broadcast 固定**とする（`cra
 
 - capacity は利用側が指定（tokio は 2 の冪に切り上げ）
 - 受信者が追従できない場合は tokio broadcast 標準の「最古から上書き drop」。受信者は `Lagged(n)` で取りこぼし件数を検知
-- slow-consumer 検知: `recv()` が `Lagged(n)` を返すたびに `tracing::warn!`（subscriber_id / skipped 付き）。さらに lag エピソードごとに 1 回 `FaultEvent::SubscriberLagged` をバスへ emit し、他の購読者（GUI / 診断）が slow consumer の存在を観測可能にする
+- slow-consumer 検知: `recv()` が `Lagged(n)` を返す lag エピソードごとに 1 回 `tracing::warn!`（subscriber_id / skipped 付き）を発火する。同じエピソード中の後続 lag は `debug!` とする。さらに lag エピソードごとに 1 回 `FaultEvent::SubscriberLagged` をバスへ emit し、他の購読者（GUI / 診断）が slow consumer の存在を観測可能にする
 - fault 再 emit は **1 エピソード 1 回に抑制**する（`fault_suppressed` フラグ）。無条件再 emit は fault 自身が受信者の再配置先を押し出して無限ループになることが判明しているため
 
 ### 将来の分散化への接続方針
