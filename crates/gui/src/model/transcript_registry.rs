@@ -131,14 +131,13 @@ impl TranscriptRegistry {
             }
             EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. })
             | EventKind::Tool(ToolEvent::ApprovalResolved { call_id, .. })
-            | EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => {
-                self.run_for_call(call_id)
-                    .or_else(|| self.call_index.get(call_id).map(String::as_str))
-                    .map_or_else(
-                        || vec![TranscriptKey::Thread],
-                        |run_id| self.route_run(run_id),
-                    )
-            }
+            | EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => self
+                .run_for_call(call_id)
+                .or_else(|| self.call_index.get(call_id).map(String::as_str))
+                .map_or_else(
+                    || vec![TranscriptKey::Thread],
+                    |run_id| self.route_run(run_id),
+                ),
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => vec![
                 TranscriptKey::Run(message.sender_run_id.clone()),
                 TranscriptKey::Run(message.recipient_run_id.clone()),
