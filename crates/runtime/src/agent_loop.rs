@@ -892,8 +892,17 @@ impl LoopState {
         // 先に emit すると、AgentRunStateChanged を受け取った観測者が
         // 直後に phase を読んだ際に旧位相を見てしまう
         // (chat_sink_runtime.rs wait_for_reply の :140 flake の根本原因)。
-        self.channels.phase_tx.send_replace(phase);
-        self.shared.bus.emit(Event::new(event));
+        match phase {
+            AgentRunPhase::Done | AgentRunPhase::Error => {
+                if let Some(runtime) = self.runtime() {
+                    runtime.publish_terminal(self.task.run_id, event);
+                }
+            }
+            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
+                self.channels.phase_tx.send_replace(phase);
+                self.shared.bus.emit(Event::new(event));
+            }
+        }
         Ok(())
     }
 

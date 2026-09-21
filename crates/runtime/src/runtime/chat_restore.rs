@@ -7,6 +7,7 @@ mod tests;
 
 pub(super) enum RunContinuation {
     Fresh,
+    Awaited,
     Handoff(RunHandoff),
     Restored(RestoredState),
 }

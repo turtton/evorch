@@ -485,12 +485,12 @@ async fn restored_delivery_consumes_one_id_before_next_live_delivery() {
     // When: restore the terminal child.
     let failed =
         runtime.send_agent_message(parent, child1, AgentMessageKind::Send, "too late", None);
-    assert_eq!(failed, Ok("msg-1".to_string()));
+    assert_eq!(failed, Ok("msg-2".to_string()));
 
     // Then: the next live delivery consumes the next ID.
     assert_eq!(
         runtime.send_agent_message(parent, child2, AgentMessageKind::Send, "ok", None),
-        Ok("msg-2".to_string())
+        Ok("msg-3".to_string())
     );
 
     let _ = runtime.cancel(parent);

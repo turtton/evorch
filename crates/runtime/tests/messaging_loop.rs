@@ -180,7 +180,10 @@ async fn running_recipient_injects_parent_steering_before_next_completion() {
 async fn running_recipient_holds_child_aside_until_turn_end() {
     // Given: 親 run-1 の最初の completion が gate 中で、子 run-2 が存在する
     let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::gated([], Arc::clone(&gate)));
+    let model = Arc::new(ScriptedModel::new([]));
+    model.gate_key("PARENT", Arc::clone(&gate)).await;
+    let child_gate = Arc::new(Notify::new());
+    model.gate_key("CHILD", Arc::clone(&child_gate)).await;
     model
         .add_keyed(
             "PARENT",
@@ -218,6 +221,8 @@ async fn running_recipient_holds_child_aside_until_turn_end() {
 
     // Then: in-flight request には無く、Stop boundary 後の継続 request にだけ注入されて完了する
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
+    child_gate.notify_one();
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
     let initial_parent = messages_for_marker(&initial_requests, "PARENT");
     assert_eq!(initial_parent.len(), 1);
     assert!(!contains_agent_message(

@@ -224,8 +224,14 @@ async fn parent_recovers_child_crash_by_new_run_with_reconstructed_context() {
         .expect("crash 後に同じ DB を開ける")
         .agent_messages_by_session(TEST_SESSION)
         .expect("crash 後に transcript を読める");
-    assert_eq!(restored, persisted);
-    assert_eq!(restored.len(), 2);
+    assert_eq!(&restored[..2], persisted.as_slice());
+    assert_eq!(restored.len(), 3);
+    assert_eq!(restored[2].message.sender_run_id, old_child.to_string());
+    assert_eq!(restored[2].message.recipient_run_id, parent.to_string());
+    assert_eq!(restored[2].message.kind, AgentMessageKind::Send);
+    assert_eq!(restored[2].message.content, "cancelled");
+    assert_eq!(restored[2].message.reply_to, None);
+    assert_eq!(restored[2].disposition, DeliveryDisposition::Aside);
     let transcript = restored
         .iter()
         .map(|record| {

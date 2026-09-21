@@ -70,6 +70,9 @@ impl AgentRuntime {
             handoff: None,
             restored: None,
         });
+        let completion_relayed = runs
+            .get(&run_id)
+            .is_none_or(|entry| entry.completion_relayed);
         runs.insert(
             run_id,
             RunEntry {
@@ -79,6 +82,7 @@ impl AgentRuntime {
                 config,
                 parent,
                 escalated_from: None,
+                completion_relayed,
                 phase_tx,
                 phase_rx,
                 message_count_rx,

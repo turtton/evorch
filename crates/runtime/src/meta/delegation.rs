@@ -158,20 +158,22 @@ pub(super) async fn delegate(
         Ok(load_skills) => load_skills,
         Err(message) => return error(message),
     };
-    let child = match runtime.delegate_background_as_child(
+    let child = match runtime.delegate_awaited_child(
         state.caller_run_id(),
-        role,
-        args.prompt,
-        RunConfig {
-            team_task: args.task,
-            name: args.name,
-            images: args.images,
-            category,
-            load_skills,
-            workspace_mode: args.workspace_mode.unwrap_or_default(),
-            workspace_branch: args.workspace_branch,
-            ..RunConfig::default()
-        },
+        (
+            role,
+            args.prompt,
+            RunConfig {
+                team_task: args.task,
+                name: args.name,
+                images: args.images,
+                category,
+                load_skills,
+                workspace_mode: args.workspace_mode.unwrap_or_default(),
+                workspace_branch: args.workspace_branch,
+                ..RunConfig::default()
+            },
+        ),
     ) {
         Ok(child) => child,
         Err(runtime_error) => return error(runtime_error.to_string()),

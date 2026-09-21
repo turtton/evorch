@@ -3,6 +3,7 @@
 mod admission;
 mod cancellation;
 mod chat_restore;
+mod completion_relay;
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
@@ -123,6 +124,7 @@ struct RunEntry {
     config: RunConfig,
     parent: Option<RunId>,
     escalated_from: Option<RunId>,
+    completion_relayed: bool,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -689,8 +691,10 @@ impl AgentRuntime {
         mut config: RunConfig,
         continuation: RunContinuation,
     ) -> RunId {
+        let completion_relayed = matches!(continuation, RunContinuation::Awaited);
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
+            RunContinuation::Awaited => (None, None),
             RunContinuation::Handoff(handoff) => (Some(handoff), None),
             RunContinuation::Restored(restored) => (None, Some(restored)),
         };
@@ -824,6 +828,7 @@ impl AgentRuntime {
                 config: config.clone(),
                 parent,
                 escalated_from,
+                completion_relayed,
                 phase_tx: phase_tx_entry,
                 phase_rx,
                 message_count_rx,
@@ -880,16 +885,16 @@ impl AgentRuntime {
                 Some(Ok(slot)) => Some(slot),
                 Some(Err(reason)) => {
                     if let Some(shared) = weak.upgrade() {
-                        shared
-                            .bus
-                            .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+                        AgentRuntime { shared }.publish_terminal(
+                            task.run_id,
+                            LifecycleEvent::AgentRunStateChanged {
                                 run_id: task.run_id.to_string(),
                                 from: AgentRunPhase::Pending,
                                 to: AgentRunPhase::Error,
                                 reason: Some(reason),
-                            }));
+                            },
+                        );
                     }
-                    let _ = channels.phase_tx.send(AgentRunPhase::Error);
                     return;
                 }
                 None => None,
@@ -986,7 +991,11 @@ impl AgentRuntime {
         loop {
             let phase = *phase_rx.borrow_and_update();
             match phase {
-                AgentRunPhase::Done | AgentRunPhase::Error => return Ok(phase),
+                AgentRunPhase::Done | AgentRunPhase::Error => {
+                    // Terminal publication holds runs until its completion relay finishes.
+                    drop(self.entry(run_id)?);
+                    return Ok(phase);
+                }
                 AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
             }
             if phase_rx.changed().await.is_err() {
