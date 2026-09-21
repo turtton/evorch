@@ -187,6 +187,37 @@ fn assert_parked(harness: &HeadlessWorkbench<AgentRuntime>, run: &str) {
 }
 
 #[test]
+fn three_subagent_panes_share_equal_height_fractions() {
+    // Given: the default workbench with its sidebar split.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut harness, _rt) = workbench(temp.path());
+    // When: three non-conversation children start in order.
+    harness
+        .state_mut()
+        .apply_events([started("a"), started("b"), started("c")]);
+    // Then: each top child consumes one of the remaining equal shares.
+    let tree = harness.state().dock().main_surface();
+    let mut node = egui_dock::NodeIndex::root().right();
+    let mut remaining = 1.0;
+    for (run, expected) in [("a", 1.0 / 3.0), ("b", 0.5)] {
+        let egui_dock::Node::Vertical(split) = &tree[node] else {
+            panic!("expected subagent vertical split at {node:?}");
+        };
+        assert_eq!(pane_node(&harness, run), node.left());
+        assert!(
+            (split.fraction - expected).abs() < f32::EPSILON,
+            "expected {expected}, got {}",
+            split.fraction
+        );
+        assert!((remaining * split.fraction - 1.0 / 3.0).abs() < f32::EPSILON);
+        remaining *= 1.0 - split.fraction;
+        node = node.right();
+    }
+    assert_eq!(pane_node(&harness, "c"), node);
+    assert!((remaining - 1.0 / 3.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn second_subagent_stacks_below_first_running_pane() {
     // Given: the default workbench.
     let temp = tempfile::tempdir().expect("temp");
