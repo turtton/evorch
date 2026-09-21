@@ -222,7 +222,7 @@ fn thread_state_follows_lifecycle_events() {
         .switch_thread(&workspace_ui::ThreadId::new("thread-1"))
         .expect("thread can be selected");
     let workbench = state(MockSource::default(), sidebar).with_pump(pump);
-    let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
+    let mut harness = HeadlessWorkbench::new(workbench, gui::window::MIN_INNER_SIZE);
     harness.run();
 
     // When: the run is attached and progresses through runtime lifecycle phases

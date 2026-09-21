@@ -35,15 +35,17 @@ fn build_harness(
         )
 }
 
-/// Prompt-marker keyed scripted model: "ORCH" delegates a worker then stops,
+/// Prompt-marker keyed scripted model: "ORCH" delegates a worker then finishes,
 /// "W1" answers with text and stops.
 struct ScriptedModel {
     scripts: Mutex<HashMap<String, VecDeque<ChatResponse>>>,
+    events: tokio::sync::Mutex<event_bus::EventReceiver>,
 }
 
 impl ScriptedModel {
-    fn new() -> Self {
+    fn new(bus: &event_bus::EventBus) -> Self {
         Self {
+            events: tokio::sync::Mutex::new(bus.subscribe()),
             scripts: Mutex::new(HashMap::from([
                 (
                     "ORCH".to_string(),
@@ -57,7 +59,11 @@ impl ScriptedModel {
                                 "name": "worker-w1"
                             }),
                         ),
-                        text_response("orchestrator finished", FinishReason::Stop),
+                        tool_response(
+                            "finish-orchestrator",
+                            "finish",
+                            serde_json::json!({ "result": "orchestrator finished" }),
+                        ),
                     ]),
                 ),
                 (
@@ -90,6 +96,24 @@ impl AgentModel for ScriptedModel {
                     | ContentBlock::ToolResult { .. } => None,
                 })
             });
+        // Exercise child completion before the parent's final response, rather
+        // than relying on which Tokio worker wins the completion race.
+        let final_orchestrator_turn = marker.as_deref() == Some("ORCH")
+            && self.scripts.lock().expect("script lock")["ORCH"].len() == 1;
+        if final_orchestrator_turn {
+            let mut events = self.events.lock().await;
+            loop {
+                let event = events.recv().await.expect("completion relay event");
+                if matches!(
+                    event.kind,
+                    event_bus::EventKind::AgentMessage(
+                        event_bus::AgentMessageEvent::Delivered { .. }
+                    )
+                ) {
+                    break;
+                }
+            }
+        }
         let mut scripts = self.scripts.lock().expect("script lock must not poison");
         scripts
             .get_mut(marker.as_deref().unwrap_or_default())
@@ -142,7 +166,7 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
     let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
     let bus = Arc::new(event_bus::EventBus::new(16));
     let executor = Arc::new(ToolExecutor::new(bus.clone()));
-    let model = Arc::new(ScriptedModel::new());
+    let model = Arc::new(ScriptedModel::new(&bus));
     let runtime = AgentRuntime::new(bus.clone(), executor, model);
     let (repaint_tx, repaint_rx) = mpsc::channel();
     let pump = EventPump::spawn(
@@ -176,15 +200,8 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
         status: AgentRunPhase::Done,
         model: "test-worker".into(),
     }];
-    let deadline = Instant::now() + Duration::from_secs(5);
     while harness.state().tasks().rows() != expected.as_slice() {
-        if Instant::now() > deadline {
-            panic!(
-                "tasks rows did not converge within 5s: {:?}",
-                harness.state().tasks().rows()
-            );
-        }
-        let _ = repaint_rx.recv_timeout(Duration::from_millis(200));
+        repaint_rx.recv().expect("runtime event repaint");
         harness.run_steps(4);
     }
     assert_eq!(harness.state().tasks().rows(), expected.as_slice());
