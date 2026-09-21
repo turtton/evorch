@@ -1,0 +1,61 @@
+implementation_issue_packet:
+  issue_title: "GUI: open threads as independent conversation panes (multi-thread view)"
+  issue_kind: feature
+  source_execution_unit: v08-multi-thread-conversation
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/gui/src/app/state.rs, crates/gui/src/app/tab_viewer.rs, crates/gui/src/app/tab_viewer/conversation.rs, crates/gui/src/app/actions.rs, crates/gui/src/app/frame.rs, crates/workspace-ui/src/panels.rs, crates/workspace-ui/src/validate.rs, crates/gui/tests/
+  target_part: "thread-bound conversation panes: per-pane thread binding on the view layer (model routing is already per-thread)"
+  dependencies: []
+  technical_baseline:
+    - "TranscriptRegistry routes root-run streams per-thread via TranscriptKey::Thread(thread_id); the model layer already holds one TranscriptModel per thread (crates/gui/src/model/transcript_registry.rs)."
+    - "The view layer renders exactly one conversation: WorkbenchState::transcript() resolves ConversationFocus::Thread (active thread only) or ConversationFocus::Agent(run_id) (crates/gui/src/app/state.rs)."
+    - "SidebarState.active_thread is the single switchable conversation target (crates/workspace-ui/src/sidebar.rs switch_thread)."
+    - "Dock panels are serde-persisted via PanelKind + target in crates/workspace-ui/src/panels.rs with validate.rs invariants (MissingTarget/UnexpectedTarget)."
+    - "AGENTS.md Compatibility policy (pre-v1): new PanelKind variants are allowed without downgrade tolerance or migration layers."
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "Ctrl+click (or an equivalent explicit affordance) on a sidebar thread opens a conversation pane bound to that thread id; invoking it again focuses the existing tab instead of duplicating it (idempotent open)."
+    - "Switching the active thread in the sidebar never retargets a thread-bound pane; the main conversation pane keeps following the active thread (existing behavior unchanged)."
+    - "A thread-bound pane live-renders that thread's root-run stream (MessageDelta/ReasoningDelta/tool entries routed to TranscriptKey::Thread of the bound thread) without owning ConversationFocus."
+    - "Closing/archiving the thread leaves the pane rendering the persisted transcript; no panic, no empty-node dock artifacts."
+    - "Workspace layout save/load roundtrip preserves thread-bound panes (kind + target thread id, active-tab state), verified by a headless roundtrip test."
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+intent_placement:
+  primary_intent: intents/evorch/features/gui-workbench/overview.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "Multi-thread conversation display extends the gui-workbench 'subagent 可視化 / workspace model 分離' surface; no new intent node required."
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: true
+    target_paths:
+      - intents/evorch/features/gui-workbench/overview.md
+    summary: "Document per-pane thread binding and the ctrl+click open affordance as part of the conversation view contract."
+closeout_learning:
+  expected: "Whether read-only extra panes are sufficient or per-pane composers are needed; any routing assumptions that broke once multiple conversation views render concurrently."
+  write_back_required: true
+  write_back_targets:
+    - intents/evorch/features/gui-workbench/overview.md
+# G645/G661: guide reachability is explicit and checked at closeout.
+guide_reachability:
+  no_role_facing_surface: false
+  routes:
+    - guide_surface: guide workflow task implementation-loop
+      role: implementation
+      target_surface: "gui workbench thread-bound conversation panes (sidebar ctrl+click open)"
