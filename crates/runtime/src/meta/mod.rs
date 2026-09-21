@@ -57,7 +57,6 @@ pub(crate) async fn dispatch(
         return error("runtime is unavailable");
     };
     match name {
-        "delegate_background" => delegation::delegate_background(state, &runtime, input),
         "delegate" => delegation::delegate(state, &runtime, input).await,
         "send" => messaging::send(state, &runtime, input),
         "send_message" => messaging::send_message(state, &runtime, input),

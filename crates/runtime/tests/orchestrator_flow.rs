@@ -87,13 +87,13 @@ async fn orchestrator_drives_children_entirely_through_meta_tool_uses() {
                 Ok(tool_responses([
                     (
                         "delegate-worker",
-                        "delegate_background",
-                        json!({ "role": "worker", "prompt": "W1" }),
+                        "delegate",
+                        json!({ "background": true, "role": "worker", "prompt": "W1" }),
                     ),
                     (
                         "delegate-explorer",
-                        "delegate_background",
-                        json!({ "role": "explorer", "prompt": "E1", "interactive": true }),
+                        "delegate",
+                        json!({ "background": true, "role": "explorer", "prompt": "E1", "interactive": true }),
                     ),
                 ])),
                 Ok(tool_response(
@@ -226,12 +226,12 @@ async fn orchestrator_drives_children_entirely_through_meta_tool_uses() {
 
 #[tokio::test]
 async fn worker_cannot_spawn_child_through_meta_tool_use() {
-    // Given: delegate_background を要求した Worker と、その後停止するモデルスクリプト
+    // Given: 非同期 delegate を要求した Worker と、その後停止するモデルスクリプト
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "denied-delegate",
-            "delegate_background",
-            json!({ "role": "worker", "prompt": "CHILD" }),
+            "delegate",
+            json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
         )),
         Ok(text_response("done", FinishReason::Stop)),
     ]));

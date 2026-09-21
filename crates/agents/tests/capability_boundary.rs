@@ -121,17 +121,10 @@ fn explorer_allows_exactly_adr_0002_tools() {
 #[test]
 fn explorer_denies_mutation_delegation_and_messaging_tools() {
     // Given: Explorer ロール (read / search のみ、write / edit / delegate / messaging は拒否)
-    // When: edit / shell / delegate_background / send / wait_reply / inbox の使用可否を問い合わせる
+    // When: edit / shell / delegate / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Explorer.capabilities();
-    for tool in [
-        "edit",
-        "shell",
-        "delegate_background",
-        "send",
-        "wait_reply",
-        "inbox",
-    ] {
+    for tool in ["edit", "shell", "delegate", "send", "wait_reply", "inbox"] {
         assert_denied(caps.check_tool("Explorer", tool), "Explorer", tool);
     }
 }
@@ -179,14 +172,10 @@ fn worker_allows_mutation_tools() {
 #[test]
 fn worker_denies_delegation_tools() {
     // Given: Worker ロール (委譲は Orchestrator のみが持つ)
-    // When: delegate_background の使用可否を問い合わせる
+    // When: delegate の使用可否を問い合わせる
     // Then: Denied になる
     let caps = Role::Worker.capabilities();
-    assert_denied(
-        caps.check_tool("Worker", "delegate_background"),
-        "Worker",
-        "delegate_background",
-    );
+    assert_denied(caps.check_tool("Worker", "delegate"), "Worker", "delegate");
 }
 
 #[test]
@@ -287,10 +276,10 @@ fn librarian_allows_exactly_adr_0002_tools() {
 fn librarian_denies_mutation_and_delegation_tools() {
     // Given: Librarian ロール (read / grep と web_search / web_fetch のみ、
     //        mutation / 委譲 / messaging は拒否)
-    // When: edit / shell / delegate_background / send の使用可否を問い合わせる
+    // When: edit / shell / delegate / send の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Librarian.capabilities();
-    for tool in ["edit", "shell", "delegate_background", "send"] {
+    for tool in ["edit", "shell", "delegate", "send"] {
         assert_denied(caps.check_tool("Librarian", tool), "Librarian", tool);
     }
 }

@@ -73,8 +73,8 @@ async fn exercise(
 fn spawn() -> providers::ChatResponse {
     tool_response(
         "spawn",
-        "delegate_background",
-        json!({"role":"worker", "prompt":"CHILD"}),
+        "delegate",
+        json!({"background":true, "role":"worker", "prompt":"CHILD"}),
     )
 }
 

@@ -1,5 +1,8 @@
 mod support;
 
+#[path = "meta_ops/delegate_contract.rs"]
+mod delegate_contract;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -81,8 +84,9 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
                 )),
                 Ok(tool_response(
                     "spawn-interactive",
-                    "delegate_background",
+                    "delegate",
                     json!({
+                        "background": true,
                         "role": "explorer",
                         "prompt": "HOLD",
                         "interactive": true,
@@ -289,7 +293,7 @@ async fn compact_meta_op_compacts_context_and_emits_agent_reason_event() {
 
 #[tokio::test]
 async fn delegate_background_accepts_isolated_workspace_mode() {
-    // Given: isolated workspace を要求する delegate_background を返す Orchestrator
+    // Given: isolated workspace を要求する非同期 delegate を返す Orchestrator
     let (_temp, repo) = init_git_repo();
     let model = Arc::new(ScriptedModel::new([]));
     model
@@ -298,8 +302,9 @@ async fn delegate_background_accepts_isolated_workspace_mode() {
             [
                 Ok(tool_response(
                     "delegate-isolated",
-                    "delegate_background",
+                    "delegate",
                     json!({
+                        "background": true,
                         "role": "worker",
                         "prompt": "ISOLATED",
                         "interactive": true,
@@ -350,13 +355,13 @@ async fn delegate_background_accepts_isolated_workspace_mode() {
 }
 
 #[tokio::test]
-async fn delegate_background_rejects_unknown_workspace_mode() {
+async fn async_delegate_rejects_unknown_workspace_mode() {
     // Given: 未知の workspace_mode を返す Orchestrator
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "invalid-workspace",
-            "delegate_background",
-            json!({ "role": "worker", "prompt": "unused", "workspace_mode": "hybrid" }),
+            "delegate",
+            json!({ "background": true, "role": "worker", "prompt": "unused", "workspace_mode": "hybrid" }),
         )),
         Ok(tool_response(
             "finish",
@@ -428,8 +433,8 @@ async fn invalid_meta_arguments_return_error_and_run_continues() {
         )),
         Ok(tool_response(
             "unknown-role",
-            "delegate_background",
-            json!({ "role": "unknown", "prompt": "unused" }),
+            "delegate",
+            json!({ "background": true, "role": "unknown", "prompt": "unused" }),
         )),
         Ok(tool_response(
             "finish",

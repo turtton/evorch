@@ -35,8 +35,8 @@ impl LoopState {
     pub(super) fn add_team_tools(&mut self) {
         if self.task.role == agents::Role::Orchestrator && self.task.config.team.is_some() {
             for spec in &mut self.tool_specs {
-                if matches!(spec.name.as_str(), "delegate" | "delegate_background") {
-                    spec.description = "Delegate a task. In team mode use role=worker and task={id: unique task id, paths: relative artifact paths}. At most three workers may run concurrently. Workers must claim the task before editing and complete it afterward. No automatic merge.".into();
+                if spec.name == "delegate" {
+                    spec.description = "Delegate a task. Role defaults to worker; background=true returns immediately with a run_id, otherwise wait for completion. interactive=true requires background=true. In team mode use role=worker and task={id: unique task id, paths: relative artifact paths}. At most three workers may run concurrently. Workers must claim the task before editing and complete it afterward. No automatic merge.".into();
                 }
             }
         }

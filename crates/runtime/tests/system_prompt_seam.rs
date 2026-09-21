@@ -98,8 +98,8 @@ async fn orchestrator_delegate_script(model: &ScriptedModel, category: &str, clo
     let script = [
         Ok(tool_response(
             "delegate-worker",
-            "delegate_background",
-            json!({ "role": "worker", "prompt": "W1", "category": category }),
+            "delegate",
+            json!({ "background": true, "role": "worker", "prompt": "W1", "category": category }),
         )),
         Ok(text_response(closing, FinishReason::Stop)),
     ];

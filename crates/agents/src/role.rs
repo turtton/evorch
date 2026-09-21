@@ -102,7 +102,6 @@ impl Role {
             Role::Orchestrator => RoleCapabilities::new(
                 [
                     "delegate",
-                    "delegate_background",
                     "send_message",
                     "skill_load",
                     "send",

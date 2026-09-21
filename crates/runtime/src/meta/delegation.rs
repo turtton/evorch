@@ -1,4 +1,4 @@
-//! 委譲系メタ操作 (delegate / delegate_background) のハンドラ。
+//! delegate メタ操作のハンドラ。
 
 use event_bus::AgentRunPhase;
 use serde::Deserialize;
@@ -8,35 +8,17 @@ use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
-struct DelegateBackgroundArgs {
-    #[serde(default)]
-    task: Option<crate::team::TaskSpec>,
-    #[serde(default)]
-    images: Vec<crate::run::DelegateImage>,
-    role: String,
-    prompt: String,
-    #[serde(default)]
-    interactive: bool,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    workspace_mode: Option<WorkspaceMode>,
-    #[serde(default)]
-    workspace_branch: Option<String>,
-    #[serde(default)]
-    load_skills: Vec<String>,
-}
-
-#[derive(Deserialize)]
 struct DelegateArgs {
     #[serde(default)]
     task: Option<crate::team::TaskSpec>,
     #[serde(default)]
     images: Vec<crate::run::DelegateImage>,
-    role: String,
+    role: Option<String>,
     prompt: String,
+    #[serde(default)]
+    background: bool,
+    #[serde(default)]
+    interactive: bool,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -80,57 +62,6 @@ fn validate_load_skills(state: &LoopState, names: &[String]) -> Result<Vec<Strin
     Ok(unique)
 }
 
-pub(super) fn delegate_background(
-    state: &LoopState,
-    runtime: &AgentRuntime,
-    input: serde_json::Value,
-) -> DispatchResult {
-    let args = match parse::<DelegateBackgroundArgs>(input) {
-        Ok(args) => args,
-        Err(message) => return error(message),
-    };
-    let role = match parse_role(&args.role) {
-        Ok(role) => role,
-        Err(message) => return error(message),
-    };
-    if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
-        return error("image payload requires MultimodalLooker");
-    }
-    let category = match parse_args_category(args.category) {
-        Ok(category) => category,
-        Err(message) => return error(message),
-    };
-    if category.is_some() && role != agents::Role::Worker {
-        return error("category is only valid for role=worker");
-    }
-    let load_skills = match validate_load_skills(state, &args.load_skills) {
-        Ok(load_skills) => load_skills,
-        Err(message) => return error(message),
-    };
-    match runtime.delegate_background_as_child(
-        state.caller_run_id(),
-        role,
-        args.prompt,
-        RunConfig {
-            team_task: args.task,
-            interactive: args.interactive,
-            images: args.images,
-            name: args.name,
-            category,
-            load_skills,
-            workspace_mode: args.workspace_mode.unwrap_or_default(),
-            workspace_branch: args.workspace_branch,
-            ..RunConfig::default()
-        },
-    ) {
-        Ok(run_id) => {
-            runtime.attach_goal_child(state.caller_run_id(), run_id, role);
-            success(run_id.to_string())
-        }
-        Err(runtime_error) => error(runtime_error.to_string()),
-    }
-}
-
 pub(super) async fn delegate(
     state: &mut LoopState,
     runtime: &AgentRuntime,
@@ -140,7 +71,10 @@ pub(super) async fn delegate(
         Ok(args) => args,
         Err(message) => return error(message),
     };
-    let role = match parse_role(&args.role) {
+    if args.interactive && !args.background {
+        return error("invalid arguments: interactive=true requires background=true");
+    }
+    let role = match parse_role(args.role.as_deref().unwrap_or("worker")) {
         Ok(role) => role,
         Err(message) => return error(message),
     };
@@ -158,26 +92,36 @@ pub(super) async fn delegate(
         Ok(load_skills) => load_skills,
         Err(message) => return error(message),
     };
-    let child = match runtime.delegate_awaited_child(
-        state.caller_run_id(),
-        (
+    let config = RunConfig {
+        team_task: args.task,
+        interactive: args.interactive,
+        images: args.images,
+        name: args.name,
+        category,
+        load_skills,
+        workspace_mode: args.workspace_mode.unwrap_or_default(),
+        workspace_branch: args.workspace_branch,
+        ..RunConfig::default()
+    };
+    if args.background {
+        return match runtime.delegate_background_as_child(
+            state.caller_run_id(),
             role,
             args.prompt,
-            RunConfig {
-                team_task: args.task,
-                name: args.name,
-                images: args.images,
-                category,
-                load_skills,
-                workspace_mode: args.workspace_mode.unwrap_or_default(),
-                workspace_branch: args.workspace_branch,
-                ..RunConfig::default()
-            },
-        ),
-    ) {
-        Ok(child) => child,
-        Err(runtime_error) => return error(runtime_error.to_string()),
-    };
+            config,
+        ) {
+            Ok(run_id) => {
+                runtime.attach_goal_child(state.caller_run_id(), run_id, role);
+                success(run_id.to_string())
+            }
+            Err(runtime_error) => error(runtime_error.to_string()),
+        };
+    }
+    let child =
+        match runtime.delegate_awaited_child(state.caller_run_id(), (role, args.prompt, config)) {
+            Ok(child) => child,
+            Err(runtime_error) => return error(runtime_error.to_string()),
+        };
     runtime.attach_goal_child(state.caller_run_id(), child, role);
     state.emit_delegated(&state.caller_run_id().to_string(), &child.to_string());
     if state.transition(AgentRunPhase::Waiting, None).is_err() {

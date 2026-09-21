@@ -52,8 +52,9 @@ impl ScriptedModel {
                     VecDeque::from([
                         tool_response(
                             "delegate-worker",
-                            "delegate_background",
+                            "delegate",
                             serde_json::json!({
+                                "background": true,
                                 "role": "worker",
                                 "prompt": "W1",
                                 "name": "worker-w1"

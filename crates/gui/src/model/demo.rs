@@ -59,8 +59,9 @@ impl DemoScriptModel {
                     VecDeque::from([
                         tool_response(
                             "demo-delegate-w1",
-                            "delegate_background",
+                            "delegate",
                             serde_json::json!({
+                                "background": true,
                                 "role": "worker",
                                 "prompt": "DEMO-W1",
                                 "name": "worker-w1"
@@ -68,8 +69,9 @@ impl DemoScriptModel {
                         ),
                         tool_response(
                             "demo-delegate-r1",
-                            "delegate_background",
+                            "delegate",
                             serde_json::json!({
+                                "background": true,
                                 "role": "reviewer",
                                 "prompt": "DEMO-R1",
                                 "name": "reviewer-r1"
@@ -129,8 +131,9 @@ impl DemoScriptModel {
                     VecDeque::from([
                         tool_response(
                             "demo-goal-delegate",
-                            "delegate_background",
+                            "delegate",
                             serde_json::json!({
+                                "background": true,
                                 "role": "worker",
                                 "prompt": "DEMO-IMPL implement the fixture unit",
                                 "workspace_mode": "isolated"

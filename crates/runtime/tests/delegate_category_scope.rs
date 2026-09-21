@@ -84,6 +84,16 @@ async fn delegate_case(tool: &str, args: Value, accepted: bool) {
 }
 
 #[tokio::test]
+async fn delegate_accepts_category_when_role_is_omitted() {
+    delegate_case(
+        "delegate",
+        json!({"category": "quick", "prompt": "CHILD"}),
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn delegate_rejects_category_when_role_is_explorer() {
     delegate_case(
         "delegate",
@@ -94,10 +104,10 @@ async fn delegate_rejects_category_when_role_is_explorer() {
 }
 
 #[tokio::test]
-async fn delegate_background_rejects_category_when_role_is_explorer() {
+async fn async_delegate_rejects_category_when_role_is_explorer() {
     delegate_case(
-        "delegate_background",
-        json!({"role": "explorer", "category": "quick", "prompt": "CHILD"}),
+        "delegate",
+        json!({"background": true, "role": "explorer", "category": "quick", "prompt": "CHILD"}),
         false,
     )
     .await;
@@ -114,10 +124,10 @@ async fn delegate_accepts_category_when_role_is_worker() {
 }
 
 #[tokio::test]
-async fn delegate_background_accepts_category_when_role_is_worker() {
+async fn async_delegate_accepts_category_when_role_is_worker() {
     delegate_case(
-        "delegate_background",
-        json!({"role": "worker", "category": "quick", "prompt": "CHILD"}),
+        "delegate",
+        json!({"background": true, "role": "worker", "category": "quick", "prompt": "CHILD"}),
         true,
     )
     .await;
@@ -134,10 +144,10 @@ async fn delegate_accepts_explorer_when_category_is_absent() {
 }
 
 #[tokio::test]
-async fn delegate_background_accepts_explorer_when_category_is_absent() {
+async fn async_delegate_accepts_explorer_when_category_is_absent() {
     delegate_case(
-        "delegate_background",
-        json!({"role": "explorer", "prompt": "CHILD"}),
+        "delegate",
+        json!({"background": true, "role": "explorer", "prompt": "CHILD"}),
         true,
     )
     .await;

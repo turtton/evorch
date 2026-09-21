@@ -411,7 +411,11 @@ impl LoopState {
                         }
                     })
                 };
-                if local && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name) {
+                // Delegate's parser preserves case-insensitive roles and structured domain errors.
+                if local
+                    && name != "delegate"
+                    && let Some(spec) = self.tool_specs.iter().find(|spec| spec.name == name)
+                {
                     permission = permission.and_then(|()| {
                         tools::ToolExecutor::validate_schema(&name, &spec.input_schema, &input)
                             .map_err(|error| error.to_string())
@@ -854,7 +858,7 @@ pub(super) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate
         return;
     }
     for spec in specs {
-        if matches!(spec.name.as_str(), "delegate" | "delegate_background") {
+        if spec.name == "delegate" {
             spec.description.push_str(crate::SUBAGENT_CONTEXT_NOTE);
         }
     }
@@ -1060,10 +1064,8 @@ mod tests {
             let mut specs = standard_tool_specs();
             append_subagent_context_note(&mut specs, family);
 
-            for name in ["delegate", "delegate_background"] {
-                let spec = specs.iter().find(|spec| spec.name == name).unwrap();
-                assert!(spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
-            }
+            let spec = specs.iter().find(|spec| spec.name == "delegate").unwrap();
+            assert!(spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
         }
     }
 
@@ -1076,10 +1078,8 @@ mod tests {
             let mut specs = standard_tool_specs();
             append_subagent_context_note(&mut specs, family);
 
-            for name in ["delegate", "delegate_background"] {
-                let spec = specs.iter().find(|spec| spec.name == name).unwrap();
-                assert!(!spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
-            }
+            let spec = specs.iter().find(|spec| spec.name == "delegate").unwrap();
+            assert!(!spec.description.contains(crate::SUBAGENT_CONTEXT_NOTE));
         }
     }
 }

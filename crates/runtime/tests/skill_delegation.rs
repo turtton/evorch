@@ -1,6 +1,6 @@
 //! T10: 委譲時 load_skills パススルーの結合テスト (issue #53 / AC6, AC9)。
 //!
-//! delegate / delegate_background の `load_skills` 引数が子 run の初期
+//! delegate の `load_skills` 引数が子 run の初期
 //! System メッセージ (単一) へ skill 本文セクションを注入すること、未知名や
 //! 未接続レジストリを子 run の生成より前に拒否すること (fail-closed)、
 //! `load_skills` 未指定の場合は v0.1 の System メッセージを変えないことを
@@ -96,22 +96,15 @@ fn registry_with_demo_skill() -> (SkillRegistry, TempDir) {
     (registry, root)
 }
 
-/// Orchestrator が load_skills 付き delegate_background を呼ぶスクリプトを登録する。
+/// Orchestrator が load_skills 付き非同期 delegate を呼ぶスクリプトを登録する。
 /// `None` なら引数自体を省略する (AC9 の未指定経路)。
-async fn orchestrator_delegate_background_script(
-    model: &ScriptedModel,
-    load_skills: Option<&[&str]>,
-) {
-    let mut args = json!({ "role": "worker", "prompt": "W1" });
+async fn orchestrator_async_delegate_script(model: &ScriptedModel, load_skills: Option<&[&str]>) {
+    let mut args = json!({ "background": true, "role": "worker", "prompt": "W1" });
     if let Some(names) = load_skills {
         args["load_skills"] = json!(names);
     }
     let script = [
-        Ok(tool_response(
-            "delegate-worker",
-            "delegate_background",
-            args,
-        )),
+        Ok(tool_response("delegate-worker", "delegate", args)),
         Ok(text_response("all done", FinishReason::Stop)),
     ];
     model.add_keyed("ORCH", script).await;
@@ -184,14 +177,14 @@ async fn run_parent_and_child(runtime: &AgentRuntime, model: &ScriptedModel) -> 
 }
 
 // Given: カタログと demo skill レジストリを接続したランタイム、load_skills ["demo"] の
-//        delegate_background を呼ぶ Orchestrator スクリプト、子用スクリプト
+//        非同期 delegate を呼ぶ Orchestrator スクリプト、子用スクリプト
 // When: 親子両方の run を終端まで実行する
 // Then: 子の最初の complete 呼び出しは System 1 件のみで、カタログ baseline と
 //       skill 本文 sentinel を両方含む (AC6 + 単一 System 不変条件)
 #[tokio::test]
 async fn delegated_child_with_load_skills_composes_skill_body_into_single_system_message() {
     let model = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model, Some(&["demo"])).await;
+    orchestrator_async_delegate_script(&model, Some(&["demo"])).await;
     add_child_script(&model).await;
     let (registry, _root) = registry_with_demo_skill();
     let runtime = runtime_with(
@@ -218,14 +211,14 @@ async fn delegated_child_with_load_skills_composes_skill_body_into_single_system
 }
 
 // Given: demo skill レジストリに存在しない "nope" を load_skills に指定した
-//        delegate_background (子用スクリプトは未登録)
+//        非同期 delegate (子用スクリプトは未登録)
 // When: 親 run を終端まで実行する
 // Then: 委譲 op は "unknown skill" を含むエラー ToolResult で拒否され、
 //       子 run は登録もモデル呼び出しもされない (AC6 error-before-spawn)
 #[tokio::test]
-async fn delegate_background_rejects_unknown_skill_before_spawn() {
+async fn async_delegate_rejects_unknown_skill_before_spawn() {
     let model = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model, Some(&["nope"])).await;
+    orchestrator_async_delegate_script(&model, Some(&["nope"])).await;
     let (registry, _root) = registry_with_demo_skill();
     let runtime = runtime_with(
         model.clone(),
@@ -254,14 +247,14 @@ async fn delegate_background_rejects_unknown_skill_before_spawn() {
 }
 
 // Given: skill レジストリ未接続のランタイムと load_skills ["demo"] の
-//        delegate_background (子用スクリプトは未登録)
+//        非同期 delegate (子用スクリプトは未登録)
 // When: 親 run を終端まで実行する
 // Then: 委譲 op は "not configured" を含むエラー ToolResult で拒否され、
 //       子 run は登録もモデル呼び出しもされない (AC6 error-before-spawn)
 #[tokio::test]
-async fn delegate_background_rejects_load_skills_without_registry_before_spawn() {
+async fn async_delegate_rejects_load_skills_without_registry_before_spawn() {
     let model = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model, Some(&["demo"])).await;
+    orchestrator_async_delegate_script(&model, Some(&["demo"])).await;
     let runtime = runtime_with(model.clone(), Some(complete_catalog()), None);
 
     let parent =
@@ -285,13 +278,13 @@ async fn delegate_background_rejects_load_skills_without_registry_before_spawn()
 }
 
 // Given: カタログ未接続 (v0.1 構成) と demo skill レジストリ、load_skills
-//        ["demo"] の delegate_background
+//        ["demo"] の非同期 delegate
 // When: 親子両方の run を終端まで実行する
 // Then: 子の System は skills セクションのみでカタログテキストを含まない
 #[tokio::test]
 async fn child_without_catalog_gets_skills_only_system_message() {
     let model = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model, Some(&["demo"])).await;
+    orchestrator_async_delegate_script(&model, Some(&["demo"])).await;
     add_child_script(&model).await;
     let (registry, _root) = registry_with_demo_skill();
     let runtime = runtime_with(model.clone(), None, Some(Arc::new(registry)));
@@ -310,13 +303,13 @@ async fn child_without_catalog_gets_skills_only_system_message() {
 #[tokio::test]
 async fn child_without_load_skills_keeps_pre_skills_baseline_system_message() {
     let model_without = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model_without, None).await;
+    orchestrator_async_delegate_script(&model_without, None).await;
     add_child_script(&model_without).await;
     let runtime_without = runtime_with(model_without.clone(), Some(complete_catalog()), None);
     let observed_without = run_parent_and_child(&runtime_without, &model_without).await;
 
     let model_with = Arc::new(ScriptedModel::new([]));
-    orchestrator_delegate_background_script(&model_with, None).await;
+    orchestrator_async_delegate_script(&model_with, None).await;
     add_child_script(&model_with).await;
     let (registry, _root) = registry_with_demo_skill();
     let runtime_with_skills = runtime_with(
