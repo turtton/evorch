@@ -7,6 +7,7 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "wait_reply",
     "inbox",
     "wait",
+    "run_output",
     "cancel",
     "list_agents",
     "inspect_agent",

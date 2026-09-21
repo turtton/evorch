@@ -13,6 +13,38 @@ struct RunArgs {
     run_id: String,
 }
 
+pub(super) fn run_output(
+    state: &LoopState,
+    runtime: &AgentRuntime,
+    input: serde_json::Value,
+) -> DispatchResult {
+    let args = match parse::<RunArgs>(input) {
+        Ok(args) => args,
+        Err(message) => return error(message),
+    };
+    let run_id = match parse_run_id(&args.run_id) {
+        Ok(run_id) => run_id,
+        Err(message) => return error(message),
+    };
+    match runtime.run_output(state.caller_run_id(), run_id) {
+        Ok(output) => serialize(&output),
+        Err(runtime_error) => {
+            let code = match &runtime_error {
+                crate::RuntimeError::UnknownRun { .. } => "unknown_run",
+                _ => "run_output_denied",
+            };
+            error(
+                serde_json::json!({
+                    "code": code,
+                    "run_id": args.run_id,
+                    "message": runtime_error.to_string(),
+                })
+                .to_string(),
+            )
+        }
+    }
+}
+
 pub(super) async fn wait(
     state: &mut LoopState,
     runtime: &AgentRuntime,

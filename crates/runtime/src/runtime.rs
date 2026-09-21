@@ -4,6 +4,7 @@ mod admission;
 mod cancellation;
 mod chat_restore;
 mod completion_relay;
+mod output;
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
@@ -125,6 +126,7 @@ struct RunEntry {
     parent: Option<RunId>,
     escalated_from: Option<RunId>,
     completion_relayed: bool,
+    terminal_reason: Option<String>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -822,6 +824,7 @@ impl AgentRuntime {
         lock_runs(&self.shared.runs).insert(
             run_id,
             RunEntry {
+                terminal_reason: None,
                 role,
                 name: name.clone(),
                 model,

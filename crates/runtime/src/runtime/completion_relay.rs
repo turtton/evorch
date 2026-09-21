@@ -42,6 +42,7 @@ impl AgentRuntime {
             },
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return,
         };
+        child.terminal_reason = reason.clone();
         child.phase_tx.send_replace(to);
         self.shared.bus.emit(Event::new(event));
         if child.completion_relayed {

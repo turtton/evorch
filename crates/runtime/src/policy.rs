@@ -14,6 +14,7 @@ pub const META_OPS: &[&str] = &[
     "send_message",
     "skill_load",
     "wait",
+    "run_output",
     "cancel",
     "list_agents",
     "inspect_agent",
@@ -245,6 +246,7 @@ mod tests {
             "send_message",
             "skill_load",
             "wait",
+            "run_output",
             "cancel",
             "list_agents",
             "inspect_agent",
@@ -259,7 +261,7 @@ mod tests {
             "submit_review",
         ];
 
-        assert_eq!(META_OPS.len(), 17);
+        assert_eq!(META_OPS.len(), 18);
         assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");

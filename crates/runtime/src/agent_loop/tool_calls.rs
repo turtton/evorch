@@ -842,11 +842,7 @@ pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpe
             input_schema: spec.input_schema,
         })
         .collect();
-    specs.extend(META_OPS.iter().map(|name| ToolSpec {
-        name: name.to_string(),
-        description: format!("{name} tool"),
-        input_schema: serde_json::json!({ "type": "object" }),
-    }));
+    specs.extend(META_OPS.iter().map(|name| crate::meta::tool_spec(name)));
     specs
 }
 

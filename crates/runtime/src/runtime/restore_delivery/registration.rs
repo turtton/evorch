@@ -76,6 +76,7 @@ impl AgentRuntime {
         runs.insert(
             run_id,
             RunEntry {
+                terminal_reason: None,
                 role,
                 name,
                 model,

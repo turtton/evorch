@@ -13,6 +13,8 @@ mod messaging;
 mod role_tests;
 mod runs;
 mod skills;
+mod specs;
+pub(crate) use specs::tool_spec;
 
 use agents::Role;
 use serde::Deserialize;
@@ -64,6 +66,7 @@ pub(crate) async fn dispatch(
         "ledger_append" => ledger::append(state, &runtime, input),
         "ledger_read" => ledger::read(state, &runtime, input),
         "wait" => runs::wait(state, &runtime, input).await,
+        "run_output" => runs::run_output(state, &runtime, input),
         "cancel" => runs::cancel(&runtime, input),
         "list_agents" => runs::list_agents(&runtime, input),
         "inspect_agent" => runs::inspect_agent(&runtime, input),
