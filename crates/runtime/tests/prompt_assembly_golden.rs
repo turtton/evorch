@@ -9,8 +9,7 @@ fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogErro
     SystemPromptCatalog::builder()
         .role_baseline(
             Role::Orchestrator,
-            "あなたは Orchestrator です。委譲と AgentRun 間メッセージによる調整を担い、\
-             mutation tool は持ちません (ADR 0002)。",
+            include_str!("../../config/assets/presets/role-orchestrator.md").trim_end(),
         )
         .role_baseline(
             Role::Explorer,
@@ -66,6 +65,40 @@ fn orchestrator_catalog() -> Result<SystemPromptCatalog, SystemPromptCatalogErro
 // Given: 完全なカタログ
 // When: Orchestrator / カテゴリなし / claude-opus-4-1 でシステムプロンプトを解決する
 // Then: Reviewer のトリガーは typed review 提出を含む正確なツール集合を公開する
+#[test]
+fn orchestrator_prompt_structure_matches_golden_fixture() {
+    // Given: the actual role preset and the reviewed golden structure.
+    let catalog = orchestrator_catalog().expect("catalog");
+    let expected = include_str!("golden/system_prompt_orchestrator.txt");
+    // When: assembling the orchestrator system prompt.
+    let prompt = catalog
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+        .expect("prompt");
+    // Then: section routing and the capability roster match without pinning prose.
+    let sections = |text: &str| {
+        text.lines()
+            .filter(|line| line.starts_with('#'))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sections(&prompt), sections(expected));
+    let tools = |text: &str| {
+        text.lines()
+            .find(|line| line.starts_with("- Orchestrator:"))
+            .expect("orchestrator roster")
+            .split(':')
+            .nth(2)
+            .expect("tools")
+            .split('/')
+            .next()
+            .expect("tool list")
+            .split(',')
+            .map(|tool| tool.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tools(&prompt), tools(expected));
+}
+
 #[test]
 fn orchestrator_prompt_exposes_typed_reviewer_tools() {
     let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
