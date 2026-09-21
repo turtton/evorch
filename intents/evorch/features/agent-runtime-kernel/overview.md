@@ -26,7 +26,7 @@ Agent Kernel
 - AgentRun 構造: id / role / category / skills / route / context / policy を持つ
 - Runtime 内部は event-driven とする（Started / MessageDelta / ReasoningDelta / ToolStarted / ToolCompleted / Delegated / BackgroundTaskStarted / BackgroundTaskCompleted / Usage / CacheStats / ProviderFallback / Completed / Failed）
 - GUI は Event Stream を購読する。UI と runtime が密結合しない
-- background agent を一級機能とする（delegate_background / send_message / wait / cancel）
+- background agent を一級機能とする（delegate（`background: bool` で背景起動を切替、既定 false は完了を待つ同期実行）/ send_message / wait / cancel）
 - Session より下に Task 境界を持ち、1 conversation = 1 task に固定しない長寿命 workspace とする
 
 ## v0.1 role 実行 runtime の実装確定（2026-08-30）
@@ -35,7 +35,7 @@ Agent Kernel
 
 - **capability 強制**: runtime は `RoleCapabilities` のみを消費し `Role` にマッチしない。Librarian / Oracle 追加は Role 定義 + capability 表の追加だけ（v0.2）
 - **independent context**: `AgentContext` は run タスク専有で、複数 AgentRun が同時並行動作
-- **background agent**: `delegate_background` / `send_message` / `wait` / `cancel` を `BackgroundTaskStarted` / `Completed` / `Cancelled` イベントで観測（GUI 非依存）
+- **background agent**: `delegate`（`background: true`）/ `send_message` / `wait` / `cancel` を `BackgroundTaskStarted` / `Completed` / `Cancelled` イベントで観測（GUI 非依存）
 - **routing 委譲境界**: `AgentModel` trait が role → model routing の境界。v01-routing-profiles（実装中）が本 trait を実装する
 - **orchestrator meta 操作**: 委譲系操作は ToolUse dispatch として runtime 内で処理
 
@@ -90,7 +90,7 @@ oh-my-pi（can1357/oh-my-pi）の参照は commit 51f0380 の調査に基づく�
 
 - `AgentRuntime::with_system_prompts(Arc<SystemPromptCatalog>)` / `with_config_prompts(&CatalogBuildInput)` で catalog を接続。`build_catalog` は `config::resolve_prompt_sources` を先行呼出し fail-closed（`PromptCompositionError{PresetResolution,Catalog}`、Display は name/path/key のみで本文・credential を含まない）とし、Ok 時のみ runtime に接続。
 - agent_loop は `AgentContext::new` 直後・push_user 前に `push_system`（Role::System 単一 Text）を run 開始時 1 回のみ挿入（Stable Prefix、全ターン byte-identical）。catalog 未接続時は v0.1 動作（User 先頭）を維持。
-- `RunConfig.category: Option<String>`、delegate/delegate_background args の category は固定 6 種で検証（`parse_category`、未知は model call 前に拒否）。
+- `RunConfig.category: Option<String>`、delegate args の category は固定 6 種で検証（`parse_category`、未知は model call 前に拒否）。委譲 meta op は単一 `delegate` tool に統合済みで、`role` は optional（既定 worker）、`background: bool`（既定 false は完了を待つ同期実行、true は run_id を即返す背景起動）、`interactive: true` は `background: true` を必須とする。
 
 ## v0.2 workspace 隔離の実装確定（issue #51、PR #52、2026-09-02）
 

@@ -90,7 +90,7 @@ Self Diagnostics / Self Improvement
 | **Provider-specific Compaction** | Provider ごとの compaction 実装。OpenAI / GPT 系では公式 Responses API の compaction を優先し、その他 provider は model-aware summarization を利用する。 |
 | **Task Boundary** | Session より下の境界。Session 内に Task A / Task B / Task C を持ち、各 task 間で compact できる。 |
 | **Persistent Memory** | Task / Session 終了時に Quick Agent が「将来も有用な知識」を抽出して保存するもの。次の Task boundary から Stable Prefix へ snapshot として含まれる。 |
-| **Background Agent** | Main Agent が `delegate_background` / `send_message` / `wait` / `cancel` できる独立した AgentRun。GUI 上でも可視化する。 |
+| **Background Agent** | Main Agent が `delegate`（`background: true` で背景起動、既定 false は完了を待つ同期実行）/ `send_message` / `wait` / `cancel` できる独立した AgentRun。GUI 上でも可視化する。 |
 | **Semantic UI API** | Agent から GUI を pixel surface として扱わせず、semantic object graph として expose する API。`ui.inspect`, `ui.find`, `ui.open_panel`, `ui.set_layout` など。 |
 | **Workspace Model** | GUI framework に依存しない data として保持される workspace 状態。Panel / LayoutNode の enum として表現される。 |
 | **DiagnosticBus** | Harness 内部の全 component が診断を送信する bus。ProviderProtocolViolation, CacheRegression, ToolCrash, SandboxViolation, AgentDeadlock, UiError, CompactionFailure, SessionCorruption, UnexpectedModelSwitch などを扱う。 |

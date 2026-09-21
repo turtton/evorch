@@ -14,13 +14,13 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 - **Team mode（opt-in、v0.7 Bundle E2）**: `ExecutionShape::Coordinated(DynamicTeam)` として実装する。root coordinator + 最大 3 worker、capability role、atomic task claim + lease / heartbeat、append-only finding log、artifact ownership、failure recovery、visibility。固定 leader/member workflow は採用しない（ADR 0001 遵守）。worker 同士の直接通信は許可するが必須ではない。単一 agent 代替ではなく、delegation value 明示時のみ有効
 - **役割別評価 / arena（v0.7 Bundle E4）**: role ごとに task type・model・prompt version・topology を測る評価系を導入する。同一 task / budget の arena、hard gate → Pareto → pairwise、train / validation / holdout / redteam 分割、failure attribution、promotion gate。結果は Router の model candidate へ段階的に反映する（観測のみ → 固定 arena → role matrix → optimizer → online feedback）
 
-- **Orchestrator の tool 制限**: delegate / delegate_background / send_message / wait / cancel / list_agents / inspect_agent / read / grep / git_diff / compact / finish のみ。write / edit / apply_patch / arbitrary shell / git commit は持たせない
+- **Orchestrator の tool 制限**: delegate / send_message / wait / cancel / list_agents / inspect_agent / read / grep / git_diff / compact / finish のみ（委譲は単一 `delegate` tool で、`background: bool`（既定 false は完了を待つ同期実行、true は即時 run_id 返却の背景起動）で切替、`role` は省略時 worker、`interactive: true` は `background: true` を必須とする）。write / edit / apply_patch / arbitrary shell / git commit は持たせない
 - **DelegationValue**: Expertise / Parallelism / ContextIsolation / IndependentReview / DifferentInformationSource / Scale。「複雑だから delegate」ではなく delegation に具体的価値を要求する
 - **Agent の5軸分解**: Agent Instance = Role + Category + Skills + Execution Policy + Route Policy
 
 ## v0.1 orchestration runtime の実装確定（2026-08-30）
 
-Orchestrator / Explorer / Worker / Reviewer の 4 role 実行と background agent が `crates/agents/` + `crates/runtime/` にコード確定（PR #16、issue #7）。capability boundary は ADR 0002 行列を `RoleCapabilities` で runtime レベル強制。Orchestrator の delegate / delegate_background / send_message / wait は meta 操作として ToolUse dispatch で処理され、event stream で観測可能。詳細は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) の確定節を参照。
+Orchestrator / Explorer / Worker / Reviewer の 4 role 実行と background agent が `crates/agents/` + `crates/runtime/` にコード確定（PR #16、issue #7）。capability boundary は ADR 0002 行列を `RoleCapabilities` で runtime レベル強制。Orchestrator の delegate（背景起動含む単一 tool）/ send_message / wait は meta 操作として ToolUse dispatch で処理され、event stream で観測可能。詳細は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) の確定節を参照。
 
 v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/runtime/src/network.rs` の写像から `BwrapConfig.allow_network` へ伝播する。`build_sandbox(&ExecutionPolicy, workspace)` が composition seam で、production composition root からの呼び出しは `v01-secure-tool-composition-root` / `v01-gui-runtime-wiring` が消費する。allow は full-open（destination filter 非対応、selective egress は v0.2）。
 
@@ -33,7 +33,7 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 ### 委譲ループ protocol
 
 1. **contract**: 親 orchestrator が goal + context の契約を作る（現行運用の `.opencode/<slice>-contract.md` 相当を run の入力として正式化）
-2. **background delegation**: `delegate_background` で worker run を起動する
+2. **background delegation**: `delegate` に `background: true` を指定して worker run を起動する（`role` 省略時は worker）
 3. **mid-run relay**: worker から親 orchestrator への完了前通知・質問・blocked 理由をメッセージとして中継する。現行運用の `[herdr-relay]` 相当で、配送は [agent-runtime-kernel](../agent-runtime-kernel/overview.md) v0.2 計画の配送语义（steering / aside / wake）に従う。実装確定（PR #48）: mid-run relay は lifecycle 完了通知と独立した durable channel（`AgentMessage` event → storage transcript）を使う
 4. **review / augment / merge**: 完了結果を review し、不足があれば追加委譲（augment）で補い、worktree の merge で収束する
 
