@@ -4,8 +4,8 @@
 //! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
 //! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
 //!
-//! Subscriber lag stays pending until an entry-producing thread boundary arrives.
-//! Quiet conversations may retain pending lag; frame-based flushes would split streams.
+//! Subscriber lag is diagnostic-only: the event bus reports each episode.
+//! Transcripts never retain lag residue or insert lag summaries into conversations.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,7 +31,6 @@ pub struct TranscriptRegistry {
     call_index: BTreeMap<String, String>,
     ambiguous_calls: BTreeSet<String>,
     compaction_checkpoints: BTreeSet<(String, String)>,
-    lag_accumulator: BTreeMap<u64, (u64, u64)>,
 }
 
 impl Default for TranscriptRegistry {
@@ -59,7 +58,6 @@ impl TranscriptRegistry {
             call_index: BTreeMap::new(),
             ambiguous_calls: BTreeSet::new(),
             compaction_checkpoints: BTreeSet::new(),
-            lag_accumulator: BTreeMap::new(),
         }
     }
 
@@ -150,17 +148,6 @@ impl TranscriptRegistry {
     }
 
     pub fn apply(&mut self, event: &Event) {
-        if let EventKind::Fault(event_bus::FaultEvent::SubscriberLagged {
-            subscriber_id,
-            skipped,
-        }) = &event.kind
-        {
-            let (skipped_total, episode_count) =
-                self.lag_accumulator.entry(*subscriber_id).or_default();
-            *skipped_total = skipped_total.saturating_add(*skipped);
-            *episode_count = episode_count.saturating_add(1);
-            return;
-        }
         if let EventKind::Compaction(event_bus::CompactionEvent::Compacted {
             run_id,
             checkpoint_id,
@@ -276,28 +263,6 @@ impl TranscriptRegistry {
                         Some(id) => self.threads.entry(id.clone()).or_default(),
                         None => &mut self.thread,
                     };
-                    if !self.lag_accumulator.is_empty()
-                        && !matches!(event.kind, EventKind::Message(_))
-                    {
-                        // Reuse projection rules without cloning the live transcript.
-                        let mut boundary = TranscriptModel::with_capacity(1);
-                        boundary.apply_thread(event, child_terminal);
-                        let creates_entry = boundary.entries().first().is_some_and(|entry| {
-                            matches!(event.kind, EventKind::Tool(ToolEvent::ToolStarted { .. }))
-                                || !matches!(entry, TranscriptEntry::Tool { call_id, .. }
-                                if model.entries().iter().any(|existing|
-                                    matches!(existing, TranscriptEntry::Tool { call_id: id, .. } if id == call_id)))
-                        });
-                        if creates_entry {
-                            for (subscriber, (total, episodes)) in
-                                std::mem::take(&mut self.lag_accumulator)
-                            {
-                                model.push_notice(format!(
-                                    "Subscriber {subscriber} skipped {total} events across {episodes} lag episodes"
-                                ));
-                            }
-                        }
-                    }
                     model.apply_thread(event, child_terminal);
                 }
                 TranscriptKey::Run(run_id) => {

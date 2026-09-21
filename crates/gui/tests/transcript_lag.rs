@@ -30,7 +30,7 @@ fn summary(text: &str) -> TranscriptEntry {
 }
 
 #[test]
-fn lag_episodes_coalesce_into_single_boundary_notice() {
+fn lag_episodes_never_interrupt_stream_or_add_boundary_notices() {
     // Given: root deltas interleaved with lag on an inactive owning thread.
     let mut registry = TranscriptRegistry::new();
     registry.bind_thread_root("owner", "root");
@@ -41,7 +41,7 @@ fn lag_episodes_coalesce_into_single_boundary_notice() {
     }
     // When: a child terminal event provides a thread boundary.
     registry.apply(&terminal("child", AgentRunPhase::Done));
-    // Then: only the resolved owner receives one summary, between message and boundary.
+    // Then: only the owner receives the intact message and legitimate boundary.
     assert!(registry.thread().entries().is_empty());
     registry.select_thread(Some("owner".into()));
     assert_eq!(
@@ -51,7 +51,6 @@ fn lag_episodes_coalesce_into_single_boundary_notice() {
                 text: "hello!".into(),
                 run_id: Some("root".into())
             },
-            summary("Subscriber 2 skipped 8 events across 2 lag episodes"),
             summary("subagent unknown (child) completed"),
         ]
     );
@@ -65,7 +64,7 @@ fn lag_episodes_coalesce_into_single_boundary_notice() {
 }
 
 #[test]
-fn lag_summary_precedes_terminal_notice() {
+fn multiple_subscribers_never_add_terminal_summaries() {
     // Given: lag for two independent subscribers.
     for phase in [AgentRunPhase::Done, AgentRunPhase::Error] {
         let mut registry = TranscriptRegistry::new();
@@ -74,7 +73,7 @@ fn lag_summary_precedes_terminal_notice() {
         registry.apply(&lag(2, 6));
         // When: a child terminates without a reason or a preceding start.
         registry.apply(&terminal("child", phase));
-        // Then: subscriber totals remain separate and directly precede the terminal notice.
+        // Then: only the legitimate terminal notice appears.
         let state = match phase {
             AgentRunPhase::Done => "completed",
             AgentRunPhase::Error => "failed",
@@ -82,18 +81,14 @@ fn lag_summary_precedes_terminal_notice() {
         };
         assert_eq!(
             registry.thread().entries(),
-            &[
-                summary("Subscriber 2 skipped 10 events across 2 lag episodes"),
-                summary("Subscriber 7 skipped 9 events across 1 lag episodes"),
-                summary(&format!("subagent unknown (child) {state}")),
-            ]
+            &[summary(&format!("subagent unknown (child) {state}")),]
         );
     }
 }
 
 #[test]
-fn post_flush_lag_starts_new_episode() {
-    // Given: one completed flush.
+fn repeated_boundaries_never_flush_lag_entries() {
+    // Given: a lag episode followed by a terminal boundary.
     let mut registry = TranscriptRegistry::new();
     registry.apply(&lag(2, 8));
     registry.apply(&terminal("first", AgentRunPhase::Done));
@@ -105,13 +100,11 @@ fn post_flush_lag_starts_new_episode() {
     ] {
         registry.apply(&event);
     }
-    // Then: counts restart and an empty accumulator adds nothing at the third boundary.
+    // Then: every boundary remains free of lag entries.
     assert_eq!(
         registry.thread().entries(),
         &[
-            summary("Subscriber 2 skipped 8 events across 1 lag episodes"),
             summary("subagent unknown (first) completed"),
-            summary("Subscriber 2 skipped 3 events across 1 lag episodes"),
             summary("subagent unknown (second) completed"),
             summary("subagent unknown (third) completed"),
         ]
@@ -119,7 +112,7 @@ fn post_flush_lag_starts_new_episode() {
 }
 
 #[test]
-fn lag_waits_through_non_entries_and_run_only_events() {
+fn lag_from_multiple_subscribers_leaves_reasoning_uninterrupted() {
     // Given: lag and a bound root whose Done event renders no entry.
     let mut registry = TranscriptRegistry::new();
     registry.bind_thread_root("owner", "root");
@@ -136,7 +129,7 @@ fn lag_waits_through_non_entries_and_run_only_events() {
             run_id: Some("root".into()),
             delta: "thinking".into(),
         }),
-        lag(2, 2),
+        lag(7, 2),
         Event::new(MessageEvent::ReasoningDelta {
             run_id: Some("root".into()),
             delta: " more".into(),
@@ -144,7 +137,7 @@ fn lag_waits_through_non_entries_and_run_only_events() {
     ] {
         registry.apply(&event);
     }
-    // Then: quiet residue stays pending and reasoning is not split.
+    // Then: diagnostic-only lag leaves one intact reasoning block.
     assert_eq!(
         registry.thread().entries(),
         &[TranscriptEntry::Reasoning {
@@ -155,7 +148,7 @@ fn lag_waits_through_non_entries_and_run_only_events() {
 }
 
 #[test]
-fn lag_waits_through_agent_messages_and_tool_updates() {
+fn lag_never_adds_entries_between_tool_updates_and_agent_messages() {
     use event_bus::{
         AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, ToolEvent,
     };
@@ -191,12 +184,20 @@ fn lag_waits_through_agent_messages_and_tool_updates() {
     }));
     registry.apply(&lag(2, 6));
     registry.apply(&started);
-    // Then: updates/delivery do not flush; the next actual entry does, even with a reused call ID.
-    assert!(matches!(registry.thread().entries(), [
-        TranscriptEntry::Tool { status: gui::model::transcript::ToolStatus::Succeeded, .. },
-        TranscriptEntry::Notice { text },
-        TranscriptEntry::Tool { status: gui::model::transcript::ToolStatus::Running, .. },
-    ] if text == "Subscriber 2 skipped 10 events across 2 lag episodes"));
+    // Then: only tool entries appear, even with a reused call ID.
+    assert!(matches!(
+        registry.thread().entries(),
+        [
+            TranscriptEntry::Tool {
+                status: gui::model::transcript::ToolStatus::Succeeded,
+                ..
+            },
+            TranscriptEntry::Tool {
+                status: gui::model::transcript::ToolStatus::Running,
+                ..
+            },
+        ]
+    ));
     for run in ["sender", "recipient"] {
         assert!(matches!(
             registry.run(run).unwrap().entries(),

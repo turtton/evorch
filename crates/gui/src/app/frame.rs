@@ -212,6 +212,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.bind_thread_run(thread_id, root_run_id);
                     self.transcripts.bind_thread_root(thread_id, root_run_id);
                 }
+                if let event_bus::OrchestratorEvent::ContinuationDispatched {
+                    trigger_run_id,
+                    new_run_id,
+                    ..
+                } = ev
+                    && let Some(thread) = self
+                        .sidebar
+                        .threads
+                        .iter()
+                        .find(|thread| thread.run_ids.iter().any(|run| run == trigger_run_id))
+                        .map(|thread| thread.id.to_string())
+                {
+                    self.bind_thread_run(&thread, new_run_id);
+                    self.transcripts.bind_thread_root(&thread, new_run_id);
+                }
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);
             }
         }
