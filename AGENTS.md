@@ -125,6 +125,14 @@ remove an entry only after verifying against a newer binary.
   → fill packet.yaml → `automation queue-seed-from-packet --execution-unit
   <id> --domain <d> --target-repo <r> --write`.
 
+## Compatibility policy (pre-v1)
+
+While evorch is v0.x, do NOT preserve backward compatibility of internal
+on-disk formats. Persisted layouts / panel registries / event or storage
+schemas may change freely (e.g. new `PanelKind` variants) without downgrade
+tolerance or migration layers. Old persistence may simply fail to load on a
+mismatch. Revisit this policy before cutting a v1 release.
+
 ## Wrong-host detection (G301)
 
 `.intent-cli/host-binding.toml` records the canonical host repo for this
