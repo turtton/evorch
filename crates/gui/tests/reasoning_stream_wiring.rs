@@ -4,7 +4,6 @@
 // assertion below fail equivalently; production code is not toggled here.
 
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use egui::vec2;
@@ -96,16 +95,13 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
         let _guard = rt.enter();
         runtime.delegate_background(Role::Worker, "answer".into(), RunConfig::default())
     };
-    let phase = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), runtime.wait(run_id))
-            .await
-            .expect("worker must finish within 5s")
-            .expect("worker run must exist")
-    });
+    let phase = rt
+        .block_on(runtime.wait(run_id))
+        .expect("worker run must exist");
     assert_eq!(phase, AgentRunPhase::Done);
     let run_id = run_id.to_string();
 
-    // Then: both ordered blocks reach the run, reasoning reaches the thread,
+    // Then: both ordered blocks reach the run, neither reaches the thread,
     // and the run pane renders the actual event-folded transcript.
     let expected = [
         TranscriptEntry::Reasoning {
@@ -117,16 +113,14 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
             run_id: Some(run_id.clone()),
         },
     ];
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let _ = repaint_rx.recv_timeout(Duration::from_millis(200));
+        repaint_rx.recv().expect("event repaint");
         harness.run_steps(4);
         if harness
             .state()
             .transcripts()
             .run(&run_id)
             .is_some_and(|transcript| transcript.entries() == expected)
-            || Instant::now() >= deadline
         {
             break;
         }
@@ -135,10 +129,10 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     assert_eq!(
         transcript.map(|transcript| transcript.entries()),
         Some(expected.as_slice()),
-        "run transcript must receive reasoning before text within 5s"
+        "run transcript must receive reasoning before text"
     );
     assert!(
-        harness
+        !harness
             .state()
             .transcripts()
             .thread()

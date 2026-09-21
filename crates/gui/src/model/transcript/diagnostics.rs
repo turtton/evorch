@@ -78,12 +78,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
                 text: format!("Skill {skill} ({scope}): {label} — {detail}"),
             })
         }
-        EventKind::Fault(FaultEvent::SubscriberLagged {
-            subscriber_id,
-            skipped,
-        }) => Some(TranscriptEntry::Notice {
-            text: format!("Subscriber {subscriber_id} lagged: skipped {skipped} events"),
-        }),
+        EventKind::Fault(FaultEvent::SubscriberLagged { .. }) => None,
         EventKind::Lifecycle(_)
         | EventKind::Ledger(_)
         | EventKind::Message(_)
@@ -117,7 +112,7 @@ mod tests {
         });
         // When
         let mut registry = crate::model::transcript_registry::TranscriptRegistry::default();
-        registry.bind_run("session", "owner");
+        registry.bind_thread_root("owner", "session");
         registry.select_thread(Some("other".into()));
         registry.apply(&event_bus::Event::new(event));
         // Then

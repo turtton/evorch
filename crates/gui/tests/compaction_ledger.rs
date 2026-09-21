@@ -48,7 +48,7 @@ fn compaction_survives_replay_without_loss_or_duplication() {
     let db = Database::open(&config).expect("reopen");
     let stored = db.events_all_ordered().expect("ordered events");
     let mut registry = TranscriptRegistry::new();
-    registry.bind_run("run-1", "thread-1");
+    registry.bind_thread_root("thread-1", "run-1");
     registry.select_thread(Some("other-thread".into()));
 
     // When: the same stored list is replayed twice into a fresh registry.

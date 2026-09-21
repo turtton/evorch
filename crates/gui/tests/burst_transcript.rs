@@ -160,6 +160,9 @@ fn burst_harness_detects_lag_with_tiny_capacity() {
 fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
     // Given: two interleaved runs, a real pump, and an independent watchdog.
     let mut harness = Harness::new();
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(&mut harness.state, "run_a");
     let mut expected: [Vec<String>; 2] = std::array::from_fn(|_| Vec::new());
     let mut received: [Vec<String>; 2] = std::array::from_fn(|_| Vec::new());
     let mut thread_expected = Vec::new();
@@ -172,7 +175,9 @@ fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
         let events = burst(tick);
         for i in 0..TOKENS_PER_TICK {
             let delta = format!("t{tick}-{i} ");
-            thread_expected.push(delta.clone());
+            if i % 2 == 0 {
+                thread_expected.push(delta.clone());
+            }
             expected[i % 2].push(delta);
         }
         let tick_start = Instant::now();
@@ -217,7 +222,7 @@ fn burst_1500_tokens_per_tick_reaches_transcript_without_drops() {
     }
     assert_eq!(
         transcript_text(harness.state.transcripts().thread()),
-        thread_expected[thread_expected.len().saturating_sub(10_000)..].concat()
+        thread_expected.concat()
     );
     assert!(elapsed < Duration::from_secs(30), "burst exceeded failsafe");
     latencies.sort_unstable();

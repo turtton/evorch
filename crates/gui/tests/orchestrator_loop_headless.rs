@@ -447,6 +447,34 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
     fixture.submit();
     fixture.wait_state(|state| state.loop_status().stage == Some(GoalStage::AwaitingMergeApproval));
 
+    let root = fixture
+        .event_snapshot()
+        .into_iter()
+        .find_map(|event| match event {
+            OrchestratorEvent::GoalCreated { root_run_id, .. } => Some(root_run_id),
+            _ => None,
+        })
+        .expect("root run");
+    let transcripts = fixture.harness.state().transcripts();
+    assert!(transcripts.run_ids().filter(|run| **run != root).any(|run| {
+        transcripts.run(run).expect("worker pane").entries().iter().any(|entry| {
+            matches!(entry, gui::model::transcript::TranscriptEntry::Message { run_id: Some(id), .. } if id == run)
+        })
+    }), "worker panes retain streamed output");
+    assert!(
+        transcripts
+            .thread()
+            .entries()
+            .iter()
+            .all(|entry| match entry {
+                gui::model::transcript::TranscriptEntry::Message { run_id, .. } =>
+                    run_id.as_ref() == Some(&root),
+                gui::model::transcript::TranscriptEntry::AgentMessage { .. } => false,
+                _ => true,
+            }),
+        "conversation excludes child streams and agent message bodies"
+    );
+
     // Then: every documented pre-approval stage occurred in order through one repair round.
     assert_stage_order(
         &fixture.event_snapshot(),

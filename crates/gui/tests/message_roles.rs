@@ -19,10 +19,13 @@ impl gui::model::tasks::AgentRunSource for Source {
 }
 
 #[test]
-fn conversation_renders_each_speakers_role() {
+fn conversation_renders_only_root_speakers_role() {
     // Given: two known speakers in a real workbench conversation.
     let mut state =
         gui::app::WorkbenchState::new(Source, &workspace_ui::UiSettings::default()).unwrap();
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(&mut state, "run-1");
     state.apply_events([
         Event::new(MessageEvent::MessageDelta {
             delta: "Plan".into(),
@@ -36,9 +39,22 @@ fn conversation_renders_each_speakers_role() {
     let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
     // When: the conversation pane renders.
     harness.run();
-    // Then: the message and reasoning each expose their own speaker's role.
+    // Then: only the root's role appears in the conversation.
     assert!(harness.has_label("[orchestrator]"));
-    assert!(harness.has_label("[worker]"));
+    assert!(!harness.has_label("[worker]"));
+    assert!(!harness.has_label("Consider"));
+    assert_eq!(
+        harness
+            .state()
+            .transcripts()
+            .run("run-2")
+            .unwrap()
+            .entries(),
+        &[gui::model::transcript::TranscriptEntry::Reasoning {
+            text: "Consider".into(),
+            run_id: Some("run-2".into())
+        }]
+    );
     if let Some(path) = std::env::var_os("ROLE_BADGE_EVIDENCE") {
         harness
             .capture()

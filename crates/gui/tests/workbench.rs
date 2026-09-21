@@ -194,6 +194,9 @@ fn transcript_text_appears_after_bus_event() {
         .expect("default state builds")
         .with_pump(pump);
     let mut harness = build_harness(state);
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(harness.state_mut(), "run-1");
     harness.run_steps(4);
 
     // When: a message delta is emitted and forwarded

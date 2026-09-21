@@ -77,6 +77,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }) = &stored.event.kind
             {
                 self.bind_thread_run(thread_id, root_run_id);
+                self.transcripts.bind_thread_root(thread_id, root_run_id);
             }
             while messages
                 .peek()
@@ -110,6 +111,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                 if let Some(owner) = owner {
                     self.bind_thread_run(&owner, run_id);
+                    if parent_run_id.is_none() {
+                        self.transcripts.bind_thread_root(&owner, run_id);
+                    }
                 }
             }
             self.transcripts.select_thread(None);

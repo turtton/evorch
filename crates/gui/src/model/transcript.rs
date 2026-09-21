@@ -2,6 +2,7 @@ use event_bus::{AgentMessageKind, CompactionReason, Event};
 
 mod compaction;
 mod diagnostics;
+mod lifecycle;
 mod thinking;
 
 #[cfg(test)]
@@ -80,6 +81,7 @@ pub struct TranscriptModel {
     view_len: usize,
     first_entry_id: usize,
     thinking: std::collections::BTreeMap<Option<String>, usize>,
+    agent_names: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for TranscriptModel {
@@ -101,6 +103,7 @@ impl TranscriptModel {
             view_len: capacity,
             first_entry_id: 0,
             thinking: std::collections::BTreeMap::new(),
+            agent_names: std::collections::BTreeMap::new(),
         }
     }
 
@@ -165,6 +168,12 @@ impl TranscriptModel {
             return;
         }
         match &event.kind {
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
+                run_id, parent_run_id: Some(_), agent_name, ..
+            }) => {
+                self.agent_names.insert(run_id.clone(), agent_name.clone());
+                self.push_notice(format!("subagent {agent_name} ({run_id}) started"));
+            }
             event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
@@ -184,6 +193,13 @@ impl TranscriptModel {
             ) => self.push(TranscriptEntry::Error {
                 text: format!("Run failed: {reason}"),
             }),
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, ..
+            }) if self.agent_names.contains_key(run_id) => {
+                if let Some(entry) = self.terminal_notice(event) {
+                    self.push(entry);
+                }
+            }
             event_bus::EventKind::Message(message) => self.append_text(message),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,

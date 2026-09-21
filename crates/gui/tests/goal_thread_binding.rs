@@ -200,9 +200,9 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         gui.has_label("cache 100%"),
         "missing status line cache 100%"
     );
-    for run in &runs {
-        assert!(gui.has_label(&format!("content-{run}")));
-        assert!(
+    for (index, run) in runs.iter().enumerate() {
+        assert_eq!(gui.has_label(&format!("content-{run}")), index == 0);
+        assert_eq!(
             gui.state()
                 .transcript()
                 .entries()
@@ -211,7 +211,11 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
                     entry,
                     gui::model::transcript::TranscriptEntry::Tool { tool_name, .. }
                         if tool_name == &format!("tool-{run}")
-                ))
+                )),
+            index == 0
         );
+        assert!(gui.state().transcripts().run(run).unwrap().entries().iter().any(|entry|
+            matches!(entry, gui::model::transcript::TranscriptEntry::Message { text, .. }
+                if text == &format!("content-{run}"))));
     }
 }

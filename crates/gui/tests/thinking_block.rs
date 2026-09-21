@@ -193,6 +193,9 @@ fn thinking_stays_closed_when_more_deltas_arrive_after_manual_collapse() {
 fn thinking_completion_is_scoped_to_its_run_through_registry() {
     // Given: concurrent runs with separate live reasoning.
     let mut registry = gui::model::transcript_registry::TranscriptRegistry::new();
+    registry.bind_thread_root("thread", "run-2");
+    registry.bind_run("run-1", "thread");
+    registry.select_thread(Some("thread".into()));
     for run in ["run-1", "run-2"] {
         registry.apply(&Event::new(MessageEvent::ReasoningDelta {
             run_id: Some(run.into()),
@@ -206,9 +209,9 @@ fn thinking_completion_is_scoped_to_its_run_through_registry() {
         to: AgentRunPhase::Done,
         reason: None,
     }));
-    // Then: both the thread and run projections close only that run.
-    assert!(!registry.thread().thinking_is_streaming(0));
-    assert!(registry.thread().thinking_is_streaming(1));
+    // Then: the non-root completion leaves the root's reasoning live.
+    assert!(registry.thread().thinking_is_streaming(0));
+    assert_eq!(registry.thread().entries().len(), 2);
     assert!(!registry.run("run-1").unwrap().thinking_is_streaming(0));
     assert!(registry.run("run-2").unwrap().thinking_is_streaming(0));
 }

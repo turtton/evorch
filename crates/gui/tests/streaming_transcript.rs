@@ -2,6 +2,13 @@ use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent};
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::TranscriptRegistry;
 
+fn root_registry() -> TranscriptRegistry {
+    let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("thread", "stream");
+    registry.select_thread(Some("thread".into()));
+    registry
+}
+
 fn message(delta: &str) -> Event {
     Event::new(MessageEvent::MessageDelta {
         delta: delta.into(),
@@ -19,7 +26,7 @@ fn reasoning(delta: &str) -> Event {
 #[test]
 fn interleaved_text_reasoning_deltas_render_in_order() {
     // Given: arrival order differs from canonical reasoning-first grouping.
-    let mut registry = TranscriptRegistry::new();
+    let mut registry = root_registry();
     let events = [
         reasoning(""),
         message("First"),
@@ -88,7 +95,7 @@ fn delta_stream_final_state_matches_snapshot() {
         text: canonical_message.into(),
         run_id: Some("stream".into()),
     }];
-    let mut registry = TranscriptRegistry::new();
+    let mut registry = root_registry();
 
     // When: the complete stream arrives without replaying the final response.
     for event in [
@@ -143,7 +150,7 @@ fn failed_or_cancelled_stream_keeps_partial_display() {
             },
         ),
     ] {
-        let mut registry = TranscriptRegistry::new();
+        let mut registry = root_registry();
         registry.apply(&reasoning("partial thought"));
         registry.apply(&message("partial answer"));
 
@@ -182,7 +189,7 @@ fn retries_exhausted_keeps_partial_display_with_one_terminal_error() {
         }),
     }
     .to_string();
-    let mut registry = TranscriptRegistry::new();
+    let mut registry = root_registry();
     registry.apply(&reasoning("partial thought"));
     registry.apply(&message("partial answer"));
 
@@ -208,7 +215,7 @@ fn retries_exhausted_keeps_partial_display_with_one_terminal_error() {
 #[test]
 fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
     // Given: ストリームの部分表示を持つrunがある。
-    let mut registry = TranscriptRegistry::new();
+    let mut registry = root_registry();
     registry.apply(&message("partial"));
 
     // When: 終端ではなく試行単位のTransport失敗を受信する。

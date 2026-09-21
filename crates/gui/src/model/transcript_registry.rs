@@ -3,6 +3,9 @@
 //! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら thread と
 //! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
 //! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
+//!
+//! Subscriber lag stays pending until an entry-producing thread boundary arrives.
+//! Quiet conversations may retain pending lag; frame-based flushes would split streams.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,10 +26,12 @@ pub struct TranscriptRegistry {
     threads: BTreeMap<String, TranscriptModel>,
     active_thread: Option<String>,
     run_threads: BTreeMap<String, String>,
+    thread_roots: BTreeMap<String, String>,
     runs: BTreeMap<String, TranscriptModel>,
     call_index: BTreeMap<String, String>,
     ambiguous_calls: BTreeSet<String>,
     compaction_checkpoints: BTreeSet<(String, String)>,
+    lag_accumulator: BTreeMap<u64, (u64, u64)>,
 }
 
 impl Default for TranscriptRegistry {
@@ -49,10 +54,12 @@ impl TranscriptRegistry {
             threads: BTreeMap::new(),
             active_thread: None,
             run_threads: BTreeMap::new(),
+            thread_roots: BTreeMap::new(),
             runs: BTreeMap::new(),
             call_index: BTreeMap::new(),
             ambiguous_calls: BTreeSet::new(),
             compaction_checkpoints: BTreeSet::new(),
+            lag_accumulator: BTreeMap::new(),
         }
     }
 
@@ -69,7 +76,7 @@ impl TranscriptRegistry {
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
             EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
-                vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())]
+                self.route_run(run_id)
             }
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             EventKind::Snapshot(snapshot) => vec![TranscriptKey::Run(snapshot.run_id.clone())],
@@ -78,8 +85,20 @@ impl TranscriptRegistry {
             }
             EventKind::Diagnostic(event) => event.run_id.as_ref().map_or_else(
                 || vec![TranscriptKey::Thread],
-                |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                |run_id| self.route_run(run_id),
             ),
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
+                run_id,
+                parent_run_id,
+                ..
+            }) => {
+                let mut route = Vec::new();
+                if parent_run_id.is_some() {
+                    route.push(TranscriptKey::Thread);
+                }
+                route.push(TranscriptKey::Run(run_id.clone()));
+                route
+            }
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
                 to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error,
@@ -91,37 +110,34 @@ impl TranscriptRegistry {
             }
             EventKind::Provider(event_bus::ProviderEvent::FallbackTriggered {
                 session_id, ..
-            }) => {
-                vec![
-                    TranscriptKey::Thread,
-                    TranscriptKey::Run(session_id.clone()),
-                ]
-            }
+            }) => self.route_run(session_id),
             EventKind::Provider(event_bus::ProviderEvent::RequestFailed { run_id, .. }) => {
                 match run_id {
-                    Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                    Some(run_id) => self.route_run(run_id),
                     None => vec![TranscriptKey::Thread],
                 }
             }
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
-                Some(run_id) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                Some(run_id) => self.route_run(run_id),
                 None => Vec::new(),
             },
             EventKind::Tool(ToolEvent::ToolStarted { run_id, .. })
             | EventKind::Tool(ToolEvent::ToolCompleted { run_id, .. }) => {
                 run_id.as_ref().map_or_else(
                     || vec![TranscriptKey::Thread],
-                    |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+                    |run_id| self.route_run(run_id),
                 )
             }
             EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. })
             | EventKind::Tool(ToolEvent::ApprovalResolved { call_id, .. })
             | EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => {
-                self.call_index.get(call_id).map_or_else(
-                    || vec![TranscriptKey::Thread],
-                    |run_id| vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
-                )
+                self.run_for_call(call_id)
+                    .or_else(|| self.call_index.get(call_id).map(String::as_str))
+                    .map_or_else(
+                        || vec![TranscriptKey::Thread],
+                        |run_id| self.route_run(run_id),
+                    )
             }
             EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => vec![
                 TranscriptKey::Run(message.sender_run_id.clone()),
@@ -135,6 +151,17 @@ impl TranscriptRegistry {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        if let EventKind::Fault(event_bus::FaultEvent::SubscriberLagged {
+            subscriber_id,
+            skipped,
+        }) = &event.kind
+        {
+            let (skipped_total, episode_count) =
+                self.lag_accumulator.entry(*subscriber_id).or_default();
+            *skipped_total = skipped_total.saturating_add(*skipped);
+            *episode_count = episode_count.saturating_add(1);
+            return;
+        }
         if let EventKind::Compaction(event_bus::CompactionEvent::Compacted {
             run_id,
             checkpoint_id,
@@ -234,18 +261,46 @@ impl TranscriptRegistry {
             })
         });
         let attributed = route.iter().any(|key| matches!(key, TranscriptKey::Run(_)));
+        let child_terminal = matches!(&event.kind,
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })
+                if !self.is_thread_root(run_id));
         for key in route {
             match key {
-                TranscriptKey::Thread => match owner.as_ref().or({
-                    if attributed {
-                        None
-                    } else {
-                        self.active_thread.as_ref()
+                TranscriptKey::Thread => {
+                    let model = match owner.as_ref().or({
+                        if attributed {
+                            None
+                        } else {
+                            self.active_thread.as_ref()
+                        }
+                    }) {
+                        Some(id) => self.threads.entry(id.clone()).or_default(),
+                        None => &mut self.thread,
+                    };
+                    if !self.lag_accumulator.is_empty()
+                        && !matches!(event.kind, EventKind::Message(_))
+                    {
+                        // Reuse projection rules without cloning the live transcript.
+                        let mut boundary = TranscriptModel::with_capacity(1);
+                        boundary.apply_thread(event, child_terminal);
+                        let creates_entry = boundary.entries().first().is_some_and(|entry| {
+                            matches!(event.kind, EventKind::Tool(ToolEvent::ToolStarted { .. }))
+                                || !matches!(entry, TranscriptEntry::Tool { call_id, .. }
+                                if model.entries().iter().any(|existing|
+                                    matches!(existing, TranscriptEntry::Tool { call_id: id, .. } if id == call_id)))
+                        });
+                        if creates_entry {
+                            for (subscriber, (total, episodes)) in
+                                std::mem::take(&mut self.lag_accumulator)
+                            {
+                                model.push_notice(format!(
+                                    "Subscriber {subscriber} skipped {total} events across {episodes} lag episodes"
+                                ));
+                            }
+                        }
                     }
-                }) {
-                    Some(id) => self.threads.entry(id.clone()).or_default().apply(event),
-                    None => self.thread.apply(event),
-                },
+                    model.apply_thread(event, child_terminal);
+                }
                 TranscriptKey::Run(run_id) => {
                     self.runs.entry(run_id).or_default().apply(event);
                 }
@@ -285,6 +340,27 @@ impl TranscriptRegistry {
         self.run_threads.insert(run.into(), thread.into());
     }
 
+    pub fn bind_thread_root(&mut self, thread: &str, run: &str) {
+        self.bind_run(run, thread);
+        self.thread_roots.insert(thread.into(), run.into());
+    }
+
+    fn is_thread_root(&self, run: &str) -> bool {
+        self.run_threads
+            .get(run)
+            .and_then(|thread| self.thread_roots.get(thread))
+            .is_some_and(|root| root == run)
+    }
+
+    fn route_run(&self, run: &str) -> Vec<TranscriptKey> {
+        let mut route = Vec::new();
+        if self.is_thread_root(run) {
+            route.push(TranscriptKey::Thread);
+        }
+        route.push(TranscriptKey::Run(run.into()));
+        route
+    }
+
     pub fn run(&self, run_id: &str) -> Option<&TranscriptModel> {
         self.runs.get(run_id)
     }
@@ -295,6 +371,12 @@ impl TranscriptRegistry {
 }
 
 // allow: SIZE_OK - issue #85 keeps routing regressions beside the existing registry tests.
+#[cfg(test)]
+mod root_tests;
+
+#[cfg(test)]
+mod approval_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +391,8 @@ mod tests {
     fn run_error_routes_to_owning_thread() {
         // Given: an attributed run failure.
         let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("thread", "run-error");
+        registry.select_thread(Some("thread".into()));
         let event = Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-error".into(),
             from: AgentRunPhase::Running,
@@ -384,9 +468,10 @@ mod tests {
     }
 
     #[test]
-    fn route_attributed_delta_to_thread_and_run() {
+    fn root_run_delta_reaches_thread_and_run() {
         // Given: both stream variants carry an explicit run attribution.
-        let registry = TranscriptRegistry::new();
+        let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("thread", "run-2");
         let events = [
             MessageEvent::MessageDelta {
                 delta: "hello".into(),
@@ -409,6 +494,7 @@ mod tests {
     #[test]
     fn route_tool_events_by_run_id_and_index_call_id() {
         let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("thread", "run-1");
         let started = Event::new(ToolEvent::ToolStarted {
             input: None,
             tool_name: "read".into(),
@@ -465,6 +551,7 @@ mod tests {
     #[test]
     fn approval_events_follow_call_index_else_thread() {
         let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("thread", "run-2");
         registry.apply(&Event::new(ToolEvent::ToolStarted {
             input: None,
             tool_name: "write".into(),
@@ -544,6 +631,6 @@ mod tests {
                 }]
             );
         }
-        assert_eq!(registry.thread().entries().len(), 3);
+        assert_eq!(registry.thread().entries(), &[]);
     }
 }

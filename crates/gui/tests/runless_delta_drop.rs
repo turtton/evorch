@@ -89,6 +89,9 @@ fn runless_delta_is_dropped_and_warned_even_when_one_run_is_running() {
 fn attributed_delta_display_is_unchanged_after_mirror_removal() {
     // Given: one Running run.
     let mut state = sole_running_state();
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(&mut state, "run-1");
 
     // When: both stream variants explicitly target that run.
     state.apply_events([

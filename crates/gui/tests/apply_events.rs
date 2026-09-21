@@ -10,6 +10,8 @@ use gui::model::tasks::AgentRunSource;
 use gui::model::transcript::TranscriptEntry;
 use runtime::{AgentSummary, RunId};
 use workspace_ui::{ThreadRunPhase, UiSettings};
+#[path = "support/thread_root.rs"]
+mod thread_root;
 
 #[derive(Clone)]
 struct MockSource(Vec<AgentSummary>);
@@ -21,6 +23,7 @@ fn apply_events_surfaces_provider_failures_in_chat() {
     let mut state = WorkbenchState::new(MockSource(vec![]), &UiSettings::default()).expect("state");
     state.add_project(dir.path()).expect("project");
     state.create_thread("provider-errors").expect("thread");
+    thread_root::bind_root(&mut state, "run-provider");
     let failures = [
         event_bus::ProviderFailureKind::RateLimited,
         event_bus::ProviderFailureKind::Auth,
@@ -84,6 +87,7 @@ fn apply_events_surfaces_run_error_in_owning_thread() {
     harness.click_label("Send");
     harness.run();
     assert!(harness.has_label("You: hello"));
+    thread_root::bind_root(harness.state_mut(), "run-error");
     // When: the submitted run fails.
     harness.state_mut().apply_events([
         run_started("run-error", "orchestrator", "orchestrator"),
@@ -110,6 +114,7 @@ fn apply_events_folds_lifecycle_and_message_into_thread_transcript() {
     .expect("default state builds");
     state.add_project(dir.path()).expect("project added");
     state.create_thread("thread-1").expect("thread created");
+    thread_root::bind_root(&mut state, "run-1");
 
     // When: lifecycle and message events are folded synchronously.
     state.apply_events(vec![
@@ -203,7 +208,7 @@ fn attributed_deltas_route_to_their_own_run_under_concurrency() {
         }),
     ]);
 
-    // Then: runs remain isolated and the thread retains all text in arrival order.
+    // Then: runs remain isolated and unbound runs never enter the conversation.
     assert_eq!(
         state
             .transcripts()
@@ -238,27 +243,7 @@ fn attributed_deltas_route_to_their_own_run_under_concurrency() {
             },
         ]
     );
-    assert_eq!(
-        state.transcripts().thread().entries(),
-        &[
-            TranscriptEntry::Message {
-                text: "m1".into(),
-                run_id: Some("run-1".into())
-            },
-            TranscriptEntry::Reasoning {
-                text: "r2".into(),
-                run_id: Some("run-2".into())
-            },
-            TranscriptEntry::Reasoning {
-                text: "r1".into(),
-                run_id: Some("run-1".into())
-            },
-            TranscriptEntry::Message {
-                text: "m2".into(),
-                run_id: Some("run-2".into())
-            },
-        ]
-    );
+    assert_eq!(state.transcripts().thread().entries(), &[]);
 }
 
 #[test]

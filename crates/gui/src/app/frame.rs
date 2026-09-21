@@ -167,12 +167,27 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if let Some(chat) = agent_name.strip_prefix("chat:") {
                     let thread = chat.split_once(':').map_or(chat, |(_, thread)| thread);
                     self.bind_thread_run(thread, run_id);
+                    self.transcripts.bind_thread_root(thread, run_id);
                 } else {
                     self.attach_run(run_id, parent_run_id.as_deref());
+                    self.open_subagent_pane(run_id);
                 }
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));
+                match to {
+                    AgentRunPhase::Done | AgentRunPhase::Error => {
+                        let has_pane = self
+                            .dock
+                            .find_tab(&PanelId::new(format!("agent-{run_id}")))
+                            .is_some();
+                        let known_conversation = self.is_conversation_run(run_id);
+                        if has_pane || !known_conversation {
+                            self.park_completed_subagent(run_id);
+                        }
+                    }
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {}
+                }
             }
             EventKind::Lifecycle(_)
             | EventKind::Ledger(_)
@@ -195,6 +210,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 } = ev
                 {
                     self.bind_thread_run(thread_id, root_run_id);
+                    self.transcripts.bind_thread_root(thread_id, root_run_id);
                 }
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);
             }

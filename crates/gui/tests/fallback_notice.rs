@@ -12,6 +12,9 @@ impl AgentRunSource for EmptySource {
 fn fallback_notice_is_visible_in_real_conversation() {
     // Given
     let mut state = WorkbenchState::new(EmptySource, &workspace_ui::UiSettings::default()).unwrap();
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(&mut state, "session");
     // When
     state.apply_events([Event::new(ProviderEvent::FallbackTriggered {
         from_provider: "kimi".into(),

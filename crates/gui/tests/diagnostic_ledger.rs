@@ -40,6 +40,7 @@ fn diagnostic_survives_storage_replay_and_is_visible_in_owning_thread() {
     let db = Database::open(&config).expect("reopen");
     let stored = db.events_all_ordered().expect("ordered events");
     let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("thread-1", "run-1");
     registry.select_thread(Some("other-thread".into()));
     for event in &stored {
         registry.apply(&event.event);

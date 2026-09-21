@@ -122,6 +122,9 @@ fn clicking_agent_row_drills_center_into_its_transcript_and_back() {
         summary(1, "worker-one", "worker"),
         summary(2, "reviewer-two", "reviewer"),
     ]);
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(fixture.workbench.state_mut(), "run-1");
     fixture.emit(Event::new(MessageEvent::MessageDelta {
         delta: "thread-only text".into(),
         run_id: Some("run-1".into()),

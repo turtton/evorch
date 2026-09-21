@@ -78,6 +78,8 @@ fn tool_card_pending_shows_spinner_and_no_output() {
 fn tool_card_pending_is_visible_when_collapsed() {
     // Given: the same run-scoped event used by the production GUI.
     let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("thread", "run-1");
+    registry.select_thread(Some("thread".into()));
     // When: it reaches the main thread before completion.
     registry.apply(&started());
     let harness = harness(registry.thread().clone());

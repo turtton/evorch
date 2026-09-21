@@ -168,10 +168,7 @@ fn ambiguous_fallback_stays_unresolved_while_route_keeps_latest_run() {
         state.apply_events([event]);
         // Then: only notification resolution fails closed; transcript routing is unchanged.
         assert_eq!(state.notifications().items().next().unwrap().run_id, None);
-        assert_eq!(
-            route,
-            vec![TranscriptKey::Thread, TranscriptKey::Run("run-3".into())]
-        );
+        assert_eq!(route, vec![TranscriptKey::Run("run-3".into())]);
     }
 }
 

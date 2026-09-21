@@ -22,7 +22,7 @@ fn ledger_routes_to_its_run_without_transcript_content() {
 }
 
 #[test]
-fn restored_routes_like_non_error_run_lifecycle() {
+fn restored_stays_silent_while_started_routes_to_run() {
     // Given: a restored run and the existing non-error run lifecycle routing.
     let registry = TranscriptRegistry::new();
     let started = Event::new(LifecycleEvent::AgentRunStarted {
@@ -39,5 +39,9 @@ fn restored_routes_like_non_error_run_lifecycle() {
     // When: routing the restored event.
     let route = registry.route(&restored);
     // Then: restoration follows the existing lifecycle policy.
-    assert_eq!(route, registry.route(&started));
+    assert_eq!(route, vec![]);
+    assert_eq!(
+        registry.route(&started),
+        vec![TranscriptKey::Run("run-1".into())]
+    );
 }

@@ -95,7 +95,7 @@ fn fault_skill_diagnostic_becomes_error() {
 }
 
 #[test]
-fn fault_subscriber_lagged_becomes_notice() {
+fn subscriber_lagged_renders_no_inline_notice() {
     // Given: a subscriber lost events.
     let mut registry = TranscriptRegistry::new();
     let event = Event::new(FaultEvent::SubscriberLagged {
@@ -104,14 +104,12 @@ fn fault_subscriber_lagged_becomes_notice() {
     });
     // When: the infrastructure fault is applied.
     registry.apply(&event);
-    // Then: only the thread receives a notice identifying the loss.
+    let mut model = TranscriptModel::new();
+    model.apply(&event);
+    // Then: neither direct projection nor routing renders an inline notice.
     assert_eq!(registry.route(&event), vec![TranscriptKey::Thread]);
-    assert_eq!(
-        registry.thread().entries(),
-        &[TranscriptEntry::Notice {
-            text: "Subscriber 7 lagged: skipped 12 events".into(),
-        }]
-    );
+    assert!(model.entries().is_empty());
+    assert!(registry.thread().entries().is_empty());
     assert_eq!(registry.run_ids().count(), 0);
 }
 
@@ -119,6 +117,8 @@ fn fault_subscriber_lagged_becomes_notice() {
 fn registry_routes_request_failed_with_run_id_to_thread_and_run() {
     // Given: an attributed provider failure.
     let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("thread", "run-1");
+    registry.select_thread(Some("thread".into()));
     let event = failed(ProviderFailureKind::Auth, Some("run-1"));
     // When: routing and applying the event.
     let routes = registry.route(&event);

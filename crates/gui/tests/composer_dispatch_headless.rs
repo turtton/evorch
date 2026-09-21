@@ -269,6 +269,9 @@ fn chat_send_renders_agent_reply() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
     submit(&mut harness, "hello agent");
+    #[path = "support/thread_root.rs"]
+    mod thread_root;
+    thread_root::bind_root(harness.state_mut(), "chat-1");
     // When: the attributed reply arrives through the event fold.
     harness
         .state_mut()
