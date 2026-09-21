@@ -33,9 +33,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 runtime::AgentModel::selected_model(model.as_ref(), role, None)
             });
         self.ownership_ui(ui);
-        self.panels.retain(|panel_id, _| {
-            !panel_id.as_str().starts_with("agent-run-") || self.dock.find_tab(panel_id).is_some()
+        let mut subagent_closed = false;
+        self.panels.retain(|panel_id, panel| {
+            let retained = !panel_id.as_str().starts_with("agent-run-")
+                || self.dock.find_tab(panel_id).is_some();
+            subagent_closed |= !retained
+                && matches!(
+                    panel.kind,
+                    workspace_ui::PanelKind::SubagentTranscript
+                        | workspace_ui::PanelKind::ParkedAgentTranscript(_)
+                );
+            retained
         });
+        if subagent_closed {
+            self.equalize_subagent_panes();
+        }
         let ctx = ui.ctx().clone();
         self.observe_attention();
         let mut sidebar_action = None;

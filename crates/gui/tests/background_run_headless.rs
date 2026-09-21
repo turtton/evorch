@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[path = "background_run_headless/equalization.rs"]
+mod equalization;
+
 #[test]
 fn floating_completion_returns_to_main_region() {
     let temp = tempfile::tempdir().expect("temp");
