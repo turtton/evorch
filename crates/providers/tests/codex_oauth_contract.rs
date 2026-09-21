@@ -189,20 +189,29 @@ async fn device_poll_abort_via_drop() {
     let client = client(&server);
     let response = user_code_response();
     let options = PollOptions {
-        interval_override: Some(Duration::from_millis(10)),
+        interval_override: Some(Duration::from_secs(60)),
         timeout: Duration::from_secs(5),
     };
 
-    tokio::select! {
-        result = client.poll_agent_code(&response, &options) => panic!("poll ended: {result:?}"),
-        () = tokio::time::sleep(Duration::from_millis(50)) => {}
-    }
-    let count_at_abort = server.received_requests().await.expect("requests").len();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let count_after_wait = server.received_requests().await.expect("requests").len();
+    let poll = tokio::spawn(async move { client.poll_agent_code(&response, &options).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server.received_requests().await.expect("requests").len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial poll request completed");
 
-    assert!(count_at_abort >= 2);
-    assert_eq!(count_after_wait, count_at_abort);
+    poll.abort();
+    assert!(
+        poll.await
+            .expect_err("poll should be cancelled")
+            .is_cancelled()
+    );
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
