@@ -120,10 +120,11 @@ pub(super) async fn run_calls_in_batches(
     let model = Arc::new(ScriptedModel::new(script));
     let runtime = AgentRuntime::new(bus, Arc::new(executor), model.clone());
     let run = runtime.delegate_background(Role::Worker, "budget".into(), config);
-    let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(run))
-        .await
-        .expect("completion deadline")
-        .expect("wait");
+    // 完了検知はランタイムの wait に委譲し、テスト内には壁時計デッドラインを持たない。
+    // 固定 timeout は共有 CI ランナーの負荷変動で正当な実行時間を超過し flaky になる
+    // (実績: 正常時 2.5s / 負荷時 10.3s)。ハング検知は nextest の
+    // slow-timeout / terminate-after (.config/nextest.toml) が担う。
+    let phase = runtime.wait(run).await.expect("wait");
     let mut events = Vec::new();
     loop {
         let event = receiver.recv().await.expect("event");

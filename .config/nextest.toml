@@ -1,3 +1,8 @@
 [profile.default]
 fail-fast = false
 retries = 0
+
+# ハング検知はテスト内の壁時計ではなくランナー側に集約する。
+# 共有 CI ランナーの負荷で正当なテストが遅延しても失敗にしないため
+# period を大きく取り、その後の terminate のみを担う。
+slow-timeout = { period = "180s", terminate-after = 1, grace-period = "30s" }
