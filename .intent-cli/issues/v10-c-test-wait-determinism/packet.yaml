@@ -1,0 +1,57 @@
+implementation_issue_packet:
+  issue_title: "v10-c: test wait determinism — purge wall-clock waits from test fixtures"
+  issue_kind: tech-debt
+  source_execution_unit: v10-c-test-wait-determinism
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: crates/*/tests, crates/*/tests/support
+  target_part: "テストフィクスチャ・テスト本体に残存する sleep / 固定 timeout / 実時刻依存待機の決定的イベント駆動待機への置換"
+  dependencies: []
+  technical_baseline:
+    - ".opencode/skill/test-policy/SKILL.md がポリシー本体 (5d46138 で制定)"
+    - ".config/nextest.toml の slow-timeout period=180s / terminate-after=1 がランナー側 hang 検知として整備済み"
+    - "crates/runtime/tests/support/budget_fixture.rs は先行修正済み (同一類例の参照実装)"
+  intent_references: []
+  acceptance_criteria:
+    - "crates/*/tests 配下で tokio::time::sleep / std::thread::sleep が完了検知目的で使われている箇所がゼロ"
+    - "完了検知を兼ねた固定 timeout (timeout(N秒, 完了future) 等) がゼロ — wait 系は直接 await + nextest 側 slow-timeout に委譲する形へ置換済み"
+    - "recv_timeout による drain ループ ('これ以上来ない' をタイムアウトで判定) は terminal シグナル受信で抜ける実装に置換済み"
+    - "ハング検知用途で残す timeout (例外) にはコメントで根拠が記載され、値は現行最遅正当ケースの 10 倍以上の余裕がある"
+    - "cargo nextest run --profile default がローカルで全緑、CI (共有ランナー) 3 連続成功を確認"
+    - "test-policy skill への適合を例外箇所ごとに自己評価したメモを PR 本文に記載"
+
+# G461: optional packet-time intent-maintenance metadata. OPTIONAL and
+# backward-compatible — packets that omit this whole block stay valid.
+# Fill it in or explicitly decline each part while the design context is
+# fresh; `improve` (G456 / G460) is the later safety net, not a substitute.
+intent_placement:
+  primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+  supporting_intents: []
+  new_intent_needed: false
+  placement_rationale: "runtime/gui integration テストの信頼性基盤 (CI 緑の維持) は agent-runtime-kernel の品質保証スコープに属する。test-policy skill を新規知識として既に追加済みであり intent tree 新設は不要"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: ""
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: ""
+closeout_learning:
+  expected: "GUI headless テスト (pty / repaint_rx 系) でイベント駆動化できない構造的制約の有無、例外 timeout の妥当な余裕係数、nextest slow-timeout の実運用での適切値"
+  write_back_required: false
+  write_back_targets: []
+
+# テスト品質基盤の是正であり、role-facing の案内面は新設しない。
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
