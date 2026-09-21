@@ -70,6 +70,25 @@ pub(super) fn run_writer(
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }
+            Ok(Command::AppendStreamEvent(stream_id, event, validator, reply)) => {
+                let guards = validator
+                    .as_ref()
+                    .map(|validator| validator.acquire(&event));
+                let result = if matches!(guards, Some(None)) {
+                    Err(StorageError::StaleMutation)
+                } else {
+                    let session_limit = state.config.hard_limits.max_session_bytes;
+                    state.config.hard_limits.max_session_bytes = u64::MAX;
+                    let result = if state.writes_suspended {
+                        handle_suspended_append(&mut state, &Some(stream_id), &event)
+                    } else {
+                        append_event_to_conn(&mut state, &Some(stream_id), &event)
+                    };
+                    state.config.hard_limits.max_session_bytes = session_limit;
+                    result
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::AppendRunLedger(run_id, body, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

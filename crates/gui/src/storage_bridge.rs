@@ -40,14 +40,10 @@ impl StorageBridge {
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => match &self.validator {
-                Some(validator) => self.storage.append_fenced_event(
-                    Some(self.session_id),
-                    event,
-                    validator.clone(),
-                ),
-                None => self.storage.append_event(Some(self.session_id), event),
-            },
+            | EventKind::Snapshot(_) => {
+                self.storage
+                    .append_stream_event(self.session_id, event, self.validator.clone())
+            }
         }
     }
 

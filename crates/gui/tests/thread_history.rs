@@ -1,5 +1,6 @@
 use event_bus::{Event, LifecycleEvent, MessageEvent};
 use gui::model::composer::ProviderStatus;
+use gui::model::transcript::TranscriptEntry;
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 use storage::{Database, Storage, StorageConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
@@ -37,6 +38,102 @@ fn reply(run: &str, thread: &str, text: &str) -> [Event; 2] {
             delta: text.into(),
         }),
     ]
+}
+
+#[test]
+fn restored_thread_includes_assistant_events_from_storage() {
+    // Given: the same sidebar and event writes used by the workbench.
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut original = state(dir.path());
+    original.composer_mut().input = "remember this".into();
+    original.submit_composer();
+    for event in reply("chat-1", "one", "remembered reply") {
+        storage
+            .handle()
+            .append_event(Some("evorch-gui"), &event)
+            .unwrap();
+        original.apply_events([event]);
+    }
+    original.save_sidebar();
+    drop(original);
+    // When: a fresh workbench replays persisted history.
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path()).with_sidebar(sidebar);
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    // Then: the transcript retains both participants, not just the sidebar's user text.
+    let entries = reopened.transcript().entries();
+    assert!(entries.iter().any(|entry| matches!(entry, TranscriptEntry::UserMessage { text } if text == "remember this")), "restored user message missing: {entries:?}");
+    assert!(entries.iter().any(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "remembered reply")), "restored assistant message missing: {entries:?}");
+}
+
+#[test]
+fn events_appended_before_gui_close_survive_restart() {
+    // Given: a previous GUI session has exhausted its event budget.
+    let dir = tempfile::tempdir().unwrap();
+    let previous = reply("old-run", "two", "old reply");
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        hard_limits: storage::HardLimits {
+            max_session_bytes: previous
+                .iter()
+                .map(|event| u64::try_from(serde_json::to_vec(&event.kind).unwrap().len()).unwrap())
+                .sum(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    for event in previous {
+        storage
+            .handle()
+            .append_event(Some("evorch-gui"), &event)
+            .unwrap();
+    }
+    storage.close();
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut bridge = gui::storage_bridge::StorageBridge::new(storage.handle(), "evorch-gui");
+    let mut original = state(dir.path());
+    original.composer_mut().input = "new question".into();
+    original.submit_composer();
+    // When: the real bridge acknowledges events, then the GUI and writer close.
+    for event in reply("new-run", "one", "new answer") {
+        let result = bridge.handle_event(&event);
+        assert!(
+            result.is_ok(),
+            "new GUI events must persist after the previous session fills: {result:?}"
+        );
+        original.apply_events([event]);
+    }
+    original.save_sidebar();
+    drop(original);
+    drop(bridge);
+    storage.close();
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path()).with_sidebar(sidebar);
+    reopened
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    // Then: both sides survive a complete writer close and database reopen.
+    let entries = reopened.transcript().entries();
+    assert!(
+        entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::UserMessage { text } if text == "new question")
+        ),
+        "restarted user message missing: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "new answer")
+        ),
+        "restarted assistant message missing: {entries:?}"
+    );
 }
 
 #[test]

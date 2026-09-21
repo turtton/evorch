@@ -10,6 +10,8 @@ use crate::entity::SecretGuard;
 use crate::{CatalogUpdateRecord, Database, ReconcileSummary, StorageConfig, StorageError};
 
 mod state;
+#[cfg(test)]
+mod stream_tests;
 
 use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
 
@@ -23,6 +25,7 @@ enum Command {
     Usage(Vec<UsageBucket>),
     AppendEvent(Option<String>, Event, ReplyTx),
     AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
+    AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
     Memory(crate::repo::memory::Mutation, ReplyTx),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
@@ -96,6 +99,18 @@ impl Drop for Storage {
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    /// Appends to a cross-session stream, retaining daily, event and database limits.
+    pub fn append_stream_event(
+        &self,
+        stream_id: &str,
+        event: &Event,
+        validator: Option<event_bus::MutationValidator>,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AppendStreamEvent(stream_id.into(), event.clone(), validator, reply)
+        })
+    }
+
     /// Append a guarded, 1..=8192 byte body and return its global sequence number.
     ///
     /// # Errors
