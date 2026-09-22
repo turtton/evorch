@@ -31,6 +31,10 @@
           file = ./rust-toolchain.toml;
           sha256 = "sha256-OATSZm98Es5kIFuqaba+UvkQtFsVgJEBMmS+t6od5/U=";
         };
+        lefthookHooked = pkgs.writeShellScriptBin "lefthook" ''
+          export TERM=dumb
+          exec ${pkgs.lefthook}/bin/lefthook "$@"
+        '';
         craneLib = (crane.mkLib pkgs).overrideToolchain (_p: rustToolchain);
         guiLibraries = [
           pkgs.wayland
@@ -159,6 +163,7 @@
             pkgs.bashInteractive
             rustToolchain
             pkgs.cargo-nextest
+            lefthookHooked
             intent-system
             # GUI (evorch-gui / winit+wgpu) が dev shell から起動できるようにする動的ライブラリ群
             pkgs.pkg-config
@@ -181,6 +186,9 @@
             # devShell 内だけ mold でリンクする(nix 外のビルドには影響しない)。
             # 呼び出し元の既存 RUSTFLAGS(sanitizer 等)は保持して追記する。
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "export RUSTFLAGS=\"\${RUSTFLAGS:+$RUSTFLAGS }-C link-args=-fuse-ld=mold\""}
+            if [ -e .git ]; then
+              lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
+            fi
           '';
         };
       }

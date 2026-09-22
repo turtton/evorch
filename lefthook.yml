@@ -1,0 +1,5 @@
+pre-commit:
+  jobs:
+    - name: cargo fmt
+      run: cargo fmt --all
+      stage_fixed: true
