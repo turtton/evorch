@@ -169,9 +169,14 @@ async fn authz_violation_on_restore_path_returns_message_denied() {
     let unrelated =
         runtime.delegate_background(Role::Worker, "unrelated".into(), RunConfig::default());
     terminal(&runtime, unrelated).await;
-    let mut record = database.run_context(&child.to_string()).unwrap().unwrap();
-    record.messages_json = "invalid".into();
-    storage.handle().upsert_run_context(&record).unwrap();
+    assert!(database.run_context(&child.to_string()).unwrap().is_some());
+    // Corruption bypasses the writer: valid writer input is now parsed before redaction.
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    conn.execute(
+        "UPDATE run_contexts SET messages_json = 'invalid' WHERE run_id = ?1",
+        [child.to_string()],
+    )
+    .unwrap();
     // When: an unrelated sender attempts restoration.
     let result = runtime.send_agent_message(unrelated, child, AgentMessageKind::Send, "turn", None);
     // Then: authorization precedes content decoding.
@@ -185,9 +190,14 @@ async fn restore_of_corrupt_context_returns_typed_error() {
     let (runtime, _) = runtime_with(model());
     let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let (parent, child) = pair(&runtime).await;
-    let mut record = database.run_context(&child.to_string()).unwrap().unwrap();
-    record.messages_json = "invalid".into();
-    storage.handle().upsert_run_context(&record).unwrap();
+    assert!(database.run_context(&child.to_string()).unwrap().is_some());
+    // Corruption bypasses the writer: valid writer input is now parsed before redaction.
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    conn.execute(
+        "UPDATE run_contexts SET messages_json = 'invalid' WHERE run_id = ?1",
+        [child.to_string()],
+    )
+    .unwrap();
     // When: an authorized send attempts restoration.
     let result = runtime.send_agent_message(parent, child, AgentMessageKind::Send, "turn", None);
     // Then: corrupt history cannot silently become an empty session.

@@ -173,7 +173,12 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str());
         assert_eq!(
-            direct, bwrap_env,
+            direct,
+            if key == "PATH" {
+                bwrap_env.and_then(|value| value.strip_suffix(":/tmp/home/.cargo/bin"))
+            } else {
+                bwrap_env
+            },
             "許可リスト {key} の扱いが Direct と bwrap で不一致"
         );
     }

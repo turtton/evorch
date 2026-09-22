@@ -98,11 +98,6 @@ impl AgentRuntime {
                     &message,
                 )?;
             }
-            if store.snapshot_failed(recipient) {
-                return Err(fail(RunRestoreFailure::UnsupportedConfig(
-                    "persist_failed".into(),
-                )));
-            }
             let mut record = store
                 .restore_record(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?

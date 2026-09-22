@@ -15,7 +15,7 @@ use crate::agent_loop::LoopState;
 use crate::context::CompactionCheckpoint;
 
 use self::cut::select_cut;
-use self::estimator::{estimate_tokens, estimate_visible};
+use self::estimator::{estimate_projected, estimate_tokens};
 use self::policy::{
     GuardDecision, SummarizerKindSel, ThresholdDecision, guard_decision, resolve_window,
     threshold_decision,
@@ -54,6 +54,29 @@ pub(crate) enum CompactionError {
     SummarizeFailed(String),
 }
 
+/// Resolve the identity of the next request, including an interactive override.
+pub(crate) fn selected_model(state: &LoopState) -> String {
+    let preference = state.channels.model_preference_rx.borrow().clone();
+    if let Some(preference) = preference {
+        let model = preference.model.or_else(|| {
+            state
+                .shared
+                .model
+                .available_profiles()
+                .into_iter()
+                .find(|profile| profile.name == preference.profile)
+                .and_then(|profile| profile.default_model)
+        });
+        if let Some(model) = model {
+            return format!("{}/{model}", preference.profile);
+        }
+    }
+    state
+        .shared
+        .model
+        .selected_model(state.run_role(), state.task.config.category.as_deref())
+}
+
 pub(crate) async fn compact_now(
     state: &mut LoopState,
     reason: CompactionReason,
@@ -64,11 +87,12 @@ pub(crate) async fn compact_now(
     }
 
     let visible = state.context.visible_messages();
-    let estimated_before = estimate_visible(&visible, state.last_usage.as_ref());
-    let selected_model = state
-        .shared
-        .model
-        .selected_model(state.run_role(), state.task.config.category.as_deref());
+    let estimated_before = estimate_projected(
+        &visible,
+        state.last_usage.as_ref(),
+        state.compaction.last_usage_estimated_tokens,
+    );
+    let selected_model = selected_model(state);
     let (window, window_source) = resolve_window(
         &settings,
         &selected_model,
@@ -107,33 +131,46 @@ pub(crate) async fn compact_now(
     state.compaction.compaction_count = state.compaction.compaction_count.saturating_add(1);
     state.compaction.in_flight = true;
     state.channels.compaction_busy.store(true, Ordering::SeqCst);
-    let summary_result = match settings.summarizer {
+    let model_preference = state.channels.model_preference_rx.borrow().clone();
+    let (summary_result, summary_usage) = match settings.summarizer {
         SummarizerKindSel::Model => {
             ModelSummarizer {
                 model: state.shared.model.clone(),
                 role: state.run_role(),
                 run_id: state.caller_run_id().to_string(),
+                category: state.task.config.category.clone(),
+                model_preference,
+                idle_timeout: std::time::Duration::from_secs(settings.summary_idle_timeout_secs),
+                timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
             }
-            .summarize(&SummaryInput { goal, compacted })
+            .summarize_with_usage(&SummaryInput { goal, compacted })
             .await
         }
-        SummarizerKindSel::Structural => {
+        SummarizerKindSel::Structural => (
             StructuralSummarizer
                 .summarize(&SummaryInput { goal, compacted })
-                .await
-        }
+                .await,
+            None,
+        ),
     };
+    if let Some(usage) = summary_usage {
+        state.budget.usage(usage);
+    }
     state.compaction.in_flight = false;
     state
         .channels
         .compaction_busy
         .store(false, Ordering::SeqCst);
-    let summary = enforce_max_bytes(
-        &summary_result.map_err(|error| CompactionError::SummarizeFailed(error.to_string()))?,
-        settings.max_summary_bytes,
-    );
+    let summary = match summary_result {
+        Ok(summary) => enforce_max_bytes(&summary, settings.max_summary_bytes),
+        Err(error) => {
+            state.compaction.record_failure(&settings);
+            return Err(CompactionError::SummarizeFailed(error.to_string()));
+        }
+    };
     // max_summary_bytes=0 などで要約本文が空になる設定を黙って成功扱いしない。
     if summary.is_empty() {
+        state.compaction.record_failure(&settings);
         return Err(CompactionError::SummarizeFailed(
             "summary became empty after max_summary_bytes enforcement".to_string(),
         ));
@@ -171,6 +208,11 @@ pub(crate) async fn compact_now(
         summary: summary_message,
         range: (plan.start, plan.end),
     });
+    // Provider usage describes the pre-compaction input and cannot be reused.
+    state.last_usage = None;
+    state.compaction.last_usage_estimated_tokens = None;
+    state.compaction.consecutive_failures = 0;
+    state.compaction.retry_after_turn = 0;
     state.compaction.checkpoint_seq = state.compaction.checkpoint_seq.saturating_add(1);
     state.compaction.last_compaction_turn = Some(state.compaction.turn_counter);
     state.compaction.compacted_this_boundary = true;

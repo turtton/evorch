@@ -17,11 +17,11 @@ pub(crate) mod stream;
 /// 接続確立のタイムアウト。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 1 回の読み込み操作のタイムアウト。ストリーミング中の無応答検出に使う。
-const READ_TIMEOUT: Duration = Duration::from_secs(60);
+const READ_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 全プロバイダ実装で共有する reqwest クライアントを構築する。
 ///
-/// - 接続タイムアウト 5 秒と読み込みタイムアウト 60 秒は常に設定する。
+/// - 接続タイムアウト 5 秒と読み込みタイムアウト 90 秒は常に設定する。
 ///   読み込みタイムアウトは「1 回の読み込み操作」に対するものであり、
 ///   ストリーミング応答の合計時間を制限しない。
 /// - `timeout` が `Some` の場合のみリクエスト全体のタイムアウトを設定する。

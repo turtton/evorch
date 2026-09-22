@@ -12,7 +12,8 @@ fn defaults_when_budget_is_missing() {
         value["budget"],
         serde_json::json!({
             "max_tool_calls": 400, "max_no_progress_rounds": 100,
-            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5
+            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
+            "max_tokens": 2_000_000, "max_elapsed_secs": 7_200
         })
     );
 }
@@ -29,7 +30,8 @@ fn defaults_merge_when_budget_is_partial() {
         value["budget"],
         serde_json::json!({
             "max_tool_calls": 17, "max_no_progress_rounds": 100,
-            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5
+            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
+            "max_tokens": 2_000_000, "max_elapsed_secs": 7_200
         })
     );
 }
@@ -88,4 +90,24 @@ fn loads_budget_from_project_file() {
             ..Default::default()
         }
     );
+}
+
+#[test]
+fn loads_cumulative_token_and_elapsed_limits() {
+    let project = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("evorch.toml"),
+        "version = 2\n[budget]\nmax_tokens = 7654321\nmax_elapsed_secs = 1234\n[compaction]\nsummary_idle_timeout_secs = 45\nsummary_timeout_secs = 180\nfailure_cooldown_turns = 6").unwrap();
+    let config = Config::load(&config::LoadOptions {
+        project_dir: Some(project.path().into()),
+        user_config_dir: Some(user.path().into()),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(config.budget.max_tokens, 7_654_321);
+    assert_eq!(config.budget.max_elapsed_secs, 1234);
+    assert_eq!(config.compaction.summary_idle_timeout_secs, 45);
+    assert_eq!(config.compaction.summary_timeout_secs, 180);
+    assert_eq!(config.compaction.failure_cooldown_turns, 6);
 }

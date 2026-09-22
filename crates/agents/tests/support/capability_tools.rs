@@ -25,6 +25,7 @@ pub const EXPLORER_TOOLS: &[&str] = &["read", "grep", "ledger_append", "ledger_r
 pub const WORKER_TOOLS: &[&str] = &[
     "read",
     "edit",
+    "write",
     "grep",
     "shell",
     "skill_load",

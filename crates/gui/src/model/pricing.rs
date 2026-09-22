@@ -19,7 +19,7 @@ fn tokens(value: u64) -> f64 {
 
 impl TokenUsage {
     pub fn cache_hit_rate(&self) -> f64 {
-        let total = tokens(self.input) + tokens(self.cache_write);
+        let total = tokens(self.input);
         if total == 0.0 {
             0.0
         } else {
@@ -35,7 +35,12 @@ impl TokenUsage {
         let mut cost = 0.0;
         let mut has_known_price = false;
         for (count, price) in [
-            (self.input.saturating_sub(self.cache_read), pricing.input),
+            (
+                self.input
+                    .saturating_sub(self.cache_read)
+                    .saturating_sub(self.cache_write),
+                pricing.input,
+            ),
             (self.output, pricing.output),
             (self.cache_read, pricing.cache_read),
             (self.cache_write, pricing.cache_write),
@@ -62,10 +67,7 @@ impl TelemetryRow {
         if let Some(cost) = cost {
             segments.push(format!("${cost:.3}"));
         }
-        let total = tokens(self.usage.input)
-            + tokens(self.usage.output)
-            + tokens(self.usage.cache_read)
-            + tokens(self.usage.cache_write);
+        let total = tokens(self.usage.input) + tokens(self.usage.output);
         segments.push(if total >= 1_000_000.0 {
             format!("{:.1}M tok", total / 1_000_000.0)
         } else if total >= 1_000.0 {

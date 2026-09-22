@@ -10,9 +10,11 @@ pub mod exec;
 pub mod keychain;
 pub mod network;
 pub mod policy;
+mod scratch;
 pub mod session;
 
 pub use approval::{ApprovalGate, ApprovalOutcome};
+
 pub use bwrap::{BwrapConfig, BwrapSandbox};
 pub use composition::production_sandbox;
 pub use credential::{CredentialStore, FileCredentialStore, Secret, open_default};

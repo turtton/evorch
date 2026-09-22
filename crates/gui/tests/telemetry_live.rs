@@ -266,10 +266,10 @@ fn context_pressure_keeps_baseline_when_next_request_starts() {
     // When: the next request starts, before another settings refresh.
     telemetry.apply_event(&started());
     // Then: both row and header retain the input baseline.
-    assert_eq!(telemetry.row("run-1").unwrap().context_pressure(), Some(95));
+    assert_eq!(telemetry.row("run-1").unwrap().context_pressure(), Some(80));
     assert_eq!(
         telemetry.thread_metrics(&["run-1".into()]).context_pressure,
-        Some(95)
+        Some(80)
     );
 }
 
@@ -296,7 +296,7 @@ fn context_pressure_increases_with_streamed_deltas() {
     }
     // Then: the live header grows by four percentage points.
     let pressure = telemetry.thread_metrics(&["run-1".into()]).context_pressure;
-    assert_eq!(pressure, Some(99));
+    assert_eq!(pressure, Some(84));
     assert!(pressure > baseline);
 }
 
@@ -316,7 +316,7 @@ fn context_pressure_replaces_estimate_with_completed_usage() {
     // Then: exact usage replaces the estimate without residue.
     assert_eq!(
         telemetry.thread_metrics(&["run-1".into()]).context_pressure,
-        Some(100)
+        Some(85)
     );
 }
 
@@ -328,8 +328,5 @@ fn context_pressure_includes_completed_output() {
     telemetry.apply_event(&context_completed());
     telemetry.refresh_costs(&context_settings());
     // Then: completed output contributes to the next request's context.
-    assert_eq!(
-        telemetry.row("run-1").unwrap().context_pressure(),
-        Some(100)
-    );
+    assert_eq!(telemetry.row("run-1").unwrap().context_pressure(), Some(85));
 }

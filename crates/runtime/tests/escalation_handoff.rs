@@ -304,8 +304,8 @@ async fn batch_edit_then_escalate_skips_remaining_tools_and_orders_terminal_befo
         Ok(tool_responses([
             (
                 "e1",
-                "edit",
-                json!({ "path": first_path, "new_string": "first edit" }),
+                "write",
+                json!({ "path": first_path, "content": "first edit" }),
             ),
             (
                 "esc",
@@ -322,8 +322,8 @@ async fn batch_edit_then_escalate_skips_remaining_tools_and_orders_terminal_befo
             ),
             (
                 "e2",
-                "edit",
-                json!({ "path": skipped_path, "new_string": "must not run" }),
+                "write",
+                json!({ "path": skipped_path, "content": "must not run" }),
             ),
         ])),
         Ok(text_response("引継ぎ完了", FinishReason::Stop)),

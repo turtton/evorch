@@ -118,8 +118,8 @@ async fn repeated_same_file_rewrites_propose_with_path() {
         Arc::new(ScriptedModel::new([
             Ok(tool_response(
                 "edit-1",
-                "edit",
-                json!({ "path": path, "new_string": "one" }),
+                "write",
+                json!({ "path": path, "content": "one" }),
             )),
             Ok(tool_response(
                 "edit-2",
@@ -194,8 +194,8 @@ async fn healthy_sequence_with_default_settings_does_not_propose() {
             Ok(tool_response("read-1", "read", json!({ "path": source }))),
             Ok(tool_response(
                 "edit-1",
-                "edit",
-                json!({ "path": target, "new_string": "written" }),
+                "write",
+                json!({ "path": target, "content": "written" }),
             )),
             Ok(text_response("done", FinishReason::Stop)),
         ])),

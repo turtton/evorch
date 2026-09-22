@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// |---|---|---|---|
 /// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系 + web_fetch (mutation tool なし) | OptIn | 可 |
 /// | Explorer | read / grep | OptIn | 不可 |
-/// | Worker | read / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | Denied | 不可 |
+/// | Worker | read / write / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | Denied | 不可 |
 /// | Reviewer | read / grep / git_diff | Denied | 不可 |
 /// | Librarian | read / grep / web_search / web_fetch | Allowed | 不可 |
 ///
@@ -127,6 +127,7 @@ impl Role {
                 [
                     "read",
                     "edit",
+                    "write",
                     "grep",
                     "shell",
                     "skill_load",

@@ -76,6 +76,9 @@ const COMPACTION_KEYS: &[&str] = &[
     "model_overrides",
     "keep_recent_tokens",
     "cooldown_turns",
+    "failure_cooldown_turns",
+    "summary_idle_timeout_secs",
+    "summary_timeout_secs",
     "max_compactions_per_run",
     "max_summary_bytes",
     "summarizer",
@@ -157,6 +160,8 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         "budget",
         &[
             "max_tool_calls",
+            "max_tokens",
+            "max_elapsed_secs",
             "max_no_progress_rounds",
             "max_file_rereads",
             "max_identical_tool_call_repeats",

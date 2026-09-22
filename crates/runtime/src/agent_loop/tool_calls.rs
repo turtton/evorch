@@ -734,12 +734,12 @@ impl LoopState {
                         } else {
                             ToolResult::error("invalid prepared local call")
                         };
-                    let rule_target = matches!(name.as_str(), "read" | "edit" | "grep")
+                    let rule_target = matches!(name.as_str(), "read" | "write" | "edit" | "grep")
                         .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                         .flatten();
                     // 停滞検出は観測専用。提案は履歴へ注入せず EscalationProposed
                     // イベントの発行だけを行う (メタ操作分岐は観測対象外)。
-                    let observation_path = if name == "edit" {
+                    let observation_path = if matches!(name.as_str(), "edit" | "write") {
                         rule_target.as_deref().map(PathBuf::from)
                     } else {
                         None
@@ -992,6 +992,7 @@ mod tests {
         let expected = [
             ("read", tools::Read.schema()),
             ("edit", tools::Edit.schema()),
+            ("write", tools::Write.schema()),
         ];
 
         // When: runtime builds the model-facing definitions.
@@ -1095,6 +1096,7 @@ mod tests {
 
         assert!(!names(&specs).contains(&"skill_load"));
         assert!(names(&specs).contains(&"edit"));
+        assert!(names(&specs).contains(&"write"));
     }
 
     // Given: Explorer のポリシー (skill_load は capability 外) と skills 設定あり

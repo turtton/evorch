@@ -131,11 +131,13 @@ async fn send_to_done_run_restores_full_context_and_processes_new_turn() {
     })
     .await
     .expect("waiting deadline");
-    assert!(
+    assert_eq!(
         database
             .run_context(&run_id.to_string())
             .expect("read")
-            .is_none()
+            .expect("safe checkpoint")
+            .terminal_phase,
+        "Checkpoint"
     );
 
     // When: manual compaction precedes the resumed turn's terminal response.

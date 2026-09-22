@@ -129,3 +129,51 @@ async fn shell_runs_pwd_and_listing_when_command_contains_and_operator() {
 async fn shell_runs_listing_when_command_contains_arguments() {
     assert_shell_listing("ls -la").await;
 }
+
+#[tokio::test]
+#[ignore = "bwrap 実行環境が必要"]
+async fn output_artifact_and_scratch_survive_between_calls() {
+    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let executor = ToolExecutor::with_production_sandbox(
+        Arc::new(EventBus::new(32)),
+        BwrapConfig::new(workspace.path().to_path_buf()),
+    )
+    .unwrap();
+    let ctx = tools::ToolExecutionContext {
+        run_id: "output-mount-test".into(),
+        thread_id: None,
+        call_id: None,
+    };
+    let result = executor.execute(&ctx, "shell", "produce", serde_json::json!({
+        "command": "printf saved > /tmp/run-artifact; i=0; while [ $i -lt 400 ]; do printf 'line %s\\n' \"$i\"; i=$((i+1)); done", "cwd":"."
+    })).await.unwrap();
+    assert!(!result.is_error, "{}", result.content);
+    let path = result.detail.as_ref().unwrap()["output_artifact"]["path"]
+        .as_str()
+        .unwrap();
+    let read_back = executor
+        .execute(
+            &ctx,
+            "shell",
+            "consume",
+            serde_json::json!({
+                "command": format!("cat /tmp/run-artifact; head -n 1 '{path}'"), "cwd":"."
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!read_back.is_error, "{}", read_back.content);
+    assert!(read_back.content.contains("savedline 0"));
+    let denied_write = executor
+        .execute(
+            &ctx,
+            "shell",
+            "read-only",
+            serde_json::json!({
+                "command": format!("printf changed > '{path}'")
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(denied_write.is_error);
+}

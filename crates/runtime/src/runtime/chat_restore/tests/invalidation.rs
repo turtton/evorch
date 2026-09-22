@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn legacy_secret_snapshot_stays_invalid_after_store_restart() {
+async fn legacy_secret_snapshot_is_redacted_on_save_and_restores_after_store_restart() {
     // Given: a legacy snapshot bypassing today's writer guard.
     let fixture = Fixture::new();
     let run = fixture.terminal().await;
@@ -26,27 +26,20 @@ async fn legacy_secret_snapshot_stays_invalid_after_store_restart() {
     let store = fixture.runtime.shared.run_store.get().unwrap();
     let legacy = store.restore_record(run).unwrap().unwrap();
     assert!(legacy.restorable);
-    let error = fixture
+    fixture
         .storage
         .handle()
         .upsert_run_context(&legacy)
-        .unwrap_err();
-    assert!(!format!("{error:?} {error}").contains(secret));
-    // When: invalidating the rejected terminal save, then replacing the entire RunStore.
-    let result = store.invalidate_snapshot(run);
-    assert!(
-        result.is_ok(),
-        "invalidation must not revalidate legacy history: {result:?}"
-    );
+        .unwrap();
     let record = store.restore_record(run).unwrap().unwrap();
-    assert!(!record.restorable);
-    assert_eq!(record.messages_json, messages);
+    assert!(record.restorable);
+    assert!(!record.messages_json.contains(secret));
+    assert!(record.messages_json.contains("[REDACTED:openai-style-key]"));
     let entry = lock_runs(&fixture.runtime.shared.runs)
         .remove(&run)
         .unwrap();
     drop(fixture.runtime);
     let bus = Arc::new(EventBus::new(128));
-    let mut events = bus.subscribe();
     let runtime = AgentRuntime::new(
         bus.clone(),
         Arc::new(ToolExecutor::new(bus)),
@@ -54,20 +47,12 @@ async fn legacy_secret_snapshot_stays_invalid_after_store_restart() {
     )
     .with_run_store(crate::RunStore::open(&config, fixture.storage.handle()).unwrap());
     lock_runs(&runtime.shared.runs).insert(run, entry);
-    // Then: durable refusal survives restart without disclosing the legacy secret.
+    // Then: sanitized history can be restored with the existing ownership checks.
     let store = runtime.shared.run_store.get().unwrap();
-    assert!(!store.snapshot_failed(run));
-    assert!(!store.restore_record(run).unwrap().unwrap().restorable);
-    let error = runtime
+    assert!(store.restore_record(run).unwrap().unwrap().restorable);
+    runtime
         .continue_goal(run, "continue".into(), RunConfig::default())
-        .unwrap_err();
-    assert!(!format!("{error:?} {error}").contains(secret));
-    assert!(matches!(error, RuntimeError::RunRestoreFailed {
-        reason: RunRestoreFailure::UnsupportedConfig(ref reason), ..
-    } if reason == "persist_failed"));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), events.recv())
-            .await
-            .is_err()
-    );
+        .unwrap();
+    runtime.cancel(run).unwrap();
+    runtime.wait(run).await.unwrap();
 }

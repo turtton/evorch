@@ -102,7 +102,7 @@ pub(crate) struct LoopState {
     resumed: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
-    budget: crate::budget_tracker::BudgetCounters,
+    pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
     durable_task: Option<storage::entity::TaskContinuation>,
 }
@@ -201,7 +201,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         return;
     }
     if state.task.config.workspace_mode == WorkspaceMode::Shared
-        && let Some(root) = sandbox_root
+        && let Some(root) = sandbox_root.clone()
     {
         match crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root) {
             Ok(executor) => {
@@ -272,10 +272,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .shared
             .rules
             .as_ref()
-            .and_then(|source| source.project_root().map(std::path::Path::to_path_buf)),
+            .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
+            .or(sandbox_root),
     };
     if let Some(source) = state.shared.rules.as_ref() {
-        state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root));
+        state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
     }
     if !is_restored {
         if let Err(error) = push_initial_system_message(
@@ -308,11 +309,32 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 );
         }
     }
+    if let Some(root) = &active_root {
+        let workspace_note = format!(
+            "Current workspace (evorch): {}. Relative file paths and shell cwd are resolved from this directory. Use read for bounded file ranges, write for create/full replacement, edit for non-empty exact replacements. Large outputs are returned as previews with temporary artifact paths; use read/grep to inspect them. Artifacts may expire without affecting conversation restore.",
+            root.display()
+        );
+        if let Some(message) = state
+            .context
+            .messages
+            .iter_mut()
+            .find(|message| message.role == providers::Role::System)
+        {
+            if let Some(ContentBlock::Text { text }) = message.content.iter_mut().find(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("Current workspace (evorch): "))) {
+                *text = workspace_note;
+            } else {
+                message.content.push(ContentBlock::Text { text: workspace_note });
+            }
+        } else {
+            state.context.prepend_system(workspace_note);
+        }
+    }
     state.publish_message_count();
     if state.transition(AgentRunPhase::Running, None).is_err() {
         cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
         return;
     }
+    state.save_checkpoint();
     state.execute().await;
     if let Some(permit) = &state.task.config.ownership
         && let Err(error) = permit.checkpoint(&state.context.visible_messages())
@@ -648,6 +670,10 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            if self.context.prune_tool_outputs() {
+                self.last_usage = None;
+                self.compaction.last_usage_estimated_tokens = None;
+            }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
@@ -662,12 +688,12 @@ impl LoopState {
                 }
             } else {
                 let visible = self.context.visible_messages();
-                let estimated =
-                    compaction::estimator::estimate_visible(&visible, self.last_usage.as_ref());
-                let selected_model = self
-                    .shared
-                    .model
-                    .selected_model(self.task.role, self.task.config.category.as_deref());
+                let estimated = compaction::estimator::estimate_projected(
+                    &visible,
+                    self.last_usage.as_ref(),
+                    self.compaction.last_usage_estimated_tokens,
+                );
+                let selected_model = compaction::selected_model(self);
                 let (window, _) = compaction::policy::resolve_window(
                     &self.shared.compaction,
                     &selected_model,
@@ -708,6 +734,21 @@ impl LoopState {
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
             }
             let visible_messages = self.context.visible_messages();
+            let selected_model = compaction::selected_model(self);
+            let (window, _) = compaction::policy::resolve_window(
+                &self.shared.compaction,
+                &selected_model,
+                self.shared.model.catalog_context_window(&selected_model),
+            );
+            let estimated = compaction::estimator::estimate_projected(
+                &visible_messages,
+                self.last_usage.as_ref(),
+                self.compaction.last_usage_estimated_tokens,
+            );
+            if estimated >= window {
+                self.finish_error(format!("ContextWindowExhausted: estimated {estimated} tokens reach model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
+                return;
+            }
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -769,6 +810,9 @@ impl LoopState {
                 return;
             }
             self.context.push_assistant(response.message);
+            self.compaction.last_usage_estimated_tokens = Some(
+                compaction::estimator::estimate_tokens(&self.context.visible_messages()),
+            );
             self.publish_message_count();
             if !self.execute_tools(tool_uses).await {
                 return;
@@ -779,6 +823,7 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            self.save_checkpoint();
             if has_tool_uses {
                 self.budget.finish_round();
                 match self.publish_budget() {
@@ -885,6 +930,7 @@ impl LoopState {
         if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
                 tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");
+                self.snapshot_diagnostic(&error);
             }
             self.channels.inbox_rx.close();
             self.task.mailbox.close();
@@ -906,6 +952,22 @@ impl LoopState {
             }
         }
         Ok(())
+    }
+
+    fn save_checkpoint(&self) {
+        if let Err(error) = crate::restore::persist_checkpoint(self) {
+            tracing::warn!(run_id = %self.task.run_id, %error, "context checkpoint failed");
+            self.snapshot_diagnostic(&error);
+        }
+    }
+
+    fn snapshot_diagnostic(&self, error: &impl std::fmt::Display) {
+        self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
+            source: "run_context".into(), severity: event_bus::DiagnosticSeverity::Warning,
+            code: "ContextSnapshotFailed".into(),
+            detail: format!("復元用コンテキストを保存できませんでした。以前の有効なチェックポイントがあれば保持します: {error}"),
+            run_id: Some(self.task.run_id.to_string()), thread_id: None, call_id: None,
+        }));
     }
 
     fn publish_message_count(&self) {

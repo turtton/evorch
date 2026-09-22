@@ -5,7 +5,7 @@
 //! 実行は必ずこの Executor 経由で行うこと。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use event_bus::{Event, EventBus, ToolEvent};
 use sandbox::{
@@ -20,7 +20,7 @@ use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
-use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
+use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
 
 mod prepared;
 mod specs;
@@ -71,6 +71,7 @@ pub struct ToolExecutor {
     policy: ApprovalPolicy,
     /// 利用者の承認応答を待つ任意のゲート。
     gate: Option<ApprovalGate>,
+    default_cwd: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl ToolExecutor {
@@ -81,6 +82,7 @@ impl ToolExecutor {
             tools: HashMap::new(),
             policy: ApprovalPolicy::allow_all(),
             gate: None,
+            default_cwd: RwLock::new(None),
         }
     }
 
@@ -99,7 +101,7 @@ impl ToolExecutor {
         Ok(())
     }
 
-    /// read / edit / grep / shell / git_diff の 5 標準ツールを登録した実行器を
+    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録した実行器を
     /// 生成する。
     ///
     /// 低レベルなサンドボックス注入 API である。渡された `Arc<dyn Sandbox>` は
@@ -125,13 +127,14 @@ impl ToolExecutor {
     ) -> Self {
         let mut executor = Self::new(event_bus);
         let shell = Shell::new(Arc::clone(&sandbox));
-        let shell = match default_cwd {
+        let shell = match default_cwd.clone() {
             Some(cwd) => shell.with_default_cwd(cwd),
             None => shell,
         };
-        let standard: [Arc<dyn Tool>; 5] = [
+        let standard: [Arc<dyn Tool>; 6] = [
             Arc::new(Read),
             Arc::new(Edit),
+            Arc::new(Write),
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
@@ -142,14 +145,55 @@ impl ToolExecutor {
                 // SAFE-EXPECT: 標準スキーマは全件をクレート内テストでコンパイル検証している。
                 .expect("標準ツールのスキーマは all_standard_tool_schemas_compile でコンパイル可能を検証済み");
         }
+        if let Some(cwd) = default_cwd {
+            executor.set_default_cwd(cwd);
+        }
         executor
     }
 
     /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
     pub fn set_default_cwd(&self, cwd: std::path::PathBuf) {
+        *self
+            .default_cwd
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd.clone());
         for registered in self.tools.values() {
             registered.tool.set_default_cwd(cwd.clone());
         }
+    }
+
+    /// Resolve relative file arguments against this run's workspace, never global cwd.
+    fn scoped_args(&self, name: &str, mut args: serde_json::Value) -> serde_json::Value {
+        let root = self
+            .default_cwd
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(root) = root.as_ref() else {
+            return args;
+        };
+        let keys: &[&str] = match name {
+            "read" => &["path", "file", "file_path", "filename", "target"],
+            "write" | "edit" | "grep" => &["path"],
+            "shell" | "git_diff" => &["cwd"],
+            _ => &[],
+        };
+        if let Some(object) = args.as_object_mut() {
+            for key in keys {
+                if let Some(path) = object.get(*key).and_then(serde_json::Value::as_str) {
+                    let path = std::path::Path::new(path);
+                    if path.is_relative() {
+                        object.insert(
+                            (*key).into(),
+                            root.join(path).to_string_lossy().into_owned().into(),
+                        );
+                    }
+                }
+            }
+            if matches!(name, "shell" | "git_diff") && !object.contains_key("cwd") {
+                object.insert("cwd".into(), root.to_string_lossy().into_owned().into());
+            }
+        }
+        args
     }
 
     /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。
@@ -187,7 +231,7 @@ impl ToolExecutor {
         Ok(self)
     }
 
-    /// read / edit / grep / shell / git_diff の 5 標準ツールを登録し、production 用の
+    /// read / write / edit / grep / shell / git_diff の 6 標準ツールを登録し、production 用の
     /// fail-closed なサンドボックスを注入した実行器を生成する。
     ///
     /// `sandbox::production_sandbox`（composition root）経由で `BwrapSandbox` を
@@ -202,9 +246,15 @@ impl ToolExecutor {
         event_bus: Arc<EventBus>,
         config: BwrapConfig,
     ) -> Result<Self, SandboxError> {
-        Ok(Self::with_standard_tools(
+        let root = config.workspace_root().to_path_buf();
+        let output_root =
+            crate::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
+                detail: format!("temporary output directory: {error}"),
+            })?;
+        Ok(Self::with_standard_tools_in(
             event_bus,
-            sandbox::production_sandbox(config)?,
+            sandbox::production_sandbox(config.ro_bind(output_root))?,
+            Some(root),
         ))
     }
 
@@ -292,6 +342,7 @@ impl ToolExecutor {
             });
         };
 
+        let args = self.scoped_args(tool_name, args);
         let started = ToolEvent::ToolStarted {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
@@ -387,6 +438,7 @@ impl ToolExecutor {
             Ok(mut result) => {
                 // 由来はツールの申告ではなく権限宣言から機械導出して上書きする (AC5)。
                 // detail はサーバー制御の文字列を含み得るため本文と同様にエスケープする。
+                result = crate::output::limit_result(result);
                 result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);

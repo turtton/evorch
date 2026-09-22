@@ -5058,6 +5058,7 @@ version = "0.1.0"
 dependencies = [
  "event-bus",
  "keyring",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -5129,6 +5130,13 @@ dependencies = [
  "memmap2",
  "smithay-client-toolkit 0.19.2",
  "tiny-skia",
+]
+
+[[package]]
+name = "secret-guard"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -5580,6 +5588,7 @@ version = "0.1.0"
 dependencies = [
  "event-bus",
  "rusqlite",
+ "secret-guard",
  "serde",
  "serde_json",
  "tempfile",
@@ -6001,8 +6010,10 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest 0.12.28",
+ "rustix 1.1.4",
  "sandbox",
  "scraper",
+ "secret-guard",
  "serde",
  "serde_json",
  "tempfile",
@@ -6010,6 +6021,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

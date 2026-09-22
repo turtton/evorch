@@ -1,14 +1,17 @@
 //! 圧縮サマリ生成（T6 で実装）。
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use agents::Role;
 use async_trait::async_trait;
-use providers::{ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent};
+use providers::{
+    ChatResponse, ContentBlock, FinishReason, Message, Role as MessageRole, ToolResultContent,
+    Usage,
+};
 use serde_json::Value;
 
 use crate::error::RuntimeError;
-use crate::model::{AgentInvocationContext, AgentModel};
+use crate::model::{AgentInvocationContext, AgentModel, ModelPreference};
 
 const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 const SUMMARY_SYSTEM_PROMPT: &str = "Summarize the compacted conversation for continuation. Preserve the goal and contract, unfinished tasks, key decisions, changed files, verification results, unresolved items, recent context, and every agent message. Use terse markdown bullets and do not invoke tools.";
@@ -27,6 +30,10 @@ pub(crate) enum SummarizeError {
     AbnormalFinish { reason: String },
     #[error("summary model returned empty summary")]
     EmptySummary,
+    #[error("summary stream was idle for {seconds} seconds")]
+    IdleTimeout { seconds: u64 },
+    #[error("summary exceeded its {seconds}-second deadline")]
+    Deadline { seconds: u64 },
 }
 
 #[async_trait]
@@ -40,6 +47,10 @@ pub(crate) struct ModelSummarizer {
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) role: Role,
     pub(crate) run_id: String,
+    pub(crate) category: Option<String>,
+    pub(crate) model_preference: Option<ModelPreference>,
+    pub(crate) idle_timeout: Duration,
+    pub(crate) timeout: Duration,
 }
 
 #[async_trait]
@@ -85,6 +96,25 @@ impl Summarizer for StructuralSummarizer {
 #[async_trait]
 impl Summarizer for ModelSummarizer {
     async fn summarize(&self, input: &SummaryInput<'_>) -> Result<String, SummarizeError> {
+        self.summarize_with_usage(input).await.0
+    }
+}
+
+impl ModelSummarizer {
+    pub(crate) async fn summarize_with_usage(
+        &self,
+        input: &SummaryInput<'_>,
+    ) -> (Result<String, SummarizeError>, Option<Usage>) {
+        match self.complete_summary(input).await {
+            Ok(response) => (summary_text(&response), Some(response.usage)),
+            Err(error) => (Err(error), None),
+        }
+    }
+
+    async fn complete_summary(
+        &self,
+        input: &SummaryInput<'_>,
+    ) -> Result<ChatResponse, SummarizeError> {
         let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
         messages.push(Message {
             role: MessageRole::System,
@@ -106,43 +136,68 @@ impl Summarizer for ModelSummarizer {
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
-            category: None,
-            model_preference: None,
+            category: self.category.clone(),
+            model_preference: self.model_preference.clone(),
             run_id: self.run_id.clone(),
         };
-        let response = self
-            .model
-            .complete(&invocation, self.role, &messages, &[])
-            .await?;
-        let finish_reason = match response.finish_reason {
-            FinishReason::Stop => None,
-            FinishReason::Length => Some("length".to_string()),
-            FinishReason::ToolUse => Some("tool_use".to_string()),
-            FinishReason::ContentFilter => Some("content_filter".to_string()),
-            FinishReason::Other(reason) => Some(format!("other: {reason}")),
+        // A private bus keeps summary reasoning/text out of the conversation UI.
+        // Streaming avoids the non-streaming provider's whole-request timeout.
+        let bus = event_bus::EventBus::new(32);
+        let mut progress = bus.subscribe();
+        let completion =
+            self.model
+                .complete_streaming(&invocation, self.role, &messages, &[], &bus);
+        tokio::pin!(completion);
+        let idle = tokio::time::sleep(self.idle_timeout);
+        let deadline = tokio::time::sleep(self.timeout);
+        tokio::pin!(idle, deadline);
+        let response = loop {
+            tokio::select! {
+                biased;
+                result = &mut completion => break result?,
+                _ = &mut deadline => return Err(SummarizeError::Deadline { seconds: self.timeout.as_secs() }),
+                _ = &mut idle => return Err(SummarizeError::IdleTimeout { seconds: self.idle_timeout.as_secs() }),
+                event = progress.recv() => {
+                    if let Ok(event) = event
+                        && matches!(event.kind, event_bus::EventKind::Message(_))
+                    {
+                        idle.as_mut().reset(tokio::time::Instant::now() + self.idle_timeout);
+                    }
+                }
+            }
         };
-        if let Some(reason) = finish_reason {
-            return Err(SummarizeError::AbnormalFinish { reason });
-        }
-        let summary: String = response
-            .message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                ContentBlock::Image { .. }
-                | ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. } => None,
-            })
-            .collect();
-        if summary.trim().is_empty() {
-            return Err(SummarizeError::EmptySummary);
-        }
-        Ok(summary)
+        Ok(response)
     }
 }
 
+fn summary_text(response: &ChatResponse) -> Result<String, SummarizeError> {
+    let finish_reason = match &response.finish_reason {
+        FinishReason::Stop => None,
+        FinishReason::Length => Some("length".to_string()),
+        FinishReason::ToolUse => Some("tool_use".to_string()),
+        FinishReason::ContentFilter => Some("content_filter".to_string()),
+        FinishReason::Other(reason) => Some(format!("other: {reason}")),
+    };
+    if let Some(reason) = finish_reason {
+        return Err(SummarizeError::AbnormalFinish { reason });
+    }
+    let summary: String = response
+        .message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Image { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. } => None,
+        })
+        .collect();
+    if summary.trim().is_empty() {
+        return Err(SummarizeError::EmptySummary);
+    }
+    Ok(summary)
+}
 pub(crate) fn enforce_max_bytes(summary: &str, max_summary_bytes: u64) -> String {
     const MARKER: &str = "\n[truncated]";
 
@@ -577,6 +632,10 @@ mod tests {
             model: model.clone(),
             role: Role::Worker,
             run_id: "run-summary-7".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
         let messages = fixture();
 
@@ -625,6 +684,10 @@ mod tests {
             model: model.clone(),
             role: Role::Worker,
             run_id: "run-summary-goal".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
         let messages = fixture();
 
@@ -667,6 +730,10 @@ mod tests {
             model,
             role: Role::Orchestrator,
             run_id: "run-summary-8".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
 
         let error = summarizer
@@ -702,6 +769,10 @@ mod tests {
             model,
             role: Role::Worker,
             run_id: "run-summary-length".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
 
         let error = summarizer
@@ -740,6 +811,10 @@ mod tests {
             model,
             role: Role::Worker,
             run_id: "run-summary-filter".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
 
         let error = summarizer
@@ -788,6 +863,10 @@ mod tests {
             model,
             role: Role::Worker,
             run_id: "run-summary-empty".to_string(),
+            category: None,
+            model_preference: None,
+            idle_timeout: std::time::Duration::from_secs(90),
+            timeout: std::time::Duration::from_secs(300),
         };
 
         let error = summarizer
@@ -832,6 +911,10 @@ mod tests {
                 model,
                 role: Role::Worker,
                 run_id: "run-summary-abnormal".to_string(),
+                category: None,
+                model_preference: None,
+                idle_timeout: std::time::Duration::from_secs(90),
+                timeout: std::time::Duration::from_secs(300),
             };
 
             let error = summarizer
@@ -862,3 +945,7 @@ mod tests {
         assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
+
+#[cfg(test)]
+#[path = "summary_timing_tests.rs"]
+mod timing_tests;

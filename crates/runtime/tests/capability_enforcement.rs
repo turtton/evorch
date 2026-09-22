@@ -50,8 +50,8 @@ async fn orchestrator_edit_is_denied_without_tool_started() {
     let (runtime, bus) = runtime_with(ScriptedModel::new([
         Ok(tool_response(
             "edit-1",
-            "edit",
-            json!({ "path": "ignored", "new_string": "x" }),
+            "write",
+            json!({ "path": "ignored", "content": "x" }),
         )),
         Ok(text_response("finished", FinishReason::Stop)),
     ]));
@@ -69,7 +69,7 @@ async fn orchestrator_edit_is_denied_without_tool_started() {
     // Then
     assert!(!events.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ToolStarted { tool_name, .. }) if tool_name == "edit"
+        EventKind::Tool(ToolEvent::ToolStarted { tool_name, .. }) if tool_name == "write"
     )));
     assert_eq!(
         runtime
@@ -88,8 +88,8 @@ async fn worker_edit_emits_started_and_completed() {
     let (runtime, bus) = runtime_with(ScriptedModel::new([
         Ok(tool_response(
             "edit-2",
-            "edit",
-            json!({ "path": path, "new_string": "written" }),
+            "write",
+            json!({ "path": path, "content": "written" }),
         )),
         Ok(text_response("finished", FinishReason::Stop)),
     ]));
@@ -97,13 +97,13 @@ async fn worker_edit_emits_started_and_completed() {
 
     // When
     let run_id =
-        runtime.delegate_background(Role::Worker, "edit".to_string(), RunConfig::default());
+        runtime.delegate_background(Role::Worker, "write".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = drain_events(&mut events).await;
 
     // Then
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "edit" && call_id == "edit-2")));
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: false, .. }) if tool_name == "edit" && call_id == "edit-2")));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "write" && call_id == "edit-2")));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: false, .. }) if tool_name == "write" && call_id == "edit-2")));
 }
 
 #[tokio::test]

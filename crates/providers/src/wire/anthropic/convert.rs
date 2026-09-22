@@ -129,7 +129,8 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
     Usage {
         input_tokens: usage
             .input_tokens
-            .saturating_add(usage.cache_read_input_tokens.unwrap_or_default()),
+            .saturating_add(usage.cache_read_input_tokens.unwrap_or_default())
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or_default()),
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_input_tokens.unwrap_or_default(),
         cache_write_tokens: usage.cache_creation_input_tokens.unwrap_or_default(),

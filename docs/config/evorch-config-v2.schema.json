@@ -41,9 +41,11 @@
       "description": "run ごとのツール実行予算。",
       "$ref": "#/$defs/BudgetConfig",
       "default": {
+        "max_elapsed_secs": 7200,
         "max_file_rereads": 20,
         "max_identical_tool_call_repeats": 5,
         "max_no_progress_rounds": 100,
+        "max_tokens": 2000000,
         "max_tool_calls": 400
       }
     },
@@ -54,11 +56,14 @@
         "context_window_tokens": 200000,
         "cooldown_turns": 1,
         "enabled": true,
+        "failure_cooldown_turns": 4,
         "keep_recent_tokens": 20000,
         "max_compactions_per_run": 32,
         "max_summary_bytes": 16384,
         "model_overrides": {},
         "summarizer": "model",
+        "summary_idle_timeout_secs": 90,
+        "summary_timeout_secs": 300,
         "threshold": 0.75
       }
     },
@@ -284,6 +289,13 @@
       "description": "ツール実行と停滞検出の上限。",
       "type": "object",
       "properties": {
+        "max_elapsed_secs": {
+          "description": "Maximum elapsed run time in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 7200,
+          "minimum": 0
+        },
         "max_file_rereads": {
           "description": "同じファイルの初回以降の再読込の許容回数 (既定: 20)。",
           "type": "integer",
@@ -303,6 +315,13 @@
           "type": "integer",
           "format": "uint32",
           "default": 100,
+          "minimum": 0
+        },
+        "max_tokens": {
+          "description": "Cumulative input (including cached input) plus output tokens per run.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 2000000,
           "minimum": 0
         },
         "max_tool_calls": {
@@ -364,6 +383,13 @@
           "type": "boolean",
           "default": true
         },
+        "failure_cooldown_turns": {
+          "description": "Base turn cooldown after summary failures; doubles after each failure.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 4,
+          "minimum": 0
+        },
         "keep_recent_tokens": {
           "description": "圧縮せずに保持する直近トークン数。",
           "type": "integer",
@@ -399,6 +425,20 @@
           "description": "要約に使用する方式。",
           "$ref": "#/$defs/SummarizerKind",
           "default": "model"
+        },
+        "summary_idle_timeout_secs": {
+          "description": "Maximum silence between summary text/reasoning updates.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 90,
+          "minimum": 0
+        },
+        "summary_timeout_secs": {
+          "description": "Overall deadline for one summary attempt (including provider retries).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
         },
         "threshold": {
           "description": "圧縮を開始するコンテキスト使用率の閾値。",

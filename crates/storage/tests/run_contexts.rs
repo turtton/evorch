@@ -82,7 +82,7 @@ fn suspended_writer_rejects_context_upsert() {
 }
 
 #[test]
-fn snapshot_secret_diagnostics_omit_values_and_decode_json_escapes() {
+fn snapshot_redacts_values_and_decodes_json_escapes() {
     // Given: escaped provider reasoning and checkpoint text containing a key.
     let temp = TempDir::new().unwrap();
     let config = StorageConfig {
@@ -100,25 +100,26 @@ fn snapshot_secret_diagnostics_omit_values_and_decode_json_escapes() {
             snapshot.messages_json = payload;
         }
         // When: the public writer receives the snapshot.
-        let error = storage.handle().upsert_run_context(&snapshot).unwrap_err();
-        // Then: a typed secret rejection reveals no offending value and persists nothing.
-        assert!(matches!(
-            error,
-            storage::StorageError::SecretDetected { .. }
-        ));
-        assert!(!format!("{error:?} {error}").contains(secret));
-        assert!(
-            Database::open(&config)
-                .unwrap()
-                .run_context("run")
-                .unwrap()
-                .is_none()
-        );
+        storage.handle().upsert_run_context(&snapshot).unwrap();
+        // Then: JSON escapes are decoded and the stored copy is redacted.
+        let saved = Database::open(&config)
+            .unwrap()
+            .run_context("run")
+            .unwrap()
+            .unwrap();
+        let payload = if checkpoint {
+            &saved.checkpoints_json
+        } else {
+            &saved.messages_json
+        };
+        assert!(!payload.contains(secret));
+        assert!(payload.contains("[REDACTED:openai-style-key]"));
+        assert!(saved.restorable);
     }
 }
 
 #[test]
-fn snapshot_rejects_secret_object_keys_without_diagnostic_leaks() {
+fn snapshot_redacts_secret_payload_keys_without_losing_their_values() {
     // Given: direct and JSON-escaped keys in either persisted history field.
     let temp = TempDir::new().unwrap();
     let config = StorageConfig {
@@ -137,24 +138,21 @@ fn snapshot_rejects_secret_object_keys_without_diagnostic_leaks() {
                 snapshot.messages_json = payload;
             }
             // When: persisting the snapshot through the real writer.
-            let result = storage.handle().upsert_run_context(&snapshot);
-            // Then: rejection identifies only the field, never the key or value.
-            let error = result.expect_err("secret object key must be rejected");
-            assert!(
-                matches!(&error, storage::StorageError::SecretDetected { field, .. }
-                if *field == if checkpoint { "checkpoints_json" } else { "messages_json" })
-            );
-            let diagnostic = format!("{error:?} {error}");
-            assert!(!diagnostic.contains(secret));
-            assert!(!diagnostic.contains(&key));
-            assert!(!diagnostic.contains("private-value"));
-            assert!(
-                Database::open(&config)
-                    .unwrap()
-                    .run_context("run")
-                    .unwrap()
-                    .is_none()
-            );
+            storage.handle().upsert_run_context(&snapshot).unwrap();
+            let saved = Database::open(&config)
+                .unwrap()
+                .run_context("run")
+                .unwrap()
+                .unwrap();
+            let payload = if checkpoint {
+                &saved.checkpoints_json
+            } else {
+                &saved.messages_json
+            };
+            assert!(!payload.contains(secret));
+            assert!(!payload.contains(&key));
+            assert!(payload.contains("[REDACTED:openai-style-key]"));
+            assert!(payload.contains("private-value"));
         }
     }
 }

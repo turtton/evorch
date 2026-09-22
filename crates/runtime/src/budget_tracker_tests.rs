@@ -133,3 +133,18 @@ fn usage_accumulation_saturates_without_wrapping() {
     assert_eq!(counters.cumulative_input_tokens, u64::MAX);
     assert_eq!(counters.cumulative_output_tokens, u64::MAX);
 }
+
+#[test]
+fn cumulative_budget_includes_cached_input_exactly_once() {
+    let mut counters = BudgetCounters::default();
+    for _ in 0..2 {
+        counters.usage(Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 60,
+            cache_write_tokens: 30,
+        });
+    }
+    assert_eq!(counters.cumulative_input_tokens, 200);
+    assert_eq!(counters.cumulative_output_tokens, 20);
+}

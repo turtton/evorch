@@ -124,7 +124,13 @@ mod tests {
     #[test]
     fn orchestrator_policy_filters_out_mutation_tool_specs() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
-        let specs = vec![spec("read"), spec("edit"), spec("shell"), spec("grep")];
+        let specs = vec![
+            spec("read"),
+            spec("write"),
+            spec("edit"),
+            spec("shell"),
+            spec("grep"),
+        ];
 
         let filtered = policy.filter_tool_specs(specs);
 
@@ -140,6 +146,7 @@ mod tests {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
         assert_eq!(policy.authorize("edit"), Ok(()));
+        assert_eq!(policy.authorize("write"), Ok(()));
     }
 
     // Given: Explorer のポリシー (read/grep のみ)
@@ -225,12 +232,18 @@ mod tests {
     #[test]
     fn worker_policy_keeps_boundary_tools_and_drops_others() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
-        let specs = vec![spec("read"), spec("edit"), spec("shell"), spec("delegate")];
+        let specs = vec![
+            spec("read"),
+            spec("write"),
+            spec("edit"),
+            spec("shell"),
+            spec("delegate"),
+        ];
 
         let filtered = policy.filter_tool_specs(specs);
 
         let names: Vec<&str> = filtered.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["read", "edit", "shell"]);
+        assert_eq!(names, vec!["read", "write", "edit", "shell"]);
     }
 
     // Given: META_OPS の正規集合
@@ -264,6 +277,7 @@ mod tests {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");
         }
         assert!(!is_meta_op("edit"));
+        assert!(!is_meta_op("write"));
         assert!(!is_meta_op("read"));
         assert!(!is_meta_op(""));
     }

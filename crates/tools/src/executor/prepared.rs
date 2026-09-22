@@ -70,6 +70,7 @@ impl ToolExecutor {
             .tools
             .get(name.as_str())
             .ok_or_else(|| ToolError::UnknownTool { name: name.clone() })?;
+        let args = self.scoped_args(&name, args);
         schema::validate_args(&registered.validator, &args)?;
         let action = resolve(
             self.policy

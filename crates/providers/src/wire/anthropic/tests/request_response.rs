@@ -160,7 +160,7 @@ fn wire_response_converts_to_canonical_response() {
                 ]
             },
             usage: Usage {
-                input_tokens: 14,
+                input_tokens: 19,
                 output_tokens: 7,
                 cache_read_tokens: 3,
                 cache_write_tokens: 5
@@ -187,5 +187,33 @@ fn stop_reason_mapping_covers_known_and_unknown_values() {
 
     for (wire, expected) in cases {
         assert_eq!(to_finish_reason(wire), expected);
+    }
+}
+
+#[test]
+fn canonical_input_includes_cache_reads_and_writes_once() {
+    use super::super::convert::from_wire_usage;
+    for (input, read, write, expected) in [
+        (100, 0, 0, 100),
+        (20, 80, 0, 100),
+        (20, 0, 80, 100),
+        (20, 50, 30, 100),
+        (u64::MAX, 1, 1, u64::MAX),
+    ] {
+        let usage = from_wire_usage(WireUsage {
+            input_tokens: input,
+            output_tokens: 7,
+            cache_read_input_tokens: Some(read),
+            cache_creation_input_tokens: Some(write),
+        });
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: expected,
+                output_tokens: 7,
+                cache_read_tokens: read,
+                cache_write_tokens: write,
+            }
+        );
     }
 }

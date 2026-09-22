@@ -21,6 +21,7 @@ fn registered_tools_report_execution_mode() {
     let expected = [
         ("read", ToolExecutionMode::Shared),
         ("edit", ToolExecutionMode::Exclusive),
+        ("write", ToolExecutionMode::Exclusive),
         ("grep", ToolExecutionMode::Shared),
         ("shell", ToolExecutionMode::Exclusive),
         ("git_diff", ToolExecutionMode::Shared),

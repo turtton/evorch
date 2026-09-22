@@ -231,7 +231,7 @@ fn thread_metrics_uses_latest_cache_hit_rate_across_runs() {
     overlay.apply_event(&request_completed(Some("run-2"), 100, 10));
     let metrics = overlay.thread_metrics(&["run-2".to_owned(), "run-1".to_owned()]);
     let rate = metrics.cache_hit_rate.expect("cache hit rate");
-    assert_eq!(rate, 3.0 / 104.0 * 100.0);
+    assert_eq!(rate, 3.0 / 100.0 * 100.0);
     assert!(metrics.cost.is_none());
 }
 
@@ -243,14 +243,14 @@ fn thread_metrics_empty_for_unknown_runs() {
 }
 
 #[test]
-fn thread_metrics_uses_cache_writes_when_input_is_zero() {
+fn thread_metrics_cache_rate_is_zero_when_total_input_is_zero() {
     // Given: completed usage with cache writes but zero input.
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&request_completed(Some("run-1"), 0, 10));
     // When: aggregating the thread's completed usage.
     let metrics = overlay.thread_metrics(&["run-1".to_owned()]);
-    // Then: writes supply the denominator for the observed usage.
-    assert_eq!(metrics.cache_hit_rate, Some(75.0));
+    // Then: inconsistent cache subtotals do not invent a total input count.
+    assert_eq!(metrics.cache_hit_rate, Some(0.0));
 }
 
 #[test]

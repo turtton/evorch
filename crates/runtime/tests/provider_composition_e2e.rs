@@ -150,8 +150,8 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
             ),
             openai_tool_response(
                 "edit-1",
-                "edit",
-                json!({ "path": edited, "new_string": "written by worker" }),
+                "write",
+                json!({ "path": edited, "content": "written by worker" }),
             ),
             openai_text_response("worker final text"),
             openai_text_response("orchestrator final text"),
@@ -205,7 +205,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     assert!(drained.iter().any(|event| matches!(
         &event.kind,
         EventKind::Tool(ToolEvent::ToolCompleted { tool_name, is_error: false, .. })
-            if tool_name == "edit"
+            if tool_name == "write"
     )));
     let message_deltas = drained
         .iter()

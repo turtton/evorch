@@ -3,6 +3,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 use crate::{
@@ -19,6 +20,8 @@ pub struct BwrapConfig {
     allow_network: bool,
     ro_binds: Vec<PathBuf>,
     rw_binds: Vec<PathBuf>,
+    cargo_home: Option<PathBuf>,
+    rustup_home: Option<PathBuf>,
 }
 
 impl BwrapConfig {
@@ -28,7 +31,21 @@ impl BwrapConfig {
             allow_network: false,
             ro_binds: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
             rw_binds: Vec::new(),
+            cargo_home: tool_home("CARGO_HOME", ".cargo"),
+            rustup_home: tool_home("RUSTUP_HOME", ".rustup"),
         }
+    }
+
+    /// Workspace used for relative file paths as well as sandbox commands.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Mount only registry / git caches and tool binaries, never Cargo credentials
+    /// or host config. Cargo's root and lock files remain in the private HOME.
+    pub fn cargo_cache(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cargo_home = Some(path.into());
+        self
     }
 
     pub const fn allow_network(mut self, allow: bool) -> Self {
@@ -52,6 +69,7 @@ impl BwrapConfig {
 pub struct BwrapSandbox {
     program: PathBuf,
     config: BwrapConfig,
+    scratch: Arc<crate::scratch::Scratch>,
 }
 
 impl BwrapSandbox {
@@ -81,16 +99,24 @@ impl BwrapSandbox {
                 detail: format!("機能確認が終了コード {status} で失敗しました"),
             });
         }
+        let scratch =
+            crate::scratch::Scratch::new().map_err(|error| SandboxError::BwrapUnavailable {
+                detail: format!("/var/tmp の作業領域を作成できません: {error}"),
+            })?;
         Ok(Self {
             program: program.to_path_buf(),
             config,
+            scratch: Arc::new(scratch),
         })
     }
 
     pub fn build_argv(&self, spec: &CommandSpec) -> Vec<String> {
         let mut args = vec!["--die-with-parent".to_owned()];
-        args.extend(["--tmpfs".to_owned(), "/tmp".to_owned()]);
-        args.extend(["--dir".to_owned(), "/tmp/home".to_owned()]);
+        args.extend([
+            "--bind".to_owned(),
+            self.scratch.path().to_string_lossy().into_owned(),
+            "/tmp".to_owned(),
+        ]);
         for path in &self.config.ro_binds {
             if let Some(parent) = path.parent()
                 && parent != Path::new("/")
@@ -104,6 +130,7 @@ impl BwrapSandbox {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
         }
+        self.append_build_cache_mounts(&mut args);
         for path in &self.config.rw_binds {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--bind".to_owned(), path.clone(), path]);
@@ -115,16 +142,59 @@ impl BwrapSandbox {
         if !self.config.allow_network {
             args.push("--unshare-net".to_owned());
         }
-        let cwd = spec
-            .cwd
-            .as_ref()
-            .unwrap_or(&self.config.workspace_root)
-            .to_string_lossy()
-            .into_owned();
-        args.extend(["--chdir".to_owned(), cwd]);
+        let cwd = match spec.cwd.as_ref() {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => self.config.workspace_root.join(path),
+            None => self.config.workspace_root.clone(),
+        };
+        args.extend(["--chdir".to_owned(), cwd.to_string_lossy().into_owned()]);
         args.push(spec.program.clone());
         args.extend(spec.args.iter().cloned());
         args
+    }
+
+    fn append_build_cache_mounts(&self, args: &mut Vec<String>) {
+        if let Some(home) = &self.config.cargo_home {
+            for relative in [
+                "registry/index",
+                "registry/cache",
+                "registry/src",
+                "git/db",
+                "git/checkouts",
+                "bin",
+            ] {
+                bind_cache(
+                    args,
+                    &home.join(relative),
+                    &PathBuf::from("/tmp/home/.cargo").join(relative),
+                );
+            }
+        }
+        if let Some(home) = &self.config.rustup_home {
+            for relative in ["toolchains", "settings.toml"] {
+                bind_cache(
+                    args,
+                    &home.join(relative),
+                    &PathBuf::from("/tmp/home/.rustup").join(relative),
+                );
+            }
+        }
+    }
+}
+
+fn tool_home(variable: &str, default: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(default)))
+}
+
+fn bind_cache(args: &mut Vec<String>, source: &Path, destination: &Path) {
+    if source.exists() {
+        args.extend([
+            "--ro-bind".to_owned(),
+            source.to_string_lossy().into_owned(),
+            destination.to_string_lossy().into_owned(),
+        ]);
     }
 }
 
@@ -132,8 +202,23 @@ impl Sandbox for BwrapSandbox {
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
         let args = self.build_argv(&spec);
         let mut env = merge_environment(spec.extra_env);
-        env.retain(|(key, _)| key != "HOME");
-        env.push(("HOME".to_owned(), "/tmp/home".to_owned()));
+        env.retain(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "HOME" | "TMPDIR" | "CARGO_HOME" | "RUSTUP_HOME"
+            )
+        });
+        env.extend([
+            ("HOME".to_owned(), "/tmp/home".to_owned()),
+            ("TMPDIR".to_owned(), "/tmp".to_owned()),
+            ("CARGO_HOME".to_owned(), "/tmp/home/.cargo".to_owned()),
+            ("RUSTUP_HOME".to_owned(), "/tmp/home/.rustup".to_owned()),
+        ]);
+        if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
+            // Preserve the host-selected compiler (notably Nix wrappers). Rustup
+            // shims are a fallback when the original host HOME is not mounted.
+            *path = format!("{path}:/tmp/home/.cargo/bin");
+        }
         Ok(WrappedCommand {
             program: self.program.to_string_lossy().into_owned(),
             args,
@@ -162,6 +247,7 @@ mod tests {
         BwrapSandbox {
             program: PathBuf::from("bwrap"),
             config,
+            scratch: Arc::new(crate::scratch::Scratch::new().unwrap()),
         }
     }
 
@@ -182,7 +268,10 @@ mod tests {
             argv.windows(3)
                 .any(|args| args == ["--bind", "/workspace", "/workspace"])
         );
-        assert!(argv.windows(2).any(|args| args == ["--dir", "/tmp/home"]));
+        assert!(argv.windows(3).any(|args| args[0] == "--bind"
+            && args[1].starts_with("/var/tmp/evorch-scratch-")
+            && args[2] == "/tmp"));
+        assert!(!argv.iter().any(|arg| arg == "--tmpfs"));
         assert!(argv.contains(&"--unshare-net".to_owned()));
         for path in DEFAULT_RO_BINDS {
             assert!(

@@ -5,8 +5,8 @@ use super::response_types::{WireChatResponse, WireUsage};
 
 /// OpenAI 非ストリーミング応答を canonical 応答へ変換します。
 ///
-/// OpenAI Chat Completions は cache-write 使用量を返さないため、
-/// [`Usage::cache_write_tokens`] は常に 0 です。
+/// Cache counts are input subtotals; compatible APIs such as Kimi may also
+/// report cache creation and a legacy top-level cache-read count.
 ///
 /// # Errors
 /// 最初の choice、message、usage、finish reason が欠ける場合、または tool call の
@@ -91,8 +91,12 @@ pub(super) fn to_usage(usage: &WireUsage) -> Usage {
         cache_read_tokens: usage
             .prompt_tokens_details
             .and_then(|details| details.cached_tokens)
+            .or(usage.cached_tokens)
             .unwrap_or_default(),
-        cache_write_tokens: 0,
+        cache_write_tokens: usage
+            .prompt_tokens_details
+            .and_then(|details| details.cache_write_tokens)
+            .unwrap_or_default(),
     }
 }
 
@@ -106,6 +110,38 @@ fn invalid(detail: impl Into<String>) -> ProviderError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn normalized_usage_counts_cache_subtotals_once() {
+        for (details, legacy, read, write) in [
+            (json!(null), json!(null), 0, 0),
+            (json!({"cached_tokens": 60}), json!(null), 60, 0),
+            (json!({"cache_write_tokens": 30}), json!(null), 0, 30),
+            (json!(null), json!(70), 70, 0),
+            (
+                json!({"cached_tokens": 60, "cache_write_tokens": 30}),
+                json!(80),
+                60,
+                30,
+            ),
+            (json!({"cached_tokens": 0}), json!(80), 0, 0),
+        ] {
+            let wire: WireUsage = serde_json::from_value(json!({
+                "prompt_tokens": 100, "completion_tokens": 10,
+                "cached_tokens": legacy, "prompt_tokens_details": details
+            }))
+            .unwrap();
+            assert_eq!(
+                to_usage(&wire),
+                Usage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    cache_read_tokens: read,
+                    cache_write_tokens: write,
+                }
+            );
+        }
+    }
 
     // Given: choices が空の wire response / When: canonical 変換 / Then: 構造欠落を InvalidJson として返す
     #[test]

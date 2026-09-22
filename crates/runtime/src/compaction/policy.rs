@@ -23,6 +23,9 @@ pub(crate) struct CompactionSettings {
     pub model_overrides: BTreeMap<String, u64>,
     pub keep_recent_tokens: u64,
     pub cooldown_turns: u32,
+    pub failure_cooldown_turns: u32,
+    pub summary_idle_timeout_secs: u64,
+    pub summary_timeout_secs: u64,
     pub max_compactions_per_run: u64,
     pub max_summary_bytes: u64,
     pub summarizer: SummarizerKindSel,
@@ -37,6 +40,9 @@ impl Default for CompactionSettings {
             model_overrides: BTreeMap::new(),
             keep_recent_tokens: 20_000,
             cooldown_turns: 1,
+            failure_cooldown_turns: 4,
+            summary_idle_timeout_secs: 90,
+            summary_timeout_secs: 300,
             max_compactions_per_run: 32,
             max_summary_bytes: 16_384,
             summarizer: SummarizerKindSel::Model,
@@ -80,6 +86,9 @@ impl From<&CompactionConfig> for CompactionSettings {
             model_overrides,
             keep_recent_tokens: config.keep_recent_tokens,
             cooldown_turns: config.cooldown_turns,
+            failure_cooldown_turns: config.failure_cooldown_turns.max(1),
+            summary_idle_timeout_secs: config.summary_idle_timeout_secs.max(1),
+            summary_timeout_secs: config.summary_timeout_secs.max(1),
             // 0 は設定ミスとして既定値へ正規化する (上限 0 は圧縮の事実上の無効化を
             // 黙って意味してしまうため)。
             max_compactions_per_run: if config.max_compactions_per_run == 0 {
@@ -144,7 +153,7 @@ pub(crate) struct CompactionLoopState {
     pub turn_counter: u64,
     pub last_compaction_turn: Option<u64>,
     pub compacted_this_boundary: bool,
-    /// 成功した圧縮の累計回数 (run 予算の消費量)。
+    /// Summary attempts, including failures (run budget).
     pub compaction_count: u64,
     /// 自動トリガの一時停止。圧縮成功時に立ち、閾値未満の境界観測で解除される
     /// (圧縮後も閾値超過が続く場合の自動連鎖を止めるラチェット)。
@@ -152,6 +161,20 @@ pub(crate) struct CompactionLoopState {
     pub checkpoint_seq: u32,
     pub in_flight: bool,
     pub last_estimated_tokens: u64,
+    /// Heuristic of visible history immediately after the last model response.
+    pub last_usage_estimated_tokens: Option<u64>,
+    pub consecutive_failures: u32,
+    pub retry_after_turn: u64,
+}
+
+impl CompactionLoopState {
+    pub(crate) fn record_failure(&mut self, settings: &CompactionSettings) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let multiplier = 1_u64 << self.consecutive_failures.saturating_sub(1).min(6);
+        let delay = u64::from(settings.failure_cooldown_turns.max(1)).saturating_mul(multiplier);
+        self.retry_after_turn = self.turn_counter.saturating_add(delay);
+        self.compacted_this_boundary = true;
+    }
 }
 
 /// 全理由共通の抑制条件を Disabled、InFlight、境界、Cooldown の順に判定する。
@@ -167,6 +190,9 @@ pub(crate) fn guard_decision(
     }
     if state.compacted_this_boundary {
         return Some(GuardDecision::AlreadyThisBoundary);
+    }
+    if state.turn_counter < state.retry_after_turn {
+        return Some(GuardDecision::Cooldown);
     }
     if state.last_compaction_turn.is_some_and(|last_turn| {
         state.turn_counter.saturating_sub(last_turn) < u64::from(settings.cooldown_turns)
@@ -260,7 +286,43 @@ mod tests {
             checkpoint_seq: 0,
             in_flight: false,
             last_estimated_tokens: 0,
+            last_usage_estimated_tokens: None,
+            consecutive_failures: 0,
+            retry_after_turn: 0,
         }
+    }
+
+    #[test]
+    fn failed_attempts_back_off_even_without_success() {
+        let settings = CompactionSettings::default();
+        let mut state = CompactionLoopState {
+            turn_counter: 10,
+            ..Default::default()
+        };
+        state.record_failure(&settings);
+        assert_eq!(state.retry_after_turn, 14);
+        assert_eq!(
+            guard_decision(&state, &settings),
+            Some(GuardDecision::AlreadyThisBoundary)
+        );
+        state.compacted_this_boundary = false;
+        for turn in 11..14 {
+            state.turn_counter = turn;
+            assert_eq!(
+                guard_decision(&state, &settings),
+                Some(GuardDecision::Cooldown)
+            );
+        }
+        state.turn_counter = 14;
+        assert_eq!(guard_decision(&state, &settings), None);
+        state.record_failure(&settings);
+        assert_eq!(state.retry_after_turn, 22);
+        state.compacted_this_boundary = false;
+        state.turn_counter = 15;
+        assert_eq!(
+            guard_decision(&state, &settings),
+            Some(GuardDecision::Cooldown)
+        );
     }
 
     // Given: 75% 閾値と 1000 token window
@@ -420,6 +482,9 @@ mod tests {
             model_overrides: BTreeMap::from([(String::from("model-a"), 99_000)]),
             keep_recent_tokens: 12_000,
             cooldown_turns: 3,
+            failure_cooldown_turns: 6,
+            summary_idle_timeout_secs: 120,
+            summary_timeout_secs: 600,
             max_compactions_per_run: 7,
             max_summary_bytes: 8_192,
             summarizer: SummarizerKind::Structural,
@@ -434,6 +499,9 @@ mod tests {
                 model_overrides: BTreeMap::from([(String::from("model-a"), 99_000)]),
                 keep_recent_tokens: 12_000,
                 cooldown_turns: 3,
+                failure_cooldown_turns: 6,
+                summary_idle_timeout_secs: 120,
+                summary_timeout_secs: 600,
                 max_compactions_per_run: 7,
                 max_summary_bytes: 8_192,
                 summarizer: SummarizerKindSel::Structural,

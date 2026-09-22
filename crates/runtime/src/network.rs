@@ -67,11 +67,23 @@ pub fn build_sandbox(
     policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-    let config = BwrapConfig::new(workspace_root).allow_network(matches!(
-        policy.sandbox_network_mode(),
-        SandboxNetworkMode::ParentNetns
-    ));
+    let config = base_config(policy, workspace_root)?;
     BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
+}
+
+fn base_config(
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+) -> Result<BwrapConfig, SandboxError> {
+    let outputs = tools::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
+        detail: format!("一時ツール出力ディレクトリを作成できません: {error}"),
+    })?;
+    Ok(BwrapConfig::new(workspace_root)
+        .allow_network(matches!(
+            policy.sandbox_network_mode(),
+            SandboxNetworkMode::ParentNetns
+        ))
+        .ro_bind(outputs))
 }
 
 /// isolated worktree が git 操作に必要とする最小 mount set を構築する。
@@ -103,10 +115,7 @@ impl SandboxFactory for BwrapFactory {
         policy: &ExecutionPolicy,
         mounts: &IsolatedMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-        let mut config = BwrapConfig::new(mounts.workspace_root.clone()).allow_network(matches!(
-            policy.sandbox_network_mode(),
-            SandboxNetworkMode::ParentNetns
-        ));
+        let mut config = base_config(policy, mounts.workspace_root.clone())?;
         for path in &mounts.ro_binds {
             config = config.ro_bind(path.clone());
         }

@@ -389,7 +389,7 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
 #[tokio::test]
 async fn still_above_threshold_reports_once_and_never_loops() {
     // Given: a tiny window and an interactive mid-session User boundary whose first
-    // checkpoint and retained tail remain above 75%.
+    // checkpoint and retained tail remain above the threshold, below the hard window.
     let huge_prompt = "huge-prompt-".repeat(40);
     let huge_turn = "huge-turn-".repeat(40);
     let model = Arc::new(ScriptedModel::new([
@@ -399,7 +399,9 @@ async fn still_above_threshold_reports_once_and_never_loops() {
         Ok(text_response("turn-four", FinishReason::ToolUse)),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(Arc::clone(&model), settings(80, 1, 10));
+    let mut config = settings(1_000, 1, 10);
+    config.threshold = 0.2;
+    let (runtime, bus) = runtime_with(Arc::clone(&model), config);
     let mut receiver = bus.subscribe();
 
     // When: the waiting run resumes at that legal User boundary and crosses three later
@@ -546,7 +548,7 @@ async fn agent_double_compact_in_one_response_is_rejected_at_same_boundary() {
 }
 
 #[tokio::test]
-async fn failed_agent_compaction_consumes_budget_without_consuming_boundary_marker() {
+async fn failed_agent_compaction_consumes_attempt_and_boundary() {
     // Given: two compact calls share one response, and the first summary attempt fails.
     let model = Arc::new(ScriptedModel::new([Err(RuntimeError::Model {
         reason: "summary unavailable".to_string(),
@@ -588,7 +590,7 @@ async fn failed_agent_compaction_consumes_budget_without_consuming_boundary_mark
         .expect("waiting run resumes");
     let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
 
-    // Then: no successful event escapes, and the second call observes exhausted attempt budget.
+    // Then: no successful event escapes, and the second call is rejected at the already-attempted boundary.
     assert!(events.is_empty());
     let observed = model.observed().await;
     let final_turn = observed.last().expect("final provider request");
@@ -603,7 +605,7 @@ async fn failed_agent_compaction_consumes_budget_without_consuming_boundary_mark
     assert_eq!(
         tool_result(final_turn, "failed-compact-2"),
         Some((
-            "compaction budget for this run is exhausted".to_string(),
+            "compaction already completed at the current turn boundary".to_string(),
             true,
         ))
     );

@@ -3,16 +3,34 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{RunContextRecord, StorageError};
 
 pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), StorageError> {
-    let guard = crate::entity::SecretGuard::from_env();
-    for (field, json) in [
-        ("messages_json", &record.messages_json),
-        ("checkpoints_json", &record.checkpoints_json),
-    ] {
-        match serde_json::from_str(json) {
-            Ok(value) => check_strings(&guard, field, &value)?,
-            Err(_) => guard.check_text("run_context", field, json)?,
+    let redactor = secret_guard::SecretRedactor::from_env();
+    let mut messages: serde_json::Value = serde_json::from_str(&record.messages_json)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut checkpoints: serde_json::Value = serde_json::from_str(&record.checkpoints_json)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut count = 0;
+    if let Some(messages) = messages.as_array_mut() {
+        for message in messages {
+            count += redact_message(&redactor, message);
         }
+    } else {
+        count += redactor.redact_json(&mut messages);
     }
+    if let Some(checkpoints) = checkpoints.as_array_mut() {
+        for checkpoint in checkpoints {
+            if let Some(summary) = checkpoint.get_mut("summary") {
+                count += redact_message(&redactor, summary);
+            } else {
+                count += redactor.redact_json(checkpoint);
+            }
+        }
+    } else {
+        count += redactor.redact_json(&mut checkpoints);
+    }
+    let messages_json = serde_json::to_string(&messages)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let checkpoints_json = serde_json::to_string(&checkpoints)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
     conn.execute(
         "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
          checkpoints_json, terminal_phase, restorable, updated_at_ns) \
@@ -28,40 +46,43 @@ pub fn upsert(conn: &Connection, record: &RunContextRecord) -> Result<(), Storag
             record.name,
             record.parent_run_id,
             record.config_json,
-            record.messages_json,
-            record.checkpoints_json,
+            messages_json,
+            checkpoints_json,
             record.terminal_phase,
             record.restorable,
             record.updated_at_ns
         ],
     )?;
+    if count > 0 {
+        tracing::info!(run_id = %record.run_id, redacted_spans = count, "run context saved with credential redactions");
+    }
     Ok(())
 }
 
-fn check_strings(
-    guard: &crate::entity::SecretGuard,
-    field: &'static str,
-    value: &serde_json::Value,
-) -> Result<(), StorageError> {
-    match value {
-        serde_json::Value::String(text) => guard.check_text("run_context", field, text),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                check_strings(guard, field, value)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(values) => {
-            for (key, value) in values {
-                guard.check_text("run_context", field, key)?;
-                check_strings(guard, field, value)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            Ok(())
+/// Only payloads are redacted: roles, tool IDs/names, and checkpoint ranges stay intact.
+fn redact_message(
+    redactor: &secret_guard::SecretRedactor,
+    message: &mut serde_json::Value,
+) -> usize {
+    let Some(blocks) = message
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return redactor.redact_json(message);
+    };
+    let mut count = 0;
+    for block in blocks {
+        let field = match block.get("type").and_then(serde_json::Value::as_str) {
+            Some("text" | "reasoning") => "text",
+            Some("tool_use") => "input",
+            Some("tool_result") => "content",
+            _ => continue,
+        };
+        if let Some(payload) = block.get_mut(field) {
+            count += redactor.redact_json(payload);
         }
     }
+    count
 }
 
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {

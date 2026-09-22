@@ -16,10 +16,7 @@ impl TelemetryRow {
         } else {
             usage.output
         };
-        let used = u128::from(usage.input)
-            + u128::from(usage.cache_read)
-            + u128::from(usage.cache_write)
-            + u128::from(output);
+        let used = u128::from(usage.input) + u128::from(output);
         Some((used * 100 + window / 2) / window)
     }
 

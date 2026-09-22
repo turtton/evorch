@@ -47,6 +47,7 @@ pub fn append_event(
     // heuristic secret guard (ADR 0008 defense-in-depth)。serialize・INSERT・
     // accounting 更新より前に拒否し、DB 行・event accounting・session bytes を
     // 変更しない。
+    let event = crate::entity::redact_tool_event(event);
     SecretGuard::from_env().check_event_kind(&event.kind)?;
     let payload = serde_json::to_string(&event.kind)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;

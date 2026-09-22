@@ -19,7 +19,7 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
-    /// Latest terminal snapshot for an exact run name, ordered by persistence time and numeric ID.
+    /// Latest terminal snapshot or safe checkpoint for an exact run name, ordered by persistence time and numeric ID.
     ///
     /// # Errors
     /// Returns an error if SQLite access or row decoding fails.
@@ -29,7 +29,7 @@ impl Database {
     ) -> Result<Option<RunContextRecord>, StorageError> {
         use rusqlite::OptionalExtension;
         let id: Option<String> = self.conn.query_row(
-            "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error') \
+            "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error', 'Checkpoint') \
              ORDER BY updated_at_ns DESC, CAST(substr(run_id, 5) AS INTEGER) DESC LIMIT 1",
             [name], |row| row.get(0),
         ).optional()?;

@@ -1,27 +1,41 @@
 use providers::{Message, Usage};
 
-const CHARS_PER_TOKEN: u64 = 4;
+const BYTES_PER_TOKEN: u64 = 4;
 
-/// Estimates visible context using the conservative chars/4 heuristic used by
-/// opencode/senpi (and mirrored by runtime rule budgeting's four bytes/token).
+/// Estimate serialized UTF-8 bytes / 4. Using bytes avoids undercounting
+/// non-ASCII tool output as severely as a character-count heuristic.
 pub(crate) fn estimate_tokens(messages: &[Message]) -> u64 {
     if messages.is_empty() {
         return 0;
     }
-    let serialized_chars = serde_json::to_string(messages).map_or(u64::MAX, |serialized| {
-        u64::try_from(serialized.chars().count()).unwrap_or(u64::MAX)
+    let serialized_bytes = serde_json::to_string(messages).map_or(u64::MAX, |serialized| {
+        u64::try_from(serialized.len()).unwrap_or(u64::MAX)
     });
-    serialized_chars.saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+    serialized_bytes.saturating_add(BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN
 }
 
-pub(crate) fn estimate_visible(messages: &[Message], last_usage: Option<&Usage>) -> u64 {
+/// Add newly appended tool results and injected messages to the last reported
+/// usage. The baseline must be cleared when old history is replaced/compacted.
+pub(crate) fn estimate_projected(
+    messages: &[Message],
+    last_usage: Option<&Usage>,
+    baseline_estimate: Option<u64>,
+) -> u64 {
+    let current_estimate = estimate_tokens(messages);
     let usage_tokens = last_usage.map_or(0, |usage| {
         usage
             .input_tokens
-            .saturating_add(usage.cache_read_tokens)
             .saturating_add(usage.output_tokens)
+            .saturating_add(
+                baseline_estimate.map_or(0, |baseline| current_estimate.saturating_sub(baseline)),
+            )
     });
-    estimate_tokens(messages).max(usage_tokens)
+    current_estimate.max(usage_tokens)
+}
+
+#[cfg(test)]
+fn estimate_visible(messages: &[Message], last_usage: Option<&Usage>) -> u64 {
+    estimate_projected(messages, last_usage, None)
 }
 
 #[cfg(test)]
@@ -33,6 +47,42 @@ mod tests {
 
     fn message(role: Role, content: Vec<ContentBlock>) -> Message {
         Message { role, content }
+    }
+
+    #[test]
+    fn new_tool_output_is_added_to_reported_usage() {
+        let mut messages = vec![message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "短い".into(),
+            }],
+        )];
+        let baseline = estimate_tokens(&messages);
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cache_read_tokens: 900,
+            ..Usage::default()
+        };
+        messages.push(message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".into(),
+                content: vec![providers::ToolResultContent::Text {
+                    text: "長い出力".repeat(100),
+                }],
+                is_error: false,
+            }],
+        ));
+        assert_eq!(
+            super::estimate_projected(&messages, Some(&usage), Some(baseline)),
+            1100 + estimate_tokens(&messages) - baseline
+        );
+        // Once the history is replaced, neither old usage nor its baseline applies.
+        assert_eq!(
+            super::estimate_projected(&messages[..1], None, None),
+            baseline
+        );
     }
 
     // Given: 4 文字の平文メッセージ / When: トークン数を推定 / Then: serialized representation の 4 文字単位切り上げになる
@@ -93,6 +143,6 @@ mod tests {
             cache_write_tokens: u64::MAX,
         };
 
-        assert_eq!(estimate_visible(&messages, Some(&usage)), 150);
+        assert_eq!(estimate_visible(&messages, Some(&usage)), 130);
     }
 }

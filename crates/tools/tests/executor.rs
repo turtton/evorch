@@ -110,7 +110,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             is_error: false,
-            detail: None,
+            detail: result.detail.clone(),
             run_id: Some("run-7".to_string()),
         }
     );
@@ -332,7 +332,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             is_error: false,
-            detail: None,
+            detail: result.detail.clone(),
             run_id: Some("run-42".to_string()),
             output: Some(result.content.clone()),
         }
@@ -419,7 +419,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
 
 // Given: 標準ツールを登録した実行器と各ツール用のフィクスチャ / When: 5 ツールそれぞれを最小引数で実行 / Then: すべて正常終了する
 #[tokio::test]
-async fn executor_with_standard_tools_registers_five() {
+async fn executor_with_standard_tools_registers_six() {
     let (_bus, executor, _receiver) = setup_executor();
 
     // read / grep 用のファイルと edit 用の書き込み先
@@ -444,8 +444,12 @@ async fn executor_with_standard_tools_registers_five() {
             serde_json::json!({ "pattern": "needle", "path": file_path }),
         ),
         (
+            "write",
+            serde_json::json!({ "path": edit_target_path.clone(), "content": "hello" }),
+        ),
+        (
             "edit",
-            serde_json::json!({ "path": edit_target_path, "new_string": "hello" }),
+            serde_json::json!({"path": edit_target_path, "old_string": "hello", "new_string": "edited"}),
         ),
         (
             "shell",
@@ -548,7 +552,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
             call_id: "call-read".to_string(),
             output: Some(result.content.clone()),
             is_error: false,
-            detail: None,
+            detail: result.detail.clone(),
             run_id: Some("run-20".to_string()),
         }
     );

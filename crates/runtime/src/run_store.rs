@@ -1,6 +1,5 @@
 //! run の永続化 writer と読み取り接続。
 
-use std::collections::HashSet;
 use std::sync::Mutex;
 
 use storage::{
@@ -13,7 +12,6 @@ pub struct RunStore {
     pub(crate) handle: StorageHandle,
     database: Mutex<Database>,
     pub(crate) next_run_id: u64,
-    failed_snapshots: Mutex<HashSet<RunId>>,
     pub(crate) restore_gate: Mutex<()>,
 }
 
@@ -42,24 +40,8 @@ impl RunStore {
             handle,
             database: Mutex::new(database),
             next_run_id,
-            failed_snapshots: Mutex::new(HashSet::new()),
             restore_gate: Mutex::new(()),
         })
-    }
-
-    pub(crate) fn snapshot_failed(&self, run_id: RunId) -> bool {
-        self.failed_snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&run_id)
-    }
-
-    pub(crate) fn invalidate_snapshot(&self, run_id: RunId) -> Result<(), StorageError> {
-        self.failed_snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(run_id);
-        self.handle.invalidate_run_context(&run_id.to_string())
     }
 
     pub(crate) fn restore_record(

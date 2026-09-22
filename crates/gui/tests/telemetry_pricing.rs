@@ -21,7 +21,7 @@ fn cost_includes_known_prices_when_cache_prices_are_unknown() {
     // When: the cost is estimated for cached usage.
     let cost = usage.estimated_cost(Some(pricing));
     // Then: the input and output portion remains visible.
-    assert_eq!(cost, Some(0.0408));
+    assert_eq!(cost, Some(0.03995));
 }
 
 fn completed(model: &str) -> Event {
@@ -88,9 +88,9 @@ fn run_cost_survives_when_another_priced_model_has_zero_usage() {
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
     }));
-    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.0408));
+    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.03995));
     overlay.refresh_costs(&settings);
-    assert_eq!(overlay.cost("run-1"), Some(0.0408));
+    assert_eq!(overlay.cost("run-1"), Some(0.03995));
 }
 
 fn settings() -> ProviderSettingsModel {
@@ -116,7 +116,7 @@ fn completed_costs_accumulate_by_profile_and_model() {
     overlay.apply_event(&completed("model"));
     overlay.apply_event(&completed("model"));
     overlay.refresh_costs(&settings());
-    assert!((overlay.cost("run-1").expect("cost") - 0.084016).abs() < 1e-10);
+    assert!((overlay.cost("run-1").expect("cost") - 0.082316).abs() < 1e-10);
     overlay.apply_event(&completed("unknown"));
     overlay.refresh_costs(&settings());
     assert_eq!(overlay.cost("run-1"), None);
@@ -143,14 +143,14 @@ async fn catalog_fills_missing_fields_but_static_prices_win() {
     let mut settings = ProviderSettingsModel::seed_from_config(&config);
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed("model"));
-    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.01));
+    assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.00915));
     settings.catalog.catalog = Some(Arc::new(
         catalog::ModelCatalog::load_or_refresh(dir.path())
             .await
             .expect("catalog"),
     ));
     overlay.refresh_costs(&settings);
-    assert!((overlay.cost("run-1").expect("cost") - 0.042008).abs() < 1e-10);
+    assert!((overlay.cost("run-1").expect("cost") - 0.041158).abs() < 1e-10);
 }
 
 #[test]
@@ -179,8 +179,8 @@ fn telemetry_cost_renders_in_agents_pane() {
         gui::panes::agents::agents_pane(ui, &tasks, &overlay);
     });
     harness.run();
-    // cache rate: 78300 / (98300 + 1700 cache_write) = 78.3% under the pi-style denominator.
-    for label in ["$0.042", "193.7K tok", "3080.0 tok/s", "cache 78.3%"] {
+    // Cache reads and writes are already included in input: 78300 / 98300.
+    for label in ["$0.041", "113.7K tok", "3080.0 tok/s", "cache 79.7%"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }
@@ -211,7 +211,7 @@ fn capture_telemetry_cost_png() {
         .expect("activate agents");
     let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     harness.run();
-    assert!(harness.has_label("$0.042"));
+    assert!(harness.has_label("$0.041"));
     assert!(harness.has_label("cache 79.7%"));
     if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
         let path = std::env::var_os("EVORCH_TELEMETRY_PNG")

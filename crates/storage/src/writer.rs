@@ -235,6 +235,7 @@ impl StorageHandle {
         }
         // 公開 ingress で fail-fast に検査する。writer スレッド側の
         // repo::event::append_event でも再検査される。
+        let event = crate::entity::redact_tool_event(event);
         SecretGuard::from_env().check_event_kind(&event.kind)?;
         let (reply, result) = mpsc::channel();
         self.0

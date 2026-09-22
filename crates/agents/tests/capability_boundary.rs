@@ -80,7 +80,7 @@ fn orchestrator_denies_mutation_tools() {
     // When: edit / shell の使用可否を問い合わせる
     // Then: 両方とも role_name / tool 入りの Denied になる
     let caps = Role::Orchestrator.capabilities();
-    for tool in ["edit", "shell"] {
+    for tool in ["write", "edit", "shell"] {
         assert_denied(caps.check_tool("Orchestrator", tool), "Orchestrator", tool);
     }
 }
@@ -124,7 +124,15 @@ fn explorer_denies_mutation_delegation_and_messaging_tools() {
     // When: edit / shell / delegate / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Explorer.capabilities();
-    for tool in ["edit", "shell", "delegate", "send", "wait_reply", "inbox"] {
+    for tool in [
+        "write",
+        "edit",
+        "shell",
+        "delegate",
+        "send",
+        "wait_reply",
+        "inbox",
+    ] {
         assert_denied(caps.check_tool("Explorer", tool), "Explorer", tool);
     }
 }
@@ -164,7 +172,7 @@ fn worker_allows_mutation_tools() {
     // When: edit / shell の使用可否を問い合わせる
     // Then: 両方とも Allowed になる
     let caps = Role::Worker.capabilities();
-    for tool in ["edit", "shell"] {
+    for tool in ["write", "edit", "shell"] {
         assert_eq!(caps.check_tool("Worker", tool), CapabilityDecision::Allowed);
     }
 }
@@ -238,7 +246,7 @@ fn reviewer_denies_mutation_and_messaging_tools() {
     // When: edit / send / wait_reply / inbox の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Reviewer.capabilities();
-    for tool in ["edit", "send", "wait_reply", "inbox"] {
+    for tool in ["write", "edit", "send", "wait_reply", "inbox"] {
         assert_denied(caps.check_tool("Reviewer", tool), "Reviewer", tool);
     }
 }
@@ -279,7 +287,7 @@ fn librarian_denies_mutation_and_delegation_tools() {
     // When: edit / shell / delegate / send の使用可否を問い合わせる
     // Then: すべて Denied になる
     let caps = Role::Librarian.capabilities();
-    for tool in ["edit", "shell", "delegate", "send"] {
+    for tool in ["write", "edit", "shell", "delegate", "send"] {
         assert_denied(caps.check_tool("Librarian", tool), "Librarian", tool);
     }
 }

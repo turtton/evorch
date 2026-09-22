@@ -85,17 +85,13 @@ pub struct ToolSpec {
 
 /// トークン使用量。
 ///
-/// 数値はプロバイダが報告した生値であり、推定値は含まない。
-/// プロバイダごとの対応:
-///
-/// - OpenAI: `prompt_tokens` → [`Usage::input_tokens`]、
-///   `prompt_tokens_details.cached_tokens` → [`Usage::cache_read_tokens`]、
-///   [`Usage::cache_write_tokens`] は常に 0。
-/// - Anthropic: `input_tokens` / `output_tokens` / `cache_read_input_tokens` /
-///   `cache_creation_input_tokens` をそれぞれ同名フィールドへ対応させる。
+/// Counts are reported by the provider, normalized to total input (including
+/// cache reads and writes). Cache fields are subtotals, never extra context.
+/// OpenAI/Codex/Kimi already include caches in prompt/input tokens. Anthropic's
+/// separate input, cache-read and cache-creation counts are summed once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Usage {
-    /// プロンプト側の入力トークン数。
+    /// Total input tokens, including cache reads and cache creation.
     pub input_tokens: u64,
     /// 生成された出力トークン数。
     pub output_tokens: u64,

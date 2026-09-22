@@ -27,8 +27,8 @@ fn cache_hit_rate_when_input_includes_cached_tokens() {
 }
 
 #[test]
-fn cache_hit_rate_includes_cache_writes_in_denominator() {
-    // Given: canonical input already includes reads, but not writes.
+fn cache_hit_rate_does_not_add_cache_writes_twice() {
+    // Given: canonical input already includes reads and writes.
     let usage = TokenUsage {
         input: 1000,
         cache_read: 900,
@@ -38,7 +38,7 @@ fn cache_hit_rate_includes_cache_writes_in_denominator() {
     // When: computing the percentage.
     let rate = usage.cache_hit_rate();
     // Then: writes are included exactly once in the denominator.
-    assert!((rate - 900.0 / 1050.0 * 100.0).abs() < 0.001, "rate={rate}");
+    assert!((rate - 900.0 / 1000.0 * 100.0).abs() < 0.001, "rate={rate}");
 }
 
 #[test]
@@ -74,8 +74,8 @@ fn cost_when_cached_tokens_are_already_in_input() {
     };
     // When: estimating cost.
     let cost = usage.estimated_cost(Some(pricing));
-    // Then: 0.5 uncached + 1 output + 0.375 read + 0.125 write.
-    assert_eq!(cost, Some(2.0));
+    // Then: 0.25 uncached + 1 output + 0.375 read + 0.125 write.
+    assert_eq!(cost, Some(1.75));
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn cost_hidden_when_pricing_unknown() {
     assert_eq!(row.usage.estimated_cost(None), None);
     assert_eq!(
         row.compact_line_at(Instant::now(), None),
-        "193.7K tok · cache 78.3%"
+        "113.7K tok · cache 79.7%"
     );
 }
 
@@ -120,11 +120,11 @@ fn cache_segment_hidden_below_10_percent() {
         ..TokenUsage::default()
     };
     // When / Then: threshold uses unrounded percentages.
-    assert_eq!(row.compact_line_at(Instant::now(), None), "1.1K tok");
+    assert_eq!(row.compact_line_at(Instant::now(), None), "1.0K tok");
     row.usage.cache_read = 100;
     assert_eq!(
         row.compact_line_at(Instant::now(), None),
-        "1.1K tok · cache 10.0%"
+        "1.0K tok · cache 10.0%"
     );
 }
 
@@ -144,6 +144,6 @@ fn compact_line_format() {
     // When / Then: stable compact presentation, with no estimated token speed marker.
     assert_eq!(
         row.compact_line_at(Instant::now(), Some(pricing)),
-        "$0.042 · 193.7K tok · 45.2 tok/s · cache 78.3%"
+        "$0.041 · 113.7K tok · 45.2 tok/s · cache 79.7%"
     );
 }

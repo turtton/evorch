@@ -92,10 +92,13 @@ fn has_checkpoint(messages: &[Message]) -> bool {
 async fn automatic_compaction_emits_complete_audit_event() {
     // Given: a long first turn that will exceed the configured window after resume
     let model = Arc::new(ScriptedModel::new([
-        Ok(text_response(&"old answer ".repeat(40), FinishReason::Stop)),
+        Ok(text_response(
+            &"old answer ".repeat(400),
+            FinishReason::Stop,
+        )),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(Arc::clone(&model), structural_settings(160));
+    let (runtime, bus) = runtime_with(Arc::clone(&model), structural_settings(1_000));
     let mut receiver = bus.subscribe();
     let run_id = runtime.delegate_background(
         Role::Worker,
@@ -135,7 +138,7 @@ async fn automatic_compaction_emits_complete_audit_event() {
     assert_eq!(event_run_id, &run_id.to_string());
     assert_eq!(*reason, CompactionReason::Automatic);
     assert_eq!(*threshold, 0.75);
-    assert_eq!(*context_window_tokens, 160);
+    assert_eq!(*context_window_tokens, 1_000);
     assert!(estimated_tokens_before > estimated_tokens_after);
     assert!(compacted_range_start < compacted_range_end);
     assert!(checkpoint_id.starts_with("ckpt-"));
@@ -430,7 +433,7 @@ async fn nothing_to_compact_keeps_run_healthy_and_unknown_run_is_rejected() {
 #[tokio::test]
 async fn still_above_threshold_compacts_once_without_reentry() {
     // Given: an interactive mid-session User boundary makes the old assistant turn legally
-    // compactable while the resulting structural checkpoint remains over a tiny window
+    // compactable while the resulting structural checkpoint remains above the threshold but below the hard window
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(
             &"first response ".repeat(20),
@@ -443,7 +446,8 @@ async fn still_above_threshold_compacts_once_without_reentry() {
         Ok(text_response("done", FinishReason::Stop)),
     ]));
     let settings = CompactionConfig {
-        context_window_tokens: 40,
+        context_window_tokens: 1_000,
+        threshold: 0.2,
         keep_recent_tokens: 1,
         cooldown_turns: 10,
         max_summary_bytes: 1_024,
@@ -485,4 +489,20 @@ async fn still_above_threshold_compacts_once_without_reentry() {
         panic!("expected compacted event")
     };
     assert!(estimated_tokens_after as f64 / context_window_tokens as f64 >= threshold);
+}
+
+#[tokio::test]
+async fn oversized_initial_context_stops_before_provider_call() {
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "must not be called",
+        FinishReason::Stop,
+    ))]));
+    let (runtime, _) = runtime_with(Arc::clone(&model), structural_settings(100));
+    let run_id = runtime.delegate_background(
+        Role::Worker,
+        "huge initial prompt ".repeat(100),
+        RunConfig::default(),
+    );
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
+    assert!(model.observed().await.is_empty());
 }

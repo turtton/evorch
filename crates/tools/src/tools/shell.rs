@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::error::ToolError;
 use crate::executor::ToolExecutionContext;
+use crate::output::Capture;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
@@ -340,12 +341,24 @@ impl Tool for Shell {
             .wrap(CommandSpec {
                 program: "sh".to_string(),
                 args: shell_args,
-                cwd: args.cwd.as_ref().map(PathBuf::from).or_else(|| {
-                    self.default_cwd
+                cwd: {
+                    let root = self
+                        .default_cwd
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                }),
+                        .clone();
+                    args.cwd
+                        .as_ref()
+                        .map(|cwd| {
+                            let path = PathBuf::from(cwd);
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                root.as_ref().map_or(path.clone(), |root| root.join(path))
+                            }
+                        })
+                        .or(root)
+                },
                 extra_env: self.extra_env.clone(),
             })
             .map_err(|error| ToolError::SandboxUnavailable {
@@ -398,32 +411,108 @@ async fn run_process(
         command.current_dir(cwd);
     }
 
-    let spawned = match timeout_ms {
-        Some(timeout_ms) => {
-            tokio::time::timeout(Duration::from_millis(timeout_ms), command.output())
-                .await
-                .map_err(|_| ToolError::Timeout { timeout_ms })?
-        }
-        None => command.output().await,
-    };
-    let output = spawned.map_err(|error| spawn_failed(&wrapped.program, error))?;
-
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.stderr.is_empty() {
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    let content = format!(
-        "exit_code: {}\n{combined}",
-        output.status.code().unwrap_or(-1)
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|error| spawn_failed(&wrapped.program, error))?;
+    let group = ProcessGroup(
+        child
+            .id()
+            .and_then(|id| rustix::process::Pid::from_raw(id as i32)),
     );
-    Ok(if output.status.success() {
-        ToolResult::success(content)
-    } else {
-        ToolResult::error(content)
-    })
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io_failed("missing stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io_failed("missing stderr"))?;
+    let mut out = Capture::default();
+    let mut err = Capture::default();
+    let completion = async {
+        tokio::join!(
+            child.wait(),
+            drain(&mut stdout, &mut out),
+            drain(&mut stderr, &mut err)
+        )
+    };
+    let waited = match timeout_ms {
+        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), completion).await,
+        None => Ok(completion.await),
+    };
+    let (exit_code, timed_out) = match waited {
+        Ok((status, stdout, stderr)) => {
+            stdout?;
+            stderr?;
+            (status.map_err(io_failed)?.code().unwrap_or(-1), false)
+        }
+        Err(_) => {
+            group.kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            (-1, true)
+        }
+    };
+    drop(group);
+    out.append(&err);
+    Ok(shell_result(
+        out,
+        exit_code,
+        if timed_out { timeout_ms } else { None },
+    ))
+}
+
+struct ProcessGroup(Option<rustix::process::Pid>);
+impl ProcessGroup {
+    fn kill(&self) {
+        if let Some(pid) = self.0 {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+async fn drain(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    capture: &mut Capture,
+) -> Result<(), ToolError> {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buffer).await.map_err(io_failed)?;
+        if n == 0 {
+            return Ok(());
+        }
+        capture.push(&buffer[..n]);
+    }
+}
+
+fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> ToolResult {
+    let mut result = capture.finish();
+    result.is_error = timed_out.is_some() || exit_code != 0;
+    let status = timed_out.map_or_else(
+        || format!("exit_code: {exit_code}"),
+        |ms| format!("exit_code: {exit_code}\ntimed out after {ms} ms; partial output follows"),
+    );
+    result.content = format!("{status}\n{}", result.content);
+    result
+}
+
+// Cancellation also tears down a PTY child; dropping a blocking task's handle
+// alone does not stop the process or its reader thread.
+struct PtyKiller(Box<dyn portable_pty::ChildKiller + Send + Sync>);
+impl Drop for PtyKiller {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
 }
 
 /// 対話モード: portable-pty の擬似端末上で 1 回限り実行する。
@@ -467,46 +556,48 @@ async fn run_interactive(
     drop(writer);
 
     // wait でブロックする blocking タスクとは独立に殺せるよう、先に killer を複製する。
-    let mut killer = child.clone_killer();
+    let mut killer = PtyKiller(child.clone_killer());
 
-    let mut blocking = tokio::task::spawn_blocking(move || -> Result<(u32, Vec<u8>), ToolError> {
-        let reader_thread = std::thread::spawn(move || -> Result<Vec<u8>, ToolError> {
-            let mut output = Vec::new();
-            reader.read_to_end(&mut output).map_err(io_failed)?;
-            Ok(output)
-        });
-        let status = child.wait().map_err(io_failed)?;
-        // 親の master を捨ててリーダー側の EOF（Linux では EIO）を確実にする。
-        drop(master);
-        let output = reader_thread.join().map_err(|_| ToolError::Io {
-            detail: "PTY リーダースレッドがパニックしました".to_string(),
-        })??;
-        Ok((status.exit_code(), output))
-    });
-
-    let waited = match timeout_ms {
-        Some(timeout_ms) => {
-            match tokio::time::timeout(Duration::from_millis(timeout_ms), &mut blocking).await {
-                Ok(joined) => joined.map_err(io_failed)?,
-                Err(_elapsed) => {
-                    let _ = killer.kill();
-                    // 後片付け（wait とリーダー読み取りの完了）を待ってから返す。
-                    let _ = blocking.await;
-                    return Err(ToolError::Timeout { timeout_ms });
+    let captured = Arc::new(Mutex::new(Capture::default()));
+    let read_capture = Arc::clone(&captured);
+    let mut blocking = tokio::task::spawn_blocking(move || -> Result<u32, ToolError> {
+        let reader_thread = std::thread::spawn(move || -> Result<(), ToolError> {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => read_capture
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(&buffer[..n]),
+                    Err(error) if error.raw_os_error() == Some(5) => return Ok(()), // Linux PTY EOF
+                    Err(error) => return Err(io_failed(error)),
                 }
             }
-        }
-        None => blocking.await.map_err(io_failed)?,
+        });
+        let status = child.wait().map_err(io_failed)?;
+        drop(master);
+        reader_thread
+            .join()
+            .map_err(|_| io_failed("PTY reader panicked"))??;
+        Ok(status.exit_code())
+    });
+    let waited = match timeout_ms {
+        Some(ms) => tokio::time::timeout(Duration::from_millis(ms), &mut blocking).await,
+        None => Ok((&mut blocking).await),
     };
-
-    let (exit_code, output) = waited?;
-    let content = format!(
-        "exit_code: {exit_code}\n{}",
-        String::from_utf8_lossy(&output)
+    let (exit_code, timed_out) = match waited {
+        Ok(joined) => (joined.map_err(io_failed)?? as i32, None),
+        Err(_) => {
+            let _ = killer.0.kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), blocking).await;
+            (-1, timeout_ms)
+        }
+    };
+    let output = std::mem::take(
+        &mut *captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    Ok(if exit_code == 0 {
-        ToolResult::success(content)
-    } else {
-        ToolResult::error(content)
-    })
+    Ok(shell_result(output, exit_code, timed_out))
 }

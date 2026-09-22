@@ -32,7 +32,8 @@ fn completed(input: u64) -> Event {
         model: "model".into(),
         streaming: true,
         duration_ms: 10,
-        input_tokens: input,
+        // Fixture argument is uncached input; normalize the separate cache subtotals.
+        input_tokens: input.saturating_add(300),
         output_tokens: 900,
         cache_read_tokens: 200,
         cache_write_tokens: 100,
@@ -229,7 +230,7 @@ fn agents_cell_shows_pressure_when_window_is_known() {
     // When: the real workbench renders its Agents pane.
     gui.run();
     // Then: cumulative in/out remains intact beside latest-request pressure.
-    assert!(gui.has_label("900 / 1800 (130%)"));
+    assert!(gui.has_label("1500 / 1800 (130%)"));
     if let Some(path) = std::env::var_os("CONTEXT_AGENTS_CAPTURE") {
         let mut tasks = gui::model::tasks::TasksModel::new(DemoSource(vec![]));
         tasks.update(&[runtime::AgentSummary {
@@ -284,5 +285,5 @@ fn agents_cell_preserves_tokens_when_window_is_unknown() {
     // When: the workbench renders.
     gui.run();
     // Then: the existing token display remains available without a percentage.
-    assert!(gui.has_label("900 / 1800"));
+    assert!(gui.has_label("1500 / 1800"));
 }

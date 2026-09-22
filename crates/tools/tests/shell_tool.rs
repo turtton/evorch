@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use sandbox::DirectSandbox;
 use serde_json::json;
-use tools::{Shell, Tool, ToolError};
+use tools::{Shell, Tool};
 
 fn shell() -> Shell {
     Shell::new(Arc::new(DirectSandbox::new_unchecked()))
@@ -108,9 +108,10 @@ async fn shell_timeout_kills_and_returns_timeout() {
             "timeout_ms": 100
         }))
         .await
-        .expect_err("Timeout が返るはずです");
+        .expect("partial timeout result");
 
-    assert_eq!(error, ToolError::Timeout { timeout_ms: 100 });
+    assert!(error.is_error);
+    assert!(error.content.contains("timed out after 100 ms"));
 }
 
 // Given: 一時ディレクトリを cwd に指定した pwd / When: 非対話モードで実行 / Then: 出力にその一時ディレクトリのパスが含まれる
@@ -179,9 +180,10 @@ async fn shell_interactive_timeout_kills_via_child_killer() {
                 "timeout_ms": 100
             }))
             .await
-            .expect_err("Timeout が返るはずです");
+            .expect("partial timeout result");
 
-        assert_eq!(error, ToolError::Timeout { timeout_ms: 100 });
+        assert!(error.is_error);
+        assert!(error.content.contains("timed out after 100 ms"));
     })
     .await;
 }

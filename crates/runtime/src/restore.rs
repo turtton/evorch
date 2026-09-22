@@ -55,7 +55,7 @@ impl RestoredState {
 /// GUI の chat 系入口 (`delegate_chat` / `continue_goal`) はスナップショットから
 /// ownership を復元せず、呼び出し側の現在の permit を常に再付与するため、
 /// このマーカーを持つ記録は history 復元を許可する。復元判定の両ゲートと
-/// `write_terminal_snapshot` は必ずこの定数を経由して文字列を一致させること。
+/// `write_snapshot` は必ずこの定数を経由して文字列を一致させること。
 pub(crate) const OWNERSHIP_ONLY_UNRESTORABLE_REASON: &str = "復元対象外の実行状態: ownership";
 
 /// 非直列化の実行権限を含まない復元用設定。拒否理由も snapshot に残す。
@@ -89,9 +89,9 @@ impl RunRestoreDescriptor {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SnapshotError {
-    #[error("終端コンテキストを直列化できません: {0}")]
+    #[error("復元コンテキストを直列化できません: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("終端コンテキストを保存できません: {0}")]
+    #[error("復元コンテキストを保存できません: {0}")]
     Storage(#[from] StorageError),
     #[error("保存時刻を取得できません: {0}")]
     Clock(#[from] std::time::SystemTimeError),
@@ -99,29 +99,62 @@ pub(crate) enum SnapshotError {
     Timestamp(#[from] std::num::TryFromIntError),
 }
 
-pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
-    let result = write_terminal_snapshot(state);
-    if result.is_err()
-        && let Some(runtime) = state.runtime()
-        && let Some(store) = runtime.shared.run_store.get()
-        && let Err(error) = store.invalidate_snapshot(state.caller_run_id())
-    {
-        tracing::warn!(run_id = %state.caller_run_id(), %error, "terminal snapshot invalidation failed");
+/// Persist only at a completed tool round; a failed write leaves the last snapshot intact.
+pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError> {
+    let end = safe_context_end(&state.context.messages);
+    if end == 0 || end != state.context.messages.len() {
+        return Ok(());
     }
-    result
+    write_snapshot(state, "Checkpoint", end)
 }
 
-fn write_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
+pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
+    let phase = match state.run_state.phase() {
+        AgentRunPhase::Done => "Done",
+        AgentRunPhase::Error => "Error",
+        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return Ok(()),
+    };
+    let end = safe_context_end(&state.context.messages);
+    if end == 0 {
+        return Ok(());
+    }
+    write_snapshot(state, phase, end)
+}
+
+/// A pending batch is omitted as a whole, so restored history never asks a provider
+/// to accept tool calls whose results were lost when the run was interrupted.
+fn safe_context_end(messages: &[providers::Message]) -> usize {
+    let mut pending = std::collections::HashSet::new();
+    let mut end = 0;
+    for (index, message) in messages.iter().enumerate() {
+        for block in &message.content {
+            match block {
+                providers::ContentBlock::ToolUse { id, .. } => {
+                    pending.insert(id.as_str());
+                }
+                providers::ContentBlock::ToolResult { tool_call_id, .. } => {
+                    pending.remove(tool_call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        if pending.is_empty() {
+            end = index + 1;
+        }
+    }
+    end
+}
+
+fn write_snapshot(
+    state: &LoopState,
+    terminal_phase: &str,
+    end: usize,
+) -> Result<(), SnapshotError> {
     let Some(runtime) = state.runtime() else {
         return Ok(());
     };
     let Some(store) = runtime.shared.run_store.get() else {
         return Ok(());
-    };
-    let terminal_phase = match state.run_state.phase() {
-        AgentRunPhase::Done => "Done",
-        AgentRunPhase::Error => "Error",
-        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return Ok(()),
     };
     let config = state.run_config();
     let mut unsupported = Vec::new();
@@ -172,12 +205,66 @@ fn write_terminal_snapshot(state: &LoopState) -> Result<(), SnapshotError> {
             .unwrap_or_else(|| descriptor.role.clone()),
         parent_run_id: descriptor.parent_run_id.map(|id| id.to_string()),
         config_json: serde_json::to_string(&descriptor)?,
-        messages_json: serde_json::to_string(&state.context.messages)?,
-        checkpoints_json: serde_json::to_string(state.context.checkpoints())?,
+        messages_json: serde_json::to_string(&state.context.messages[..end])?,
+        checkpoints_json: serde_json::to_string(
+            &state
+                .context
+                .checkpoints()
+                .iter()
+                .filter(|checkpoint| checkpoint.range.1 <= end)
+                .collect::<Vec<_>>(),
+        )?,
         terminal_phase: terminal_phase.to_string(),
         restorable: descriptor.restorable,
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
     };
     store.handle.upsert_run_context(&record)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_context_end;
+    use providers::{ContentBlock, Message, Role, ToolResultContent};
+
+    #[test]
+    fn incomplete_tool_batches_are_not_checkpoint_boundaries() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "work".into(),
+            }],
+        }];
+        assert_eq!(safe_context_end(&messages), 1);
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "a".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "b".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+        });
+        let result = |id: &str| Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: id.into(),
+                content: vec![ToolResultContent::Text {
+                    text: "done".into(),
+                }],
+                is_error: false,
+            }],
+        };
+        assert_eq!(safe_context_end(&messages), 1);
+        messages.push(result("a"));
+        assert_eq!(safe_context_end(&messages), 1);
+        messages.push(result("b"));
+        assert_eq!(safe_context_end(&messages), 4);
+    }
 }

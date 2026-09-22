@@ -40,4 +40,4 @@ reqwest = { workspace = true }
 tokio-rustls = { workspace = true }
 mock-openai = { path = "../mock-openai" }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

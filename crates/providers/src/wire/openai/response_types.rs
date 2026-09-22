@@ -57,6 +57,9 @@ pub struct WireUsage {
     /// 入力トークンの内訳。
     #[serde(default)]
     pub prompt_tokens_details: Option<WirePromptTokensDetails>,
+    /// Legacy Kimi cache-read count; details take precedence when present.
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
 }
 
 /// OpenAI の入力トークン内訳。
@@ -65,6 +68,9 @@ pub struct WirePromptTokensDetails {
     /// キャッシュから読み出された入力トークン数。
     #[serde(default)]
     pub cached_tokens: Option<u64>,
+    /// Kimi cache creation count, already included in prompt_tokens.
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// SSE の Chat Completions chunk。

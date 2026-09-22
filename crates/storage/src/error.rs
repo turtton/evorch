@@ -4,28 +4,7 @@ use std::fmt;
 
 use crate::LimitKind;
 
-/// secret guard が検出に用いた規則を識別します。
-///
-/// 診断には規則名のみを含め、検出対象となった値本体やその前後コンテキストは
-/// 一切含みません（ADR 0008 の credential 非漏洩方針）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretRule {
-    /// 明示的に注入された既知 credential 値、または限定的な credential 環境変数の
-    /// 値と一致しました。
-    KnownCredentialValue,
-    /// 高シグナルな API key 形状（プロバイダ接頭辞、private key block 等）に
-    /// 一致しました。保持するのは規則ラベルのみです。
-    ApiKeyShape(&'static str),
-}
-
-impl fmt::Display for SecretRule {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::KnownCredentialValue => formatter.write_str("known-credential-value"),
-            Self::ApiKeyShape(label) => formatter.write_str(label),
-        }
-    }
-}
+pub use secret_guard::SecretRule;
 
 #[derive(Debug)]
 struct IoSource;

@@ -12,6 +12,7 @@ pub mod shell_contract;
 pub mod shell_escalation;
 pub mod web_fetch;
 pub mod web_search;
+pub mod write;
 
 pub use edit::Edit;
 pub use git_diff::GitDiff;
@@ -21,6 +22,7 @@ pub use shell::Shell;
 pub use shell_contract::{CommandVerdict, ShellCommandContract};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
+pub use write::Write;
 
 #[cfg(test)]
 mod tests {
@@ -28,7 +30,7 @@ mod tests {
 
     use sandbox::DirectSandbox;
 
-    use super::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch};
+    use super::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
     use crate::tool::Tool;
 
     // Given: 5 つの標準ツールの静的スキーマ / When: jsonschema::validator_for でコンパイル / Then: すべて成功する
@@ -39,6 +41,7 @@ mod tests {
         let schemas = [
             (Read.name(), Read.schema()),
             (Edit.name(), Edit.schema()),
+            (Write.name(), Write.schema()),
             (Grep.name(), Grep.schema()),
             (
                 shell.name(),

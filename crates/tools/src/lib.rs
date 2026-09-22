@@ -1,6 +1,6 @@
 //! ツールレイヤの実装クレート。
 //!
-//! LLM エージェントが呼び出す標準ツール（read / edit / grep / shell / git_diff）の
+//! LLM エージェントが呼び出す標準ツール（read / write / edit / grep / shell / git_diff）の
 //! 定義、引数スキーマ、権限モデル、出力サニタイズ、そして実行の窓口である
 //! ToolExecutor を提供する。web_search / web_fetch は
 //! [`executor::ToolExecutor::with_web_tools`] で追加登録する。
@@ -14,6 +14,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod network_guard;
 pub mod origin;
+pub mod output;
 pub mod result;
 pub mod sanitize;
 pub(crate) mod schema;
@@ -37,4 +38,5 @@ pub use search::{
 pub use tool::{Permissions, Tool, ToolExecutionMode};
 pub use tools::{
     CommandVerdict, Edit, GitDiff, Grep, Read, Shell, ShellCommandContract, WebFetch, WebSearch,
+    Write,
 };

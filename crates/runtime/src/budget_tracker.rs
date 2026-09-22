@@ -44,10 +44,11 @@ impl From<&config::BudgetConfig> for BudgetSettings {
     fn from(config: &config::BudgetConfig) -> Self {
         Self {
             max_tool_calls: config.max_tool_calls,
+            max_tokens: config.max_tokens,
+            max_elapsed: Duration::from_secs(config.max_elapsed_secs),
             max_no_progress_rounds: config.max_no_progress_rounds,
             max_file_rereads: config.max_file_rereads,
             max_identical_tool_call_repeats: config.max_identical_tool_call_repeats,
-            ..Self::default()
         }
     }
 }

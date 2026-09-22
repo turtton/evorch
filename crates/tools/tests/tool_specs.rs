@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use event_bus::EventBus;
 use sandbox::DirectSandbox;
-use tools::{Edit, GitDiff, Grep, Read, Shell, Tool, ToolExecutor, WebFetch, WebSearch};
+use tools::{Edit, GitDiff, Grep, Read, Shell, Tool, ToolExecutor, WebFetch, WebSearch, Write};
 
 #[test]
 fn tool_specs_preserve_registered_schemas_and_descriptions() {
@@ -11,6 +11,7 @@ fn tool_specs_preserve_registered_schemas_and_descriptions() {
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(Read),
         Arc::new(Edit),
+        Arc::new(Write),
         Arc::new(Grep),
         Arc::new(Shell::new(sandbox.clone())),
         Arc::new(GitDiff::new(sandbox)),

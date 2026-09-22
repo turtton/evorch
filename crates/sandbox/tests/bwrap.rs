@@ -144,3 +144,95 @@ fn writes_are_scoped_to_workspace() {
         "外部パスはホストへ反映されないはずです"
     );
 }
+
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn scratch_survives_calls_and_relative_cwd_is_workspace_based() {
+    let workspace = workspace();
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf())).unwrap();
+    let command = |script: &str| CommandSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: Some(".".into()),
+        extra_env: Vec::new(),
+    };
+    let first = run(sandbox
+        .wrap(command("pwd; printf retained > /tmp/evorch-retained"))
+        .unwrap());
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout).trim(),
+        workspace.path().to_str().unwrap()
+    );
+    let second = run(sandbox.wrap(command("cat /tmp/evorch-retained")).unwrap());
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(second.stdout, b"retained");
+    let other = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf())).unwrap();
+    assert!(
+        !run(other.wrap(command("test -e /tmp/evorch-retained")).unwrap())
+            .status
+            .success()
+    );
+}
+
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn cargo_cache_is_readable_without_credentials_and_cannot_be_modified() {
+    let workspace = workspace();
+    let cache = tempdir().unwrap();
+    fs::create_dir_all(cache.path().join("registry/src")).unwrap();
+    fs::write(
+        cache.path().join("registry/src/cached"),
+        "cached dependency",
+    )
+    .unwrap();
+    fs::write(cache.path().join("credentials.toml"), "private credential").unwrap();
+    let sandbox = BwrapSandbox::detect(
+        BwrapConfig::new(workspace.path().to_path_buf()).cargo_cache(cache.path()),
+    )
+    .unwrap();
+    let result = run(sandbox.wrap(CommandSpec {
+        program: "sh".into(),
+        args: vec!["-c".into(), "cat \"$CARGO_HOME/registry/src/cached\"; test ! -e \"$CARGO_HOME/credentials.toml\" && test ! -e \"$HOME/.cargo/credentials.toml\" && ! touch \"$CARGO_HOME/registry/src/forbidden\" && touch \"$CARGO_HOME/.package-cache\"".into()],
+        cwd: None, extra_env: Vec::new(),
+    }).unwrap());
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"cached dependency");
+    assert!(!cache.path().join("registry/src/forbidden").exists());
+}
+
+#[ignore = "bwrap とホストの Cargo 依存キャッシュが必要"]
+#[test]
+fn cargo_builds_cached_dependency_offline_inside_sandbox() {
+    let workspace = workspace();
+    fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n[package]\nname = \"evorch-sandbox-offline-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\nserde = \"1\"\n").unwrap();
+    fs::create_dir(workspace.path().join("src")).unwrap();
+    fs::write(workspace.path().join("src/main.rs"), "fn main() { let _: Option<serde::de::IgnoredAny> = None; println!(\"offline build ok\"); }").unwrap();
+    let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf())).unwrap();
+    let output = run(sandbox
+        .wrap(CommandSpec {
+            program: "cargo".into(),
+            args: vec!["run".into(), "--offline".into(), "--quiet".into()],
+            cwd: Some(".".into()),
+            extra_env: Vec::new(),
+        })
+        .unwrap());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"offline build ok\n");
+}

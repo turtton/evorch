@@ -44,9 +44,6 @@ impl AgentRuntime {
             AgentRunPhase::Done | AgentRunPhase::Error => {}
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
-        if store.snapshot_failed(run_id) {
-            return Err(fail(RunRestoreFailure::MissingContext));
-        }
         let mut record = store
             .restore_record(run_id)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?

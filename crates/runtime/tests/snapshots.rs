@@ -24,8 +24,8 @@ async fn mutating_tool_emits_checkpoint_before_execution_and_can_be_undone() {
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response(
             "edit-1",
-            "edit",
-            serde_json::json!({"path": file, "new_string": "after"}),
+            "write",
+            serde_json::json!({"path": file, "content": "after"}),
         )),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
@@ -33,7 +33,7 @@ async fn mutating_tool_emits_checkpoint_before_execution_and_can_be_undone() {
         Arc::new(SnapshotService::new(&root, &temp.path().join("snapshots")).expect("service"));
     let runtime = AgentRuntime::new(bus, executor, model).with_snapshots(service);
     // When: complete an edit through the public runtime surface.
-    let run = runtime.delegate_background(Role::Worker, "edit".into(), RunConfig::default());
+    let run = runtime.delegate_background(Role::Worker, "write".into(), RunConfig::default());
     runtime.wait(run).await.expect("wait");
     assert_eq!(std::fs::read_to_string(&file).expect("file"), "after");
     let mut checkpoint_seen = false;

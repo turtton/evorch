@@ -21,6 +21,12 @@ pub struct CompactionConfig {
     pub keep_recent_tokens: u64,
     /// 圧縮後に再圧縮を抑制するターン数。
     pub cooldown_turns: u32,
+    /// Base turn cooldown after summary failures; doubles after each failure.
+    pub failure_cooldown_turns: u32,
+    /// Maximum silence between summary text/reasoning updates.
+    pub summary_idle_timeout_secs: u64,
+    /// Overall deadline for one summary attempt (including provider retries).
+    pub summary_timeout_secs: u64,
     /// 1 run あたりの圧縮回数の上限 (DoS/暴走防止)。
     pub max_compactions_per_run: u64,
     /// 要約本文の最大バイト数。
@@ -38,6 +44,9 @@ impl Default for CompactionConfig {
             model_overrides: BTreeMap::new(),
             keep_recent_tokens: 20_000,
             cooldown_turns: 1,
+            failure_cooldown_turns: 4,
+            summary_idle_timeout_secs: 90,
+            summary_timeout_secs: 300,
             max_compactions_per_run: 32,
             max_summary_bytes: 16_384,
             summarizer: SummarizerKind::Model,
@@ -134,6 +143,9 @@ summarizer = "structural"
             model_overrides: BTreeMap::from([(String::from("model-a"), 90_000)]),
             keep_recent_tokens: 10_000,
             cooldown_turns: 2,
+            failure_cooldown_turns: 5,
+            summary_idle_timeout_secs: 120,
+            summary_timeout_secs: 600,
             max_compactions_per_run: 12,
             max_summary_bytes: 4_096,
             summarizer: SummarizerKind::Structural,

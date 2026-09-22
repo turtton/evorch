@@ -252,11 +252,11 @@ async fn snapshot_taken_before_each_write_tool_in_wave() {
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
     let (mut executor, trace, _receiver) = executor(bus.clone());
-    executor.register(Arc::new(tools::Edit)).expect("edit");
+    executor.register(Arc::new(tools::Write)).expect("edit");
     let edit = |id: &str, text: &str| ContentBlock::ToolUse {
         id: id.into(),
-        name: "edit".into(),
-        input: json!({"path":file,"new_string":text}),
+        name: "write".into(),
+        input: json!({"path":file,"content":text}),
     };
     let service = Arc::new(
         runtime::snapshot::SnapshotService::new(&root, &temp.path().join("snapshots"))

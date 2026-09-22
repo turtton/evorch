@@ -1,6 +1,6 @@
 //! edit ツールの実装。
 //!
-//! `old_string` の指定有無でファイル全体の書き込みと対象置換を切り替える。
+//! 空でない `old_string` の最初の一致箇所を置換する。
 //! 書き込みは必ず同一親ディレクトリ上の一時ファイル経由で行い、`persist` に
 //! よる原子的リネームで反映する。ディスクへの書き込みはバイト一致とし、制御
 //! マーカーのエスケープは行わない（ADR 0008。エスケープは wave 3 の
@@ -24,7 +24,7 @@ impl Tool for Edit {
     }
 
     fn description(&self) -> &str {
-        "Write a file with new_string, or replace the first old_string match when provided."
+        "Replace the first exact, non-empty old_string match in an existing file with new_string. Read the file first. To create or replace a whole file, use write(path, content)."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -32,10 +32,10 @@ impl Tool for Edit {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "old_string": { "type": "string" },
+                "old_string": { "type": "string", "minLength": 1 },
                 "new_string": { "type": "string" }
             },
-            "required": ["path", "new_string"],
+            "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
         })
     }
@@ -48,10 +48,7 @@ impl Tool for Edit {
         ToolExecutionMode::Exclusive
     }
 
-    /// ファイルを作成・上書き、または `old_string` の最初の一致箇所を置換する。
-    ///
-    /// `old_string` が無い場合は `new_string` でファイル全体を書き込む（新規作成を
-    /// 含む）。有る場合は対象ファイルの最初の一致箇所のみを `new_string` へ置換する。
+    /// 既存ファイルの `old_string` の最初の一致箇所を置換する。
     ///
     /// # Errors
     /// 引数が不正なら [`ToolError::InvalidArgs`]、`old_string` 指定時にファイルが
@@ -60,33 +57,37 @@ impl Tool for Edit {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         let path_text = required_str(&args, "path")?;
         let new_string = required_str(&args, "new_string")?;
-        let old_string = args.get("old_string").and_then(serde_json::Value::as_str);
-
+        let old_string = required_str(&args, "old_string")?;
+        if old_string.is_empty() {
+            return Err(ToolError::InvalidArgs {
+                detail: "old_string must be non-empty; use write(path, content) to create or replace a file".into(),
+            });
+        }
         let path = Path::new(path_text);
-        let next_content = match old_string {
-            None => new_string.to_string(),
-            Some(old_string) => {
-                if !path.exists() {
-                    return Err(ToolError::PathNotFound {
-                        path: path_text.to_string(),
-                    });
+        let current = std::fs::read_to_string(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ToolError::PathNotFound {
+                    path: path_text.to_string(),
                 }
-                let current = std::fs::read_to_string(path)
-                    .map_err(|error| io_error("ファイルの読み込みに失敗しました", error))?;
-                replace_first(&current, old_string, new_string).ok_or_else(|| {
-                    ToolError::EditTargetNotFound {
-                        path: path_text.to_string(),
-                    }
-                })?
+            } else {
+                io_error("ファイルの読み込みに失敗しました", error)
             }
-        };
+        })?;
+        let next_content = replace_first(&current, old_string, new_string).ok_or_else(|| {
+            ToolError::EditTargetNotFound {
+                path: path_text.to_string(),
+            }
+        })?;
         write_atomically(path, &next_content)?;
         Ok(ToolResult::success(format!("edited {path_text}")))
     }
 }
 
 /// `args` から必須の文字列プロパティを取り出す。
-fn required_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, ToolError> {
+pub(super) fn required_str<'a>(
+    args: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, ToolError> {
     args.get(key)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ToolError::InvalidArgs {
@@ -108,13 +109,22 @@ fn replace_first(haystack: &str, needle: &str, replacement: &str) -> Option<Stri
 ///
 /// 同一親ディレクトリに一時ファイルを作成して書き出した後、`persist` で `path`
 /// へリネームする。失敗時は一時ファイルが drop 時に削除される。
-fn write_atomically(path: &Path, content: &str) -> Result<(), ToolError> {
+pub(super) fn write_atomically(path: &Path, content: &str) -> Result<(), ToolError> {
     let parent_dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     };
     let mut temp = tempfile::NamedTempFile::new_in(&parent_dir)
         .map_err(|error| io_error("一時ファイルの作成に失敗しました", error))?;
+    // 原子的な置換で既存ファイルの実行ビット等を失わない。
+    match std::fs::metadata(path) {
+        Ok(metadata) => temp
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(|error| io_error("ファイル権限の維持に失敗しました", error))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("ファイル情報の読み込みに失敗しました", error)),
+    }
     temp.write_all(content.as_bytes())
         .map_err(|error| io_error("一時ファイルへの書き込みに失敗しました", error))?;
     temp.flush()

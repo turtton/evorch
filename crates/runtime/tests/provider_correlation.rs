@@ -115,8 +115,8 @@ async fn agent_loop_stamps_run_id_on_provider_attempts_and_tool_events() {
                     "id": "call-1",
                     "type": "function",
                     "function": {
-                        "name": "edit",
-                        "arguments": json!({ "path": path, "new_string": "written" }).to_string()
+                        "name": "write",
+                        "arguments": json!({ "path": path, "content": "written" }).to_string()
                     }
                 }]
             },

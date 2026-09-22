@@ -119,7 +119,9 @@ async fn budget_exhaustion_blocks_further_compactions() {
         ],
         Arc::clone(&gate),
     ));
-    let (runtime, bus) = runtime_with(model.clone(), settings(80, 1, SummarizerKind::Structural));
+    let mut config = settings(1_000, 1, SummarizerKind::Structural);
+    config.threshold = 0.2;
+    let (runtime, bus) = runtime_with(model.clone(), config);
     let mut receiver = bus.subscribe();
     let run_id = runtime.delegate_background(
         Role::Worker,
@@ -172,7 +174,9 @@ async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
         ],
         Arc::clone(&gate),
     ));
-    let (runtime, bus) = runtime_with(model.clone(), settings(800, 4, SummarizerKind::Structural));
+    let mut config = settings(2_000, 4, SummarizerKind::Structural);
+    config.threshold = 0.4;
+    let (runtime, bus) = runtime_with(model.clone(), config);
     let mut receiver = bus.subscribe();
     let run_id = runtime.delegate_background(
         Role::Worker,

@@ -162,10 +162,10 @@ async fn worker_run_with_tool_call_completes_over_mock() {
                 MODEL,
                 0,
                 "call_1",
-                "edit",
+                "write",
                 [
                     path_chunk.as_str(),
-                    "\"new_string\":\"written by ",
+                    "\"content\":\"written by ",
                     "streaming mock e2e\"}",
                 ],
             ),
@@ -229,7 +229,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
                 }
                 EventKind::Tool(ToolEvent::ToolStarted {
                     tool_name, run_id, ..
-                }) if tool_name == "edit"
+                }) if tool_name == "write"
                     && run_id.as_deref() == Some(expected_run_id.as_str()) =>
                 {
                     tool_started += 1;
@@ -239,7 +239,7 @@ async fn worker_run_with_tool_call_completes_over_mock() {
                     run_id,
                     is_error: false,
                     ..
-                }) if tool_name == "edit"
+                }) if tool_name == "write"
                     && run_id.as_deref() == Some(expected_run_id.as_str()) =>
                 {
                     tool_completed += 1;

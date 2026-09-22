@@ -266,7 +266,7 @@ impl EscalationDetector {
             return None;
         }
 
-        if obs.tool == "edit" {
+        if matches!(obs.tool, "edit" | "write") {
             if obs.is_error {
                 self.consecutive_edit_failures = self.consecutive_edit_failures.saturating_add(1);
             } else {

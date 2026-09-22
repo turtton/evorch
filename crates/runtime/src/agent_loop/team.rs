@@ -144,13 +144,13 @@ impl LoopState {
         let team = self.task.config.team.as_ref().ok_or("team is missing")?;
         match name {
             "shell" => {
-                Err("team workers use owned edit paths, not unrestricted shell writes".into())
+                Err("team workers use owned write/edit paths, not unrestricted shell writes".into())
             }
-            "edit" => {
+            "edit" | "write" => {
                 let path = input
                     .get("path")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or("edit path missing")?;
+                    .ok_or("write/edit path missing")?;
                 team.board
                     .authorize_path(
                         &self.task.run_id.to_string(),

@@ -74,3 +74,101 @@ async fn read_non_utf8_content_is_io_error() {
         "実際のエラー: {error:?}"
     );
 }
+
+#[tokio::test]
+async fn read_range_reports_next_line_and_stops_at_eof() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("range.txt");
+    fs::write(&path, "first\nsecond\n三行目\nfourth").unwrap();
+    let result = Read
+        .execute(serde_json::json!({"path": path, "offset": 2, "limit": 2}))
+        .await
+        .unwrap();
+    let detail = result.detail.unwrap();
+    assert!(result.content.starts_with("second\n三行目\n"));
+    assert_eq!(detail["next_offset"], 4);
+    assert_eq!(detail["next_byte_offset"], 0);
+    let last = Read
+        .execute(serde_json::json!({"path": path, "offset": 4}))
+        .await
+        .unwrap();
+    assert_eq!(last.content, "fourth");
+    assert_eq!(last.detail.unwrap()["truncated"], false);
+    assert_eq!(
+        Read.execute(serde_json::json!({"path": path, "offset": 99}))
+            .await
+            .unwrap()
+            .content,
+        ""
+    );
+}
+
+#[tokio::test]
+async fn read_caps_line_limit_even_when_requested_larger() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("many.txt");
+    fs::write(&path, "line\n".repeat(1000)).unwrap();
+    let result = Read
+        .execute(serde_json::json!({"path": path, "limit": 10000}))
+        .await
+        .unwrap();
+    let detail = result.detail.unwrap();
+    assert_eq!(detail["bytes_returned"], 1500);
+    assert_eq!(detail["next_offset"], 301);
+    assert!(result.content.starts_with(&"line\n".repeat(300)));
+}
+
+#[tokio::test]
+async fn read_continues_long_unicode_line_without_loss_or_duplicates() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("long.txt");
+    let content = format!("skip\n{}\nlast", "日本語🦀".repeat(6000));
+    fs::write(&path, &content).unwrap();
+    let mut offset = 2;
+    let mut byte_offset = 0;
+    let mut collected = String::new();
+    loop {
+        let result = Read
+            .execute(
+                serde_json::json!({"path": path, "offset": offset, "byte_offset": byte_offset}),
+            )
+            .await
+            .unwrap();
+        let detail = result.detail.unwrap();
+        let bytes = detail["bytes_returned"].as_u64().unwrap() as usize;
+        assert!(bytes <= tools::tools::read::MAX_READ_BYTES);
+        collected.push_str(&result.content[..bytes]);
+        if !detail["truncated"].as_bool().unwrap() {
+            break;
+        }
+        offset = detail["next_offset"].as_u64().unwrap();
+        byte_offset = detail["next_byte_offset"].as_u64().unwrap();
+    }
+    assert_eq!(collected, content.strip_prefix("skip\n").unwrap());
+}
+
+#[tokio::test]
+async fn read_skips_giant_line_and_rejects_invalid_ranges() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("giant.txt");
+    fs::write(&path, format!("{}\nnext\n", "x".repeat(2 * 1024 * 1024))).unwrap();
+    let result = Read
+        .execute(serde_json::json!({"path": path, "offset": 2}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "next\n");
+    for args in [
+        serde_json::json!({"path": path, "offset": 0}),
+        serde_json::json!({"path": path, "limit": -1}),
+    ] {
+        assert!(matches!(
+            Read.execute(args).await.unwrap_err(),
+            ToolError::InvalidArgs { .. }
+        ));
+    }
+    assert!(
+        Read.execute(serde_json::json!({"path": path, "offset": 2, "byte_offset": 6}))
+            .await
+            .is_err()
+    );
+}

@@ -66,7 +66,7 @@ async fn ledger_only_run_id_is_reserved_after_restart() {
 }
 
 #[tokio::test]
-async fn failed_terminal_update_rejects_stale_restore() {
+async fn consumed_snapshot_stays_unrestorable_when_no_new_checkpoint_can_be_saved() {
     for close_writer in [false, true] {
         // Given: a child with a snapshot that predates writer closure.
         let (_dir, config, storage, database) = storage_fixture();
@@ -98,7 +98,7 @@ async fn failed_terminal_update_rejects_stale_restore() {
             result,
             Err(RuntimeError::RunRestoreFailed {
                 run_id: child.to_string(),
-                reason: RunRestoreFailure::UnsupportedConfig("persist_failed".into()),
+                reason: RunRestoreFailure::UnsupportedConfig("snapshot_consumed".into()),
             })
         );
         {
@@ -126,14 +126,7 @@ async fn failed_terminal_update_rejects_stale_restore() {
                 restarted.send_agent_message(parent, child, AgentMessageKind::Send, "next", None),
                 Err(RuntimeError::RunRestoreFailed {
                     run_id: child.to_string(),
-                    reason: RunRestoreFailure::UnsupportedConfig(
-                        if close_writer {
-                            "snapshot_consumed"
-                        } else {
-                            "persist_failed"
-                        }
-                        .into()
-                    )
+                    reason: RunRestoreFailure::UnsupportedConfig("snapshot_consumed".into())
                 })
             );
         }
