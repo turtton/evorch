@@ -349,6 +349,17 @@ struct BatchCall {
     ready: ReadyCall,
 }
 
+impl BatchCall {
+    fn awaited_delegate(&self) -> bool {
+        self.name == "delegate"
+            && matches!(self.ready, ReadyCall::Local)
+            && self
+                .input
+                .get("background")
+                .is_none_or(|value| value == &Value::Bool(false))
+    }
+}
+
 impl LoopState {
     pub(super) async fn execute_tools(
         &mut self,
@@ -488,6 +499,76 @@ impl LoopState {
                     crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
                 }
                 let mut wave = vec![first];
+                if wave[0].awaited_delegate() {
+                    while calls.front().is_some_and(BatchCall::awaited_delegate) {
+                        if let Some(call) = calls.pop_front() {
+                            wave.push(call);
+                        }
+                    }
+                    let Some(runtime) = self.runtime() else {
+                        for call in wave {
+                            self.context.push_tool_result(
+                                call.id,
+                                ToolResult::error("runtime is unavailable"),
+                            );
+                            self.publish_message_count();
+                        }
+                        continue;
+                    };
+                    let mut ids = Vec::with_capacity(wave.len());
+                    let mut children = Vec::with_capacity(wave.len());
+                    let mut spawned = Vec::with_capacity(wave.len());
+                    for call in wave {
+                        if let Some(permit) = &self.task.config.ownership
+                            && let Err(error) = permit.validate_mutation()
+                        {
+                            meta::cleanup_delegates(&runtime, spawned).await;
+                            self.finish_error(error.to_string());
+                            return false;
+                        }
+                        if self.cancelled() {
+                            meta::cleanup_delegates(&runtime, spawned).await;
+                            self.finish_cancelled();
+                            return false;
+                        }
+                        let child = match self
+                            .guard_team_artifact(&call.name, &call.input)
+                            .and_then(|()| {
+                                self.policy
+                                    .authorize(&call.name)
+                                    .map_err(|error| error.to_string())
+                            }) {
+                            Ok(()) => meta::spawn_delegate(self, &runtime, call.input),
+                            Err(error) => Err(meta::DispatchResult {
+                                result: ToolResult::error(error),
+                                terminal: meta::Terminal::Continue,
+                            }),
+                        };
+                        if let Ok(child) = &child {
+                            spawned.push(*child);
+                        }
+                        ids.push(call.id);
+                        children.push(child);
+                    }
+                    for (id, dispatch) in ids
+                        .into_iter()
+                        .zip(meta::wait_delegates(self, &runtime, children).await)
+                    {
+                        self.context.push_tool_result(id, dispatch.result);
+                        self.publish_message_count();
+                    }
+                    if self.cancelled() {
+                        self.finish_cancelled();
+                        return false;
+                    }
+                    if let Some(permit) = &self.task.config.ownership
+                        && let Err(error) = permit.validate_mutation()
+                    {
+                        self.finish_error(error.to_string());
+                        return false;
+                    }
+                    continue;
+                }
                 if self.shared_call(&wave[0]) {
                     while calls.front().is_some_and(|call| self.shared_call(call)) {
                         if let Some(call) = calls.pop_front() {

@@ -67,30 +67,55 @@ pub(super) async fn delegate(
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
+    let child = match spawn_delegate(state, runtime, input) {
+        Ok(child) => child,
+        Err(result) => return result,
+    };
+    if state.transition(AgentRunPhase::Waiting, None).is_err() {
+        cleanup_delegates(runtime, std::iter::once(child)).await;
+        return error("parent run could not enter Waiting");
+    }
+    let result = runtime.wait(child).await;
+    if state.transition(AgentRunPhase::Running, None).is_err() {
+        return error("parent run could not resume Running");
+    }
+    match result {
+        Ok(phase) => success(format!("{phase:?}")),
+        Err(runtime_error) => error(runtime_error.to_string()),
+    }
+}
+
+pub(crate) fn spawn_delegate(
+    state: &mut LoopState,
+    runtime: &AgentRuntime,
+    input: serde_json::Value,
+) -> Result<crate::RunId, DispatchResult> {
     let args = match parse::<DelegateArgs>(input) {
         Ok(args) => args,
-        Err(message) => return error(message),
+        Err(message) => return Err(error(message)),
     };
     if args.interactive && !args.background {
-        return error("invalid arguments: interactive=true requires background=true");
+        return Err(error(
+            "invalid arguments: interactive=true requires background=true",
+        ));
     }
     let role = match parse_role(args.role.as_deref().unwrap_or("worker")) {
         Ok(role) => role,
-        Err(message) => return error(message),
+        Err(message) => return Err(error(message)),
     };
     if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
-        return error("image payload requires MultimodalLooker");
+        return Err(error("image payload requires MultimodalLooker"));
     }
     let category = match parse_args_category(args.category) {
         Ok(category) => category,
-        Err(message) => return error(message),
+        Err(message) => return Err(error(message)),
     };
     if category.is_some() && role != agents::Role::Worker {
-        return error("category is only valid for role=worker");
+        return Err(error("category is only valid for role=worker"));
     }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
-        Err(message) => return error(message),
+        Err(message) => return Err(error(message)),
     };
     let config = RunConfig {
         team_task: args.task,
@@ -104,35 +129,104 @@ pub(super) async fn delegate(
         ..RunConfig::default()
     };
     if args.background {
-        return match runtime.delegate_background_as_child(
-            state.caller_run_id(),
-            role,
-            args.prompt,
-            config,
-        ) {
-            Ok(run_id) => {
-                runtime.attach_goal_child(state.caller_run_id(), run_id, role);
-                success(run_id.to_string())
-            }
-            Err(runtime_error) => error(runtime_error.to_string()),
-        };
+        return Err(
+            match runtime.delegate_background_as_child(
+                state.caller_run_id(),
+                role,
+                args.prompt,
+                config,
+            ) {
+                Ok(run_id) => {
+                    runtime.attach_goal_child(state.caller_run_id(), run_id, role);
+                    success(run_id.to_string())
+                }
+                Err(runtime_error) => error(runtime_error.to_string()),
+            },
+        );
     }
     let child =
         match runtime.delegate_awaited_child(state.caller_run_id(), (role, args.prompt, config)) {
             Ok(child) => child,
-            Err(runtime_error) => return error(runtime_error.to_string()),
+            Err(runtime_error) => return Err(error(runtime_error.to_string())),
         };
     runtime.attach_goal_child(state.caller_run_id(), child, role);
     state.emit_delegated(&state.caller_run_id().to_string(), &child.to_string());
+    Ok(child)
+}
+
+pub(crate) async fn wait_delegates(
+    state: &mut LoopState,
+    runtime: &AgentRuntime,
+    children: Vec<Result<crate::RunId, DispatchResult>>,
+) -> Vec<DispatchResult> {
+    if !children.iter().any(Result::is_ok) {
+        return children.into_iter().filter_map(Result::err).collect();
+    }
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
-        return error("parent run could not enter Waiting");
+        cleanup_delegates(
+            runtime,
+            children
+                .iter()
+                .filter_map(|child| child.as_ref().ok().copied()),
+        )
+        .await;
+        return children
+            .into_iter()
+            .map(|child| {
+                child
+                    .err()
+                    .unwrap_or_else(|| error("parent run could not enter Waiting"))
+            })
+            .collect();
     }
-    let result = runtime.wait(child).await;
-    if state.transition(AgentRunPhase::Running, None).is_err() {
-        return error("parent run could not resume Running");
-    }
-    match result {
-        Ok(phase) => success(format!("{phase:?}")),
-        Err(runtime_error) => error(runtime_error.to_string()),
-    }
+    let cancel = state.channels.cancel_rx.clone();
+    let results = futures_util::future::join_all(children.into_iter().map(|child| {
+        let mut cancel = cancel.clone();
+        async move {
+            match child {
+                Ok(child) => Ok(tokio::select! {
+                    biased;
+                    _ = async { drop(cancel.wait_for(|cancelled| *cancelled).await); } => {
+                        match runtime.cancel(child) {
+                            Ok(()) => runtime.wait(child).await,
+                            Err(error) => Err(error),
+                        }
+                    }
+                    result = runtime.wait(child) => result,
+                }),
+                Err(result) => Err(result),
+            }
+        }
+    }))
+    .await;
+    let resumed = state.transition(AgentRunPhase::Running, None).is_ok();
+    results
+        .into_iter()
+        .map(|result| match result {
+            Err(result) => result,
+            Ok(_) if !resumed => error("parent run could not resume Running"),
+            Ok(Ok(phase)) => success(format!("{phase:?}")),
+            Ok(Err(runtime_error)) => error(runtime_error.to_string()),
+        })
+        .collect()
+}
+
+pub(crate) async fn cleanup_delegates(
+    runtime: &AgentRuntime,
+    children: impl IntoIterator<Item = crate::RunId>,
+) {
+    let waits: Vec<_> = children
+        .into_iter()
+        .map(|child| {
+            if let Err(error) = runtime.cancel(child) {
+                tracing::warn!(%child, %error, "delegate cleanup cancellation failed");
+            }
+            async move {
+                if let Err(error) = runtime.wait(child).await {
+                    tracing::warn!(%child, %error, "delegate cleanup wait failed");
+                }
+            }
+        })
+        .collect();
+    futures_util::future::join_all(waits).await;
 }

@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 catalog = { path = "../catalog" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
+futures-util = { workspace = true }
 globset = { workspace = true }
 # merge approval トークン (128-bit random, D8) の生成に使用する (T2.2)。
 # W0 で manifest を固定するために宣言済み (既存 workspace 依存の追加のみ)。
@@ -33,7 +34,6 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-futures-util = { workspace = true }
 wiremock = { workspace = true }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
