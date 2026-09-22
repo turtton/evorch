@@ -78,6 +78,7 @@ fn fixture(cancel_rx: watch::Receiver<bool>) -> (AgentRuntime, LoopState) {
         rules_session: None,
         compaction: CompactionLoopState::default(),
         last_usage: None,
+        answered_questions: Default::default(),
         resumed: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),

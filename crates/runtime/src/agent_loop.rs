@@ -9,6 +9,8 @@ mod delegate_cleanup_tests;
 mod durable;
 mod identical_calls;
 mod messages;
+mod observability;
+mod questions;
 mod snapshots;
 mod team;
 mod tool_calls;
@@ -99,6 +101,7 @@ pub(crate) struct LoopState {
     pub(crate) rules_session: Option<RulesSession>,
     pub(crate) compaction: CompactionLoopState,
     pub(crate) last_usage: Option<Usage>,
+    answered_questions: std::collections::HashSet<String>,
     resumed: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
@@ -185,6 +188,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         rules_session: None,
         compaction: CompactionLoopState::default(),
         last_usage: None,
+        answered_questions: Default::default(),
         resumed: is_restored,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
@@ -336,6 +340,22 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     state.save_checkpoint();
     state.execute().await;
+    if let Err(error) = state
+        .shared
+        .executor
+        .drain_shell_jobs(&state.task.run_id.to_string())
+        .await
+    {
+        state.snapshot_diagnostic(&error);
+        // A child may still own the workspace. Preserve it for explicit reconciliation.
+        tracing::error!(%error, "shell job cleanup failed; workspace retained");
+        return;
+    }
+    if let Err(error) = crate::restore::persist_terminal_snapshot(&state) {
+        state.snapshot_diagnostic(&error);
+    } else {
+        state.snapshot_saved_diagnostic();
+    }
     if let Some(permit) = &state.task.config.ownership
         && let Err(error) = permit.checkpoint(&state.context.visible_messages())
     {
@@ -669,6 +689,10 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            if let Err(error) = self.flush_user_answers() {
+                self.finish_error(error);
+                return;
+            }
             self.inject_parent_messages();
             if self.context.prune_tool_outputs() {
                 self.last_usage = None;
@@ -688,11 +712,7 @@ impl LoopState {
                 }
             } else {
                 let visible = self.context.visible_messages();
-                let estimated = compaction::estimator::estimate_projected(
-                    &visible,
-                    self.last_usage.as_ref(),
-                    self.compaction.last_usage_estimated_tokens,
-                );
+                let estimated = self.estimated_context_tokens(&visible);
                 let selected_model = compaction::selected_model(self);
                 let (window, _) = compaction::policy::resolve_window(
                     &self.shared.compaction,
@@ -740,15 +760,12 @@ impl LoopState {
                 &selected_model,
                 self.shared.model.catalog_context_window(&selected_model),
             );
-            let estimated = compaction::estimator::estimate_projected(
-                &visible_messages,
-                self.last_usage.as_ref(),
-                self.compaction.last_usage_estimated_tokens,
-            );
+            let estimated = self.estimated_context_tokens(&visible_messages);
             if estimated >= window {
                 self.finish_error(format!("ContextWindowExhausted: estimated {estimated} tokens reach model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
             }
+            self.publish_context(&visible_messages, estimated, window);
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -766,6 +783,7 @@ impl LoopState {
                     &self.shared.bus,
                 ) => result,
             };
+            self.activity(event_bus::RunActivity::Idle);
             let response = match completion {
                 Ok(response) => response,
                 Err(error) => {
@@ -814,6 +832,13 @@ impl LoopState {
                 compaction::estimator::estimate_tokens(&self.context.visible_messages()),
             );
             self.publish_message_count();
+            if has_tool_uses && let Err(error) = crate::restore::persist_tool_intent(self) {
+                self.finish_error(format!(
+                    "Cannot record tool intent before execution: {error}"
+                ));
+                return;
+            }
+            self.activity(event_bus::RunActivity::Tools);
             if !self.execute_tools(tool_uses).await {
                 return;
             }
@@ -840,8 +865,38 @@ impl LoopState {
                         self.finish_cancelled();
                         return;
                     }
+                    match self.flush_user_answers() {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.finish_error(error);
+                            return;
+                        }
+                    }
+                    if self
+                        .shared
+                        .executor
+                        .has_unobserved_shell_jobs(&self.task.run_id.to_string())
+                    {
+                        self.context.push_user("Shell jobs are still running. Poll their results or stop them before finishing.");
+                        continue;
+                    }
                     if self.flush_aside() {
                         continue;
+                    }
+                    match self.user_question_readiness() {
+                        Ok(questions::UserQuestionReadiness::Ready) => {}
+                        Ok(questions::UserQuestionReadiness::AnswersAvailable) => continue,
+                        Ok(questions::UserQuestionReadiness::Waiting) => {
+                            if !self.wait_for_input().await {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            self.finish_error(error);
+                            return;
+                        }
                     }
                     if !self.task.config.interactive
                         || (self.resumed && !self.task.config.keep_alive)
@@ -870,6 +925,19 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        self.activity(event_bus::RunActivity::User);
+        let Some(runtime) = self.runtime() else {
+            return false;
+        };
+        let mut answers = runtime.shared.question_version.subscribe();
+        match self.flush_user_answers() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                self.finish_error(error);
+                return false;
+            }
+        }
         if self.transition(AgentRunPhase::Waiting, None).is_err() {
             return false;
         }
@@ -881,6 +949,14 @@ impl LoopState {
                         self.finish_cancelled();
                     }
                     return false;
+                }
+                changed = answers.changed() => {
+                    if changed.is_err() { return false; }
+                    match self.flush_user_answers() {
+                        Ok(true) => return self.transition(AgentRunPhase::Running, None).is_ok(),
+                        Ok(false) => {},
+                        Err(error) => { self.finish_error(error); return false; }
+                    }
                 }
                 message = self.channels.inbox_rx.recv() => {
                     let Some(message) = message else {
@@ -928,9 +1004,15 @@ impl LoopState {
             .map_err(|_| ())?;
         self.publish_durable_task(phase, reason);
         if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
+            self.activity(event_bus::RunActivity::Idle);
+            self.shared
+                .executor
+                .cancel_shell_jobs(&self.task.run_id.to_string());
             if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
                 tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");
                 self.snapshot_diagnostic(&error);
+            } else {
+                self.snapshot_saved_diagnostic();
             }
             self.channels.inbox_rx.close();
             self.task.mailbox.close();
@@ -958,6 +1040,25 @@ impl LoopState {
         if let Err(error) = crate::restore::persist_checkpoint(self) {
             tracing::warn!(run_id = %self.task.run_id, %error, "context checkpoint failed");
             self.snapshot_diagnostic(&error);
+        } else {
+            self.snapshot_saved_diagnostic();
+        }
+    }
+
+    fn snapshot_saved_diagnostic(&self) {
+        if self
+            .runtime()
+            .is_some_and(|r| r.shared.run_store.get().is_some())
+        {
+            self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
+                source: "run_context".into(),
+                severity: event_bus::DiagnosticSeverity::Info,
+                code: "ContextCheckpointSaved".into(),
+                detail: "Valid conversation checkpoint saved".into(),
+                run_id: Some(self.task.run_id.to_string()),
+                thread_id: None,
+                call_id: None,
+            }));
         }
     }
 

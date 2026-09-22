@@ -10,6 +10,7 @@ pub const MAX_NOTIFICATIONS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationKind {
     RunCompleted,
+    QuestionPending { question_id: String },
     RunFailed { reason: Option<String> },
     ApprovalPending { tool_name: String, call_id: String },
     MergeApprovalPending { goal_id: String },
@@ -33,6 +34,17 @@ pub struct NotificationsModel {
 impl NotificationsModel {
     pub fn apply_event(&mut self, event: &Event, resolve_run: impl Fn(&str) -> Option<String>) {
         let (kind, run_id, summary) = match &event.kind {
+            EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
+                if question.answer.is_none() =>
+            {
+                (
+                    NotificationKind::QuestionPending {
+                        question_id: question.id.clone(),
+                    },
+                    Some(question.root_run_id.clone()),
+                    format!("Question: {}", question.title),
+                )
+            }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                 run_id,
                 to,
@@ -96,7 +108,8 @@ impl NotificationsModel {
         let phase = match &kind {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
-            NotificationKind::ApprovalPending { .. }
+            NotificationKind::QuestionPending { .. }
+            | NotificationKind::ApprovalPending { .. }
             | NotificationKind::MergeApprovalPending { .. } => ThreadRunPhase::Waiting,
         };
         // Never reuse an id while a renderer may still hold its revision.

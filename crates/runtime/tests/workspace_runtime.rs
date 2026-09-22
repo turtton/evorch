@@ -17,8 +17,8 @@ use tokio::time::{Duration, sleep, timeout};
 use tools::ToolExecutor;
 
 use support::{
-    ScriptedModel, collect_events, gated_factory, git, init_git_repo, recording_factory,
-    text_response, tool_response,
+    ScriptedModel, gated_factory, git, init_git_repo, recording_factory, text_response,
+    tool_response,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -286,9 +286,39 @@ async fn isolated_run_executor_registers_web_tools() {
     // 観測され、引数スキーマ検証 (url 必須) で is_error 完了する
     // (検証は実行前のためネットワーク I/O は発生しない)
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let events = collect_events(&mut events, 6).await;
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. }) if tool_name == "web_fetch" && call_id == "fetch-1")));
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: true, .. }) if tool_name == "web_fetch" && call_id == "fetch-1")));
+    let target = run_id.to_string();
+    timeout(SETUP_TIMEOUT, async {
+        let mut started = false;
+        loop {
+            match events.recv().await.expect("event bus remains open").kind {
+                EventKind::Tool(ToolEvent::ToolStarted {
+                    tool_name,
+                    call_id,
+                    run_id: Some(event_run),
+                    ..
+                }) if tool_name == "web_fetch" && call_id == "fetch-1" && event_run == target => {
+                    started = true;
+                }
+                EventKind::Tool(ToolEvent::ToolCompleted {
+                    tool_name,
+                    call_id,
+                    run_id: Some(event_run),
+                    is_error,
+                    ..
+                }) if tool_name == "web_fetch" && call_id == "fetch-1" && event_run == target => {
+                    assert!(
+                        started,
+                        "registered tool must emit Started before Completed"
+                    );
+                    assert!(is_error, "missing url must fail argument validation");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("web_fetch completion must be observed independently of progress event count");
 }
 
 #[tokio::test]

@@ -599,7 +599,33 @@ impl LoopState {
                     } = call;
                     match ready {
                         ReadyCall::Tool(call) => {
-                            let guard = match self.snapshot_before_tool(&name, &id).await {
+                            let continuation = name == "shell"
+                                && matches!(
+                                    input.get("action").and_then(Value::as_str),
+                                    Some("poll" | "stdin" | "stop")
+                                );
+                            if !continuation
+                                && self
+                                    .shared
+                                    .executor
+                                    .tool_permissions(&name)
+                                    .is_some_and(|p| p.fs_write)
+                                && self.shared.executor.has_running_shell_jobs(&ctx.run_id)
+                            {
+                                completed.push((index,id,name,input,ReadyCall::Rejected(ToolResult::error("A shell job still owns this workspace. Poll or stop it before another mutation."))));
+                                continue;
+                            }
+                            let mut cancel = self.channels.cancel_rx.clone();
+                            let snapshot = if continuation {
+                                Ok(None)
+                            } else {
+                                tokio::select! {
+                                    biased;
+                                    _=cancel.wait_for(|cancelled|*cancelled)=>Err("cancelled while waiting for workspace".into()),
+                                    result=self.snapshot_before_tool(&name,&id)=>result,
+                                }
+                            };
+                            let guard = match snapshot {
                                 Ok(guard) => guard,
                                 Err(error) => {
                                     completed.push((
@@ -635,19 +661,24 @@ impl LoopState {
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
                     let run_id = ctx.run_id.clone();
+                    let executor = Arc::clone(&self.shared.executor);
                     let handle = tasks.spawn(async move {
-                            let _guard = guard;
                             let result = tokio::select! {
                                 biased;
                                 _ = cancel.wait_for(|cancelled| *cancelled) => {
                                     bus.emit(Event::new(event_bus::ToolEvent::ToolCompleted {
                                         tool_name: name.clone(), call_id: id.clone(), is_error: true,
-                                        output: Some("cancelled".into()), detail: None, run_id: Some(run_id),
+                                        output: Some("cancelled".into()), detail: None, run_id: Some(run_id.clone()),
                                     }));
                                     ToolResult::error("cancelled")
                                 },
                                 result = call.execute() => result.unwrap_or_else(|error| ToolResult::error(error.to_string())),
                             };
+                            // A cancelled start may never return its job ID. Its process
+                            // still owns this lease until it is actually reaped.
+                            if name == "shell" && let Some(guard) = guard {
+                                executor.retain_shell_call_guard(&run_id, &id, Box::new(guard));
+                            }
                             (index, id, name, input, ReadyCall::Executed(result))
                         });
                     pending.insert(handle.id(), metadata);

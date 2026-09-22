@@ -275,3 +275,37 @@ fn thread_metrics_cache_rate_excludes_cold_start_in_same_run() {
     // Then: only the warm response determines the rate.
     assert_eq!(rate, Some(20_000.0 / 20_500.0 * 100.0));
 }
+
+#[test]
+fn history_completion_preserves_context_but_never_revives_live_activity() {
+    let mut overlay = TelemetryOverlay::new();
+    let start = Instant::now();
+    overlay.apply_event_at(
+        &agent_run_changed("run-1", AgentRunPhase::Pending, AgentRunPhase::Running),
+        start,
+    );
+    overlay.apply_event_at(&request_started(Some("run-1")), start);
+    overlay.apply_event_at(
+        &Event::new(LifecycleEvent::RunProgress {
+            run_id: "run-1".into(),
+            activity: event_bus::RunActivity::Model,
+            context: Some(event_bus::ContextComposition {
+                tool_outputs: 40,
+                ..Default::default()
+            }),
+        }),
+        start,
+    );
+    overlay.finish_history();
+    let row = overlay.row("run-1").unwrap();
+    assert!(row.activity.is_none());
+    assert!(row.request_started_at.is_none());
+    assert!(!row.in_flight);
+    assert_eq!(row.context_composition.as_ref().unwrap().tool_outputs, 40);
+    assert_eq!(
+        overlay
+            .thread_metrics_at(&["run-1".into()], start + Duration::from_secs(3600))
+            .wall_time,
+        Duration::ZERO
+    );
+}

@@ -26,7 +26,8 @@ impl SpanMapper {
                     terminal: terminal_error(is_error.then_some("tool_error")),
                 })
             }
-            ToolEvent::ApprovalRequested { .. }
+            ToolEvent::UserQuestionUpdated { .. }
+            | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }
             | ToolEvent::ExecutionDenied { .. } => Vec::new(),
         }

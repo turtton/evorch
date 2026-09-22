@@ -10,6 +10,9 @@ use storage::{RunContextRecord, StorageError};
 use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 
+mod diagnostics;
+pub use diagnostics::RunRestoreDiagnostics;
+
 pub(crate) struct RestoredState {
     pub(crate) messages: Vec<providers::Message>,
     pub(crate) checkpoints: Vec<crate::CompactionCheckpoint>,
@@ -36,11 +39,23 @@ impl RestoredState {
             serde_json::from_str(&record.checkpoints_json)
                 .map_err(|error| fail(error.to_string()))?;
         if messages.is_empty()
+            || safe_context_end(&messages) != messages.len()
             || checkpoints.iter().any(|checkpoint| {
                 checkpoint.range.0 >= checkpoint.range.1 || checkpoint.range.1 > messages.len()
             })
         {
             return Err(fail("context range".into()));
+        }
+        let descriptor: RunRestoreDescriptor =
+            serde_json::from_str(&record.config_json).map_err(|error| fail(error.to_string()))?;
+        if descriptor.has_uncertain_effects() {
+            return Err(crate::RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: crate::RunRestoreFailure::UnsupportedConfig(
+                    "unresolved_tool_calls: inspect actual effects before starting a new run"
+                        .into(),
+                ),
+            });
         }
         Ok(Self {
             messages,
@@ -58,6 +73,30 @@ impl RestoredState {
 /// `write_snapshot` は必ずこの定数を経由して文字列を一致させること。
 pub(crate) const OWNERSHIP_ONLY_UNRESTORABLE_REASON: &str = "復元対象外の実行状態: ownership";
 
+/// A team root may reuse history only with an explicit current team authority.
+pub(crate) const TEAM_RENEWAL_REQUIRED_REASON: &str = "current_team_authority_required";
+pub(crate) const ROOT_CONTEXT_RENEWAL_REQUIRED_REASON: &str =
+    "current_root_context_authority_required";
+
+/// Identity only: no database path, writer, permit, or lease is restored from disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamRestoreIdentity {
+    pub team_id: String,
+    pub coordinator_run_id: RunId,
+}
+
+/// Calls with uncertain effects or in an incomplete batch. Inputs are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptedToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub result_observed: bool,
+    /// Based on the tool's registered permissions at dispatch; unknown/meta writes fail closed.
+    pub may_have_side_effects: bool,
+}
+
 /// 非直列化の実行権限を含まない復元用設定。拒否理由も snapshot に残す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,16 +113,44 @@ pub struct RunRestoreDescriptor {
     pub model_preference: Option<ModelPreference>,
     pub restorable: bool,
     pub non_restorable_reason: Option<String>,
+    #[serde(default)]
+    pub renewable_team: Option<TeamRestoreIdentity>,
+    #[serde(default)]
+    pub interrupted_tool_calls: Vec<InterruptedToolCall>,
+    #[serde(default)]
+    pub durable_task_id: Option<String>,
 }
 
 impl RunRestoreDescriptor {
+    pub(crate) fn has_uncertain_effects(&self) -> bool {
+        self.interrupted_tool_calls
+            .iter()
+            .any(|call| call.may_have_side_effects)
+    }
+
     /// ownership のみが復元不可の理由である記録かを返す。
     ///
     /// chat 系入口は ownership をスナップショットから復元しないため、
     /// この条件を満たす記録は `restorable` / `non_restorable_reason` に
     /// かかわらず history 復元を許可してよい。
     pub(crate) fn renewable_ownership_only(&self) -> bool {
-        self.non_restorable_reason.as_deref() == Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON)
+        !self.has_uncertain_effects()
+            && self.non_restorable_reason.as_deref() == Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON)
+    }
+
+    pub(crate) fn renewable_root_context(&self) -> bool {
+        !self.has_uncertain_effects()
+            && self.parent_run_id.is_none()
+            && self.renewable_team.is_none()
+            && self.non_restorable_reason.as_deref() == Some(ROOT_CONTEXT_RENEWAL_REQUIRED_REASON)
+    }
+
+    pub(crate) fn renewable_team_root(&self) -> bool {
+        !self.has_uncertain_effects()
+            && self.parent_run_id.is_none()
+            && self.role == agents::Role::Orchestrator.name()
+            && self.renewable_team.is_some()
+            && self.non_restorable_reason.as_deref() == Some(TEAM_RENEWAL_REQUIRED_REASON)
     }
 }
 
@@ -103,6 +170,17 @@ pub(crate) enum SnapshotError {
 pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end != state.context.messages.len() {
+        return Ok(());
+    }
+    write_snapshot(state, "Checkpoint", end)
+}
+
+/// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
+/// Recovery never repeats an incomplete batch; an operator can inspect the effects and
+/// continue its durable task in a new run with current authority.
+pub(crate) fn persist_tool_intent(state: &LoopState) -> Result<(), SnapshotError> {
+    let end = safe_context_end(&state.context.messages);
+    if end == 0 || end == state.context.messages.len() {
         return Ok(());
     }
     write_snapshot(state, "Checkpoint", end)
@@ -177,10 +255,80 @@ fn write_snapshot(
             unsupported.push(field);
         }
     }
-    let non_restorable_reason = match unsupported.as_slice() {
-        [] => None,
-        ["ownership"] => Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON.to_owned()),
-        _ => Some(format!("復元対象外の実行状態: {}", unsupported.join(", "))),
+    let renewable_team = match (&config.team, &config.team_store) {
+        (Some(team), Some(store))
+            if state.task.parent.is_none()
+                && state.run_role() == agents::Role::Orchestrator
+                && config.topology.worker_limit().is_some()
+                && team.coordinator == state.caller_run_id()
+                && team.id == store.id
+                && unsupported.iter().all(|field| {
+                    matches!(
+                        *field,
+                        "topology"
+                            | "team"
+                            | "team_store"
+                            | "delegation_value"
+                            | "ownership"
+                            | "memory"
+                            | "finding_store"
+                    )
+                }) =>
+        {
+            Some(TeamRestoreIdentity {
+                team_id: team.id.clone(),
+                coordinator_run_id: team.coordinator,
+            })
+        }
+        _ => None,
+    };
+    let mut interrupted_tool_calls = interrupted_tool_calls(&state.context.messages[end..]);
+    for call in cancelled_tool_calls(&state.context.messages[..end]) {
+        if !interrupted_tool_calls
+            .iter()
+            .any(|pending| pending.call_id == call.call_id)
+        {
+            interrupted_tool_calls.push(call);
+        }
+    }
+    if state
+        .shared
+        .executor
+        .has_unobserved_shell_jobs(&state.caller_run_id().to_string())
+    {
+        interrupted_tool_calls.push(InterruptedToolCall {
+            call_id: "unobserved-shell-jobs".into(),
+            tool_name: "shell".into(),
+            result_observed: false,
+            may_have_side_effects: true,
+        });
+    }
+    for call in &mut interrupted_tool_calls {
+        call.may_have_side_effects =
+            tool_may_have_side_effects(&state.shared.executor, &call.tool_name);
+    }
+    let non_restorable_reason = if interrupted_tool_calls
+        .iter()
+        .any(|call| call.may_have_side_effects)
+    {
+        Some("unresolved_tool_calls: inspect actual effects before starting a new run".into())
+    } else if renewable_team.is_some() {
+        Some(TEAM_RENEWAL_REQUIRED_REASON.into())
+    } else if state.task.parent.is_none()
+        && unsupported
+            .iter()
+            .any(|field| matches!(*field, "memory" | "finding_store"))
+        && unsupported
+            .iter()
+            .all(|field| matches!(*field, "memory" | "finding_store" | "ownership"))
+    {
+        Some(ROOT_CONTEXT_RENEWAL_REQUIRED_REASON.into())
+    } else {
+        match unsupported.as_slice() {
+            [] => None,
+            ["ownership"] => Some(OWNERSHIP_ONLY_UNRESTORABLE_REASON.to_owned()),
+            _ => Some(format!("復元対象外の実行状態: {}", unsupported.join(", "))),
+        }
     };
     let descriptor = RunRestoreDescriptor {
         role: state.run_role().name().to_string(),
@@ -193,8 +341,11 @@ fn write_snapshot(
         workspace_mode: config.workspace_mode,
         network_access: config.network_access,
         model_preference: state.channels.model_preference_rx.borrow().clone(),
-        restorable: unsupported.is_empty(),
+        restorable: non_restorable_reason.is_none(),
         non_restorable_reason,
+        renewable_team,
+        interrupted_tool_calls,
+        durable_task_id: config.task_id.clone(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
@@ -220,6 +371,81 @@ fn write_snapshot(
     };
     store.handle.upsert_run_context(&record)?;
     Ok(())
+}
+
+fn interrupted_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolCall> {
+    let results: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                providers::ContentBlock::ToolResult { tool_call_id, .. } => {
+                    Some(tool_call_id.as_str())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    messages
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                providers::ContentBlock::ToolUse { id, name, .. } => Some(InterruptedToolCall {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    result_observed: results.contains(id.as_str()),
+                    may_have_side_effects: true,
+                }),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn tool_may_have_side_effects(executor: &tools::ToolExecutor, name: &str) -> bool {
+    if let Some(permissions) = executor.tool_permissions(name) {
+        return permissions.fs_write || permissions.process_spawn || permissions.network;
+    }
+    !matches!(
+        name,
+        "list_agents"
+            | "inspect_agent"
+            | "run_output"
+            | "skill_load"
+            | "wait"
+            | "wait_reply"
+            | "inbox"
+            | "ledger_read"
+            | "compact"
+    )
+}
+
+// Runtime cancellation produces a protocol-complete error result, but cannot
+// establish whether a process had already modified files before it was stopped.
+fn cancelled_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolCall> {
+    let cancelled: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|block| match block {
+                providers::ContentBlock::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error: true,
+                } if content.iter().any(|part| {
+                    matches!(part,
+                        providers::ToolResultContent::Text { text } if text == "cancelled"
+                    )
+                }) =>
+                {
+                    Some(tool_call_id.as_str())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    interrupted_tool_calls(messages)
+        .into_iter()
+        .filter(|call| cancelled.contains(call.call_id.as_str()))
+        .collect()
 }
 
 #[cfg(test)]

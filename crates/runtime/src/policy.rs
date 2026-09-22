@@ -26,6 +26,8 @@ pub const META_OPS: &[&str] = &[
     "ledger_append",
     "ledger_read",
     "submit_review",
+    "ask_user",
+    "user_answers",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -269,9 +271,11 @@ mod tests {
             "ledger_append",
             "ledger_read",
             "submit_review",
+            "ask_user",
+            "user_answers",
         ];
 
-        assert_eq!(META_OPS.len(), 17);
+        assert_eq!(META_OPS.len(), 19);
         assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");

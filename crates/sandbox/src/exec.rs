@@ -22,6 +22,64 @@ pub struct WrappedCommand {
     pub env: Vec<(String, String)>,
 }
 
+impl WrappedCommand {
+    /// Diagnose deterministic launch failures before entering a model/tool retry
+    /// loop. This does not execute a probe or disable sandboxing.
+    pub fn preflight(&self) -> Result<(), SandboxError> {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = self
+            .cwd
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+            .map_err(|error| SandboxError::InvalidSpec {
+                detail: format!("working directory unavailable: {error}; fix cwd before retrying"),
+            })?;
+        if !cwd.is_dir() {
+            return Err(SandboxError::InvalidSpec {
+                detail: format!(
+                    "working directory does not exist or is not a directory: {}; fix cwd before retrying",
+                    cwd.display()
+                ),
+            });
+        }
+        let executable = |path: &std::path::Path| {
+            path.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        };
+        let program = std::path::Path::new(&self.program);
+        let found = if self.program.contains('/') {
+            executable(&if program.is_absolute() {
+                program.to_path_buf()
+            } else {
+                cwd.join(program)
+            })
+        } else {
+            let path = self
+                .env
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map_or("/bin:/usr/bin", |(_, value)| value.as_str());
+            std::env::split_paths(path).any(|dir| {
+                executable(&if dir.is_absolute() {
+                    dir.join(program)
+                } else {
+                    cwd.join(dir).join(program)
+                })
+            })
+        };
+        if !found {
+            return Err(SandboxError::InvalidSpec {
+                detail: format!(
+                    "executable unavailable: {}; install it or correct PATH before retrying; sandbox fallback is disabled",
+                    self.program
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// コマンドを実行環境へ包む境界。
 pub trait Sandbox: Send + Sync {
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError>;
@@ -140,5 +198,49 @@ mod tests {
             .wrap(spec())
             .expect("コマンドを包めるはずです");
         assert_eq!(wrapped.cwd, Some(PathBuf::from("/workspace")));
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn missing_executable_and_invalid_cwd_report_actionable_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = WrappedCommand {
+            program: "missing-evorch-executable".into(),
+            args: vec![],
+            cwd: Some(dir.path().into()),
+            env: vec![("PATH".into(), dir.path().display().to_string())],
+        };
+        let error = command.preflight().unwrap_err().to_string();
+        assert!(error.contains("correct PATH before retrying"));
+        assert!(error.contains("sandbox fallback is disabled"));
+        command.cwd = Some(dir.path().join("absent"));
+        assert!(
+            command
+                .preflight()
+                .unwrap_err()
+                .to_string()
+                .contains("fix cwd before retrying")
+        );
+    }
+
+    #[test]
+    fn executable_lookup_uses_child_path_and_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("command");
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        let command = WrappedCommand {
+            program: "command".into(),
+            args: vec![],
+            cwd: Some(dir.path().into()),
+            env: vec![("PATH".into(), ".".into())],
+        };
+        assert!(command.preflight().is_err());
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(command.preflight().is_ok());
     }
 }

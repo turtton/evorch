@@ -236,6 +236,11 @@ impl SecretGuard {
         // reason / delta 系の自由文字列 field を明示列挙する。新しい text field を持つ
         // variant が event-bus へ追加されたらここへも検査を追加すること。
         match kind {
+            EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
+                let payload = serde_json::to_string(question)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                self.check_text("event", "UserQuestionUpdated", &payload)
+            }
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { body, .. }) => {
                 self.check_text("event", "RunLedgerAppended.body", body)
             }

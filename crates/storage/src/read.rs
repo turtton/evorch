@@ -19,6 +19,22 @@ pub struct StoredAgentMessage {
 }
 
 impl Database {
+    pub fn user_question(&self, id: &str) -> Result<Option<event_bus::UserQuestion>, StorageError> {
+        crate::repo::user_questions::get(&self.conn, id)
+    }
+    pub fn user_questions_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<event_bus::UserQuestion>, StorageError> {
+        crate::repo::user_questions::for_run(&self.conn, run_id)
+    }
+    pub fn user_question_recipients(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        crate::repo::user_questions::recipients(&self.conn, id)
+    }
+    pub fn pending_user_questions(&self) -> Result<Vec<event_bus::UserQuestion>, StorageError> {
+        crate::repo::user_questions::pending(&self.conn)
+    }
+
     /// Latest terminal snapshot or safe checkpoint for an exact run name, ordered by persistence time and numeric ID.
     ///
     /// # Errors
@@ -54,14 +70,14 @@ impl Database {
             .optional()?)
     }
 
-    /// Highest numeric run ID reserved by a context snapshot or ledger entry.
+    /// Highest numeric run ID reserved by a context, ledger, or question recipient.
     ///
     /// # Errors
     /// Returns an error for unreadable rows or invalid run IDs.
     pub fn max_persisted_run_id(&self) -> Result<u64, StorageError> {
         let mut statement = self
             .conn
-            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger")?;
+            .prepare("SELECT run_id FROM run_contexts UNION SELECT run_id FROM run_ledger UNION SELECT run_id FROM user_questions UNION SELECT run_id FROM user_question_links")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut maximum = 0;
         for id in ids {

@@ -168,6 +168,12 @@ impl TranscriptModel {
             return;
         }
         match &event.kind {
+            event_bus::EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) => {
+                self.push(TranscriptEntry::Notice {text:match &question.answer {
+                    Some(answer)=>format!("Answer [{}]: {}",question.id,answer),
+                    None=>format!("Question [{}]: {}",question.id,question.title),
+                }});
+            }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
                 run_id, parent_run_id: Some(_), agent_name, ..
             }) => {

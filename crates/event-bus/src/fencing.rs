@@ -83,7 +83,8 @@ impl MutationFences {
         };
         let accepted = match &event.kind {
             EventKind::Lifecycle(event) => match event {
-                LifecycleEvent::AgentRunStarted { run_id, .. }
+                LifecycleEvent::RunProgress { run_id, .. }
+                | LifecycleEvent::AgentRunStarted { run_id, .. }
                 | LifecycleEvent::AgentRunRestored { run_id, .. }
                 | LifecycleEvent::AgentRunStateChanged { run_id, .. }
                 | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
@@ -114,6 +115,9 @@ impl MutationFences {
                 | ProviderEvent::RequestCompleted { run_id, .. }
                 | ProviderEvent::RequestFailed { run_id, .. },
             ) => run_id.as_deref().is_none_or(accepts),
+            EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
+                accepts(&question.run_id)
+            }
             EventKind::Tool(
                 ToolEvent::ApprovalRequested { call_id, .. }
                 | ToolEvent::ApprovalResolved { call_id, .. }
@@ -138,5 +142,30 @@ impl MutationFences {
             | EventKind::Ownership(_) => true,
         };
         accepted.then(|| guards.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+    #[test]
+    fn question_updates_preserve_the_requester_generation_fence() {
+        let fences = MutationFences::default();
+        assert!(fences.register("run-1".into(), Arc::new(|| false)));
+        let mut question = crate::UserQuestion {
+            id: "question-1".into(),
+            run_id: "run-1".into(),
+            root_run_id: "run-1".into(),
+            root_name: "chat:Worker:thread".into(),
+            title: "scope".into(),
+            options: vec![],
+            blocking: true,
+            answer: None,
+        };
+        assert!(!fences.accepts(&Event::new(ToolEvent::UserQuestionUpdated {
+            question: question.clone()
+        })));
+        question.answer = Some("A".into());
+        assert!(!fences.accepts(&Event::new(ToolEvent::UserQuestionUpdated { question })));
     }
 }

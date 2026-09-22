@@ -14,6 +14,7 @@ impl SpanMapper {
         at: SystemTime,
     ) -> Vec<SpanAction> {
         match event {
+            LifecycleEvent::RunProgress { .. } => Vec::new(),
             LifecycleEvent::Started { session_id } => self.start_span(StartSpec {
                 key: SpanKey::Session {
                     session_id: session_id.clone(),

@@ -62,15 +62,34 @@ pub struct ChatSubmission {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkbenchCommand {
-    RestoreSnapshot { thread_id: String, redo: bool },
+    AnswerUserQuestion {
+        thread_id: String,
+        question_id: String,
+        answer: String,
+    },
+    RestoreSnapshot {
+        thread_id: String,
+        redo: bool,
+    },
     SendChat(ChatSubmission),
-    CancelChat { thread_id: String },
+    CancelChat {
+        thread_id: String,
+    },
     SubmitGoal(GoalSubmission),
     DecideMerge(MergeCommand),
-    DecideToolApproval { call_id: String, approved: bool },
-    PauseGoal { goal_id: String },
-    ResumeGoal { goal_id: String },
-    CancelGoal { goal_id: String },
+    DecideToolApproval {
+        call_id: String,
+        approved: bool,
+    },
+    PauseGoal {
+        goal_id: String,
+    },
+    ResumeGoal {
+        goal_id: String,
+    },
+    CancelGoal {
+        goal_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +146,10 @@ pub struct LoopStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopEvent {
+    /// Host command acknowledgement, emitted only after durable storage accepted the answer.
+    UserAnswerSaved {
+        question_id: String,
+    },
     SnapshotRestored {
         thread_id: String,
         diff: Option<String>,
@@ -155,6 +178,15 @@ pub enum LoopEvent {
 }
 
 pub trait CommandSink: Send {
+    /// Rebuild identity mappings from trusted live or persisted goal events, without spawning work.
+    fn bind_goal_context(&mut self, _thread: &str, _project: &str, _run: &str) {}
+    fn restore_diagnostics(
+        &self,
+        _run: &str,
+    ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
+        Ok(None)
+    }
+
     fn set_default_cwd(&mut self, _cwd: Option<std::path::PathBuf>) -> Result<(), String> {
         Ok(())
     }
@@ -235,7 +267,8 @@ impl CommandSink for FixtureLoopAdapter {
                 }]
             }
             WorkbenchCommand::CancelChat { .. } => Vec::new(),
-            WorkbenchCommand::DecideToolApproval { .. } => Vec::new(),
+            WorkbenchCommand::DecideToolApproval { .. }
+            | WorkbenchCommand::AnswerUserQuestion { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);
                 vec![LoopEvent::ChatAccepted {

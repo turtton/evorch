@@ -22,7 +22,10 @@ fn shell_schema_exposes_require_escalated_and_justification_when_requested() {
     let schema = shell().schema();
     assert_eq!(schema["properties"]["require_escalated"]["type"], "boolean");
     assert_eq!(schema["properties"]["justification"]["type"], "string");
-    assert_eq!(schema["required"], json!(["command"]));
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&json!({"command":"true"})));
+    assert!(!validator.is_valid(&json!({})));
+    assert!(validator.is_valid(&json!({"action":"poll", "job_id":"job"})));
     assert_eq!(schema["additionalProperties"], false);
 }
 

@@ -1,7 +1,8 @@
 //! shell ツールの実装。
 //!
 //! 非対話モードでは [`tokio::process`] で子プロセスを起動し、対話モードでは
-//! portable-pty 経由の擬似端末（PTY）上で 1 回限りの実行を行う。
+//! portable-pty 経由の擬似端末（PTY）を使う。yield_ms の明示指定時には
+//! owner-scoped job として制御を返し、poll/stdin/stop で継続する。
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -18,6 +19,10 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
 use crate::tools::shell_escalation::{EscalationDecision, ShellEscalation, ShellEscalationGate};
+
+#[cfg(test)]
+mod job_tests;
+mod jobs;
 
 #[cfg(test)]
 mod tests {
@@ -135,6 +140,7 @@ pub struct Shell {
     extra_env: Vec<(String, String)>,
     default_cwd: Arc<Mutex<Option<PathBuf>>>,
     escalation: Arc<RwLock<Option<ShellEscalation>>>,
+    jobs: Arc<jobs::JobRegistry>,
 }
 
 impl Shell {
@@ -153,6 +159,7 @@ impl Shell {
             extra_env: Vec::new(),
             default_cwd: Arc::new(Mutex::new(None)),
             escalation: Arc::new(RwLock::new(None)),
+            jobs: Arc::new(jobs::JobRegistry::default()),
         }
     }
 
@@ -171,6 +178,7 @@ impl Shell {
             extra_env,
             default_cwd: Arc::new(Mutex::new(None)),
             escalation: Arc::new(RwLock::new(None)),
+            jobs: Arc::new(jobs::JobRegistry::default()),
         }
     }
 
@@ -188,7 +196,11 @@ impl Shell {
 /// スキーマ検証は wave 3 の ToolExecutor が担うため、ここでは JSON からの
 /// 復元に失敗した場合のみ [`ToolError::InvalidArgs`] を返す。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShellArgs {
+    #[serde(default)]
+    action: Option<String>,
+    yield_ms: Option<u64>,
     /// 実行する POSIX シェルコマンド（pipe、redirect、&&、glob をサポート）。
     command: String,
     /// [deprecated] command に空白区切りで追記するシェル構文。command 内への記述を推奨。
@@ -214,28 +226,33 @@ impl Tool for Shell {
     }
 
     fn description(&self) -> &str {
-        "Run a POSIX shell command in the configured sandbox with an optional directory and timeout."
+        "Run a POSIX shell command. Without yield_ms, wait for completion. With yield_ms (0..60000), return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion."
     }
 
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "POSIX shell command supporting pipes, redirects, && and glob expansion." },
-                "args": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "deprecated": true,
-                    "description": "Deprecated: put arguments in command instead. Joined with spaces without quoting and interpreted as shell syntax."
-                },
-                "interactive": { "type": "boolean", "default": false },
-                "require_escalated": { "type": "boolean", "default": false },
-                "justification": { "type": "string" },
-                "cwd": { "type": "string" },
-                "timeout_ms": { "type": "integer", "minimum": 1 }
+                "action": {"type":"string", "enum":["start", "poll", "stdin", "stop"], "default":"start"},
+                "command": {"type":"string", "minLength":1, "description":"POSIX shell command. Required for start."},
+                "args": {"type":"array", "items":{"type":"string"}, "deprecated":true, "description":"Deprecated shell fragments; put all shell syntax in command."},
+                "interactive": {"type":"boolean", "default":false, "description":"Use a PTY. With yield_ms, retain stdin for later input."},
+                "require_escalated": {"type":"boolean", "default":false},
+                "justification": {"type":"string"},
+                "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
+                "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
+                "yield_ms": {"type":"integer", "minimum":0, "maximum":60000, "description":"Start async job or wait for new output/completion, at most this many milliseconds."},
+                "job_id": {"type":"string", "minLength":1, "description":"ID returned by this run's asynchronous shell start."},
+                "cursor": {"type":"integer", "minimum":0, "default":0, "description":"Returned output cursor, in redacted UTF-8 bytes. Older live output may expire."},
+                "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},
+                "close_stdin": {"type":"boolean", "default":false, "description":"stdin only: close pipe stdin or send PTY EOF after writing."}
             },
-            "required": ["command"],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [{
+                "if": {"properties":{"action":{"enum":["poll", "stdin", "stop"]}}, "required":["action"]},
+                "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["require_escalated"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
+                "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
+            }]
         })
     }
 
@@ -266,6 +283,27 @@ impl Tool for Shell {
             Some(ShellEscalation { gate, unsandboxed });
     }
 
+    fn cancel_shell_jobs(&self, run_id: &str) {
+        self.jobs.cancel(run_id);
+    }
+    async fn drain_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
+        self.jobs.drain(run_id).await
+    }
+    fn has_running_shell_jobs(&self, run_id: &str) -> bool {
+        self.jobs.running(run_id)
+    }
+    fn has_unobserved_shell_jobs(&self, run_id: &str) -> bool {
+        self.jobs.unobserved(run_id)
+    }
+
+    fn retain_shell_call_guard(&self, run_id: &str, call_id: &str, guard: Box<dyn Send + Sync>) {
+        self.jobs.retain_call_guard(run_id, call_id, guard);
+    }
+
+    fn retain_shell_job_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
+        self.jobs.retain_guard(run_id, job_id, guard);
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         self.execute_with_context(
             &ToolExecutionContext {
@@ -283,10 +321,42 @@ impl Tool for Shell {
         ctx: &ToolExecutionContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
+        if args
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|action| action != "start")
+        {
+            let args = serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
+                detail: error.to_string(),
+            })?;
+            return self.jobs.control(ctx, args).await;
+        }
         let args: ShellArgs =
             serde_json::from_value(args).map_err(|error| ToolError::InvalidArgs {
                 detail: error.to_string(),
             })?;
+        if args
+            .action
+            .as_deref()
+            .is_some_and(|action| action != "start")
+            || args.command.trim().is_empty()
+        {
+            return Err(ToolError::InvalidArgs {
+                detail: "start requires a nonempty command".into(),
+            });
+        }
+        if args.yield_ms.is_some_and(|ms| ms > 60_000)
+            || args.timeout_ms == Some(0)
+            || args.timeout_ms.is_some_and(|ms| {
+                tokio::time::Instant::now()
+                    .checked_add(Duration::from_millis(ms))
+                    .is_none()
+            })
+        {
+            return Err(ToolError::InvalidArgs {
+                detail: "yield_ms must be 0..60000 and timeout_ms must be positive".into(),
+            });
+        }
         // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを
         // 起動しない。拒否は Err ではなく is_error 付きの結果として返し、
         // モデルへツールエラーとして見せる（計画 S9）。
@@ -313,6 +383,7 @@ impl Tool for Shell {
                 )));
             }
         }
+        let mut escalated_input = None;
         let sandbox = if args.require_escalated {
             if args.justification.trim().is_empty() {
                 return Ok(ToolResult::error(
@@ -331,7 +402,14 @@ impl Tool for Shell {
                 .decide(ctx, &shell_args[1], &args.justification)
                 .await
             {
-                EscalationDecision::Approve => escalation.unsandboxed,
+                EscalationDecision::Approve => {
+                    escalated_input = Some(jobs::EscalatedInput {
+                        gate: escalation.gate,
+                        command: shell_args[1].clone(),
+                        justification: args.justification.clone(),
+                    });
+                    escalation.unsandboxed
+                }
                 EscalationDecision::Deny { reason } => return Ok(ToolResult::error(reason)),
             }
         } else {
@@ -364,6 +442,28 @@ impl Tool for Shell {
             .map_err(|error| ToolError::SandboxUnavailable {
                 detail: error.to_string(),
             })?;
+        wrapped
+            .preflight()
+            .map_err(|error| ToolError::SpawnFailed {
+                command: wrapped.program.clone(),
+                detail: error.to_string(),
+            })?;
+        if let Some(yield_ms) = args.yield_ms {
+            return self
+                .jobs
+                .start(
+                    ctx,
+                    jobs::JobLaunch {
+                        wrapped,
+                        interactive: args.interactive,
+                        timeout_ms: args.timeout_ms,
+                        yield_ms,
+                        escalated: escalated_input,
+                        sandbox,
+                    },
+                )
+                .await;
+        }
         if args.interactive {
             run_interactive(&wrapped, args.timeout_ms).await
         } else {

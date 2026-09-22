@@ -89,6 +89,36 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::CreateUserQuestion(question, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "question writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::user_questions::create(&state.conn, &question)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::BindUserQuestions(source, target, ids, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "question writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::user_questions::bind(&state.conn, &source, &target, &ids)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AnswerUserQuestion(id, answer, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "question writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::user_questions::answer(&state.conn, &id, &answer)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::AppendRunLedger(run_id, body, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

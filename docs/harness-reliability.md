@@ -83,3 +83,12 @@ persisted copy, preserving roles and tool-call IDs. Terminal persistence errors
 emit a diagnostic and retain any previous valid checkpoint. An incomplete tool
 batch is excluded from terminal snapshots. Restoration does not open output
 artifact paths; missing temporary files do not prevent continuation.
+
+
+## Interactive execution and recovery diagnostics
+
+See [the runtime improvements](harness-runtime-improvements.md) for bounded shell
+jobs, durable user questions, event-driven waits, context composition, the restore
+contract proposal and repeatable regression commands. Pending tool intent is now
+saved before dispatch, so an incomplete side effect blocks automatic restoration
+instead of silently repeating a tool excluded from the terminal history.

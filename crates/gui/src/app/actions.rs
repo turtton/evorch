@@ -327,6 +327,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn apply_loop_event(&mut self, event: LoopEvent) {
         match event {
+            LoopEvent::UserAnswerSaved { question_id } => {
+                self.user_questions.remove(&question_id);
+                self.question_drafts.remove(&question_id);
+            }
             LoopEvent::SnapshotRestored { thread_id, diff } => {
                 if self
                     .sidebar
@@ -373,6 +377,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             LoopEvent::LoopStatusUpdated(status) => self.loop_status = status,
             LoopEvent::CommandRejected { reason } => {
                 tracing::warn!(%reason, "goal loop command rejected");
+                self.push_notice(reason);
             }
         }
     }

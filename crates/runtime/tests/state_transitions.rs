@@ -42,6 +42,7 @@ async fn run_emits_pending_running_done_in_order() {
     let lifecycle: Vec<&LifecycleEvent> = events
         .iter()
         .filter_map(|event| match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::RunProgress { .. }) => None,
             EventKind::Lifecycle(event) => Some(event),
             EventKind::Message(_)
             | EventKind::Ledger(_)
@@ -105,7 +106,7 @@ async fn model_error_transitions_run_to_error_with_reason() {
     let run_id =
         runtime.delegate_background(Role::Explorer, "inspect".to_string(), RunConfig::default());
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Error));
-    let events = collect_events(&mut events, 5).await;
+    let events = drain_events(&mut events).await;
 
     // Then
     assert!(events.iter().any(|event| matches!(

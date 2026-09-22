@@ -261,10 +261,13 @@ fn render_data_row(
             .unwrap_or("unknown");
         ui.add_sized([widths[6], ROW_DENSE], Label::new(provider).truncate());
         let current_tool = row_telemetry
-            .and_then(|value| value.current_tool.as_deref())
-            .unwrap_or("unknown");
+            .map(|value| value.activity_label())
+            .unwrap_or_else(|| "unknown".into());
         ui.add_sized([widths[7], ROW_DENSE], Label::new(current_tool).truncate());
         let usage = row_telemetry.map_or_else(|| "0 / 0".into(), TelemetryRow::tokens_label);
-        ui.add_sized([widths[8], ROW_DENSE], Label::new(usage).truncate());
+        let response = ui.add_sized([widths[8], ROW_DENSE], Label::new(usage).truncate());
+        if let Some(value) = row_telemetry {
+            response.on_hover_text(value.diagnostics_label());
+        }
     });
 }

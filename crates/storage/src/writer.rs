@@ -30,6 +30,9 @@ enum Command {
     Memory(crate::repo::memory::Mutation, ReplyTx),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
     AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
+    CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
+    BindUserQuestions(String, String, Vec<String>, ReplyTx),
+    AnswerUserQuestion(String, String, ReplyTx),
     UpsertRunContext(crate::RunContextRecord, ReplyTx),
     InvalidateRunContext(String, ReplyTx),
     Reconcile(ReconcileReplyTx),
@@ -99,6 +102,29 @@ impl Drop for Storage {
 pub struct StorageHandle(SyncSender<Command>);
 
 impl StorageHandle {
+    /// Persist a bounded clarification before publishing it to a user.
+    pub fn create_user_question(
+        &self,
+        question: &event_bus::UserQuestion,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::CreateUserQuestion(question.clone(), reply))
+    }
+    /// Link explicitly selected questions from a prior run to its continuation.
+    pub fn bind_user_questions(
+        &self,
+        source: &str,
+        target: &str,
+        ids: &[String],
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::BindUserQuestions(source.into(), target.into(), ids.to_vec(), reply)
+        })
+    }
+    /// First answer wins; retrying the same answer is idempotent.
+    pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<(), StorageError> {
+        self.request(|reply| Command::AnswerUserQuestion(id.into(), answer.into(), reply))
+    }
+
     /// Appends to a cross-session stream, retaining daily, event and database limits.
     pub fn append_stream_event(
         &self,

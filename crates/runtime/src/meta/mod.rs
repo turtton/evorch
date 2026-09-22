@@ -10,6 +10,7 @@ pub(crate) use delegation::{cleanup_delegates, spawn_delegate, wait_delegates};
 mod escalation;
 mod ledger;
 mod messaging;
+mod questions;
 #[cfg(test)]
 mod role_tests;
 mod runs;
@@ -57,7 +58,12 @@ pub(crate) async fn dispatch(
     let Some(runtime) = state.runtime() else {
         return error("runtime is unavailable");
     };
+    if matches!(name, "wait" | "wait_reply" | "delegate") {
+        state.activity(event_bus::RunActivity::Children);
+    }
     match name {
+        "ask_user" => questions::ask_user(state, &runtime, input),
+        "user_answers" => questions::user_answers(state, &runtime, input),
         "delegate" => delegation::delegate(state, &runtime, input).await,
         "send" => messaging::send(state, &runtime, input),
         "send_message" => messaging::send_message(state, &runtime, input),
@@ -94,6 +100,18 @@ async fn finish(
         Ok(args) => args,
         Err(message) => return error(message),
     };
+    if state
+        .shared
+        .executor
+        .has_unobserved_shell_jobs(&state.caller_run_id().to_string())
+    {
+        return error(
+            "Shell jobs are still running. Poll their results or stop them before finishing.",
+        );
+    }
+    if let Err(error) = state.user_question_completion_check() {
+        return self::error(error);
+    }
     let Some(gate) = runtime.goal_gate() else {
         return DispatchResult {
             result: ToolResult::success(&args.result),
@@ -162,7 +180,7 @@ pub(super) fn parse_category(name: &str) -> Result<String, String> {
     }
 }
 
-pub(super) fn parse_run_id(value: &str) -> Result<RunId, String> {
+pub(crate) fn parse_run_id(value: &str) -> Result<RunId, String> {
     let Some(number) = value.strip_prefix("run-") else {
         return Err(format!("invalid run_id: {value}"));
     };

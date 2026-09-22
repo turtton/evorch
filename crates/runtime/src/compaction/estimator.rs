@@ -1,4 +1,4 @@
-use providers::{Message, Usage};
+use providers::{Message, ToolSpec, Usage};
 
 const BYTES_PER_TOKEN: u64 = 4;
 
@@ -12,6 +12,25 @@ pub(crate) fn estimate_tokens(messages: &[Message]) -> u64 {
         u64::try_from(serialized.len()).unwrap_or(u64::MAX)
     });
     serialized_bytes.saturating_add(BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN
+}
+
+/// Include tool definitions in the serialized estimate. Provider input usage already
+/// includes them, so compare the two totals instead of adding schemas to usage.
+pub(crate) fn estimate_request(
+    messages: &[Message],
+    tools: &[ToolSpec],
+    last_usage: Option<&Usage>,
+    baseline_estimate: Option<u64>,
+) -> u64 {
+    estimate_projected(messages, last_usage, baseline_estimate)
+        .max(estimate_tokens(messages).saturating_add(estimate_tool_tokens(tools)))
+}
+
+pub(crate) fn estimate_tool_tokens(tools: &[ToolSpec]) -> u64 {
+    if tools.is_empty() {
+        return 0;
+    }
+    serde_json::to_vec(tools).map_or(u64::MAX, |bytes| (bytes.len() as u64).div_ceil(4))
 }
 
 /// Add newly appended tool results and injected messages to the last reported
@@ -83,6 +102,41 @@ mod tests {
             super::estimate_projected(&messages[..1], None, None),
             baseline
         );
+    }
+
+    #[test]
+    fn schemas_count_once_when_combining_usage_and_serialized_estimates() {
+        let messages = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        )];
+        let tools = [providers::ToolSpec {
+            name: "read".into(),
+            description: "Read a file with bounded output".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        }];
+        let serialized = super::estimate_tokens(&messages) + super::estimate_tool_tokens(&tools);
+        assert_eq!(
+            super::estimate_request(&messages, &tools, None, None),
+            serialized
+        );
+        let usage = Usage {
+            input_tokens: serialized * 2,
+            output_tokens: 100,
+            ..Usage::default()
+        };
+        assert_eq!(
+            super::estimate_request(
+                &messages,
+                &tools,
+                Some(&usage),
+                Some(super::estimate_tokens(&messages))
+            ),
+            usage.input_tokens + usage.output_tokens
+        );
+        assert_eq!(super::estimate_tool_tokens(&[]), 0);
     }
 
     // Given: 4 文字の平文メッセージ / When: トークン数を推定 / Then: serialized representation の 4 文字単位切り上げになる

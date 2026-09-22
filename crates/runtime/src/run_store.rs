@@ -16,6 +16,32 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn user_question(
+        &self,
+        id: &str,
+    ) -> Result<Option<event_bus::UserQuestion>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .user_question(id)
+    }
+    pub(crate) fn user_questions(
+        &self,
+        run: RunId,
+    ) -> Result<Vec<event_bus::UserQuestion>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .user_questions_for_run(&run.to_string())
+    }
+
+    pub(crate) fn user_question_recipients(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .user_question_recipients(id)
+    }
+
     pub(crate) fn latest_terminal_named(
         &self,
         name: &str,

@@ -2,6 +2,7 @@ use super::*;
 use crate::RunRestoreFailure;
 use crate::restore::{RestoredState, RunRestoreDescriptor};
 
+mod renewal;
 #[cfg(test)]
 mod tests;
 
@@ -13,7 +14,8 @@ pub(super) enum RunContinuation {
 }
 
 impl AgentRuntime {
-    /// Continue a goal root in place, restoring terminal history without restoring stale ownership.
+    /// Continue a goal root in place, including after process restart.
+    /// Persisted root identity supplies the role; the caller supplies current authority.
     pub fn continue_goal(
         &self,
         run_id: RunId,
@@ -31,17 +33,21 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
-        let (role, phase) = {
-            let entry = self.entry(run_id)?;
-            (entry.role, *entry.phase_rx.borrow())
+        let previous = {
+            let runs = lock_runs(&self.shared.runs);
+            runs.get(&run_id)
+                .map(|entry| (entry.role, *entry.phase_rx.borrow()))
         };
-        match phase {
-            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
-                self.set_model_preference(run_id, authority.model_preference)?;
-                self.send_message_with_images(run_id, prompt, authority.images)?;
-                return Ok(run_id);
-            }
-            AgentRunPhase::Done | AgentRunPhase::Error => {}
+        if matches!(
+            previous,
+            Some((
+                _,
+                AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+            ))
+        ) {
+            self.set_model_preference(run_id, authority.model_preference)?;
+            self.send_message_with_images(run_id, prompt, authority.images)?;
+            return Ok(run_id);
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
         let mut record = store
@@ -50,18 +56,10 @@ impl AgentRuntime {
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-        // Ownership はスナップショットから復元せず呼び出し側の現在の permit で
-        // 再付与するため、ownership のみを理由とする復元不可記録は受け入れる
-        // (delegate_chat と同一の規則)。
-        if (!record.restorable || !descriptor.restorable) && !descriptor.renewable_ownership_only()
-        {
-            return Err(fail(RunRestoreFailure::UnsupportedConfig(
-                descriptor
-                    .non_restorable_reason
-                    .unwrap_or_else(|| "実行設定".into()),
-            )));
-        }
-        if descriptor.role != role.name()
+        self.validate_history_restore(&record, &descriptor, &authority)?;
+        let role = Role::from_name(&descriptor.role)
+            .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
+        if previous.is_some_and(|(previous_role, _)| previous_role != role)
             || record.role != descriptor.role
             || descriptor.parent_run_id.is_some()
             || record.parent_run_id.is_some()
@@ -109,6 +107,7 @@ impl AgentRuntime {
         mut config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
         let name = format!("chat:{}:{thread_id}", role.name());
+        let mut restored_source = None;
         let restored = match self.shared.run_store.get() {
             None => None,
             Some(store) => {
@@ -130,13 +129,11 @@ impl AgentRuntime {
                             serde_json::from_str(&record.config_json).map_err(|error| {
                                 fail(RunRestoreFailure::CorruptContext(error.to_string()))
                             })?;
-                        // Ownership is deliberately renewed by the GUI, never restored from disk.
-                        let supported =
-                            descriptor.restorable || descriptor.renewable_ownership_only();
-                        if !supported
-                            || record.role != role.name()
+                        self.validate_history_restore(&record, &descriptor, &config)?;
+                        if record.role != role.name()
                             || descriptor.role != role.name()
                             || record.parent_run_id.is_some()
+                            || descriptor.parent_run_id.is_some()
                         {
                             return Err(fail(RunRestoreFailure::UnsupportedConfig(
                                 descriptor
@@ -144,6 +141,10 @@ impl AgentRuntime {
                                     .unwrap_or_else(|| "chat identity".into()),
                             )));
                         }
+                        restored_source =
+                            Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
+                                fail(RunRestoreFailure::CorruptContext(reason))
+                            })?);
                         Some(RestoredState::from_record(&record)?)
                     }
                 }
@@ -151,6 +152,15 @@ impl AgentRuntime {
         };
         config.name = Some(name);
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
+        if let (Some(source), Some(restored)) = (restored_source, restored.as_ref()) {
+            self.inherit_user_questions(source, run_id, &restored.messages)
+                .map_err(|reason| RuntimeError::RunRestoreFailed {
+                    run_id: source.to_string(),
+                    reason: RunRestoreFailure::CorruptContext(format!(
+                        "question inheritance failed: {reason}"
+                    )),
+                })?;
+        }
         let continuation = restored.map_or(RunContinuation::Fresh, RunContinuation::Restored);
         Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
     }

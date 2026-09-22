@@ -292,10 +292,38 @@ pub enum EscalationTrigger {
     },
 }
 
+/// Current work at a run boundary. These labels never authorize or schedule actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunActivity {
+    Model,
+    Tools,
+    Children,
+    User,
+    Compaction,
+    Idle,
+}
+
+/// Estimated request composition in serialized UTF-8 bytes / 4 (not billed tokens).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextComposition {
+    pub instructions: u64,
+    pub tool_definitions: u64,
+    pub conversation: u64,
+    pub tool_outputs: u64,
+    pub projected_tokens: u64,
+    pub window_tokens: u64,
+}
+
 /// セッションおよびタスクのライフサイクルに関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum LifecycleEvent {
+    /// Observational activity and request composition; does not transition run phase.
+    RunProgress {
+        run_id: String,
+        activity: RunActivity,
+        context: Option<ContextComposition>,
+    },
     /// セッションが開始した。
     Started {
         /// 開始したセッションの ID。
@@ -428,10 +456,25 @@ pub enum MessageEvent {
     },
 }
 
+/// A persisted clarification, independent of tool approval and run phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserQuestion {
+    pub id: String,
+    pub run_id: String,
+    pub root_run_id: String,
+    pub root_name: String,
+    pub title: String,
+    pub options: Vec<String>,
+    pub blocking: bool,
+    pub answer: Option<String>,
+}
+
 /// ツール実行に関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ToolEvent {
+    /// A durable user question changed. Answers always allow free text.
+    UserQuestionUpdated { question: UserQuestion },
     /// ツール呼び出しが開始した。
     ToolStarted {
         /// 呼び出されたツール名。

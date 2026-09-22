@@ -123,7 +123,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             }
             // エージェント実行はセッションではないため、セッション射影を変更しません。
             LifecycleEvent::AgentRunStateChanged { .. } => {}
-            LifecycleEvent::AgentRunStarted { .. } => {}
+            LifecycleEvent::RunProgress { .. } | LifecycleEvent::AgentRunStarted { .. } => {}
             LifecycleEvent::AgentRunRestored { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
@@ -168,7 +168,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             }
         }
         EventKind::Tool(
-            ToolEvent::ApprovalRequested { .. }
+            ToolEvent::UserQuestionUpdated { .. }
+            | ToolEvent::ApprovalRequested { .. }
             | ToolEvent::ApprovalResolved { .. }
             | ToolEvent::ExecutionDenied { .. },
         ) => {}

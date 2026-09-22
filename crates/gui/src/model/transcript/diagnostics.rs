@@ -4,6 +4,7 @@ use super::TranscriptEntry;
 
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
+        EventKind::Diagnostic(event) if event.code == "ContextCheckpointSaved" => None,
         EventKind::Diagnostic(event) => {
             let text = format!(
                 "[{}] {} ({}): {}",

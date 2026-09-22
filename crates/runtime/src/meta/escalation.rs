@@ -16,7 +16,7 @@ use crate::escalation::EscalationMemo;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EscalateArgs {
+pub(super) struct EscalateArgs {
     original_request: String,
     escalation_reason: String,
     #[serde(default)]

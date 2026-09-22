@@ -162,7 +162,7 @@ impl Role {
         };
         capabilities
             .allowed_tools
-            .extend(["ledger_append", "ledger_read"].map(String::from));
+            .extend(["ledger_append", "ledger_read", "ask_user", "user_answers"].map(String::from));
         capabilities
     }
 }

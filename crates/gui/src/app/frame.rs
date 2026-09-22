@@ -85,7 +85,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .quota
             .configure(account, self.credential_store.clone());
         self.telemetry.quota.poll(std::time::Instant::now());
+        if ui.small_button("実行の診断").clicked() {
+            self.diagnostics_open = true;
+            self.restore_status = None;
+        }
         self.render(ui);
+        self.render_restore_diagnostics(&ctx);
+        self.render_user_questions(&ctx);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(
                 editor.models_fetch_state,
@@ -118,6 +124,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_event(&mut self, event: &Event) {
+        self.fold_user_question(event);
+        self.invalidate_restore_diagnostics(event);
+        self.bind_goal_event(event);
         if self.apply_conversation_event(event) {
             self.save_sidebar();
         }

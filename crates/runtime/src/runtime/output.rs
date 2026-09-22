@@ -27,9 +27,38 @@ impl AgentRuntime {
         caller: RunId,
         target: RunId,
     ) -> Result<RunOutput, RuntimeError> {
+        let admission = self.admission_snapshot(target);
         let runs = lock_runs(&self.shared.runs);
         let caller_entry = runs.get(&caller).ok_or_else(|| unknown_run(caller))?;
-        let entry = runs.get(&target).ok_or_else(|| unknown_run(target))?;
+        let Some(entry) = runs.get(&target) else {
+            if caller != target
+                && let Some(admission) = admission
+                && admission.parent == Some(caller)
+            {
+                let (phase, status, reason) = match admission.result {
+                    None => (AgentRunPhase::Pending, OutputStatus::StillRunning, None),
+                    Some(Err(RuntimeError::RunTerminated { .. })) => (
+                        AgentRunPhase::Error,
+                        OutputStatus::Cancelled,
+                        Some("cancelled".into()),
+                    ),
+                    Some(Err(error)) => (
+                        AgentRunPhase::Error,
+                        OutputStatus::Failed,
+                        Some(error.to_string()),
+                    ),
+                    Some(Ok(())) => return Err(unknown_run(target)),
+                };
+                return Ok(RunOutput {
+                    run_id: target.to_string(),
+                    phase,
+                    status,
+                    output: None,
+                    reason,
+                });
+            }
+            return Err(unknown_run(target));
+        };
         if caller == target || (caller_entry.parent != Some(target) && entry.parent != Some(caller))
         {
             return Err(RuntimeError::MessageDenied {

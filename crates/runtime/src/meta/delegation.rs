@@ -8,7 +8,7 @@ use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
-struct DelegateArgs {
+pub(super) struct DelegateArgs {
     #[serde(default)]
     task: Option<crate::team::TaskSpec>,
     #[serde(default)]

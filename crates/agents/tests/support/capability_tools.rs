@@ -18,9 +18,18 @@ pub const ORCHESTRATOR_TOOLS: &[&str] = &[
     "web_fetch",
     "ledger_append",
     "ledger_read",
+    "ask_user",
+    "user_answers",
 ];
 
-pub const EXPLORER_TOOLS: &[&str] = &["read", "grep", "ledger_append", "ledger_read"];
+pub const EXPLORER_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "ledger_append",
+    "ledger_read",
+    "ask_user",
+    "user_answers",
+];
 
 pub const WORKER_TOOLS: &[&str] = &[
     "read",
@@ -36,6 +45,8 @@ pub const WORKER_TOOLS: &[&str] = &[
     "escalate",
     "ledger_append",
     "ledger_read",
+    "ask_user",
+    "user_answers",
 ];
 
 pub const REVIEWER_TOOLS: &[&str] = &[
@@ -45,6 +56,8 @@ pub const REVIEWER_TOOLS: &[&str] = &[
     "submit_review",
     "ledger_append",
     "ledger_read",
+    "ask_user",
+    "user_answers",
 ];
 
 pub const LIBRARIAN_TOOLS: &[&str] = &[
@@ -54,4 +67,6 @@ pub const LIBRARIAN_TOOLS: &[&str] = &[
     "web_fetch",
     "ledger_append",
     "ledger_read",
+    "ask_user",
+    "user_answers",
 ];

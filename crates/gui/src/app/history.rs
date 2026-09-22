@@ -34,6 +34,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
         let events = db.events_all_ordered()?;
+        self.user_questions = db
+            .pending_user_questions()?
+            .into_iter()
+            .map(|q| (q.id.clone(), q))
+            .collect();
         if let Some(path) = &self.sidebar_path {
             match std::fs::read(path) {
                 Ok(bytes) => {
@@ -54,6 +59,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut messages = self.history.clone();
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
+        self.telemetry = crate::model::telemetry::TelemetryOverlay::new();
+        let replay_now = std::time::Instant::now();
+        let replay_end = events.last().map(|stored| stored.event.meta.wall_clock);
         for stored in events {
             while messages
                 .peek()
@@ -63,6 +71,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.restore_user_message(message);
                 }
             }
+            self.bind_goal_event(&stored.event);
+            let at = replay_end
+                .and_then(|end| end.duration_since(stored.event.meta.wall_clock).ok())
+                .and_then(|age| replay_now.checked_sub(age))
+                .unwrap_or(replay_now);
+            self.telemetry.apply_event_at(&stored.event, at);
             self.transcripts.select_thread(None);
             self.apply_conversation_event(&stored.event);
         }
@@ -70,6 +84,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_user_message(message);
         }
         self.transcripts.finish_history();
+        self.telemetry.finish_history();
         self.ledger.load_all(db.run_ledger_all()?);
         self.transcripts
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));

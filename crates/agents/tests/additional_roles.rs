@@ -26,7 +26,7 @@ fn additional_roles_have_least_privilege_capabilities() {
             capabilities.allowed_tools,
             tools
                 .into_iter()
-                .chain(["ledger_append", "ledger_read"])
+                .chain(["ledger_append", "ledger_read", "ask_user", "user_answers"])
                 .map(String::from)
                 .collect()
         );
@@ -50,7 +50,7 @@ fn every_role_authorizes_ledger_meta_ops() {
     ] {
         let capabilities = role.capabilities();
         // When / Then: both self-scoped operations are authorized.
-        for op in ["ledger_append", "ledger_read"] {
+        for op in ["ledger_append", "ledger_read", "ask_user", "user_answers"] {
             assert_eq!(
                 capabilities.check_tool(role.name(), op),
                 agents::CapabilityDecision::Allowed

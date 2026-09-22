@@ -11,6 +11,8 @@ mod history;
 mod input;
 mod ownership;
 mod provider_settings;
+mod questions;
+mod restoration;
 mod role_settings;
 mod routing_settings;
 mod sandbox_settings;

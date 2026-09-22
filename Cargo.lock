@@ -4888,6 +4888,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "globset",
+ "jsonschema",
  "mock-openai",
  "model",
  "providers",

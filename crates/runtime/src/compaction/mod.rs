@@ -15,7 +15,7 @@ use crate::agent_loop::LoopState;
 use crate::context::CompactionCheckpoint;
 
 use self::cut::select_cut;
-use self::estimator::{estimate_projected, estimate_tokens};
+use self::estimator::estimate_tokens;
 use self::policy::{
     GuardDecision, SummarizerKindSel, ThresholdDecision, guard_decision, resolve_window,
     threshold_decision,
@@ -81,17 +81,14 @@ pub(crate) async fn compact_now(
     state: &mut LoopState,
     reason: CompactionReason,
 ) -> Result<CompactionOutcome, CompactionError> {
+    state.activity(event_bus::RunActivity::Compaction);
     let settings = state.shared.compaction.clone();
     if let Some(decision) = guard_decision(&state.compaction, &settings) {
         return Err(error_from_guard(decision));
     }
 
     let visible = state.context.visible_messages();
-    let estimated_before = estimate_projected(
-        &visible,
-        state.last_usage.as_ref(),
-        state.compaction.last_usage_estimated_tokens,
-    );
+    let estimated_before = state.estimated_context_tokens(&visible);
     let selected_model = selected_model(state);
     let (window, window_source) = resolve_window(
         &settings,
@@ -192,7 +189,8 @@ pub(crate) async fn compact_now(
         plan.start,
         plan.end,
         &summary_message,
-    );
+    )
+    .saturating_add(state.estimated_tool_tokens());
     let still_above_threshold = estimated_after as f64 / window as f64 >= settings.threshold;
     let outcome = CompactionOutcome {
         estimated_tokens_before: estimated_before,

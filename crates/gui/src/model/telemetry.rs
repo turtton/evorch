@@ -36,6 +36,10 @@ pub struct TelemetryRow {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub current_tool: Option<String>,
+    pub activity: Option<event_bus::RunActivity>,
+    pub context_composition: Option<event_bus::ContextComposition>,
+    pub last_checkpoint: Option<std::time::SystemTime>,
+    pub checkpoint_failure: Option<String>,
     pub usage: TokenUsage,
     latest_context: Option<context_pressure::RequestContext>,
     in_flight: bool,
@@ -105,6 +109,30 @@ impl TelemetryOverlay {
 
     pub fn apply_event_at(&mut self, event: &Event, now: Instant) {
         match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::RunProgress {
+                run_id,
+                activity,
+                context,
+            }) => {
+                let row = self.rows.entry(run_id.clone()).or_default();
+                row.activity = Some(*activity);
+                if let Some(context) = context {
+                    row.context_composition = Some(context.clone());
+                }
+            }
+            EventKind::Diagnostic(d)
+                if d.code == "ContextCheckpointSaved" || d.code == "ContextSnapshotFailed" =>
+            {
+                if let Some(run) = &d.run_id {
+                    let row = self.rows.entry(run.clone()).or_default();
+                    if d.code == "ContextCheckpointSaved" {
+                        row.last_checkpoint = Some(event.meta.wall_clock);
+                        row.checkpoint_failure = None;
+                    } else {
+                        row.checkpoint_failure = Some(d.detail.clone());
+                    }
+                }
+            }
             EventKind::Provider(ProviderEvent::RequestStarted {
                 provider,
                 profile,
@@ -281,6 +309,17 @@ impl TelemetryOverlay {
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
             | EventKind::Snapshot(_) => {}
+        }
+    }
+
+    /// Persisted progress is history, never evidence of a live request after restart.
+    pub fn finish_history(&mut self) {
+        self.active_running_start.clear();
+        for row in self.rows.values_mut() {
+            row.activity = None;
+            row.current_tool = None;
+            row.in_flight = false;
+            row.request_started_at = None;
         }
     }
 

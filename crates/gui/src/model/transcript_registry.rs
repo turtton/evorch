@@ -73,6 +73,9 @@ impl TranscriptRegistry {
 
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
+            EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
+                self.route_run(&question.run_id)
+            }
             EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
                 self.route_run(run_id)
             }

@@ -3,8 +3,26 @@ use super::*;
 pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
 
 pub(super) struct Admission {
+    parent: Option<RunId>,
     cancelled: bool,
+    ownership: Option<crate::ownership::OwnerPermit>,
     result: watch::Receiver<Option<Result<(), RuntimeError>>>,
+}
+
+pub(super) struct AdmissionSnapshot {
+    pub parent: Option<RunId>,
+    pub ownership: Option<crate::ownership::OwnerPermit>,
+    pub result: Option<Result<(), RuntimeError>>,
+}
+
+impl Admission {
+    pub(super) fn snapshot(&self) -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            parent: self.parent,
+            ownership: self.ownership.clone(),
+            result: self.result.borrow().clone(),
+        }
+    }
 }
 
 impl AgentRuntime {
@@ -26,7 +44,9 @@ impl AgentRuntime {
             .insert(
                 run_id,
                 Admission {
+                    parent,
                     cancelled: false,
+                    ownership: config.ownership.clone(),
                     result: receiver,
                 },
             );
@@ -58,6 +78,17 @@ impl AgentRuntime {
             result.send_replace(Some(admitted));
         });
         run_id
+    }
+
+    /// Preserve the parent boundary before provider admission registers the run.
+    /// Never acquire admissions while holding runs: registration locks admissions first.
+    pub(super) fn admission_snapshot(&self, run_id: RunId) -> Option<AdmissionSnapshot> {
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admissions.get(&run_id).map(Admission::snapshot)
     }
 
     pub(crate) async fn wait_admission(&self, run_id: RunId) -> Result<(), RuntimeError> {

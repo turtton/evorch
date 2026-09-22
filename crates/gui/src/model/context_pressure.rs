@@ -8,6 +8,39 @@ pub(super) struct RequestContext {
 }
 
 impl TelemetryRow {
+    pub fn activity_label(&self) -> String {
+        use event_bus::RunActivity;
+        match self.activity {
+            Some(RunActivity::Model) => "model".into(),
+            Some(RunActivity::Tools) => self.current_tool.clone().unwrap_or_else(|| "tools".into()),
+            Some(RunActivity::Children) => "agents".into(),
+            Some(RunActivity::User) => "user input".into(),
+            Some(RunActivity::Compaction) => "compaction".into(),
+            Some(RunActivity::Idle) | None => {
+                self.current_tool.clone().unwrap_or_else(|| "idle".into())
+            }
+        }
+    }
+    pub fn diagnostics_label(&self) -> String {
+        let mut text = format!(
+            "Cumulative input / output: {} / {}",
+            self.usage.input, self.usage.output
+        );
+        if let Some(c) = &self.context_composition {
+            text.push_str(&format!("\nLatest context estimate: {} / {}\nInstructions: {} · tool definitions: {}\nConversation: {} · tool outputs: {}\nEstimation: serialized UTF-8 bytes / 4",c.projected_tokens,c.window_tokens,c.instructions,c.tool_definitions,c.conversation,c.tool_outputs));
+        }
+        if let Some(at) = self
+            .last_checkpoint
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            text.push_str(&format!("\nLast saved checkpoint: Unix {}", at.as_secs()));
+        }
+        if let Some(reason) = &self.checkpoint_failure {
+            text.push_str(&format!("\nCheckpoint save failed: {reason}"));
+        }
+        text
+    }
+
     pub fn context_pressure(&self) -> Option<u128> {
         let usage = self.latest_context.as_ref()?.usage;
         let window = u128::from(self.context_window.filter(|window| *window > 0)?);

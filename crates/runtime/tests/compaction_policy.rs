@@ -1,3 +1,5 @@
+#[path = "support/compaction_context.rs"]
+mod compaction_context;
 mod support;
 
 // allow: SIZE_OK — Wave-9 の budget / ratchet / in-flight を同じ runtime policy
@@ -109,6 +111,10 @@ async fn finish_and_collect(
 // Then: 予算超過後は新しいイベントを出さず Done で完了する
 #[tokio::test]
 async fn budget_exhaustion_blocks_further_compactions() {
+    let request = compaction_context::probe(|model| {
+        runtime_with(model, settings(1_000_000, 4, SummarizerKind::Structural))
+    })
+    .await;
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::gated(
         [
@@ -119,7 +125,7 @@ async fn budget_exhaustion_blocks_further_compactions() {
         ],
         Arc::clone(&gate),
     ));
-    let mut config = settings(1_000, 1, SummarizerKind::Structural);
+    let mut config = settings(request.tool_tokens + 1_000, 1, SummarizerKind::Structural);
     config.threshold = 0.2;
     let (runtime, bus) = runtime_with(model.clone(), config);
     let mut receiver = bus.subscribe();
@@ -164,6 +170,10 @@ async fn budget_exhaustion_blocks_further_compactions() {
 // Then: 低使用率境界では圧縮せず、次の高使用率境界で自動圧縮を再開する
 #[tokio::test]
 async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
+    let request = compaction_context::probe(|model| {
+        runtime_with(model, settings(1_000_000, 4, SummarizerKind::Structural))
+    })
+    .await;
     let gate = Arc::new(Notify::new());
     let model = Arc::new(ScriptedModel::gated(
         [
@@ -174,7 +184,11 @@ async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
         ],
         Arc::clone(&gate),
     ));
-    let mut config = settings(2_000, 4, SummarizerKind::Structural);
+    let mut config = settings(
+        (request.tool_tokens + 800) * 5 / 2,
+        4,
+        SummarizerKind::Structural,
+    );
     config.threshold = 0.4;
     let (runtime, bus) = runtime_with(model.clone(), config);
     let mut receiver = bus.subscribe();
@@ -204,6 +218,20 @@ async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
     let events = finish_and_collect(&runtime, &mut receiver, run_id).await;
 
     assert_eq!(events.len(), 2);
+    let observed = model.observed().await;
+    let threshold_tokens = (request.tool_tokens + 800) as f64;
+    assert!((request.estimate(&observed[1]) as f64) < threshold_tokens);
+    assert!((request.estimate(&observed[2]) as f64) < threshold_tokens);
+    let CompactionEvent::Compacted {
+        estimated_tokens_before,
+        estimated_tokens_after,
+        threshold,
+        context_window_tokens,
+        ..
+    } = &events[1];
+    assert!(*estimated_tokens_before as f64 >= *context_window_tokens as f64 * *threshold);
+    assert_eq!(*estimated_tokens_after, request.estimate(&observed[3]));
+    assert!(*estimated_tokens_after < *context_window_tokens);
     assert!(matches!(
         events[0],
         CompactionEvent::Compacted {

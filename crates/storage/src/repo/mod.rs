@@ -13,6 +13,7 @@ pub mod run_context;
 pub mod run_ledger;
 pub mod session;
 pub mod task;
+pub(crate) mod user_questions;
 
 #[cfg(test)]
 mod crud_tests;

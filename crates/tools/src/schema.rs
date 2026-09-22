@@ -39,7 +39,14 @@ pub(crate) fn validate_args(
 ) -> Result<(), ToolError> {
     let detail = validator
         .iter_errors(args)
-        .map(|error| error.to_string())
+        .map(|error| {
+            let path = error.instance_path().as_str();
+            if path.is_empty() {
+                error.to_string()
+            } else {
+                format!("{path}: {error}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("; ");
     if detail.is_empty() {
@@ -113,6 +120,24 @@ mod tests {
             panic!("InvalidArgs を期待しましたが {error:?} でした");
         };
         assert!(!detail.is_empty());
+    }
+
+    #[test]
+    fn schema_length_error_identifies_the_argument_path() {
+        let validator = compile(
+            "test",
+            &json!({
+                "type": "object",
+                "properties": {"escalation_reason": {"type": "string", "minLength": 1}}
+            }),
+        )
+        .unwrap();
+        let ToolError::InvalidArgs { detail } =
+            validate_args(&validator, &json!({"escalation_reason": ""})).unwrap_err()
+        else {
+            panic!("expected invalid arguments");
+        };
+        assert!(detail.starts_with("/escalation_reason:"), "{detail}");
     }
 
     // Given: 未定義プロパティを含む引数 / When: validate_args / Then: InvalidArgs になる

@@ -63,6 +63,7 @@ pub struct RuntimeCommandSink {
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
     goal_runs: BTreeMap<String, RunId>,
+    goal_projects: BTreeMap<String, String>,
     chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     events_tx: std::sync::mpsc::Sender<LoopEvent>,
@@ -102,6 +103,7 @@ impl RuntimeCommandSink {
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
             goal_runs: BTreeMap::new(),
+            goal_projects: BTreeMap::new(),
             chat_permits: BTreeMap::new(),
             ownership: None,
             events_tx,
@@ -157,6 +159,25 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
+        if let Some(id) = run.strip_prefix("run-").and_then(|s| s.parse::<u64>().ok()) {
+            self.goal_runs.insert(thread.into(), RunId::new(id));
+            self.goal_projects.insert(thread.into(), project.into());
+        }
+    }
+    fn restore_diagnostics(
+        &self,
+        run: &str,
+    ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
+        let id = run
+            .strip_prefix("run-")
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("invalid run ID")?;
+        self.runtime
+            .restore_diagnostics(RunId::new(id))
+            .map_err(|e| e.to_string())
+    }
+
     fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
         // cwd 未指定時は起動済み executor を維持し、不要な sandbox 構築を避ける。
         let Some(root) = cwd else {
@@ -215,7 +236,10 @@ impl CommandSink for RuntimeCommandSink {
             let thread = match &command {
                 WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::CancelChat { thread_id } => Some(thread_id.as_str()),
+                WorkbenchCommand::CancelChat { thread_id }
+                | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
+                    Some(thread_id.as_str())
+                }
                 WorkbenchCommand::DecideMerge(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::RestoreSnapshot { .. } => None,
                 WorkbenchCommand::PauseGoal { .. }
@@ -245,6 +269,103 @@ impl RuntimeCommandSink {
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<LoopEvent> {
         match command {
+            WorkbenchCommand::AnswerUserQuestion {
+                thread_id,
+                question_id,
+                answer,
+            } => {
+                let question = match self.runtime.user_question(&question_id) {
+                    Ok(Some(q)) => q,
+                    Ok(None) => {
+                        return vec![LoopEvent::CommandRejected {
+                            reason: "Unknown question".into(),
+                        }];
+                    }
+                    Err(reason) => return vec![LoopEvent::CommandRejected { reason }],
+                };
+                let chat_role = [Role::Worker, Role::Orchestrator]
+                    .into_iter()
+                    .find(|role| question.root_name == format!("chat:{}:{thread_id}", role.name()));
+                let bound_goal = self
+                    .goal_runs
+                    .get(&thread_id)
+                    .or_else(|| self.chat_runs.get(&thread_id))
+                    .is_some_and(|run| run.to_string() == question.root_run_id);
+                if chat_role.is_none() && !bound_goal {
+                    return vec![LoopEvent::CommandRejected { reason:"Question belongs to a different or inactive conversation; resume its goal first".into() }];
+                }
+                if let Some(previous) = &question.answer {
+                    return if previous == &answer {
+                        vec![LoopEvent::UserAnswerSaved { question_id }]
+                    } else {
+                        vec![LoopEvent::CommandRejected {
+                            reason: "Question was already answered".into(),
+                        }]
+                    };
+                }
+                // Offline requesters have no live permit for the runtime to guard.
+                // Keep the submitting host's generation stable through durable storage.
+                let caller_guard = match permit.as_ref().map(|p| p.mutation_guard()).transpose() {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        return vec![LoopEvent::CommandRejected {
+                            reason: error.to_string(),
+                        }];
+                    }
+                };
+                let question = match self.runtime.answer_user_question(&question_id, &answer) {
+                    Ok(q) => q,
+                    Err(reason) => return vec![LoopEvent::CommandRejected { reason }],
+                };
+                // Resumption writes the ownership registry, so release its read guard first.
+                drop(caller_guard);
+                let saved = LoopEvent::UserAnswerSaved {
+                    question_id: question_id.clone(),
+                };
+                let active = match self.runtime.has_active_question_recipient(&question_id) {
+                    Ok(active) => active,
+                    Err(reason) => {
+                        return vec![
+                            saved,
+                            LoopEvent::CommandRejected {
+                                reason: format!(
+                                    "回答は保存済みですが受信先を確認できません: {reason}"
+                                ),
+                            },
+                        ];
+                    }
+                };
+                if active {
+                    return vec![saved];
+                }
+                let text = format!(
+                    "[user-answer id={}]\nQuestion: {}\nAnswer: {}",
+                    question.id, question.title, answer
+                );
+                let mut events = self.submit_authorized(
+                    WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                        thread_id,
+                        text,
+                        images: Vec::new(),
+                        model_preference: None,
+                        composer_role: if chat_role == Some(Role::Worker) {
+                            crate::model::composer::ComposerRole::Worker
+                        } else {
+                            crate::model::composer::ComposerRole::Orchestrator
+                        },
+                    }),
+                    permit,
+                );
+                events.insert(0, saved);
+                for event in &mut events {
+                    if let LoopEvent::ChatRejected { reason, .. } = event {
+                        *reason = format!(
+                            "回答は保存済みですが会話の再開に失敗しました: {reason}。原因を解消して会話を再開してください。"
+                        );
+                    }
+                }
+                events
+            }
             WorkbenchCommand::DecideToolApproval { call_id, approved } => {
                 if let Some(bus) = &self.event_bus {
                     bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
@@ -311,6 +432,8 @@ impl RuntimeCommandSink {
                     },
                     None => None,
                 };
+                self.goal_projects
+                    .insert(submission.thread_id.clone(), submission.project_id.clone());
                 let delegation_value = submission.delegation_value.clone();
                 let memory = match self
                     .memory_config
@@ -420,17 +543,58 @@ impl RuntimeCommandSink {
             WorkbenchCommand::SendChat(submission) => {
                 let thread_id = submission.thread_id;
                 if let Some(&run_id) = self.goal_runs.get(&thread_id) {
+                    let mut authority = RunConfig {
+                        ownership: permit,
+                        images: submission.images,
+                        model_preference: submission.model_preference,
+                        ..RunConfig::default()
+                    };
+                    if self
+                        .runtime
+                        .restore_diagnostics(run_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|d| d.renewable_team.is_some())
+                    {
+                        let Some(project) = self.goal_projects.get(&thread_id) else {
+                            return vec![LoopEvent::ChatRejected {
+                                thread_id,
+                                reason: "Current project binding is required to continue this team"
+                                    .into(),
+                            }];
+                        };
+                        let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer)
+                        else {
+                            return vec![LoopEvent::ChatRejected {
+                                thread_id,
+                                reason: "Current team storage is unavailable".into(),
+                            }];
+                        };
+                        authority.team_store = Some(runtime::team_context::TeamStore {
+                            config: config.clone(),
+                            writer: writer.clone(),
+                            id: format!("{project}:{thread_id}"),
+                        });
+                        authority.topology =
+                            runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+                        authority.delegation_value = Some(submission.text.clone());
+                        authority.finding_store = Some(config.db_path.clone());
+                        authority.memory =
+                            match runtime::memory::MemoryBoundary::capture(config, project) {
+                                Ok(memory) => Some(memory),
+                                Err(error) => {
+                                    return vec![LoopEvent::ChatRejected {
+                                        thread_id,
+                                        reason: error.to_string(),
+                                    }];
+                                }
+                            };
+                    }
                     let _guard = self.handle.enter();
-                    return match self.runtime.continue_goal(
-                        run_id,
-                        submission.text,
-                        RunConfig {
-                            ownership: permit,
-                            images: submission.images,
-                            model_preference: submission.model_preference,
-                            ..RunConfig::default()
-                        },
-                    ) {
+                    return match self
+                        .runtime
+                        .continue_goal(run_id, submission.text, authority)
+                    {
                         Ok(run_id) => {
                             self.chat_runs.insert(thread_id.clone(), run_id);
                             vec![LoopEvent::ChatAccepted {
@@ -769,6 +933,100 @@ mod tests {
 
         // Then: panic せず、即応イベントも返さない。
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn offline_question_rejects_caller_fenced_after_command_authorization() {
+        let (rt, mut sink, runtime, _) = build_sink();
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("questions.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        // Persisted question from a stopped requester, as after restarting the GUI.
+        let question = event_bus::UserQuestion {
+            id: "question-offline".into(),
+            run_id: "run-99".into(),
+            root_run_id: "run-99".into(),
+            root_name: "chat:Worker:thread-1".into(),
+            title: "Which format?".into(),
+            options: vec!["JSON".into()],
+            blocking: true,
+            answer: None,
+        };
+        storage.handle().create_user_question(&question).unwrap();
+        assert!(!runtime.has_active_question_recipient(&question.id).unwrap());
+        let bus = Arc::new(EventBus::new(64));
+        let first =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
+                .unwrap();
+        first.start("thread-1").unwrap();
+        let authorized = first.owned_permit("thread-1").unwrap();
+        let successor =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+        // Ownership changes between submit's initial check and durable answer write.
+        first.handoff(&authorized, &successor).unwrap();
+        let events = sink.submit_authorized(
+            WorkbenchCommand::AnswerUserQuestion {
+                thread_id: "thread-1".into(),
+                question_id: question.id.clone(),
+                answer: "JSON".into(),
+            },
+            Some(authorized),
+        );
+        assert!(
+            matches!(events.as_slice(), [LoopEvent::CommandRejected { .. }]),
+            "{events:?}"
+        );
+        assert!(
+            runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .is_none()
+        );
+        assert!(runtime.list_agents().is_empty());
+
+        // The current caller may save and resume; no registry read lock crosses begin_turn.
+        let events = sink.submit_authorized(
+            WorkbenchCommand::AnswerUserQuestion {
+                thread_id: "thread-1".into(),
+                question_id: question.id.clone(),
+                answer: "JSON".into(),
+            },
+            Some(successor.owned_permit("thread-1").unwrap()),
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    LoopEvent::UserAnswerSaved { .. },
+                    LoopEvent::ChatAccepted { .. }
+                ]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(
+            runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .as_deref(),
+            Some("JSON")
+        );
+        let run = sink.chat_runs["thread-1"];
+        runtime.cancel(run).unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                .await
+                .unwrap()
+                .unwrap();
+        });
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod cancellation;
 mod chat_restore;
 mod completion_relay;
 mod output;
+mod questions;
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
@@ -55,6 +56,7 @@ pub struct AgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) question_version: watch::Sender<u64>,
     pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     admissions: admission::Admissions,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
@@ -236,6 +238,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                question_version: watch::channel(0).0,
                 reviewer_results: Mutex::new(HashMap::new()),
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -465,6 +468,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
                 bus,

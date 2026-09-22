@@ -196,6 +196,56 @@ impl ToolExecutor {
         args
     }
 
+    /// Cancel all yielded shell processes owned by this run. Call at every
+    /// terminal/cancellation boundary, even if the executor is shared.
+    pub fn cancel_shell_jobs(&self, run_id: &str) {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.cancel_shell_jobs(run_id);
+        }
+    }
+
+    /// Wait for real process teardown before workspace cleanup. On error the
+    /// caller must retain the workspace rather than deleting a live job's cwd.
+    pub async fn drain_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.drain_shell_jobs(run_id).await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn has_running_shell_jobs(&self, run_id: &str) -> bool {
+        self.tools
+            .get("shell")
+            .is_some_and(|shell| shell.tool.has_running_shell_jobs(run_id))
+    }
+
+    pub fn has_unobserved_shell_jobs(&self, run_id: &str) -> bool {
+        self.tools
+            .get("shell")
+            .is_some_and(|shell| shell.tool.has_unobserved_shell_jobs(run_id))
+    }
+
+    pub fn retain_shell_call_guard(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        guard: Box<dyn Send + Sync>,
+    ) {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.retain_shell_call_guard(run_id, call_id, guard);
+        }
+    }
+
+    /// Retain the workspace snapshot guard while an async shell can mutate it.
+    /// Control calls (poll/stdin/stop) keep normal tool authorization but must
+    /// not reacquire that same mutation lock.
+    pub fn retain_shell_job_guard(&self, run_id: &str, job_id: &str, guard: Box<dyn Send + Sync>) {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.retain_shell_job_guard(run_id, job_id, guard);
+        }
+    }
+
     /// 登録済み shell に、審査ゲートと承認時だけ使う非隔離経路を設定する。
     pub fn set_shell_escalation(
         &self,

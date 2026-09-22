@@ -135,12 +135,14 @@ fn orchestrator_prompt_exposes_typed_reviewer_tools() {
     assert_eq!(
         tools.split(',').map(str::trim).collect::<Vec<_>>(),
         [
+            "ask_user",
             "git_diff",
             "grep",
             "ledger_append",
             "ledger_read",
             "read",
-            "submit_review"
+            "submit_review",
+            "user_answers"
         ]
     );
 }

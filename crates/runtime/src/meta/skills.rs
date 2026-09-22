@@ -9,7 +9,7 @@ use crate::agent_loop::LoopState;
 use crate::skill::{SkillRegistry, read_skill_resource};
 
 #[derive(Deserialize)]
-struct SkillLoadArgs {
+pub(super) struct SkillLoadArgs {
     name: String,
     #[serde(default)]
     resource: Option<String>,

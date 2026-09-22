@@ -1,3 +1,5 @@
+#[path = "support/compaction_context.rs"]
+mod compaction_context;
 mod support;
 
 // allow: SIZE_OK — issue #63 requires independent end-to-end trigger scenarios in this
@@ -75,14 +77,6 @@ fn text_message(role: MessageRole, text: &str) -> Message {
     }
 }
 
-fn estimated_tokens(messages: &[Message]) -> u64 {
-    let chars = serde_json::to_string(messages)
-        .expect("test messages serialize")
-        .chars()
-        .count() as u64;
-    chars.div_ceil(4)
-}
-
 fn request_texts(messages: &[Message]) -> Vec<&str> {
     messages
         .iter()
@@ -158,21 +152,6 @@ async fn wait_for_phase(runtime: &AgentRuntime, run_id: RunId, phase: AgentRunPh
     .expect("phase transition timeout");
 }
 
-async fn assembled_system_message(settings: CompactionConfig) -> Message {
-    let model = Arc::new(ScriptedModel::new([Ok(text_response(
-        "probe-done",
-        FinishReason::Stop,
-    ))]));
-    let (runtime, _) = runtime_with(Arc::clone(&model), settings);
-    let run_id =
-        runtime.delegate_background(Role::Worker, "probe".to_string(), RunConfig::default());
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(run_id)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
-    model.observed().await[0][0].clone()
-}
-
 async fn finish_and_collect(
     runtime: &AgentRuntime,
     receiver: &mut event_bus::EventReceiver,
@@ -203,9 +182,12 @@ async fn finish_and_collect(
 #[tokio::test]
 async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window() {
     // Given: the resumed boundary is exactly 75%, while the first request is below it.
-    let window = 400;
+    let request =
+        compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
+    // Keep exact percentage boundaries while allowing both instructions and schemas.
+    let window = (request.tool_tokens + 400).div_ceil(100) * 200;
     let compaction_settings = settings(window, 1, 1);
-    let system = assembled_system_message(compaction_settings.clone()).await;
+    let system = request.system.clone();
     let old_request = "old-request-".repeat(8);
     let mut old_reply = String::new();
     let resume = "resume";
@@ -217,12 +199,12 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
             text_message(MessageRole::User, resume),
         ]
     };
-    while estimated_tokens(&before_messages(&old_reply)) < window * 3 / 4 {
+    while request.estimate(&before_messages(&old_reply)) < window * 3 / 4 {
         old_reply.push('x');
     }
-    let boundary_tokens = estimated_tokens(&before_messages(&old_reply));
+    let boundary_tokens = request.estimate(&before_messages(&old_reply));
     assert_eq!(boundary_tokens * 4, window * 3);
-    assert!(estimated_tokens(&before_messages(&old_reply)[..2]) * 4 < window * 3);
+    assert!(request.estimate(&before_messages(&old_reply)[..2]) * 4 < window * 3);
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(&old_reply, FinishReason::Stop)),
         Ok(text_response("done", FinishReason::Stop)),
@@ -262,11 +244,16 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
     assert!((*threshold - 0.75).abs() < f64::EPSILON);
     assert_eq!(*context_window_tokens, window);
     assert_eq!(*estimated_tokens_before, boundary_tokens);
+    assert!(
+        boundary_tokens - request.tool_tokens < window * 3 / 4,
+        "schemas are required to cross the threshold"
+    );
     assert!(*estimated_tokens_after < *estimated_tokens_before);
     assert!(compacted_range_start < compacted_range_end);
     assert!(checkpoint_id.starts_with("ckpt-"));
     let observed = model.observed().await;
     assert_eq!(observed.len(), 2);
+    assert_eq!(*estimated_tokens_after, request.estimate(&observed[1]));
     assert!(request_texts(&observed[0]).contains(&old_request.as_str()));
     assert!(checkpoint_ids(&observed[0]).is_empty());
     assert_eq!(checkpoint_ids(&observed[1]), vec![checkpoint_id.as_str()]);
@@ -281,9 +268,12 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
 #[tokio::test]
 async fn below_threshold_never_fires() {
     // Given: the complete resumed request is exactly 74% of its configured window.
-    let window = 400;
+    let request =
+        compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
+    // Keep exact percentage boundaries while allowing both instructions and schemas.
+    let window = (request.tool_tokens + 400).div_ceil(100) * 200;
     let compaction_settings = settings(window, 1, 1);
-    let system = assembled_system_message(compaction_settings.clone()).await;
+    let system = request.system.clone();
     let old_request = "below-request-".repeat(4);
     let mut old_reply = String::new();
     let resume = "below-resume";
@@ -295,11 +285,11 @@ async fn below_threshold_never_fires() {
             text_message(MessageRole::User, resume),
         ]
     };
-    while estimated_tokens(&raw_resumed(&old_reply)) < window * 74 / 100 {
+    while request.estimate(&raw_resumed(&old_reply)) < window * 74 / 100 {
         old_reply.push('x');
     }
     let raw_resumed = raw_resumed(&old_reply);
-    let raw_tokens = estimated_tokens(&raw_resumed);
+    let raw_tokens = request.estimate(&raw_resumed);
     assert_eq!(raw_tokens * 100, window * 74);
     let model = Arc::new(ScriptedModel::new([
         Ok(text_response(&old_reply, FinishReason::Stop)),
@@ -388,7 +378,9 @@ async fn manual_compact_on_waiting_run_runs_at_resume_boundary() {
 
 #[tokio::test]
 async fn still_above_threshold_reports_once_and_never_loops() {
-    // Given: a tiny window and an interactive mid-session User boundary whose first
+    let request =
+        compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
+    // Given: a window including tool schemas and a mid-session User boundary whose first
     // checkpoint and retained tail remain above the threshold, below the hard window.
     let huge_prompt = "huge-prompt-".repeat(40);
     let huge_turn = "huge-turn-".repeat(40);
@@ -399,7 +391,7 @@ async fn still_above_threshold_reports_once_and_never_loops() {
         Ok(text_response("turn-four", FinishReason::ToolUse)),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
-    let mut config = settings(1_000, 1, 10);
+    let mut config = settings(request.tool_tokens + 1_000, 1, 10);
     config.threshold = 0.2;
     let (runtime, bus) = runtime_with(Arc::clone(&model), config);
     let mut receiver = bus.subscribe();
@@ -430,6 +422,7 @@ async fn still_above_threshold_reports_once_and_never_loops() {
         ..
     } = &events[0];
     assert!(*estimated_tokens_after as f64 / *context_window_tokens as f64 >= *threshold);
+    assert!(*estimated_tokens_after < *context_window_tokens);
     let observed = model.observed().await;
     assert_eq!(observed.len(), 5);
     let ids: BTreeSet<&str> = observed

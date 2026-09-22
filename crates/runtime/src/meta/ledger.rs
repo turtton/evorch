@@ -8,7 +8,7 @@ use crate::agent_loop::LoopState;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AppendArgs {
+pub(super) struct AppendArgs {
     body: String,
 }
 

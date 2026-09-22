@@ -11,13 +11,13 @@ use crate::AgentRuntime;
 use crate::agent_loop::LoopState;
 
 #[derive(Deserialize)]
-struct SendMessageArgs {
+pub(super) struct SendMessageArgs {
     run_id: String,
     message: String,
 }
 
 #[derive(Deserialize)]
-struct SendArgs {
+pub(super) struct SendArgs {
     run_id: String,
     message: String,
     #[serde(default)]
@@ -27,7 +27,7 @@ struct SendArgs {
 }
 
 #[derive(Deserialize)]
-struct WaitReplyArgs {
+pub(super) struct WaitReplyArgs {
     message_id: String,
     timeout_ms: u64,
 }

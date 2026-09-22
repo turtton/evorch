@@ -14,11 +14,11 @@ pub mod usage;
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
     AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
-    CompactionReason, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
+    CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    RoutingSource, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent, UsageEvent,
-    WindowSource,
+    RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent,
+    UsageEvent, UserQuestion, WindowSource,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,
