@@ -4,6 +4,8 @@ use egui_kittest::{Harness, kittest::Queryable};
 use super::render_markdown;
 use crate::theme::tokens::palette;
 
+mod nested;
+
 fn assert_narrow_content(source: String, prose: bool) {
     // Given: a narrow message area inside a wider viewport, as in a dock pane.
     let mut harness = Harness::builder()
