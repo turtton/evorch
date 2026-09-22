@@ -47,6 +47,22 @@ impl ProviderTypeConfig {
             Self::KimiSubscription => "kimi-subscription",
         }
     }
+
+    /// Returns models.dev provider slugs to try in order during metadata resolution.
+    /// An empty list means no known mapping; callers fall back to profile-name guessing,
+    /// uniqueness, or limit-agreement resolution.
+    pub const fn models_dev_provider_candidates(self) -> &'static [&'static str] {
+        match self {
+            Self::KimiSubscription => &["kimi-code-plan-global", "kimi-code-plan-cn"],
+            Self::Anthropic
+            | Self::AnthropicSubscription
+            | Self::OpenAi
+            | Self::OpenAiCodex
+            | Self::GithubCopilot
+            | Self::Openrouter
+            | Self::OpenAiCompatible => &[],
+        }
+    }
 }
 
 /// モデルとの通信に用いる API プロトコル (設定ファイル上の表現)。
@@ -571,6 +587,38 @@ fn add_sugar_properties(schema: &mut schemars::Schema) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Given: Kimi サブスクリプションのプロバイダ種別 / When: models.dev 候補を取得する
+    // Then: global を先に、cn を次に返す
+    #[test]
+    fn kimi_subscription_maps_to_models_dev_provider_candidates() {
+        let candidates = ProviderTypeConfig::KimiSubscription.models_dev_provider_candidates();
+
+        assert_eq!(candidates, ["kimi-code-plan-global", "kimi-code-plan-cn"]);
+    }
+
+    // Given: Kimi 以外の全プロバイダ種別 / When: models.dev 候補を取得する
+    // Then: 既知の候補がなく空スライスを返す
+    #[test]
+    fn other_provider_types_have_no_models_dev_candidates() {
+        let provider_types = [
+            ProviderTypeConfig::Anthropic,
+            ProviderTypeConfig::AnthropicSubscription,
+            ProviderTypeConfig::OpenAi,
+            ProviderTypeConfig::OpenAiCodex,
+            ProviderTypeConfig::GithubCopilot,
+            ProviderTypeConfig::Openrouter,
+            ProviderTypeConfig::OpenAiCompatible,
+        ];
+
+        for provider_type in provider_types {
+            assert_eq!(
+                provider_type.models_dev_provider_candidates(),
+                &[] as &[&str],
+                "unexpected models.dev candidate for {provider_type:?}"
+            );
+        }
+    }
 
     #[test]
     fn models_legacy_string_list_parses_as_enabled_entries() {
