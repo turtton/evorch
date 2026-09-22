@@ -651,14 +651,13 @@ fn v02_end_to_end_chained_scenario() {
         leaf_sets,
         vec![
             BTreeSet::from(["sidebar-main".to_string()]),
-            BTreeSet::from(["agent-main".to_string()]),
+            BTreeSet::from(["agent-main".to_string(), "agent-run-1".to_string()]),
             BTreeSet::from(["terminal-main".to_string()]),
             BTreeSet::from([
                 "agents-main".to_string(),
                 "notifications-main".to_string(),
                 "approvals-main".to_string(),
                 "durable-tasks-main".to_string(),
-                "agent-run-1".to_string(),
             ]),
             BTreeSet::from(["diff-main".to_string()]),
             BTreeSet::from(["agent-run-2".to_string()]),

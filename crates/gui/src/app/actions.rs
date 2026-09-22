@@ -199,8 +199,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         );
         let target = self
             .dock
-            .find_tab(&PanelId::new("agents-main"))
-            .or_else(|| self.dock.find_tab(&PanelId::new("agent-main")))
+            .find_tab(&PanelId::new("agent-main"))
+            .or_else(|| self.dock.find_tab(&PanelId::new("agents-main")))
             .or_else(|| self.dock.find_tab(&PanelId::new("notifications-main")))
             .or_else(|| self.dock.iter_all_tabs().next().map(|(path, _)| path));
         if let Some(path) = target

@@ -107,13 +107,8 @@ fn notification_click_opens_run_transcript() {
 
 #[test]
 fn manually_opened_transcripts_stay_adjacent_to_conversation() {
-    // Given: the conversation is the only preferred target leaf.
+    // Given: the untouched default layout with separate conversation and agents leaves.
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
-    let agents = state
-        .dock()
-        .find_tab(&PanelId::new("agents-main"))
-        .expect("agents tab");
-    state.dock_mut().remove_tab(agents);
 
     // When: two transcript tabs are opened in sequence.
     state.open_agent_pane("run-1");
