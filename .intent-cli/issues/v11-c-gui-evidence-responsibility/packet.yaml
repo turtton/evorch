@@ -1,0 +1,54 @@
+implementation_issue_packet:
+  issue_title: "v11-c: GUI エビデンス収集の責務整理（headless_capture matrix script と #[ignore] 証跡テストの分界固定）"
+  issue_kind: tech-debt
+  source_execution_unit: v11-c-gui-evidence-responsibility
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/gui/ scripts/ .github/workflows/"
+  target_part: "GUI エビデンス生成系の整理: (a) scripts/gui-evidence-matrix.sh が担う theme × size 網羅証跡と crates/gui/tests/ の #[ignore] 証跡テストが担う個別・操作系証跡の責務分界を固定 (b) 証跡シナリオの定義源（headless_capture の CLI flag 系・script 内 state 名・個別テスト本体に分散する現状）の単一 source 化を実施または見送り根拠を記録 (c) #[ignore] 側証跡の保存先規約違反（matrix 直下への混入）を検出するチェック追加"
+  dependencies: []
+  technical_baseline:
+    - "scripts/gui-evidence-matrix.sh: 2 theme（graphite / tokyo-night）× 6 state（empty / demo / error-thread / edit-profile / theme-settings / pending-approvals）× 4 size = 24 枚 + 2 state × 2 DPI（1.5 / 2.0）= 4 枚、計 28 PNG / theme を cargo run -p gui --bin headless_capture で生成し枚数のみ assert。末尾コメントに「Ignored tests store their own evidence in subdirectories, outside this matrix」という規約があるが強制力はない"
+    - ".github/workflows/ci.yml: offscreen-gate job が cargo test -p gui --tests -- --ignored --nocapture を実行後に scripts/gui-evidence-matrix.sh を実行し、gui-evidence artifact を upload（両系統が同一 job で連続実行される）"
+    - "crates/gui/tests/ の #[ignore] 証跡テスト群: provider_settings/capture.rs, provider_settings/tabs.rs, model_metadata_capture.rs, pending_approvals_capture.rs, role_settings_headless/evidence.rs, role_settings_headless/legacy.rs, sandbox_composer_headless.rs, offscreen.rs, codex_quota_display.rs 等が独自に PNG を生成"
+    - "crates/gui/src/bin/headless_capture.rs: 証跡シナリオは CLI flag（--demo / --error-thread / --pending-approvals / --provider-configured / --open-settings / --open-theme-settings / --edit-profile / --activate / --pointer / --size / --dpi）にハードコードされ、matrix script 側の state 名と flag の対応は script 内 case 文にのみ存在"
+    - "問題: 証跡状態の定義が script / headless_capture flag / 個別 #[ignore] テストの3方向に分散しており、重複・抜け・陳腐化を検出する仕組みがない。matrix 側は枚数 assert のみで個々の PNG の内容正当性は未検証"
+  intent_references:
+    - intents/evorch/features/gui-workbench/overview.md
+  acceptance_criteria:
+    - "matrix script が担う証跡（theme × size の網羅的状態行列）と #[ignore] テストが担う証跡（個別 pane / 操作系 / GPU 依存）の責務分界が確定し、gui-workbench overview に反映される"
+    - "証跡シナリオの単一 source 化（例: crates/gui 内の共有定義を headless_capture と script / テストの双方が参照）を実施するか、見送る場合はその根拠（DI コスト・保守性等）を PR body に記録する"
+    - "#[ignore] 側の証跡が matrix 出力直下（target/gui-evidence/<theme>/ の直下）に混入した場合に検出できるチェック（script assert 強化またはテスト）が追加される"
+    - "offscreen-gate job の実行順序（ignored テスト → matrix script）と成果物パスの整合が維持される（変更する場合は ci.yml に反映）"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する（shell script 変更時は bash -n または相当の構文確認を含む）"
+  intent_placement:
+    primary_intent: intents/evorch/features/gui-workbench/overview.md
+    supporting_intents: []
+    new_intent_needed: false
+    placement_rationale: "GUI エビデンス収集は gui-workbench の開発・review 工程基盤であり、既存 overview の evidence 運用記述（mock-openai 支援 endpoint 等の記録箇所）への追記で足りる。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/gui-workbench/overview.md
+      summary: "確定した責務分界（matrix script / ignored テスト / headless_capture flag 系の役割）と証跡保存先規約の強制方法を反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "証跡シナリオ単一 source 化の可否判断の根拠、matrix と ignored テストの重複領域の棚卸し結果、陳腐化検出の運用方法を gui-workbench overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/gui-workbench/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

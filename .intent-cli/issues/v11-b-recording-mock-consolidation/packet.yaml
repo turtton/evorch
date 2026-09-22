@@ -1,0 +1,52 @@
+implementation_issue_packet:
+  issue_title: "v11-b: runtime の独自 RecordingMockOpenAi を crates/mock-openai へ統合（テスト fixture 重複解消）"
+  issue_kind: tech-debt
+  source_execution_unit: v11-b-recording-mock-consolidation
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/runtime/tests/ crates/mock-openai/"
+  target_part: "crates/runtime/tests/support/mock_openai.rs の独自 HTTP fixture RecordingMockOpenAi を廃止し、唯一の利用箇所である provider_correlation.rs を crates/mock-openai の StreamingMockOpenAi + recorded_requests() へ移行する。移行に crate 側の不足 API（例: raw body script）が必要かを判断し、必要な場合のみ crates/mock-openai へ additive に追加する"
+  dependencies: []
+  technical_baseline:
+    - "crates/runtime/tests/support/mock_openai.rs: 独自 HTTP fixture（約100行）。RecordedRequest は authorization / body のみで method / path / stream / path 記録を持たない subset 実装。script は生 JSON 文字列の Vec<String> で SSE 非対応。script 枯渇時は pop_front 後に continue して無応答のまま接続を放置しクライアントをハングさせうる。Drop / shutdown 機構がなく accept thread がプロセス終了まで残留する"
+    - "利用箇所は crates/runtime/tests/provider_correlation.rs（RecordingMockOpenAi::spawn(vec![tool_response, stop_response]) で run_id 相関を request body / authorization 観測から検証）と crates/runtime/tests/support/mod.rs:3 の pub mod mock_openai; 宣言のみ"
+    - "crate 側 crates/mock-openai の StreamingMockOpenAi は機能的 superset: RecordedRequest { method, path, authorization, body, stream }、recorded_requests() の owned snapshot、1 request / 1 connection、Drop で listener を shutdown、/v1/models 対応"
+    - "相違点は応答 body の自由度のみ: 独自版は生 JSON 文字列をそのまま返せる一方、crate 版は ScriptedResponse が生成する SSE / JSON に限定される。移行方式（ScriptedResponse へ書き換えるか、crate に raw body script API を additive 追加するか）は実装時に判断し PR body に記録する"
+    - "関連 slice v11-a-mock-openai-error-scripting が error scripting / matched dispatch を crate 側へ追加する場合がある。独立に実施可能だが raw body 要否判断の材料になるため後続が望ましい"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+  acceptance_criteria:
+    - "crates/runtime/tests/support/mock_openai.rs が削除され、support/mod.rs から pub mod mock_openai; 宣言が除去される"
+    - "provider_correlation.rs が crates/mock-openai の StreamingMockOpenAi（および recorded_requests() / remaining_scripts()）のみで従来と同等の assertion（provider attempt の request body における run_id 相関、authorization 記録等）を維持する"
+    - "crate 側への追加 API が必要と判断した場合は crates/mock-openai/tests/ に対応テストを追加し、不要と判断した場合はその根拠を PR body に記録する"
+    - "cargo test -p runtime および workspace 全体の mock 利用テストが pass する"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents: []
+    new_intent_needed: false
+    placement_rationale: "テスト fixture の単一化は agent-runtime-kernel の provider 接続契約検証基盤の保守性に関する話題であり、既存 overview への反映で足りる。新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: false
+      target_paths: []
+      summary: ""
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "fixture 統合で判明した crate 側 API の不足有無、生 JSON script の需要度、test fixture を tests/support に局所実装するか crate 化するかの基準を closeout メモとして残す"
+    write_back_required: false
+    write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []

@@ -1,0 +1,58 @@
+implementation_issue_packet:
+  issue_title: "v11-a: mock-openai の error response scripting + request 条件付き dispatch（テスト fixture 拡張）"
+  issue_kind: feature
+  source_execution_unit: v11-a-mock-openai-error-scripting
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/mock-openai/"
+  target_part: "OpenAI 互換テスト fixture（crates/mock-openai）の拡張: (a) ScriptedResponse に任意 HTTP status と error body を script できる error 応答 API を additive に追加（現状は 200 OK の成功 JSON/SSE と script 枯渇時の固定 500 のみ表現可能） (b) script dispatch を純粋 FIFO から opt-in で request 内容（method / path / body の model 等）に基づき選択する matched dispatch を追加し、並行実行・複数モデル script の取り違えを防ぐ"
+  dependencies: []
+  technical_baseline:
+    - "crates/mock-openai/src/scenario.rs: ScriptedResponse は text_stream / tool_call の2コンストラクタのみ（内部は closed な enum ResponseKind { Text, ToolCall }）。finish_reason は stop / tool_calls 固定、usage は with_usage の手動値（既定 0）。HTTP status / error body / 任意 JSON body を表現する経路が存在しない"
+    - "crates/mock-openai/src/server.rs: dispatch は GET /v1/models のみ専用処理し、それ以外は method / path 不問で Mutex 内 VecDeque から pop_front する純粋 FIFO。枯渇時は固定 500 {\"error\":{\"message\":\"unscripted request\",\"type\":\"mock_openai\"}}。成功応答は write_sse / write_json のいずれも 200 OK 固定で、script 側から status を制御不能"
+    - "crates/mock-openai/src/server.rs: WriteMode は FramePerWrite(default) / WholeBody / GatedAfterFirst（最初の SSE frame 送信後に外部 release を最大 5 秒待機）。SSE 途中での error / 切断注入機構はない"
+    - "RecordedRequest { method, path, authorization, body, stream } と recorded_requests() の owned snapshot は実装済みであり、matched dispatch の判定材料は揃っている"
+    - "利用側は runtime（streaming_mock_e2e / provider_composition_e2e / team_e2e / catalog_unknown_tools / streaming_switchable_model / provider_verify）、gui（provider_settings/fetch, tabs / runtime_wiring/live）、arena（runner / variants）、evorch（headless_e2e）が mock-openai に統一。一方エラー系 contract は providers/tests/*.rs（openai_contract / anthropic_contract / openai_compatible_contract / codex_* / observation_contract / streaming_retry）が wiremock で担当中"
+    - "別系統の独自複製として crates/runtime/tests/support/mock_openai.rs の RecordingMockOpenAi が存在する（本 packet の対象外。v11-b-recording-mock-consolidation で統合する）"
+  intent_references:
+    - intents/evorch/features/agent-runtime-kernel/overview.md
+    - intents/evorch/features/provider-routing/overview.md
+  acceptance_criteria:
+    - "ScriptedResponse から任意の HTTP status（少なくとも 401 / 429 / 500 を構成可能）と OpenAI 形式 error body（error.message / error.type 構造）を返す script を additive API で構成できる。既存の text_stream / tool_call / spawn / spawn_with / spawn_with_models と WriteMode の挙動は不変"
+    - "streaming request（body.stream == true）に対しても error script が SSE ではなく error JSON + 指定 status で応答できる"
+    - "opt-in の matched dispatch があり、どの script も predicate に一致しない request は既存の FIFO / unscripted-500 挙動へ明確に fallback する。API 形態は実装時に最小限で決定し、決定内容を PR body に記録する"
+    - "crates/mock-openai/tests/ に error scripting と matched dispatch の双方を検証するテストが追加される（実 client である OpenAiCompatibleClient 経由の経路を含む）"
+    - "既存の mock-openai 利用テスト（runtime / gui / arena / evorch）が無変更で pass する（後方互換）"
+    - "cargo test / cargo clippy --workspace --all-targets -- -D warnings / cargo fmt --check / git diff --check が pass する"
+  intent_placement:
+    primary_intent: intents/evorch/features/agent-runtime-kernel/overview.md
+    supporting_intents:
+      - intents/evorch/features/provider-routing/overview.md
+    new_intent_needed: false
+    placement_rationale: "mock-openai は agent-runtime-kernel の provider 接続契約を検証する fixture として overview に記載済み。既存 fixture の additive 拡張であり新規 intent は不要"
+  knowledge_updates:
+    intent_tree:
+      required: true
+      target_paths:
+        - intents/evorch/features/agent-runtime-kernel/overview.md
+      summary: "mock-openai の確定拡張 API（error scripting / matched dispatch の仕様と dispatch fallback 規則）を実装確定として反映する"
+    adr:
+      required: false
+      target_paths: []
+      decision_title: ""
+    diagram:
+      required: false
+      target_paths: []
+      diagram_type: none
+    docs:
+      required: false
+      target_paths: []
+      summary: ""
+  closeout_learning:
+    expected: "error scripting / matched dispatch の確定 API 形態、wiremock との役割分担（provider contract 系は wiremock、E2E 系は mock-openai）の再確認結果を agent-runtime-kernel overview に記録する"
+    write_back_required: true
+    write_back_targets:
+      - intents/evorch/features/agent-runtime-kernel/overview.md
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
