@@ -14,12 +14,24 @@ impl MetadataSources<'_> {
         &self,
         entry: &ModelEntryConfig,
         provider: &str,
+        provider_type: Option<config::ProviderTypeConfig>,
     ) -> runtime::model_resolve::ResolvedModelMetadata {
-        resolve_model_metadata(entry, self.presets, self.catalog, Some(provider))
+        resolve_model_metadata(
+            entry,
+            self.presets,
+            self.catalog,
+            Some(provider),
+            provider_type,
+        )
     }
 
-    pub fn labels(&self, entry: &ModelEntryConfig, provider: &str) -> [String; 4] {
-        let resolved = self.resolve(entry, provider);
+    pub fn labels(
+        &self,
+        entry: &ModelEntryConfig,
+        provider: &str,
+        provider_type: Option<config::ProviderTypeConfig>,
+    ) -> [String; 4] {
+        let resolved = self.resolve(entry, provider, provider_type);
         let preset = entry
             .preset
             .as_ref()
@@ -31,9 +43,9 @@ impl MetadataSources<'_> {
             MetadataOrigin::Catalog => "models.dev",
             MetadataOrigin::Default => "default",
         };
-        let model = self
-            .catalog
-            .and_then(|catalog| resolve_catalog_entry(entry, catalog, Some(provider)));
+        let model = self.catalog.and_then(|catalog| {
+            resolve_catalog_entry(entry, catalog, Some(provider), provider_type)
+        });
         let context_hint = match resolved.origin {
             MetadataOrigin::Default => " - set preset or metadata_ref",
             MetadataOrigin::Manual | MetadataOrigin::Preset | MetadataOrigin::Catalog => "",

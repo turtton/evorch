@@ -193,6 +193,14 @@ impl ProviderSettingsModel {
             .find(|entry| entry.id == model)
     }
 
+    pub fn provider_type(&self, profile: Option<&str>) -> Option<config::ProviderTypeConfig> {
+        let name = profile?;
+        self.profiles
+            .iter()
+            .find(|profile| profile.name == name)
+            .map(|profile| profile.provider_type)
+    }
+
     pub fn openai_mut(&mut self) -> Option<&mut OpenAiEditorModel> {
         match &mut self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => Some(editor),

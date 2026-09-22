@@ -4,6 +4,9 @@ use gui::model::{provider_settings::ProviderSettingsModel, telemetry::TelemetryO
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+#[path = "context_pressure/provider_types.rs"]
+mod provider_types;
+
 fn settings(window: Option<u64>) -> ProviderSettingsModel {
     let mut config = Config::default();
     let mut entry = ModelEntryConfig::enabled("model");

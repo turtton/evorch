@@ -112,6 +112,7 @@ impl TelemetryOverlay {
             .iter()
             .try_fold(0.0, |total, (key, usage)| {
                 let fallback = ModelEntryConfig::enabled(&key.model);
+                let provider_type = settings.provider_type(key.profile.as_deref());
                 let entry = settings
                     .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
                     .unwrap_or(&fallback);
@@ -123,7 +124,8 @@ impl TelemetryOverlay {
                         runtime::model_resolve::resolve_catalog_entry(
                             entry,
                             catalog,
-                            Some(&key.provider),
+                            Some(key.profile.as_deref().unwrap_or(&key.provider)),
+                            provider_type,
                         )
                     })
                     .map(|model| ModelPricing {

@@ -6,6 +6,9 @@ use gui::model::model_catalog::{CatalogBackend, CatalogRequest, CatalogState};
 use gui::model::model_metadata::MetadataSources;
 use gui::model::provider_settings::OpenAiEditorModel;
 
+#[path = "model_metadata/provider_types.rs"]
+mod provider_types;
+
 fn entry() -> ModelEntryConfig {
     ModelEntryConfig {
         id: "test-model".into(),
@@ -57,7 +60,7 @@ fn model_row_shows_resolved_context_window_from_preset() {
         presets: &presets,
         catalog: None,
     };
-    let labels = sources.labels(&entry, "test-provider");
+    let labels = sources.labels(&entry, "test-provider", None);
     assert_eq!(labels[0], "128000 ctx (Preset: large)");
     assert_eq!(labels[1], "8000 max output (Preset: large)");
     assert_eq!(labels[2], "$2.5/M input (Preset: large)");
@@ -72,11 +75,11 @@ fn model_row_shows_catalog_origin() {
         catalog: Some(&catalog),
     };
     assert_eq!(
-        sources.labels(&entry(), "test-provider")[0],
+        sources.labels(&entry(), "test-provider", None)[0],
         "64000 ctx (models.dev)"
     );
     assert_eq!(
-        sources.labels(&entry(), "wrong-provider")[0],
+        sources.labels(&entry(), "wrong-provider", None)[0],
         "64000 ctx (models.dev)"
     );
 }
@@ -95,7 +98,7 @@ fn model_row_auto_catalog_and_unknown_guidance() {
     // When: rendering metadata through the existing GUI surface.
     let mut harness = Harness::new_ui_state(
         |ui, entry| {
-            for label in sources.labels(entry, "Crof") {
+            for label in sources.labels(entry, "Crof", None) {
                 ui.label(label);
             }
         },
@@ -123,11 +126,11 @@ fn model_row_manual_override_shown() {
     entry.preset = Some("large".into());
     entry.context_window = Some(256_000);
     assert_eq!(
-        sources.labels(&entry, "test-provider")[0],
+        sources.labels(&entry, "test-provider", None)[0],
         "256000 ctx (manual override)"
     );
     assert_eq!(
-        sources.labels(&entry, "test-provider")[3],
+        sources.labels(&entry, "test-provider", None)[3],
         "$3/M output (models.dev)"
     );
 }
@@ -209,7 +212,7 @@ fn metadata_controls_edit_and_clear_override() {
                 catalog: None,
             };
             gui::panes::model_metadata::model_metadata(ui, entry, &sources);
-            for label in sources.labels(entry, "test-provider") {
+            for label in sources.labels(entry, "test-provider", None) {
                 ui.label(label);
             }
         },

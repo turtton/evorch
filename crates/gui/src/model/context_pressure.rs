@@ -42,7 +42,14 @@ impl TelemetryOverlay {
                 let entry = settings
                     .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
                     .unwrap_or(&fallback);
-                sources.resolve(entry, &key.provider).context_window
+                let provider_type = settings.provider_type(key.profile.as_deref());
+                sources
+                    .resolve(
+                        entry,
+                        key.profile.as_deref().unwrap_or(&key.provider),
+                        provider_type,
+                    )
+                    .context_window
             });
         }
     }

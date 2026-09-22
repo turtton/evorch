@@ -110,7 +110,11 @@ pub fn provider_models(
                     super::model_metadata::model_metadata(ui, &mut editor.models[index], sources);
                 });
                 ui.horizontal_wrapped(|ui| {
-                    for label in sources.labels(&editor.models[index], &editor.name) {
+                    for label in sources.labels(
+                        &editor.models[index],
+                        &editor.name,
+                        Some(editor.provider_type),
+                    ) {
                         ui.label(muted(label));
                     }
                 });
