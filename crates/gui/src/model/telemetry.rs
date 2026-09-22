@@ -38,6 +38,7 @@ pub struct TelemetryRow {
     pub current_tool: Option<String>,
     pub usage: TokenUsage,
     latest_context: Option<context_pressure::RequestContext>,
+    in_flight: bool,
     context_order: u64,
     context_window: Option<u64>,
     pub requests: u32,
@@ -113,8 +114,7 @@ impl TelemetryOverlay {
                 self.context_order = self.context_order.saturating_add(1);
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.context_order = self.context_order;
-                row.latest_context = None;
-                row.context_window = None;
+                row.in_flight = true;
                 row.provider = Some(provider.clone());
                 row.model = Some(model.clone());
                 row.requests = row.requests.saturating_add(1);
@@ -204,6 +204,7 @@ impl TelemetryOverlay {
                     },
                 });
                 row.context_window = None;
+                row.in_flight = false;
                 row.last_finish_reason = Some(finish_reason.clone());
                 row.output_tokens = *output_tokens;
                 row.request_duration = Some(Duration::from_millis(*duration_ms));
@@ -216,6 +217,7 @@ impl TelemetryOverlay {
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.request_duration = Some(Duration::from_millis(*duration_ms));
                 row.request_started_at = None;
+                row.in_flight = false;
                 row.output_tokens = 0;
             }
             EventKind::Tool(ToolEvent::ToolStarted {

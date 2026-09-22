@@ -1,4 +1,4 @@
-use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
+use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
 use std::time::{Duration, Instant};
 
 impl TelemetryOverlay {
@@ -9,20 +9,11 @@ impl TelemetryOverlay {
     pub fn thread_metrics_at(&self, run_ids: &[String], now: Instant) -> ThreadMetrics {
         let mut cost_total = 0.0;
         let mut has_cost = false;
-        let mut usage = TokenUsage::default();
         let mut wall_time = Duration::ZERO;
         for run_id in run_ids {
             if let Some(cost) = self.costs.get(run_id) {
                 cost_total += cost;
                 has_cost = true;
-            }
-            if let Some(billed) = self.billed.get(run_id) {
-                for entry in billed.values() {
-                    usage.input = usage.input.saturating_add(entry.input);
-                    usage.output = usage.output.saturating_add(entry.output);
-                    usage.cache_read = usage.cache_read.saturating_add(entry.cache_read);
-                    usage.cache_write = usage.cache_write.saturating_add(entry.cache_write);
-                }
             }
             if let Some(accumulated) = self.accumulated_running.get(run_id) {
                 wall_time += *accumulated;
@@ -37,7 +28,9 @@ impl TelemetryOverlay {
             .max_by_key(|row| row.context_order);
         ThreadMetrics {
             cost: has_cost.then_some(cost_total),
-            cache_hit_rate: (usage.input > 0).then(|| usage.cache_hit_rate()),
+            cache_hit_rate: latest
+                .and_then(|row| row.latest_context.as_ref())
+                .map(|request| request.usage.cache_hit_rate()),
             wall_time,
             context_pressure: latest.and_then(TelemetryRow::context_pressure),
             ttft: latest

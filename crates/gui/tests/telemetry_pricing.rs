@@ -179,7 +179,8 @@ fn telemetry_cost_renders_in_agents_pane() {
         gui::panes::agents::agents_pane(ui, &tasks, &overlay);
     });
     harness.run();
-    for label in ["$0.042", "193.7K tok", "3080.0 tok/s", "cache 79.7%"] {
+    // cache rate: 78300 / (98300 + 1700 cache_write) = 78.3% under the pi-style denominator.
+    for label in ["$0.042", "193.7K tok", "3080.0 tok/s", "cache 78.3%"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }

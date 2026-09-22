@@ -226,3 +226,110 @@ fn completed_metrics_render_as_headless_labels() {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }
+
+fn context_settings() -> gui::model::provider_settings::ProviderSettingsModel {
+    let mut config = config::Config::default();
+    let mut entry = config::ModelEntryConfig::enabled("model");
+    entry.context_window = Some(1000);
+    config.providers.insert(
+        "fixture".into(),
+        config::ProviderProfileConfig {
+            models: vec![entry],
+            ..Default::default()
+        },
+    );
+    gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&config)
+}
+
+fn context_completed() -> Event {
+    let mut event = completed(10, 50);
+    if let EventKind::Provider(ProviderEvent::RequestCompleted {
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        ..
+    }) = &mut event.kind
+    {
+        *input_tokens = 800;
+        *cache_read_tokens = 100;
+        *cache_write_tokens = 50;
+    }
+    event
+}
+
+#[test]
+fn context_pressure_keeps_baseline_when_next_request_starts() {
+    // Given: a completed request with a known context window.
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.apply_event(&context_completed());
+    telemetry.refresh_costs(&context_settings());
+    // When: the next request starts, before another settings refresh.
+    telemetry.apply_event(&started());
+    // Then: both row and header retain the input baseline.
+    assert_eq!(telemetry.row("run-1").unwrap().context_pressure(), Some(95));
+    assert_eq!(
+        telemetry.thread_metrics(&["run-1".into()]).context_pressure,
+        Some(95)
+    );
+}
+
+#[test]
+fn context_pressure_increases_with_streamed_deltas() {
+    // Given: an in-flight request after a completed baseline.
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.apply_event(&context_completed());
+    telemetry.apply_event(&started());
+    telemetry.refresh_costs(&context_settings());
+    let baseline = telemetry.thread_metrics(&["run-1".into()]).context_pressure;
+    // When: text and reasoning each contribute twenty estimated output tokens.
+    for delta in [
+        MessageEvent::MessageDelta {
+            delta: "a".repeat(80),
+            run_id: Some("run-1".into()),
+        },
+        MessageEvent::ReasoningDelta {
+            delta: "b".repeat(80),
+            run_id: Some("run-1".into()),
+        },
+    ] {
+        telemetry.apply_event(&Event::new(delta));
+    }
+    // Then: the live header grows by four percentage points.
+    let pressure = telemetry.thread_metrics(&["run-1".into()]).context_pressure;
+    assert_eq!(pressure, Some(99));
+    assert!(pressure > baseline);
+}
+
+#[test]
+fn context_pressure_replaces_estimate_with_completed_usage() {
+    // Given: forty estimated output tokens on the next request.
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.apply_event(&context_completed());
+    telemetry.apply_event(&started());
+    telemetry.apply_event(&Event::new(MessageEvent::MessageDelta {
+        delta: "a".repeat(160),
+        run_id: Some("run-1".into()),
+    }));
+    // When: completion reports fifty actual output tokens.
+    telemetry.apply_event(&context_completed());
+    telemetry.refresh_costs(&context_settings());
+    // Then: exact usage replaces the estimate without residue.
+    assert_eq!(
+        telemetry.thread_metrics(&["run-1".into()]).context_pressure,
+        Some(100)
+    );
+}
+
+#[test]
+fn context_pressure_includes_completed_output() {
+    // Given: 800 input, 100 reads, 50 writes, and 50 output tokens.
+    let mut telemetry = TelemetryOverlay::new();
+    // When: completed usage is resolved against a 1000-token window.
+    telemetry.apply_event(&context_completed());
+    telemetry.refresh_costs(&context_settings());
+    // Then: completed output contributes to the next request's context.
+    assert_eq!(
+        telemetry.row("run-1").unwrap().context_pressure(),
+        Some(100)
+    );
+}

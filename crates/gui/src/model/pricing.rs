@@ -19,7 +19,7 @@ fn tokens(value: u64) -> f64 {
 
 impl TokenUsage {
     pub fn cache_hit_rate(&self) -> f64 {
-        let total = tokens(self.input);
+        let total = tokens(self.input) + tokens(self.cache_write);
         if total == 0.0 {
             0.0
         } else {

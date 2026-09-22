@@ -27,6 +27,21 @@ fn cache_hit_rate_when_input_includes_cached_tokens() {
 }
 
 #[test]
+fn cache_hit_rate_includes_cache_writes_in_denominator() {
+    // Given: canonical input already includes reads, but not writes.
+    let usage = TokenUsage {
+        input: 1000,
+        cache_read: 900,
+        cache_write: 50,
+        ..TokenUsage::default()
+    };
+    // When: computing the percentage.
+    let rate = usage.cache_hit_rate();
+    // Then: writes are included exactly once in the denominator.
+    assert!((rate - 900.0 / 1050.0 * 100.0).abs() < 0.001, "rate={rate}");
+}
+
+#[test]
 fn cache_hit_rate_when_counts_are_at_boundaries() {
     for (input, cache_read, expected) in [(100, 0, 0.0), (0, 10, 0.0), (10, 20, 100.0)] {
         // Given: no hits, no input, or inconsistent cached counts.
@@ -91,7 +106,7 @@ fn cost_hidden_when_pricing_unknown() {
     assert_eq!(row.usage.estimated_cost(None), None);
     assert_eq!(
         row.compact_line_at(Instant::now(), None),
-        "193.7K tok · cache 79.7%"
+        "193.7K tok · cache 78.3%"
     );
 }
 
@@ -129,6 +144,6 @@ fn compact_line_format() {
     // When / Then: stable compact presentation, with no estimated token speed marker.
     assert_eq!(
         row.compact_line_at(Instant::now(), Some(pricing)),
-        "$0.042 · 193.7K tok · 45.2 tok/s · cache 79.7%"
+        "$0.042 · 193.7K tok · 45.2 tok/s · cache 78.3%"
     );
 }

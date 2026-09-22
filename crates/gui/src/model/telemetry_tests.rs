@@ -225,13 +225,13 @@ fn wall_time_preserves_active_start_on_duplicate_running_events() {
 }
 
 #[test]
-fn thread_metrics_aggregates_cache_hit_rate_across_runs() {
+fn thread_metrics_uses_latest_cache_hit_rate_across_runs() {
     let mut overlay = TelemetryOverlay::new();
-    overlay.apply_event(&request_completed(Some("run-1"), 100, 10));
+    overlay.apply_event(&request_completed(Some("run-1"), 1000, 10));
     overlay.apply_event(&request_completed(Some("run-2"), 100, 10));
-    let metrics = overlay.thread_metrics(&["run-1".to_owned(), "run-2".to_owned()]);
+    let metrics = overlay.thread_metrics(&["run-2".to_owned(), "run-1".to_owned()]);
     let rate = metrics.cache_hit_rate.expect("cache hit rate");
-    assert_eq!(rate, 3.0);
+    assert_eq!(rate, 3.0 / 104.0 * 100.0);
     assert!(metrics.cost.is_none());
 }
 
@@ -243,12 +243,35 @@ fn thread_metrics_empty_for_unknown_runs() {
 }
 
 #[test]
-fn thread_metrics_hides_cache_rate_when_input_is_zero() {
-    // Given: cache counters without an input denominator.
+fn thread_metrics_uses_cache_writes_when_input_is_zero() {
+    // Given: completed usage with cache writes but zero input.
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&request_completed(Some("run-1"), 0, 10));
     // When: aggregating the thread's completed usage.
     let metrics = overlay.thread_metrics(&["run-1".to_owned()]);
-    // Then: an absent denominator is not displayed as a rate.
-    assert_eq!(metrics.cache_hit_rate, None);
+    // Then: writes supply the denominator for the observed usage.
+    assert_eq!(metrics.cache_hit_rate, Some(75.0));
+}
+
+#[test]
+fn thread_metrics_cache_rate_excludes_cold_start_in_same_run() {
+    // Given: cold then warm responses within one run.
+    let mut overlay = TelemetryOverlay::new();
+    for (input, reads, writes) in [(20_000, 0, 20_000), (20_500, 20_000, 0)] {
+        let mut event = request_completed(Some("run-1"), input, 10);
+        if let EventKind::Provider(ProviderEvent::RequestCompleted {
+            cache_read_tokens,
+            cache_write_tokens,
+            ..
+        }) = &mut event.kind
+        {
+            *cache_read_tokens = reads;
+            *cache_write_tokens = writes;
+        }
+        overlay.apply_event(&event);
+    }
+    // When: reading the header metric.
+    let rate = overlay.thread_metrics(&["run-1".into()]).cache_hit_rate;
+    // Then: only the warm response determines the rate.
+    assert_eq!(rate, Some(20_000.0 / 20_500.0 * 100.0));
 }

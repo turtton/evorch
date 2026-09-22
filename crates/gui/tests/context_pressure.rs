@@ -40,21 +40,21 @@ fn completed(input: u64) -> Event {
 }
 
 #[test]
-fn pressure_uses_latest_input_side_tokens_when_requests_accumulate() {
+fn pressure_uses_latest_request_tokens_when_requests_accumulate() {
     // Given: an earlier request whose usage must not enter the pressure numerator.
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed(800));
-    // When: the latest request occupies 100 + 200 + 100 of 1000 tokens.
+    // When: the latest request occupies 100 + 200 + 100 + 900 (output) of 1000 tokens.
     overlay.apply_event(&completed(100));
     overlay.refresh_costs(&settings(Some(1000)));
-    // Then: output tokens and previous requests are excluded.
+    // Then: previous requests are excluded; the latest request includes its output.
     assert_eq!(
         overlay
             .row("run-1")
             .unwrap()
             .context_pressure_label()
             .as_deref(),
-        Some("40%")
+        Some("130%")
     );
 }
 
@@ -72,12 +72,12 @@ fn pressure_is_omitted_when_window_is_unknown_or_zero() {
 }
 
 #[test]
-fn pressure_is_omitted_when_next_request_has_no_usage_yet() {
+fn pressure_keeps_last_known_baseline_while_next_request_is_in_flight() {
     // Given: pressure from a completed request.
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed(100));
     overlay.refresh_costs(&settings(Some(1000)));
-    // When: the next request switches models but has not reported usage.
+    // When: the next request starts but has not reported usage or streamed output yet.
     overlay.apply_event(&Event::new(ProviderEvent::RequestStarted {
         request_id: "next".into(),
         provider: "vendor".into(),
@@ -88,8 +88,15 @@ fn pressure_is_omitted_when_next_request_has_no_usage_yet() {
         run_id: Some("run-1".into()),
     }));
     overlay.refresh_costs(&settings(Some(1000)));
-    // Then: the old context is not attributed to the new model.
-    assert_eq!(overlay.row("run-1").unwrap().context_pressure_label(), None);
+    // Then: the last known input-side baseline stays visible as the live starting point.
+    assert_eq!(
+        overlay
+            .row("run-1")
+            .unwrap()
+            .context_pressure_label()
+            .as_deref(),
+        Some("40%")
+    );
 }
 
 #[test]
@@ -116,14 +123,14 @@ fn pressure_uses_preset_when_manual_window_is_absent() {
     overlay.apply_event(&completed(100));
     // When: resolving the request's profile alias through shared metadata.
     overlay.refresh_costs(&ProviderSettingsModel::seed_from_config(&config));
-    // Then: 400 / 2000 is 20%, not the manual-fixture's 40%.
+    // Then: 1300 / 2000 is 65%, not the manual-fixture's 130%.
     assert_eq!(
         overlay
             .row("run-1")
             .unwrap()
             .context_pressure_label()
             .as_deref(),
-        Some("20%")
+        Some("65%")
     );
 }
 
@@ -160,8 +167,9 @@ fn thread_pressure_uses_latest_request_instead_of_run_list_order() {
     overlay.refresh_costs(&settings(Some(1000)));
     // When: aggregating a thread with reverse run order.
     let metrics = overlay.thread_metrics(&["run-2".into(), "run-1".into()]);
-    // Then: pressure is neither summed nor selected by run-list order.
-    assert_eq!(metrics.context_pressure, Some(90));
+    // Then: pressure (600 + 200 + 100 + 900 output of 1000) is neither summed
+    // nor selected by run-list order.
+    assert_eq!(metrics.context_pressure, Some(180));
 }
 
 #[test]
@@ -219,7 +227,7 @@ fn agents_cell_shows_pressure_when_window_is_known() {
     // When: the real workbench renders its Agents pane.
     gui.run();
     // Then: cumulative in/out remains intact beside latest-request pressure.
-    assert!(gui.has_label("900 / 1800 (40%)"));
+    assert!(gui.has_label("900 / 1800 (130%)"));
     if let Some(path) = std::env::var_os("CONTEXT_AGENTS_CAPTURE") {
         let mut tasks = gui::model::tasks::TasksModel::new(DemoSource(vec![]));
         tasks.update(&[runtime::AgentSummary {
@@ -247,18 +255,18 @@ fn agents_cell_shows_pressure_when_window_is_known() {
 
 #[test]
 fn conversation_status_line_shows_context_when_window_is_known() {
-    // Given: a thread owns the run with 40% pressure.
+    // Given: a thread owns the run with 130% pressure (100 + 200 + 100 + 900 of 1000).
     let mut gui = workbench(Some(1000));
     // When: the conversation renders.
     gui.run();
     // Then: context lives in the status line below the composer, not the header.
-    let status = gui.label_rects("ctx 40%")[0];
+    let status = gui.label_rects("ctx 130%")[0];
     let composer = gui.label_rects("Message or /command")[0];
     assert!(
         status.min.y > composer.max.y,
         "status={status:?} composer={composer:?}"
     );
-    assert!(gui.label_rects("ctx 40%").len() == 1);
+    assert!(gui.label_rects("ctx 130%").len() == 1);
     if let Some(path) = std::env::var_os("CONTEXT_PRESSURE_CAPTURE") {
         gui.capture()
             .unwrap()
