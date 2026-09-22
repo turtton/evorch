@@ -206,8 +206,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(path) = target
             && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
         {
-            leaf.tabs.push(panel_id);
-            let _ = leaf.set_active_tab(leaf.tabs.len() - 1);
+            let index = leaf
+                .tabs
+                .iter()
+                .position(|id| id.as_str() == "agent-main")
+                .map_or(leaf.tabs.len(), |index| index + 1);
+            if leaf.active.0 >= index {
+                leaf.active.0 += 1;
+            }
+            leaf.tabs.insert(index, panel_id);
+            let _ = leaf.set_active_tab(index);
         }
     }
 

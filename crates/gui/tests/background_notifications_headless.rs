@@ -91,7 +91,11 @@ fn notification_click_opens_run_transcript() {
         .expect("parked transcript");
     let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
     assert_ne!(leaf.active, parked.tab);
-    assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
+    if let Some(conversation_index) = leaf.tabs.iter().position(|id| id.as_str() == "agent-main") {
+        assert_eq!(parked.tab.0, conversation_index + 1);
+    } else {
+        assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
+    }
     // When: the actual notification row is clicked.
     harness.get_by_label("Run run-X completed").click();
     harness.run_steps(3);
@@ -99,6 +103,37 @@ fn notification_click_opens_run_transcript() {
     let dock = harness.state().dock();
     let path = dock.find_tab(&panel).expect("run transcript opened");
     assert_eq!(dock.leaf(path.node_path()).unwrap().active, path.tab);
+}
+
+#[test]
+fn manually_opened_transcripts_stay_adjacent_to_conversation() {
+    // Given: the conversation is the only preferred target leaf.
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
+    let agents = state
+        .dock()
+        .find_tab(&PanelId::new("agents-main"))
+        .expect("agents tab");
+    state.dock_mut().remove_tab(agents);
+
+    // When: two transcript tabs are opened in sequence.
+    state.open_agent_pane("run-1");
+    state.open_agent_pane("run-2");
+
+    // Then: each new transcript is immediately right of the conversation, and the newest is active.
+    let conversation = state
+        .dock()
+        .find_tab(&PanelId::new("agent-main"))
+        .expect("conversation tab");
+    let leaf = state.dock().leaf(conversation.node_path()).unwrap();
+    assert_eq!(
+        leaf.tabs,
+        vec![
+            PanelId::new("agent-main"),
+            PanelId::new("agent-run-2"),
+            PanelId::new("agent-run-1"),
+        ]
+    );
+    assert_eq!(leaf.active, egui_dock::TabIndex(1));
 }
 
 #[test]
@@ -268,7 +303,15 @@ fn background_run_then_completion_notification_end_to_end() {
                 .expect("parked transcript");
             let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
             assert_ne!(leaf.active, parked.tab);
-            assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
+            if let Some(conversation_index) = leaf
+                .tabs
+                .iter()
+                .position(|panel| panel.as_str() == "agent-main")
+            {
+                assert_eq!(parked.tab.0, conversation_index + 1);
+            } else {
+                assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
+            }
             assert_eq!(
                 current
                     .iter()

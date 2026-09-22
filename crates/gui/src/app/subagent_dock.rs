@@ -128,7 +128,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
         {
             leaf.active = path.tab;
-            leaf.tabs.extend(parked.into_iter().map(|(_, id)| id));
+            let index = leaf
+                .tabs
+                .iter()
+                .position(|id| id.as_str() == "agent-main")
+                .map_or(leaf.tabs.len(), |index| index + 1);
+            if leaf.active.0 >= index {
+                leaf.active.0 += parked.len();
+            }
+            leaf.tabs
+                .splice(index..index, parked.into_iter().map(|(_, id)| id));
         }
         self.restore_subagent_focus(focus);
         self.equalize_subagent_panes();

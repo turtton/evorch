@@ -185,7 +185,11 @@ fn assert_parked(harness: &HeadlessWorkbench<AgentRuntime>, run: &str) {
         .find_tab(&PanelId::new(format!("agent-{run}")))
         .expect("parked pane exists");
     let leaf = harness.state().dock().leaf(path.node_path()).expect("leaf");
-    assert_eq!(path.tab.0, leaf.tabs.len() - 1);
+    if let Some(conversation_index) = leaf.tabs.iter().position(|id| id.as_str() == "agent-main") {
+        assert_eq!(path.tab.0, conversation_index + 1);
+    } else {
+        assert_eq!(path.tab.0, leaf.tabs.len() - 1);
+    }
     assert_ne!(path.tab, leaf.active);
 }
 
