@@ -1,10 +1,17 @@
 //! Terminal PTY session adapter (portable-pty).
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+pub fn resolve_terminal_cwd(primary: Option<&Path>, _process_cwd: &Path, home: &Path) -> PathBuf {
+    primary
+        .filter(|path| *path != Path::new("/"))
+        .map_or_else(|| home.to_path_buf(), Path::to_path_buf)
+}
 
 /// PTYセッションの操作で発生するエラーです。
 #[derive(Debug, thiserror::Error)]
@@ -136,13 +143,56 @@ impl Drop for PtySession {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use portable_pty::CommandBuilder;
 
-    use super::PtySession;
+    use super::{PtySession, resolve_terminal_cwd};
+
+    #[test]
+    fn terminal_cwd_uses_primary_or_home_and_never_root() {
+        // Given: a primary project, root process cwd, and home directory
+        let primary = Path::new("/projects/primary");
+        let home = Path::new("/home/tester");
+
+        // When: the terminal cwd is resolved
+        let primary_cwd = resolve_terminal_cwd(Some(primary), Path::new("/"), home);
+        let root_primary_cwd = resolve_terminal_cwd(Some(Path::new("/")), primary, home);
+        let fallback_cwd = resolve_terminal_cwd(None, Path::new("/"), home);
+        let non_root_fallback = resolve_terminal_cwd(None, Path::new("/workspace"), home);
+
+        // Then: primary wins, otherwise home is always used
+        assert_eq!(primary_cwd, primary);
+        assert_eq!(root_primary_cwd, home);
+        assert_eq!(fallback_cwd, home);
+        assert_eq!(non_root_fallback, home);
+    }
+
+    #[test]
+    fn pty_starts_in_command_builder_cwd() {
+        // Given: a shell whose builder explicitly requests a fresh directory
+        let directory = tempfile::tempdir().expect("temporary directory must be created");
+        let expected = directory.path().to_string_lossy().into_owned();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "pwd"]);
+        command.cwd(directory.path());
+        let session = PtySession::spawn(command, 24, 80, None).expect("shell must spawn");
+
+        // When: the reader receives the shell's output
+        let mut output = Vec::new();
+        while !output
+            .windows(expected.len())
+            .any(|window| window == expected.as_bytes())
+        {
+            output.extend(session.output_rx.recv().expect("shell must report output"));
+        }
+
+        // Then: pwd reports the requested directory
+        assert!(String::from_utf8_lossy(&output).contains(&expected));
+    }
 
     fn echo_session() -> PtySession {
         let mut command = CommandBuilder::new("/bin/sh");

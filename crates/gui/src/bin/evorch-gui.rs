@@ -14,7 +14,7 @@ use gui::model::codex_auth_backend::{
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
-use gui::pty::PtySession;
+use gui::pty::{PtySession, resolve_terminal_cwd};
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
@@ -834,7 +834,18 @@ fn run() -> Result<(), GuiError> {
     spawn_storage_bridge(Arc::clone(&bus), storage.handle(), STORAGE_SESSION_ID)?;
     restore_goals(&storage_config, &supervisor);
 
-    let pty = PtySession::spawn(CommandBuilder::new("/bin/sh"), 24, 80, None)?;
+    let home = std::env::home_dir()
+        .ok_or_else(|| GuiError::Arguments("No home directory for terminal cwd".into()))?;
+    let terminal_cwd = resolve_terminal_cwd(
+        sidebar
+            .resolved_primary_project()
+            .map(|project| project.repo_root.as_path()),
+        &repo_root,
+        &home,
+    );
+    let mut terminal_command = CommandBuilder::new("/bin/sh");
+    terminal_command.cwd(&terminal_cwd);
+    let pty = PtySession::spawn(terminal_command, 24, 80, None)?;
     let ownership_root = match demo_directory.as_ref() {
         Some(directory) => directory.path().join("threads"),
         None => std::env::var_os("XDG_STATE_HOME")
