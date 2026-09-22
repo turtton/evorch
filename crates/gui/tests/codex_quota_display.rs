@@ -149,7 +149,7 @@ fn quota_snapshot_renders_both_windows_and_plan() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 400.0))
         .build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
         });
     // When: the pane renders headlessly.
     harness.run();
@@ -168,7 +168,7 @@ fn stale_indicator_shown_when_refresh_failed() {
     telemetry.quota.accept(Ok(cached));
     let tasks = TasksModel::new(DemoSource(Vec::new()));
     let mut harness = Harness::builder().build_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
     });
     // When: rendering cached data after the failure.
     harness.run();
@@ -184,7 +184,7 @@ fn first_failure_shows_unavailable_without_fabricated_usage() {
     telemetry.quota.accept(Err(QuotaError::Timeout));
     let tasks = TasksModel::new(DemoSource(Vec::new()));
     let mut harness = Harness::builder().build_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
     });
     harness.run();
     harness.get_by_label("Codex quota unavailable · refresh failed");
@@ -205,7 +205,7 @@ fn reauth_required_shows_relogin_message() {
             .accept(Err(QuotaError::ReauthenticationRequired));
         let tasks = TasksModel::new(DemoSource(Vec::new()));
         let mut harness = Harness::builder().build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
         });
         // When: the real Agents pane renders the authentication failure.
         harness.run();
@@ -238,7 +238,7 @@ fn weekly_only_plan_labels_primary_window_by_its_duration() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(900.0, 400.0))
         .build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
         });
     // When: the pane renders headlessly.
     harness.run();

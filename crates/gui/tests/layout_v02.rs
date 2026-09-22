@@ -46,12 +46,12 @@ fn assert_content_layout(root: &LayoutNode, approvals: bool) {
     let right_tabs: &[&str] = if approvals {
         &[
             "agents-main",
+            "tasks-main",
             "notifications-main",
             "approvals-main",
-            "durable-tasks-main",
         ]
     } else {
-        &["agents-main", "notifications-main"]
+        &["agents-main", "tasks-main", "notifications-main"]
     };
     assert_eq!(
         *content.second,
@@ -93,7 +93,7 @@ fn v1_layout_file_loads_via_migration_into_workbench() {
     let state = WorkbenchState::new(Source(Vec::new()), &settings).expect("build workbench");
 
     // Then: the migrated legacy panels remain available in the dock
-    assert!(state.dock().find_tab(&PanelId::new("tasks-main")).is_some());
+    assert_work_tabs(&state);
     assert!(state.dock().find_tab(&PanelId::new("agent-main")).is_some());
     assert!(
         state
@@ -137,24 +137,16 @@ fn reset_layout_restores_v02_default() {
             target: None,
         },
     );
-    let id = PanelId::new("durable-tasks-main");
-    panels.insert(
-        id.clone(),
-        workspace_ui::Panel {
-            id,
-            kind: workspace_ui::PanelKind::DurableTasks,
-            title: "Durable Tasks".into(),
-            target: None,
-        },
-    );
     let extracted =
         gui::dock::from_dock_state(workbench.state().dock(), &panels).expect("reset workspace");
     assert_content_layout(&extracted.main.root, true);
+    assert_work_tabs(workbench.state());
     // And: all default v0.2 panels are back on the main surface
     for id in [
         "sidebar-main",
         "agent-main",
         "agents-main",
+        "tasks-main",
         "diff-main",
         "terminal-main",
     ] {
@@ -209,6 +201,7 @@ fn dynamic_agent_pane_roundtrips_through_save_load() {
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(loaded);
     let reloaded = WorkbenchState::new(source, &settings).expect("reload workbench");
+    assert_work_tabs(&reloaded);
     for id in ["agent-run-1", "agent-run-3", "agent-run-4"] {
         assert!(reloaded.dock().find_tab(&PanelId::new(id)).is_some());
     }
@@ -244,6 +237,7 @@ fn undock_to_floating_and_reload_preserves_v02_panels() {
         "sidebar-main",
         "agent-main",
         "agents-main",
+        "tasks-main",
         "diff-main",
         "terminal-main",
     ] {
@@ -267,5 +261,44 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
         role_name: role.into(),
         phase: event_bus::AgentRunPhase::Running,
         model: "fixture".into(),
+    }
+}
+
+fn assert_work_tabs<S: AgentRunSource>(state: &WorkbenchState<S>) {
+    for id in ["agents-main", "tasks-main"] {
+        assert_eq!(
+            state
+                .dock()
+                .iter_all_tabs()
+                .filter(|(_, panel)| panel.as_str() == id)
+                .count(),
+            1,
+            "one canonical {id} tab"
+        );
+    }
+    assert!(
+        state
+            .dock()
+            .find_tab(&PanelId::new("durable-tasks-main"))
+            .is_none()
+    );
+}
+
+#[test]
+fn memory_storage_keeps_one_tasks_tab_in_current_and_legacy_layouts() {
+    for mut workspace in [Workspace::default_v01(), Workspace::default_v02()] {
+        workspace.version = workspace_ui::WORKSPACE_SCHEMA_VERSION;
+        let mut settings = UiSettings::default();
+        settings.layout.workspace = Some(workspace);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("memory.db"),
+            ..Default::default()
+        };
+        let state = WorkbenchState::new(Source(Vec::new()), &settings)
+            .expect("workbench")
+            .with_memory_storage(config.clone())
+            .with_memory_storage(config);
+        assert_work_tabs(&state);
     }
 }

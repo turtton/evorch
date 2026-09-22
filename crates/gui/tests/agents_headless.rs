@@ -103,7 +103,7 @@ fn missing_provider_renders_unknown_not_fabricated() {
     let telemetry = TelemetryOverlay::new();
     let mut harness = Harness::builder().build_ui_state(
         |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
-            gui::panes::agents::agents_pane(ui, &state.0, &state.1);
+            gui::panes::agents::agents_pane(ui, &state.0, &state.1, &Default::default());
         },
         (tasks, telemetry),
     );

@@ -217,7 +217,7 @@ fn completed_metrics_render_as_headless_labels() {
     telemetry.apply_event(&first_token());
     telemetry.apply_event(&completed(12_300, 556));
     let mut harness = Harness::new_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+        gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
     });
     // When: egui renders its real widgets.
     harness.run();

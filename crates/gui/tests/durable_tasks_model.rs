@@ -142,3 +142,125 @@ fn goal_evidence_updates_linked_task_only_when_successful_and_same_revision() {
     assert_eq!(row.last_artifact.as_deref(), Some("good.log"));
     assert_eq!(row.detail, "checkpoint: 50 calls · 100/20 tokens · 900 ms");
 }
+
+#[test]
+fn retry_keeps_task_identity_and_links_each_attempt() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&progress("run-1", "running", Some("good.txt")));
+    model.apply_event(&Event::new(OrchestratorEvent::TaskRetryScheduled {
+        goal_id: "goal-1".into(),
+        task_id: "task-1".into(),
+        attempt: 1,
+        reason: "retry".into(),
+        new_run_id: "run-2".into(),
+    }));
+    model.apply_event(&progress("run-2", "completed", None));
+
+    assert_eq!(model.rows().count(), 1);
+    let row = model.rows().next().unwrap();
+    assert_eq!(row.id, "task-1");
+    assert_eq!(row.run_ids, ["run-1", "run-2"]);
+    assert_eq!(row.run_id.as_deref(), Some("run-2"));
+    for run in ["run-1", "run-2"] {
+        assert_eq!(model.tasks_for_run(run).next().unwrap().id, "task-1");
+    }
+    assert!(model.tasks_for_run("run-3").next().is_none());
+}
+
+#[test]
+fn background_execution_does_not_invent_a_task() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&Event::new(LifecycleEvent::BackgroundTaskStarted {
+        task_id: "run-1".into(),
+    }));
+    assert_eq!(model.rows().count(), 0);
+}
+
+#[test]
+fn original_run_id_matching_task_id_cannot_overwrite_retry() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&Event::new(OrchestratorEvent::TaskProgressed {
+        task_id: "run-1".into(),
+        run_id: "run-1".into(),
+        progress: serde_json::json!({"status":"running"}),
+        reason: "start".into(),
+    }));
+    model.apply_event(&Event::new(OrchestratorEvent::TaskRetryScheduled {
+        goal_id: "goal-1".into(),
+        task_id: "run-1".into(),
+        attempt: 1,
+        reason: "retry".into(),
+        new_run_id: "run-2".into(),
+    }));
+    model.apply_event(&Event::new(LifecycleEvent::BackgroundTaskCompleted {
+        task_id: "run-1".into(),
+    }));
+    assert_eq!(model.rows().next().unwrap().status, TaskStatus::Retrying);
+}
+
+#[test]
+fn execution_completion_does_not_complete_its_goal() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&Event::new(OrchestratorEvent::GoalCreated {
+        goal_id: "goal-1".into(),
+        session_id: "session".into(),
+        project_id: "project".into(),
+        thread_id: "thread".into(),
+        goal: "Ship task".into(),
+        references: Vec::new(),
+        constraints: Vec::new(),
+        repo: "owner/repo".into(),
+        base_ref: "main".into(),
+        root_run_id: "run-1".into(),
+    }));
+    model.apply_event(&Event::new(OrchestratorEvent::GoalStateChanged {
+        goal_id: "goal-1".into(),
+        from: event_bus::GoalState::Paused,
+        to: event_bus::GoalState::Active,
+        reason: "working".into(),
+    }));
+    model.apply_event(&Event::new(LifecycleEvent::BackgroundTaskCompleted {
+        task_id: "run-1".into(),
+    }));
+    assert_eq!(model.rows().next().unwrap().status, TaskStatus::Running);
+    assert_eq!(model.tasks_for_run("run-1").next().unwrap().id, "goal-1");
+}
+
+#[test]
+fn waiting_execution_does_not_block_its_running_task() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&progress("run-1", "running", None));
+    model.apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "run-1".into(),
+        from: event_bus::AgentRunPhase::Running,
+        to: event_bus::AgentRunPhase::Waiting,
+        reason: Some("waiting for tool".into()),
+    }));
+    assert_eq!(model.rows().next().unwrap().status, TaskStatus::Running);
+    assert_eq!(model.rows().next().unwrap().detail, "progress");
+}
+
+#[test]
+fn retry_remains_retrying_while_its_new_execution_starts() {
+    let mut model = DurableTasksModel::default();
+    model.apply_event(&progress("run-1", "running", None));
+    model.apply_event(&Event::new(OrchestratorEvent::TaskRetryScheduled {
+        goal_id: "goal-1".into(),
+        task_id: "task-1".into(),
+        attempt: 1,
+        reason: "retry requested".into(),
+        new_run_id: "run-2".into(),
+    }));
+    for to in [
+        event_bus::AgentRunPhase::Pending,
+        event_bus::AgentRunPhase::Running,
+    ] {
+        model.apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-2".into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to,
+            reason: None,
+        }));
+        assert_eq!(model.rows().next().unwrap().status, TaskStatus::Retrying);
+    }
+}

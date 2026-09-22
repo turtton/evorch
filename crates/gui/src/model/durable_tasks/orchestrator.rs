@@ -16,12 +16,17 @@ impl DurableTasksModel {
                 let row = self.row(goal_id);
                 row.title.clone_from(goal);
                 row.goal_id = Some(goal_id.clone());
-                row.run_id = Some(root_run_id.clone());
+                row.attach_run(root_run_id);
             }
             OrchestratorEvent::RunAttached {
                 goal_id, run_id, ..
             } => {
                 self.run_goals.insert(run_id.clone(), goal_id.clone());
+                if let Some(goal) = self.rows.get_mut(goal_id)
+                    && !goal.run_ids.contains(run_id)
+                {
+                    goal.run_ids.push(run_id.clone());
+                }
                 for row in self
                     .rows
                     .values_mut()
@@ -37,6 +42,7 @@ impl DurableTasksModel {
                 ..
             } => {
                 let row = self.row(goal_id);
+                row.goal_id = Some(goal_id.clone());
                 row.status = match to {
                     GoalState::Active => TaskStatus::Running,
                     GoalState::Paused | GoalState::Blocked => TaskStatus::Blocked,
@@ -57,6 +63,13 @@ impl DurableTasksModel {
                 };
                 row.detail.clone_from(reason);
                 if let Some(progress) = parsed {
+                    if row.title == row.id
+                        && let Some(title) = progress.input.as_deref().and_then(|input| {
+                            input.lines().map(str::trim).find(|line| !line.is_empty())
+                        })
+                    {
+                        row.title = title.chars().take(160).collect();
+                    }
                     row.status = progress.status;
                     row.attempt = row.attempt.max(progress.attempts);
                     if let Some(artifact) = progress
@@ -85,7 +98,7 @@ impl DurableTasksModel {
                 }
             }
             OrchestratorEvent::TaskRetryScheduled {
-                goal_id: _,
+                goal_id,
                 task_id,
                 attempt,
                 reason,
@@ -96,7 +109,8 @@ impl DurableTasksModel {
                     return;
                 }
                 row.attempt = *attempt;
-                row.run_id = Some(new_run_id.clone());
+                row.attach_run(new_run_id);
+                row.goal_id = Some(goal_id.clone());
                 row.status = TaskStatus::Retrying;
                 row.detail.clone_from(reason);
                 if let Some(goal) = row.goal_id.clone() {

@@ -5,7 +5,6 @@ mod attention;
 pub mod auto_title;
 mod composer;
 mod conversation;
-mod durable_tasks;
 mod external_commands;
 mod frame;
 mod history;
@@ -21,6 +20,7 @@ mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
 mod viewer;
+mod work_panels;
 
 pub use attention::ack::{AttentionAck, DisplayRevision};
 pub use state::{ConversationFocus, WorkbenchState};

@@ -152,7 +152,7 @@ fn multiple_concurrent_runs_display_states() {
         })
         .collect();
     let mut state = WorkbenchState::new(DemoSource(runs), &UiSettings::default()).unwrap();
-    // When: a single frame batch folds all transitions and the real Tasks pane renders.
+    // When: a single frame batch folds all transitions and the real Agents pane renders.
     state.apply_events(
         ["run-1", "run-2", "run-3"]
             .into_iter()
@@ -162,7 +162,14 @@ fn multiple_concurrent_runs_display_states() {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(800.0, 480.0))
         .build_ui_state(
-            |ui, state| gui::panes::tasks::tasks_pane(ui, state.tasks()),
+            |ui, state| {
+                gui::panes::agents::agents_pane(
+                    ui,
+                    state.tasks(),
+                    state.telemetry(),
+                    &Default::default(),
+                );
+            },
             state,
         );
     harness.run();

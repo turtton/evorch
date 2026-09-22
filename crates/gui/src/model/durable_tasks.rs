@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use event_bus::{Event, EventKind};
 use storage::entity::TaskStatus;
 
-mod lifecycle;
 mod orchestrator;
 
 #[derive(Debug, Clone)]
@@ -11,6 +10,8 @@ pub struct DurableTaskRow {
     pub id: String,
     pub title: String,
     pub run_id: Option<String>,
+    /// Every execution associated with this task, including earlier attempts.
+    pub run_ids: Vec<String>,
     pub goal_id: Option<String>,
     pub status: TaskStatus,
     pub attempt: u32,
@@ -29,11 +30,18 @@ impl DurableTasksModel {
         self.rows.values()
     }
 
+    pub fn tasks_for_run(&self, run_id: &str) -> impl Iterator<Item = &DurableTaskRow> {
+        self.rows
+            .values()
+            .filter(move |row| row.run_ids.iter().any(|run| run == run_id))
+    }
+
     pub fn apply_event(&mut self, event: &Event) {
         match &event.kind {
             EventKind::Orchestrator(event) => self.apply_orchestrator(event),
-            EventKind::Lifecycle(event) => self.apply_lifecycle(event),
-            EventKind::Ledger(_)
+            // Execution lifecycle does not determine the state of its continuing task.
+            EventKind::Lifecycle(_)
+            | EventKind::Ledger(_)
             | EventKind::Message(_)
             | EventKind::Tool(_)
             | EventKind::Usage(_)
@@ -54,6 +62,7 @@ impl DurableTasksModel {
                 id: id.into(),
                 title: id.into(),
                 run_id: None,
+                run_ids: Vec::new(),
                 goal_id: None,
                 status: TaskStatus::Queued,
                 attempt: 0,
@@ -71,19 +80,20 @@ impl DurableTasksModel {
             return None;
         }
         let goal = self.run_goals.get(run).cloned();
-        if id != run
-            && let Some(previous) = self.rows.remove(run)
-        {
-            self.rows.entry(id.into()).or_insert(DurableTaskRow {
-                id: id.into(),
-                ..previous
-            });
-        }
         let row = self.row(id);
-        row.run_id = Some(run.into());
+        row.attach_run(run);
         if goal.is_some() {
             row.goal_id = goal;
         }
         Some(row)
+    }
+}
+
+impl DurableTaskRow {
+    fn attach_run(&mut self, run: &str) {
+        if !self.run_ids.iter().any(|known| known == run) {
+            self.run_ids.push(run.into());
+        }
+        self.run_id = Some(run.into());
     }
 }

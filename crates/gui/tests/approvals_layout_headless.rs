@@ -51,7 +51,6 @@ fn with_approval(workspace: &Workspace, neighbor: &str) -> Workspace {
                     if tabs.active > index {
                         tabs.active += 1;
                     }
-                    tabs.panels.push(PanelId::new("durable-tasks-main"));
                 }
             }
         }
@@ -68,21 +67,37 @@ fn with_approval(workspace: &Workspace, neighbor: &str) -> Workspace {
         },
     );
     insert(&mut expected.main.root, &PanelId::new(neighbor));
-    let id = PanelId::new("durable-tasks-main");
-    expected.panels.insert(
-        id.clone(),
-        Panel {
-            id,
-            kind: PanelKind::DurableTasks,
-            title: "Durable Tasks".into(),
-            target: None,
-        },
-    );
+    if !expected.panels.contains_key(&PanelId::new("agents-main")) {
+        fn append_agents(node: &mut LayoutNode) {
+            match node {
+                LayoutNode::Split(split) => {
+                    append_agents(&mut split.first);
+                    append_agents(&mut split.second);
+                }
+                LayoutNode::Tabs(tabs) => {
+                    if tabs.panels.contains(&PanelId::new("tasks-main")) {
+                        tabs.panels.push(PanelId::new("agents-main"));
+                    }
+                }
+            }
+        }
+        let id = PanelId::new("agents-main");
+        expected.panels.insert(
+            id.clone(),
+            Panel {
+                id,
+                kind: PanelKind::Agents,
+                title: "Agents".into(),
+                target: None,
+            },
+        );
+        append_agents(&mut expected.main.root);
+    }
     expected
 }
 
 #[test]
-fn inserts_only_missing_approval_when_loading_saved_layouts() {
+fn inserts_missing_approval_and_work_tabs_when_loading_saved_layouts() {
     for (mut workspace, neighbor) in [
         (legacy_workspace(), "notifications-main"),
         (Workspace::default_v01(), "notifications-main"),
@@ -105,7 +120,7 @@ fn inserts_only_missing_approval_when_loading_saved_layouts() {
             .expect("restore workbench")
             .with_save_path(&path);
 
-        // Then: 選択・順序・split・サイズを保って承認タブだけが増え、元ファイルは不変。
+        // Then: 選択・順序・split・サイズを保って不足していた承認・Agentsタブだけが増え、元ファイルは不変。
         let actual = from_dock_state(state.dock(), &expected.panels).expect("extract layout");
         assert_eq!(actual, expected);
         assert_eq!(std::fs::read(&path).expect("saved bytes"), original);

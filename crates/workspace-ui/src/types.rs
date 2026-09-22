@@ -130,7 +130,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let workbench_panels: &[&str] = &["agents-main", "notifications-main"];
+        let workbench_panels: &[&str] = &["agents-main", "tasks-main", "notifications-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,

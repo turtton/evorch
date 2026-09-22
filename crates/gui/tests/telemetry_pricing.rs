@@ -176,7 +176,7 @@ fn telemetry_cost_renders_in_agents_pane() {
     overlay.apply_event(&completed("model"));
     overlay.refresh_costs(&settings());
     let mut harness = Harness::new_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &overlay);
+        gui::panes::agents::agents_pane(ui, &tasks, &overlay, &Default::default());
     });
     harness.run();
     // Cache reads and writes are already included in input: 78300 / 98300.

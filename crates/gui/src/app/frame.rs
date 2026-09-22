@@ -251,14 +251,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match action {
             KeyAction::FocusAgentPane => self.focus_panel("agent-main"),
             KeyAction::FocusTerminalPane => self.focus_panel("terminal-main"),
-            KeyAction::FocusTasksPane => {
-                let id = if self.dock.find_tab(&PanelId::new("tasks-main")).is_some() {
-                    "tasks-main"
-                } else {
-                    "agents-main"
-                };
-                self.focus_panel(id);
-            }
+            KeyAction::FocusTasksPane => self.focus_panel("tasks-main"),
             KeyAction::SaveLayout => self.save_layout(),
             KeyAction::ResetLayout => self.reset_layout(ctx),
             KeyAction::CycleAgentRole => self.composer.toggle_role(),
@@ -286,7 +279,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.dock = dock;
                 self.panels = workspace.panels;
                 self.register_approvals_panel();
-                self.register_durable_tasks_panel();
+                self.register_work_panels();
                 ctx.request_repaint();
             }
             Err(error) => tracing::warn!(%error, "failed to reset layout"),

@@ -22,7 +22,7 @@ use crate::panes::{
     diff::diff_pane,
     notifications::{NotificationsAction, notifications_pane},
     sidebar::{SidebarAction, sidebar_pane},
-    tasks::tasks_pane,
+    tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
 use crate::pty::PtySession;
@@ -42,6 +42,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) telemetry: &'a TelemetryOverlay,
     pub(super) tasks: &'a mut TasksModel<S>,
     pub(super) durable_tasks: &'a crate::model::durable_tasks::DurableTasksModel,
+    pub(super) selected_task: Option<&'a str>,
+    pub(super) tasks_action: &'a mut Option<TasksAction>,
     pub(super) terminal: &'a mut TerminalBuffer,
     pub(super) terminal_input: &'a mut String,
     pub(super) pty: &'a mut Option<PtySession>,
@@ -105,7 +107,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Agents
                     | PanelKind::Notifications
                     | PanelKind::Approvals
-                    | PanelKind::DurableTasks
                     | PanelKind::Diff
                     | PanelKind::Terminal
                     | PanelKind::Tasks
@@ -158,9 +159,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::SubagentRegion => {
                 ui.label("Completed subagent logs are available in the tabs above.");
             }
-            PanelKind::DurableTasks => {
-                crate::panes::durable_tasks::durable_tasks_pane(ui, self.durable_tasks)
-            }
             PanelKind::Approvals => {
                 if let Some(action) = approvals_pane(ui, self.pending_approvals) {
                     *self.approvals_action = Some(action);
@@ -173,7 +171,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 }
             }
             PanelKind::Agents => {
-                if let Some(action) = agents_pane(ui, self.tasks, self.telemetry) {
+                if let Some(action) =
+                    agents_pane(ui, self.tasks, self.telemetry, self.durable_tasks)
+                {
                     *self.agents_action = Some(action);
                 }
             }
@@ -208,13 +208,15 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
             PanelKind::Tasks => {
-                crate::panes::team::team_pane(ui, &self.tasks.teams());
-                ui.separator();
-                if let Some(config) = &self.memory.config {
-                    crate::panes::tasks::dependencies_pane(ui, config);
-                    ui.separator();
+                if let Some(action) = tasks_pane(
+                    ui,
+                    self.durable_tasks,
+                    &self.tasks.teams(),
+                    self.memory.config.as_ref(),
+                    self.selected_task,
+                ) {
+                    *self.tasks_action = Some(action);
                 }
-                tasks_pane(ui, self.tasks);
             }
             PanelKind::Memory => {
                 let project = self

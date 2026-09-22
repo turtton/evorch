@@ -31,6 +31,24 @@ impl StorageHandle {
 }
 
 impl Database {
+    /// List explicitly queued work and tasks with durable progress.
+    /// Background execution projections share the table but are not work items.
+    pub fn durable_tasks(&self) -> Result<Vec<TaskRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM tasks WHERE progress_json IS NOT NULL
+             OR id IN (SELECT json_extract(payload, '$.id') FROM task_queue_ledger WHERE operation = 'enqueue')
+             ORDER BY created_at_ns, id",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.iter()
+            .map(|id| {
+                crate::repo::task::get(&self.conn, id)?.ok_or_else(|| invalid("task disappeared"))
+            })
+            .collect()
+    }
+
     pub fn queued_tasks(&self) -> Result<Vec<TaskRecord>, StorageError> {
         let mut statement = self
             .conn

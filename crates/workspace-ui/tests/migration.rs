@@ -12,6 +12,7 @@ fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
     assert_eq!(ws.version, 3);
     assert_eq!(ws.panels.len(), 6);
     let mut expected = Workspace::default_v02();
+    expected.panels.remove(&PanelId::new("tasks-main"));
     expected.main.root = serde_json::from_value(serde_json::json!({
         "type": "split", "direction": "horizontal", "fraction": 0.2,
         "first": {"type": "tabs", "panels": ["sidebar-main"], "active": 0},

@@ -3,53 +3,75 @@ use runtime::{
     team::{ClaimState, TeamTask},
 };
 
+use super::tasks::{TasksAction, task_label};
+use crate::theme::{
+    text::{h3, muted},
+    tokens::{SP_1, palette},
+    widgets::surface_frame,
+};
+
 pub fn team_pane(ui: &mut egui::Ui, teams: &[(RunId, Vec<TeamTask>)]) {
-    ui.label(crate::theme::text::h3("Team"));
+    let _ = team_tasks_pane(ui, teams, None);
+}
+
+pub fn team_tasks_pane(
+    ui: &mut egui::Ui,
+    teams: &[(RunId, Vec<TeamTask>)],
+    selected_task: Option<&str>,
+) -> Option<TasksAction> {
+    let mut action = None;
+    ui.label(h3("Team"));
     if teams.is_empty() {
-        ui.label(crate::theme::text::muted(
-            "Team mode is disabled or no team has started.",
-        ));
-        return;
+        ui.label(muted("Team mode is disabled or no team has started."));
+        return None;
     }
-    egui::ScrollArea::vertical()
-        .id_salt("team_claims")
-        .max_height(240.0)
-        .show(ui, |ui| {
-            for (coordinator, tasks) in teams {
-                ui.push_id(coordinator.get(), |ui| {
-                    ui.label(crate::theme::text::badge(format!(
-                        "Coordinator {coordinator}"
-                    )));
-                    egui::Grid::new("claims").striped(true).show(ui, |ui| {
-                        ui.label(crate::theme::text::badge("Task").strong());
-                        ui.label(crate::theme::text::badge("State").strong());
-                        ui.label(crate::theme::text::badge("Owner").strong());
-                        ui.end_row();
-                        for task in tasks {
-                            ui.monospace(&task.spec.id);
+    for (coordinator, tasks) in teams {
+        ui.push_id(coordinator.get(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(muted("Coordinator"));
+                if ui.link(coordinator.to_string()).clicked() {
+                    action = Some(TasksAction::OpenRun(coordinator.to_string()));
+                }
+            });
+            for task in tasks {
+                let key = format!("team:{coordinator}:{}", task.spec.id);
+                let fill = if selected_task == Some(key.as_str()) {
+                    palette().ACTIVE_ROW
+                } else {
+                    palette().SURFACE
+                };
+                ui.push_id(&task.spec.id, |ui| {
+                    surface_frame(fill).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            task_label(ui, &task.spec.id, &task.spec.id, &key, selected_task);
                             match &task.state {
-                                ClaimState::Ready => {
-                                    ui.label("Ready");
-                                    ui.label("—");
-                                }
+                                ClaimState::Ready => { ui.label("Ready"); }
                                 ClaimState::Claimed(lease) => {
                                     ui.label("Claimed");
-                                    ui.monospace(&lease.owner_id).on_hover_text(format!(
-                                        "Generation {} · lease deadline {} ms",
+                                    if ui.link(&lease.owner_id).on_hover_text(format!(
+                                        "Open assigned execution · Generation {} · lease deadline {} ms",
                                         lease.generation, lease.expires_at
-                                    ));
+                                    )).clicked() {
+                                        action = Some(TasksAction::OpenRun(lease.owner_id.clone()));
+                                    }
                                 }
-                                ClaimState::Complete => {
-                                    ui.label("Complete");
-                                    ui.label("—");
-                                }
+                                ClaimState::Complete => { ui.label("Complete"); }
                             }
-                            ui.end_row();
+                        });
+                        if !task.spec.paths.is_empty() {
+                            ui.label(muted("Paths").strong());
+                            for path in &task.spec.paths {
+                                ui.add(egui::Label::new(path.display().to_string()).wrap());
+                            }
                         }
                     });
+                    ui.add_space(SP_1);
                 });
             }
         });
+    }
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
+    action
 }

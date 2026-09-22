@@ -247,7 +247,7 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
         "terminal-main",
         "notifications-main",
         "approvals-main",
-        "durable-tasks-main",
+        "tasks-main",
     ] {
         let tab = workbench
             .state()
@@ -657,7 +657,7 @@ fn v02_end_to_end_chained_scenario() {
                 "agents-main".to_string(),
                 "notifications-main".to_string(),
                 "approvals-main".to_string(),
-                "durable-tasks-main".to_string(),
+                "tasks-main".to_string(),
             ]),
             BTreeSet::from(["diff-main".to_string()]),
             BTreeSet::from(["agent-run-2".to_string()]),
@@ -765,7 +765,7 @@ fn v1_settings_file_end_to_end_migration() {
 
     // Then: the legacy tabs render without panic. Tab titles are painted text,
     // so the body content proves each migrated pane actually rendered.
-    for id in ["tasks-main", "agent-main", "terminal-main"] {
+    for id in ["tasks-main", "agents-main", "agent-main", "terminal-main"] {
         assert!(
             workbench
                 .state()
@@ -775,7 +775,7 @@ fn v1_settings_file_end_to_end_migration() {
             "missing migrated tab {id}"
         );
     }
-    assert!(workbench.has_label("Name"), "tasks table missing");
+    assert!(workbench.has_label("Tasks"), "Tasks pane missing");
     assert!(workbench.has_label("Conversation"), "agent pane missing");
 }
 

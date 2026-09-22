@@ -12,7 +12,7 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
     // Then: the exact split tree and unchanged panel registry are present.
     assert_eq!(workspace.version, WORKSPACE_SCHEMA_VERSION);
     assert_eq!(workspace.version, 3);
-    assert_eq!(workspace.panels.len(), 6);
+    assert_eq!(workspace.panels.len(), 7);
     let LayoutNode::Split(root) = &workspace.main.root else {
         panic!("default root must be a horizontal split");
     };
@@ -59,6 +59,7 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
         &LayoutNode::Tabs(Tabs {
             panels: vec![
                 PanelId::new("agents-main"),
+                PanelId::new("tasks-main"),
                 PanelId::new("notifications-main"),
             ],
             active: 0,
@@ -78,6 +79,10 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
     assert_eq!(
         workspace.panels[&PanelId::new("agents-main")].kind,
         PanelKind::Agents
+    );
+    assert_eq!(
+        workspace.panels[&PanelId::new("tasks-main")].kind,
+        PanelKind::Tasks
     );
     assert_eq!(
         workspace.panels[&PanelId::new("diff-main")].kind,

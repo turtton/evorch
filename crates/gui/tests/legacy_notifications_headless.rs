@@ -37,14 +37,14 @@ fn notification_opens_transcript_when_saved_layout_has_only_tasks_and_terminal()
 }
 
 #[test]
-fn transcript_opens_in_first_leaf_when_all_fixed_anchors_are_absent() {
+fn transcript_opens_beside_agents_added_to_legacy_layout() {
     // Given: a layout with no Agents, Agent, or Notifications tab.
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(tasks_and_terminal());
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &settings).unwrap();
     // When: a transcript is opened directly.
     state.open_agent_pane("fallback-run");
-    // Then: it is appended and selected beside the existing tabs.
+    // Then: it is appended and selected beside the restored Agents tab.
     // (承認タブは保存済み配置にも追加挿入される — approvals_layout_headless.rs 参照)
     let dock = state.dock();
     let path = dock
@@ -58,7 +58,7 @@ fn transcript_opens_in_first_leaf_when_all_fixed_anchors_are_absent() {
             PanelId::new("tasks-main"),
             PanelId::new("approvals-main"),
             PanelId::new("terminal-main"),
-            PanelId::new("durable-tasks-main"),
+            PanelId::new("agents-main"),
             PanelId::new("agent-fallback-run")
         ]
     );

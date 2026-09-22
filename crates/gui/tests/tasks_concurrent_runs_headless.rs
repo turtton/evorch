@@ -24,7 +24,7 @@ fn run(id: u64, name: &'static str, phase: AgentRunPhase) -> AgentSummary {
 }
 
 #[test]
-fn tasks_pane_lists_multiple_concurrent_run_states() {
+fn agents_pane_lists_multiple_concurrent_run_states() {
     // Given: concurrent runs covering every agent lifecycle phase.
     let source = FixtureSource(vec![
         run(1, "pending-run", AgentRunPhase::Pending),
@@ -38,7 +38,14 @@ fn tasks_pane_lists_multiple_concurrent_run_states() {
     let mut harness = Harness::builder()
         .with_size(vec2(800.0, 480.0))
         .build_ui_state(
-            |ui, tasks: &mut TasksModel<FixtureSource>| gui::panes::tasks::tasks_pane(ui, tasks),
+            |ui, tasks: &mut TasksModel<FixtureSource>| {
+                gui::panes::agents::agents_pane(
+                    ui,
+                    tasks,
+                    &gui::model::telemetry::TelemetryOverlay::default(),
+                    &gui::model::durable_tasks::DurableTasksModel::default(),
+                );
+            },
             tasks,
         );
     harness
@@ -48,7 +55,7 @@ fn tasks_pane_lists_multiple_concurrent_run_states() {
         .or_default()
         .focused = Some(true);
 
-    // When: the tasks pane is rendered.
+    // When: the Agents pane is rendered.
     harness.run();
 
     // Then: every run name and its distinct phase label is visible.

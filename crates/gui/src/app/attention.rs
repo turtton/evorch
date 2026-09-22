@@ -39,7 +39,7 @@ pub(super) fn attention_for(
     inputs: &AttentionInputs,
 ) -> PaneAttention {
     match kind {
-        PanelKind::Agents | PanelKind::Tasks => inputs
+        PanelKind::Agents => inputs
             .tasks_rows
             .iter()
             .map(|row| agent_run_attention(row.status))
@@ -51,7 +51,7 @@ pub(super) fn attention_for(
             .map_or(PaneAttention::None, |phase| thread_phase_attention(*phase)),
         PanelKind::Sidebar
         | PanelKind::SubagentRegion
-        | PanelKind::DurableTasks
+        | PanelKind::Tasks
         | PanelKind::Approvals
         | PanelKind::Notifications
         | PanelKind::Agent
@@ -108,7 +108,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .and_then(|run| self.phases.get(run).map(|phase| (run.clone(), *phase)))
                     .into_iter()
                     .collect(),
-                PanelKind::Agents | PanelKind::Tasks => self
+                PanelKind::Agents => self
                     .tasks
                     .rows()
                     .iter()
@@ -125,7 +125,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .collect(),
                 PanelKind::Sidebar
                 | PanelKind::SubagentRegion
-                | PanelKind::DurableTasks
+                | PanelKind::Tasks
                 | PanelKind::Approvals
                 | PanelKind::Notifications
                 | PanelKind::Diff
@@ -242,14 +242,11 @@ mod tests {
             tasks_rows: &rows,
         };
 
-        // Then: both agent-list tabs are marked as info
-        for kind in [PanelKind::Agents, PanelKind::Tasks] {
-            assert_eq!(
-                attention_for(kind, None, &inputs),
-                PaneAttention::None,
-                "{kind:?}"
-            );
-        }
+        // Then: the Agents list has no unread emphasis for active runs.
+        assert_eq!(
+            attention_for(PanelKind::Agents, None, &inputs),
+            PaneAttention::None
+        );
         assert_eq!(PaneAttention::Info.color(), Some(palette().INFO));
     }
 
@@ -265,6 +262,7 @@ mod tests {
         // Then: navigation and static panes stay quiet
         for kind in [
             PanelKind::Sidebar,
+            PanelKind::Tasks,
             PanelKind::Agent,
             PanelKind::Diff,
             PanelKind::Terminal,

@@ -1,3 +1,4 @@
+use crate::model::durable_tasks::DurableTasksModel;
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow};
 use crate::panes::agents_columns::fit_columns;
@@ -12,6 +13,7 @@ pub enum AgentsAction {
     ReturnToThread,
     OpenPane(String),
     OpenDefaultPanes,
+    OpenTask(String),
 }
 
 const HEADERS: [&str; 9] = [
@@ -30,6 +32,7 @@ pub fn agents_pane<S: AgentRunSource>(
     ui: &mut egui::Ui,
     tasks: &TasksModel<S>,
     telemetry: &TelemetryOverlay,
+    durable_tasks: &DurableTasksModel,
 ) -> Option<AgentsAction> {
     pane_root(ui, "Agents", |ui| {
         let mut action = ui
@@ -81,7 +84,8 @@ pub fn agents_pane<S: AgentRunSource>(
             return action;
         }
 
-        egui::ScrollArea::horizontal().show(ui, |ui| {
+        let teams = tasks.teams();
+        egui::ScrollArea::both().show(ui, |ui| {
             let widths = column_widths(ui, tasks, telemetry);
 
             render_header_row(ui, &widths);
@@ -89,6 +93,32 @@ pub fn agents_pane<S: AgentRunSource>(
                 let run_id = row.run_id.to_string();
                 let row_telemetry = telemetry.row(&run_id);
                 render_data_row(ui, &widths, row, row_telemetry, &mut action);
+                ui.push_id(&run_id, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for task in durable_tasks.tasks_for_run(&run_id) {
+                            if ui
+                                .link(format!("Task: {}", task.id))
+                                .on_hover_text(&task.title)
+                                .clicked()
+                            {
+                                action = Some(AgentsAction::OpenTask(task.id.clone()));
+                            }
+                        }
+                        for (coordinator, team_tasks) in &teams {
+                            for task in team_tasks {
+                                if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
+                                    if lease.owner_id == run_id)
+                                    && ui.link(format!("Team task: {}", task.spec.id)).clicked()
+                                {
+                                    action = Some(AgentsAction::OpenTask(format!(
+                                        "team:{coordinator}:{}",
+                                        task.spec.id
+                                    )));
+                                }
+                            }
+                        }
+                    });
+                });
                 if let Some(value) = row_telemetry {
                     let now = std::time::Instant::now();
                     ui.horizontal_wrapped(|ui| {

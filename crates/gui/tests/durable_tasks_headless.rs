@@ -1,7 +1,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use event_bus::{Event, EventBus, LifecycleEvent, OrchestratorEvent};
+use event_bus::{Event, EventBus, OrchestratorEvent};
 use gui::{
     app::WorkbenchState, events::EventPump, fixture::DemoSource, headless::HeadlessWorkbench,
 };
@@ -25,8 +25,8 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())?.with_pump(pump);
     let path = state
         .dock()
-        .find_tab(&PanelId::new("durable-tasks-main"))
-        .ok_or("durable Tasks panel missing")?;
+        .find_tab(&PanelId::new("tasks-main"))
+        .ok_or("Tasks panel missing")?;
     state
         .dock_mut()
         .set_active_tab(path)
@@ -54,8 +54,11 @@ fn durable_tasks_panel_lists_queued_then_retrying_then_completed_with_last_artif
             "retrying",
         ),
         (
-            Event::new(LifecycleEvent::BackgroundTaskCompleted {
-                task_id: "run-2".into(),
+            Event::new(OrchestratorEvent::TaskProgressed {
+                task_id: "task-1".into(),
+                run_id: "run-2".into(),
+                progress: serde_json::json!({"status":"completed", "attempts":2}),
+                reason: "task completed".into(),
             }),
             "completed",
         ),

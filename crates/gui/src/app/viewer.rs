@@ -10,6 +10,7 @@ use crate::panes::{
     notifications::NotificationsAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
     sidebar::{SidebarAction, set_sidebar_error},
+    tasks::TasksAction,
 };
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -52,6 +53,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.observe_attention();
         let mut sidebar_action = None;
         let mut agents_action = None;
+        let mut tasks_action = None;
         let mut notifications_action = None;
         let mut approvals_action = None;
         let mut diff_request = None;
@@ -81,6 +83,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 telemetry: &self.telemetry,
                 tasks: &mut self.tasks,
                 durable_tasks: &self.durable_tasks,
+                selected_task: self.selected_task.as_deref(),
+                tasks_action: &mut tasks_action,
                 terminal: &mut self.terminal,
                 terminal_input: &mut self.terminal_input,
                 pty: &mut self.pty,
@@ -120,7 +124,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 AgentsAction::ReturnToThread => self.return_to_thread(),
                 AgentsAction::OpenPane(run_id) => self.open_agent_pane(&run_id),
                 AgentsAction::OpenDefaultPanes => self.open_default_agent_panes(),
+                AgentsAction::OpenTask(task_id) => {
+                    // Every navigation should reveal the target, including repeated visits.
+                    ctx.data_mut(|data| {
+                        data.remove::<String>(egui::Id::new("tasks_scrolled_selection"));
+                    });
+                    self.selected_task = Some(task_id);
+                    self.focus_panel("tasks-main");
+                }
             }
+        }
+        if let Some(TasksAction::OpenRun(run_id)) = tasks_action {
+            self.open_agent_pane(&run_id);
         }
         if let Some(NotificationsAction::OpenRun(run_id)) = notifications_action {
             self.open_agent_pane(&run_id);

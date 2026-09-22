@@ -34,7 +34,7 @@ fn agents_grid_keeps_all_columns_when_wide() {
         .with_size(vec2(2400.0, 320.0))
         .build_ui_state(
             |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
-                gui::panes::agents::agents_pane(ui, &state.0, &state.1);
+                gui::panes::agents::agents_pane(ui, &state.0, &state.1, &Default::default());
             },
             (tasks, telemetry),
         );
@@ -96,7 +96,12 @@ fn agents_grid_prioritizes_identity_when_default_right_pane_is_narrow() {
                 |ui, state: &mut (TasksModel<MockSource>, TelemetryOverlay)| {
                     gui::theme::install(ui.ctx());
                     egui::ScrollArea::horizontal().show(ui, |ui| {
-                        gui::panes::agents::agents_pane(ui, &state.0, &state.1);
+                        gui::panes::agents::agents_pane(
+                            ui,
+                            &state.0,
+                            &state.1,
+                            &Default::default(),
+                        );
                     });
                 },
                 (tasks, telemetry),
@@ -136,7 +141,7 @@ fn agents_grid_telemetry_is_reachable_when_scrolled() {
         .with_size(vec2(480.0, 320.0))
         .build_ui(|ui| {
             gui::theme::install(ui.ctx());
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry);
+            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
         });
     harness.run();
     // When: scrolling the last column into view through accessibility.
