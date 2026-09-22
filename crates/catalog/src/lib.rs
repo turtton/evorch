@@ -55,6 +55,22 @@ impl ModelCatalog {
             .find_map(|provider| provider.models.get(model))
     }
 
+    /// Returns the first exact model entry when all providers agree on both limits.
+    ///
+    /// A single carrier trivially agrees. Provider choice is irrelevant for agreed limits;
+    /// pricing still follows the first provider as a best-effort choice.
+    pub fn find_agreeing_model(&self, model: &str) -> Option<&ModelMetadata> {
+        let mut matches = self
+            .api
+            .values()
+            .filter_map(|provider| provider.models.get(model));
+        let first = matches.next()?;
+        let limits = (first.context_window, first.max_output_tokens);
+        matches
+            .all(|candidate| (candidate.context_window, candidate.max_output_tokens) == limits)
+            .then_some(first)
+    }
+
     /// Matches exact IDs first, then slash-delimited suffixes; rejects ambiguous candidates.
     pub fn find_unique_model(&self, model: &str) -> Option<&ModelMetadata> {
         if model.is_empty() {
