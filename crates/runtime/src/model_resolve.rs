@@ -28,6 +28,7 @@ pub fn resolve_catalog_entry<'a>(
     entry: &ModelEntryConfig,
     catalog: &'a ModelCatalog,
     provider_id: Option<&str>,
+    provider_type: Option<config::ProviderTypeConfig>,
 ) -> Option<&'a ModelMetadata> {
     let reference = match entry.metadata_source {
         Some(MetadataSource::ModelsDev) | None => entry.metadata_ref.as_deref(),
@@ -44,9 +45,14 @@ pub fn resolve_catalog_entry<'a>(
             .or_else(|| catalog.find_unique_model(reference))
     });
     explicit.or_else(|| {
-        provider_id
-            .and_then(|provider| catalog.find(provider, &entry.id))
+        provider_type
+            .map(config::ProviderTypeConfig::models_dev_provider_candidates)
+            .unwrap_or(&[])
+            .iter()
+            .find_map(|slug| catalog.find(slug, &entry.id))
+            .or_else(|| provider_id.and_then(|provider| catalog.find(provider, &entry.id)))
             .or_else(|| catalog.find_unique_model(&entry.id))
+            .or_else(|| catalog.find_agreeing_model(&entry.id))
     })
 }
 
@@ -56,10 +62,11 @@ pub fn resolve_model_metadata(
     presets: &BTreeMap<String, ModelPresetConfig>,
     catalog: Option<&ModelCatalog>,
     provider_id: Option<&str>,
+    provider_type: Option<config::ProviderTypeConfig>,
 ) -> ResolvedModelMetadata {
     let preset = entry.preset.as_ref().and_then(|name| presets.get(name));
-    let catalog_entry =
-        catalog.and_then(|catalog| resolve_catalog_entry(entry, catalog, provider_id));
+    let catalog_entry = catalog
+        .and_then(|catalog| resolve_catalog_entry(entry, catalog, provider_id, provider_type));
     let (context_window, origin) = if let Some(window) = entry.context_window {
         (Some(window), MetadataOrigin::Manual)
     } else if let Some(window) = preset.and_then(|preset| preset.context_window) {
@@ -86,10 +93,15 @@ pub(crate) fn apply_model_windows(
     let mut windows = BTreeMap::new();
     for (name, profile) in &config.providers {
         for entry in profile.models.iter().filter(|entry| entry.enabled) {
-            if let Some(window) =
-                resolve_model_metadata(entry, &config.model_presets, catalog, Some(name))
-                    .context_window
-                    .filter(|window| *window > 0)
+            if let Some(window) = resolve_model_metadata(
+                entry,
+                &config.model_presets,
+                catalog,
+                Some(name),
+                Some(profile.provider_type),
+            )
+            .context_window
+            .filter(|window| *window > 0)
             {
                 windows.entry(entry.id.clone()).or_insert(window);
                 windows.insert(format!("{name}/{}", entry.id), window);
