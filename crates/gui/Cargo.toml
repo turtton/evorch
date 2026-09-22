@@ -31,6 +31,7 @@ event-bus = { path = "../event-bus" }
 image = { workspace = true, default-features = false, features = ["png"] }
 model = { path = "../model" }
 portable-pty = { workspace = true }
+pulldown-cmark = { version = "0.13", default-features = false }
 providers = { path = "../providers" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }

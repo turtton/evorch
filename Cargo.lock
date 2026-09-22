@@ -2375,6 +2375,7 @@ dependencies = [
  "model",
  "portable-pty",
  "providers",
+ "pulldown-cmark",
  "routing",
  "runtime",
  "sandbox",
