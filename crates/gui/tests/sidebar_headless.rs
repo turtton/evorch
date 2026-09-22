@@ -225,11 +225,11 @@ fn thread_state_follows_lifecycle_events() {
     let mut harness = HeadlessWorkbench::new(workbench, gui::window::MIN_INNER_SIZE);
     harness.run();
 
-    // When: the run is attached and progresses through runtime lifecycle phases
+    // When: a chat run identifies its thread and progresses through runtime lifecycle phases
     bus.emit(Event::new(LifecycleEvent::AgentRunStarted {
         run_id: "run-1".into(),
         parent_run_id: None,
-        agent_name: "worker".into(),
+        agent_name: "chat:Worker:thread-1".into(),
         role: "worker".into(),
     }));
     repaint_rx

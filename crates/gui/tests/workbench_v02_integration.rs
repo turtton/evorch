@@ -123,10 +123,10 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
     }
 }
 
-fn run_started(run_id: &str, agent_name: &str, role: &str) -> Event {
+fn run_started(run_id: &str, agent_name: &str, role: &str, parent_run_id: Option<&str>) -> Event {
     Event::new(LifecycleEvent::AgentRunStarted {
         run_id: run_id.into(),
-        parent_run_id: None,
+        parent_run_id: parent_run_id.map(str::to_owned),
         agent_name: agent_name.into(),
         role: role.into(),
     })
@@ -410,12 +410,12 @@ fn v02_end_to_end_chained_scenario() {
     mod thread_root;
     thread_root::bind_root(fixture.workbench.state_mut(), "run-1");
     // When: lifecycle, provider, tool, and agent-message events flow through the pump.
-    for (id, name, role) in [
-        (1, "orchestrator", "orchestrator"),
-        (2, "implementer", "worker"),
-        (3, "reviewer", "reviewer"),
+    for (id, name, role, parent) in [
+        (1, "orchestrator", "orchestrator", None),
+        (2, "implementer", "worker", Some("run-1")),
+        (3, "reviewer", "reviewer", Some("run-1")),
     ] {
-        fixture.emit(run_started(&format!("run-{id}"), name, role));
+        fixture.emit(run_started(&format!("run-{id}"), name, role, parent));
     }
     fixture.emit(Event::new(LifecycleEvent::AgentRunStateChanged {
         run_id: "run-2".into(),

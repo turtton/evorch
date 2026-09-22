@@ -118,8 +118,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_event(&mut self, event: &Event) {
+        if self.apply_conversation_event(event) {
+            self.save_sidebar();
+        }
         self.apply_runtime_event(event);
-        self.transcripts.apply(event);
         self.pending_approvals.apply_event(
             event,
             |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
@@ -158,20 +160,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     fn apply_runtime_event(&mut self, event: &Event) {
         match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
-                run_id,
-                parent_run_id,
-                agent_name,
-                ..
-            }) => {
-                if let Some(chat) = agent_name.strip_prefix("chat:") {
-                    let thread = chat.split_once(':').map_or(chat, |(_, thread)| thread);
-                    self.bind_thread_run(thread, run_id);
-                    self.transcripts.bind_thread_root(thread, run_id);
-                } else {
-                    self.attach_run(run_id, parent_run_id.as_deref());
-                    self.open_subagent_pane(run_id);
-                }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+                self.open_subagent_pane(run_id);
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));
@@ -203,68 +193,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::Snapshot(_) => {}
             // goal ループ状態の UI 反映は T1.5 の reducer で接続する。
             EventKind::Orchestrator(ev) => {
-                if let event_bus::OrchestratorEvent::GoalCreated {
-                    thread_id,
-                    root_run_id,
-                    ..
-                } = ev
-                {
-                    self.bind_thread_run(thread_id, root_run_id);
-                    self.transcripts.bind_thread_root(thread_id, root_run_id);
-                }
-                if let event_bus::OrchestratorEvent::ContinuationDispatched {
-                    trigger_run_id,
-                    new_run_id,
-                    ..
-                } = ev
-                    && let Some(thread) = self
-                        .sidebar
-                        .threads
-                        .iter()
-                        .find(|thread| thread.run_ids.iter().any(|run| run == trigger_run_id))
-                        .map(|thread| thread.id.to_string())
-                {
-                    self.bind_thread_run(&thread, new_run_id);
-                    self.transcripts.bind_thread_root(&thread, new_run_id);
-                }
                 apply_orchestrator_event(&mut self.merge.view, &mut self.loop_status, ev);
             }
-        }
-    }
-
-    fn attach_run(&mut self, run_id: &str, parent_run_id: Option<&str>) {
-        if self
-            .sidebar
-            .threads
-            .iter()
-            .any(|thread| thread.run_ids.iter().any(|run| run == run_id))
-        {
-            return;
-        }
-        let parent = parent_run_id.and_then(|parent| {
-            self.sidebar
-                .threads
-                .iter()
-                .position(|thread| thread.run_ids.iter().any(|run| run == parent))
-        });
-        let active = self.sidebar.active_thread.as_ref().and_then(|active| {
-            self.sidebar.threads.iter().position(|thread| {
-                &thread.id == active
-                    && parent_run_id.is_none()
-                    && self.sidebar.threads.len() == 1
-                    && self.sidebar.selected_project.as_ref() == Some(&thread.project_id)
-            })
-        });
-        if let Some(index) = parent.or(active)
-            && !self.sidebar.threads[index]
-                .run_ids
-                .iter()
-                .any(|existing| existing == run_id)
-        {
-            self.sidebar.threads[index].run_ids.push(run_id.to_owned());
-            self.transcripts
-                .bind_run(run_id, &self.sidebar.threads[index].id.to_string());
-            self.save_sidebar();
         }
     }
 

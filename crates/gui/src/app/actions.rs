@@ -344,7 +344,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
-                self.bind_thread_run(&thread_id, &run_id);
+                if self.bind_thread_run(&thread_id, &run_id) {
+                    self.save_sidebar();
+                }
             }
             LoopEvent::ChatRejected { reason, .. } => {
                 tracing::warn!(%reason, "chat command rejected");

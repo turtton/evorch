@@ -4,6 +4,7 @@ mod actions;
 mod attention;
 pub mod auto_title;
 mod composer;
+mod conversation;
 mod durable_tasks;
 mod external_commands;
 mod frame;

@@ -32,21 +32,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
-    pub(super) fn bind_thread_run(&mut self, thread_id: &str, run_id: &str) {
-        if let Some(thread) = self
-            .sidebar
-            .threads
-            .iter_mut()
-            .find(|thread| thread.id.to_string() == thread_id)
-        {
-            if !thread.run_ids.iter().any(|run| run == run_id) {
-                thread.run_ids.push(run_id.into());
-            }
-            self.transcripts.bind_run(run_id, thread_id);
-            self.save_sidebar();
-        }
-    }
-
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
         let events = db.events_all_ordered()?;
         if let Some(path) = &self.sidebar_path {
@@ -70,15 +55,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
         for stored in events {
-            if let event_bus::EventKind::Orchestrator(event_bus::OrchestratorEvent::GoalCreated {
-                thread_id,
-                root_run_id,
-                ..
-            }) = &stored.event.kind
-            {
-                self.bind_thread_run(thread_id, root_run_id);
-                self.transcripts.bind_thread_root(thread_id, root_run_id);
-            }
             while messages
                 .peek()
                 .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
@@ -87,37 +63,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.restore_user_message(message);
                 }
             }
-            if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
-                run_id,
-                parent_run_id,
-                agent_name,
-                ..
-            }) = &stored.event.kind
-            {
-                let owner = agent_name
-                    .strip_prefix("chat:")
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        self.sidebar
-                            .threads
-                            .iter()
-                            .find(|thread| {
-                                thread.run_ids.contains(run_id)
-                                    || parent_run_id
-                                        .as_ref()
-                                        .is_some_and(|parent| thread.run_ids.contains(parent))
-                            })
-                            .map(|thread| thread.id.to_string())
-                    });
-                if let Some(owner) = owner {
-                    self.bind_thread_run(&owner, run_id);
-                    if parent_run_id.is_none() {
-                        self.transcripts.bind_thread_root(&owner, run_id);
-                    }
-                }
-            }
             self.transcripts.select_thread(None);
-            self.transcripts.apply(&stored.event);
+            self.apply_conversation_event(&stored.event);
         }
         for message in messages {
             self.restore_user_message(message);
