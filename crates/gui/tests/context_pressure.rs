@@ -4,6 +4,8 @@ use gui::model::{provider_settings::ProviderSettingsModel, telemetry::TelemetryO
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+#[path = "context_pressure/model_switch.rs"]
+mod model_switch;
 #[path = "context_pressure/provider_types.rs"]
 mod provider_types;
 
@@ -72,7 +74,7 @@ fn pressure_is_omitted_when_window_is_unknown_or_zero() {
 }
 
 #[test]
-fn pressure_keeps_last_known_baseline_while_next_request_is_in_flight() {
+fn pressure_is_omitted_when_next_model_window_is_unknown() {
     // Given: pressure from a completed request.
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed(100));
@@ -88,14 +90,14 @@ fn pressure_keeps_last_known_baseline_while_next_request_is_in_flight() {
         run_id: Some("run-1".into()),
     }));
     overlay.refresh_costs(&settings(Some(1000)));
-    // Then: the last known input-side baseline stays visible as the live starting point.
+    // Then: the previous model's window must not stand in for unknown metadata.
     assert_eq!(
         overlay
             .row("run-1")
             .unwrap()
             .context_pressure_label()
             .as_deref(),
-        Some("40%")
+        None
     );
 }
 

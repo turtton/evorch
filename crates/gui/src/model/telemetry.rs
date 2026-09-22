@@ -107,6 +107,7 @@ impl TelemetryOverlay {
         match &event.kind {
             EventKind::Provider(ProviderEvent::RequestStarted {
                 provider,
+                profile,
                 model,
                 run_id: Some(run_id),
                 ..
@@ -117,6 +118,17 @@ impl TelemetryOverlay {
                 row.in_flight = true;
                 row.provider = Some(provider.clone());
                 row.model = Some(model.clone());
+                if let Some(context) = &mut row.latest_context {
+                    let key = pricing::ModelKey {
+                        provider: provider.clone(),
+                        profile: profile.clone(),
+                        model: model.clone(),
+                    };
+                    if context.key != key {
+                        context.key = key;
+                        row.context_window = None;
+                    }
+                }
                 row.requests = row.requests.saturating_add(1);
                 row.request_started_at = Some(now);
                 row.request_duration = None;
