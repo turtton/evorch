@@ -4,6 +4,8 @@
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
 mod budget;
+#[cfg(test)]
+mod delegate_cleanup_tests;
 mod durable;
 mod identical_calls;
 mod messages;
