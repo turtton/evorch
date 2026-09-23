@@ -670,10 +670,6 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
-            if self.context.prune_tool_outputs() {
-                self.last_usage = None;
-                self.compaction.last_usage_estimated_tokens = None;
-            }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,

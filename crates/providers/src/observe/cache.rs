@@ -1,20 +1,27 @@
-use crate::message::{ChatRequest, ContentBlock, ToolResultContent};
+//! Cache ratios use provider token counts. Regression comparisons require an
+//! unchanged, recently observed wire prefix; request size is not cache residency.
 use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::time::Duration;
 
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
+use tokio::time::Instant;
 
 use super::AttemptObserver;
 use crate::message::Usage;
 
-/// Below 50% of the byte-based prefix estimate warrants investigation, not failure.
+#[path = "cache_prefix.rs"]
+mod prefix;
+use prefix::{RequestPrefix, WireInput};
+
 const CACHE_REGRESSION_THRESHOLD: f64 = 0.5;
-/// Bound observer bookkeeping; evicted runs restart cold rather than false-alerting.
-const MAX_WARM_SCOPES: usize = 1024;
-static WARM_SCOPES: LazyLock<Mutex<VecDeque<WarmScope>>> =
+const MAX_SCOPES: usize = 1024;
+// A conservative comparison window, not a guarantee of server cache residency.
+const MAX_BASELINE_AGE: Duration = Duration::from_secs(5 * 60);
+static RECENT_REQUESTS: LazyLock<Mutex<VecDeque<CachedRequest>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct CacheScope {
     run: String,
     provider: String,
@@ -23,40 +30,26 @@ struct CacheScope {
     model: String,
 }
 
-struct WarmScope {
+#[derive(Clone)]
+struct CachedRequest {
     bus: Weak<EventBus>,
     scope: CacheScope,
-}
-
-struct CacheRegression {
+    prefix: RequestPrefix,
     request_id: String,
-    scope: CacheScope,
-    expected: u64,
-    actual: u64,
-    ratio: f64,
+    cached_tokens: u64,
+    started_at: Instant,
 }
 
-impl From<CacheRegression> for DiagnosticEvent {
-    fn from(regression: CacheRegression) -> Self {
-        Self {
-            source: "providers.cache".into(),
-            severity: DiagnosticSeverity::Warning,
-            code: "CacheRegression".into(),
-            detail: format!(
-                "provider={} profile={:?} protocol={} model={} expected_cacheable_tokens={} cache_read_tokens={} cache_hit_ratio={} threshold={CACHE_REGRESSION_THRESHOLD}",
-                regression.scope.provider,
-                regression.scope.profile,
-                regression.scope.protocol,
-                regression.scope.model,
-                regression.expected,
-                regression.actual,
-                regression.ratio,
-            ),
-            run_id: Some(regression.scope.run),
-            thread_id: None,
-            call_id: Some(regression.request_id),
-        }
-    }
+pub(super) struct CacheObservation {
+    prefix: RequestPrefix,
+    baseline: Option<CachedRequest>,
+}
+
+fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
+    (denominator > 0).then(|| {
+        Duration::from_secs(numerator).as_secs_f64()
+            / Duration::from_secs(denominator).as_secs_f64()
+    })
 }
 
 impl AttemptObserver {
@@ -70,31 +63,52 @@ impl AttemptObserver {
         })
     }
 
-    /// Snapshot before sending: concurrent cold attempts cannot warm each other.
-    /// Only a completed request reporting cache read/write > 0 establishes warmth
-    /// in the same bus/run/provider/profile/protocol/model. Missing scope stays cold.
-    pub(super) fn cache_is_warm(&self) -> bool {
-        let Some((bus, scope)) = self.bus.as_ref().zip(self.cache_scope()) else {
-            return false;
-        };
-        let mut scopes = WARM_SCOPES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        scopes.retain(|entry| entry.bus.strong_count() > 0);
-        scopes
-            .iter()
-            .any(|entry| entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope)
+    /// Snapshot before sending, so concurrent cold requests cannot warm each
+    /// other retroactively. Persist only fixed-size hashes, never prompt text.
+    pub(super) fn observe_cache_request(
+        &self,
+        request: &impl serde::Serialize,
+    ) -> Option<CacheObservation> {
+        let wire = WireInput::new(request, self.protocol)?;
+        let previous = self
+            .bus
+            .as_ref()
+            .zip(self.cache_scope())
+            .and_then(|(bus, scope)| {
+                let mut recent = RECENT_REQUESTS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                recent.retain(|entry| {
+                    entry.bus.strong_count() > 0 && entry.started_at.elapsed() < MAX_BASELINE_AGE
+                });
+                recent
+                    .iter()
+                    .find(|entry| entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope)
+                    .cloned()
+            });
+        let baseline =
+            previous.filter(|entry| entry.cached_tokens > 0 && wire.extends(&entry.prefix));
+        Some(CacheObservation {
+            prefix: wire.prefix()?,
+            baseline,
+        })
     }
 
     pub(super) fn record_cache(&self, usage: &Usage) {
-        let Some(expected) = self.expected_cacheable_tokens else {
-            return;
-        };
-        let ratio = u32::try_from(expected)
-            .ok()
-            .filter(|n| *n > 0)
-            .zip(u32::try_from(usage.cache_read_tokens).ok())
-            .map(|(expected, actual)| f64::from(actual) / f64::from(expected));
+        let valid_usage = usage
+            .cache_read_tokens
+            .checked_add(usage.cache_write_tokens)
+            .filter(|cached| *cached <= usage.input_tokens);
+        let hit_ratio =
+            valid_usage.and_then(|_| ratio(usage.cache_read_tokens, usage.input_tokens));
+        let baseline = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.baseline.as_ref());
+        let previous_cache_tokens = baseline.map(|entry| entry.cached_tokens);
+        let retention_ratio = valid_usage.and_then(|_| {
+            previous_cache_tokens.and_then(|tokens| ratio(usage.cache_read_tokens, tokens))
+        });
         tracing::info!(
             request_id = %self.request_id,
             run_id = self.observation.as_ref().map(|context| context.run_id.as_str()),
@@ -102,79 +116,65 @@ impl AttemptObserver {
             profile = self.profile.as_deref(),
             protocol = self.protocol,
             model = %self.model,
-            expected_cacheable_tokens = expected,
+            input_tokens = usage.input_tokens,
             cache_read_tokens = usage.cache_read_tokens,
-            cache_hit_ratio = ratio,
-            cache_estimation = "utf8_bytes_div_4",
+            cache_hit_ratio = hit_ratio,
+            previous_request_id = baseline.map(|entry| entry.request_id.as_str()),
+            previous_cache_tokens,
+            cache_retention_ratio = retention_ratio,
+            cache_comparison = "unchanged_wire_prefix",
             "prompt cache request completed"
         );
         let Some((bus, scope)) = self.bus.as_ref().zip(self.cache_scope()) else {
             return;
         };
-        if expected > 0 && (usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0) {
-            let mut scopes = WARM_SCOPES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scopes.retain(|entry| {
-                entry.bus.strong_count() > 0
-                    && !(entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope)
-            });
-            if scopes.len() >= MAX_WARM_SCOPES {
-                scopes.pop_front();
-            }
-            scopes.push_back(WarmScope {
-                bus: Arc::downgrade(bus),
-                scope,
-            });
-        }
-        if let Some(ratio) =
-            ratio.filter(|ratio| self.cache_warm && *ratio < CACHE_REGRESSION_THRESHOLD)
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        if let (Some(baseline), Some(retention), Some(hit)) = (baseline, retention_ratio, hit_ratio)
+            && retention < CACHE_REGRESSION_THRESHOLD
         {
-            // Rebuild only on the diagnostic path after moving the scope into bookkeeping.
-            if let Some(scope) = self.cache_scope() {
-                bus.emit(Event::new(DiagnosticEvent::from(CacheRegression {
-                    request_id: self.request_id.clone(),
-                    scope,
-                    expected,
-                    actual: usage.cache_read_tokens,
-                    ratio,
-                })));
-            }
+            bus.emit(Event::new(DiagnosticEvent {
+                source: "providers.cache".into(),
+                severity: DiagnosticSeverity::Warning,
+                code: "CacheRegression".into(),
+                detail: format!(
+                    "provider={} profile={:?} protocol={} model={} input_tokens={} cache_read_tokens={} cache_hit_ratio={} previous_request_id={} previous_cache_tokens={} cache_retention_ratio={} threshold={CACHE_REGRESSION_THRESHOLD}",
+                    self.provider, self.profile, self.protocol, self.model,
+                    usage.input_tokens, usage.cache_read_tokens, hit,
+                    baseline.request_id, baseline.cached_tokens, retention,
+                ),
+                run_id: Some(scope.run.clone()),
+                thread_id: None,
+                call_id: Some(self.request_id.clone()),
+            }));
         }
+        let mut recent = RECENT_REQUESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A late response from an earlier concurrent attempt must not replace
+        // the newest request's baseline with an older branch of the conversation.
+        if recent.iter().any(|entry| {
+            entry.bus.ptr_eq(&Arc::downgrade(bus))
+                && entry.scope == scope
+                && entry.started_at > self.started_at
+        }) {
+            return;
+        }
+        recent.retain(|entry| {
+            entry.bus.strong_count() > 0
+                && !(entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope)
+        });
+        if recent.len() >= MAX_SCOPES {
+            recent.pop_front();
+        }
+        recent.push_back(CachedRequest {
+            bus: Arc::downgrade(bus),
+            scope,
+            prefix: cache.prefix.clone(),
+            request_id: self.request_id.clone(),
+            cached_tokens: valid_usage.unwrap_or_default(),
+            started_at: self.started_at,
+        });
     }
-}
-
-/// Approximate the reusable prefix, excluding the newest conversation message.
-/// This is a byte heuristic, not a tokenizer or a prediction of cache residency.
-pub(super) fn expected_cacheable_tokens(request: &ChatRequest) -> u64 {
-    let newest = request
-        .messages
-        .iter()
-        .rposition(|message| message.role != crate::message::Role::System);
-    let message_bytes = request
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| Some(*index) != newest)
-        .flat_map(|(_, message)| &message.content)
-        .map(|block| match block {
-            ContentBlock::Text { text } | ContentBlock::Reasoning { text } => text.len(),
-            ContentBlock::ToolUse { id, name, input } => {
-                id.len() + name.len() + input.to_string().len()
-            }
-            ContentBlock::ToolResult { content, .. } => content
-                .iter()
-                .map(|part| match part {
-                    ToolResultContent::Text { text } => text.len(),
-                })
-                .sum(),
-            ContentBlock::Image { .. } => 0,
-        })
-        .sum::<usize>();
-    let tool_bytes = request
-        .tools
-        .iter()
-        .map(|tool| tool.name.len() + tool.description.len() + tool.input_schema.to_string().len())
-        .sum::<usize>();
-    u64::try_from(message_bytes.saturating_add(tool_bytes).div_ceil(4)).unwrap_or(u64::MAX)
 }

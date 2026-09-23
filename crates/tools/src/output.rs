@@ -152,20 +152,7 @@ fn tail_preview(text: &str) -> &str {
     text
 }
 
-/// Save older in-memory text before removing its preview from model context.
-pub fn archive_text(text: &str) -> Option<String> {
-    let safe = SecretRedactor::from_env().redact(text);
-    let result = artifact_result(
-        &safe.text,
-        "",
-        text.len() as u64,
-        text.len() <= CAPTURE_BYTES,
-        safe.count,
-    );
-    artifact_reference(&result.content).map(str::to_owned)
-}
-
-/// Extract a compact, self-contained reference for old tool-result pruning.
+/// Extract a self-contained artifact reference for shell job metadata.
 pub fn artifact_reference(text: &str) -> Option<&str> {
     let index = text.rfind(MARKER)?;
     text.ends_with(']').then_some(&text[index + 1..])

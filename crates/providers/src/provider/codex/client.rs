@@ -129,7 +129,6 @@ impl CodexClient {
             streaming,
             request.observation.clone(),
         )
-        .with_cache_expectation(request)
     }
 
     async fn execute(
@@ -150,7 +149,9 @@ impl CodexClient {
         let token = self.session.current().await?;
         let wire_request = to_wire_request(request);
         let turn_id = Uuid::new_v4().to_string();
-        let mut observer = self.observer(request, streaming);
+        let mut observer = self
+            .observer(request, streaming)
+            .with_cache_observation(&wire_request);
         let mut builder = self
             .http_client
             .post(&self.endpoint)

@@ -107,6 +107,8 @@ impl AgentContext {
     ///
     /// ツール結果は provider の canonical 形式ではユーザーロールで送る
     /// (Anthropic Messages API 互換の慣習)。
+    /// サイズ制限・artifact 退避は返却時に適用済み。追加後の本文は書き換えず、
+    /// モデル要求間の共通 prefix を保つ。履歴の縮小は圧縮チェックポイントで行う。
     pub fn push_tool_result(&mut self, tool_call_id: impl Into<String>, result: ToolResult) {
         self.messages.push(Message {
             role: MessageRole::User,
@@ -118,42 +120,6 @@ impl AgentContext {
                 is_error: result.is_error,
             }],
         });
-    }
-
-    /// Keep recent results verbatim; replace older bulky text with temporary
-    /// references, retaining tool-call IDs and error status for protocol validity.
-    pub(crate) fn prune_tool_outputs(&mut self) -> bool {
-        let mut recent = 0usize;
-        let mut changed = false;
-        let visible_start = self
-            .latest_checkpoint()
-            .map_or(0, |checkpoint| checkpoint.range.1);
-        for message in self.messages[visible_start..].iter_mut().rev() {
-            for block in message.content.iter_mut().rev() {
-                if let ContentBlock::ToolResult { content, .. } = block {
-                    recent += 1;
-                    if recent <= 8 {
-                        continue;
-                    }
-                    for item in content {
-                        {
-                            let ToolResultContent::Text { text } = item;
-                            if text.len() < 1024 {
-                                continue;
-                            }
-                            let reference = tools::output::artifact_reference(text)
-                                .map(str::to_owned)
-                                .or_else(|| tools::output::archive_text(text));
-                            if let Some(reference) = reference {
-                                *text = reference;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        changed
     }
 
     /// 圧縮チェックポイントを追加する。
@@ -229,50 +195,6 @@ mod tests {
         context.prepend_system("workspace".into());
         assert_eq!(context.latest_checkpoint().unwrap().range, (1, 3));
         assert_eq!(&context.visible_messages()[1..], before.as_slice());
-    }
-
-    #[test]
-    fn prune_old_tool_previews_preserves_pairs_errors_and_recent_results() {
-        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
-        let marker =
-            "[Output artifact: /var/tmp/expired-test-log; complete. Temporary logs can expire.]";
-        for index in 0..10 {
-            context.push_assistant(Message {
-                role: MessageRole::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: format!("call-{index}"),
-                    name: "shell".into(),
-                    input: serde_json::json!({"command":"example"}),
-                }],
-            });
-            context.push_tool_result(
-                format!("call-{index}"),
-                ToolResult::error(format!("{}\n{marker}", "output".repeat(300))),
-            );
-        }
-        assert!(context.prune_tool_outputs());
-        assert_eq!(context.messages.len(), 20);
-        let ContentBlock::ToolResult {
-            tool_call_id,
-            content,
-            is_error,
-        } = &context.messages[1].content[0]
-        else {
-            panic!("tool result");
-        };
-        assert_eq!(tool_call_id, "call-0");
-        assert!(*is_error);
-        assert_eq!(
-            content,
-            &vec![ToolResultContent::Text {
-                text: marker.into()
-            }]
-        );
-        let ContentBlock::ToolResult { content, .. } = &context.messages[19].content[0] else {
-            panic!("recent result");
-        };
-        assert!(matches!(&content[0], ToolResultContent::Text { text } if text.len() > 1024));
-        assert!(!context.prune_tool_outputs());
     }
 
     // Given: run-1 の Worker ロール / When: new で生成 / Then: 履歴は空

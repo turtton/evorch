@@ -9,8 +9,8 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 ## 要件
 
 - **Stable Prefix**: system prompt / role definition / tool schema / project instruction snapshot / skill snapshot / memory snapshot からなる prefix を毎 turn 再生成しない。AGENTS.md / skills / memory / environment / tool schema は task 開始時に snapshot 化して固定する。`refresh_context` で明示的に cache invalidation する
-- **Append-only Context**: Stable Prefix の後に user / assistant / tool の message を追記するのみ
-- **Cache metrics**: 各 request で expected cacheable tokens / actual cache read tokens / cache hit ratio を記録する。急落した場合は CacheRegression として DiagnosticBus に流す。cache は billing metric ではなく runtime health metric
+- **Append-only Context**: Stable Prefix の後に user / assistant / tool の message を追記するのみ。大きなツール出力の制限・ファイル退避は返却時に行い、送信済み結果を件数や経過ターンに応じて書き換えない。履歴削減は明示的な compaction 境界で行う
+- **Cache metrics**: 各 request で実測 input tokens / cache read tokens / cache hit ratio (`cache_read / input`) を記録する。比較可能な直近要求の wire prefix がそのまま残る場合、以前の実測 cache read/write に対する再利用量が急落したときに CacheRegression として DiagnosticBus に流す。概算の本文量を実測率の分母にしない。cache は billing metric ではなく runtime health metric
 - **Cache-aware wait**: 長時間 command 実行中に prompt cache TTL が切れないよう、JobHandle で待機し cache lease 期限切れが近づいたら agent turn に戻る。tool call 自体を cache TTL より長く block させない（Senpi の cache-aware wait を runtime primitive にする）
 - **Compaction**: Agent が自分で判断して呼べる control-flow primitive（compact_context）。context checkpoint を更新して agent resume。provider 固有 compaction は `trait Compactor` で抽象化し、OpenAI / GPT 系は公式 Responses API の compaction を優先
 - **Memory**: task / session 終了時に quick agent が「将来も有用な知識」を抽出して persistent memory へ保存。session 途中で stable prefix に挿入せず、次の task boundary から利用（Relevant Memory Retrieval → Memory Snapshot → Stable Prefix）
@@ -18,7 +18,7 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 ## 受け入れ基準
 
 - Stable Prefix がターン間で不変であり、cache hit ratio が計測・記録されること
-- cache hit ratio が閾値を下回った場合に CacheRegression 診断が発行されること
+- 直近の不変 wire prefix で以前の実測 cache 量に対する再利用割合が閾値を下回る場合に CacheRegression が発行され、新規 suffix 増加・入力変更・古い基準だけでは誤警告しないこと
 - compact_context が control-flow primitive として動作し、checkpoint から resume できること
 
 ## Related decisions
@@ -26,6 +26,8 @@ Prompt cache hit rate は後付け optimization ではなく、Runtime correctne
 - [ADR 0003: Cache-first Context Engine](../../decisions/0003-cache-first-context-engine.md)
 - [ADR 0004: Provider Type / Profile / Logical Model / API Protocol の分離](../../decisions/0004-provider-routing-separation.md)
 - [2026-09-17 cache 方針補足: 指標・診断・snapshot の実装語彙と未解決範囲](../../clarifications/cache-policy-2026-09-17.md)
+
+- [2026-09-23 cache 方針補足: ツール返却時の制限と実測率・回帰判定](../../clarifications/cache-policy-2026-09-23.md)
 
 ## Open questions
 

@@ -106,7 +106,7 @@ impl ProviderClient for AnthropicClient {
             false,
             request.observation.clone(),
         )
-        .with_cache_expectation(request);
+        .with_cache_observation(&wire_request);
         let request_builder = self
             .http_client
             .post(self.messages_url())
@@ -161,7 +161,7 @@ impl ProviderClient for AnthropicClient {
             true,
             request.observation.clone(),
         )
-        .with_cache_expectation(request);
+        .with_cache_observation(&wire_request);
         let http_request = self
             .http_client
             .post(self.messages_url())

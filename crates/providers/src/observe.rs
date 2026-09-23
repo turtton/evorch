@@ -43,8 +43,7 @@ pub(crate) struct AttemptObserver {
     started_emitted: bool,
     first_token_emitted: bool,
     terminal_emitted: bool,
-    expected_cacheable_tokens: Option<u64>,
-    cache_warm: bool,
+    cache: Option<cache::CacheObservation>,
 }
 
 impl AttemptObserver {
@@ -71,14 +70,12 @@ impl AttemptObserver {
             started_emitted: false,
             first_token_emitted: false,
             terminal_emitted: false,
-            expected_cacheable_tokens: None,
-            cache_warm: false,
+            cache: None,
         }
     }
 
-    pub(crate) fn with_cache_expectation(mut self, request: &crate::message::ChatRequest) -> Self {
-        self.expected_cacheable_tokens = Some(cache::expected_cacheable_tokens(request));
-        self.cache_warm = self.cache_is_warm();
+    pub(crate) fn with_cache_observation(mut self, wire_request: &impl serde::Serialize) -> Self {
+        self.cache = self.observe_cache_request(wire_request);
         self
     }
 
