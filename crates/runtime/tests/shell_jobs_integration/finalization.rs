@@ -197,11 +197,7 @@ async fn more_than_retained_capacity_cancelled_runs_release_handles_and_keep_dur
                 .iter()
                 .any(|c| c.call_id == "unobserved-shell-jobs" && c.may_have_side_effects)
         );
-        assert!(
-            runtime
-                .continue_goal(run, "unsafe resume".into(), RunConfig::default())
-                .is_err()
-        );
+        assert!(diagnostics.history_available_with_current_authority);
         let poll = executor
             .execute(
                 &ToolExecutionContext {

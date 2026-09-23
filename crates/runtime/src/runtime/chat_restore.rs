@@ -68,7 +68,7 @@ impl AgentRuntime {
                 "goal identity".into(),
             )));
         }
-        let restored = RestoredState::from_record(&record)?;
+        let restored = RestoredState::for_conversation(&record)?;
         descriptor.restorable = false;
         descriptor.non_restorable_reason = Some("snapshot_consumed".into());
         record.restorable = false;
@@ -145,7 +145,7 @@ impl AgentRuntime {
                             Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
                                 fail(RunRestoreFailure::CorruptContext(reason))
                             })?);
-                        Some(RestoredState::from_record(&record)?)
+                        Some(RestoredState::for_conversation(&record)?)
                     }
                 }
             }

@@ -11,6 +11,7 @@ use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 
 mod diagnostics;
+mod recovery;
 pub use diagnostics::RunRestoreDiagnostics;
 
 pub(crate) struct RestoredState {
@@ -52,8 +53,7 @@ impl RestoredState {
             return Err(crate::RuntimeError::RunRestoreFailed {
                 run_id: record.run_id.clone(),
                 reason: crate::RunRestoreFailure::UnsupportedConfig(
-                    "unresolved_tool_calls: inspect actual effects before starting a new run"
-                        .into(),
+                    recovery::UNRESOLVED_TOOL_CALLS_REASON.into(),
                 ),
             });
         }
@@ -176,8 +176,8 @@ pub(crate) fn persist_checkpoint(state: &LoopState) -> Result<(), SnapshotError>
 }
 
 /// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
-/// Recovery never repeats an incomplete batch; an operator can inspect the effects and
-/// continue its durable task in a new run with current authority.
+/// Recovery never repeats an incomplete batch. Current-authority chat entrances
+/// retain history and report missing outcomes as errors on the next turn.
 pub(crate) fn persist_tool_intent(state: &LoopState) -> Result<(), SnapshotError> {
     let end = safe_context_end(&state.context.messages);
     if end == 0 || end == state.context.messages.len() {
@@ -307,12 +307,9 @@ fn write_snapshot(
         call.may_have_side_effects =
             tool_may_have_side_effects(&state.shared.executor, &call.tool_name);
     }
-    let non_restorable_reason = if interrupted_tool_calls
-        .iter()
-        .any(|call| call.may_have_side_effects)
-    {
-        Some("unresolved_tool_calls: inspect actual effects before starting a new run".into())
-    } else if renewable_team.is_some() {
+    // Tool uncertainty is diagnostic history, not an execution configuration.
+    // Preserve the independent authority-renewal reason even for interrupted runs.
+    let non_restorable_reason = if renewable_team.is_some() {
         Some(TEAM_RENEWAL_REQUIRED_REASON.into())
     } else if state.task.parent.is_none()
         && unsupported

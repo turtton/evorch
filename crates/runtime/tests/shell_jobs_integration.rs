@@ -323,10 +323,22 @@ async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in
         "continue".into(),
         RunConfig::default(),
     );
-    assert!(
-        matches!(restore, Err(RuntimeError::RunRestoreFailed { .. })),
-        "uncertain writes must not be silently replayed: {restore:?}"
+    let restored = restore.unwrap();
+    let resumed = next(&mut calls).await;
+    let text = serde_json::to_string(&resumed.messages).unwrap();
+    assert!(text.contains("ToolExecutionOutcomeUnknown"));
+    assert!(text.contains("unobserved-shell-jobs"));
+    // No replay: the existing partial effect and dead PID remain unchanged.
+    assert_eq!(
+        std::fs::read_to_string(root.join("partial.txt")).unwrap(),
+        "partial"
     );
+    assert_pid_reaped(&pid);
+    resumed.respond(text_response(
+        "continued with unknown outcome",
+        FinishReason::Stop,
+    ));
+    assert_eq!(wait(&runtime, restored).await, AgentRunPhase::Done);
     drop(call);
 }
 

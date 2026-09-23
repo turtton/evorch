@@ -322,6 +322,66 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
 }
 
 #[tokio::test]
+async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
+    let read = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let mut harness = harness_with_read(
+        vec![
+            read_response(0),
+            read_response(2),
+            text_response("continued"),
+        ],
+        1_000_000,
+        read.clone(),
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Keep this conversation".into(),
+        RunConfig::default(),
+    );
+    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
+        .await
+        .unwrap();
+    harness.runtime.cancel(run).unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Error).await;
+    harness.runtime.wait(run).await.unwrap();
+    harness
+        .runtime
+        .continue_goal(
+            run,
+            "Explain the interrupted result".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+    verify_trace(&harness, run, &events, 0);
+    let requests = harness.mock.recorded_requests();
+    let request = &requests
+        .iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .nth(1)
+        .unwrap()
+        .body;
+    let text = request.to_string();
+    assert!(text.contains("ToolExecutionOutcomeUnknown"));
+    assert!(text.contains("Explain the interrupted result"));
+    assert!(text.contains("cancelled"));
+}
+
+#[tokio::test]
 async fn ordinary_tool_turns_reuse_all_previous_wire_input() {
     // Includes returned artifacts, errors, multibyte text and the former eight-result boundary.
     let script = (0..12)

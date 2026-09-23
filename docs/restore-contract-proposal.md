@@ -8,6 +8,38 @@ restoration. This revision preserves ADR 0026's existing run/task substrate and
 separates **reusing conversation history** from **reviving execution authority**.
 It does not resume old tools, processes, workers, or leases.
 
+## 2026-09-24 amendment: outcome errors do not end the conversation
+
+The operator requested that unavailable execution results be treated as errors
+while continuing the original conversation, including an escalation source thread.
+This supersedes the blanket chat-restoration refusal described below; it does not
+add cross-thread coordination or history search.
+
+- `continue_goal` / `delegate_chat` reuse the protocol-complete saved prefix and
+  append `ToolExecutionOutcomeUnknown` notices naming each interrupted call.
+  Missing batches have no saved arguments, so recovery does not fabricate tool
+  calls or orphan tool-result blocks. Already-sent cancellation results remain
+  unchanged. A notice says the outcome may include partial/full effects and that
+  the operation was not replayed; dependent work should inspect current state.
+- Explicit current authority, root identity, stopped descendants, team/claim
+  validation, consumed snapshots and unsupported configuration checks remain.
+  A retained live shell after failed cleanup also prevents restoring that root.
+- Ordinary successful history remains byte-for-byte unchanged. Notices are
+  appended, not inserted into the old prefix, and identical per-call notices are
+  not repeatedly appended for old cancellations. Aggregate shell markers may
+  represent a new interruption and are reported again when present.
+- Newly saved uncertainty metadata is independent of configuration refusal
+  reasons. Existing root records with `unresolved_tool_calls` may reuse history
+  under current authority; no old permit, job, lease or process is restored.
+- `restore_and_deliver` still cannot renew authority or restore histories with
+  uncertain side effects. Read-only diagnostics report conditional chat recovery
+  separately from disk-authoritative support. This is not acknowledgement that
+  unknown effects did not occur.
+
+Regression coverage: `restore_tool_intent`, `shell_jobs_integration`, GUI
+`escalation_follow_up`, and the input-derived mock cache plus independent wire
+prefix checks in `cache_preservation_e2e`.
+
 ## 承認済みの範囲
 
 - `continue_goal` / `delegate_chat` で、停止済みrootの会話履歴を引き継げる範囲を広げます。

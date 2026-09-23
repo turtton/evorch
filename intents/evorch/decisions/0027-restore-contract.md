@@ -6,6 +6,8 @@ Accepted（2026-09-21）。root履歴の明示的な権限更新と終端処理�
 改訂範囲は利用者が「OK。承認する」と最終承認した。
 回答は `intents/evorch/interviews/harness-reliability-20260923.json` の
 `final-approval` に記録している。
+2026-09-24、利用者の「実行結果が取れなかったものはそういうエラーとして処理して
+会話を継続させる」指示に基づき、第5節のchat継続契約を改訂した。
 
 ## Context
 
@@ -84,9 +86,17 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
   保存する。引数本体はこの診断metadataに保存しない。run storeが設定されている場合、
   intent保存の失敗後はtoolをdispatchしない。
 - 結果が揃う前のcrash/cancelや、終了結果を未確認のshell jobは
-  `interrupted_tool_calls` として残す。書込・process・networkなどの副作用を
-  否定できない履歴は全ての復元入口で拒否する。未知のtoolも安全側に倒す。
-  read-only中断は診断に残すが履歴再利用を妨げず、toolを自動再実行しない。
+  `interrupted_tool_calls` として残す。2026-09-24の利用者指示により、
+  `continue_goal` / `delegate_chat` は未取得結果を `ToolExecutionOutcomeUnknown`
+  の通知として履歴末尾に追加し、現在の権限で会話を継続する。結果の成功・無副作用は
+  仮定せず、旧tool/jobを再実行しない。tool call本体を保存していない不完全batchには
+  引数や孤立したToolResultを捏造せず、call ID/nameを含む通知を使う。
+  既存履歴・cancelled結果・cache prefixは書き換えない。
+- `restore_and_deliver` は副作用不明の記録を引き続き拒否する。現在の権限・root識別・
+  team/claim・子孫停止・消費済み記録・非対応設定の確認は会話継続でも維持する。
+  cleanup失敗で旧shell processが動作中なら継続を拒否する。新規snapshotは未確認結果と
+  設定の拒否理由を独立に保持し、既存rootの `unresolved_tool_calls` 記録は現在権限で
+  履歴だけを再利用する。escalation先の状態取得・thread間連携はこの変更に含めない。
 - shell回収、最終保存、handle解放、workspace cleanupまたは引継ぎ準備を終えてから
   元runの終端状態と完了通知を公開する。同一IDで再開したrunに、旧runのdrain、
   snapshot書込、workspace inspection更新が触れない順序を守る。
@@ -96,8 +106,9 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
   回収や必要な保存を確認できなければhandle/workspaceを保持して失敗を報告する。
   未確認shell副作用がないrunのsnapshot保存失敗は診断に残し、既存の非致命扱いを保つ。
 
-未確認の副作用を自動承認する経路は設けない。利用者が実ファイル・process・durable
-artifactを照合した後、既存のdurable task継続から新runを開始できる。
+未確認の副作用を自動承認する経路は設けない。ただし、不明な結果をエラーとして
+引き継ぐことは副作用の承認ではなく、会話の継続を妨げない。結果に依存する追加作業では
+現状確認を促す。全ての追加操作を意味解析で制限する新たな機構は導入しない。
 
 ### 6. 診断と将来の変更
 

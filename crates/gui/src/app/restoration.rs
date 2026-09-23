@@ -152,6 +152,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         if let Some(reason) = &status.refusal_reason {
                             ui.label(reason);
                         }
+                        if status.history_available_with_current_authority
+                            && !status.interrupted_tool_calls.is_empty()
+                        {
+                            ui.label("未取得の実行結果はエラーとして引き継ぎ、会話を続けられます。旧処理は自動再実行しません。");
+                        }
                         for call in &status.interrupted_tool_calls {
                             ui.label(format!(
                                 "未確認の実行: {} ({})",

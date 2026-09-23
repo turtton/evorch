@@ -52,6 +52,11 @@ impl AgentRuntime {
         let history = RestoredState::from_record(&history_record)?;
         let disk_restorable =
             record.restorable && descriptor.restorable && !descriptor.has_uncertain_effects();
+        let renewable = descriptor.conversation_descriptor();
+        let history_available_with_current_authority = (record.restorable && renewable.restorable)
+            || renewable.renewable_ownership_only()
+            || renewable.renewable_root_context()
+            || renewable.renewable_team_root();
         Ok(Some(RunRestoreDiagnostics {
             run_id,
             last_successful_checkpoint_at_ns: record.updated_at_ns,
@@ -59,11 +64,8 @@ impl AgentRuntime {
             message_count: history.messages.len(),
             compaction_checkpoint_count: history.checkpoints.len(),
             disk_restorable,
-            history_available_with_current_authority: disk_restorable
-                || descriptor.renewable_ownership_only()
-                || descriptor.renewable_root_context()
-                || descriptor.renewable_team_root(),
-            refusal_reason: descriptor.non_restorable_reason,
+            history_available_with_current_authority,
+            refusal_reason: renewable.non_restorable_reason,
             renewable_team: descriptor.renewable_team,
             interrupted_tool_calls: descriptor.interrupted_tool_calls,
             durable_task_id: descriptor.durable_task_id,

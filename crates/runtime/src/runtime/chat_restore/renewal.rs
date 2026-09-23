@@ -20,11 +20,11 @@ impl AgentRuntime {
                     run_id: record.run_id.clone(),
                 })?;
         }
-        if descriptor.has_uncertain_effects() {
-            return Err(fail(
-                "unresolved_tool_calls: inspect actual effects before starting a new run".into(),
-            ));
-        }
+        // Current callers reuse history, not the old execution or tool jobs.
+        // Retain the authority/identity gates while reporting lost outcomes to
+        // the next model turn instead of refusing the entire conversation.
+        let history_descriptor = descriptor.conversation_descriptor();
+        let descriptor = &history_descriptor;
         if (record.restorable && descriptor.restorable)
             || descriptor.renewable_ownership_only()
             || descriptor.renewable_root_context()
@@ -140,6 +140,22 @@ impl AgentRuntime {
                     });
                 }
             }
+        }
+        // Terminal cleanup can fail while retaining process handles. Reusing
+        // history must not race a shell still modifying the old workspace.
+        if self
+            .shared
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_running_shell_jobs(&record.run_id)
+        {
+            return Err(RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: RunRestoreFailure::UnsupportedConfig(
+                    "shell_cleanup_required: previous shell processes are still running".into(),
+                ),
+            });
         }
         Ok(())
     }

@@ -27,7 +27,8 @@ impl AgentModel for EscalatingModel {
         _: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         self.0.lock().unwrap().push((role, messages.to_vec()));
-        let (content, finish_reason) = if role == Role::Worker {
+        let (content, finish_reason) = if role == Role::Worker && self.0.lock().unwrap().len() == 1
+        {
             (
                 ContentBlock::ToolUse {
                     id: "escalate-test".into(),
@@ -219,6 +220,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
             .run_ids,
         [root]
     );
+    let recorded_requests = requests.clone();
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
     assert!(requests[2].1.starts_with(&initial));
@@ -227,5 +229,61 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
         requests[1..]
             .iter()
             .all(|(role, _)| *role == Role::Orchestrator)
+    );
+    let original = requests[0].1.clone();
+    drop(requests);
+
+    // A prior-version source checkpoint like run-98: escalation finished, but
+    // an asynchronous shell outcome was never collected. The original thread
+    // must remain a usable conversation without switching to the Orchestrator.
+    let source = state
+        .sidebar()
+        .threads
+        .iter()
+        .find(|t| t.id == ThreadId::new("parent"))
+        .unwrap()
+        .run_ids[0]
+        .clone();
+    let mut record = storage::Database::open(&config)
+        .unwrap()
+        .run_context(&source)
+        .unwrap()
+        .unwrap();
+    let mut descriptor: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+    descriptor["restorable"] = serde_json::json!(false);
+    descriptor["non_restorable_reason"] = serde_json::json!(
+        "unresolved_tool_calls: inspect actual effects before starting a new run"
+    );
+    descriptor["interrupted_tool_calls"] = serde_json::json!([{
+        "call_id":"unobserved-shell-jobs", "tool_name":"shell", "result_observed":false, "may_have_side_effects":true
+    }]);
+    record.config_json = descriptor.to_string();
+    record.restorable = false;
+    storage.handle().upsert_run_context(&record).unwrap();
+    state.switch_thread(ThreadId::new("parent")).unwrap();
+    state.composer_mut().input = "状況を教えて".into();
+    state.submit_composer();
+    rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = receiver.recv().await.unwrap();
+                state.apply_events([event.clone()]);
+                if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to:AgentRunPhase::Waiting, ..}) if run_id == &source) {
+                    break;
+                }
+            }
+        }).await.unwrap();
+    });
+    let observed = recorded_requests.lock().unwrap();
+    assert_eq!(observed.len(), 5);
+    assert_eq!(observed[4].0, Role::Worker);
+    assert!(observed[4].1.starts_with(&original));
+    let text = serde_json::to_string(&observed[4].1).unwrap();
+    assert!(text.contains("ToolExecutionOutcomeUnknown"));
+    assert!(text.contains("状況を教えて"));
+    assert_eq!(
+        runtime.list_agents().len(),
+        2,
+        "no replacement thread or run is required"
     );
 }
