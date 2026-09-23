@@ -35,6 +35,23 @@ fn started(run: &str, parent: Option<&str>, name: &str) -> Event {
     })
 }
 
+fn prompt(run: &str, parent: Option<&str>, name: &str, text: &str) -> Event {
+    Event::new(LifecycleEvent::TaskPromptPublished {
+        run_id: run.into(),
+        parent_run_id: parent.map(str::to_owned),
+        agent_name: name.into(),
+        role: "reviewer".into(),
+        prompt: text.into(),
+    })
+}
+
+fn final_result(run: &str, text: &str) -> Event {
+    Event::new(MessageEvent::FinalResultPublished {
+        run_id: run.into(),
+        text: text.into(),
+    })
+}
+
 fn delta(run: &str, text: &str) -> Event {
     Event::new(MessageEvent::MessageDelta {
         run_id: Some(run.into()),
@@ -71,6 +88,7 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
             &mut original,
             vec![
                 started("root", None, name),
+                prompt("root", None, name, "investigate this"),
                 Event::new(ToolEvent::ToolStarted {
                     tool_name: "read".into(),
                     call_id: "call".into(),
@@ -86,12 +104,19 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
                     detail: None,
                 }),
                 delta("root", "found the cause"),
+                final_result("root", "found the cause"),
+                Event::new(LifecycleEvent::AgentRunStateChanged {
+                    run_id: "root".into(),
+                    from: AgentRunPhase::Running,
+                    to: AgentRunPhase::Done,
+                    reason: None,
+                }),
             ],
         );
         storage.close();
         let expected = original.transcript().entries().to_vec();
-        assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::UserMessage { text } if text == "investigate this")));
-        assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "found the cause")));
+        assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::UserMessage { text } if text == "investigate this")).count(), 1);
+        assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "found the cause")).count(), 1);
         assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Tool { status: ToolStatus::Succeeded, output: Some(text), .. } if text == "file contents")));
         assert!(
             original
@@ -244,6 +269,149 @@ fn goal_children_and_continuation_replay_in_their_owning_conversation() {
         }
         reopened.switch_thread(ThreadId::new("two")).unwrap();
         assert!(reopened.transcript().entries().is_empty());
+    }
+}
+
+#[test]
+fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut live = state(dir.path(), &["one", "two"]);
+    let instruction = prompt(
+        "child",
+        Some("root"),
+        "reviewer",
+        "Review the implementation",
+    );
+    persist_and_apply(
+        &storage,
+        &mut live,
+        vec![
+            started("root", None, "chat:Orchestrator:one"),
+            started("child", Some("root"), "reviewer"),
+            instruction.clone(),
+            delta("child", "Checking the changes"),
+            final_result("child", "Canonical review report"),
+        ],
+    );
+    assert!(
+        matches!(live.transcripts().run("child").unwrap().entries().last(),
+        Some(TranscriptEntry::Message { text, .. }) if text == "Canonical review report"),
+        "result is visible before the terminal event"
+    );
+    // A restore reuses the same run and must not duplicate its initial instruction.
+    persist_and_apply(
+        &storage,
+        &mut live,
+        vec![
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "child".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Done,
+                reason: None,
+            }),
+            started("child", Some("root"), "reviewer"),
+            instruction,
+        ],
+    );
+    storage.close();
+    let mut replay = state(dir.path(), &["one", "two"]).with_sidebar(live.sidebar().clone());
+    let db = Database::open(&config).unwrap();
+    for _ in 0..2 {
+        replay.restore_history(&db).unwrap();
+        assert_eq!(replay.transcript().entries(), live.transcript().entries());
+        let expected = live.transcripts().run("child").unwrap().entries();
+        assert_eq!(
+            replay.transcripts().run("child").unwrap().entries(),
+            expected
+        );
+        assert!(
+            matches!(expected.first(), Some(TranscriptEntry::UserMessage { text }) if text == "Review the implementation")
+        );
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+                .count(),
+            1
+        );
+        let result = expected
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+            TranscriptEntry::Message { text, .. } if text == "Canonical review report")
+            })
+            .unwrap();
+        let terminal = expected
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+            TranscriptEntry::Notice { text } if text == "subagent reviewer (child) completed")
+            })
+            .unwrap();
+        assert!(result < terminal);
+        assert!(
+            !replay
+                .transcript()
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry,
+            TranscriptEntry::Message { text, .. } if text == "Canonical review report")),
+            "child result stays in its own run"
+        );
+    }
+}
+
+#[test]
+fn learning_reviewer_root_prompt_never_appears_in_main_thread_live_or_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut live = state(dir.path(), &["one"]);
+    persist_and_apply(
+        &storage,
+        &mut live,
+        vec![
+            started("learning-reviewer", None, "learning-reviewer"),
+            prompt(
+                "learning-reviewer",
+                None,
+                "learning-reviewer",
+                "Review this completed run for learning",
+            ),
+            final_result("learning-reviewer", "Learning review complete"),
+        ],
+    );
+    storage.close();
+    let mut replay = state(dir.path(), &["one"]);
+    replay
+        .restore_history(&Database::open(&config).unwrap())
+        .unwrap();
+    for state in [&live, &replay] {
+        assert!(state.transcript().entries().is_empty());
+        assert_eq!(
+            state
+                .transcripts()
+                .run("learning-reviewer")
+                .unwrap()
+                .entries(),
+            &[
+                TranscriptEntry::UserMessage {
+                    text: "Review this completed run for learning".into()
+                },
+                TranscriptEntry::Message {
+                    text: "Learning review complete".into(),
+                    run_id: Some("learning-reviewer".into())
+                },
+            ]
+        );
     }
 }
 

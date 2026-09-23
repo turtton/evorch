@@ -180,6 +180,24 @@ impl TranscriptModel {
                 self.agent_names.insert(run_id.clone(), agent_name.clone());
                 self.push_notice(format!("subagent {agent_name} ({run_id}) started"));
             }
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
+                run_id, agent_name, prompt, ..
+            }) => {
+                let first_instruction = self.entries.iter().find_map(|entry| match entry {
+                    TranscriptEntry::UserMessage { text } => Some(text),
+                    _ => None,
+                });
+                if first_instruction != Some(prompt) {
+                    let only_start_notice = matches!(self.entries.as_slice(),
+                        [TranscriptEntry::Notice { text }]
+                            if text == &format!("subagent {agent_name} ({run_id}) started"));
+                    self.push_user_message(prompt.clone());
+                    // The spawn notice arrives first, but the run's instruction leads its transcript.
+                    if only_start_notice && self.entries.len() == 2 {
+                        self.entries.swap(0, 1);
+                    }
+                }
+            }
             event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
@@ -299,6 +317,24 @@ impl TranscriptModel {
         let (delta, run_id) = match message {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
+            MessageEvent::FinalResultPublished { text, run_id } => {
+                self.thinking.remove(&Some(run_id.clone()));
+                let last_message = self.entries.iter().rev().find_map(|entry| match entry {
+                    TranscriptEntry::Message {
+                        text,
+                        run_id: Some(id),
+                    } if id == run_id => Some(text),
+                    _ => None,
+                });
+                if !text.is_empty() && last_message != Some(text) {
+                    // A finish result is a complete message, not another stream chunk.
+                    self.push(TranscriptEntry::Message {
+                        text: text.clone(),
+                        run_id: Some(run_id.clone()),
+                    });
+                }
+                return;
+            }
         };
         if delta.is_empty() {
             return;
@@ -329,10 +365,12 @@ impl TranscriptModel {
             }
         } else {
             self.push(match message {
-                MessageEvent::MessageDelta { .. } => TranscriptEntry::Message {
-                    text: delta.clone(),
-                    run_id: run_id.clone(),
-                },
+                MessageEvent::MessageDelta { .. } | MessageEvent::FinalResultPublished { .. } => {
+                    TranscriptEntry::Message {
+                        text: delta.clone(),
+                        run_id: run_id.clone(),
+                    }
+                }
                 MessageEvent::ReasoningDelta { .. } => TranscriptEntry::Reasoning {
                     text: delta.clone(),
                     run_id: run_id.clone(),

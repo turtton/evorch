@@ -50,7 +50,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => false,
         };
         self.transcripts.apply(event);
-        self.project_escalation_result(event);
         changed
     }
 

@@ -40,6 +40,15 @@ impl AgentModel for EscalatingModel {
                 },
                 FinishReason::ToolUse,
             )
+        } else if self.0.lock().unwrap().len() == 2 {
+            (
+                ContentBlock::ToolUse {
+                    id: "finish-test".into(),
+                    name: "finish".into(),
+                    input: serde_json::json!({"result": "orchestrator answer"}),
+                },
+                FinishReason::ToolUse,
+            )
         } else {
             (
                 ContentBlock::Text {
@@ -127,6 +136,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
     let root = rt.block_on(async {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut root = None;
+            let mut final_seen = false;
             loop {
                 let event = receiver.recv().await.unwrap();
                 state.apply_events([event.clone()]);
@@ -137,6 +147,16 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
                 {
                     root = Some(new_run_id.clone());
                 }
+                if let EventKind::Message(event_bus::MessageEvent::FinalResultPublished {
+                    run_id, text,
+                }) = &event.kind
+                {
+                    assert_eq!(root.as_ref(), Some(run_id));
+                    assert_eq!(text, "orchestrator answer");
+                    assert!(state.transcripts().run(run_id).unwrap().entries().iter().any(|entry|
+                        matches!(entry, TranscriptEntry::Message { text, .. } if text == "orchestrator answer")));
+                    final_seen = true;
+                }
                 if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                     run_id,
                     to: AgentRunPhase::Done,
@@ -144,6 +164,7 @@ fn child_composer_continues_same_orchestrator_after_completion_and_while_alive()
                 }) = &event.kind
                     && root.as_ref() == Some(run_id)
                 {
+                    assert!(final_seen, "canonical result is visible before Done");
                     break run_id.clone();
                 }
             }

@@ -88,11 +88,18 @@ impl TranscriptRegistry {
                 || vec![TranscriptKey::Thread],
                 |run_id| self.route_run(run_id),
             ),
-            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
-                run_id,
-                parent_run_id,
-                ..
-            }) => {
+            EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStarted {
+                    run_id,
+                    parent_run_id,
+                    ..
+                }
+                | event_bus::LifecycleEvent::TaskPromptPublished {
+                    run_id,
+                    parent_run_id,
+                    ..
+                },
+            ) => {
                 let mut route = Vec::new();
                 if parent_run_id.is_some() {
                     route.push(TranscriptKey::Thread);
@@ -117,6 +124,9 @@ impl TranscriptRegistry {
                     Some(run_id) => self.route_run(run_id),
                     None => vec![TranscriptKey::Thread],
                 }
+            }
+            EventKind::Message(MessageEvent::FinalResultPublished { run_id, .. }) => {
+                self.route_run(run_id)
             }
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
@@ -176,7 +186,8 @@ impl TranscriptRegistry {
                 }
                 | MessageEvent::ReasoningDelta {
                     run_id: Some(_), ..
-                },
+                }
+                | MessageEvent::FinalResultPublished { .. },
             )
             | EventKind::Lifecycle(_)
             | EventKind::Ledger(_)

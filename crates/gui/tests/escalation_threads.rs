@@ -82,6 +82,13 @@ fn message(run: &str, text: &str) -> Event {
     })
 }
 
+fn final_report() -> String {
+    format!(
+        "Canonical report: {}end of report",
+        "complete detail. ".repeat(40)
+    )
+}
+
 fn events() -> Vec<Event> {
     vec![
         started("run-1", None, "chat:Worker:parent"),
@@ -93,6 +100,10 @@ fn events() -> Vec<Event> {
         message("run-2", " and later output"),
         started("run-3", Some("run-2"), "child worker"),
         message("run-3", "private child output"),
+        Event::new(MessageEvent::FinalResultPublished {
+            run_id: "run-2".into(),
+            text: final_report(),
+        }),
         Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-2".into(),
             from: AgentRunPhase::Running,
@@ -119,24 +130,16 @@ fn assert_projection(state: &mut WorkbenchState<DemoSource>) {
         TranscriptEntry::Message { text, .. } if text == "early output and later output")));
     assert!(!entries.iter().any(|entry| matches!(entry,
         TranscriptEntry::Message { text, .. } if text.contains("private child"))));
+    assert!(entries.iter().any(|entry| matches!(entry,
+        TranscriptEntry::Message { text, run_id: Some(run) } if text == &final_report() && run == "run-2")));
     state.switch_thread(ThreadId::new("parent")).unwrap();
     assert_eq!(
-        state
-            .transcript()
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry,
-        TranscriptEntry::Notice { text } if text.starts_with("Orchestrator thread を開始")))
-            .count(),
-        1
-    );
-    assert!(
-        state
-            .transcript()
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry,
-        TranscriptEntry::Notice { text } if text.contains("完了しました") && text.contains("結果: early output and later output")))
+        state.transcript().entries(),
+        &[TranscriptEntry::Message {
+            text: "worker output".into(),
+            run_id: Some("run-1".into()),
+        }],
+        "escalation start and completion must not add source-thread notices or results"
     );
 }
 
@@ -171,6 +174,7 @@ fn escalation_owns_a_child_conversation_and_links_both_directions() {
         Some(ThreadId::new("escalation-run-2"))
     );
     assert!(gui.has_label("early output and later output"));
+    assert!(gui.has_label(&final_report()));
     assert_eq!(
         gui.state().composer().role,
         gui::model::composer::ComposerRole::Orchestrator
@@ -210,6 +214,82 @@ fn persisted_escalation_replays_child_root_and_continuation_binding() {
             .iter()
             .any(|(thread, _, run)| thread == "escalation-run-2" && run == "run-2")
     );
+}
+
+#[test]
+fn escalation_summary_stays_in_child_and_source_is_unchanged_on_start_done_or_error() {
+    for phase in [AgentRunPhase::Done, AgentRunPhase::Error] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let mut live = state(dir.path(), Bindings::default());
+        let mut events = vec![
+            started("run-1", None, "chat:Worker:parent"),
+            message("run-1", "worker output"),
+            started("run-2", None, "escalation-orchestrator"),
+            Event::new(LifecycleEvent::TaskPromptPublished {
+                run_id: "run-2".into(),
+                parent_run_id: None,
+                agent_name: "escalation-orchestrator".into(),
+                role: "orchestrator".into(),
+                prompt: "Coordinate the implementation".into(),
+            }),
+            escalation(),
+            escalation(),
+        ];
+        for event in &events {
+            storage.handle().append_event(Some("gui"), event).unwrap();
+        }
+        live.apply_events(events.drain(..));
+        live.switch_thread(ThreadId::new("parent")).unwrap();
+        let source = live.transcript().entries().to_vec();
+        assert_eq!(source.len(), 1, "no escalation start notice");
+        let terminal = Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-2".into(),
+            from: AgentRunPhase::Running,
+            to: phase,
+            reason: (phase == AgentRunPhase::Error).then(|| "fixture failure".into()),
+        });
+        storage
+            .handle()
+            .append_event(Some("gui"), &terminal)
+            .unwrap();
+        live.apply_events([terminal]);
+        storage.close();
+        let mut replay =
+            state(dir.path(), Bindings::default()).with_sidebar(live.sidebar().clone());
+        replay
+            .restore_history(&storage::Database::open(&config).unwrap())
+            .unwrap();
+        for state in [&mut live, &mut replay] {
+            assert_eq!(state.transcript().entries(), source);
+            let child = &state.sidebar().threads[2];
+            assert_eq!(child.parent_thread_id, Some(ThreadId::new("parent")));
+            assert_eq!(child.escalation_source_run_id.as_deref(), Some("run-1"));
+            assert_eq!(child.run_ids, ["run-2"]);
+            state
+                .switch_thread(ThreadId::new("escalation-run-2"))
+                .unwrap();
+            assert!(matches!(state.transcript().entries().first(),
+                Some(TranscriptEntry::UserMessage { text }) if text == "Coordinate the implementation"));
+            assert_eq!(state.transcript().entries().iter().filter(|entry| matches!(entry,
+                TranscriptEntry::Notice { text } if text == "Worker task からの escalation: Coordination required\nImplement the feature"
+            )).count(), 1);
+            if phase == AgentRunPhase::Error {
+                assert!(
+                    state
+                        .transcript()
+                        .entries()
+                        .iter()
+                        .any(|entry| matches!(entry,
+                    TranscriptEntry::Error { text } if text.contains("fixture failure")))
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -1,4 +1,7 @@
-use event_bus::{Event, FaultEvent, ProviderEvent, ProviderFailureKind, SkillDiagnosticKind};
+use event_bus::{
+    Event, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
+    SkillDiagnosticKind,
+};
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::{TranscriptKey, TranscriptRegistry};
 
@@ -153,4 +156,189 @@ fn registry_routes_request_failed_without_run_id_to_thread_only() {
         registry.thread().entries(),
         [TranscriptEntry::Notice { .. }]
     ));
+}
+
+fn task_prompt(run: &str, parent: Option<&str>, prompt: &str) -> Event {
+    Event::new(LifecycleEvent::TaskPromptPublished {
+        run_id: run.into(),
+        parent_run_id: parent.map(str::to_owned),
+        agent_name: "agent".into(),
+        role: "worker".into(),
+        prompt: prompt.into(),
+    })
+}
+
+#[test]
+fn task_prompt_routes_root_only_to_run_and_child_to_owning_thread() {
+    let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("owner", "root");
+    registry.bind_run("child", "owner");
+    registry.select_thread(Some("other".into()));
+    let root = task_prompt("root", None, "main instruction");
+    let child = task_prompt("child", Some("root"), "child instruction");
+    assert_eq!(
+        registry.route(&root),
+        vec![TranscriptKey::Run("root".into())]
+    );
+    assert_eq!(
+        registry.route(&child),
+        vec![TranscriptKey::Thread, TranscriptKey::Run("child".into())]
+    );
+    registry.apply(&root);
+    registry.apply(&child);
+    assert!(registry.thread().entries().is_empty());
+    registry.select_thread(Some("owner".into()));
+    assert_eq!(
+        registry.thread().entries(),
+        &[TranscriptEntry::UserMessage {
+            text: "child instruction".into()
+        }]
+    );
+}
+
+#[test]
+fn task_prompt_dedups_exact_first_instruction_on_redelivery() {
+    let mut model = TranscriptModel::new();
+    model.push_user_message("instruction");
+    model.push_notice("restored");
+    model.apply(&task_prompt("run", Some("parent"), "instruction"));
+    assert_eq!(model.entries().len(), 2);
+    model.apply(&task_prompt("run", Some("parent"), "instruction "));
+    assert_eq!(model.entries().len(), 3, "dedup must not trim text");
+    model.apply(&task_prompt("run", Some("parent"), "instruction"));
+    assert_eq!(
+        model.entries().len(),
+        3,
+        "compare the first instruction, not the last entry"
+    );
+}
+
+#[test]
+fn final_result_routes_like_message_delta_including_background_and_non_root_runs() {
+    let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("owner", "root");
+    registry.bind_run("child", "owner");
+    registry.select_thread(Some("other".into()));
+    for run in ["root", "child", "unbound"] {
+        let result = Event::new(MessageEvent::FinalResultPublished {
+            run_id: run.into(),
+            text: "canonical report".into(),
+        });
+        let delta = Event::new(MessageEvent::MessageDelta {
+            run_id: Some(run.into()),
+            delta: "canonical report".into(),
+        });
+        assert_eq!(registry.route(&result), registry.route(&delta));
+        registry.apply(&result);
+        assert_eq!(
+            registry.run(run).unwrap().entries(),
+            &[TranscriptEntry::Message {
+                text: "canonical report".into(),
+                run_id: Some(run.into()),
+            }]
+        );
+    }
+    assert!(registry.thread().entries().is_empty());
+    registry.select_thread(Some("owner".into()));
+    assert_eq!(
+        registry.thread().entries(),
+        registry.run("root").unwrap().entries()
+    );
+}
+
+#[test]
+fn final_result_dedups_last_message_for_same_run_even_after_other_entries() {
+    let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("owner", "run");
+    registry.select_thread(Some("owner".into()));
+    for delta in ["canonical ", "report"] {
+        registry.apply(&Event::new(MessageEvent::MessageDelta {
+            run_id: Some("run".into()),
+            delta: delta.into(),
+        }));
+    }
+    registry.apply(&Event::new(event_bus::ToolEvent::ToolStarted {
+        run_id: Some("run".into()),
+        tool_name: "read".into(),
+        call_id: "call".into(),
+        input: None,
+    }));
+    let result = Event::new(MessageEvent::FinalResultPublished {
+        run_id: "run".into(),
+        text: "canonical report".into(),
+    });
+    registry.apply(&result);
+    registry.apply(&result);
+    for model in [registry.thread(), registry.run("run").unwrap()] {
+        assert_eq!(
+            model
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::Message { .. }))
+                .count(),
+            1
+        );
+    }
+    let mut model = registry.run("run").unwrap().clone();
+    model.apply(&Event::new(MessageEvent::FinalResultPublished {
+        run_id: "other".into(),
+        text: "canonical report".into(),
+    }));
+    model.apply(&result);
+    assert_eq!(model.entries().len(), 3, "other runs do not affect dedup");
+    model.apply(&Event::new(MessageEvent::FinalResultPublished {
+        run_id: "run".into(),
+        text: "canonical report ".into(),
+    }));
+    assert_eq!(
+        model.entries().len(),
+        4,
+        "only exact duplicates are skipped"
+    );
+    model.apply(&result);
+    assert_eq!(
+        model.entries().len(),
+        5,
+        "only the last message for that run is compared"
+    );
+}
+
+#[test]
+fn final_result_is_separate_from_progress_and_finishes_thinking_before_done() {
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(MessageEvent::MessageDelta {
+        run_id: Some("run".into()),
+        delta: "Progress".into(),
+    }));
+    let result = Event::new(MessageEvent::FinalResultPublished {
+        run_id: "run".into(),
+        text: "Final report".into(),
+    });
+    model.apply(&result);
+    assert_eq!(
+        model.entries(),
+        &[
+            TranscriptEntry::Message {
+                text: "Progress".into(),
+                run_id: Some("run".into())
+            },
+            TranscriptEntry::Message {
+                text: "Final report".into(),
+                run_id: Some("run".into())
+            },
+        ]
+    );
+    model.apply(&Event::new(MessageEvent::ReasoningDelta {
+        run_id: Some("run".into()),
+        delta: "Thinking".into(),
+    }));
+    let id = model.visible_entry_id(2);
+    assert!(model.thinking_is_streaming(id));
+    model.apply(&result);
+    assert!(!model.thinking_is_streaming(id));
+    assert_eq!(
+        model.entries().len(),
+        3,
+        "a deduped result still ends thinking"
+    );
 }

@@ -104,6 +104,9 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     // Then: both ordered blocks reach the run, neither reaches the thread,
     // and the run pane renders the actual event-folded transcript.
     let expected = [
+        TranscriptEntry::UserMessage {
+            text: "answer".into(),
+        },
         TranscriptEntry::Reasoning {
             text: "weighing options".into(),
             run_id: Some(run_id.clone()),
@@ -114,7 +117,9 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
         },
     ];
     loop {
-        repaint_rx.recv().expect("event repaint");
+        repaint_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("event repaint before transcript deadline");
         harness.run_steps(4);
         if harness
             .state()
@@ -131,18 +136,19 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
         Some(expected.as_slice()),
         "run transcript must receive reasoning before text"
     );
-    assert!(
+    assert!(expected.iter().all(|entry| {
         !harness
             .state()
             .transcripts()
             .thread()
             .entries()
-            .contains(&expected[0])
-    );
+            .contains(entry)
+    }));
     let mut pane = Harness::new_ui(|ui| {
         gui::panes::agent_transcript::agent_transcript_pane(ui, &run_id, transcript);
     });
     pane.run();
+    assert!(pane.query_by_label("You: answer").is_some());
     assert!(pane.query_by_label("thinking").is_some());
     assert!(pane.query_by_label("weighing options").is_none());
     pane.get_by_label("thinking").click();

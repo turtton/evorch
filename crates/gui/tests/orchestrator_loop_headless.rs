@@ -455,6 +455,12 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
             _ => None,
         })
         .expect("root run");
+    let mut conversation_roots = std::collections::BTreeSet::from([root.clone()]);
+    for event in fixture.event_snapshot() {
+        if let OrchestratorEvent::ContinuationDispatched { new_run_id, .. } = event {
+            conversation_roots.insert(new_run_id);
+        }
+    }
     let transcripts = fixture.harness.state().transcripts();
     assert!(transcripts.run_ids().filter(|run| **run != root).any(|run| {
         transcripts.run(run).expect("worker pane").entries().iter().any(|entry| {
@@ -467,12 +473,13 @@ fn queued_unit_goal_completes_through_gui_with_request_update_round() {
             .entries()
             .iter()
             .all(|entry| match entry {
-                gui::model::transcript::TranscriptEntry::Message { run_id, .. } =>
-                    run_id.as_ref() == Some(&root),
+                gui::model::transcript::TranscriptEntry::Message { run_id, .. } => run_id
+                    .as_ref()
+                    .is_some_and(|run| conversation_roots.contains(run)),
                 gui::model::transcript::TranscriptEntry::AgentMessage { .. } => false,
                 _ => true,
             }),
-        "conversation excludes child streams and agent message bodies"
+        "conversation includes roots and continuations, but excludes child streams and agent message bodies"
     );
 
     // Then: every documented pre-approval stage occurred in order through one repair round.
@@ -598,6 +605,16 @@ fn gate_missing_continuation_is_visible_in_gui() {
             .contains(&"no_pull_request".to_owned())
     });
     fixture.wait_state(|state| state.loop_status().epoch == 1);
+    let transcripts = fixture.harness.state().transcripts();
+    for transcript in std::iter::once(transcripts.thread()).chain(
+        transcripts
+            .run_ids()
+            .map(|run| transcripts.run(run).unwrap()),
+    ) {
+        assert!(!transcript.entries().iter().any(|entry| matches!(entry,
+            gui::model::transcript::TranscriptEntry::Message { text, .. } if text == "not delivered"
+        )), "a rejected finish must not publish its proposed result");
+    }
 }
 
 #[test]
