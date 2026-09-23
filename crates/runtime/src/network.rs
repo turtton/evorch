@@ -317,7 +317,7 @@ mod network_access_tests {
         let role = RoleCapabilities::new(["web_fetch"], NetworkAccess::Allowed, false);
         let decision = judge_web_network_access(
             &role,
-            "Librarian",
+            "WebResearcher",
             "web_fetch",
             PolicyDecision::Ask,
             NetworkAccess::OptIn,

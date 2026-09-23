@@ -61,7 +61,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ("Explorer", Role::Explorer),
             ("Worker", Role::Worker),
             ("Reviewer", Role::Reviewer),
-            ("Librarian", Role::Librarian),
+            ("WebResearcher", Role::WebResearcher),
             ("Planner", Role::Planner),
             ("Oracle", Role::Oracle),
             ("Multimodal Looker", Role::MultimodalLooker),

@@ -24,6 +24,12 @@ fn production_catalog_and_triggers_cover_additional_roles() {
 
     // Given: the production catalog and its role trigger sources.
     // When: additional roles resolve their generic prompts.
+    let researcher_prompt = catalog
+        .system_prompt_for(Role::WebResearcher, None, "generic")
+        .expect("WebResearcher prompt");
+    assert!(researcher_prompt.contains("# WebResearcher"));
+    assert!(researcher_prompt.contains("web_search / web_fetch"));
+    assert!(researcher_prompt.contains("出典 URL"));
     let planner_prompt = catalog
         .system_prompt_for(Role::Planner, None, "generic")
         .expect("Planner prompt");
@@ -38,7 +44,12 @@ fn production_catalog_and_triggers_cover_additional_roles() {
     assert_ne!(oracle_prompt, looker_prompt);
 
     // Then: each role selects its own capability-bearing trigger source.
-    for role in [Role::Planner, Role::Oracle, Role::MultimodalLooker] {
+    for role in [
+        Role::WebResearcher,
+        Role::Planner,
+        Role::Oracle,
+        Role::MultimodalLooker,
+    ] {
         let trigger = triggers
             .iter()
             .find(|trigger| trigger.name == role.name())
@@ -53,6 +64,7 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     // Given: a coordinator requesting all new roles and an invalid one.
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("ROOT", [
+        Ok(tool_response("researcher", "delegate", json!({"role":"web_researcher", "prompt":"CHILD"}))),
         Ok(tool_response("planner", "delegate", json!({"role":"Planner", "prompt":"CHILD"}))),
         Ok(tool_response("oracle", "delegate", json!({"role":"Oracle", "prompt":"CHILD"}))),
         Ok(tool_response("looker", "delegate", json!({"role":"MultimodalLooker", "prompt":"CHILD", "images":[{"media_type":"image/png", "data":"aGVsbG8="}]}))),
@@ -62,7 +74,7 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     model
         .add_keyed(
             "CHILD",
-            (0..3).map(|_| Ok(text_response("done", FinishReason::Stop))),
+            (0..4).map(|_| Ok(text_response("done", FinishReason::Stop))),
         )
         .await;
     let bus = Arc::new(EventBus::new(128));
@@ -76,8 +88,8 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     assert_eq!(runtime.wait(root).await, Ok(AgentRunPhase::Done));
     // Then: only known roles spawn, and the invalid role returns structured data.
     let runs = runtime.list_agents();
-    assert_eq!(runs.len(), 4);
-    for name in ["Planner", "Oracle", "MultimodalLooker"] {
+    assert_eq!(runs.len(), 5);
+    for name in ["WebResearcher", "Planner", "Oracle", "MultimodalLooker"] {
         assert!(runs.iter().any(|run| run.role_name == name));
     }
     let observed = model.observed().await;

@@ -32,7 +32,7 @@ pub struct AgentPromptSources {
 
 /// 設定からエージェントプロンプトに必要な全文ソースをすべて収集する。
 ///
-/// ロール別ベースライン 4 種、モデルファミリー別セクション 6 種 (generic を
+/// ロール別ベースライン 8 種、モデルファミリー別セクション 6 種 (generic を
 /// 含む)、カテゴリ別オーバーレイ 6 種、および agents 設定の `preset` 参照が
 /// 指す appendix 本文を解決する。1 つでも解決できなければプロバイダに到達
 /// 可能になる前にエラーで失敗する (fail-closed)。エラーにプリセット本文は
@@ -57,12 +57,13 @@ pub fn resolve_prompt_sources(
 }
 
 /// ロールとバインディングの対応表を返す。
-fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 7] {
+fn role_bindings(agents: &AgentsConfig) -> [(&'static str, &RoleBindingConfig); 8] {
     [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
         ("worker", &agents.worker),
         ("reviewer", &agents.reviewer),
+        ("webresearcher", &agents.roles.web_researcher),
         ("planner", &agents.roles.planner),
         ("oracle", &agents.roles.oracle),
         ("multimodallooker", &agents.roles.multimodal_looker),

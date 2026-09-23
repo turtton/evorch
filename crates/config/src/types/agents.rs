@@ -34,7 +34,7 @@ pub struct AgentsConfig {
 
 /// agents 内の明示的な logical_model 参照を旧名→新名で置き換える。
 ///
-/// 各 role (orchestrator/explorer/worker/reviewer/roles.librarian/roles.planner/
+/// 各 role (orchestrator/explorer/worker/reviewer/roles.web_researcher/roles.planner/
 /// roles.oracle/roles.multimodal_looker) と worker.categories の全 category が対象。
 /// logical_model が None (暗黙の role 名参照) のものは変更しない。
 /// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
@@ -48,7 +48,7 @@ pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<S
         &mut agents.explorer.logical_model,
         &mut agents.worker.base.logical_model,
         &mut agents.reviewer.logical_model,
-        &mut agents.roles.librarian.logical_model,
+        &mut agents.roles.web_researcher.logical_model,
         &mut agents.roles.planner.logical_model,
         &mut agents.roles.oracle.logical_model,
         &mut agents.roles.multimodal_looker.logical_model,
@@ -121,7 +121,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 8] {
         ("explorer", &agents.explorer),
         ("worker", &agents.worker.base),
         ("reviewer", &agents.reviewer),
-        ("roles.librarian", &agents.roles.librarian),
+        ("roles.web_researcher", &agents.roles.web_researcher),
         ("roles.planner", &agents.roles.planner),
         ("roles.oracle", &agents.roles.oracle),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
@@ -131,7 +131,7 @@ fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 8] {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdditionalRoleBindings {
-    pub librarian: RoleBindingConfig,
+    pub web_researcher: RoleBindingConfig,
     pub planner: RoleBindingConfig,
     pub oracle: RoleBindingConfig,
     pub multimodal_looker: RoleBindingConfig,
@@ -167,7 +167,7 @@ impl AgentsConfig {
             "explorer" => &self.explorer,
             "worker" => &self.worker.base,
             "reviewer" => &self.reviewer,
-            "librarian" => &self.roles.librarian,
+            "web_researcher" => &self.roles.web_researcher,
             "planner" => &self.roles.planner,
             "oracle" => &self.roles.oracle,
             "multimodal_looker" => &self.roles.multimodal_looker,
@@ -313,7 +313,7 @@ mod tests {
             "explorer",
             "worker",
             "reviewer",
-            "roles.librarian",
+            "roles.web_researcher",
             "roles.planner",
             "roles.oracle",
             "roles.multimodal_looker",
@@ -344,7 +344,7 @@ mod tests {
             roles_using("shared", &agents),
             expected.into_keys().collect::<Vec<_>>()
         );
-        for logical in ["worker", "librarian", "shared"] {
+        for logical in ["worker", "web_researcher", "shared"] {
             assert!(implicit_roles_using(logical, &agents).is_empty());
         }
     }
@@ -392,7 +392,7 @@ mod tests {
             ("explorer", "explorer"),
             ("worker", "worker"),
             ("reviewer", "reviewer"),
-            ("librarian", "roles.librarian"),
+            ("web_researcher", "roles.web_researcher"),
             ("planner", "roles.planner"),
             ("oracle", "roles.oracle"),
             ("multimodal_looker", "roles.multimodal_looker"),
@@ -400,15 +400,15 @@ mod tests {
             // Then: only the role address is reported (not its inheriting categories).
             assert_eq!(implicit_roles_using(logical, &agents), [address]);
         }
-        for logical in ["quick", "roles.librarian", "unknown", "Worker"] {
+        for logical in ["quick", "roles.web_researcher", "unknown", "Worker"] {
             assert!(implicit_roles_using(logical, &agents).is_empty());
         }
         // Given: an explicit reference equal to the fallback is still not implicit.
         agents.worker.base.logical_model = Some("worker".into());
-        agents.roles.librarian.logical_model = Some("librarian".into());
+        agents.roles.web_researcher.logical_model = Some("web_researcher".into());
         // When/Then: explicit references suppress fallback warnings.
         assert!(implicit_roles_using("worker", &agents).is_empty());
-        assert!(implicit_roles_using("librarian", &agents).is_empty());
+        assert!(implicit_roles_using("web_researcher", &agents).is_empty());
     }
 
     #[test]
@@ -426,7 +426,7 @@ logical_model = "old"
 reasoning_effort = "old"
 [agents.reviewer]
 logical_model = "old"
-[agents.roles.librarian]
+[agents.roles.web_researcher]
 logical_model = "old"
 [agents.roles.planner]
 logical_model = "old"
@@ -490,7 +490,7 @@ logical_model = "old"
             "explorer",
             "worker",
             "reviewer",
-            "librarian",
+            "web_researcher",
             "planner",
             "oracle",
             "multimodal_looker",
@@ -824,7 +824,7 @@ logical_model = "shared"
 logical_model = "shared"
 [agents.reviewer]
 logical_model = "shared"
-[agents.roles.librarian]
+[agents.roles.web_researcher]
 logical_model = "shared"
 [agents.roles.planner]
 logical_model = "shared"
@@ -845,10 +845,10 @@ logical_model = "shared"
                 "explorer",
                 "orchestrator",
                 "reviewer",
-                "roles.librarian",
                 "roles.multimodal_looker",
                 "roles.oracle",
                 "roles.planner",
+                "roles.web_researcher",
                 "worker",
                 "worker.categories.quick",
             ]

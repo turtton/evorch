@@ -36,12 +36,15 @@ fn parse_args_accepts_full_form() {
         "hello world",
         "--user-config",
         "/tmp/user-config",
+        "--web-tool-access",
+        "opt-in",
     ]))
     .expect("妥当な引数はパースできる");
 
     assert_eq!(parsed.project_dir, PathBuf::from("/tmp/project"));
     assert_eq!(parsed.role, Role::Worker);
     assert_eq!(parsed.prompt, "hello world");
+    assert_eq!(parsed.web_tool_access, Some(config::WebToolAccess::OptIn));
     assert_eq!(
         parsed.user_config_dir,
         Some(PathBuf::from("/tmp/user-config"))
@@ -56,6 +59,7 @@ fn parse_args_maps_role_names() {
         ("orchestrator", Role::Orchestrator),
         ("explorer", Role::Explorer),
         ("reviewer", Role::Reviewer),
+        ("web_researcher", Role::WebResearcher),
     ] {
         let parsed = parse_args(argv(&[
             "run",
@@ -96,6 +100,23 @@ fn parse_args_rejects_unknown_flag() {
     ]))
     .expect_err("未知フラグはエラーになる");
 
+    assert!(matches!(error, HeadlessError::Usage(_)));
+}
+
+#[test]
+fn parse_args_rejects_automatic_web_access_for_root_runs() {
+    let error = parse_args(argv(&[
+        "run",
+        "--project",
+        "/p",
+        "--role",
+        "orchestrator",
+        "--prompt",
+        "x",
+        "--web-tool-access",
+        "allowed",
+    ]))
+    .expect_err("CLI は都度承認のみ選択可能");
     assert!(matches!(error, HeadlessError::Usage(_)));
 }
 
@@ -149,6 +170,7 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
         role: Role::Worker,
         prompt: PROMPT.to_string(),
         user_config_dir,
+        web_tool_access: None,
     }
 }
 

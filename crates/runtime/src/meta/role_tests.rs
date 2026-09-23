@@ -4,6 +4,9 @@ use agents::Role;
 #[test]
 fn additional_role_names_are_case_insensitive() {
     for (name, expected) in [
+        ("web_researcher", Role::WebResearcher),
+        ("WEB_RESEARCHER", Role::WebResearcher),
+        ("WebResearcher", Role::WebResearcher),
         ("planner", Role::Planner),
         ("ORACLE", Role::Oracle),
         ("multimodal_looker", Role::MultimodalLooker),

@@ -37,7 +37,7 @@ fn diagnostic(events: &[event_bus::Event], run: &str) -> serde_json::Value {
 #[tokio::test]
 async fn mcp_scope_emits_diagnostic_when_call_succeeds() {
     // Given/When: the real runtime executes an allowed MCP call.
-    let (_, events, run) = scenario(Role::Librarian, Failure::None, None).await;
+    let (_, events, run) = scenario(Role::WebResearcher, Failure::None, None).await;
     // Then: the successful RPC metadata is correlated, not its response body.
     assert_eq!(
         diagnostic(&events, &run),
@@ -53,7 +53,7 @@ async fn mcp_scope_emits_diagnostic_when_communication_fails() {
         (3, "tools/call", 3),
     ] {
         // Given/When: the server fails a different stage of the allowed call.
-        let (_, events, run) = scenario(Role::Librarian, Failure::Http(index), None).await;
+        let (_, events, run) = scenario(Role::WebResearcher, Failure::Http(index), None).await;
         // Then: exactly one safe diagnostic accompanies the failed lifecycle pair.
         assert_eq!(
             diagnostic(&events, &run),

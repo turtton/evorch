@@ -100,18 +100,18 @@ fn all_layers_permissive_allow_web_fetch() {
     assert_eq!(decision, NetworkAccessDecision::Allow);
 }
 
-// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_fetch を authorize / Then: Librarian と Orchestrator は許可され、他の 3 role は CapabilityDenied になる (AC6)
+// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_fetch を authorize / Then: WebResearcher と Orchestrator は許可され、他の 3 role は CapabilityDenied になる (AC6)
 // agents::Role に全 variant の定数はないため列挙する。現行の全 variant は
-// Orchestrator / Explorer / Worker / Reviewer / Librarian の 5 つであり、
+// Orchestrator / Explorer / Worker / Reviewer / WebResearcher の 5 つであり、
 // 新 variant を enum に追加した際はこの列挙への追加が必要である
 // (match と異なり追加漏れはコンパイラに検出されない)。
-// web_fetch は ADR 0002 (2026-09-03 補足) により Librarian (network Allowed) と
+// web_fetch は ADR 0002 (2026-09-03 補足) により WebResearcher (network Allowed) と
 // Orchestrator (network OptIn) に公開され、このテストは production gate の
 // 公開範囲を固定する。
 // role の公開範囲を変更する slice は必ず本テストを更新すること (tripwire)。
 #[test]
-fn production_layer1_gate_exposes_web_fetch_to_librarian_and_orchestrator() {
-    for role in [Role::Librarian, Role::Orchestrator] {
+fn production_layer1_gate_exposes_web_fetch_to_web_researcher_and_orchestrator() {
+    for role in [Role::WebResearcher, Role::Orchestrator] {
         let policy = ExecutionPolicy::for_role(role);
         assert_eq!(
             policy.authorize("web_fetch"),
@@ -136,11 +136,11 @@ fn production_layer1_gate_exposes_web_fetch_to_librarian_and_orchestrator() {
     }
 }
 
-// Given: Librarian と Orchestrator の production ポリシー / When: ケイパビリティの network を参照する / Then: Librarian は Allowed、Orchestrator は OptIn になる (ADR 0002 2026-09-03 補足)
+// Given: WebResearcher と Orchestrator の production ポリシー / When: ケイパビリティの network を参照する / Then: WebResearcher は Allowed、Orchestrator は OptIn になる (ADR 0002 2026-09-03 補足)
 #[test]
-fn librarian_network_is_allowed_and_orchestrator_is_opt_in() {
+fn web_researcher_network_is_allowed_and_orchestrator_is_opt_in() {
     assert_eq!(
-        ExecutionPolicy::for_role(Role::Librarian)
+        ExecutionPolicy::for_role(Role::WebResearcher)
             .capabilities
             .network,
         NetworkAccess::Allowed

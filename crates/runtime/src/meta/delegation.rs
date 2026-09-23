@@ -1,5 +1,6 @@
 //! delegate メタ操作のハンドラ。
 
+use agents::NetworkAccess;
 use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
@@ -27,11 +28,50 @@ pub(super) struct DelegateArgs {
     #[serde(default)]
     workspace_branch: Option<String>,
     #[serde(default)]
+    network_access: Option<String>,
+    #[serde(default)]
     load_skills: Vec<String>,
 }
 
 fn parse_args_category(category: Option<String>) -> Result<Option<String>, String> {
     category.as_deref().map(parse_category).transpose()
+}
+
+fn resolve_network_access(
+    role: agents::Role,
+    parent: NetworkAccess,
+    requested: Option<&str>,
+) -> Result<NetworkAccess, String> {
+    // Selecting the dedicated external research role is an explicit network grant.
+    // Other child roles remain bounded by the parent session's authority.
+    let ceiling = if role == agents::Role::WebResearcher {
+        NetworkAccess::Allowed
+    } else {
+        parent
+    };
+    let child = match requested {
+        None => return Ok(ceiling),
+        Some("denied") => NetworkAccess::Denied,
+        Some("opt_in") => NetworkAccess::OptIn,
+        Some("allowed") => NetworkAccess::Allowed,
+        Some(value) => {
+            return Err(format!(
+                "invalid arguments: unknown network_access '{value}'; expected denied, opt_in or allowed"
+            ));
+        }
+    };
+    if matches!(
+        (ceiling, child),
+        (
+            NetworkAccess::Denied,
+            NetworkAccess::OptIn | NetworkAccess::Allowed
+        ) | (NetworkAccess::OptIn, NetworkAccess::Allowed)
+    ) {
+        return Err(format!(
+            "invalid arguments: network_access {child:?} exceeds parent permission {parent:?}"
+        ));
+    }
+    Ok(child)
 }
 
 /// load_skills を検証し、重複を除去した注入名リストを返す (issue #53 / AC6)。
@@ -112,6 +152,14 @@ pub(crate) fn spawn_delegate(
     if category.is_some() && role != agents::Role::Worker {
         return Err(error("category is only valid for role=worker"));
     }
+    let network_access = match resolve_network_access(
+        role,
+        state.run_config().network_access,
+        args.network_access.as_deref(),
+    ) {
+        Ok(access) => access,
+        Err(message) => return Err(error(message)),
+    };
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
         Err(message) => return Err(error(message)),
@@ -125,6 +173,7 @@ pub(crate) fn spawn_delegate(
         load_skills,
         workspace_mode: args.workspace_mode.unwrap_or_default(),
         workspace_branch: args.workspace_branch,
+        network_access,
         ..RunConfig::default()
     };
     if args.background {

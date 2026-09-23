@@ -163,7 +163,7 @@ fn compose_with_empty_routes_rejects_role_and_arbitrary_names() {
         "explorer",
         "worker",
         "reviewer",
-        "librarian",
+        "web_researcher",
         "planner",
         "oracle",
         "multimodal_looker",

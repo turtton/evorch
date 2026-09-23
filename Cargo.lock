@@ -1843,6 +1843,7 @@ dependencies = [
 name = "evorch"
 version = "0.1.0"
 dependencies = [
+ "agents",
  "config",
  "event-bus",
  "mock-openai",
@@ -2356,6 +2357,7 @@ dependencies = [
 name = "gui"
 version = "0.1.0"
 dependencies = [
+ "agents",
  "arena",
  "ashpd",
  "async-trait",

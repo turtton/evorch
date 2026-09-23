@@ -220,14 +220,17 @@ fn seed_tracks_implicit_users_only_for_role_name_fallbacks() {
 
 #[test]
 fn prefill_seeds_implicit_users_for_new_role_named_route() {
-    // Given: a missing librarian route with an implicit librarian binding.
+    // Given: a missing web_researcher route with an implicit web_researcher binding.
     let config = fixture();
     // When: prefilling a route from role settings.
-    let model = RoutingSettingsModel::seed_from_config_prefill(&config, "librarian");
+    let model = RoutingSettingsModel::seed_from_config_prefill(&config, "web_researcher");
     // Then: the new route and existing routes both retain their fallback users.
-    assert_eq!(model.implicit_route_users["librarian"], ["roles.librarian"]);
+    assert_eq!(
+        model.implicit_route_users["web_researcher"],
+        ["roles.web_researcher"]
+    );
     assert_eq!(model.implicit_route_users["worker"], ["worker"]);
-    assert!(model.route_users["librarian"].is_empty());
+    assert!(model.route_users["web_researcher"].is_empty());
 }
 
 #[test]

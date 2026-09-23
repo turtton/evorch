@@ -77,7 +77,7 @@
             # Local capability_enforcement passes; sandbox DNS initialization fails.
             "--skip=explorer_web_fetch_is_denied_without_tool_started"
             # Local capability_enforcement passes; sandbox DNS initialization fails.
-            "--skip=librarian_web_search_reaches_executor"
+            "--skip=web_researcher_web_search_reaches_executor"
             # Local capability_enforcement passes; sandbox DNS initialization fails.
             "--skip=orchestrator_web_fetch_default_session_is_denied_before_executor"
             # Local capability_enforcement passes; sandbox DNS initialization fails.

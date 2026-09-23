@@ -5,6 +5,11 @@ fn additional_roles_have_least_privilege_capabilities() {
     // Given: the closed role names and their capability contracts.
     let cases = [
         (
+            "WebResearcher",
+            vec!["read", "grep", "web_search", "web_fetch"],
+            NetworkAccess::Allowed,
+        ),
+        (
             "Planner",
             vec!["read", "grep", "git_diff", "skill_load", "web_fetch"],
             NetworkAccess::OptIn,
@@ -43,7 +48,7 @@ fn every_role_authorizes_ledger_meta_ops() {
         Role::Explorer,
         Role::Worker,
         Role::Reviewer,
-        Role::Librarian,
+        Role::WebResearcher,
         Role::Planner,
         Role::Oracle,
         Role::MultimodalLooker,
@@ -74,7 +79,7 @@ fn existing_role_names_still_round_trip() {
         Role::Explorer,
         Role::Worker,
         Role::Reviewer,
-        Role::Librarian,
+        Role::WebResearcher,
     ] {
         // Given / When: an existing canonical name is parsed.
         let parsed = Role::from_name(role.name()).expect("existing role");

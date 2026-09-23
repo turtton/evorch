@@ -15,26 +15,25 @@ use serde::{Deserialize, Serialize};
 /// | Explorer | read / grep | OptIn | 不可 |
 /// | Worker | read / write / edit / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | Denied | 不可 |
 /// | Reviewer | read / grep / git_diff | Denied | 不可 |
-/// | Librarian | read / grep / web_search / web_fetch | Allowed | 不可 |
+/// | WebResearcher | read / grep / web_search / web_fetch | Allowed | 不可 |
 ///
 /// # 設計上の決定
 ///
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
 /// - Orchestrator のネットワークは web_fetch のみを対象とする
 ///   [`NetworkAccess::OptIn`] (ADR 0002 2026-09-03 補足)。
-///   web_search は Librarian 専用であり、Orchestrator は持たない。
+///   web_search は WebResearcher 専用であり、Orchestrator は持たない。
 ///
-/// # v0.2 拡張レシピ
+/// # ロール追加時の配線
 ///
-/// Librarian はこのレシピに従い追加済み。将来の新ロール (Oracle など) の追加も
-/// ロール定義の追加のみで完結する:
-///
-/// 1. この enum に variant を追加する。
+/// 1. この enum と名前の変換に variant を追加する。
 /// 2. [`Role::capabilities`] に対応する arm を 1 つ追加する
 ///    (網羅的 match によりコンパイラが追加を強制する)。
+/// 3. delegate の解析・schema、設定バインディング、基準プロンプト・catalog、
+///    GUI のロール選択へ登録する。
 ///
-/// ランタイムの境界強制は [`RoleCapabilities`] のみを消費し、`Role` に対して
-/// マッチングしない。そのため既存ロールの強制ロジックには変更が不要である。
+/// ツール権限の強制は [`RoleCapabilities`] を消費する共通の仕組みであり、
+/// ロールごとの強制ロジックを追加する必要はない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     /// 調整役。委譲のみを行い、mutation tool を持たない。
@@ -45,8 +44,9 @@ pub enum Role {
     Worker,
     /// レビュー役。生成と独立したレビューを行う。
     Reviewer,
-    /// 調査役 (v0.2)。read / grep と web_search / web_fetch を持ち、ネットワークは常時許可。
-    Librarian,
+    /// 外部情報の調査役。read / grep / web_search / web_fetch を持つ。
+    /// ネットワークの実行にはセッション設定と per-tool 権限による許可も必要。
+    WebResearcher,
     Planner,
     Oracle,
     MultimodalLooker,
@@ -72,7 +72,7 @@ impl Role {
             "Explorer" => Ok(Self::Explorer),
             "Worker" => Ok(Self::Worker),
             "Reviewer" => Ok(Self::Reviewer),
-            "Librarian" => Ok(Self::Librarian),
+            "WebResearcher" => Ok(Self::WebResearcher),
             "Planner" => Ok(Self::Planner),
             "Oracle" => Ok(Self::Oracle),
             "MultimodalLooker" => Ok(Self::MultimodalLooker),
@@ -89,7 +89,7 @@ impl Role {
             Role::Explorer => "Explorer",
             Role::Worker => "Worker",
             Role::Reviewer => "Reviewer",
-            Role::Librarian => "Librarian",
+            Role::WebResearcher => "WebResearcher",
             Role::Planner => "Planner",
             Role::Oracle => "Oracle",
             Role::MultimodalLooker => "MultimodalLooker",
@@ -147,7 +147,7 @@ impl Role {
                 NetworkAccess::Denied,
                 false,
             ),
-            Role::Librarian => RoleCapabilities::new(
+            Role::WebResearcher => RoleCapabilities::new(
                 ["read", "grep", "web_search", "web_fetch"],
                 NetworkAccess::Allowed,
                 false,

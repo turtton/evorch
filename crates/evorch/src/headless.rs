@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use event_bus::{AgentRunPhase, EventBus};
+use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
 use routing::EnvLookup;
 use runtime::{
     ExecutionPolicy, ModelSource, Role, RunConfig, RunId, RuntimeComposition, compose_runtime,
@@ -17,7 +17,7 @@ use sandbox::{CredentialError, DirectSandbox};
 use tools::ToolExecutor;
 
 /// `parse_args` の使い方テキスト。
-pub const USAGE: &str = "usage: evorch run --project <dir> --role <worker|orchestrator|explorer|reviewer> --prompt <text> [--user-config <dir>]";
+pub const USAGE: &str = "usage: evorch run --project <dir> --role <worker|orchestrator|explorer|reviewer|web_researcher> --prompt <text> [--user-config <dir>] [--web-tool-access <denied|opt-in>]";
 
 /// `evorch run` の引数。
 #[derive(Debug, Clone)]
@@ -26,6 +26,8 @@ pub struct HeadlessArgs {
     pub role: Role,
     pub prompt: String,
     pub user_config_dir: Option<PathBuf>,
+    /// Optional per-run override of the saved Web tool policy.
+    pub web_tool_access: Option<config::WebToolAccess>,
 }
 
 /// tool 実行の sandbox 方式。
@@ -78,6 +80,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, He
     let mut role = None;
     let mut prompt = None;
     let mut user_config = None;
+    let mut web_tool_access = None;
     while let Some(flag) = argv.next() {
         let Some(value) = argv.next() else {
             return Err(usage_error());
@@ -87,6 +90,13 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, He
             "--role" => role = Some(value),
             "--prompt" => prompt = Some(value),
             "--user-config" => user_config = Some(value),
+            "--web-tool-access" => {
+                web_tool_access = Some(match value.as_str() {
+                    "denied" => config::WebToolAccess::Denied,
+                    "opt-in" => config::WebToolAccess::OptIn,
+                    _ => return Err(usage_error()),
+                });
+            }
             _ => return Err(usage_error()),
         }
     }
@@ -103,6 +113,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<HeadlessArgs, He
         role,
         prompt,
         user_config_dir: user_config.map(PathBuf::from),
+        web_tool_access,
     })
 }
 
@@ -116,6 +127,7 @@ fn parse_role(text: &str) -> Option<Role> {
         "explorer" => Some(Role::Explorer),
         "worker" => Some(Role::Worker),
         "reviewer" => Some(Role::Reviewer),
+        "web_researcher" | "webresearcher" => Some(Role::WebResearcher),
         _ => None,
     }
 }
@@ -140,7 +152,11 @@ pub async fn run_headless(
         read_env: false,
         ..config::LoadOptions::default()
     })?;
+    let web_tool_access = args
+        .web_tool_access
+        .unwrap_or(config.sandbox.web_tool_access);
     let bus = Arc::new(EventBus::new(256));
+    let approval_receiver = bus.subscribe();
     let executor: Arc<ToolExecutor> = match sandbox {
         SandboxChoice::Production => production_executor(
             Arc::clone(&bus),
@@ -159,7 +175,7 @@ pub async fn run_headless(
 
     let composed = compose_runtime(RuntimeComposition {
         config: &config,
-        bus,
+        bus: Arc::clone(&bus),
         executor,
         credential_store,
         env,
@@ -171,8 +187,31 @@ pub async fn run_headless(
         SandboxChoice::Production => composed.runtime.with_sandbox_root(args.project_dir),
         SandboxChoice::DirectUnchecked => composed.runtime,
     };
-    let run_id = runtime.delegate_background(args.role, args.prompt, RunConfig::default());
-    let phase = runtime.wait(run_id).await?;
+    let network_access = match web_tool_access {
+        config::WebToolAccess::Denied => agents::NetworkAccess::Denied,
+        config::WebToolAccess::OptIn => agents::NetworkAccess::OptIn,
+    };
+    let approval_task = if web_tool_access == config::WebToolAccess::OptIn {
+        Some(tokio::spawn(serve_approvals(
+            approval_receiver,
+            Arc::clone(&bus),
+        )))
+    } else {
+        None
+    };
+    let run_id = runtime.delegate_background(
+        args.role,
+        args.prompt,
+        RunConfig {
+            network_access,
+            ..RunConfig::default()
+        },
+    );
+    let phase = runtime.wait(run_id).await;
+    if let Some(task) = approval_task {
+        task.abort();
+    }
+    let phase = phase?;
     let final_text = runtime.run_result(run_id)?;
 
     Ok(HeadlessOutcome {
@@ -195,4 +234,36 @@ fn open_credential_store(args: &HeadlessArgs) -> Result<Arc<dyn CredentialStore>
             )
         })?;
     Ok(open_default(dir)?)
+}
+
+/// Answer tool approval requests on the terminal for an opt-in headless run.
+async fn serve_approvals(mut receiver: event_bus::EventReceiver, bus: Arc<EventBus>) {
+    loop {
+        let event = match receiver.recv().await {
+            Ok(event) => event,
+            Err(event_bus::RecvError::Lagged(_)) => continue,
+            Err(event_bus::RecvError::Closed) => return,
+        };
+        let EventKind::Tool(ToolEvent::ApprovalRequested {
+            tool_name, call_id, ..
+        }) = event.kind
+        else {
+            continue;
+        };
+        let display_call_id = call_id.clone();
+        let approved = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            eprint!("Approve {tool_name} [{display_call_id}]? [y/N] ");
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).is_ok()
+                && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        })
+        .await
+        .unwrap_or(false);
+        bus.emit(Event::new(ToolEvent::ApprovalResolved {
+            call_id,
+            approved,
+        }));
+    }
 }

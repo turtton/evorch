@@ -12,6 +12,7 @@ name = "evorch"
 path = "src/main.rs"
 
 [dependencies]
+agents = { path = "../agents" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 routing = { path = "../routing" }

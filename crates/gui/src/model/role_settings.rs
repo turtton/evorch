@@ -143,7 +143,7 @@ pub fn bindings(agents: &config::AgentsConfig) -> [(&str, &config::RoleBindingCo
         ("explorer", &agents.explorer),
         ("worker", &agents.worker),
         ("reviewer", &agents.reviewer),
-        ("roles.librarian", &agents.roles.librarian),
+        ("roles.web_researcher", &agents.roles.web_researcher),
         ("roles.planner", &agents.roles.planner),
         ("roles.oracle", &agents.roles.oracle),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),

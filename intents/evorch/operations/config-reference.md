@@ -111,6 +111,18 @@ claude-main = [
 | `enabled` | bool | downsampled metrics 記録の有効化（ADR 0012） |
 | `retention_days` | u32 | 保持日数 |
 
+## Web ツールのネットワーク設定
+
+`[sandbox]` の `web_tool_access` は `denied`（既定）または `opt-in`。
+`opt-in` にすると、GUI では Web ツールの呼び出しごとに Approvals パネルで判断し、
+CLI の `evorch run` では端末で `y/N` を尋ねる。CLI では
+`--web-tool-access opt-in` で当該 run だけ上書きできる。
+
+`allow_network` は shell の sandbox 通信を制御する別設定。
+WebResearcher に委譲した子 run は、専用ロール選択により既定で Web ツールの
+ネットワークを許可する。明示的な `network_access = "opt_in"` を
+delegate に渡した場合は、その子の呼び出しごとに承認を求める。
+
 ## JSON Schema
 
 `Config` から `schemars` で自動生成した JSON Schema を versioned artifact として公開している（ADR 0014）。

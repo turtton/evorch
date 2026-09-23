@@ -221,7 +221,7 @@ mod tests {
             Role::Orchestrator,
             Role::Explorer,
             Role::Reviewer,
-            Role::Librarian,
+            Role::WebResearcher,
         ] {
             assert!(matches!(
                 ExecutionPolicy::for_role(role).authorize("escalate"),

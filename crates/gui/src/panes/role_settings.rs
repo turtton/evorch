@@ -56,7 +56,7 @@ pub fn role_settings_modal(
                                 Some(&mut agents.worker.categories),
                             ),
                             ("Reviewer", "reviewer", &mut agents.reviewer, None),
-                            ("Librarian", "librarian", &mut agents.roles.librarian, None),
+                            ("WebResearcher", "web_researcher", &mut agents.roles.web_researcher, None),
                             ("Planner", "planner", &mut agents.roles.planner, None),
                             ("Oracle", "oracle", &mut agents.roles.oracle, None),
                             ("Multimodal Looker", "multimodal_looker", &mut agents.roles.multimodal_looker, None),

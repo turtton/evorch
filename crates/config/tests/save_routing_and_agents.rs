@@ -98,7 +98,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         &mut agents.explorer,
         &mut agents.worker.base,
         &mut agents.reviewer,
-        &mut agents.roles.librarian,
+        &mut agents.roles.web_researcher,
         &mut agents.roles.planner,
         &mut agents.roles.oracle,
         &mut agents.roles.multimodal_looker,

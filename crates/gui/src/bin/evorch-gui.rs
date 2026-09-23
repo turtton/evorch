@@ -881,6 +881,7 @@ fn run() -> Result<(), GuiError> {
         .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(
             RuntimeCommandSink::new(runtime.clone(), handle.clone(), supervisor)
+                .with_web_tool_access(composition_config.sandbox.web_tool_access)
                 .with_event_bus(Arc::clone(&bus))
                 .with_ownership(ownership)
                 .with_memory_storage(storage_config.clone())

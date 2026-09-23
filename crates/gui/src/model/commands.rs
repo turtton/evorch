@@ -81,6 +81,9 @@ pub enum WorkbenchCommand {
         call_id: String,
         approved: bool,
     },
+    SetWebToolAccess {
+        access: config::WebToolAccess,
+    },
     PauseGoal {
         goal_id: String,
     },
@@ -268,6 +271,7 @@ impl CommandSink for FixtureLoopAdapter {
             }
             WorkbenchCommand::CancelChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
+            | WorkbenchCommand::SetWebToolAccess { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);

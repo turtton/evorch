@@ -18,9 +18,6 @@
           "generation": {}
         },
         "roles": {
-          "librarian": {
-            "generation": {}
-          },
           "multimodal_looker": {
             "generation": {}
           },
@@ -28,6 +25,9 @@
             "generation": {}
           },
           "planner": {
+            "generation": {}
+          },
+          "web_researcher": {
             "generation": {}
           }
         },
@@ -156,7 +156,8 @@
       "default": {
         "allow_network": false,
         "escalate_to_user_on_deny": false,
-        "escalation_approval": "auto"
+        "escalation_approval": "auto",
+        "web_tool_access": "denied"
       }
     },
     "team": {
@@ -179,12 +180,6 @@
     "AdditionalRoleBindings": {
       "type": "object",
       "properties": {
-        "librarian": {
-          "$ref": "#/$defs/RoleBindingConfig",
-          "default": {
-            "generation": {}
-          }
-        },
         "multimodal_looker": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
@@ -198,6 +193,12 @@
           }
         },
         "planner": {
+          "$ref": "#/$defs/RoleBindingConfig",
+          "default": {
+            "generation": {}
+          }
+        },
+        "web_researcher": {
           "$ref": "#/$defs/RoleBindingConfig",
           "default": {
             "generation": {}
@@ -234,9 +235,6 @@
         "roles": {
           "$ref": "#/$defs/AdditionalRoleBindings",
           "default": {
-            "librarian": {
-              "generation": {}
-            },
             "multimodal_looker": {
               "generation": {}
             },
@@ -244,6 +242,9 @@
               "generation": {}
             },
             "planner": {
+              "generation": {}
+            },
+            "web_researcher": {
               "generation": {}
             }
           }
@@ -1078,6 +1079,10 @@
         "escalation_approval": {
           "$ref": "#/$defs/EscalationApproval",
           "default": "auto"
+        },
+        "web_tool_access": {
+          "$ref": "#/$defs/WebToolAccess",
+          "default": "denied"
         }
       },
       "additionalProperties": false
@@ -1113,6 +1118,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "WebToolAccess": {
+      "description": "Session policy for web_search and web_fetch.",
+      "type": "string",
+      "enum": [
+        "denied",
+        "opt-in"
+      ]
     },
     "WorkerBindingConfig": {
       "description": "worker 専用のロール設定とカテゴリ別バインディング。",

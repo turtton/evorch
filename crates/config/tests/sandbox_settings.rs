@@ -1,4 +1,34 @@
-use config::{Config, EscalationApproval, LoadOptions, SandboxConfig, save_sandbox};
+use config::{Config, EscalationApproval, LoadOptions, SandboxConfig, WebToolAccess, save_sandbox};
+
+#[test]
+fn web_tool_access_defaults_to_denied_and_round_trips_opt_in() {
+    let defaults: Config = toml::from_str("version = 2").expect("defaults");
+    assert_eq!(defaults.sandbox.web_tool_access, WebToolAccess::Denied);
+
+    let dir = tempfile::tempdir().expect("temp");
+    let path = dir.path().join("evorch.toml");
+    save_sandbox(
+        &path,
+        SandboxConfig {
+            web_tool_access: WebToolAccess::OptIn,
+            ..Default::default()
+        },
+    )
+    .expect("save");
+    let loaded = Config::load(&LoadOptions {
+        project_dir: Some(dir.path().into()),
+        user_config_dir: Some(dir.path().join("user")),
+        read_env: false,
+        ..Default::default()
+    })
+    .expect("load");
+    assert_eq!(loaded.sandbox.web_tool_access, WebToolAccess::OptIn);
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("web_tool_access = \"opt-in\"")
+    );
+}
 
 #[test]
 fn sandbox_allow_network_defaults_to_false_when_section_absent() {
@@ -121,6 +151,7 @@ fn save_sandbox_persists_escalation_fields_and_keeps_other_sections() {
     .expect("write");
     let sandbox = SandboxConfig {
         allow_network: true,
+        web_tool_access: WebToolAccess::OptIn,
         escalation_approval: EscalationApproval::User,
         escalate_to_user_on_deny: true,
     };

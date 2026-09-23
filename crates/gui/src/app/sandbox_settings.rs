@@ -79,6 +79,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     ui.checkbox(&mut self.sandbox_settings.draft.escalate_to_user_on_deny, "審査で拒否された場合はユーザー承認へ昇格");
                     ui.checkbox(&mut self.sandbox_settings.draft.allow_network, "Allow network inside sandbox");
                     ui.label(muted("Applies to new runs. Shares the host network without destination restrictions. Roles that deny network remain blocked. Web tool permissions are unchanged."));
+                    ui.separator();
+                    ui.label("Web search and fetch");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.sandbox_settings.draft.web_tool_access, config::WebToolAccess::Denied, "Block web tools");
+                        ui.radio_value(&mut self.sandbox_settings.draft.web_tool_access, config::WebToolAccess::OptIn, "Ask for each web request");
+                    });
+                    ui.label(muted("Applies to new and continued runs. WebResearcher children can research automatically; other roles follow this setting."));
                 });
                 if let Some(error) = &self.sandbox_settings.error {
                     ui.colored_label(palette().ERROR_FG, error);
@@ -111,6 +118,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match result {
             Ok(()) => {
                 self.sandbox_settings.config = self.sandbox_settings.draft;
+                self.sink
+                    .submit(crate::model::commands::WorkbenchCommand::SetWebToolAccess {
+                        access: self.sandbox_settings.config.web_tool_access,
+                    });
                 if let Some(runtime) = &self.sandbox_settings.runtime {
                     runtime.set_sandbox_network(self.sandbox_settings.config.allow_network);
                     runtime.set_sandbox_escalation(
