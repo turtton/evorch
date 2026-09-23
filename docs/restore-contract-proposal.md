@@ -1,11 +1,22 @@
 # ADR 0027 revision: explicit renewal of a team coordinator
 
-Status: implementation proposal, pending canonical intent update in the host repository.
+Status: approved by the operator on 2026-09-23 and incorporated into
+[ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
 
 The user requested reconsideration of ADR 0027's blanket rejection of DynamicTeam
 restoration. This revision preserves ADR 0026's existing run/task substrate and
 separates **reusing conversation history** from **reviving execution authority**.
 It does not resume old tools, processes, workers, or leases.
+
+## 承認済みの範囲
+
+- `continue_goal` / `delegate_chat` で、停止済みrootの会話履歴を引き継げる範囲を広げます。
+- DynamicTeamのroot Orchestratorでは、呼出元が現在のteam store・同一team ID・委譲設定・権限を明示します。
+- Single / DynamicTeamのrootに付いていたmemory・finding設定も、現在の設定で更新できます。古い保存先や権限は復元しません。
+- 動作中または起動待ちの子agent、残存claim、結果未確認の副作用がある場合は拒否します。
+- 旧workerのlease、プロセス、workspace branchは再開しません。ディスク情報だけで復元する `restore_and_deliver` の拒否は維持します。
+
+以下の範囲で利用者が「OK。承認する」と最終承認し、正式なADR 0027を改訂しました。
 
 ## Allowed expansion
 
@@ -24,7 +35,9 @@ that previously used DynamicTeam when all of these checks pass:
    claimed tasks. Expired claims are not automatically treated as safe by this
    restore path. Reconciliation must establish the prior owner's effects first.
 5. No incomplete or cancelled tool execution with potential side effects remains
-   in the run checkpoint.
+   in the run checkpoint. Terminal visibility follows process drain, final context
+   persistence and workspace teardown, so a new incarnation cannot race an older
+   run's cleanup or checkpoint write.
 
 `continue_goal` also accepts a persisted root after process restart, when no live
 RunEntry exists, and verifies its root identity and role before registering it.
@@ -43,6 +56,9 @@ restored. Old lessons already present in conversation remain historical referenc
 text; a new boundary/store, if needed, is explicitly supplied by the current
 caller. This is necessary for ordinary GUI-created goals, which set both fields. For Single
 roots this uses a distinct caller-renewal marker; a team authority is not required.
+All root history reuse paths, including ordinary and ownership-only records,
+check that the source root and descendants (including pending admissions) are
+stopped. A refusal leaves the checkpoint available for a later safe continuation.
 
 ## Boundaries retained
 

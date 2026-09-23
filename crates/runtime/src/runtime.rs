@@ -929,8 +929,9 @@ impl AgentRuntime {
         &self,
         memo: EscalationMemo,
         source_config: &RunConfig,
-        worktree: Option<OwnedWorktree>,
-    ) -> RunId {
+        worktree: &mut Option<OwnedWorktree>,
+        before_spawn: impl FnOnce(),
+    ) -> Result<RunId, String> {
         let config = RunConfig {
             interactive: false,
             name: Some("escalation-orchestrator".to_string()),
@@ -944,7 +945,25 @@ impl AgentRuntime {
         };
         let source_run_id = memo.source_run_id;
         let run_id = RunId::new(self.shared.next_run_id.fetch_add(1, Ordering::Relaxed));
-        self.spawn_run_with_handoff(
+        // Escalation starts from the memo, not the source conversation. Every
+        // source question/answer therefore still needs delivery to this root.
+        // Persist the explicit recipient before any provider admission or spawn.
+        self.inherit_user_questions(source_run_id, run_id, &[])?;
+        // Detach before public terminal state permits a new incarnation of
+        // source_run_id. The adopter must never clear the source entry later.
+        if let Some(owned) = worktree.as_ref()
+            && let Some(source) = self
+                .shared
+                .workspaces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(&source_run_id)
+            && source.worktree_path.as_ref() == Some(&owned.path)
+        {
+            source.worktree_path = None;
+        }
+        before_spawn();
+        Ok(self.spawn_run_with_handoff(
             run_id,
             None,
             Role::Orchestrator,
@@ -952,9 +971,9 @@ impl AgentRuntime {
             config,
             RunContinuation::Handoff(RunHandoff {
                 source_run_id,
-                worktree,
+                worktree: worktree.take(),
             }),
-        )
+        ))
     }
 
     /// エスカレーションで生成された run の移譲元を返す。

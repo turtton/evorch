@@ -7,6 +7,7 @@ mod budget;
 #[cfg(test)]
 mod delegate_cleanup_tests;
 mod durable;
+mod finalization;
 mod identical_calls;
 mod messages;
 mod observability;
@@ -108,6 +109,7 @@ pub(crate) struct LoopState {
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
     durable_task: Option<storage::entity::TaskContinuation>,
+    pending_terminal: Option<(RunState, LifecycleEvent)>,
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
@@ -195,7 +197,11 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
         durable_task: None,
+        pending_terminal: None,
     };
+    let mut owned_worktree = None;
+    // Every setup/execute return flows through one finalization boundary.
+    async {
     if state.cancelled()
         || state
             .runtime()
@@ -237,7 +243,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     // Family-scoped description variation keeps the request prefix stable within a model family,
     // so prompt-cache hit rates are unaffected.
     tool_calls::append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
-    let mut owned_worktree = match state.task.config.workspace_mode {
+    owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {
             let Some(runtime_shared) = shared.upgrade() else {
@@ -340,35 +346,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     state.save_checkpoint();
     state.execute().await;
-    if let Err(error) = state
-        .shared
-        .executor
-        .drain_shell_jobs(&state.task.run_id.to_string())
-        .await
-    {
-        state.snapshot_diagnostic(&error);
-        // A child may still own the workspace. Preserve it for explicit reconciliation.
-        tracing::error!(%error, "shell job cleanup failed; workspace retained");
-        return;
-    }
-    if let Err(error) = crate::restore::persist_terminal_snapshot(&state) {
-        state.snapshot_diagnostic(&error);
-    } else {
-        state.snapshot_saved_diagnostic();
-    }
-    if let Some(permit) = &state.task.config.ownership
-        && let Err(error) = permit.checkpoint(&state.context.visible_messages())
-    {
-        state.finish_error(error.to_string());
-    }
-    // cancel() は cooperative で task abort しない契約への依存。JoinHandle::abort 導入は禁止。
-    match state.take_pending_escalation() {
-        Some(memo) => {
-            crate::escalation::handoff::complete(&shared, &state, memo, owned_worktree.take())
-                .await;
-        }
-        None => cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await,
-    }
+    }.await;
+    state.finalize(owned_worktree).await;
 }
 
 async fn setup_isolated_workspace(
@@ -441,7 +420,7 @@ async fn attach_adopted_workspace(
     owned: OwnedWorktree,
 ) -> Result<(OwnedWorktree, Arc<ToolExecutor>), String> {
     let run_id = state.task.run_id;
-    let source_run_id = state
+    let _source_run_id = state
         .task
         .handoff
         .as_ref()
@@ -461,9 +440,6 @@ async fn attach_adopted_workspace(
                 merge_mode: state.task.config.merge_mode,
             },
         );
-        if let Some(source) = workspaces.get_mut(&source_run_id) {
-            source.worktree_path = None;
-        }
     }
 
     match attach_worktree_executor(workspace, runtime_shared, state, &owned).await {
@@ -657,7 +633,7 @@ impl LoopState {
     }
 
     pub(crate) fn phase(&self) -> AgentRunPhase {
-        *self.channels.phase_tx.borrow()
+        self.run_state.phase()
     }
 
     pub(crate) fn run_role(&self) -> Role {
@@ -998,40 +974,25 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
+        let previous = self.run_state;
         let event = self
             .run_state
             .transition(self.task.run_id, phase, reason.clone())
             .map_err(|_| ())?;
-        self.publish_durable_task(phase, reason);
         if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
             self.activity(event_bus::RunActivity::Idle);
             self.shared
                 .executor
                 .cancel_shell_jobs(&self.task.run_id.to_string());
-            if let Err(error) = crate::restore::persist_terminal_snapshot(self) {
-                tracing::warn!(run_id = %self.task.run_id, %error, "terminal context snapshot failed");
-                self.snapshot_diagnostic(&error);
-            } else {
-                self.snapshot_saved_diagnostic();
-            }
             self.channels.inbox_rx.close();
             self.task.mailbox.close();
-        }
-        // issue #98: 位相 commit はイベント発行に happens-before させる
-        // (PR #84 由来の決定論化規約: 観測可能な状態変化はその通知より先)。
-        // 先に emit すると、AgentRunStateChanged を受け取った観測者が
-        // 直後に phase を読んだ際に旧位相を見てしまう
-        // (chat_sink_runtime.rs wait_for_reply の :140 flake の根本原因)。
-        match phase {
-            AgentRunPhase::Done | AgentRunPhase::Error => {
-                if let Some(runtime) = self.runtime() {
-                    runtime.publish_terminal(self.task.run_id, event);
-                }
-            }
-            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
-                self.channels.phase_tx.send_replace(phase);
-                self.shared.bus.emit(Event::new(event));
-            }
+            // Public terminal state permits same-ID restoration. Publish only after
+            // process teardown, final persistence, and workspace cleanup finish.
+            self.pending_terminal = Some((previous, event));
+        } else {
+            self.publish_durable_task(phase, reason);
+            self.channels.phase_tx.send_replace(phase);
+            self.shared.bus.emit(Event::new(event));
         }
         Ok(())
     }
@@ -1098,13 +1059,7 @@ impl LoopState {
         if let Some(text) = self.final_assistant_text() {
             self.channels.result_tx.send_replace(Some(text));
         }
-        if self.transition(AgentRunPhase::Done, None).is_ok() {
-            self.shared
-                .bus
-                .emit(Event::new(LifecycleEvent::BackgroundTaskCompleted {
-                    task_id: self.task.run_id.to_string(),
-                }));
-        }
+        let _ = self.transition(AgentRunPhase::Done, None);
     }
 
     /// エスカレーションで run を終端させる。
@@ -1116,16 +1071,7 @@ impl LoopState {
     /// で回収する。
     pub(crate) fn finish_escalated(&mut self, memo: EscalationMemo) {
         self.pending_escalation = Some(memo);
-        if self
-            .transition(AgentRunPhase::Done, Some("escalated".to_string()))
-            .is_ok()
-        {
-            self.shared
-                .bus
-                .emit(Event::new(LifecycleEvent::BackgroundTaskCompleted {
-                    task_id: self.task.run_id.to_string(),
-                }));
-        }
+        let _ = self.transition(AgentRunPhase::Done, Some("escalated".to_string()));
     }
 
     /// 記録済みのエスカレーションメモを取り出す (取り出し後は `None`)。
@@ -1166,11 +1112,6 @@ impl LoopState {
     }
 
     fn finish_cancelled(&mut self) {
-        self.shared
-            .bus
-            .emit(Event::new(LifecycleEvent::BackgroundTaskCancelled {
-                task_id: self.task.run_id.to_string(),
-            }));
         self.finish_error("cancelled".to_string());
     }
 }

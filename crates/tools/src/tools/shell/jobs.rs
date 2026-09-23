@@ -326,6 +326,23 @@ impl JobRegistry {
         ))
     }
 
+    pub(super) fn release(&self, run_id: &str) -> Result<(), ToolError> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if jobs
+            .values()
+            .any(|job| job.owner == run_id && job.running())
+        {
+            return Err(io_failed(
+                "cannot release shell handles before process teardown",
+            ));
+        }
+        jobs.retain(|_, job| job.owner != run_id);
+        Ok(())
+    }
+
     pub(super) fn running(&self, run_id: &str) -> bool {
         self.jobs
             .lock()

@@ -125,6 +125,12 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Forget reaped handles only after the terminal snapshot recorded uncertain
+    /// effects. This never acknowledges results and refuses to forget live jobs.
+    fn release_shell_jobs(&self, _run_id: &str) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     /// Whether this run still owns a live shell process.
     fn has_running_shell_jobs(&self, _run_id: &str) -> bool {
         false

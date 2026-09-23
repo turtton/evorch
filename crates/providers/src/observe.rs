@@ -259,7 +259,7 @@ mod tests {
         }
     }
 
-    // Given: 同一プロセス内の連続呼び出し / When: request ID を生成 / Then: req prefix と単調増加する一意な counter を持つ
+    // Given: 他スレッドも採番する同一プロセス / When: request ID を生成 / Then: req prefix と呼出元ごとの単調増加・全体の一意性を保つ
     #[test]
     fn request_id_has_prefix_and_unique_increasing_counter() {
         let first = next_request_id();
@@ -270,10 +270,38 @@ mod tests {
         assert_eq!(first_parts.len(), 3);
         assert_eq!(first_parts[0], "req");
         assert_eq!(first_parts[1], second_parts[1]);
-        assert_eq!(
-            first_parts[2].parse::<u64>().expect("counter は数値") + 1,
-            second_parts[2].parse::<u64>().expect("counter は数値")
+        // Other callers may allocate IDs between these two calls.
+        assert!(
+            first_parts[2].parse::<u64>().expect("counter は数値")
+                < second_parts[2].parse::<u64>().expect("counter は数値")
         );
+        let batches = std::thread::scope(|scope| {
+            let threads = (0..8)
+                .map(|_| scope.spawn(|| (0..64).map(|_| next_request_id()).collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut unique = std::collections::HashSet::from([first.clone(), second.clone()]);
+        for batch in batches {
+            let mut previous = second_parts[2].parse::<u64>().unwrap();
+            for id in batch {
+                let parts = id.split('-').collect::<Vec<_>>();
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], "req");
+                assert_eq!(parts[1], first_parts[1]);
+                let current = parts[2].parse::<u64>().expect("counter は数値");
+                assert!(current > previous, "each caller's IDs must increase");
+                assert!(
+                    unique.insert(id),
+                    "concurrent callers must never share an ID"
+                );
+                previous = current;
+            }
+        }
+        assert_eq!(unique.len(), 2 + 8 * 64);
     }
 
     // Given: ProviderError の全 variant / When: attempt 失敗を発行 / Then: 観測用 failure 分類へ写像される

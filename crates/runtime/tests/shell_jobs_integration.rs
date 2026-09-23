@@ -1,4 +1,6 @@
 //! Runtime regression tests using the real shell, snapshot locks, and storage.
+#[path = "shell_jobs_integration/finalization.rs"]
+mod finalization;
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -301,7 +303,10 @@ async fn cancellation_reaps_job_before_unlock_and_preserves_uncertain_effects_in
     );
     assert_pid_reaped(&pid);
     assert_eq!(runtime.run_result(run).unwrap(), None);
-    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    assert!(
+        !executor.has_unobserved_shell_jobs(&run.to_string()),
+        "terminal handles are released only after persisting the uncertainty"
+    );
     let diagnostics = runtime.restore_diagnostics(run).unwrap().unwrap();
     assert!(!diagnostics.disk_restorable);
     assert!(
@@ -426,7 +431,7 @@ async fn cancelling_start_before_job_id_delivery_keeps_lease_until_real_process_
             .unwrap(),
     );
     assert_pid_reaped(&pid);
-    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
     assert_eq!(runtime.run_result(run).unwrap(), None);
 }
 

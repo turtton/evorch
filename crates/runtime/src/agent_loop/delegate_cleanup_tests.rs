@@ -85,6 +85,7 @@ fn fixture(cancel_rx: watch::Receiver<bool>) -> (AgentRuntime, LoopState) {
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
         durable_task: None,
+        pending_terminal: None,
     };
     (runtime, state)
 }

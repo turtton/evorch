@@ -214,6 +214,16 @@ impl ToolExecutor {
         }
     }
 
+    /// Release terminal handles after durable side-effect markers have been saved.
+    /// The caller must prevent a new incarnation of this run from starting first.
+    pub fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.release_shell_jobs(run_id)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.tools
             .get("shell")

@@ -1,87 +1,130 @@
-# ADR 0027: 復元契約と実行状態の分離（restore / isolation 語彙の責務分離）（2026-09-21）
+# ADR 0027: 復元契約と実行状態の分離（2026-09-21、2026-09-23改訂）
 
 ## Status
 
-Accepted（2026-09-21）
+Accepted（2026-09-21）。root履歴の明示的な権限更新と終端処理を2026-09-23に改訂。
+改訂範囲は利用者が「OK。承認する」と最終承認した。
+回答は `intents/evorch/interviews/harness-reliability-20260923.json` の
+`final-approval` に記録している。
 
 ## Context
 
-run-29 で観測された不具合: GUI の chat run は常に ownership permit を持つため
-`write_terminal_snapshot` が終端スナップショットに
-`restorable = false` / `non_restorable_reason = "復元対象外の実行状態: ownership"` を
-記録していた。後続メッセージの継続入口である `continue_goal` はこの記録をそのまま
-`UnsupportedConfig` として拒否し、`chat failed: 実行 run-29 の復元に失敗しました`
-で失敗した。
+run-29ではGUIが現在のownership permitを再発行するにもかかわらず、保存済みの
+`ownership` を復元不可理由として `continue_goal` が履歴の継続を拒否した。
+初版はownershipをrenewable authorityと分類し、履歴と実行権限の区別を定義した。
 
-根本原因は語彙の混同にある。ownership はスナップショットから復元すべき「隔離設定」
-（isolation）ではなく、continue 時に GUI が現在の permit を再発行する「実行権限」
-（renewable authority）である。`delegate_chat` はこの区別を入口内にインラインで
-持っており ownership-only 記録を受け入れていたが、`continue_goal` には同じ carve-out が
-なかった。入口ごとに語彙の解釈がずれ、片方だけが壊れた。
+初版はDynamicTeam、memory、findingなどを全入口で一律に拒否した。そのため、
+現在の呼出元が権限・保存先を明示できるrootでも履歴を継続できなかった。
+今回、ADR 0026の既存run/task基盤を維持したまま、停止したrootの会話履歴を
+現在の設定で再利用する契約を追加する。旧worker、process、lease、workspace branch
+の再開はこの改訂に含めない。
 
 ## Decision
 
-復元可否を「実行状態の列挙」ではなく「設定フィールドごとの復元 class 分類」として
-語彙化し、3 surface で解釈を統一する。
+復元可否はrun phaseやdurable task状態とは独立した、設定と復元入口の契約とする。
 
-1. **マーカーの一元化。** ownership のみを理由とする復元不可記録は
-   `restore.rs` の `OWNERSHIP_ONLY_UNRESTORABLE_REASON` 定数によってのみ識別し、
-   判定は `RunRestoreDescriptor::renewable_ownership_only()` に集約する。
-   `write_terminal_snapshot` の書き込み側と `continue_goal` / `delegate_chat` の
-   両ゲートは必ずこの定数・helper を経由し、文字列の inline 複写を禁止する。
-2. **3 class 分類。** `write_terminal_snapshot` が復元不可として記録する
-   設定フィールドは、意味によって次のいずれかに必ず分類する。
-   - **renewable（呼び出し側が新規権限を再発行）**: `ownership`。スナップショットからは
-     一切復元せず、continue / delegate 時の現在権限で上書きする。ownership
-     のみを理由とする記録は復入口では history 復元を許可してよい。
-   - **blocking（構造的に継続不能）**: `topology`（DynamicTeam）・`team`・`team_task`・
-     `team_store`・`finding_store`・`delegation_value`・`memory`・`learning_internal`・
-     `workspace_branch`。協調・委譲・workspace・session 配線を含む実行構造は
-     スナップショットから意味のある継続が定義できず、いかなる入口でも拒否する。
-   - **security/privacy（自動 carve-out 禁止）**: `skip_secret_redaction` のような
-     配慮系トグル、および **ownership との複合を含むあらゆる hard blocker 組み合わせ**。
-     複合理由 `"復元対象外の実行状態: team_task, ownership"` は renewable 判定の
-     完全一致に引っかからず拒否理由としてそのまま返る
-     （テスト `goal_restore_rejects_ownership_combined_with_other_blockers` で固定）。
-     ownership が同居しても安全側に緩めない。
-3. **surface ごとの carve-out 適否。**
+### 1. 判定の一元化
 
-   | 復入口 | 権限の供給源 | renewable（ownership のみ）carve-out | blocking / security |
-   |---|---|---|---|
-   | `continue_goal` | 呼び出し側の `RunConfig`（GUI が現在 permit を再発行） | 許可 | 拒否 |
-   | `delegate_chat` | 同上 | 許可 | 拒否 |
-   | `restore_and_deliver` | ディスク上の descriptor のみ（disk-descriptor-authoritative） | **不可** | 拒否 |
+`restore.rs` の書込側と復元入口は次の定数・helperを共有し、理由文字列を
+入口ごとに複写しない。
 
-   `restore_and_deliver` は呼び出し側権限を持たず config 全体をディスク記録から導出する
-   責務のため、`restorable == false` なら理由を問わず `UnsupportedConfig` で fail closed
-   する。carve-out を持たない。
-4. **将来ルール。** `RunConfig` に新規フィールドが追加され
-   `write_terminal_snapshot` がそれを復元不可として記録し始める場合、merge 前に
-   本 ADR の 3 class のいずれかへ分類を明記し、該当 surface での挙動をテストで
-   固定すること。class 未決のまま復元不可記録を増やしてはならない。
+- `OWNERSHIP_ONLY_UNRESTORABLE_REASON` / `renewable_ownership_only()`
+- `ROOT_CONTEXT_RENEWAL_REQUIRED_REASON` / `renewable_root_context()`
+- `TEAM_RENEWAL_REQUIRED_REASON` / `renewable_team_root()`
 
-なお `snapshot_consumed` は消費済みスナップショットの二重复元防止を示す内部
-bookkeeping であり、3 class の分類対象ではない。
+新しい2つのマーカーもdiskだけで復元可能という意味ではない。呼出元が現在の
+設定を供給し、以下の条件を検証できる入口に限り、履歴の再利用を許す。
+
+### 2. 設定フィールドの分類
+
+| class | フィールド・条件 | 契約 |
+|---|---|---|
+| renewable | `ownership` | 古いpermitを復元せず、呼出元の現在の権限を検証して付与する。既存のownership-only判定を維持する。 |
+| renewable（root限定） | `memory`、`finding_store` | Single/DynamicTeamのrootだけを対象とし、現在の設定を使う。旧MemoryBoundaryや保存先を開かない。履歴中のlessonは過去の参考情報に留める。 |
+| renewable（team root限定） | `topology`（DynamicTeam）、`team`、`team_store`、`delegation_value` | root Orchestratorの履歴を、同一team IDに対する現在のTeamStore・topology・非空の委譲設定で継続する。下記の停止・claim条件を必須とする。 |
+| blocking | `team_task`、non-rootのteam構造、childのmemory/finding、`learning_internal`、`workspace_branch` | 旧workerのlease、実行構造、学習処理、branchをこの入口で再開しない。常に拒否する。 |
+| security/privacy | `skip_secret_redaction`などの配慮設定、およびhard blockerを含む組み合わせ | 保存済み情報から権限を拡張しない。ownershipやrenewable設定が同居してもhard blockerを緩めない。 |
+
+### 3. root履歴の継続条件
+
+- `continue_goal` / `delegate_chat` は記録のroot識別子、role、parentを検証する。
+  停止済みrootの履歴を再利用するときは、元rootと既知の子孫が停止済みであることを
+  確認する。provider admission待ちの子も対象とし、admissions→runsの同じlock順で
+  登録との隙間を作らない。動作中rootへの通常のメッセージ送信は別経路である。
+- DynamicTeamの記録にはteam IDとcoordinator run IDだけを保存し、DB path、writer、
+  permit、lease、semaphoreを含めない。記録だけを根拠にTeamStoreを開かない。
+- 現在の呼出元が同一team IDのTeamStore、DynamicTeam topology、非空の委譲設定を
+  明示する。現在のboardを検証し、claimed taskがあれば拒否する。期限切れclaimも
+  自動的に安全とはみなさず、旧ownerの副作用を照合してから既存の管理手段で処理する。
+- 既存のteam初期化経路からboardのrevision/generationを読み込む。完了taskを
+  再実行せず、ready taskも復元だけでは実行しない。stale writerのrevision fenceを維持する。
+- ownership、network access、workspace設定、model、skills、worker limitは現在の
+  呼出元から供給する。旧RunEntryやdescriptorから実行権限を暗黙に引き継がない。
+- `continue_goal` はプロセス再起動後も保存済みrootを検証し、同じgoal run IDで継続できる。
+  `delegate_chat` は新しいrun IDを使う。必要な質問・回答は明示的なconsumer linkを
+  永続化してから引き継ぎ、新しいrootの開始より先に配送先を確定する。
+
+### 4. 入口ごとの権限源
+
+| 復元入口 | 権限の供給源 | renewable履歴 | blocking / security |
+|---|---|---|---|
+| `continue_goal` | 呼出元の現在の `RunConfig` | 上記条件を満たす場合のみ許可 | 拒否 |
+| `delegate_chat` | 同上 | 上記条件を満たす場合のみ許可 | 拒否 |
+| `restore_and_deliver` | disk descriptorのみ | **不可** | 拒否 |
+
+`restore_and_deliver` は現在のteam/storage authorityを供給できないため、
+`restorable == false` の記録を理由によらず拒否する。単なるメッセージ送信に
+新しい権限を付与する効果を持たせない。拒否は最後のcheckpointを消費しない。
+既存の同期的な `snapshot_consumed` 判定を維持する。このマーカーは消費済み履歴の
+再利用防止というbookkeepingであり、設定フィールドのclassには含めない。
+
+### 5. 未確認の副作用と終了境界
+
+- tool batchをdispatchする前に、protocol上完結した履歴prefixとcall ID/nameを
+  保存する。引数本体はこの診断metadataに保存しない。run storeが設定されている場合、
+  intent保存の失敗後はtoolをdispatchしない。
+- 結果が揃う前のcrash/cancelや、終了結果を未確認のshell jobは
+  `interrupted_tool_calls` として残す。書込・process・networkなどの副作用を
+  否定できない履歴は全ての復元入口で拒否する。未知のtoolも安全側に倒す。
+  read-only中断は診断に残すが履歴再利用を妨げず、toolを自動再実行しない。
+- shell回収、最終保存、handle解放、workspace cleanupまたは引継ぎ準備を終えてから
+  元runの終端状態と完了通知を公開する。同一IDで再開したrunに、旧runのdrain、
+  snapshot書込、workspace inspection更新が触れない順序を守る。
+- エスカレーションは質問継承とworkspace引継ぎ準備の後、元run終了通知→新root開始
+  の既存順序を維持する。準備に失敗した場合は新rootを開始しない。
+- 未確認shell結果のhandleは、回収と副作用マーカーの保存を確認してから解放する。
+  回収や必要な保存を確認できなければhandle/workspaceを保持して失敗を報告する。
+  未確認shell副作用がないrunのsnapshot保存失敗は診断に残し、既存の非致命扱いを保つ。
+
+未確認の副作用を自動承認する経路は設けない。利用者が実ファイル・process・durable
+artifactを照合した後、既存のdurable task継続から新runを開始できる。
+
+### 6. 診断と将来の変更
+
+`restore_diagnostics` は最後の保存時刻・phase、履歴量、compaction checkpoint数、
+復元可能範囲、拒否理由、durable task/team識別子、未確認callを読み取り専用で返す。
+条件付きで履歴再利用が可能という表示は、現在の権限やclaim照合が確認済みという
+意味ではない。保存なしと破損も区別する。
+
+`RunConfig` に新しい復元不可フィールドを加える場合は、merge前に本ADRのclassと
+入口ごとの挙動を定義し、テストで固定する。設定追加だけを根拠に自動的な緩和や
+一律の禁止を増やさない。
 
 ## Evidence（実装検証）
 
-- 修正は `crates/runtime/src/restore.rs`（`OWNERSHIP_ONLY_UNRESTORABLE_REASON` +
-  `renewable_ownership_only()`）と `crates/runtime/src/runtime/chat_restore.rs`
-  （`continue_goal` ゲート）に限定され、Rust 側の code 修正テストは green。
-- acceptance テスト: `goal_restore_accepts_renewable_ownership_only_snapshot`
-  （ownership-only 記録の継続成功・呼び出し側 permit 供給・snapshot 同期消費を固定）、
-  `goal_restore_rejects_ownership_combined_with_other_blockers`
-  （複合理由の拒否を文字列一致で固定）。
-- 復入口の拒否理由は記録された `non_restorable_reason` をそのまま利用者に返すため、
-  診断可能性を保ったまま語彙の解釈差異のみを解消している。
+- `crates/runtime/tests/restore_expansion.rs`: 現在権限、再起動、team/claim、子孫停止、
+  admission、memory/finding境界。
+- `crates/runtime/tests/restore_tool_intent.rs`: dispatch前保存、未完了tool、取消、保存失敗。
+- `crates/runtime/tests/shell_jobs_integration.rs`: process回収、同一ID即時継続、
+  35回取消後もhandle枯渇しないこと、未確認副作用の保持。
+- `crates/runtime/tests/restore.rs`、`escalation_handoff.rs`、`escalation_questions.rs`:
+  既存の非致命保存失敗、終端通知順序、質問継承失敗時の起動抑止。
+- GUIのgoal復元テスト: 現在のproject/threadの権限、拒否理由、別projectの拒否。
+- 実行結果・再現手順は `docs/harness-validation.md` と `scripts/check-harness.sh`。
 
 ## Consequences
 
-- 「実行状態の列挙」（run phase / durable task 状態機械）と「設定の復元可否」
-  （`restorable` + `non_restorable_reason`）は別軸として記憶・運用される。
-  詳細は `features/orchestration/durable-execution-states.md` の
-  「復元可否 (restorable) は実行状態列挙とは別軸」を参照。
-- GUI chat の ownership 持ち run は終端後も継続可能で、run-29 型の拒否は再現しない。
-- blocking / security class の複合は常に fail closed で、renewable の緩和が
-  他フィールドへ外挿される経路は存在しない。
-- 新規 `RunConfig` フィールド追加時は ADR 本書の class 表更新が review 必須項目になる。
+run/taskの実行状態と、履歴の復元可否を分離したまま、現在の呼出元が権限を供給する
+rootの継続範囲を広げる。新しい実行engineや旧workerの再開機構は導入しない。
+blocking/securityの複合は引き続き拒否し、履歴から権限や未確認の副作用を復活させない。
+関連する実行状態の契約は `features/orchestration/durable-execution-states.md` を参照。

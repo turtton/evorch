@@ -24,7 +24,7 @@ const HEADERS: [&str; 9] = [
     "phase",
     "model",
     "provider",
-    "current tool",
+    "activity",
     "tokens (in/out)",
 ];
 
@@ -186,8 +186,7 @@ fn column_widths<S: AgentRunSource>(
                 .max(text_width(value.model.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
             natural[6] = natural[6]
                 .max(text_width(value.provider.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
-            natural[7] = natural[7]
-                .max(text_width(value.current_tool.as_deref().unwrap_or("unknown")) + CELL_PAD_X);
+            natural[7] = natural[7].max(text_width(&value.activity_label()) + CELL_PAD_X);
             let usage = value.tokens_label();
             natural[8] = natural[8].max(text_width(&usage) + CELL_PAD_X);
         } else {

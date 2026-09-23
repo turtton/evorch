@@ -376,3 +376,38 @@ async fn running_job_capacity_is_bounded() {
     assert!(excess.content.contains("capacity"));
     shell.drain_shell_jobs("owner").await.unwrap();
 }
+
+#[tokio::test]
+async fn terminal_release_rejects_live_jobs_and_preserves_other_owners() {
+    let shell = shell();
+    let first = invoke(
+        &shell,
+        "first",
+        json!({"command":"read value", "yield_ms":0}),
+    )
+    .await;
+    invoke(
+        &shell,
+        "second",
+        json!({"command":"read value", "yield_ms":0}),
+    )
+    .await;
+    assert!(shell.release_shell_jobs("first").is_err());
+    assert!(shell.has_running_shell_jobs("first"));
+    shell.drain_shell_jobs("first").await.unwrap();
+    assert!(shell.has_unobserved_shell_jobs("first"));
+    shell.release_shell_jobs("first").unwrap();
+    assert!(!shell.has_unobserved_shell_jobs("first"));
+    assert!(shell.has_running_shell_jobs("second"));
+    assert!(
+        shell
+            .execute_with_context(
+                &context("first"),
+                json!({"action":"poll", "job_id":id(&first)})
+            )
+            .await
+            .is_err()
+    );
+    shell.drain_shell_jobs("second").await.unwrap();
+    shell.release_shell_jobs("second").unwrap();
+}

@@ -26,6 +26,8 @@
 // に AC9 専用の replay 機構を混入させて他ターゲットへ死にコードを生むため、
 // compaction_triggers.rs と同様に単一対象で保つ判断とした。
 
+#[path = "support/compaction_context.rs"]
+mod compaction_context;
 mod support;
 
 use std::sync::Arc;
@@ -49,9 +51,6 @@ use support::{ScriptedModel, load_compaction_fixture, text_response};
 
 const CHECKPOINT_PREFIX: &str = "[COMPACTION CHECKPOINT ";
 const PARENT_MARKER: &str = "PARENT-ORCH-MARKER";
-/// System メッセージ (compaction policy 合成テキスト) の文字数上限の見積り。
-/// 実テキストは約 500 文字であり、推定アンカーの上限側にのみ使う。
-const SYSTEM_ALLOWANCE_CHARS: usize = 700;
 /// fixture の assistant tool ターン (スクリプト供給順)。
 const SUMMARY_TURN_INDEX: usize = 26;
 
@@ -229,40 +228,49 @@ fn replay_known_messages(fixture: &[Message]) -> Vec<Message> {
     known
 }
 
-/// 境界 b10 (agent2 注入直後) と b13 (pause 直後) の推定から window を較正する。
-///
-/// 履歴の既知分は fixture と実 ToolExecutor の決定論的結果から復元でき、未知分は
-/// System メッセージのみ。上限アンカー (System 700 文字扱い) < 0.75·window ≤
-/// 下限アンカー (System 0 扱い) となる中心を採ることで、圧縮発火境界が
-/// agent2 が履歴に沈んだ後・pause 前に収まることを保証する。
-fn calibrated_window(fixture: &[Message]) -> u64 {
-    fn estimate_tokens(messages: &[Message]) -> u64 {
-        let chars = serde_json::to_string(messages)
-            .expect("test messages serialize")
-            .chars()
-            .count() as u64;
-        chars.div_ceil(4)
-    }
-
+/// Calibrate the automatic boundary between b10 (second agent message arrives)
+/// and b13 (resume). Both anchors include the real Explorer system prompt and
+/// tool schemas; serialized UTF-8 bytes match the runtime's estimate.
+fn calibrated_window(fixture: &[Message], request: &compaction_context::RequestContext) -> u64 {
     let known = replay_known_messages(fixture);
-    // 境界 b10 = System + goal + T1..T9 + agent1 (= known[..20])
-    let mut upper = vec![Message {
-        role: MessageRole::System,
-        content: vec![ContentBlock::Text {
-            text: "x".repeat(SYSTEM_ALLOWANCE_CHARS),
-        }],
-    }];
+    let mut upper = vec![request.system.clone()];
     upper.extend(known[..20].iter().cloned());
-    let upper_bound = estimate_tokens(&upper);
-    // 境界 b13 = System + goal .. U27 (= known[..27])、System を 0 扱いにした下限
-    let lower_bound = estimate_tokens(&known[..27]);
-
+    let upper_bound = request.estimate(&upper);
+    let mut lower = vec![request.system.clone()];
+    lower.extend(known[..27].iter().cloned());
+    let lower_bound = request.estimate(&lower);
     assert!(
         lower_bound.saturating_sub(upper_bound) >= 50,
         "compaction anchor window collapsed: upper={upper_bound} lower={lower_bound}"
     );
     let midpoint = (upper_bound + lower_bound) / 2;
     ((midpoint as f64) / 0.75).ceil() as u64
+}
+
+fn compaction_settings(window: u64) -> CompactionConfig {
+    CompactionConfig {
+        context_window_tokens: window,
+        keep_recent_tokens: 100,
+        cooldown_turns: 1000,
+        max_summary_bytes: 8192,
+        summarizer: SummarizerKind::Structural,
+        ..CompactionConfig::default()
+    }
+}
+
+fn runtime_with(
+    model: Arc<ScriptedModel>,
+    settings: CompactionConfig,
+) -> (AgentRuntime, Arc<EventBus>) {
+    let bus = Arc::new(EventBus::new(128));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime_model: Arc<dyn AgentModel> = model;
+    let runtime =
+        AgentRuntime::new(Arc::clone(&bus), executor, runtime_model).with_compaction(settings);
+    (runtime, bus)
 }
 
 fn agent_body(message: &Message) -> &str {
@@ -333,15 +341,11 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     let closeout_text = text_of(&fixture[27]);
     let agent1 = agent_message_text("msg-1", "run-1", "send", &body_send);
     let agent2 = agent_message_text("msg-2", "run-1", "send", &body_reply);
-    let window = calibrated_window(&fixture);
-    let settings = CompactionConfig {
-        context_window_tokens: window,
-        keep_recent_tokens: 100,
-        cooldown_turns: 1000,
-        max_summary_bytes: 8192,
-        summarizer: SummarizerKind::Structural,
-        ..CompactionConfig::default()
-    };
+    let request_context = compaction_context::probe_for_role(Role::Explorer, |model| {
+        runtime_with(model, compaction_settings(1_000_000))
+    })
+    .await;
+    let window = calibrated_window(&fixture, &request_context);
 
     let tool_turn = |index: usize| {
         Ok(scripted_response(
@@ -378,14 +382,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         )
         .await;
 
-    let bus = Arc::new(EventBus::new(128));
-    let executor = Arc::new(ToolExecutor::with_standard_tools(
-        Arc::clone(&bus),
-        Arc::new(DirectSandbox::new_unchecked()),
-    ));
-    let runtime_model: Arc<dyn AgentModel> = model.clone();
-    let runtime =
-        AgentRuntime::new(Arc::clone(&bus), executor, runtime_model).with_compaction(settings);
+    let (runtime, bus) = runtime_with(model.clone(), compaction_settings(window));
     let mut receiver = bus.subscribe();
 
     let parent = runtime.delegate_background(
@@ -413,7 +410,12 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
             }
         })
         .await
-        .expect("provider call timeout");
+        .unwrap_or_else(|_| {
+            panic!(
+                "provider call timeout at step {step}: {:?}",
+                runtime.inspect_agent(child)
+            )
+        });
         let request = &model.observed().await[step];
         match step {
             0 => {
@@ -517,6 +519,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     assert!((*threshold - 0.75).abs() < f64::EPSILON);
     assert_eq!(*context_window_tokens, window);
     assert!(*estimated_tokens_before > *estimated_tokens_after);
+    assert!(*estimated_tokens_after < window);
     assert!(compacted_range_start < compacted_range_end);
     assert!(checkpoint_id.starts_with("ckpt-"));
 
@@ -536,6 +539,11 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         .position(|request| !checkpoint_ids(request).is_empty())
         .expect("a compacted provider request exists")
         + 1;
+
+    assert_eq!(
+        *estimated_tokens_after,
+        request_context.estimate(&child_requests[first_compacted - 1])
+    );
 
     // B4a の完全ターン境界ルールでは relayed reply が compacted 域外(tail)に verbatim で残りうる。
     // tail 生存は要約内保持より強い保存形態なので「summary 内 or 圧縮後全要求の tail 内」の OR を検証する。

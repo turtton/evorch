@@ -14,12 +14,13 @@ existing event bus, storage and runtime rather than a parallel scheduler.
 
 One substantive conflict was found: ADR 0027 explicitly rejects DynamicTeam,
 team-related and memory/finding configuration at every restoration entrance.
-The operator answered **「ADRを見直し、復元範囲の拡大も検討する」**. The narrow,
-tested candidate is [the restore proposal](restore-contract-proposal.md).
-Canonical ADR 0027 is unchanged pending approval of that exact revision.
-Automatic approval review rejected rewriting it on the strength of “consider
-expansion” alone; the answer itself was recorded separately. No approval bypass
-or hand-edited workflow state is used.
+The operator answered **「ADRを見直し、復元範囲の拡大も検討する」**. The accepted
+scope is recorded in [the restore proposal](restore-contract-proposal.md).
+The operator subsequently answered **「OK。承認する」** to the concrete ADR
+revision and finalization correction. Both answers were recorded with the CLI;
+canonical ADR 0027 and its related feature summary now reflect the approved scope.
+The earlier automated approval rejection was resolved by this explicit answer.
+No approval bypass or hand-edited workflow state is used.
 
 ## Read-only commands invoked
 
@@ -47,7 +48,7 @@ with the repository's verified-interface ledger.
 
 ## Mutation commands invoked
 
-Only the already accepted clarification was recorded:
+The initial clarification and final explicit approval were recorded:
 
 ```sh
 intent-cli interview record-answer --session harness-reliability-20260923 \
@@ -56,20 +57,32 @@ intent-cli interview record-answer --session harness-reliability-20260923 \
   --from-file /tmp/evorch-restore-answer.txt --write --format markdown
 ```
 
+Final approval was previewed and then recorded with:
+
+```sh
+intent-cli interview record-answer --session harness-reliability-20260923 \
+  --question final-approval --domain evorch \
+  --prompt '復元改訂案に沿ってADR 0027を正式改訂し、shell回収・最終保存・ハンドル解放と引継ぎ準備・元run終了通知・昇格先root開始の順序で終了処理を修正する。既存通知順序を維持し、ハンドル枯渇と即時再開の競合を解消して再検証する、この2点を承認して続行してよいですか？' \
+  --from-file /tmp/evorch-harness-final-approval.txt --write --format markdown
+```
+
 Artifact: `intents/evorch/interviews/harness-reliability-20260923.json`.
-The input file contains the operator's exact answer quoted above.
+Each input file contains the operator's exact answer. The operator also explicitly
+authorized merging to main, pushing main, and verifying CI after implementation.
 
 ## Files changed
 
 - `crates/tools/src/tools/shell*`, executor/tool APIs: bounded interactive jobs and lifecycle.
 - `crates/sandbox/src/exec.rs`: deterministic executable/cwd preflight.
 - `crates/runtime/src/meta*`, role capabilities: concrete schemas, bounded event waits and questions.
-- `crates/runtime/src/restore*`, `runtime/chat_restore*`: recovery proposal and diagnostics.
+- `crates/runtime/src/restore*`, `runtime/chat_restore*`: approved history renewal and diagnostics.
 - `crates/runtime/src/agent_loop*`, compaction: safe completion, tool intent and context estimates.
 - `crates/storage/src/*`, migration v9: bounded durable questions and explicit inheritance.
 - `crates/event-bus/src/*`: typed progress/question events and existing projections.
 - `crates/gui/src/*`: question cards, answer acknowledgements and restore/context diagnostics.
+- Provider observation tests: deterministic scoped-tracing and concurrent ID coverage.
 - Corresponding regression tests, `scripts/check-harness.sh`, these documentation files.
+- ADR 0027 and its durable-execution feature summary: approved root history renewal boundaries.
 - Accepted interview artifact above. No queue-state, label or publish artifacts changed.
 
 ## Issue URLs created or updated
@@ -78,12 +91,13 @@ None.
 
 ## Clarifications opened, answered or deferred
 
-- Restore scope: answered with permission to reconsider; recorded verbatim.
-- Exact canonical ADR revision: deferred until candidate review and final operator approval.
+- Restore scope: initial reconsideration and exact final revision both approved and recorded verbatim.
+- Shell finalization: concrete correction explicitly approved; notification-order and storage-failure regressions corrected without weakening expectations.
+- Delivery: merge, push to main, and CI verification explicitly authorized.
 
 ## Skipped commands and reasons
 
-- `intent draft-from-interview --write`: the existing ADR revision is still a candidate.
+- `intent draft-from-interview --write`: this changes an existing approved ADR, not a new intent shape draft.
 - `packet draft --write`, `issue publish-flow --write`: this task directly authorizes
   implementation; publishing a new issue/packet was not requested.
 - Queue/label transitions: no published unit is being transitioned.
@@ -95,3 +109,10 @@ None.
 intent-cli workflow were not used. CLI help and guides supplied the workflow.
 Canonical feature/ADR documents and application prompt fixtures were reviewed
 as project requirements and code, not as alternative workflow instructions.
+
+## Final validation
+
+Workspace tests: 3,439 passed, 0 failed, 48 environment-dependent tests ignored.
+Workspace, GUI browser and event-bus otel Clippy all passed with `-D warnings`.
+See [the validation report](harness-validation.md) for targeted coverage and
+reproduction. The final operator report records the pushed main commit and CI run.

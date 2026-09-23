@@ -18,9 +18,12 @@ run() {
 }
 run format cargo fmt --all --check
 run runtime cargo test -p runtime --test restore_expansion --test restore_tool_intent \
-    --test shell_jobs_integration --test wait_runs --test user_questions \
+    --test shell_jobs_integration --test state_transitions --test background --test messaging_loop \
+    --test workspace_cleanup \
+    --test wait_runs --test user_questions --test escalation_questions --test escalation_handoff \
     --test context_observability --test compaction_engine --test compaction_policy \
-    --test compaction_triggers --test meta_ops --lib
+    --test compaction_triggers --test compaction_continuation --test meta_ops --lib
+run providers cargo test -p providers --lib
 run tools cargo test -p tools -p sandbox
 run storage cargo test -p storage --test user_questions --test migration
 run gui cargo test -p gui --test user_questions_headless --test goal_restore_authority \

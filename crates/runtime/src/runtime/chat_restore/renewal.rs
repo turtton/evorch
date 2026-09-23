@@ -1,4 +1,4 @@
-//! A current caller can renew a team root's authority; disk delivery cannot.
+//! Current callers may reuse stopped root history; disk delivery cannot renew authority.
 
 use super::*;
 
@@ -29,6 +29,7 @@ impl AgentRuntime {
             || descriptor.renewable_ownership_only()
             || descriptor.renewable_root_context()
         {
+            self.validate_stopped_history_tree(record, "root")?;
             return Ok(());
         }
         if !descriptor.renewable_team_root() {
@@ -62,6 +63,41 @@ impl AgentRuntime {
         {
             return Err(fail("current_team_authority_required: team identity, topology and delegation value must be explicitly renewed".into()));
         }
+        self.validate_stopped_history_tree(record, "team")?;
+        // Read only from caller-granted storage. Expired claims are also blocked:
+        // expiry alone cannot prove a prior process has stopped applying effects.
+        let current = crate::team_context::TeamContext::persistent(
+            team.coordinator_run_id,
+            store,
+            authority
+                .topology
+                .worker_limit()
+                .expect("validated team topology"),
+        )
+        .map_err(|error| fail(format!("team storage validation failed: {error}")))?;
+        if current
+            .board
+            .snapshot()
+            .map_err(|error| fail(error.to_string()))?
+            .iter()
+            .any(|task| matches!(task.state, crate::team::ClaimState::Claimed(_)))
+        {
+            return Err(fail("team_reconciliation_required: persisted task claims must be reconciled before continuing".into()));
+        }
+        Ok(())
+    }
+
+    fn validate_stopped_history_tree(
+        &self,
+        record: &storage::RunContextRecord,
+        scope: &str,
+    ) -> Result<(), RuntimeError> {
+        let root = crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
+            RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: RunRestoreFailure::CorruptContext(reason),
+            }
+        })?;
         // Fence pending admission and registered runs together. Admission holds
         // this lock while registering, so a child cannot disappear between the
         // two views. Match that lock order: admissions, then runs.
@@ -89,8 +125,13 @@ impl AgentRuntime {
                     if !visited.insert(candidate) {
                         break;
                     }
-                    if candidate == team.coordinator_run_id {
-                        return Err(fail("team_reconciliation_required: the previous coordinator or a descendant is still running or awaiting admission".into()));
+                    if candidate == root {
+                        return Err(RuntimeError::RunRestoreFailed {
+                            run_id: record.run_id.clone(),
+                            reason: RunRestoreFailure::UnsupportedConfig(format!(
+                                "{scope}_reconciliation_required: the previous root or a descendant is still running or awaiting admission"
+                            )),
+                        });
                     }
                     cursor = runs.get(&candidate).and_then(|run| run.parent).or_else(|| {
                         admissions
@@ -99,26 +140,6 @@ impl AgentRuntime {
                     });
                 }
             }
-        }
-        // Read only from caller-granted storage. Expired claims are also blocked:
-        // expiry alone cannot prove a prior process has stopped applying effects.
-        let current = crate::team_context::TeamContext::persistent(
-            team.coordinator_run_id,
-            store,
-            authority
-                .topology
-                .worker_limit()
-                .expect("validated team topology"),
-        )
-        .map_err(|error| fail(format!("team storage validation failed: {error}")))?;
-        if current
-            .board
-            .snapshot()
-            .map_err(|error| fail(error.to_string()))?
-            .iter()
-            .any(|task| matches!(task.state, crate::team::ClaimState::Claimed(_)))
-        {
-            return Err(fail("team_reconciliation_required: persisted task claims must be reconciled before continuing".into()));
         }
         Ok(())
     }

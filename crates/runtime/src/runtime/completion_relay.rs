@@ -43,12 +43,35 @@ impl AgentRuntime {
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return,
         };
         child.terminal_reason = reason.clone();
+        // Finalization is complete. Keep cancellation before Error for observers
+        // that stop at the terminal phase; the runs lock still fences restarts.
+        if !child.completion_relayed
+            && to == AgentRunPhase::Error
+            && reason.as_deref() == Some("cancelled")
+        {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::BackgroundTaskCancelled {
+                    task_id: run_id.to_string(),
+                }));
+        }
         child.phase_tx.send_replace(to);
         self.shared.bus.emit(Event::new(event));
         if child.completion_relayed {
             return;
         }
         child.completion_relayed = true;
+        // Serialize the legacy notification with terminal publication so a
+        // same-ID restart cannot overtake completion of its previous incarnation.
+        let legacy = match to {
+            AgentRunPhase::Done => Some(LifecycleEvent::BackgroundTaskCompleted {
+                task_id: run_id.to_string(),
+            }),
+            _ => None,
+        };
+        if let Some(event) = legacy {
+            self.shared.bus.emit(Event::new(event));
+        }
         let Some(parent) = child.parent else { return };
         let Some(recipient) = runs.get(&parent) else {
             return;

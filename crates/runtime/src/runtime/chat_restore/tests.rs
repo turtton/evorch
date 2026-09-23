@@ -355,3 +355,41 @@ async fn goal_restore_fails_closed_when_consumed_marker_cannot_be_persisted() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn saved_root_history_cannot_be_reused_while_its_incarnation_is_live() {
+    let fixture = Fixture::new();
+    let root = fixture.terminal().await;
+    let store = fixture.runtime.shared.run_store.get().unwrap();
+    let record = store.restore_record(root).unwrap().unwrap();
+    let descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json).unwrap();
+    assert!(record.restorable && descriptor.restorable);
+    for phase in [
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+        AgentRunPhase::Waiting,
+    ] {
+        // Keep the former terminal checkpoint while a newer incarnation is live.
+        fixture
+            .runtime
+            .entry(root)
+            .unwrap()
+            .phase_tx
+            .send_replace(phase);
+        let error = fixture
+            .runtime
+            .validate_history_restore(&record, &descriptor, &RunConfig::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("root_reconciliation_required"));
+    }
+    fixture
+        .runtime
+        .entry(root)
+        .unwrap()
+        .phase_tx
+        .send_replace(AgentRunPhase::Done);
+    fixture
+        .runtime
+        .validate_history_restore(&record, &descriptor, &RunConfig::default())
+        .unwrap();
+}

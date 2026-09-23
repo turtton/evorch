@@ -289,6 +289,9 @@ impl Tool for Shell {
     async fn drain_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.drain(run_id).await
     }
+    fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
+        self.jobs.release(run_id)
+    }
     fn has_running_shell_jobs(&self, run_id: &str) -> bool {
         self.jobs.running(run_id)
     }

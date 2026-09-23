@@ -2,7 +2,7 @@
 
 use std::sync::Weak;
 
-use event_bus::{AgentRunPhase, Event, LifecycleEvent};
+use event_bus::{AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event, LifecycleEvent};
 
 use super::EscalationMemo;
 use crate::agent_loop::{LoopState, cleanup_worktree};
@@ -11,9 +11,9 @@ use crate::workspace::OwnedWorktree;
 
 pub(crate) async fn complete(
     shared: &Weak<Shared>,
-    state: &LoopState,
+    state: &mut LoopState,
     memo: EscalationMemo,
-    worktree: Option<OwnedWorktree>,
+    mut worktree: Option<OwnedWorktree>,
 ) {
     match state.phase() {
         AgentRunPhase::Done | AgentRunPhase::Error => {}
@@ -32,7 +32,25 @@ pub(crate) async fn complete(
     };
     let source_run_id = memo.source_run_id;
     let summary = memo.summary();
-    let new_run_id = runtime.spawn_escalated_root(memo, state.run_config(), worktree);
+    let config = state.run_config().clone();
+    let new_run_id = match runtime.spawn_escalated_root(memo, &config, &mut worktree, || {
+        state.publish_terminal();
+    }) {
+        Ok(run) => run,
+        Err(reason) => {
+            state.shared.bus.emit(Event::new(DiagnosticEvent {
+                source: "escalation_handoff".into(),
+                severity: DiagnosticSeverity::Error,
+                code: "EscalationHandoffFailed".into(),
+                detail: format!("question inheritance failed: {reason}"),
+                run_id: Some(source_run_id.to_string()),
+                thread_id: None,
+                call_id: None,
+            }));
+            cleanup_worktree(&state.shared, source_run_id, worktree).await;
+            return;
+        }
+    };
     state
         .shared
         .bus

@@ -1,8 +1,8 @@
 # Harness reliability improvements
 
-Implementation branch: `codex/harness-reliability`. ADR 0027 expansion remains a
-review candidate until the operator approves the exact contract in
-[the restore proposal](restore-contract-proposal.md).
+Implementation branch: `codex/harness-reliability`. The operator approved the
+limited restore expansion and finalization correction on 2026-09-23. The accepted
+contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
 
 ## Execution and interaction
 
@@ -19,8 +19,13 @@ review candidate until the operator approves the exact contract in
 - Process groups are stopped and reaped before releasing the workspace snapshot
   lease. Read tools may run while a job runs; conflicting writes report a useful
   error instead of waiting on the same run's lease. The model must observe each
-  terminal result before declaring completion. Missing cleanup confirmation keeps
-  the workspace and reports failure.
+  terminal result before declaring completion. Run completion is published after
+  process drain, final checkpoint and workspace teardown. Only then may the same
+  run ID be reused; completed job handles can be released without losing persisted
+  uncertainty markers. Missing cleanup confirmation keeps the workspace and reports
+  failure. Snapshot failures without uncertain shell effects remain non-fatal diagnostics.
+  Escalation prepares question inheritance and workspace transfer before publishing
+  the source terminal event, then starts the new root in the existing event order.
 - Secret filtering buffers incomplete output lines. A PTY prompt without a newline
   may not become visible until the line completes or the process exits. PTY output
   capture is bounded and cursor-based; this does not promise terminal emulation.
@@ -31,6 +36,8 @@ review candidate until the operator approves the exact contract in
   suggestions and free text is supported. The model can continue independent work.
   A required unanswered question blocks completion; answer delivery wakes the loop.
   `user_answers` reads only the run's own or explicitly inherited questions.
+  Chat continuation and Worker-to-Orchestrator escalation persist explicit question
+  recipients before starting the new run; failed inheritance prevents startup.
 - The first answer is final; retries of the same answer are idempotent. At most 32
   questions per run and 1024 globally pending questions are permitted. Storage or
   secret-guard failures are surfaced. No answer grants tool permission.
@@ -40,7 +47,7 @@ review candidate until the operator approves the exact contract in
 
 ## Recovery and diagnosis
 
-The restore proposal defines current-authority renewal, durable tool intent before
+ADR 0027 defines current-authority renewal, durable tool intent before
 side effects, interruption diagnosis, and the boundaries that remain unsupported.
 It does not replay uncertain side effects. A durable task may seed a new run after
 its actual effects have been reconciled through existing task controls.

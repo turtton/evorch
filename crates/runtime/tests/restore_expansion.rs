@@ -525,3 +525,164 @@ async fn team_history_rejects_child_before_and_after_admission_registration() {
     runtime.cancel(resumed).unwrap();
     runtime.wait(resumed).await.unwrap();
 }
+
+#[tokio::test]
+async fn single_history_rejects_live_children_for_every_renewable_descriptor() {
+    for marker in ["plain", "context", "ownership"] {
+        let fixture = Fixture::new();
+        let runtime = fixture.runtime();
+        let mut config = RunConfig {
+            name: Some(format!("chat:Worker:{marker}")),
+            ..Default::default()
+        };
+        match marker {
+            "context" => config.memory = Some(runtime::memory::MemoryBoundary::default()),
+            "ownership" => {
+                let registry_path = fixture._dir.path().join("owners.sqlite3");
+                let owner = runtime::ownership::ThreadOwner::new(
+                    marker.into(),
+                    runtime::ownership::Lease {
+                        owner_id: "current-owner".into(),
+                        generation: 1,
+                        expires_at: u64::MAX,
+                    },
+                );
+                runtime::ownership::Registry::open(&registry_path)
+                    .unwrap()
+                    .start(&owner)
+                    .unwrap();
+                config.ownership = Some(runtime::ownership::OwnerPermit {
+                    registry_path,
+                    thread_id: owner.thread_id.clone(),
+                    lease: owner.lease.clone(),
+                    run_id: None,
+                });
+            }
+            _ => {}
+        }
+        let root = runtime.delegate_background(Role::Worker, "single root history".into(), config);
+        assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+        let before = runtime.restore_diagnostics(root).unwrap().unwrap();
+        assert_eq!(before.disk_restorable, marker == "plain");
+        assert!(before.history_available_with_current_authority);
+        if marker == "context" {
+            assert_eq!(
+                before.refusal_reason.as_deref(),
+                Some("current_root_context_authority_required")
+            );
+        }
+        if marker == "ownership" {
+            assert_eq!(
+                before.refusal_reason.as_deref(),
+                Some("復元対象外の実行状態: ownership")
+            );
+        }
+        fixture
+            .model
+            .gate_key("active single child", Arc::new(tokio::sync::Notify::new()))
+            .await;
+        let child = runtime
+            .delegate_background_as_child(
+                root,
+                Role::Explorer,
+                "active single child",
+                RunConfig::default(),
+            )
+            .unwrap();
+        for attempt in [
+            runtime.continue_goal(root, "continue".into(), RunConfig::default()),
+            runtime.delegate_chat(
+                marker,
+                Role::Worker,
+                "continue".into(),
+                RunConfig::default(),
+            ),
+        ] {
+            let error = attempt.unwrap_err().to_string();
+            assert!(
+                error.contains("root_reconciliation_required"),
+                "{marker}: {error}"
+            );
+        }
+        assert_eq!(
+            runtime.restore_diagnostics(root).unwrap().unwrap(),
+            before,
+            "refusal must preserve the checkpoint"
+        );
+        runtime.cancel(child).unwrap();
+        assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Error);
+        let resumed = runtime
+            .delegate_chat(
+                marker,
+                Role::Worker,
+                "continue after child stops".into(),
+                RunConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+        assert!(
+            serde_json::to_string(fixture.model.observed().await.last().unwrap())
+                .unwrap()
+                .contains("single root history")
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_history_rejects_child_waiting_for_provider_admission() {
+    let fixture = Fixture::new();
+    let bus = Arc::new(EventBus::new(128));
+    let model = Arc::new(PendingChildAdmission {
+        inner: fixture.model.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(RunStore::open(&fixture.config, fixture.storage.handle()).unwrap());
+    let root = runtime.delegate_background(
+        Role::Worker,
+        "single pending admission".into(),
+        RunConfig {
+            name: Some("chat:Worker:pending-single".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(runtime.wait(root).await.unwrap(), AgentRunPhase::Done);
+    let child = runtime
+        .delegate_background_as_child(root, Role::Explorer, "pending child", RunConfig::default())
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), model.entered.notified())
+        .await
+        .unwrap();
+    assert!(runtime.inspect_agent(child).is_err());
+    for attempt in [
+        runtime.continue_goal(root, "continue".into(), RunConfig::default()),
+        runtime.delegate_chat(
+            "pending-single",
+            Role::Worker,
+            "continue".into(),
+            RunConfig::default(),
+        ),
+    ] {
+        let error = attempt.unwrap_err().to_string();
+        assert!(
+            error.contains("root_reconciliation_required") && error.contains("awaiting admission"),
+            "{error}"
+        );
+    }
+    runtime.cancel(child).unwrap();
+    model.release.notify_one();
+    assert!(matches!(
+        runtime.wait(child).await,
+        Err(runtime::RuntimeError::RunTerminated { .. })
+    ));
+    let resumed = runtime
+        .delegate_chat(
+            "pending-single",
+            Role::Worker,
+            "continue after admission cancelled".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(runtime.wait(resumed).await.unwrap(), AgentRunPhase::Done);
+}

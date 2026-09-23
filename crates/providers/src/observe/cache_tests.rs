@@ -106,8 +106,21 @@ fn cache_completion_records_expected_and_actual_once_without_a_bus() {
         ]
     }))
     .unwrap();
+    // Keep both dispatchers alive: tracing-core's single-dispatch fast path
+    // otherwise registers shared callsites using the registering thread's
+    // default (NoSubscriber in concurrent tests), caching Interest::never even
+    // while this thread has a scoped recorder. No global subscriber is changed.
+    let _unscoped = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     // When: one attempt completes twice (terminal operations are idempotent).
     tracing::subscriber::with_default(subscriber, || {
+        // Another test thread can reach this shared tracing callsite first.
+        std::thread::spawn(|| {
+            let mut other = AttemptObserver::new(None, "other", None, "test", "test", false, None);
+            other.expected_cacheable_tokens = Some(1);
+            other.emit_completed(&Usage::default(), FinishReason::Stop);
+        })
+        .join()
+        .unwrap();
         let mut observer = AttemptObserver::new(None, "test", None, "test", "test", false, None)
             .with_cache_expectation(&request);
         observer.emit_completed(

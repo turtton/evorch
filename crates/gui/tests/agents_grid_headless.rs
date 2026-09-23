@@ -47,7 +47,7 @@ fn agents_grid_keeps_all_columns_when_wide() {
         "phase",
         "model",
         "provider",
-        "current tool",
+        "activity",
         "tokens (in/out)",
     ];
     let mut last_min_x: Option<f32> = None;

@@ -27,7 +27,15 @@ impl RequestContext {
     }
 }
 
+#[allow(dead_code)] // Most targets use a Worker; continuation probes Explorer.
 pub async fn probe(
+    build: impl FnOnce(Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>),
+) -> RequestContext {
+    probe_for_role(Role::Worker, build).await
+}
+
+pub async fn probe_for_role(
+    role: Role,
     build: impl FnOnce(Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>),
 ) -> RequestContext {
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
@@ -36,7 +44,7 @@ pub async fn probe(
     ))]));
     let (runtime, bus) = build(Arc::clone(&model));
     let mut events = bus.subscribe();
-    let run_id = runtime.delegate_background(Role::Worker, "probe".into(), RunConfig::default());
+    let run_id = runtime.delegate_background(role, "probe".into(), RunConfig::default());
     assert_eq!(
         timeout(Duration::from_secs(5), runtime.wait(run_id)).await,
         Ok(Ok(AgentRunPhase::Done))
