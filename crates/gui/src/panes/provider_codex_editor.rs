@@ -149,6 +149,15 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
             }
         }
     });
+    if let Some(version) = &editor.fetch.catalog_version {
+        ui.label(muted(format!(
+            "Catalog client version: {}",
+            version.version
+        )));
+        if let Some(warning) = &version.warning {
+            ui.add(egui::Label::new(warning).wrap());
+        }
+    }
     if editor.fetch.models_fetch_state == ModelsFetchState::Loaded {
         ui.label(badge("Fetched models"));
         egui::ScrollArea::vertical()

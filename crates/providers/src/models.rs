@@ -59,13 +59,13 @@ pub struct CodexModelInfo {
     pub supports_fast: bool,
 }
 
-/// カタログの `minimal_client_version` フィルタを満たす Codex CLI 互換バージョン。
-///
-/// 観測例では 0.7.x→0件、0.147.0→9件で、gpt-6-astra は 0.153.0 必須。
-/// アプリ自身のバージョンを送るとモデルが除外されるため、絶対に代用しない。
-pub const CODEX_MODELS_CLIENT_VERSION: &str = "0.153.0";
+/// Tested inference protocol version; deliberately independent of catalog discovery.
+/// Updating the catalog must not alter inference headers or prompt-cache affinity.
+pub const CODEX_INFERENCE_CLIENT_VERSION: &str = "0.153.0";
 
 /// OAuth の Bearer トークンとアカウント ID で Codex のモデルカタログを取得する。
+/// `client_version` は [`crate::CodexCatalogVersionResolver`] で解決した値を渡す。
+/// バージョン解決を分離し、GitHub へ Codex 認証情報を送らない。
 ///
 /// # Errors
 /// HTTP・通信エラー、または応答形式が不正な場合の JSON エラーを返す。
@@ -73,15 +73,16 @@ pub async fn list_codex_models(
     base_url: &str,
     auth: &ProviderAuth,
     account_id: &str,
+    client_version: &str,
 ) -> Result<Vec<CodexModelInfo>, ProviderError> {
     let request = build_http_client(Some(std::time::Duration::from_secs(10)))?
         .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
+        .query(&[("client_version", client_version)])
         .header("chatgpt-account-id", account_id)
         .header("originator", "codex_cli_rs")
         .header(
             reqwest::header::USER_AGENT,
-            format!("codex_cli_rs/{CODEX_MODELS_CLIENT_VERSION}"),
+            format!("codex_cli_rs/{client_version}"),
         )
         .bearer_auth(&auth.api_key);
     let models: CodexModelList = fetch_list(request).await?;

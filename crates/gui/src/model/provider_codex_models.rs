@@ -10,12 +10,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod tests;
 
 #[derive(Debug)]
+pub struct CodexFetchedModels {
+    pub models: Vec<String>,
+    pub version: providers::CodexCatalogVersion,
+}
+
+#[derive(Debug)]
 pub struct CodexModelsFetch {
     pub base_url: String,
     pub models_fetch_state: ModelsFetchState,
     pub available_models: Option<Vec<String>>,
     pub fetch_selected: BTreeSet<String>,
-    pub models_rx: Option<mpsc::Receiver<Result<Vec<String>, String>>>,
+    pub models_rx: Option<mpsc::Receiver<Result<CodexFetchedModels, String>>>,
+    pub version_resolver: Arc<providers::CodexCatalogVersionResolver>,
+    pub catalog_version: Option<providers::CodexCatalogVersion>,
     pub(super) source: Option<(String, String)>,
 }
 
@@ -27,6 +35,8 @@ impl Default for CodexModelsFetch {
             available_models: None,
             fetch_selected: BTreeSet::new(),
             models_rx: None,
+            version_resolver: providers::CodexCatalogVersionResolver::shared(),
+            catalog_version: None,
             source: None,
         }
     }
@@ -42,7 +52,9 @@ impl CodexEditorModel {
         }
         self.fetch.models_fetch_state = ModelsFetchState::Loading;
         self.fetch.available_models = None;
+        self.fetch.catalog_version = None;
         self.fetch.fetch_selected.clear();
+        let resolver = self.fetch.version_resolver.clone();
         let account = self.account.clone();
         let base_url = self.fetch.base_url.clone();
         self.fetch.source = Some((account.clone(), base_url.clone()));
@@ -54,14 +66,21 @@ impl CodexEditorModel {
                     .enable_all()
                     .build()
                     .map_err(|error| error.to_string())?;
-                runtime
-                    .block_on(providers::list_codex_models(
+                runtime.block_on(async {
+                    let version = resolver.resolve().await;
+                    let models = providers::list_codex_models(
                         &base_url,
                         &providers::ProviderAuth::new(credentials.access_token),
                         &credentials.account_id,
-                    ))
-                    .map(expand_fetched_models)
-                    .map_err(|error| map_fetch_error(&error))
+                        &version.version,
+                    )
+                    .await
+                    .map_err(|error| map_fetch_error(&error))?;
+                    Ok(CodexFetchedModels {
+                        models: expand_fetched_models(models),
+                        version,
+                    })
+                })
             });
             let _ = tx.send(result);
         });
@@ -93,12 +112,19 @@ impl CodexEditorModel {
             result
         };
         self.fetch.source = None;
+        let result = result.map(|fetched| {
+            self.fetch.catalog_version = Some(fetched.version);
+            fetched.models
+        });
         match result {
             Ok(models) if models.is_empty() => {
                 self.fetch.available_models = None;
                 self.fetch.models_fetch_state = ModelsFetchState::Failed(format!(
-                    "Codex backend returned 0 models; pinned client version {} may have been rejected",
-                    providers::CODEX_MODELS_CLIENT_VERSION,
+                    "Codex backend returned 0 models with client version {}; check catalog compatibility and account access",
+                    self.fetch
+                        .catalog_version
+                        .as_ref()
+                        .map_or("unknown", |version| version.version.as_str()),
                 ));
             }
             Ok(models) => {

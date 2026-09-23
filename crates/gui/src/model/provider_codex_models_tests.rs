@@ -179,14 +179,21 @@ fn surfaces_hint_when_backend_returns_zero_models() {
     let editor = settings.codex_mut().unwrap();
     let configured = editor.models.clone();
     let (tx, rx) = mpsc::channel();
-    tx.send(Ok(Vec::new())).unwrap();
+    tx.send(Ok(CodexFetchedModels {
+        models: Vec::new(),
+        version: providers::CodexCatalogVersion {
+            version: "0.157.0".into(),
+            warning: None,
+        },
+    }))
+    .unwrap();
     editor.fetch.models_rx = Some(rx);
     // When
     editor.poll_models();
     // Then
     assert!(
         matches!(&editor.fetch.models_fetch_state, ModelsFetchState::Failed(message)
-        if message.contains("0 models") && message.contains(providers::CODEX_MODELS_CLIENT_VERSION))
+        if message.contains("0 models") && message.contains("0.157.0"))
     );
     assert_eq!(editor.models, configured);
     assert!(editor.fetch.available_models.is_none());

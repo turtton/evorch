@@ -124,7 +124,7 @@ async fn factory_builds_codex_client_from_profile() {
         .and(header("chatgpt-account-id", "acc-123"))
         .and(header("originator", "codex_cli_rs"))
         .and(header("openai-beta", "responses=experimental"))
-        .and(header("version", providers::CODEX_MODELS_CLIENT_VERSION))
+        .and(header("version", providers::CODEX_INFERENCE_CLIENT_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_raw(SSE_SUCCESS, "text/event-stream"))
         .expect(1)
         .mount(&server)

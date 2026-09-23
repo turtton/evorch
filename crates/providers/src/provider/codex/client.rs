@@ -159,10 +159,10 @@ impl CodexClient {
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
             .header("OpenAI-Beta", "responses=experimental")
-            .header("version", crate::CODEX_MODELS_CLIENT_VERSION)
+            .header("version", crate::CODEX_INFERENCE_CLIENT_VERSION)
             .header(
                 reqwest::header::USER_AGENT,
-                format!("codex_cli_rs/{}", crate::CODEX_MODELS_CLIENT_VERSION),
+                format!("codex_cli_rs/{}", crate::CODEX_INFERENCE_CLIENT_VERSION),
             )
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .header("session-id", &self.session_id)

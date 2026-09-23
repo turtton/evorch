@@ -220,6 +220,10 @@ async fn codex_verification_uses_stored_oauth_and_account() {
             "Bearer access-token",
         ))
         .and(wiremock::matchers::header("chatgpt-account-id", "account"))
+        .and(wiremock::matchers::query_param(
+            "client_version",
+            providers::CODEX_MODELS_FALLBACK_VERSION,
+        ))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"models": [{"slug": "gpt-4o"}]})),

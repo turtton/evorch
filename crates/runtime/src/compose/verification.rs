@@ -30,13 +30,14 @@ impl RoutedModel {
                         Some(result) => result,
                         None => {
                             let result = match account {
-                                Some(account) => {
-                                    providers::list_codex_models(&key.0, &auth, &account)
-                                        .await
-                                        .map(|models| {
-                                            models.into_iter().map(|model| model.slug).collect()
-                                        })
-                                }
+                                Some(account) => providers::list_codex_models(
+                                    &key.0,
+                                    &auth,
+                                    &account,
+                                    providers::CODEX_MODELS_FALLBACK_VERSION,
+                                )
+                                .await
+                                .map(|models| models.into_iter().map(|model| model.slug).collect()),
                                 None => providers::list_models(&key.0, &auth).await,
                             }
                             .map_err(|error| match error {

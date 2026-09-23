@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod client;
+mod codex_catalog_version;
 pub(crate) mod dedup;
 pub mod error;
 pub mod http;
@@ -16,13 +17,16 @@ pub mod wire;
 
 pub use auth::ProviderAuth;
 pub use client::ProviderClient;
+pub use codex_catalog_version::{
+    CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
+};
 pub use error::ProviderError;
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
     ProviderCapabilities, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{
-    CODEX_MODELS_CLIENT_VERSION, CodexModelInfo, list_codex_models, list_models,
+    CODEX_INFERENCE_CLIENT_VERSION, CodexModelInfo, list_codex_models, list_models,
     verify_connectivity,
 };
 pub use retry::RetryPolicy;

@@ -127,6 +127,15 @@ fn discards_result_when_account_changes_during_fetch() {
 
 #[test]
 fn loads_catalog_when_profile_account_has_valid_access_token() {
+    fetch_catalog(false);
+}
+
+#[test]
+fn loads_catalog_with_visible_fallback_when_github_fails() {
+    fetch_catalog(true);
+}
+
+fn fetch_catalog(github_fails: bool) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sandbox::CredentialStore;
     use std::io::{Read, Write};
@@ -134,20 +143,36 @@ fn loads_catalog_when_profile_account_has_valid_access_token() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut bytes = Vec::new();
-        let mut buffer = [0; 1024];
-        while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
-            let count = stream.read(&mut buffer).unwrap();
-            assert!(count > 0);
-            bytes.extend_from_slice(&buffer[..count]);
+        let mut requests = Vec::new();
+        for (status, body) in [
+            if github_fails {
+                ("503 Service Unavailable", "unavailable")
+            } else {
+                (
+                    "200 OK",
+                    r#"[{"tag_name":"rust-v0.157.2","name":"0.157.2","draft":false,"prerelease":false}]"#,
+                )
+            },
+            (
+                "200 OK",
+                r#"{"models":[{"slug":"gpt-6-sol"},{"slug":"gpt-6-luna"},{"slug":"gpt-6-sol"}]}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 1024];
+            while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            requests.push(String::from_utf8(bytes).unwrap());
         }
-        let body = r#"{"models":[{"slug":"gpt-fetched"},{"slug":"gpt-fetched"}]}"#;
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        String::from_utf8(bytes).unwrap()
+        requests
     });
     let token = format!(
         "header.{}.signature",
@@ -172,6 +197,9 @@ fn loads_catalog_when_profile_account_has_valid_access_token() {
     let mut settings = settings();
     let editor = settings.codex_mut().unwrap();
     editor.account = "oauth-account".into();
+    editor.fetch.version_resolver = Arc::new(providers::CodexCatalogVersionResolver::new(format!(
+        "{base_url}/releases"
+    )));
     editor.fetch.base_url = base_url;
     // When
     settings.start_models_fetch_with_store(Some(store));
@@ -181,13 +209,23 @@ fn loads_catalog_when_profile_account_has_valid_access_token() {
     assert_eq!(editor.fetch.models_fetch_state, ModelsFetchState::Loaded);
     assert_eq!(
         editor.fetch.available_models,
-        Some(vec!["gpt-fetched".into()])
+        Some(vec!["gpt-6-sol".into(), "gpt-6-luna".into()])
     );
-    let request = server.join().unwrap();
-    assert!(request.starts_with("GET /models?client_version=0.153.0 HTTP/1.1"));
+    let version = if github_fails { "0.156.1" } else { "0.157.2" };
+    let resolved = editor.fetch.catalog_version.as_ref().unwrap();
+    assert_eq!(resolved.version, version);
+    assert_eq!(resolved.warning.is_some(), github_fails);
+    let requests = server.join().unwrap();
+    let release_request = &requests[0];
+    assert!(release_request.starts_with("GET /releases?per_page=10&page=1 HTTP/1.1"));
+    assert!(!release_request.contains(&token));
+    assert!(!release_request.contains("authorization:"));
+    assert!(!release_request.contains("chatgpt-account-id:"));
+    let request = &requests[1];
+    assert!(request.starts_with(&format!("GET /models?client_version={version} HTTP/1.1")));
     assert!(request.contains("chatgpt-account-id: jwt-account\r\n"));
     assert!(request.contains("originator: codex_cli_rs\r\n"));
-    assert!(request.contains("user-agent: codex_cli_rs/0.153.0\r\n"));
+    assert!(request.contains(&format!("user-agent: codex_cli_rs/{version}\r\n")));
     assert!(request.contains(&format!("authorization: Bearer {token}\r\n")));
     assert!(!request.contains("unused-refresh"));
 }

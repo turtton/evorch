@@ -31,7 +31,7 @@ async fn mount(server: &MockServer, response: ResponseTemplate) {
         .and(header("originator", "codex_cli_rs"))
         .and(header(
             "user-agent",
-            format!("codex_cli_rs/{}", providers::CODEX_MODELS_CLIENT_VERSION),
+            format!("codex_cli_rs/{}", providers::CODEX_INFERENCE_CLIENT_VERSION),
         ))
         .and(header("accept", "text/event-stream"))
         .and(CodexIdMatcher)
