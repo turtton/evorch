@@ -3,7 +3,7 @@ use config::EscalationApproval;
 use event_bus::{Event, EventBus, EventKind, ToolEvent};
 use std::sync::Mutex;
 use tools::ToolExecutionContext;
-use tools::tools::shell_escalation::{EscalationDecision, ShellEscalationGate};
+use tools::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
 
 fn context() -> ToolExecutionContext {
     ToolExecutionContext {
@@ -127,6 +127,38 @@ async fn auto_non_approve_with_fallback_asks_user_then_applies_outcome() {
     }
 }
 
+// An automatic decline followed by user approval is a pending handoff, not a final warning.
+#[tokio::test]
+async fn fallback_approval_records_info_then_final_approval() {
+    let (gate, _) = fixture(
+        EscalationApproval::Auto,
+        true,
+        Some(r#"{"approve":false,"reason":"needs user review"}"#),
+    );
+    let mut events = gate.bus.subscribe();
+    let responder = respond(&gate, true).await;
+    assert!(matches!(
+        gate.decide(&context(), "pwd", "inspect").await,
+        EscalationDecision::Approve
+    ));
+    responder.await.expect("responder");
+    let mut diagnostics = Vec::new();
+    while diagnostics.len() < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("diagnostic deadline")
+            .expect("diagnostic event");
+        if let EventKind::Diagnostic(diagnostic) = event.kind {
+            diagnostics.push(diagnostic);
+        }
+    }
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0].severity, event_bus::DiagnosticSeverity::Info);
+    assert!(diagnostics[0].detail.contains("requesting user approval"));
+    assert_eq!(diagnostics[1].severity, event_bus::DiagnosticSeverity::Info);
+    assert!(diagnostics[1].detail.ends_with("approved"));
+}
+
 // Given: user mode / When: human approves / Then: no model is called.
 #[tokio::test]
 async fn user_mode_asks_user_without_reviewer() {
@@ -186,4 +218,37 @@ fn execution_policy_escalation_defaults_and_builders() {
         .with_escalate_to_user_on_deny(true);
     assert_eq!(policy.escalation_approval, EscalationApproval::User);
     assert!(policy.escalate_to_user_on_deny);
+}
+
+#[tokio::test]
+async fn network_only_human_approval_identifies_its_scope() {
+    let (gate, model) = fixture(EscalationApproval::User, false, None);
+    let bus = gate.bus.clone();
+    let mut rx = bus.subscribe();
+    let responder = tokio::spawn(async move {
+        loop {
+            if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, input, .. }) =
+                rx.recv().await.expect("approval event").kind
+            {
+                assert_eq!(input.expect("input")["kind"], "shell_network");
+                bus.emit(Event::new(ToolEvent::ApprovalResolved {
+                    call_id,
+                    approved: true,
+                }));
+                break;
+            }
+        }
+    });
+    let decision = gate
+        .decide_scoped_with_cwd(
+            &context(),
+            "git pull --ff-only",
+            "sandbox DNS failed",
+            None,
+            ShellAccess::Network,
+        )
+        .await;
+    assert!(matches!(decision, EscalationDecision::Approve));
+    responder.await.expect("responder");
+    assert!(model.observed().await.is_empty());
 }
