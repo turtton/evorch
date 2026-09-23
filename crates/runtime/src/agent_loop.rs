@@ -22,6 +22,7 @@ use std::sync::{Arc, Weak};
 use agents::Role;
 use event_bus::{
     AgentRunPhase, CompactionReason, EscalationMemoSummary, Event, EventBus, LifecycleEvent,
+    MessageEvent,
 };
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
@@ -1078,6 +1079,12 @@ impl LoopState {
             }],
         });
         self.publish_message_count();
+        self.shared
+            .bus
+            .emit(Event::new(MessageEvent::FinalResultPublished {
+                run_id: self.task.run_id.to_string(),
+                text: result.to_string(),
+            }));
     }
 
     fn cancelled(&self) -> bool {

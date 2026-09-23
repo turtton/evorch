@@ -42,7 +42,9 @@ async fn run_emits_pending_running_done_in_order() {
     let lifecycle: Vec<&LifecycleEvent> = events
         .iter()
         .filter_map(|event| match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::RunProgress { .. }) => None,
+            EventKind::Lifecycle(
+                LifecycleEvent::RunProgress { .. } | LifecycleEvent::TaskPromptPublished { .. },
+            ) => None,
             EventKind::Lifecycle(event) => Some(event),
             EventKind::Message(_)
             | EventKind::Ledger(_)

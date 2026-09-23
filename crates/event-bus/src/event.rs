@@ -365,6 +365,19 @@ pub enum LifecycleEvent {
         /// 委譲 role 語彙における実行 role。
         role: String,
     },
+    /// run に渡した最終タスクプロンプトを観測用に公開した。
+    TaskPromptPublished {
+        /// プロンプトを受け取った run の ID。
+        run_id: String,
+        /// 委譲元 run の ID。ルート run では `None`。
+        parent_run_id: Option<String>,
+        /// run を実行する agent の名前。
+        agent_name: String,
+        /// 委譲 role 語彙における実行 role。
+        role: String,
+        /// メモリやチームタスク情報を付加し、実際に run へ渡した最終プロンプト。
+        prompt: String,
+    },
     /// エージェント実行の位相が遷移した。
     AgentRunStateChanged {
         /// 状態が変化した実行の ID。
@@ -432,6 +445,13 @@ pub enum LifecycleEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum MessageEvent {
+    /// 受理された finish 操作の最終結果を観測用に公開した。
+    FinalResultPublished {
+        /// 結果を返した run の ID。
+        run_id: String,
+        /// 最終結果の全文。
+        text: String,
+    },
     /// 応答テキストの差分。
     MessageDelta {
         /// 追加されたテキスト。
@@ -1609,6 +1629,65 @@ mod tests {
             assert!(json.contains(r#""run_id":"run-7""#));
             assert_eq!(restored, event);
         }
+    }
+
+    #[test]
+    fn task_prompt_published_round_trips_with_and_without_parent() {
+        for parent_run_id in [None, Some("run-parent".to_string())] {
+            let prompt = "指示全文\nPrior validated lessons: \"verified\"\nTeam task id: task-1";
+            let event = Event::new(LifecycleEvent::TaskPromptPublished {
+                run_id: "run-7".into(),
+                parent_run_id: parent_run_id.clone(),
+                agent_name: "worker-alpha".into(),
+                role: "worker".into(),
+                prompt: prompt.into(),
+            });
+
+            let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+            let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+            assert_eq!(restored, event);
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                value["kind"],
+                serde_json::json!({
+                    "kind": "Lifecycle",
+                    "payload": {
+                        "kind": "TaskPromptPublished",
+                        "payload": {
+                            "run_id": "run-7",
+                            "parent_run_id": parent_run_id,
+                            "agent_name": "worker-alpha",
+                            "role": "worker",
+                            "prompt": prompt
+                        }
+                    }
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn final_result_published_round_trips_with_full_text() {
+        let text = "完了しました。\n\n```rust\nlet result = \"full text\";\n```\n";
+        let event = Event::new(MessageEvent::FinalResultPublished {
+            run_id: "run-7".into(),
+            text: text.into(),
+        });
+
+        let json = serde_json::to_string(&event).expect("JSONへ変換できる");
+        let restored: Event = serde_json::from_str(&json).expect("JSONから復元できる");
+        assert_eq!(restored, event);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["kind"],
+            serde_json::json!({
+                "kind": "Message",
+                "payload": {
+                    "kind": "FinalResultPublished",
+                    "payload": { "run_id": "run-7", "text": text }
+                }
+            })
+        );
     }
 
     #[test]

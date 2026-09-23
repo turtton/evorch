@@ -123,7 +123,9 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             }
             // エージェント実行はセッションではないため、セッション射影を変更しません。
             LifecycleEvent::AgentRunStateChanged { .. } => {}
-            LifecycleEvent::RunProgress { .. } | LifecycleEvent::AgentRunStarted { .. } => {}
+            LifecycleEvent::RunProgress { .. }
+            | LifecycleEvent::AgentRunStarted { .. }
+            | LifecycleEvent::TaskPromptPublished { .. } => {}
             LifecycleEvent::AgentRunRestored { .. } => {}
             // entry 判定は session/task を更新しない。
             LifecycleEvent::RoutingDecision { .. } => {}
@@ -139,6 +141,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
                 }
             }
         },
+        // 観測専用の最終結果はセッションの応答差分へ混ぜず、events から再生する。
+        EventKind::Message(MessageEvent::FinalResultPublished { .. }) => {}
         EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
             if let Some(session) = state.session(stored) {
                 session.snapshot.pending_message.push_str(delta);

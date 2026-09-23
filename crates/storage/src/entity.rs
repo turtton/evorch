@@ -269,6 +269,12 @@ impl SecretGuard {
             EventKind::Lifecycle(LifecycleEvent::RoutingDecision { reason, .. }) => {
                 self.check_text("event", "RoutingDecision.reason", reason)
             }
+            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { prompt, .. }) => {
+                self.check_text("event", "TaskPromptPublished.prompt", prompt)
+            }
+            EventKind::Message(MessageEvent::FinalResultPublished { text, .. }) => {
+                self.check_text("event", "FinalResultPublished.text", text)
+            }
             EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
                 self.check_text("event", "MessageDelta.delta", delta)
             }
@@ -347,7 +353,26 @@ mod tests {
     fn event_check_covers_reason_and_delta_fields_and_skips_typed_only_variants() {
         // Given: 既知値を注入した guard と各イベント variant
         let guard = SecretGuard::with_known_values([KNOWN_VALUE.to_owned()]);
-        let cases: [(&str, EventKind); 7] = [
+        let cases: [(&str, EventKind); 9] = [
+            (
+                "TaskPromptPublished.prompt",
+                LifecycleEvent::TaskPromptPublished {
+                    run_id: "run-1".into(),
+                    parent_run_id: None,
+                    agent_name: "Worker".into(),
+                    role: "worker".into(),
+                    prompt: format!("task {KNOWN_VALUE}"),
+                }
+                .into(),
+            ),
+            (
+                "FinalResultPublished.text",
+                MessageEvent::FinalResultPublished {
+                    run_id: "run-1".into(),
+                    text: format!("result {KNOWN_VALUE}"),
+                }
+                .into(),
+            ),
             (
                 "Failed.reason",
                 LifecycleEvent::Failed {

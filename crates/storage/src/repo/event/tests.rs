@@ -116,6 +116,53 @@ fn reasoning_delta_with_run_id_round_trips_through_sqlite() {
 }
 
 #[test]
+fn published_prompt_and_result_with_run_id_round_trip_through_sqlite() {
+    let connection = fixture();
+    let mut accounting = EventAccounting::default();
+    let kinds = [
+        LifecycleEvent::TaskPromptPublished {
+            run_id: "run-7".into(),
+            parent_run_id: Some("run-1".into()),
+            agent_name: "worker-alpha".into(),
+            role: "worker".into(),
+            prompt: "最終指示\nMemory lesson and team task".into(),
+        }
+        .into(),
+        MessageEvent::FinalResultPublished {
+            run_id: "run-7".into(),
+            text: "完了\n\nFull result text\n".into(),
+        }
+        .into(),
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let expected = Event {
+            kind,
+            ..event(index as u64 + 1)
+        };
+        append_event(
+            &connection,
+            Some("s1"),
+            &expected,
+            &HardLimits::default(),
+            &mut accounting,
+        )
+        .unwrap();
+        let stored = list_by_session(&connection, "s1").unwrap();
+        assert_eq!(stored[index].session_id.as_deref(), Some("s1"));
+        assert_eq!(stored[index].event, expected);
+        // Like MessageDelta, per-run attribution is kept in the JSON payload;
+        // the events table indexes the caller-supplied session_id, not run_id.
+        let value = serde_json::to_value(&stored[index].event.kind).unwrap();
+        assert_eq!(value["payload"]["payload"]["run_id"], "run-7");
+    }
+    assert!(
+        list_by_session(&connection, "other-session")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn legacy_delta_row_without_run_id_reads_as_none() {
     // Given: run_id のない旧形式のメッセージ差分行
     let connection = fixture();

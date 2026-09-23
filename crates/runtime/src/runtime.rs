@@ -888,9 +888,21 @@ impl AgentRuntime {
             .emit(Event::new(LifecycleEvent::AgentRunStarted {
                 run_id: run_id.to_string(),
                 parent_run_id: parent.map(|parent| parent.to_string()),
-                agent_name: name,
+                agent_name: name.clone(),
                 role: role.name().to_lowercase(),
             }));
+        // 復元時は保存済みの指示イベントを再生するため、ここでは重複発行しない。
+        if task.restored.is_none() {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::TaskPromptPublished {
+                    run_id: run_id.to_string(),
+                    parent_run_id: parent.map(|parent| parent.to_string()),
+                    agent_name: name,
+                    role: role.name().to_lowercase(),
+                    prompt: task.prompt.clone(),
+                }));
+        }
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::AgentRunStateChanged {

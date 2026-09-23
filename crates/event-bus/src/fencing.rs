@@ -85,6 +85,7 @@ impl MutationFences {
             EventKind::Lifecycle(event) => match event {
                 LifecycleEvent::RunProgress { run_id, .. }
                 | LifecycleEvent::AgentRunStarted { run_id, .. }
+                | LifecycleEvent::TaskPromptPublished { run_id, .. }
                 | LifecycleEvent::AgentRunRestored { run_id, .. }
                 | LifecycleEvent::AgentRunStateChanged { run_id, .. }
                 | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
@@ -115,6 +116,9 @@ impl MutationFences {
                 | ProviderEvent::RequestCompleted { run_id, .. }
                 | ProviderEvent::RequestFailed { run_id, .. },
             ) => run_id.as_deref().is_none_or(accepts),
+            EventKind::Message(MessageEvent::FinalResultPublished { run_id, .. }) => {
+                accepts(run_id)
+            }
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
                 accepts(&question.run_id)
             }
@@ -148,6 +152,30 @@ impl MutationFences {
 #[cfg(test)]
 mod question_tests {
     use super::*;
+
+    #[test]
+    fn published_prompt_and_result_preserve_the_run_fence() {
+        let fences = MutationFences::default();
+        assert!(fences.register("run-stale".into(), Arc::new(|| false)));
+        for run in ["run-current", "run-stale"] {
+            let events = [
+                Event::new(LifecycleEvent::TaskPromptPublished {
+                    run_id: run.into(),
+                    parent_run_id: None,
+                    agent_name: "Worker".into(),
+                    role: "worker".into(),
+                    prompt: "task".into(),
+                }),
+                Event::new(MessageEvent::FinalResultPublished {
+                    run_id: run.into(),
+                    text: "result".into(),
+                }),
+            ];
+            for event in events {
+                assert_eq!(fences.accepts(&event), run == "run-current");
+            }
+        }
+    }
     #[test]
     fn question_updates_preserve_the_requester_generation_fence() {
         let fences = MutationFences::default();
