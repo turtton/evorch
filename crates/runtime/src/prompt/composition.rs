@@ -39,13 +39,14 @@ pub enum PromptCompositionError {
     Catalog(#[from] SystemPromptCatalogError),
 }
 
-/// 固定 4 ロールと agents 設定フィールドの対応表。
-fn role_bindings(config: &Config) -> [(Role, &RoleBindingConfig); 7] {
+/// 固定 8 ロールと agents 設定フィールドの対応表。
+fn role_bindings(config: &Config) -> [(Role, &RoleBindingConfig); 8] {
     [
         (Role::Orchestrator, &config.agents.orchestrator),
         (Role::Explorer, &config.agents.explorer),
         (Role::Worker, &config.agents.worker),
         (Role::Reviewer, &config.agents.reviewer),
+        (Role::WebResearcher, &config.agents.roles.web_researcher),
         (Role::Planner, &config.agents.roles.planner),
         (Role::Oracle, &config.agents.roles.oracle),
         (
@@ -73,7 +74,7 @@ fn appendix_body<'a>(sources: &'a AgentPromptSources, preset: &str) -> &'a str {
 ///
 /// ソースからカタログへの写像規約:
 ///
-/// - role baseline: config 側のキーは小文字ロール名のため、固定 4 ロールを
+/// - role baseline: config 側のキーは小文字ロール名のため、固定 8 ロールを
 ///   ループして小文字名で lookup する。欠落キーは builder の完全性検証で
 ///   型付きエラーになる。
 /// - family section: config のキーは素のファミリー名、カタログキーは

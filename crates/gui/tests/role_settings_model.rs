@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use gui::model::role_settings::{RoleSettingsModel, effort_options};
 
 #[test]
-fn librarian_unknown_binding_is_allowed_but_unrouted() {
-    // Given: a librarian assignment discovered during editor seeding.
+fn web_researcher_unknown_binding_is_allowed_but_unrouted() {
+    // Given: a web_researcher assignment discovered during editor seeding.
     let mut config = config::Config::default();
-    config.agents.roles.librarian.logical_model = Some("research-model".into());
+    config.agents.roles.web_researcher.logical_model = Some("research-model".into());
     let mut editor = RoleSettingsModel::seed_from_config(&config);
     assert!(
         editor
@@ -15,7 +15,7 @@ fn librarian_unknown_binding_is_allowed_but_unrouted() {
             .any(|name| name == "research-model")
     );
     // When: the assignment is changed to a name that has no route yet.
-    editor.agents.roles.librarian.logical_model = Some("unknown".into());
+    editor.agents.roles.web_researcher.logical_model = Some("unknown".into());
     // Then: validation accepts it (UI warns and offers route creation) while no route claims it.
     assert!(editor.validate().is_ok());
     assert!(!editor.route_names.contains("unknown"));
@@ -56,7 +56,7 @@ fn picker_uses_route_keys_and_explicit_bindings_only() {
             ..Default::default()
         },
     );
-    config.agents.roles.librarian.logical_model = Some("explicit-binding".into());
+    config.agents.roles.web_researcher.logical_model = Some("explicit-binding".into());
     config.routing.routes.insert(
         "declared-route".into(),
         vec![config::RouteCandidateConfig {

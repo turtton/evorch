@@ -15,7 +15,7 @@ pub enum NetworkAccess {
     Denied,
     /// 明示的なオプトイン時のみ許可する。
     OptIn,
-    /// 常に許可する (Librarian 等)。
+    /// 常に許可する (WebResearcher 等)。
     Allowed,
 }
 

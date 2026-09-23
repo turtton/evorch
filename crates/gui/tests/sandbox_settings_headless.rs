@@ -26,6 +26,8 @@ fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
     harness.run();
     harness.click_label("Allow network inside sandbox");
     harness.run();
+    harness.click_label("Ask for each web request");
+    harness.run();
     harness.click_label("Save sandbox");
     harness.run();
     // Then: the typed setting is persisted without changing other sections.
@@ -37,6 +39,7 @@ fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
     })
     .expect("load");
     assert!(saved.sandbox.allow_network);
+    assert_eq!(saved.sandbox.web_tool_access, config::WebToolAccess::OptIn);
     assert!(!saved.metrics.enabled);
     assert_eq!(
         runtime

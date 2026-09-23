@@ -409,7 +409,7 @@ async fn orchestrator_web_search_is_denied_without_tool_started() {
 }
 
 #[tokio::test]
-async fn librarian_web_search_reaches_executor() {
+async fn web_researcher_web_search_reaches_executor() {
     // Given
     let (runtime, bus) = web_runtime_with(ScriptedModel::new([
         Ok(tool_response("search-2", "web_search", json!({}))),
@@ -419,7 +419,7 @@ async fn librarian_web_search_reaches_executor() {
 
     // When
     let run_id = runtime.delegate_background(
-        Role::Librarian,
+        Role::WebResearcher,
         "search".to_string(),
         RunConfig {
             network_access: NetworkAccess::Allowed,

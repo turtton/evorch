@@ -18,6 +18,7 @@ chromiumoxide = { version = "0.9", default-features = false, optional = true }
 base64 = { workspace = true }
 futures-util = { workspace = true, optional = true }
 arena = { path = "../arena" }
+agents = { path = "../agents" }
 ashpd = { workspace = true }
 async-trait = { workspace = true }
 catalog = { path = "../catalog" }

@@ -1,8 +1,8 @@
 //! ADR 0002 ケイパビリティ境界の完全マトリックステスト。
 //!
-//! v0.2 の 5 ロール (Orchestrator / Explorer / Worker / Reviewer / Librarian) について
+//! v0.2 の 5 ロール (Orchestrator / Explorer / Worker / Reviewer / WebResearcher) について
 //! 許可ツール集合・拒否ツール・ネットワーク要件・委譲可否を検証する。
-//! Librarian は v0.2 で `Role` variant として追加され、
+//! WebResearcher は v0.2 で `Role` variant として追加され、
 //! Orchestrator は web_fetch を持ちネットワークが OptIn になった
 //! (ADR 0002 2026-09-03 補足)。
 
@@ -56,7 +56,7 @@ fn role_names_are_stable_identifiers() {
     assert_eq!(Role::Explorer.name(), "Explorer");
     assert_eq!(Role::Worker.name(), "Worker");
     assert_eq!(Role::Reviewer.name(), "Reviewer");
-    assert_eq!(Role::Librarian.name(), "Librarian");
+    assert_eq!(Role::WebResearcher.name(), "WebResearcher");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn orchestrator_denies_mutation_tools() {
 #[test]
 fn orchestrator_denies_web_search_but_allows_web_fetch() {
     // Given: Orchestrator ロール (ADR 0002 2026-09-03 補足: web_fetch のみ持ち、
-    //        web_search は Librarian 専用、ネットワークは OptIn)
+    //        web_search は WebResearcher 専用、ネットワークは OptIn)
     // When: web_search / web_fetch の使用可否を問い合わせる
     // Then: web_search は Denied、web_fetch は Allowed になる
     let caps = Role::Orchestrator.capabilities();
@@ -266,29 +266,33 @@ fn reviewer_denies_skill_load() {
 }
 
 #[test]
-fn librarian_allows_exactly_adr_0002_tools() {
-    // Given: Librarian ロール (v0.2 の調査役、web_search / web_fetch を持つ)
+fn web_researcher_allows_exactly_adr_0002_tools() {
+    // Given: WebResearcher ロール (v0.2 の調査役、web_search / web_fetch を持つ)
     // When: ケイパビリティのツール集合と全ツールの判定を検査する
     // Then: ADR 0002 (2026-09-03 補足) のツール集合と完全一致し、全ツールが Allowed になる
-    let caps = Role::Librarian.capabilities();
+    let caps = Role::WebResearcher.capabilities();
     assert_eq!(caps.allowed_tools, tool_set(LIBRARIAN_TOOLS));
     for &tool in LIBRARIAN_TOOLS {
         assert_eq!(
-            caps.check_tool(Role::Librarian.name(), tool),
+            caps.check_tool(Role::WebResearcher.name(), tool),
             CapabilityDecision::Allowed
         );
     }
 }
 
 #[test]
-fn librarian_denies_mutation_and_delegation_tools() {
-    // Given: Librarian ロール (read / grep と web_search / web_fetch のみ、
+fn web_researcher_denies_mutation_and_delegation_tools() {
+    // Given: WebResearcher ロール (read / grep と web_search / web_fetch のみ、
     //        mutation / 委譲 / messaging は拒否)
     // When: edit / shell / delegate / send の使用可否を問い合わせる
     // Then: すべて Denied になる
-    let caps = Role::Librarian.capabilities();
+    let caps = Role::WebResearcher.capabilities();
     for tool in ["write", "edit", "shell", "delegate", "send"] {
-        assert_denied(caps.check_tool("Librarian", tool), "Librarian", tool);
+        assert_denied(
+            caps.check_tool("WebResearcher", tool),
+            "WebResearcher",
+            tool,
+        );
     }
 }
 
@@ -297,7 +301,7 @@ fn network_access_defaults_match_adr_matrix() {
     // Given: v0.2 の 5 ロール
     // When: 各ロールのネットワーク要件を参照する
     // Then: Worker / Reviewer は Denied (ADR 0008 default-deny)、
-    //       Explorer / Orchestrator は OptIn、Librarian は Allowed になる
+    //       Explorer / Orchestrator は OptIn、WebResearcher は Allowed になる
     //       (Orchestrator の OptIn は web_fetch のみを対象とする ADR 0002 2026-09-03 補足)
     assert_eq!(
         Role::Orchestrator.capabilities().network,
@@ -307,7 +311,7 @@ fn network_access_defaults_match_adr_matrix() {
     assert_eq!(Role::Worker.capabilities().network, NetworkAccess::Denied);
     assert_eq!(Role::Reviewer.capabilities().network, NetworkAccess::Denied);
     assert_eq!(
-        Role::Librarian.capabilities().network,
+        Role::WebResearcher.capabilities().network,
         NetworkAccess::Allowed
     );
 }
@@ -321,7 +325,7 @@ fn only_orchestrator_can_delegate() {
     assert!(!Role::Explorer.capabilities().can_delegate);
     assert!(!Role::Worker.capabilities().can_delegate);
     assert!(!Role::Reviewer.capabilities().can_delegate);
-    assert!(!Role::Librarian.capabilities().can_delegate);
+    assert!(!Role::WebResearcher.capabilities().can_delegate);
 }
 
 #[test]
@@ -336,18 +340,22 @@ fn role_capabilities_new_collects_tools_into_a_btreeset() {
 }
 
 #[test]
-fn librarian_role_is_defined_via_capabilities_only() {
-    // Given: v0.2 の Librarian ロール (ADR 0002 2026-09-03 補足: read / grep と
+fn web_researcher_role_is_defined_via_capabilities_only() {
+    // Given: v0.2 の WebResearcher ロール (ADR 0002 2026-09-03 補足: read / grep と
     //        web_search / web_fetch を持ち、network は Allowed、委譲は不可)
-    // When: Role::Librarian のケイパビリティを参照する
+    // When: Role::WebResearcher のケイパビリティを参照する
     // Then: 境界チェックは RoleCapabilities 経由で機能し、network は Allowed、
     //       委譲は不可になる (ランタイムの強制は RoleCapabilities のみを消費する)
-    let caps = Role::Librarian.capabilities();
+    let caps = Role::WebResearcher.capabilities();
     assert_eq!(
-        caps.check_tool("Librarian", "read"),
+        caps.check_tool("WebResearcher", "read"),
         CapabilityDecision::Allowed
     );
-    assert_denied(caps.check_tool("Librarian", "edit"), "Librarian", "edit");
+    assert_denied(
+        caps.check_tool("WebResearcher", "edit"),
+        "WebResearcher",
+        "edit",
+    );
     assert_eq!(caps.network, NetworkAccess::Allowed);
     assert!(!caps.can_delegate);
 }

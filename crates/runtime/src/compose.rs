@@ -599,7 +599,7 @@ const fn role_key(role: Role) -> &'static str {
         Role::Explorer => "explorer",
         Role::Worker => "worker",
         Role::Reviewer => "reviewer",
-        Role::Librarian => "librarian",
+        Role::WebResearcher => "web_researcher",
         Role::Planner => "planner",
         Role::Oracle => "oracle",
         Role::MultimodalLooker => "multimodal_looker",

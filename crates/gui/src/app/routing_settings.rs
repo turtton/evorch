@@ -230,7 +230,7 @@ fn set_project_agent_ref(
         "explorer" => &mut agents.explorer.logical_model,
         "worker" => &mut agents.worker.base.logical_model,
         "reviewer" => &mut agents.reviewer.logical_model,
-        "roles.librarian" => &mut agents.roles.librarian.logical_model,
+        "roles.web_researcher" => &mut agents.roles.web_researcher.logical_model,
         "roles.planner" => &mut agents.roles.planner.logical_model,
         "roles.oracle" => &mut agents.roles.oracle.logical_model,
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker.logical_model,

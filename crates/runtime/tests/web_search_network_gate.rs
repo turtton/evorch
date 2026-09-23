@@ -100,22 +100,22 @@ fn all_layers_permissive_allow_web_search() {
     assert_eq!(decision, NetworkAccessDecision::Allow);
 }
 
-// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_search を authorize / Then: Librarian のみ許可され、他の 4 role は CapabilityDenied になる (AC6)
+// Given: production の layer-1 execute gate (ExecutionPolicy::for_role) と全 5 role / When: web_search を authorize / Then: WebResearcher のみ許可され、他の 4 role は CapabilityDenied になる (AC6)
 // agents::Role に全 variant の定数はないため列挙する。現行の全 variant は
-// Orchestrator / Explorer / Worker / Reviewer / Librarian の 5 つであり、
+// Orchestrator / Explorer / Worker / Reviewer / WebResearcher の 5 つであり、
 // 新 variant を enum に追加した際はこの列挙への追加が必要である
 // (match と異なり追加漏れはコンパイラに検出されない)。
-// web_search は ADR 0002 (2026-09-03 補足) により Librarian 専用であり、
-// このテストは production gate が Librarian にのみ web_search を公開し、
+// web_search は ADR 0002 (2026-09-03 補足) により WebResearcher 専用であり、
+// このテストは production gate が WebResearcher にのみ web_search を公開し、
 // 他の全 role で拒否することを固定する。
 // role の公開範囲を変更する slice は必ず本テストを更新すること (tripwire)。
 #[test]
-fn production_layer1_gate_exposes_web_search_only_to_librarian() {
-    let policy = ExecutionPolicy::for_role(Role::Librarian);
+fn production_layer1_gate_exposes_web_search_only_to_web_researcher() {
+    let policy = ExecutionPolicy::for_role(Role::WebResearcher);
     assert_eq!(
         policy.authorize("web_search"),
         Ok(()),
-        "Librarian の web_search は layer-1 execute gate で許可されるべき (AC6)"
+        "WebResearcher の web_search は layer-1 execute gate で許可されるべき (AC6)"
     );
 
     for role in [

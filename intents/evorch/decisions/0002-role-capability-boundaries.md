@@ -52,3 +52,11 @@ Role を personality ではなく capability boundary とする。
 - ContentOrigin::WebUntrusted は ToolExecutor が権限宣言から機械導出し fail-closed を維持 (回帰テスト追加)。
 - sandbox 影響: Orchestrator の OptIn は explicit_opt_in=false では Unshared に解決され bwrap 挙動は不変。web tool は in-process reqwest で bwrap の外 (NetworkGuard が境界)。
 - 未配線 (後続 slice): GUI からの `ApprovalResolved` 発行 UI と `network_access` 設定 surface (現状 GUI 起動の run は session Denied で fail-closed に拒否される)、delegate 系 meta-op への `network_access` 引数・親 run からの継承、Librarian の config フィールド / prompt baseline / `parse_role` / GUI 露出。
+
+## 2026-09-23 確定: Librarian を WebResearcher に改称し、委譲先へ配線
+
+- 外部の Web 情報を収集・検証する責務を名前で示すため、`Librarian` を `WebResearcher` に改称する。過去の本 ADR にある Librarian は同じロールの旧称。
+- Rust のロール名は `Role::WebResearcher`、delegate と設定の識別子は `web_researcher`、設定バインディングは `[agents.roles.web_researcher]` とする。pre-v1 の方針に従い、旧設定キー・保存済みロール名の互換層は設けない。
+- 調査ツールは `read` / `grep` / `web_search` / `web_fetch`。書き込み・編集・shell・再委譲は不可。全ロール共通の ledger / user question 操作は引き続き利用できる。
+- delegate のロール解析・schema、設定のモデル解決、同梱の `role-webresearcher` 基準プロンプト、production prompt catalog、GUI のロール設定を接続する。Orchestrator の委譲案内に外部調査の担当として記載する。
+- role capability の `NetworkAccess::Allowed` はネットワーク利用能力の上限を示す。実行時は per-tool と session の各層の判定も必要。WebResearcher への委譲だけは session を既定 `Allowed` とし、明示 `OptIn` が選択された場合は呼び出しごとの承認を要する。Orchestrator および他 run の既定 session は `Denied`。

@@ -118,7 +118,7 @@ fn resolved_preview_shows_profile_model_per_role() {
     agents.orchestrator.logical_model = Some("fast".into());
     agents.explorer.logical_model = Some("fast".into());
     agents.reviewer.logical_model = Some("fast".into());
-    agents.roles.librarian.logical_model = Some("fast".into());
+    agents.roles.web_researcher.logical_model = Some("fast".into());
     agents.roles.planner.logical_model = Some("fast".into());
     agents.roles.oracle.logical_model = Some("fast".into());
     agents.roles.multimodal_looker.logical_model = Some("fast".into());
@@ -137,7 +137,7 @@ fn resolved_preview_shows_profile_model_per_role() {
         "Explorer",
         "Worker",
         "Reviewer",
-        "Librarian",
+        "WebResearcher",
         "Planner",
         "Oracle",
         "Multimodal Looker",

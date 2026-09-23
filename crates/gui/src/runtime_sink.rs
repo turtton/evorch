@@ -57,6 +57,7 @@ pub struct RuntimeCommandSink {
     memory_config: Option<storage::StorageConfig>,
     runtime: AgentRuntime,
     shell_cwd: Option<PathBuf>,
+    web_tool_access: config::WebToolAccess,
     handle: tokio::runtime::Handle,
     supervisor: SupervisorHandle,
     accepted_goals: u64,
@@ -79,6 +80,7 @@ impl RuntimeCommandSink {
             RunConfig {
                 interactive: false,
                 keep_alive: false,
+                network_access: self.network_access(),
                 ..RunConfig::default()
             },
         )
@@ -97,6 +99,7 @@ impl RuntimeCommandSink {
             memory_config: None,
             runtime,
             shell_cwd: None,
+            web_tool_access: config::WebToolAccess::Denied,
             handle,
             supervisor,
             accepted_goals: 0,
@@ -108,6 +111,18 @@ impl RuntimeCommandSink {
             ownership: None,
             events_tx,
             events_rx,
+        }
+    }
+
+    pub fn with_web_tool_access(mut self, access: config::WebToolAccess) -> Self {
+        self.web_tool_access = access;
+        self
+    }
+
+    fn network_access(&self) -> agents::NetworkAccess {
+        match self.web_tool_access {
+            config::WebToolAccess::Denied => agents::NetworkAccess::Denied,
+            config::WebToolAccess::OptIn => agents::NetworkAccess::OptIn,
         }
     }
 
@@ -244,6 +259,7 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::RestoreSnapshot { .. } => None,
                 WorkbenchCommand::PauseGoal { .. }
                 | WorkbenchCommand::DecideToolApproval { .. }
+                | WorkbenchCommand::SetWebToolAccess { .. }
                 | WorkbenchCommand::ResumeGoal { .. }
                 | WorkbenchCommand::CancelGoal { .. } => None,
             };
@@ -366,6 +382,10 @@ impl RuntimeCommandSink {
                 }
                 events
             }
+            WorkbenchCommand::SetWebToolAccess { access } => {
+                self.web_tool_access = access;
+                Vec::new()
+            }
             WorkbenchCommand::DecideToolApproval { call_id, approved } => {
                 if let Some(bus) = &self.event_bus {
                     bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
@@ -485,6 +505,7 @@ impl RuntimeCommandSink {
                     .map(|config| config.db_path.clone());
                 let root_run = runtime.reserve_run_id();
                 self.goal_runs.insert(thread_id.clone(), root_run);
+                let network_access = self.network_access();
                 self.handle.spawn(async move {
                     let decision = runtime.entry_router().classify(&goal_for_log).await;
                     // issue #83: root run の起動より先に goal を登録する。
@@ -512,6 +533,7 @@ impl RuntimeCommandSink {
                             finding_store,
                             memory,
                             ownership: permit,
+                            network_access,
                             ..RunConfig::default()
                         },
                     );
@@ -551,6 +573,7 @@ impl RuntimeCommandSink {
                         ownership: permit,
                         images: submission.images,
                         model_preference: submission.model_preference,
+                        network_access: self.network_access(),
                         ..RunConfig::default()
                     };
                     if self
@@ -631,6 +654,7 @@ impl RuntimeCommandSink {
                             ownership: permit,
                             images: submission.images,
                             model_preference: submission.model_preference,
+                            network_access: self.network_access(),
                             ..RunConfig::default()
                         },
                     ) {
@@ -658,6 +682,7 @@ impl RuntimeCommandSink {
                         interactive: true,
                         keep_alive: true,
                         model_preference: submission.model_preference,
+                        network_access: self.network_access(),
                         ..RunConfig::default()
                     },
                 );
@@ -795,12 +820,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use agents::NetworkAccess;
     use async_trait::async_trait;
     use event_bus::{EventBus, EventKind, GoalReference, GoalState, OrchestratorEvent};
     use providers::{ChatResponse, Message, ToolSpec};
+    use runtime::restore::RunRestoreDescriptor;
     use runtime::{
         AgentInvocationContext, AgentModel, AgentRuntime, AgentSummary, FixtureDeliveryAdapter,
-        GoalSpec, GoalSupervisor, OrchestrationSettings, Role, RunConfig, RuntimeError,
+        GoalSpec, GoalSupervisor, OrchestrationSettings, Role, RunConfig, RunStore, RuntimeError,
         SupervisorHandle,
     };
     use storage::{Database, Storage, StorageConfig, StorageHandle};
@@ -889,6 +916,55 @@ mod tests {
         let sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
         (rt, sink, runtime, supervisor)
+    }
+
+    #[test]
+    fn web_tool_setting_reaches_new_background_run_config() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let dir = tempfile::tempdir().expect("store directory");
+        let config = StorageConfig {
+            db_path: dir.path().join("runs.sqlite3"),
+            ..StorageConfig::default()
+        };
+        let storage = Storage::open(config.clone()).expect("storage");
+        let bus = Arc::new(EventBus::new(64));
+        let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(HeldModel))
+            .with_run_store(RunStore::open(&config, storage.handle()).expect("run store"));
+        let supervisor = rt.block_on(async {
+            GoalSupervisor::spawn(
+                runtime.clone(),
+                bus,
+                Arc::new(FixtureDeliveryAdapter::default()),
+                OrchestrationSettings::default(),
+            )
+        });
+        let mut sink = RuntimeCommandSink::new(runtime, rt.handle().clone(), supervisor);
+        assert!(
+            sink.submit(WorkbenchCommand::SetWebToolAccess {
+                access: config::WebToolAccess::OptIn,
+            })
+            .is_empty()
+        );
+        let run_id = sink.start_background_run("inspect".into());
+        let descriptor = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(record) = Database::open(&config)
+                        .expect("database")
+                        .run_context(&run_id.to_string())
+                        .expect("run context")
+                    {
+                        break serde_json::from_str::<RunRestoreDescriptor>(&record.config_json)
+                            .expect("descriptor");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("run persisted")
+        });
+        assert_eq!(descriptor.network_access, NetworkAccess::OptIn);
     }
 
     #[test]

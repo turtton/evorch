@@ -12,7 +12,7 @@ pub enum Attribution {
     Reviewer,
     Qa,
     ToolUse,
-    Librarian,
+    WebResearcher,
     Oracle,
     MultimodalLooker,
     Synthesizer,

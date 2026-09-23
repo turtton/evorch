@@ -1048,12 +1048,12 @@ mod tests {
         assert!(tool_names.contains(&"web_fetch"));
     }
 
-    // Given: Librarian のポリシーと skills 未設定
+    // Given: WebResearcher のポリシーと skills 未設定
     // When: visible_tool_specs を呼ぶ
     // Then: web_search と web_fetch がモデルに見える
     #[test]
-    fn visible_tool_specs_exposes_both_web_tools_for_librarian() {
-        let policy = ExecutionPolicy::for_role(Role::Librarian);
+    fn visible_tool_specs_exposes_both_web_tools_for_web_researcher() {
+        let policy = ExecutionPolicy::for_role(Role::WebResearcher);
 
         let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
         let tool_names = names(&specs);

@@ -7,7 +7,7 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         ("Explorer", "explorer"),
         ("Worker", "worker"),
         ("Reviewer", "reviewer"),
-        ("Librarian", "librarian"),
+        ("WebResearcher", "web_researcher"),
         ("Planner", "planner"),
         ("Oracle", "oracle"),
         ("Multimodal Looker", "multimodal_looker"),

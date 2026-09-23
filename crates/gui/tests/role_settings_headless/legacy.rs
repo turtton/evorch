@@ -63,7 +63,7 @@ fn category_override_editable_per_role() {
 
 #[test]
 fn category_ui_is_scoped_to_worker_row() {
-    for role in ["Explorer", "Librarian", "Worker"] {
+    for role in ["Explorer", "WebResearcher", "Worker"] {
         // Given: a fresh modal with every role row collapsed.
         let temp = tempfile::tempdir().expect("temp");
         let (mut harness, _) = fixture(temp.path());
@@ -91,13 +91,13 @@ fn category_ui_is_scoped_to_worker_row() {
 }
 
 #[test]
-fn librarian_row_saves_when_model_selected() {
+fn web_researcher_row_saves_when_model_selected() {
     // Given: the real role settings modal with distinct routes.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, model) = fixture(temp.path());
     harness.run();
-    // When: editing the librarian row and saving through its controls.
-    harness.click_label("Librarian");
+    // When: editing the web_researcher row and saving through its controls.
+    harness.click_label("WebResearcher");
     harness.run();
     harness.click_label("Role logical model");
     harness.run();
@@ -113,13 +113,13 @@ fn librarian_row_saves_when_model_selected() {
             .state()
             .role_settings()
             .agents
-            .binding_for("librarian", None)
-            .expect("saved librarian")
+            .binding_for("web_researcher", None)
+            .expect("saved web_researcher")
             .logical_model,
         "fast"
     );
     assert_eq!(
-        model.selected_model(Role::Librarian, None),
+        model.selected_model(Role::WebResearcher, None),
         "accelerated/fast"
     );
 }

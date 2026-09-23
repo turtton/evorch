@@ -63,7 +63,7 @@ const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
 const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer", "roles"];
-const ADDITIONAL_ROLE_KEYS: &[&str] = &["librarian", "planner", "oracle", "multimodal_looker"];
+const ADDITIONAL_ROLE_KEYS: &[&str] = &["web_researcher", "planner", "oracle", "multimodal_looker"];
 const RULES_KEYS: &[&str] = &[
     "context_window_tokens",
     "response_headroom_tokens",
@@ -174,6 +174,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         "sandbox",
         &[
             "allow_network",
+            "web_tool_access",
             "escalation_approval",
             "escalate_to_user_on_deny",
         ],

@@ -571,6 +571,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
+            | WorkbenchCommand::SetWebToolAccess { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
@@ -615,6 +616,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
+            | WorkbenchCommand::SetWebToolAccess { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();

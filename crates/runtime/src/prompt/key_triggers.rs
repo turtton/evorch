@@ -49,15 +49,16 @@ pub fn render_key_triggers(sources: &[TriggerSource]) -> String {
     rendered
 }
 
-/// ADR 0002 の 4 ロールからデフォルトの keyTriggers を構築する。
+/// ADR 0002 の 8 ロールからデフォルトの keyTriggers を構築する。
 ///
 /// 各エントリはロール名とその [`agents::RoleCapabilities`] の要約からなる。
 pub fn default_role_triggers() -> Vec<TriggerSource> {
-    const ROLES: [agents::Role; 7] = [
+    const ROLES: [agents::Role; 8] = [
         agents::Role::Orchestrator,
         agents::Role::Explorer,
         agents::Role::Worker,
         agents::Role::Reviewer,
+        agents::Role::WebResearcher,
         agents::Role::Planner,
         agents::Role::Oracle,
         agents::Role::MultimodalLooker,
@@ -202,9 +203,9 @@ mod tests {
         assert_eq!(render_key_triggers(&sources), render_key_triggers(&sources));
     }
 
-    // Given: ADR 0002 の 4 ロール
+    // Given: ADR 0002 の 8 ロール
     // When: default_role_triggers を構築する
-    // Then: 4 ロール分のエントリがケイパビリティ要約付きで固定順に並ぶ
+    // Then: 全ロール分のエントリがケイパビリティ要約付きで固定順に並ぶ
     #[test]
     fn default_role_triggers_lists_fixed_roles_with_capability_summary() {
         let triggers = default_role_triggers();
@@ -217,6 +218,7 @@ mod tests {
                 "Explorer",
                 "Worker",
                 "Reviewer",
+                "WebResearcher",
                 "Planner",
                 "Oracle",
                 "MultimodalLooker"

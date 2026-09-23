@@ -162,6 +162,7 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
         "explorer" => Ok(Role::Explorer),
         "worker" => Ok(Role::Worker),
         "reviewer" => Ok(Role::Reviewer),
+        "web_researcher" | "webresearcher" => Ok(Role::WebResearcher),
         "planner" => Ok(Role::Planner),
         "oracle" => Ok(Role::Oracle),
         "multimodallooker" | "multimodal_looker" => Ok(Role::MultimodalLooker),

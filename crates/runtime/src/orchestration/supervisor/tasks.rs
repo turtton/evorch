@@ -92,7 +92,7 @@ impl SupervisorActor {
             Role::Worker,
             Role::Reviewer,
             Role::Explorer,
-            Role::Librarian,
+            Role::WebResearcher,
             Role::Planner,
             Role::Oracle,
             Role::MultimodalLooker,

@@ -10,6 +10,13 @@ pub fn save_sandbox(path: &Path, sandbox: SandboxConfig) -> Result<(), ConfigErr
     let mut doc = crate::save::read_document(path)?;
     let mut section = toml_edit::Table::new();
     section.insert("allow_network", toml_edit::value(sandbox.allow_network));
+    section.insert(
+        "web_tool_access",
+        toml_edit::value(match sandbox.web_tool_access {
+            crate::WebToolAccess::Denied => "denied",
+            crate::WebToolAccess::OptIn => "opt-in",
+        }),
+    );
     let escalation_approval = match sandbox.escalation_approval {
         crate::EscalationApproval::Auto => "auto",
         crate::EscalationApproval::User => "user",

@@ -262,7 +262,7 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_run_executor_registers_web_tools() {
     // Given: isolated run では setup_isolated_workspace が executor を再構築する。
-    // Librarian は web_fetch を capability に持つ
+    // WebResearcher は web_fetch を capability に持つ
     let (_temp, repo) = init_git_repo();
     let model = Arc::new(ScriptedModel::new([
         Ok(tool_response("fetch-1", "web_fetch", json!({}))),
@@ -273,7 +273,7 @@ async fn isolated_run_executor_registers_web_tools() {
 
     // When
     let run_id = runtime.delegate_background(
-        Role::Librarian,
+        Role::WebResearcher,
         "fetch".to_string(),
         RunConfig {
             workspace_mode: WorkspaceMode::Isolated,

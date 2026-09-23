@@ -35,7 +35,7 @@ impl ArenaReport {
             ),
             Attribution::Qa
             | Attribution::ToolUse
-            | Attribution::Librarian
+            | Attribution::WebResearcher
             | Attribution::Synthesizer => {
                 return Err(ArenaError::InvalidSpec(
                     "evaluation role has no active runtime binding",

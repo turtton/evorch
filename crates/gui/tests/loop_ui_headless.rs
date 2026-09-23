@@ -102,6 +102,7 @@ fn issued_decisions(
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
+            | WorkbenchCommand::SetWebToolAccess { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect()
@@ -174,6 +175,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::CancelGoal { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
+            | WorkbenchCommand::SetWebToolAccess { .. }
             | WorkbenchCommand::RestoreSnapshot { .. } => None,
         })
         .collect();
