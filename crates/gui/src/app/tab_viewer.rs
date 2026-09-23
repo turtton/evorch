@@ -17,10 +17,10 @@ use crate::model::transcript_registry::TranscriptRegistry;
 use crate::panes::{
     agent_transcript::agent_transcript_pane_with_repo_root,
     agents::{AgentsAction, agents_pane},
-    approvals::{ApprovalsAction, approvals_pane},
     composer::ComposerAction,
     diff::diff_pane,
     notifications::{NotificationsAction, notifications_pane},
+    requests::RequestAction,
     sidebar::{SidebarAction, sidebar_pane},
     tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
@@ -31,7 +31,9 @@ mod conversation;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) pending_approvals: &'a PendingApprovalsModel,
-    pub(super) approvals_action: &'a mut Option<ApprovalsAction>,
+    pub(super) request_action: &'a mut Option<RequestAction>,
+    pub(super) user_questions: &'a BTreeMap<String, event_bus::UserQuestion>,
+    pub(super) question_drafts: &'a mut BTreeMap<String, String>,
     pub(super) notifications: &'a mut NotificationsModel,
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
@@ -106,7 +108,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Sidebar
                     | PanelKind::Agents
                     | PanelKind::Notifications
-                    | PanelKind::Approvals
                     | PanelKind::Diff
                     | PanelKind::Terminal
                     | PanelKind::Tasks
@@ -158,11 +159,6 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
         match panel.kind {
             PanelKind::SubagentRegion => {
                 ui.label("Completed subagent logs are available in the tabs above.");
-            }
-            PanelKind::Approvals => {
-                if let Some(action) = approvals_pane(ui, self.pending_approvals) {
-                    *self.approvals_action = Some(action);
-                }
             }
             PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {

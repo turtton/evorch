@@ -5,10 +5,10 @@ use super::tab_viewer::WorkbenchTabViewer;
 use crate::model::tasks::AgentRunSource;
 use crate::panes::{
     agents::AgentsAction,
-    approvals::ApprovalsAction,
     composer::ComposerAction,
     notifications::NotificationsAction,
     provider_settings::{ProviderSettingsAction, provider_settings_modal},
+    requests::RequestAction,
     sidebar::{SidebarAction, set_sidebar_error},
     tasks::TasksAction,
 };
@@ -55,7 +55,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut agents_action = None;
         let mut tasks_action = None;
         let mut notifications_action = None;
-        let mut approvals_action = None;
+        let mut request_action = None;
         let mut diff_request = None;
         let mut composer_action = None;
         let mut focus_request = None;
@@ -72,7 +72,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             let mut viewer = WorkbenchTabViewer {
                 sandbox_picker,
                 pending_approvals: &self.pending_approvals,
-                approvals_action: &mut approvals_action,
+                request_action: &mut request_action,
+                user_questions: &self.user_questions,
+                question_drafts: &mut self.question_drafts,
                 notifications: &mut self.notifications,
                 notifications_action: &mut notifications_action,
                 attention_acks: &mut self.attention_acks,
@@ -137,11 +139,40 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(TasksAction::OpenRun(run_id)) = tasks_action {
             self.open_agent_pane(&run_id);
         }
-        if let Some(NotificationsAction::OpenRun(run_id)) = notifications_action {
-            self.open_agent_pane(&run_id);
+        if let Some(action) = notifications_action {
+            match action {
+                NotificationsAction::OpenRun(run_id) => self.open_agent_pane(&run_id),
+                NotificationsAction::OpenConversation(run_id) => {
+                    if let Some(thread_id) = self.thread_for_run(&run_id)
+                        && self
+                            .switch_thread(workspace_ui::ThreadId::new(thread_id))
+                            .is_ok()
+                    {
+                        self.return_to_thread();
+                        self.focus_panel("agent-main");
+                    }
+                }
+            }
         }
-        if let Some(ApprovalsAction::Decide { call_id, approved }) = approvals_action {
-            self.decide_tool_approval(call_id, approved);
+        if let Some(action) = request_action {
+            match action {
+                RequestAction::Decide { call_id, approved } => {
+                    self.decide_tool_approval(call_id, approved)
+                }
+                RequestAction::Answer {
+                    thread_id,
+                    question_id,
+                    answer,
+                } => {
+                    self.submit_command(
+                        crate::model::commands::WorkbenchCommand::AnswerUserQuestion {
+                            thread_id,
+                            question_id,
+                            answer,
+                        },
+                    );
+                }
+            }
         }
         if let Some(action) = sidebar_action {
             let result = match action {

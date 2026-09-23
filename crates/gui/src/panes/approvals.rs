@@ -1,88 +1,90 @@
 use egui::{RichText, Ui};
 
-use crate::model::{pending_approvals::PendingApprovalsModel, scoped_call::parse_scoped_call_id};
-use crate::theme::tokens::{FONT_MONO, R_SM, SP_2, STATUS_STROKE, palette};
+use crate::model::{pending_approvals::PendingApproval, scoped_call::parse_scoped_call_id};
+use crate::theme::tokens::{FONT_MONO, SP_2, palette};
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ApprovalsAction {
-    Decide { call_id: String, approved: bool },
-}
+use super::requests::{RequestAction, request_card};
 
-pub fn approvals_pane(ui: &mut Ui, model: &PendingApprovalsModel) -> Option<ApprovalsAction> {
+/// Always render the complete input. Commands get a literal, selectable code
+/// block (including newlines), with all other arguments retained below it.
+pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestAction> {
     let mut action = None;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let mut items = model.items().peekable();
-        if items.peek().is_none() {
-            ui.label(RichText::new("保留中の承認要求はありません").color(palette().TEXT_MUTED));
-        }
-        for item in items {
-            ui.push_id(&item.call_id, |ui| {
-                egui::Frame::new()
-                    .stroke(egui::Stroke::new(STATUS_STROKE, palette().INFO))
-                    .corner_radius(R_SM)
-                    .inner_margin(SP_2)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&item.tool_name)
-                                    .strong()
-                                    .color(palette().TEXT),
-                            )
-                            .wrap(),
-                        );
-                        let original = parse_scoped_call_id(&item.call_id)
-                            .map(|(_, call, _)| call)
-                            .unwrap_or_else(|| item.call_id.clone());
-                        let call = if original.is_empty() {
-                            "—"
-                        } else {
-                            &original
-                        };
-                        let attempt = item.attempt.map_or_else(|| "—".into(), |n| n.to_string());
-                        let correlation = format!(
-                            "{} · {call} · attempt {attempt}",
-                            item.run_id.as_deref().unwrap_or("—")
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(correlation)
-                                    .monospace()
-                                    .size(FONT_MONO)
-                                    .color(palette().TEXT_MUTED),
-                            )
-                            .wrap(),
-                        )
-                        .on_hover_text(&item.call_id);
-                        let summary = match item.input.as_ref() {
-                            Some(input) => {
-                                let input = input.to_string();
-                                let mut chars = input.chars();
-                                let mut summary: String = chars.by_ref().take(120).collect();
-                                if chars.next().is_some() {
-                                    summary.push('…');
-                                }
-                                summary
+    ui.push_id(("approval", &item.call_id), |ui| {
+        request_card(ui, "コマンドの承認待ち", |ui| {
+            ui.add(egui::Label::new(RichText::new(&item.tool_name).strong()).wrap());
+            let original = parse_scoped_call_id(&item.call_id)
+                .map(|(_, call, _)| call)
+                .unwrap_or_else(|| item.call_id.clone());
+            let call = if original.is_empty() {
+                "—"
+            } else {
+                &original
+            };
+            let attempt = item.attempt.map_or_else(|| "—".into(), |n| n.to_string());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "{} · {call} · attempt {attempt}",
+                        item.run_id.as_deref().unwrap_or("—")
+                    ))
+                    .monospace()
+                    .size(FONT_MONO)
+                    .color(palette().TEXT_MUTED),
+                )
+                .wrap(),
+            )
+            .on_hover_text(&item.call_id);
+            match item.input.as_ref() {
+                Some(input) => {
+                    if let Some(command) = input.get("command").and_then(serde_json::Value::as_str)
+                    {
+                        full_input(ui, command);
+                        let mut rest = input.clone();
+                        if let Some(args) = rest.as_object_mut() {
+                            args.remove("command");
+                            if !args.is_empty() {
+                                full_input(
+                                    ui,
+                                    &serde_json::to_string_pretty(&rest).expect("JSON input"),
+                                );
                             }
-                            None => "引数情報なし".into(),
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(summary).color(palette().TEXT_MUTED))
-                                .wrap(),
+                        }
+                    } else {
+                        full_input(
+                            ui,
+                            &serde_json::to_string_pretty(input).expect("JSON input"),
                         );
-                        ui.horizontal_wrapped(|ui| {
-                            for (label, approved) in [("Approve", true), ("Reject", false)] {
-                                if ui.button(label).clicked() {
-                                    action = Some(ApprovalsAction::Decide {
-                                        call_id: item.call_id.clone(),
-                                        approved,
-                                    });
-                                }
-                            }
+                    }
+                }
+                None => {
+                    ui.label("引数情報なし");
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (label, approved) in [("Approve", true), ("Reject", false)] {
+                    if ui.button(label).clicked() {
+                        action = Some(RequestAction::Decide {
+                            call_id: item.call_id.clone(),
+                            approved,
                         });
-                    });
-                ui.add_space(SP_2);
+                    }
+                }
             });
-        }
+        });
     });
     action
+}
+
+fn full_input(ui: &mut Ui, text: &str) {
+    egui::Frame::new()
+        .fill(palette().CANVAS)
+        .inner_margin(SP_2)
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(text).monospace().size(FONT_MONO))
+                    .wrap()
+                    .selectable(true),
+            );
+        });
+    ui.add_space(SP_2);
 }

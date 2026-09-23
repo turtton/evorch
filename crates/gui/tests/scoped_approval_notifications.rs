@@ -3,14 +3,32 @@ use event_bus::{Event, ToolEvent};
 use gui::{
     app::WorkbenchState, fixture::DemoSource, model::transcript_registry::TranscriptRegistry,
 };
-use workspace_ui::{PanelId, UiSettings};
+use workspace_ui::{PanelId, ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[test]
-fn runtime_approval_formats_open_run_transcript_without_started_event() {
+fn runtime_approval_formats_open_parent_conversation_without_started_event() {
     // Given: executor preflight, network, and post-failure correlation IDs without prior events.
     for call_id in ["run-2:call-1:0", "run-2:call-1", "run-2:call-1:17"] {
-        let mut state =
-            WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
+        let mut sidebar = SidebarState::default();
+        let project = ProjectId::new("project");
+        sidebar
+            .add_project(
+                project.clone(),
+                "project",
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        sidebar
+            .create_thread(ThreadId::new("one"), project.clone(), "one")
+            .unwrap();
+        sidebar.threads[0].run_ids.push("run-2".into());
+        sidebar
+            .create_thread(ThreadId::new("two"), project, "two")
+            .unwrap();
+        sidebar.switch_thread(&ThreadId::new("two")).unwrap();
+        let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+            .unwrap()
+            .with_sidebar(sidebar);
         state.apply_events([Event::new(ToolEvent::ApprovalRequested {
             input: None,
             tool_name: "shell".into(),
@@ -43,10 +61,16 @@ fn runtime_approval_formats_open_run_transcript_without_started_event() {
         // When: the notification row is clicked once.
         harness.get_by_label("Approval requested: shell").click();
         harness.run_steps(3);
-        // Then: the owning run's transcript is the active tab.
+        // Then: the owning conversation is selected, not a standalone transcript.
         let dock = harness.state().dock();
-        let path = dock.find_tab(&panel).expect("run transcript opened");
+        assert!(dock.find_tab(&panel).is_none());
+        let path = dock.find_tab(&PanelId::new("agent-main")).unwrap();
         assert_eq!(dock.leaf(path.node_path()).unwrap().active, path.tab);
+        assert_eq!(
+            harness.state().sidebar().active_thread,
+            Some(ThreadId::new("one"))
+        );
+        assert!(harness.query_by_label("Approve").is_some());
     }
 }
 

@@ -7,6 +7,7 @@ use crate::theme::widgets::empty_state;
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotificationsAction {
     OpenRun(String),
+    OpenConversation(String),
 }
 
 pub fn notifications_pane(
@@ -71,7 +72,13 @@ pub fn notifications_pane(
                                     .add(egui::Button::new(summary).frame(false).wrap())
                                     .clicked()
                                 {
-                                    action = Some(NotificationsAction::OpenRun(run_id.clone()));
+                                    action = Some(match notification.kind {
+                                        NotificationKind::ApprovalPending { .. }
+                                        | NotificationKind::QuestionPending { .. } => {
+                                            NotificationsAction::OpenConversation(run_id.clone())
+                                        }
+                                        _ => NotificationsAction::OpenRun(run_id.clone()),
+                                    });
                                 }
                             }
                             None => {

@@ -19,6 +19,7 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                 &TranscriptModel::default(),
                 None,
                 ConversationContext {
+                    requests: None,
                     task_rows: &[],
                     phase_unread: true,
                     has_project: true,

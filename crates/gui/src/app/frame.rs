@@ -91,7 +91,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.render(ui);
         self.render_restore_diagnostics(&ctx);
-        self.render_user_questions(&ctx);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(
                 editor.models_fetch_state,
@@ -296,7 +295,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(dock) => {
                 self.dock = dock;
                 self.panels = workspace.panels;
-                self.register_approvals_panel();
                 self.register_work_panels();
                 ctx.request_repaint();
             }

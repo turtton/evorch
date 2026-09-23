@@ -246,7 +246,6 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
         "diff-main",
         "terminal-main",
         "notifications-main",
-        "approvals-main",
         "tasks-main",
     ] {
         let tab = workbench
@@ -258,7 +257,7 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
     }
     assert_eq!(
         workbench.state().dock().iter_all_tabs().count(),
-        8,
+        7,
         "no dynamic panes before the scenario opens them"
     );
 }
@@ -658,7 +657,6 @@ fn v02_end_to_end_chained_scenario() {
             BTreeSet::from([
                 "agents-main".to_string(),
                 "notifications-main".to_string(),
-                "approvals-main".to_string(),
                 "tasks-main".to_string(),
             ]),
             BTreeSet::from(["diff-main".to_string()]),

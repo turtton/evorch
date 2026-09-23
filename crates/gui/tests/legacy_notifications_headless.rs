@@ -45,7 +45,6 @@ fn transcript_opens_beside_agents_added_to_legacy_layout() {
     // When: a transcript is opened directly.
     state.open_agent_pane("fallback-run");
     // Then: it is appended and selected beside the restored Agents tab.
-    // (承認タブは保存済み配置にも追加挿入される — approvals_layout_headless.rs 参照)
     let dock = state.dock();
     let path = dock
         .find_tab(&PanelId::new("agent-fallback-run"))
@@ -56,7 +55,6 @@ fn transcript_opens_beside_agents_added_to_legacy_layout() {
         leaf.tabs,
         vec![
             PanelId::new("tasks-main"),
-            PanelId::new("approvals-main"),
             PanelId::new("terminal-main"),
             PanelId::new("agents-main"),
             PanelId::new("agent-fallback-run")

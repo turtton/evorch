@@ -25,6 +25,7 @@ pub struct AgentIdentity<'a> {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
+    pub requests: Option<super::requests::ConversationRequests<'a>>,
     pub task_rows: &'a [crate::model::tasks::TaskRow],
     pub phase_unread: bool,
     pub has_project: bool,
@@ -45,6 +46,7 @@ pub enum AgentPaneAction {
     FocusPanel(&'static str),
     Composer(ComposerAction),
     ModelPreference(Option<workspace_ui::ModelPreference>),
+    Request(super::requests::RequestAction),
 }
 
 /// トランスクリプトモデルを egui 上に描画します。
@@ -68,6 +70,7 @@ pub fn agent_pane_with_repo_root(
     picker_state: &mut crate::model::model_picker::ModelPickerState,
     repo_root: Option<&std::path::Path>,
 ) -> Option<AgentPaneAction> {
+    let mut ctx = ctx;
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
@@ -115,11 +118,21 @@ pub fn agent_pane_with_repo_root(
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 if model.visible_entries().is_empty()
+                    && ctx
+                        .requests
+                        .as_ref()
+                        .is_none_or(|requests| requests.is_empty())
                     && identity.is_none_or(|identity| identity.ledger.is_empty())
                 {
                     empty_state_body(ui, &ctx, &mut action);
-                } else {
-                    run_detail_body(ui, model, (identity, ctx.task_rows), repo_root);
+                } else if let Some(request) = run_detail_body(
+                    ui,
+                    model,
+                    (identity, ctx.task_rows),
+                    repo_root,
+                    ctx.requests.as_mut(),
+                ) {
+                    action = Some(AgentPaneAction::Request(request));
                 }
             });
         action
@@ -170,7 +183,7 @@ pub fn transcript_body_with_repo_root(
     model: &TranscriptModel,
     repo_root: Option<&std::path::Path>,
 ) {
-    run_detail_body(ui, model, (None, &[]), repo_root);
+    run_detail_body(ui, model, (None, &[]), repo_root, None);
 }
 
 fn run_detail_body(
@@ -178,7 +191,8 @@ fn run_detail_body(
     model: &TranscriptModel,
     context: (Option<AgentIdentity<'_>>, &[crate::model::tasks::TaskRow]),
     repo_root: Option<&std::path::Path>,
-) {
+    requests: Option<&mut super::requests::ConversationRequests<'_>>,
+) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
     egui::ScrollArea::vertical()
@@ -242,7 +256,9 @@ fn run_detail_body(
             if let Some(identity) = identity {
                 crate::panes::ledger::ledger_section(ui, identity.run_id, identity.ledger);
             }
-        });
+            requests.and_then(|requests| requests.show(ui))
+        })
+        .inner
 }
 
 fn entry_accent(entry: &TranscriptEntry) -> Color32 {
@@ -351,6 +367,7 @@ mod tests {
                         &[],
                     ),
                     None,
+                    None,
                 );
             });
         harness.run_steps(2);
@@ -391,6 +408,7 @@ mod tests {
                     &[],
                 ),
                 None,
+                None,
             );
         });
         // Then: no ledger header is exposed.
@@ -409,6 +427,7 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
+                        requests: None,
                         task_rows: &[],
                         phase_unread: true,
                         has_project: true,

@@ -8,7 +8,7 @@ use gui::{
     model::commands::{CommandSink, LoopEvent, RecordingSink, WorkbenchCommand},
 };
 use serde_json::json;
-use workspace_ui::{PanelId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 const A: &str = "run-2:call-1:17";
 const B: &str = "run-3:call-1:0018:opaque";
@@ -29,14 +29,35 @@ fn requested(call_id: &str, tool_name: &str) -> Event {
     })
 }
 
+fn state() -> WorkbenchState<DemoSource> {
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("project");
+    sidebar
+        .add_project(
+            project.clone(),
+            "project",
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
+    for id in ["one", "two"] {
+        sidebar
+            .create_thread(ThreadId::new(id), project.clone(), id)
+            .unwrap();
+    }
+    sidebar.threads[0].run_ids = vec!["run-2".into(), "run-3".into()];
+    sidebar.threads[1].run_ids = vec!["run-4".into()];
+    sidebar.switch_thread(&ThreadId::new("one")).unwrap();
+    WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar)
+}
+
 fn harness() -> (
     Harness<'static, WorkbenchState<DemoSource>>,
     Arc<Mutex<RecordingSink>>,
 ) {
     let sink = Arc::new(Mutex::new(RecordingSink::default()));
-    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
-        .expect("workbench")
-        .with_command_sink(Box::new(SharedSink(sink.clone())));
+    let mut state = state().with_command_sink(Box::new(SharedSink(sink.clone())));
     state.apply_events([
         Event::new(ToolEvent::ToolStarted {
             tool_name: "shell".into(),
@@ -47,11 +68,6 @@ fn harness() -> (
         requested(A, "shell"),
         requested(B, "write"),
     ]);
-    let path = state
-        .dock()
-        .find_tab(&PanelId::new("approvals-main"))
-        .expect("approvals tab");
-    state.dock_mut().set_active_tab(path).expect("activate");
     let harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(
@@ -75,14 +91,16 @@ fn displays_arguments_when_approval_arrives_before_tool_started() {
     let mut harness = Harness::builder().build_ui_state(
         |ui, state| {
             gui::theme::install(ui.ctx());
-            gui::panes::approvals::approvals_pane(ui, state.pending_approvals());
+            for item in state.pending_approvals().items() {
+                gui::panes::approvals::approval_card(ui, item);
+            }
         },
         state,
     );
     // When: 承認待ちの pane を描画する。
     harness.run_steps(3);
     // Then: 実行開始を待たずにイベントの引数要約を表示する。
-    assert!(harness.query_by_label(r#"{"command":"pwd"}"#).is_some());
+    assert!(harness.query_by_label("pwd").is_some());
     assert!(harness.query_by_label("引数情報なし").is_none());
 }
 
@@ -98,7 +116,7 @@ fn displays_correlations_and_arguments_when_requests_are_pending() {
         "write",
         "run-2 · call-1 · attempt 17",
         "run-3 · call-1 · attempt 18",
-        r#"{"command":"pwd"}"#,
+        "pwd",
         "引数情報なし",
     ] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
@@ -123,7 +141,9 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
     let mut harness = Harness::builder().build_ui_state(
         |ui, state| {
             gui::theme::install(ui.ctx());
-            gui::panes::approvals::approvals_pane(ui, state.pending_approvals());
+            for item in state.pending_approvals().items() {
+                gui::panes::approvals::approval_card(ui, item);
+            }
         },
         state,
     );
@@ -139,16 +159,12 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
             approved: false,
         })]);
     harness.run_steps(3);
-    assert!(
-        harness
-            .query_by_label("保留中の承認要求はありません")
-            .is_some()
-    );
+    assert!(harness.query_by_label("コマンドの承認待ち").is_none());
     assert_eq!(harness.query_all_by_label("Approve").count(), 0);
 }
 
 #[test]
-fn truncates_unicode_arguments_when_summary_exceeds_limit() {
+fn preserves_full_unicode_arguments_and_wraps_in_a_narrow_conversation() {
     // Given: 120 文字を超える日本語の JSON 引数。
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
@@ -166,14 +182,16 @@ fn truncates_unicode_arguments_when_summary_exceeds_limit() {
         .build_ui_state(
             |ui, state| {
                 gui::theme::install(ui.ctx());
-                gui::panes::approvals::approvals_pane(ui, state.pending_approvals());
+                for item in state.pending_approvals().items() {
+                    gui::panes::approvals::approval_card(ui, item);
+                }
             },
             state,
         );
     // When: 狭い pane に描画する。
     harness.run_steps(3);
-    // Then: UTF-8 を壊さず120文字と省略記号になり、ボタンは pane 内に収まる。
-    let expected = format!("\"{}…", "界".repeat(119));
+    // Then: 末尾まで全文が表示され、ボタンは pane 内に収まる。
+    let expected = format!("\"{}\"", "界".repeat(130));
     assert!(harness.query_by_label(&expected).is_some());
     for label in ["Approve", "Reject"] {
         let rect = harness.get_by_label(label).rect();
@@ -255,4 +273,99 @@ fn removes_only_resolved_row_when_resolution_arrives() {
         assert_eq!(harness.query_all_by_label("Approve").count(), 1);
         assert_eq!(harness.query_all_by_label("Reject").count(), 1);
     }
+}
+
+#[test]
+fn nested_subagent_approval_belongs_to_parent_conversation_not_selected_thread() {
+    use event_bus::LifecycleEvent;
+    let mut state = state();
+    let start = |run: &str, parent: Option<&str>, name: &str| {
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: run.into(),
+            parent_run_id: parent.map(Into::into),
+            agent_name: name.into(),
+            role: "Worker".into(),
+        })
+    };
+    state.apply_events([
+        start("run-10", None, "chat:Worker:one"),
+        start("run-11", Some("run-10"), "child"),
+        start("run-12", Some("run-11"), "grandchild"),
+    ]);
+    state.switch_thread(ThreadId::new("two")).unwrap();
+    let command = format!(
+        "printf '%s\n' '{}'\npwd # command-tail",
+        "長い引数".repeat(45)
+    );
+    state.apply_events([
+        Event::new(ToolEvent::ApprovalRequested {
+            call_id: "run-12:call:0007:opaque".into(),
+            tool_name: "shell".into(),
+            input: Some(
+                json!({"command": command, "cwd": "/tmp/approval-test", "require_escalated": true}),
+            ),
+        }),
+        requested("run-99:unknown:1", "unknown-owner"),
+    ]);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1800.0, 1400.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    h.run_steps(4);
+    assert!(h.query_by_label("Approve").is_none());
+    h.state_mut().switch_thread(ThreadId::new("one")).unwrap();
+    h.run_steps(4);
+    assert_eq!(h.query_all_by_label("Approve").count(), 1);
+    assert!(h.query_by_label("unknown-owner").is_none());
+    let code = h.get_by_label(&command).rect();
+    let composer = h.get_by_label("Message or /command").rect();
+    assert!(
+        code.right() <= h.get_by_label("Send").rect().right() + 20.0,
+        "code must wrap within conversation: {code:?}, composer: {composer:?}"
+    );
+    assert!(h.get_by_label("Approve").rect().bottom() < composer.top());
+    assert!(h.query_by_label("run-12 · call · attempt 7").is_some());
+    let rest = serde_json::to_string_pretty(
+        &json!({"cwd": "/tmp/approval-test", "require_escalated": true}),
+    )
+    .unwrap();
+    assert!(h.query_by_label(&rest).is_some());
+    h.get_by_label("Approve").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state().issued(),
+        &[WorkbenchCommand::DecideToolApproval {
+            call_id: "run-12:call:0007:opaque".into(),
+            approved: true,
+        }]
+    );
+    assert!(
+        h.state()
+            .dock()
+            .find_tab(&workspace_ui::PanelId::new("approvals-main"))
+            .is_none()
+    );
+}
+
+#[test]
+fn approval_notification_navigates_to_owning_conversation() {
+    let (mut h, _) = harness();
+    h.state_mut().switch_thread(ThreadId::new("two")).unwrap();
+    let tab = h
+        .state()
+        .dock()
+        .find_tab(&workspace_ui::PanelId::new("notifications-main"))
+        .unwrap();
+    h.state_mut().dock_mut().set_active_tab(tab).unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("Approve").is_none());
+    h.get_by_label("Approval requested: shell").click();
+    h.run_steps(4);
+    assert_eq!(
+        h.state().sidebar().active_thread,
+        Some(ThreadId::new("one"))
+    );
+    assert_eq!(h.query_all_by_label("Approve").count(), 2);
 }

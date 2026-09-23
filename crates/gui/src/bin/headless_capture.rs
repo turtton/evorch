@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         state.apply_events(gui::fixture::demo_pending_approval_events());
     }
     let active_panel = if capture.pending_approvals {
-        Some("approvals-main")
+        Some("agent-main")
     } else {
         capture.activate.as_deref()
     };
@@ -285,7 +285,7 @@ Modes:
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
-   --pending-approvals  with --demo: show two requests in Approvals (overrides --activate)
+   --pending-approvals  with --demo: show two requests in Conversation (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  show the registered demo profile list
    --open-theme-settings  show the theme picker

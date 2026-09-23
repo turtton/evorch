@@ -14,7 +14,7 @@ fn workbench() -> Result<HeadlessWorkbench<DemoSource>, Box<dyn std::error::Erro
     state.apply_events(demo_pending_approval_events());
     let path = state
         .dock()
-        .find_tab(&PanelId::new("approvals-main"))
+        .find_tab(&PanelId::new("agent-main"))
         .ok_or("approvals tab missing")?;
     state
         .dock_mut()
@@ -35,10 +35,10 @@ fn displays_two_scoped_requests_when_demo_is_populated() -> Result<(), Box<dyn s
         "write",
         "run-2 · call-1 · attempt 17",
         "run-3 · call-2 · attempt 18",
-        r#"{"command":"rm -rf /tmp/build"}"#,
+        "rm -rf /tmp/build",
         "引数情報なし",
     ] {
-        assert!(workbench.has_label(label), "missing {label}");
+        assert!(workbench.count_labels(label) > 0, "missing {label}");
     }
     assert_eq!(workbench.count_labels("Approve"), 2);
     assert_eq!(workbench.count_labels("Reject"), 2);

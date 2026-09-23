@@ -17,7 +17,7 @@ impl AgentRunSource for Source {
     }
 }
 
-fn assert_content_layout(root: &LayoutNode, approvals: bool) {
+fn assert_content_layout(root: &LayoutNode) {
     let LayoutNode::Split(root) = root else {
         panic!("sidebar split")
     };
@@ -43,16 +43,7 @@ fn assert_content_layout(root: &LayoutNode, approvals: bool) {
             second: Box::new(tabs(&["terminal-main"])),
         })
     );
-    let right_tabs: &[&str] = if approvals {
-        &[
-            "agents-main",
-            "tasks-main",
-            "notifications-main",
-            "approvals-main",
-        ]
-    } else {
-        &["agents-main", "tasks-main", "notifications-main"]
-    };
+    let right_tabs = &["agents-main", "tasks-main", "notifications-main"];
     assert_eq!(
         *content.second,
         LayoutNode::Split(Split {
@@ -72,7 +63,7 @@ fn default_layout_has_bottom_terminal_and_split_right_pane() {
     let dock = gui::dock::to_dock_state(&workspace).expect("dock");
     let extracted = gui::dock::from_dock_state(&dock, &workspace.panels).expect("workspace");
     // Then: Terminal is below Conversation and Diff is below Agents/Notifications
-    assert_content_layout(&extracted.main.root, false);
+    assert_content_layout(&extracted.main.root);
 }
 
 #[test]
@@ -126,20 +117,10 @@ fn reset_layout_restores_v02_default() {
     workbench.run();
 
     // Then: reset restores the new splits, proportions and active tabs
-    let mut panels = Workspace::default().panels;
-    let id = PanelId::new("approvals-main");
-    panels.insert(
-        id.clone(),
-        workspace_ui::Panel {
-            id,
-            kind: workspace_ui::PanelKind::Approvals,
-            title: "Approvals".into(),
-            target: None,
-        },
-    );
+    let panels = Workspace::default().panels;
     let extracted =
         gui::dock::from_dock_state(workbench.state().dock(), &panels).expect("reset workspace");
-    assert_content_layout(&extracted.main.root, true);
+    assert_content_layout(&extracted.main.root);
     assert_work_tabs(workbench.state());
     // And: all default v0.2 panels are back on the main surface
     for id in [

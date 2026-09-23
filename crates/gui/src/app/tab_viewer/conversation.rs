@@ -33,7 +33,36 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .active_thread
             .as_ref()
             .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id));
+        // Ownership includes nested subagents; never guess from the selected thread.
+        let thread_id = active_thread.map(|thread| thread.id.to_string());
+        let requests = active_thread.map(|thread| crate::panes::requests::ConversationRequests {
+            thread_id: thread_id.as_deref().expect("active thread"),
+            approvals: self
+                .pending_approvals
+                .items()
+                .filter(|approval| {
+                    approval
+                        .run_id
+                        .as_ref()
+                        .is_some_and(|run| thread.run_ids.contains(run))
+                })
+                .collect(),
+            questions: self
+                .user_questions
+                .values()
+                .filter(|question| {
+                    super::super::questions::user_visible(question)
+                        && super::super::questions::belongs_to_thread(
+                            question,
+                            thread_id.as_deref().expect("active thread"),
+                            &thread.run_ids,
+                        )
+                })
+                .collect(),
+            drafts: self.question_drafts,
+        });
         let ctx = ConversationContext {
+            requests,
             sandbox_picker: self.sandbox_picker,
             task_rows: self.tasks.rows(),
             phase_unread: self
@@ -86,6 +115,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             self.repo_root,
         ) {
             match action {
+                AgentPaneAction::Request(a) => *self.request_action = Some(a),
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),
