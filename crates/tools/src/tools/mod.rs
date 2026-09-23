@@ -4,6 +4,7 @@
 //! 実装する。スキーマと権限の宣言は最終契約である。
 
 pub mod edit;
+mod file_diff;
 pub mod git_diff;
 pub mod grep;
 pub mod read;

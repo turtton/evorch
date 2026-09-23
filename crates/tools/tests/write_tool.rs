@@ -61,3 +61,60 @@ async fn atomic_write_and_edit_preserve_existing_permissions() {
         0o750
     );
 }
+
+#[tokio::test]
+async fn write_returns_create_and_overwrite_diffs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("write.txt");
+    let created = Write
+        .execute(json!({"path": path, "content": "first\n"}))
+        .await
+        .unwrap();
+    assert!(
+        created
+            .content
+            .starts_with(&format!("--- /dev/null\n+++ b/{}\n", path.display()))
+    );
+    assert!(created.content.contains("+first\n"));
+
+    let overwritten = Write
+        .execute(json!({"path": path, "content": "second\n"}))
+        .await
+        .unwrap();
+    assert!(overwritten.content.starts_with(&format!(
+        "--- a/{}\n+++ b/{}\n",
+        path.display(),
+        path.display()
+    )));
+    assert!(overwritten.content.contains("-first\n+second\n"));
+}
+
+#[tokio::test]
+async fn write_preserves_replacement_of_non_utf8_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("binary.txt");
+    std::fs::write(&path, [0xff]).unwrap();
+    let result = Write
+        .execute(json!({"path": path, "content": "valid"}))
+        .await
+        .unwrap();
+    assert!(result.content.contains("diff unavailable"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "valid");
+}
+
+#[tokio::test]
+async fn write_omits_diff_for_large_previous_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.txt");
+    std::fs::write(&path, "x".repeat(2 * 1024 * 1024 + 1)).unwrap();
+    let result = Write
+        .execute(json!({"path": path, "content": "small"}))
+        .await
+        .unwrap();
+    assert!(
+        result
+            .content
+            .contains("diff unavailable: previous file exceeds")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "small");
+}

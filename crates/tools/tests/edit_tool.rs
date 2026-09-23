@@ -70,3 +70,35 @@ async fn edit_accepts_empty_replacement_for_deletion() {
         .unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
 }
+
+#[tokio::test]
+async fn edit_returns_the_actual_file_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit.txt");
+    std::fs::write(&path, "keep\nold\nkeep\n").unwrap();
+    let result = Edit
+        .execute(json!({"path": path, "old_string": "old", "new_string": "new"}))
+        .await
+        .unwrap();
+
+    assert!(result.content.starts_with(&format!(
+        "--- a/{}\n+++ b/{}\n",
+        path.display(),
+        path.display()
+    )));
+    assert!(result.content.contains("@@ -1,3 +1,3 @@"));
+    assert!(result.content.contains("-old\n+new\n"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "keep\nnew\nkeep\n");
+}
+
+#[tokio::test]
+async fn edit_noop_reports_that_no_bytes_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same.txt");
+    std::fs::write(&path, "same").unwrap();
+    let result = Edit
+        .execute(json!({"path": path, "old_string": "same", "new_string": "same"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, format!("No changes to {}", path.display()));
+}

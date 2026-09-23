@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::edit::{required_str, write_atomically};
+use super::file_diff;
 use crate::{Permissions, Tool, ToolError, ToolExecutionMode, ToolResult};
 
 /// UTF-8 ファイルを原子的に作成・上書きするツール。
@@ -42,7 +43,12 @@ impl Tool for Write {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
         let path = required_str(&args, "path")?;
         let content = required_str(&args, "content")?;
+        let before = file_diff::read_previous(Path::new(path));
         write_atomically(Path::new(path), content)?;
-        Ok(ToolResult::success(format!("wrote {path}")))
+        let output = match before {
+            Ok(previous) => file_diff::changed_file(path, previous.as_deref(), content),
+            Err(reason) => format!("Wrote {path}; diff unavailable: {reason}"),
+        };
+        Ok(ToolResult::success(output))
     }
 }

@@ -215,3 +215,15 @@ fn transcript_card_accent_line_does_not_overlap_text() {
         assert!(bar.bottom() >= text.pos.y);
     }
 }
+
+#[test]
+fn tool_card_edit_and_write_show_unified_diff() {
+    for tool in ["edit", "write"] {
+        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut harness = harness(tool, serde_json::json!({"path": "test.txt"}), diff);
+        expand(&mut harness);
+        assert!(harness.query_by_label("Diff").is_some());
+        assert!(harness.query_by_label(diff).is_some());
+        assert!(harness.query_by_label("Output").is_none());
+    }
+}

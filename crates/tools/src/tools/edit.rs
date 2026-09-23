@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::file_diff;
 use crate::error::ToolError;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
@@ -79,7 +80,11 @@ impl Tool for Edit {
             }
         })?;
         write_atomically(path, &next_content)?;
-        Ok(ToolResult::success(format!("edited {path_text}")))
+        Ok(ToolResult::success(file_diff::changed_file(
+            path_text,
+            Some(&current),
+            &next_content,
+        )))
     }
 }
 

@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use egui::{Color32, RichText, Ui};
+use egui::{
+    Color32, FontId, RichText, Ui,
+    text::{LayoutJob, TextFormat},
+};
 
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
 use crate::theme::tokens::{FONT_SMALL, R_SM, SP_2, palette};
@@ -105,16 +108,27 @@ pub fn tool_card_with_repo_root(
                 code(ui, &content, palette().TEXT);
             }
             if let Some(output) = output {
-                ui.label(if *is_error { "Error" } else { "Output" });
-                code(
-                    ui,
-                    &display_output(tool_name, output),
-                    if *is_error {
-                        palette().ERROR_FG
-                    } else {
-                        palette().TEXT
-                    },
-                );
+                let is_diff = !*is_error && matches!(tool_name.as_str(), "edit" | "write");
+                ui.label(if *is_error {
+                    "Error"
+                } else if is_diff {
+                    "Diff"
+                } else {
+                    "Output"
+                });
+                if is_diff {
+                    diff_code(ui, output);
+                } else {
+                    code(
+                        ui,
+                        &display_output(tool_name, output),
+                        if *is_error {
+                            palette().ERROR_FG
+                        } else {
+                            palette().TEXT
+                        },
+                    );
+                }
             }
             if let Some(detail) = detail {
                 ui.label("Detail");
@@ -205,5 +219,38 @@ fn code(ui: &mut Ui, content: &str, color: Color32) {
         .inner_margin(SP_2)
         .show(ui, |ui| {
             ui.add(egui::Label::new(RichText::new(content).monospace().color(color)).wrap());
+        });
+}
+
+fn diff_code(ui: &mut Ui, content: &str) {
+    let mut job = LayoutJob::default();
+    for line in content.split_inclusive('\n') {
+        let color = if line.starts_with('+') && !line.starts_with("+++ ") {
+            palette().SUCCESS
+        } else if line.starts_with('-') && !line.starts_with("--- ") {
+            palette().ERROR_FG
+        } else if line.starts_with("@@") {
+            palette().INFO
+        } else {
+            palette().TEXT
+        };
+        job.append(
+            line,
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(FONT_SMALL),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    egui::Frame::new()
+        .fill(palette().SURFACE_RAISED)
+        .corner_radius(R_SM)
+        .inner_margin(SP_2)
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
+            });
         });
 }

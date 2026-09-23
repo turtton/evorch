@@ -93,3 +93,39 @@ async fn relative_file_paths_and_explicit_dot_share_workspace() {
         }
     }
 }
+
+#[tokio::test]
+async fn large_write_diff_is_bounded_before_reaching_the_agent_and_gui() {
+    let root = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(16));
+    let mut events = bus.subscribe();
+    let executor = ToolExecutor::with_standard_tools_in(
+        bus,
+        Arc::new(DirectSandbox::new_unchecked()),
+        Some(root.path().to_path_buf()),
+    );
+    let content = "new line with content\n".repeat(1000);
+    let result = executor
+        .execute(
+            &ToolExecutionContext {
+                run_id: "run-diff".into(),
+                thread_id: None,
+                call_id: None,
+            },
+            "write",
+            "write-diff",
+            json!({"path": "large.txt", "content": content}),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.content.len() < 20 * 1024);
+    assert!(result.content.contains("[Output artifact:"));
+    assert!(result.detail.as_ref().unwrap()["output_artifact"]["path"].is_string());
+    events.recv().await.unwrap();
+    let completed = events.recv().await.unwrap();
+    let EventKind::Tool(ToolEvent::ToolCompleted { output, .. }) = completed.kind else {
+        panic!("expected completed tool event");
+    };
+    assert_eq!(output.as_deref(), Some(result.content.as_str()));
+}

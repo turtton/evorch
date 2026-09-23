@@ -878,3 +878,36 @@ async fn direct_tool_call_does_not_escape_markers() {
         result.content
     );
 }
+
+#[tokio::test]
+async fn edit_and_write_publish_the_same_diff_returned_to_the_agent() {
+    let (_bus, executor, mut receiver) = setup_executor();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("changes.txt");
+
+    for (tool, args, changed_line) in [
+        (
+            "write",
+            serde_json::json!({"path": path, "content": "before\n"}),
+            "+before",
+        ),
+        (
+            "edit",
+            serde_json::json!({"path": path, "old_string": "before", "new_string": "after"}),
+            "+after",
+        ),
+    ] {
+        let result = executor
+            .execute(&test_ctx("run-diff"), tool, tool, args)
+            .await
+            .unwrap();
+        assert!(result.content.starts_with("--- "));
+        assert!(result.content.contains(changed_line));
+        receiver.recv().await.unwrap();
+        let completed = receiver.recv().await.unwrap();
+        let ToolEvent::ToolCompleted { output, .. } = tool_event(&completed) else {
+            panic!("expected completed tool event");
+        };
+        assert_eq!(output.as_deref(), Some(result.content.as_str()));
+    }
+}
