@@ -20,7 +20,7 @@ mod tests;
 pub struct BudgetSettings {
     pub max_tool_calls: u32,
     pub max_elapsed: Duration,
-    pub max_tokens: u64,
+    pub max_tokens: Option<u64>,
     /// Reads after the first read of the same path.
     pub max_file_rereads: u32,
     pub max_no_progress_rounds: u32,
@@ -32,7 +32,7 @@ impl Default for BudgetSettings {
         Self {
             max_tool_calls: 400,
             max_elapsed: Duration::from_secs(2 * 60 * 60),
-            max_tokens: 2_000_000,
+            max_tokens: None,
             max_file_rereads: 20,
             max_no_progress_rounds: 100,
             max_identical_tool_call_repeats: 5,
@@ -171,11 +171,13 @@ impl BudgetCounters {
                 u64::try_from(settings.max_elapsed.as_millis()).unwrap_or(u64::MAX),
             ),
             (
-                self.cumulative_input_tokens
-                    .saturating_add(self.cumulative_output_tokens)
-                    > settings.max_tokens,
+                settings.max_tokens.is_some_and(|limit| {
+                    self.cumulative_input_tokens
+                        .saturating_add(self.cumulative_output_tokens)
+                        > limit
+                }),
                 "max_tokens",
-                settings.max_tokens,
+                settings.max_tokens.unwrap_or_default(),
             ),
             (
                 rereads > settings.max_file_rereads,
@@ -215,13 +217,17 @@ impl BudgetCounters {
             }
         }
         let remaining_tool_calls = settings.max_tool_calls.saturating_sub(tool_calls);
-        let remaining_tokens = settings.max_tokens.saturating_sub(
-            self.cumulative_input_tokens
-                .saturating_add(self.cumulative_output_tokens),
-        );
+        let remaining_tokens = settings.max_tokens.map(|limit| {
+            limit.saturating_sub(
+                self.cumulative_input_tokens
+                    .saturating_add(self.cumulative_output_tokens),
+            )
+        });
         if !self.warned
             && (remaining_tool_calls <= settings.max_tool_calls / 5
-                || remaining_tokens <= settings.max_tokens / 5)
+                || remaining_tokens
+                    .zip(settings.max_tokens)
+                    .is_some_and(|(remaining, limit)| remaining <= limit / 5))
         {
             self.warned = true;
             context.bus.emit(Event::new(DiagnosticEvent {
@@ -229,8 +235,10 @@ impl BudgetCounters {
                 severity: DiagnosticSeverity::Warning,
                 code: diagnostic_codes::BUDGET_WARNING.into(),
                 detail: format!(
-                    "task {} remaining_tool_calls={remaining_tool_calls}; remaining_tokens={remaining_tokens}",
-                    context.task_id
+                    "task {} remaining_tool_calls={remaining_tool_calls}{}",
+                    context.task_id,
+                    remaining_tokens
+                        .map_or_else(String::new, |tokens| format!("; remaining_tokens={tokens}"))
                 ),
                 run_id: Some(context.run_id.into()),
                 thread_id: None,

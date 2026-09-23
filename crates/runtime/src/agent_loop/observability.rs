@@ -9,6 +9,16 @@ fn tokens(value: &impl serde::Serialize) -> u64 {
 }
 
 impl LoopState {
+    /// One effective window for automatic compaction, preflight and telemetry.
+    pub(crate) fn resolved_context_window(&self) -> (u64, event_bus::WindowSource) {
+        let selected_model = crate::compaction::selected_model(self);
+        crate::compaction::policy::resolve_window(
+            &self.shared.compaction,
+            &selected_model,
+            self.shared.model.catalog_context_window(&selected_model),
+        )
+    }
+
     pub(crate) fn estimated_context_tokens(&self, messages: &[Message]) -> u64 {
         estimate_request(
             messages,

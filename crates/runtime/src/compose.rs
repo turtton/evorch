@@ -118,10 +118,10 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             let model = compose_routed_model(
                 input.config,
                 ComposeDeps {
-                    credential_store: input.credential_store,
+                    credential_store: Arc::clone(&input.credential_store),
                     event_bus: Some(Arc::clone(&input.bus)),
                     env: input.env,
-                    catalog: ModelCatalog::builtin(),
+                    catalog: ModelCatalog::new(),
                     factory: FactoryOptions::default(),
                 },
             )?;
@@ -136,7 +136,9 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
             }
         }
     };
-    let runtime = composed.runtime.with_model_resolution(input.config);
+    let runtime = composed
+        .runtime
+        .with_model_resolution(input.config, Some(input.credential_store));
     runtime.configure_shell_escalation(
         &runtime
             .shared

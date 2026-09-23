@@ -74,7 +74,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
             ),
             event_bus: Some(Arc::clone(bus)),
             env: Arc::new(MapEnv::from_iter([("KEY", "fixture-key")])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

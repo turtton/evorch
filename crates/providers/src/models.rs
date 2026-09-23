@@ -40,6 +40,8 @@ struct CodexModelList {
 struct CodexModel {
     slug: String,
     #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
     service_tiers: Option<Vec<CodexServiceTierEntry>>,
     #[serde(default)]
     additional_speed_tiers: Option<Vec<String>>,
@@ -55,6 +57,8 @@ struct CodexServiceTierEntry {
 pub struct CodexModelInfo {
     /// APIへ送信する実モデル識別子。
     pub slug: String,
+    /// Context window advertised by this Codex backend, when available.
+    pub context_window: Option<u64>,
     /// priority tierまたは旧fast tierの対応が広告されているか。
     pub supports_fast: bool,
 }
@@ -101,6 +105,7 @@ pub async fn list_codex_models(
                     .flatten()
                     .any(|tier| tier == "fast"),
             slug: model.slug,
+            context_window: model.context_window.filter(|window| *window > 0),
         })
         .collect())
 }

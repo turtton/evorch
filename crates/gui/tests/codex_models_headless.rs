@@ -250,3 +250,23 @@ fn applies_fetched_checkbox_selection_when_apply_is_clicked() {
     );
     assert!(harness.query_by_label("gpt-new · Already added").is_some());
 }
+
+#[test]
+fn shows_fetched_context_window_and_override_control() {
+    let mut harness = editor();
+    harness
+        .state_mut()
+        .codex_mut()
+        .unwrap()
+        .fetch
+        .context_windows
+        .insert("gpt-6-astra".into(), 272_000);
+    harness.run_steps(16);
+    assert!(harness.query_by_label("Provider: 272000").is_some());
+    assert!(
+        harness
+            .query_all(By::new().label("Override"))
+            .next()
+            .is_some()
+    );
+}

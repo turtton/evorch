@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct BudgetConfig {
     /// 1 run あたりのツール実行回数の上限 (既定: 400)。
     pub max_tool_calls: u32,
-    /// Cumulative input (including cached input) plus output tokens per run.
-    pub max_tokens: u64,
+    /// Optional cumulative usage guard for operators who explicitly want a run-level cap.
+    /// This is not a context-window limit and is disabled by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
     /// Maximum elapsed run time in seconds.
     pub max_elapsed_secs: u64,
     /// 成功した非メタツール結果のないラウンドの許容回数 (既定: 100)。
@@ -26,7 +28,7 @@ impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
             max_tool_calls: 400,
-            max_tokens: 2_000_000,
+            max_tokens: None,
             max_elapsed_secs: 7_200,
             max_no_progress_rounds: 100,
             max_file_rereads: 20,

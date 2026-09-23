@@ -1,7 +1,7 @@
 use super::{CodexEditorModel, ModelsFetchState};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use providers::provider::codex::tokens::{CodexTokenStore, parse_jwt_claims};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +12,7 @@ mod tests;
 #[derive(Debug)]
 pub struct CodexFetchedModels {
     pub models: Vec<String>,
+    pub context_windows: BTreeMap<String, u64>,
     pub version: providers::CodexCatalogVersion,
 }
 
@@ -20,6 +21,7 @@ pub struct CodexModelsFetch {
     pub base_url: String,
     pub models_fetch_state: ModelsFetchState,
     pub available_models: Option<Vec<String>>,
+    pub context_windows: BTreeMap<String, u64>,
     pub fetch_selected: BTreeSet<String>,
     pub models_rx: Option<mpsc::Receiver<Result<CodexFetchedModels, String>>>,
     pub version_resolver: Arc<providers::CodexCatalogVersionResolver>,
@@ -33,6 +35,7 @@ impl Default for CodexModelsFetch {
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             models_fetch_state: ModelsFetchState::Idle,
             available_models: None,
+            context_windows: BTreeMap::new(),
             fetch_selected: BTreeSet::new(),
             models_rx: None,
             version_resolver: providers::CodexCatalogVersionResolver::shared(),
@@ -52,6 +55,7 @@ impl CodexEditorModel {
         }
         self.fetch.models_fetch_state = ModelsFetchState::Loading;
         self.fetch.available_models = None;
+        self.fetch.context_windows.clear();
         self.fetch.catalog_version = None;
         self.fetch.fetch_selected.clear();
         let resolver = self.fetch.version_resolver.clone();
@@ -76,8 +80,10 @@ impl CodexEditorModel {
                     )
                     .await
                     .map_err(|error| map_fetch_error(&error))?;
+                    let (models, context_windows) = expand_fetched_models(models);
                     Ok(CodexFetchedModels {
-                        models: expand_fetched_models(models),
+                        models,
+                        context_windows,
                         version,
                     })
                 })
@@ -114,6 +120,7 @@ impl CodexEditorModel {
         self.fetch.source = None;
         let result = result.map(|fetched| {
             self.fetch.catalog_version = Some(fetched.version);
+            self.fetch.context_windows = fetched.context_windows;
             fetched.models
         });
         match result {
@@ -139,6 +146,7 @@ impl CodexEditorModel {
             }
             Err(error) => {
                 self.fetch.available_models = None;
+                self.fetch.context_windows.clear();
                 self.fetch.models_fetch_state = ModelsFetchState::Failed(error);
             }
         }
@@ -150,6 +158,8 @@ impl CodexEditorModel {
             for id in models {
                 if self.fetch.fetch_selected.contains(id) && !self.models.contains(id) {
                     self.models.push(id.clone());
+                    self.model_entries
+                        .insert(id.clone(), config::ModelEntryConfig::enabled(id));
                     if self.default_model.is_empty() {
                         self.default_model.clone_from(id);
                     }
@@ -188,17 +198,27 @@ fn map_fetch_error(error: &providers::ProviderError) -> String {
 }
 
 /// 取得したカタログを選択肢 ID へ展開する。fast 対応モデルは通常版の直後に `+fast` 版を並べる。
-fn expand_fetched_models(models: Vec<providers::CodexModelInfo>) -> Vec<String> {
-    models
-        .into_iter()
-        .flat_map(|info| {
-            let mut ids = vec![info.slug.clone()];
-            if info.supports_fast {
-                ids.push(config::types::provider::fast_variant_id(&info.slug));
+fn expand_fetched_models(
+    models: Vec<providers::CodexModelInfo>,
+) -> (Vec<String>, BTreeMap<String, u64>) {
+    let mut ids = Vec::new();
+    let mut windows = BTreeMap::new();
+    for info in models {
+        let fast = info
+            .supports_fast
+            .then(|| config::types::provider::fast_variant_id(&info.slug));
+        if let Some(window) = info.context_window.filter(|window| *window > 0) {
+            windows.insert(info.slug.clone(), window);
+            if let Some(fast) = &fast {
+                windows.insert(fast.clone(), window);
             }
-            ids
-        })
-        .collect()
+        }
+        ids.push(info.slug);
+        if let Some(fast) = fast {
+            ids.push(fast);
+        }
+    }
+    (ids, windows)
 }
 
 /// モデル選択肢の表示名を返す。fast 版は `<base> (fast)` と表示する。

@@ -2,17 +2,18 @@
 
 use crate::ConfigError;
 use crate::save::{
-    insert_profile, invalid_field, normalized_models, read_document, remove_original_profile,
-    write_document,
+    insert_profile, invalid_field, model_values, normalized_models, read_document,
+    remove_original_profile, write_document,
 };
 use crate::types::provider::ModelEntryConfig;
 use std::path::Path;
-use toml_edit::{Array, InlineTable, Table, value};
+use toml_edit::{InlineTable, Table, value};
 
 pub struct CodexProviderInput {
     pub name: String,
     pub account: String,
-    pub models: Vec<String>,
+    pub base_url: String,
+    pub models: Vec<ModelEntryConfig>,
     pub default_model: String,
 }
 
@@ -50,8 +51,14 @@ pub fn save_codex_provider_edit(
             "keyring account must not be empty",
         ));
     }
-    let entries: Vec<_> = input.models.iter().map(ModelEntryConfig::enabled).collect();
-    let models = normalized_models(&entries);
+    let base_url = input.base_url.trim();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(invalid_field(
+            "providers.base_url",
+            "base_url must start with http:// or https://",
+        ));
+    }
+    let models = normalized_models(&input.models);
     if !input.default_model.is_empty()
         && !models.iter().any(|model| model.id == input.default_model)
     {
@@ -64,17 +71,14 @@ pub fn save_codex_provider_edit(
     let mut profile = Table::new();
     profile.insert("type", value("openai-codex"));
     profile.insert("api_protocol", value("openai-codex-responses"));
-    profile.insert("base_url", value("https://chatgpt.com/backend-api/codex"));
+    profile.insert("base_url", value(base_url));
     let mut credential = InlineTable::new();
     credential.insert("type", "keyring".into());
     credential.insert("service", "evorch".into());
     credential.insert("account", input.account.as_str().into());
     profile.insert("credential", value(credential));
     if !models.is_empty() {
-        profile.insert(
-            "models",
-            value(models.into_iter().map(|model| model.id).collect::<Array>()),
-        );
+        profile.insert("models", value(model_values(&models)?));
     }
     if !input.default_model.is_empty() {
         profile.insert("default_model", value(input.default_model.as_str()));

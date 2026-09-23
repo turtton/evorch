@@ -48,11 +48,15 @@ OpenAI-compatible/Kimi input already has this total. Legacy Kimi root-level
 `cached_tokens` is a fallback when nested cache details are absent. Anthropic
 input is normalized from uncached input + cache read + cache creation.
 
-Context pressure estimates the next request, while the run token budget sums
-input + output over all successful requests, including compaction summaries.
-Cached input still counts toward that cumulative budget. Price estimates apply
-the provider's separate cached rates. Without reported usage, serialized UTF-8
-bytes / 4 remains a heuristic rather than a model-specific tokenizer.
+Context pressure projects the next request from the provider's reported input
+and output usage plus an estimate for messages added since that response. The
+cumulative input/output totals remain checkpoint telemetry; they do not stop a
+run by default. An operator may explicitly set `[budget].max_tokens` as a
+separate run-level usage cap. Cached input counts once in that optional cap.
+Price estimates apply the provider's separate cached rates. Without reported
+usage, serialized UTF-8 bytes / 4 remains a heuristic rather than a
+model-specific tokenizer. Codex context limits come from its `/models`
+response when available, followed by models.dev and the configured fallback.
 
 Old bulky tool results are replaced by saved artifact references, retaining
 call IDs and error status. The eight most recent results remain visible.
@@ -66,7 +70,6 @@ The following configuration fields are exposed (values shown are defaults):
 
 ```toml
 [budget]
-max_tokens = 2000000
 max_elapsed_secs = 7200
 
 [compaction]

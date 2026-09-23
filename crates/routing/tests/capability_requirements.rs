@@ -7,12 +7,20 @@ use routing::{
 };
 
 fn router(models: &[&str]) -> Router {
-    let mut catalog = ModelCatalog::builtin();
-    catalog.merge_discovered(vec!["unknown".into()]);
-    let mut unsupported = catalog.get("gpt-4o").expect("builtin").clone();
-    unsupported.model_id = "unsupported".into();
-    unsupported.capabilities.tool_calling = false;
-    catalog.merge_models_dev(vec![unsupported]);
+    let mut catalog = ModelCatalog::new();
+    catalog.merge_discovered(vec![
+        "gpt-4o".into(),
+        "gpt-4o-mini".into(),
+        "unknown".into(),
+        "unsupported".into(),
+    ]);
+    let mut confirmed = Vec::new();
+    for id in ["gpt-4o", "gpt-4o-mini", "unsupported"] {
+        let mut entry = catalog.get(id).expect("fixture placeholder").clone();
+        entry.capabilities.tool_calling = id != "unsupported";
+        confirmed.push(entry);
+    }
+    catalog.merge_models_dev(confirmed);
     let profiles = models
         .iter()
         .map(|id| ProviderProfile {
@@ -65,7 +73,7 @@ fn resolve_degrades_when_tool_support_is_explicitly_unsupported() {
 
 #[test]
 fn supported_route_is_unchanged_when_tools_are_required() {
-    // Given: confirmed builtin candidates in declared order.
+    // Given: confirmed external-catalog candidates in declared order.
     let router = router(&["gpt-4o", "gpt-4o-mini"]);
     let logical = LogicalModelId::from("worker");
     let expected = router.resolve(&mut SessionAffinity::default(), "run", &logical);

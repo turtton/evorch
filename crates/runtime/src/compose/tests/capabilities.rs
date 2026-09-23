@@ -14,7 +14,7 @@ async fn tools_follow_declaration_when_preferred_model_support_is_unknown_or_uns
     // Given: an explicitly selected model with unknown or unsupported tools.
     for confirmed in [false, true] {
         let (mut model, requests) = routed_model(Ok(response()), "custom", None);
-        let mut catalog = ModelCatalog::builtin();
+        let mut catalog = ModelCatalog::new();
         catalog.merge_discovered(vec!["custom".into()]);
         if confirmed {
             let entry = catalog.get("custom").expect("placeholder").clone();
@@ -75,8 +75,31 @@ async fn automatic_tool_flow_proceeds_when_model_support_is_unknown() {
 
 #[tokio::test]
 async fn tool_specs_are_unchanged_when_canonical_support_is_supported() {
-    // Given: a supported builtin model.
-    let (model, requests) = routed_model(Ok(response()), "gpt-4o", None);
+    // Given: a model with tool support confirmed by external metadata.
+    let (mut model, requests) = routed_model(Ok(response()), "gpt-4o", None);
+    let mut catalog = ModelCatalog::new();
+    catalog.merge_discovered(vec!["gpt-4o".into()]);
+    let mut entry = catalog.get("gpt-4o").expect("fixture model").clone();
+    entry.capabilities.tool_calling = true;
+    catalog.merge_models_dev(vec![entry]);
+    model.router = Router::new(
+        vec![model.providers["local"].profile.clone()],
+        &RoutingConfig {
+            routes: BTreeMap::from([(
+                "worker".into(),
+                vec![RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: None,
+                }],
+            )]),
+        },
+        catalog,
+    )
+    .expect("valid fixture route");
+    model.tool_router = model
+        .router
+        .clone()
+        .requiring_capability(Capability::ToolCalling);
     let tools = specs();
     // When: completing a tool flow.
     model

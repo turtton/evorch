@@ -69,7 +69,7 @@ fn legacy_struct_converts_without_inventing_dimensions() {
 #[test]
 fn discovered_and_missing_models_safely_degrade() {
     // Given: a catalog populated with a newly discovered ID.
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     catalog.merge_discovered(vec!["discovered".into()]);
     // When: resolving the canonical capabilities.
     let entry = catalog.get("discovered").expect("discovered entry exists");
@@ -99,10 +99,18 @@ fn discovered_and_missing_models_safely_degrade() {
 
 #[test]
 fn catalog_sources_leave_vision_unknown() {
-    // Given: builtin, external, and discovered catalog sources.
-    let mut catalog = ModelCatalog::builtin();
-    let mut external = catalog.get("gpt-4o").expect("builtin exists").clone();
-    external.model_id = "external".into();
+    // Given: external metadata and a discovered placeholder.
+    let mut catalog = ModelCatalog::new();
+    let external: CatalogEntry = serde_json::from_str(
+        r#"{
+        "model_id":"external", "provider":"openai", "context_window":128000,
+        "max_output_tokens":4096,
+        "capabilities":{"tool_calling":true,"reasoning":false,"prompt_cache":true},
+        "price":null,"availability":"available","source":"models-dev",
+        "attributes_confirmed":true
+    }"#,
+    )
+    .expect("external catalog entry");
     catalog.merge_models_dev(vec![external]);
     catalog.merge_discovered(vec!["discovered".into()]);
     // When: reading each canonical view.

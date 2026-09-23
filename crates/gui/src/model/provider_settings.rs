@@ -34,6 +34,7 @@ pub struct CodexEditorModel {
     pub account: String,
     pub auth: CodexAuthModel,
     pub models: Vec<String>,
+    pub model_entries: BTreeMap<String, config::ModelEntryConfig>,
     pub default_model: String,
     pub fetch: CodexModelsFetch,
 }
@@ -123,6 +124,7 @@ impl ProviderSettingsModel {
                     .iter()
                     .map(|id| (*id).to_owned())
                     .collect(),
+                model_entries: BTreeMap::new(),
                 default_model: config::types::provider::CODEX_DEFAULT_MODEL.to_owned(),
                 fetch: CodexModelsFetch::default(),
             }),
@@ -162,6 +164,11 @@ impl ProviderSettingsModel {
                         .models
                         .iter()
                         .map(|model| model.id.clone())
+                        .collect(),
+                    model_entries: profile
+                        .models
+                        .iter()
+                        .map(|model| (model.id.clone(), model.clone()))
                         .collect(),
                     default_model: profile.default_model.clone(),
                     fetch: CodexModelsFetch {

@@ -125,7 +125,7 @@ fn resolves_fast_variant_when_base_capability_is_unknown() {
 }
 
 fn discovered_catalog() -> ModelCatalog {
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     for id in ["k3", "kimi-k3"] {
         assert!(catalog.get(id).is_none(), "K3 must not be builtin");
     }

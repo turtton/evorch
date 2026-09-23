@@ -155,7 +155,7 @@ fn fetch_catalog(github_fails: bool) {
             },
             (
                 "200 OK",
-                r#"{"models":[{"slug":"gpt-6-sol"},{"slug":"gpt-6-luna"},{"slug":"gpt-6-sol"}]}"#,
+                r#"{"models":[{"slug":"gpt-6-sol","context_window":272000},{"slug":"gpt-6-luna"},{"slug":"gpt-6-sol","context_window":272000}]}"#,
             ),
         ] {
             let (mut stream, _) = listener.accept().unwrap();
@@ -211,6 +211,11 @@ fn fetch_catalog(github_fails: bool) {
         editor.fetch.available_models,
         Some(vec!["gpt-6-sol".into(), "gpt-6-luna".into()])
     );
+    assert_eq!(
+        editor.fetch.context_windows.get("gpt-6-sol"),
+        Some(&272_000)
+    );
+    assert!(!editor.fetch.context_windows.contains_key("gpt-6-luna"));
     let version = if github_fails { "0.156.1" } else { "0.157.2" };
     let resolved = editor.fetch.catalog_version.as_ref().unwrap();
     assert_eq!(resolved.version, version);

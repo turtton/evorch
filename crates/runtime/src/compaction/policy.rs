@@ -21,6 +21,8 @@ pub(crate) struct CompactionSettings {
     pub threshold: f64,
     pub context_window_tokens: u64,
     pub model_overrides: BTreeMap<String, u64>,
+    /// Windows resolved from provider /models or models.dev for this runtime.
+    pub catalog_windows: BTreeMap<String, u64>,
     pub keep_recent_tokens: u64,
     pub cooldown_turns: u32,
     pub failure_cooldown_turns: u32,
@@ -38,6 +40,7 @@ impl Default for CompactionSettings {
             threshold: DEFAULT_THRESHOLD,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             model_overrides: BTreeMap::new(),
+            catalog_windows: BTreeMap::new(),
             keep_recent_tokens: 20_000,
             cooldown_turns: 1,
             failure_cooldown_turns: 4,
@@ -84,6 +87,7 @@ impl From<&CompactionConfig> for CompactionSettings {
             threshold,
             context_window_tokens,
             model_overrides,
+            catalog_windows: BTreeMap::new(),
             keep_recent_tokens: config.keep_recent_tokens,
             cooldown_turns: config.cooldown_turns,
             failure_cooldown_turns: config.failure_cooldown_turns.max(1),
@@ -107,14 +111,21 @@ pub(crate) fn resolve_window(
     model_id: &str,
     catalog_window: Option<u64>,
 ) -> (u64, event_bus::WindowSource) {
-    match (settings.model_overrides.get(model_id), catalog_window) {
-        (Some(window), _) => (*window, event_bus::WindowSource::Override),
-        (None, Some(window)) => (window, event_bus::WindowSource::Catalog),
-        (None, None) => (
-            settings.context_window_tokens,
-            event_bus::WindowSource::Default,
-        ),
+    if let Some(window) = settings.model_overrides.get(model_id) {
+        return (*window, event_bus::WindowSource::Override);
     }
+    if let Some(window) = settings
+        .catalog_windows
+        .get(model_id)
+        .copied()
+        .or(catalog_window)
+    {
+        return (window, event_bus::WindowSource::Catalog);
+    }
+    (
+        settings.context_window_tokens,
+        event_bus::WindowSource::Default,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +508,7 @@ mod tests {
                 threshold: 0.8,
                 context_window_tokens: 128_000,
                 model_overrides: BTreeMap::from([(String::from("model-a"), 99_000)]),
+                catalog_windows: BTreeMap::new(),
                 keep_recent_tokens: 12_000,
                 cooldown_turns: 3,
                 failure_cooldown_turns: 6,

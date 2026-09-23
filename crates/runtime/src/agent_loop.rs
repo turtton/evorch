@@ -685,12 +685,7 @@ impl LoopState {
             } else {
                 let visible = self.context.visible_messages();
                 let estimated = self.estimated_context_tokens(&visible);
-                let selected_model = compaction::selected_model(self);
-                let (window, _) = compaction::policy::resolve_window(
-                    &self.shared.compaction,
-                    &selected_model,
-                    self.shared.model.catalog_context_window(&selected_model),
-                );
+                let (window, _) = self.resolved_context_window();
                 // 閾値未満の境界を観測したら自動トリガを再武装する (ラチェット解除)。
                 if (estimated as f64) < window as f64 * self.shared.compaction.threshold {
                     self.compaction.auto_suspended = false;
@@ -725,16 +720,30 @@ impl LoopState {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
             }
-            let visible_messages = self.context.visible_messages();
-            let selected_model = compaction::selected_model(self);
-            let (window, _) = compaction::policy::resolve_window(
-                &self.shared.compaction,
-                &selected_model,
-                self.shared.model.catalog_context_window(&selected_model),
-            );
-            let estimated = self.estimated_context_tokens(&visible_messages);
+            let (window, _) = self.resolved_context_window();
+            let mut visible_messages = self.context.visible_messages();
+            let mut estimated = self.estimated_context_tokens(&visible_messages);
+            // A cooldown or the post-compaction latch must not terminate a run
+            // when one more compaction can still make the next request fit.
+            while estimated >= window {
+                match compaction::compact_now(self, CompactionReason::Automatic).await {
+                    Ok(_) => {
+                        visible_messages = self.context.visible_messages();
+                        let after = self.estimated_context_tokens(&visible_messages);
+                        if after >= estimated {
+                            estimated = after;
+                            break;
+                        }
+                        estimated = after;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "context limit compaction could not proceed");
+                        break;
+                    }
+                }
+            }
             if estimated >= window {
-                self.finish_error(format!("ContextWindowExhausted: estimated {estimated} tokens reach model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
+                self.finish_error(format!("ContextWindowExhausted: compaction could not reduce the projected context ({estimated} tokens) below model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
             }
             self.publish_context(&visible_messages, estimated, window);

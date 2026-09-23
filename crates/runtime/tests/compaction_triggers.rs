@@ -718,3 +718,81 @@ async fn manual_compact_succeeds_after_cooldown_expires() {
         }
     )));
 }
+
+#[tokio::test]
+async fn context_limit_retries_compaction_during_cooldown_before_stopping() {
+    let probe =
+        compaction_context::probe(|model| runtime_with(model, settings(1_000_000, 1, 1))).await;
+    let initial = [
+        probe.system.clone(),
+        text_message(MessageRole::User, "goal"),
+    ];
+    let window = probe.estimate(&initial) + 600;
+    let old_reply = "old-".repeat(1500);
+    let new_reply = "new-".repeat(1500);
+    let model = Arc::new(ScriptedModel::new([
+        Ok(text_response(&old_reply, FinishReason::Stop)),
+        Ok(text_response(&new_reply, FinishReason::ToolUse)),
+    ]));
+    let mut config = settings(window, 1, 10);
+    config.threshold = 1.0;
+    let (runtime, bus) = runtime_with(Arc::clone(&model), config);
+    let mut receiver = bus.subscribe();
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "goal".into(),
+        RunConfig {
+            interactive: true,
+            ..RunConfig::default()
+        },
+    );
+    wait_for_phase(&runtime, run, AgentRunPhase::Waiting).await;
+    runtime
+        .compact(run)
+        .expect("first manual compaction requested");
+    runtime.send_message(run, "continue".into()).unwrap();
+
+    // The new reply crosses the hard limit before the next provider call.
+    // A cooldown must not prevent a last compaction attempt. This fixture
+    // cannot shrink its protected tail, so it must stop with the window error.
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Error));
+    let mut compacted = Vec::new();
+    let failure_reason = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = receiver.recv().await.expect("event bus remains open");
+            match event.kind {
+                EventKind::Compaction(event) => compacted.push(event),
+                EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                    run_id,
+                    to: AgentRunPhase::Error,
+                    reason,
+                    ..
+                }) if run_id == run.to_string() => break reason,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("error event timeout");
+    assert!(
+        failure_reason
+            .unwrap_or_default()
+            .contains("ContextWindowExhausted")
+    );
+    assert_eq!(compacted.len(), 2);
+    assert!(matches!(
+        compacted[0],
+        CompactionEvent::Compacted {
+            reason: CompactionReason::Manual,
+            ..
+        }
+    ));
+    assert!(matches!(
+        compacted[1],
+        CompactionEvent::Compacted {
+            reason: CompactionReason::Automatic,
+            ..
+        }
+    ));
+    assert_eq!(model.observed().await.len(), 2);
+}

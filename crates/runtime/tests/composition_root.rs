@@ -159,7 +159,7 @@ fn composed_runtime_and_direct_routed_model_have_selected_model_parity() {
                 credential_store: credential_store(),
                 event_bus: Some(bus),
                 env: Arc::new(MapEnv::from_iter([(KEY_ENV, "test-key")])),
-                catalog: ModelCatalog::builtin(),
+                catalog: ModelCatalog::new(),
                 factory: FactoryOptions::default(),
             },
         )

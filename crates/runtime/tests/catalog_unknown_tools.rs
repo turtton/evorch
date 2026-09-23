@@ -10,7 +10,7 @@ use serde_json::json;
 #[tokio::test]
 async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
     // Given: an unknown model explicitly selected on a tool-capable HTTP provider.
-    let catalog = ModelCatalog::builtin();
+    let catalog = ModelCatalog::new();
     assert!(catalog.get("custom-tool-model").is_none());
     let server = StreamingMockOpenAi::spawn_with_models(
         vec![ScriptedResponse::text_stream(

@@ -13,7 +13,7 @@ fn defaults_when_budget_is_missing() {
         serde_json::json!({
             "max_tool_calls": 400, "max_no_progress_rounds": 100,
             "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
-            "max_tokens": 2_000_000, "max_elapsed_secs": 7_200
+            "max_elapsed_secs": 7_200
         })
     );
 }
@@ -31,7 +31,7 @@ fn defaults_merge_when_budget_is_partial() {
         serde_json::json!({
             "max_tool_calls": 17, "max_no_progress_rounds": 100,
             "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
-            "max_tokens": 2_000_000, "max_elapsed_secs": 7_200
+            "max_elapsed_secs": 7_200
         })
     );
 }
@@ -93,7 +93,7 @@ fn loads_budget_from_project_file() {
 }
 
 #[test]
-fn loads_cumulative_token_and_elapsed_limits() {
+fn loads_explicit_cumulative_token_and_elapsed_limits() {
     let project = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("evorch.toml"),
@@ -105,7 +105,7 @@ fn loads_cumulative_token_and_elapsed_limits() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(config.budget.max_tokens, 7_654_321);
+    assert_eq!(config.budget.max_tokens, Some(7_654_321));
     assert_eq!(config.budget.max_elapsed_secs, 1234);
     assert_eq!(config.compaction.summary_idle_timeout_secs, 45);
     assert_eq!(config.compaction.summary_timeout_secs, 180);

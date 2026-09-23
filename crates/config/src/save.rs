@@ -148,80 +148,7 @@ pub fn save_openai_compatible_provider_edit(
             profile.insert("credential", value(reference));
         }
     }
-    profile.insert(
-        "models",
-        value(
-            normalized_models(&input.models)
-                .into_iter()
-                .map(|model| {
-                    Ok(
-                        if model.enabled
-                            && model.metadata_source.is_none()
-                            && model.metadata_ref.is_none()
-                            && model.preset.is_none()
-                            && model.context_window.is_none()
-                            && model.pricing_for(None).is_none()
-                            && model.effort_levels.is_none()
-                        {
-                            toml_edit::Value::from(model.id)
-                        } else {
-                            let mut table = InlineTable::new();
-                            table.insert("id", model.id.into());
-                            table.insert("enabled", model.enabled.into());
-                            if let Some(source) = model.metadata_source {
-                                let source = match source {
-                                    crate::MetadataSource::Manual => "manual",
-                                    crate::MetadataSource::ModelsDev => "models-dev",
-                                    crate::MetadataSource::ProviderDefault => "provider-default",
-                                };
-                                table.insert("metadata_source", source.into());
-                            }
-                            if let Some(reference) = model.metadata_ref {
-                                table.insert("metadata_ref", reference.into());
-                            }
-                            if let Some(preset) = model.preset {
-                                table.insert("preset", preset.into());
-                            }
-                            if let Some(window) = model.context_window {
-                                table.insert(
-                                    "context_window",
-                                    toml_edit::Value::from(i64::try_from(window).map_err(
-                                        |_| {
-                                            invalid_field(
-                                                "context_window",
-                                                "must fit in a TOML integer",
-                                            )
-                                        },
-                                    )?),
-                                );
-                            }
-                            for (key, price) in [
-                                ("input_price", model.input_price),
-                                ("output_price", model.output_price),
-                                ("cache_read_price", model.cache_read_price),
-                                ("cache_write_price", model.cache_write_price),
-                            ] {
-                                if let Some(price) = price {
-                                    table.insert(key, price.into());
-                                }
-                            }
-                            if let Some(levels) = model.effort_levels {
-                                table.insert(
-                                    "effort_levels",
-                                    levels
-                                        .iter()
-                                        .map(toml_edit::Value::from)
-                                        .collect::<toml_edit::Array>()
-                                        .into(),
-                                );
-                            }
-                            table.into()
-                        },
-                    )
-                })
-                .collect::<Result<Array, ConfigError>>()?,
-        ),
-    );
+    profile.insert("models", value(model_values(&input.models)?));
     let excluded_models = normalized_string_models(&input.excluded_models);
     if !excluded_models.is_empty() {
         profile.insert(
@@ -233,6 +160,73 @@ pub fn save_openai_compatible_provider_edit(
     insert_profile(&mut doc, &input.name, profile)?;
     remove_original_profile(&mut doc, original_name, &input.name);
     write_document(path, &doc)
+}
+
+pub(crate) fn model_values(input: &[ModelEntryConfig]) -> Result<Array, ConfigError> {
+    normalized_models(input)
+        .into_iter()
+        .map(|model| {
+            Ok(
+                if model.enabled
+                    && model.metadata_source.is_none()
+                    && model.metadata_ref.is_none()
+                    && model.preset.is_none()
+                    && model.context_window.is_none()
+                    && model.pricing_for(None).is_none()
+                    && model.effort_levels.is_none()
+                {
+                    toml_edit::Value::from(model.id)
+                } else {
+                    let mut table = InlineTable::new();
+                    table.insert("id", model.id.into());
+                    table.insert("enabled", model.enabled.into());
+                    if let Some(source) = model.metadata_source {
+                        let source = match source {
+                            crate::MetadataSource::Manual => "manual",
+                            crate::MetadataSource::ModelsDev => "models-dev",
+                            crate::MetadataSource::ProviderDefault => "provider-default",
+                        };
+                        table.insert("metadata_source", source.into());
+                    }
+                    if let Some(reference) = model.metadata_ref {
+                        table.insert("metadata_ref", reference.into());
+                    }
+                    if let Some(preset) = model.preset {
+                        table.insert("preset", preset.into());
+                    }
+                    if let Some(window) = model.context_window {
+                        table.insert(
+                            "context_window",
+                            toml_edit::Value::from(i64::try_from(window).map_err(|_| {
+                                invalid_field("context_window", "must fit in a TOML integer")
+                            })?),
+                        );
+                    }
+                    for (key, price) in [
+                        ("input_price", model.input_price),
+                        ("output_price", model.output_price),
+                        ("cache_read_price", model.cache_read_price),
+                        ("cache_write_price", model.cache_write_price),
+                    ] {
+                        if let Some(price) = price {
+                            table.insert(key, price.into());
+                        }
+                    }
+                    if let Some(levels) = model.effort_levels {
+                        table.insert(
+                            "effort_levels",
+                            levels
+                                .iter()
+                                .map(toml_edit::Value::from)
+                                .collect::<toml_edit::Array>()
+                                .into(),
+                        );
+                    }
+                    table.into()
+                },
+            )
+        })
+        .collect::<Result<Array, ConfigError>>()
 }
 
 pub(crate) fn remove_original_profile(

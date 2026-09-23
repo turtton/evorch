@@ -48,7 +48,7 @@ fn deps(env: MapEnv) -> ComposeDeps {
         credential_store: credential_store(),
         event_bus: None,
         env: Arc::new(env),
-        catalog: ModelCatalog::builtin(),
+        catalog: ModelCatalog::new(),
         factory: FactoryOptions::default(),
     }
 }

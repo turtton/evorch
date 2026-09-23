@@ -71,7 +71,7 @@ async fn http_failure_switches_provider_and_keeps_session_on_fallback() {
             ),
             event_bus: Some(bus.clone()),
             env: Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-key")])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: Default::default(),
         },
     )

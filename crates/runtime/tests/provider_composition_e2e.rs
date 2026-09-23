@@ -39,7 +39,7 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
             credential_store: credential_store(directory.path()),
             event_bus: None,
             env: Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

@@ -87,7 +87,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
         credential_store: store.clone(),
         event_bus: Some(bus.clone()),
         env: env.clone(),
-        catalog: ModelCatalog::builtin(),
+        catalog: ModelCatalog::new(),
         factory: FactoryOptions::default(),
     };
     // When

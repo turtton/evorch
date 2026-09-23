@@ -51,7 +51,7 @@ async fn streaming_deltas_reach_bus_before_completion() {
             ),
             event_bus: Some(Arc::clone(&bus)),
             env: Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

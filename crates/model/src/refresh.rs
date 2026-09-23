@@ -1,7 +1,6 @@
 //! モデルカタログのリフレッシュオーケストレーションです。
 //!
-//! ADR 0013 のハイブリッド供給源のうち外部系 (ディスクキャッシュ・
-//! models.dev) と組み込みカタログを優先順に解決する状態機械を提供し、
+//! ディスクキャッシュと models.dev を優先順に解決する状態機械を提供し、
 //! 採用した供給源をカタログ更新履歴 (`storage` の `catalog_updates`) へ
 //! 記録します。
 
@@ -24,8 +23,8 @@ pub enum RefreshSource {
     /// TTL 期限切れだが、取得失敗時のフォールバックとして採用された
     /// ディスクキャッシュ。
     CacheStale,
-    /// 外部取得にもキャッシュにも失敗した場合に維持される組み込みカタログ。
-    Builtin,
+    /// 外部取得にもキャッシュにも失敗し、既存項目を維持した。
+    Unavailable,
 }
 
 impl RefreshSource {
@@ -35,7 +34,7 @@ impl RefreshSource {
             Self::Cache => "cache",
             Self::ModelsDev => "models-dev",
             Self::CacheStale => "cache-stale",
-            Self::Builtin => "builtin",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -50,7 +49,7 @@ pub struct RefreshOutcome {
 }
 
 impl ModelCatalog {
-    /// キャッシュ・外部カタログ・組み込みカタログの優先順でリフレッシュする。
+    /// キャッシュと外部カタログからリフレッシュする。
     ///
     /// 状態機械は以下の優先順で解決します:
     ///
@@ -65,8 +64,8 @@ impl ModelCatalog {
     ///    ([`CatalogCache::load_ignoring_ttl`]) へフォールバックします。
     ///    項目があればマージし、供給源 `cache-stale` として、詳細に取得
     ///    エラーを含めて履歴に記録します。
-    /// 4. キャッシュもなければ組み込みカタログをそのまま維持し、供給源
-    ///    `builtin` として、詳細に取得エラーを含めて履歴に記録します。
+    /// 4. キャッシュもなければ既存カタログを維持し、供給源
+    ///    `unavailable` として、詳細に取得エラーを含めて履歴に記録します。
     ///
     /// 履歴の記録は `handle.record_catalog_update` (型付き writer API) のみを
     /// 使い、このクレートは SQL を直接扱いません。`model_count` にはマージ
@@ -106,11 +105,11 @@ impl ModelCatalog {
                     );
                     return self.record_refresh(handle, RefreshSource::CacheStale, detail);
                 }
-                // 4. キャッシュもなければ組み込みカタログを維持する。
+                // 4. キャッシュもなければ、既存カタログを維持する。
                 let detail = format!(
-                    "外部カタログの取得とキャッシュのいずれも利用できないため組み込みカタログを維持しました: {fetch_error}"
+                    "外部カタログの取得とキャッシュのいずれも利用できません: {fetch_error}"
                 );
-                return self.record_refresh(handle, RefreshSource::Builtin, detail);
+                return self.record_refresh(handle, RefreshSource::Unavailable, detail);
             }
         };
 

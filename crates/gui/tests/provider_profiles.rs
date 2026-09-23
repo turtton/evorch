@@ -95,6 +95,7 @@ fn delete_removes_profile_and_refreshes_list() {
         &config::CodexProviderInput {
             name: "work".into(),
             account: "work".into(),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
             models: vec![],
             default_model: String::new(),
         },

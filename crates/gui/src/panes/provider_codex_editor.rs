@@ -41,11 +41,33 @@ pub(super) fn codex_body(
         for (index, id) in editor.models.iter().enumerate() {
             ui.push_id(id, |ui| {
                 ui.horizontal(|ui| {
+                    let label_width = (ui.available_width() * 0.28).max(70.0);
+                    ui.add_sized([label_width, 20.0], egui::Label::new(id).truncate())
+                        .on_hover_text(id);
+                    let current = editor
+                        .fetch
+                        .context_windows
+                        .get(id)
+                        .map_or_else(|| "Unknown".to_owned(), |window| window.to_string());
+                    ui.label(muted(format!("Provider: {current}")))
+                        .on_hover_text(
+                            "Current context window from Codex /models; refresh models to load it",
+                        );
+                    let entry = editor
+                        .model_entries
+                        .entry(id.clone())
+                        .or_insert_with(|| config::ModelEntryConfig::enabled(id));
+                    let mut override_window = entry.context_window.unwrap_or(0);
+                    let override_label = ui.label("Override");
                     ui.add_sized(
-                        [(ui.available_width() - 80.0).max(40.0), 20.0],
-                        egui::Label::new(id).truncate(),
+                        [75.0, 20.0],
+                        egui::DragValue::new(&mut override_window)
+                            .range(0..=i64::MAX as u64)
+                            .speed(100.0),
                     )
-                    .on_hover_text(id);
+                    .labelled_by(override_label.id)
+                    .on_hover_text("0 uses the provider context window");
+                    entry.context_window = (override_window > 0).then_some(override_window);
                     let button = ui.button("Remove");
                     button.widget_info(|| {
                         egui::WidgetInfo::labeled(
@@ -62,6 +84,7 @@ pub(super) fn codex_body(
         }
         if let Some(index) = remove {
             let removed = editor.models.remove(index);
+            editor.model_entries.remove(&removed);
             if editor.default_model == removed {
                 editor.default_model = editor.models.first().cloned().unwrap_or_default();
             }
@@ -86,6 +109,9 @@ pub(super) fn codex_body(
                             editor.default_model = id.to_owned();
                         }
                         editor.models.push(id.to_owned());
+                        editor
+                            .model_entries
+                            .insert(id.to_owned(), config::ModelEntryConfig::enabled(id));
                         inputs.add.clear();
                     }
                 }
@@ -166,11 +192,17 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
             .show(ui, |ui| {
                 if let Some(models) = &editor.fetch.available_models {
                     for id in models {
+                        let current = editor
+                            .fetch
+                            .context_windows
+                            .get(id)
+                            .map_or_else(|| "unknown".to_owned(), |window| window.to_string());
                         if editor.models.contains(id) {
                             ui.label(muted(format!(
                                 "{} · Already added",
                                 model_display_label(id)
                             )));
+                            ui.label(muted(format!("Provider context window: {current}")));
                         } else {
                             let mut selected = editor.fetch.fetch_selected.contains(id);
                             if ui
@@ -183,6 +215,7 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
                                     editor.fetch.fetch_selected.remove(id);
                                 }
                             }
+                            ui.label(muted(format!("Provider context window: {current}")));
                         }
                     }
                 }

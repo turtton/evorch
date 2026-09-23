@@ -71,7 +71,7 @@ default_model = "gpt-4o"
             ),
             event_bus: Some(Arc::clone(&bus)),
             env: Arc::new(MapEnv::from_iter([("T4_STREAMING_KEY", "fixture-key")])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

@@ -7,6 +7,7 @@ fn seeded(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
             &config::CodexProviderInput {
                 name: name.into(),
                 account: name.into(),
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
                 models: vec![],
                 default_model: String::new(),
             },

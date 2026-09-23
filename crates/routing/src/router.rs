@@ -402,13 +402,13 @@ mod tests {
             },
             price: None,
             availability,
-            source: CatalogSource::Builtin,
+            source: CatalogSource::ModelsDev,
             attributes_confirmed: true,
         }
     }
 
     fn build_catalog(confirmed: &[(&str, Availability)], discovered: &[&str]) -> ModelCatalog {
-        let mut catalog = ModelCatalog::builtin();
+        let mut catalog = ModelCatalog::new();
         for (model_id, availability) in confirmed {
             catalog.merge_models_dev(vec![catalog_entry(model_id, *availability)]);
         }

@@ -111,8 +111,6 @@ pub enum Availability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CatalogSource {
-    /// 組み込みデフォルト。
-    Builtin,
     /// models.dev 等の外部カタログ。
     ModelsDev,
     /// プロバイダ API から検出されたモデル。

@@ -294,7 +294,11 @@ impl AgentRuntime {
         self
     }
 
-    pub(crate) fn with_model_resolution(self, config: &config::Config) -> Self {
+    pub(crate) fn with_model_resolution(
+        self,
+        config: &config::Config,
+        credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
+    ) -> Self {
         let _ = self.shared.budget.set((&config.budget).into());
         self.set_sandbox_network(config.sandbox.allow_network);
         self.set_sandbox_escalation(
@@ -308,7 +312,10 @@ impl AgentRuntime {
         let _ = self
             .shared
             .model_resolution
-            .set(crate::model_resolve::ModelResolution::new(config));
+            .set(crate::model_resolve::ModelResolution::new(
+                config,
+                credential_store,
+            ));
         let _ = self
             .shared
             .compaction

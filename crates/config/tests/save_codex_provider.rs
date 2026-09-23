@@ -4,7 +4,8 @@ fn codex(name: &str) -> CodexProviderInput {
     CodexProviderInput {
         name: name.into(),
         account: name.into(),
-        models: vec!["gpt-5-codex".into()],
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        models: vec![config::ModelEntryConfig::enabled("gpt-5-codex")],
         default_model: "gpt-5-codex".into(),
     }
 }
@@ -117,5 +118,37 @@ fn switching_credential_modes_drops_stale_env_key_on_save() {
     assert_eq!(
         load(tmp.path()).providers["work"].provider_type,
         ProviderTypeConfig::OpenAiCodex
+    );
+}
+
+#[test]
+fn codex_model_override_preserves_other_model_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("evorch.toml");
+    let mut input = codex("work");
+    let model = &mut input.models[0];
+    model.context_window = Some(272_000);
+    model.metadata_source = Some(config::MetadataSource::ModelsDev);
+    model.metadata_ref = Some("openai/gpt-5-codex".into());
+    model.input_price = Some(1.25);
+    model.effort_levels = Some(vec!["low".into(), "high".into()]);
+    let expected = model.clone();
+    config::save_codex_provider(&path, &input).unwrap();
+    let saved = &load(tmp.path()).providers["work"].models[0];
+    assert_eq!(saved, &expected);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("context_window = 272000"));
+
+    // Clearing only the override keeps the remaining model metadata intact.
+    input.models[0].context_window = None;
+    config::save_codex_provider(&path, &input).unwrap();
+    assert_eq!(
+        load(tmp.path()).providers["work"].models[0],
+        input.models[0]
+    );
+    assert!(
+        !std::fs::read_to_string(path)
+            .unwrap()
+            .contains("context_window")
     );
 }

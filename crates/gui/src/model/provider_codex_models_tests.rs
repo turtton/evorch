@@ -147,20 +147,26 @@ fn expands_fast_capable_models_into_base_and_fast_rows() {
         providers::CodexModelInfo {
             slug: "gpt-a".into(),
             supports_fast: true,
+            context_window: Some(272_000),
         },
         providers::CodexModelInfo {
             slug: "gpt-b".into(),
             supports_fast: false,
+            context_window: None,
         },
         providers::CodexModelInfo {
             slug: "gpt-c".into(),
             supports_fast: true,
+            context_window: Some(272_000),
         },
     ];
     // When
-    let ids = expand_fetched_models(models);
+    let (ids, windows) = expand_fetched_models(models);
     // Then: fast 対応は通常版の直後に fast 版が並び、非対応は単独行のまま
     assert_eq!(ids, ["gpt-a", "gpt-a+fast", "gpt-b", "gpt-c", "gpt-c+fast"]);
+    assert_eq!(windows.get("gpt-a"), Some(&272_000));
+    assert_eq!(windows.get("gpt-a+fast"), Some(&272_000));
+    assert!(!windows.contains_key("gpt-b"));
 }
 
 #[test]
@@ -181,6 +187,7 @@ fn surfaces_hint_when_backend_returns_zero_models() {
     let (tx, rx) = mpsc::channel();
     tx.send(Ok(CodexFetchedModels {
         models: Vec::new(),
+        context_windows: BTreeMap::new(),
         version: providers::CodexCatalogVersion {
             version: "0.157.0".into(),
             warning: None,

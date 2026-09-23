@@ -51,7 +51,7 @@ fn deps(store: Arc<dyn CredentialStore>) -> ComposeDeps {
         credential_store: store,
         event_bus: None,
         env: Arc::new(MapEnv::default()),
-        catalog: model::ModelCatalog::builtin(),
+        catalog: model::ModelCatalog::new(),
         factory: routing::factory::FactoryOptions::default(),
     }
 }

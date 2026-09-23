@@ -87,12 +87,12 @@ async fn agreeing_duplicates_resolve_without_any_provider_hint() {
     let mut settings = CompactionSettings::default();
 
     // When: provider hint に依存せずモデル上限を適用する。
-    apply_model_windows(&config, Some(&catalog), &mut settings);
+    apply_model_windows(&config, Some(&catalog), &BTreeMap::new(), &mut settings);
 
     // Then: 両方のキーが合意した 1M の上限になる。
-    assert_eq!(settings.model_overrides.get("kimi-k3"), Some(&1_048_576));
+    assert_eq!(settings.catalog_windows.get("kimi-k3"), Some(&1_048_576));
     assert_eq!(
-        settings.model_overrides.get("neuralwatt/kimi-k3"),
+        settings.catalog_windows.get("neuralwatt/kimi-k3"),
         Some(&1_048_576)
     );
 }
@@ -115,11 +115,11 @@ async fn disagreeing_duplicates_stay_unresolved() {
     let mut settings = CompactionSettings::default();
 
     // When: 合意できないモデル上限を適用する。
-    apply_model_windows(&config, Some(&catalog), &mut settings);
+    apply_model_windows(&config, Some(&catalog), &BTreeMap::new(), &mut settings);
 
     // Then: override を書かず既定値へのフォールバックを維持する。
-    assert!(!settings.model_overrides.contains_key("kimi-k3"));
-    assert!(!settings.model_overrides.contains_key("neuralwatt/kimi-k3"));
+    assert!(!settings.catalog_windows.contains_key("kimi-k3"));
+    assert!(!settings.catalog_windows.contains_key("neuralwatt/kimi-k3"));
 }
 
 #[tokio::test]

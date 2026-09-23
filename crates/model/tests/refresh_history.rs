@@ -79,7 +79,7 @@ fn storage_config(dir: &tempfile::TempDir) -> StorageConfig {
     }
 }
 
-// Given: 空のキャッシュと成功するフェッチャー、組み込みカタログ
+// Given: 空のキャッシュと成功するフェッチャー、空のカタログ
 // When: refresh を実行する
 // Then: 取得項目がマージされキャッシュされ、履歴に source="models-dev" の
 //       記録が 1 件残る
@@ -89,7 +89,7 @@ async fn refresh_success_merges_and_records_history() {
     let cache = CatalogCache::new(dir.path(), Duration::from_secs(3_600));
     let config = storage_config(&dir);
     let storage = Storage::open(config.clone()).expect("storage を開ける");
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     let fetcher = MockFetcher::ok(vec![test_entry("gemma-3-27b"), test_entry("gpt-4o")]);
 
     let outcome = catalog
@@ -102,10 +102,7 @@ async fn refresh_success_merges_and_records_history() {
         RefreshSource::ModelsDev,
         "供給源は models-dev"
     );
-    assert_eq!(
-        outcome.merged_count, 13,
-        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
-    );
+    assert_eq!(outcome.merged_count, 2, "外部データの項目数");
     let entry = catalog
         .get("gemma-3-27b")
         .expect("取得した新規モデルがマージされる");
@@ -127,20 +124,20 @@ async fn refresh_success_merges_and_records_history() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "models-dev");
-    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 2, "マージ後の項目数が記録される");
 }
 
 // Given: キャッシュが存在せず、常に失敗するフェッチャー
 // When: refresh を実行する
-// Then: 組み込みカタログはそのまま維持され、履歴 source="builtin" の詳細に
+// Then: カタログは空のままで、履歴 source="unavailable" の詳細に
 //       フェッチエラーの文言が含まれる
 #[tokio::test]
-async fn fetch_failure_falls_back_to_builtin_and_records_history() {
+async fn fetch_failure_without_cache_records_unavailable() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let cache = CatalogCache::new(dir.path(), Duration::from_secs(3_600));
     let config = storage_config(&dir);
     let storage = Storage::open(config.clone()).expect("storage を開ける");
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     let before = catalog.entries().clone();
     let fetcher = MockFetcher::fail("boom: 模擬ネットワーク障害");
 
@@ -149,9 +146,13 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
         .await
         .expect("refresh は成功する");
 
-    assert_eq!(outcome.source, RefreshSource::Builtin, "供給源は builtin");
-    assert_eq!(outcome.merged_count, 12, "組み込みカタログのまま");
-    assert_eq!(catalog.entries(), &before, "組み込みカタログは変更されない");
+    assert_eq!(
+        outcome.source,
+        RefreshSource::Unavailable,
+        "供給源は unavailable"
+    );
+    assert_eq!(outcome.merged_count, 0, "外部データなし");
+    assert_eq!(catalog.entries(), &before, "カタログは変更されない");
 
     storage.close();
     let records = Database::open(&config)
@@ -159,8 +160,8 @@ async fn fetch_failure_falls_back_to_builtin_and_records_history() {
         .catalog_updates()
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
-    assert_eq!(records[0].source, "builtin");
-    assert_eq!(records[0].model_count, 12, "維持した項目数が記録される");
+    assert_eq!(records[0].source, "unavailable");
+    assert_eq!(records[0].model_count, 0, "維持した項目数が記録される");
     assert!(
         records[0].detail.contains("boom"),
         "詳細にフェッチエラーの文言が含まれる: {}",
@@ -181,7 +182,7 @@ async fn fresh_cache_skips_fetch() {
     cache
         .store(&[test_entry("cached-model"), test_entry("gpt-4o")])
         .expect("キャッシュを事前保存できる");
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     let fetcher = MockFetcher::fail("boom: 呼ばれてはならない");
 
     let outcome = catalog
@@ -194,10 +195,7 @@ async fn fresh_cache_skips_fetch() {
         "TTL 内のキャッシュがあるため fetch は呼ばれない"
     );
     assert_eq!(outcome.source, RefreshSource::Cache, "供給源は cache");
-    assert_eq!(
-        outcome.merged_count, 13,
-        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
-    );
+    assert_eq!(outcome.merged_count, 2, "外部データの項目数");
     let entry = catalog
         .get("cached-model")
         .expect("キャッシュの項目がマージされる");
@@ -210,7 +208,7 @@ async fn fresh_cache_skips_fetch() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache");
-    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 2, "マージ後の項目数が記録される");
 }
 
 // Given: 期限切れまで待機したキャッシュと、常に失敗するフェッチャー
@@ -228,7 +226,7 @@ async fn stale_cache_used_when_fetch_fails() {
         .expect("キャッシュを事前保存できる");
     std::thread::sleep(Duration::from_millis(10));
     assert!(cache.load().is_none(), "事前条件: キャッシュは期限切れ");
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     let fetcher = MockFetcher::fail("boom: 模擬ネットワーク障害");
 
     let outcome = catalog
@@ -242,10 +240,7 @@ async fn stale_cache_used_when_fetch_fails() {
         RefreshSource::CacheStale,
         "供給源は cache-stale"
     );
-    assert_eq!(
-        outcome.merged_count, 13,
-        "組み込み 12 項目 + 新規 1 項目 = 13 項目"
-    );
+    assert_eq!(outcome.merged_count, 1, "外部データの項目数");
     assert!(
         catalog.get("stale-model").is_some(),
         "期限切れキャッシュの項目がマージされる"
@@ -258,7 +253,7 @@ async fn stale_cache_used_when_fetch_fails() {
         .expect("履歴を一覧できる");
     assert_eq!(records.len(), 1, "履歴は 1 件");
     assert_eq!(records[0].source, "cache-stale");
-    assert_eq!(records[0].model_count, 13, "マージ後の項目数が記録される");
+    assert_eq!(records[0].model_count, 1, "マージ後の項目数が記録される");
     assert!(
         records[0].detail.contains("boom"),
         "詳細にフェッチエラーの文言が含まれる: {}",

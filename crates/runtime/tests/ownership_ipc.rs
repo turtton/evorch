@@ -63,7 +63,8 @@ fn two_process_attach_and_quiesce_preserve_generation() {
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             match line {
-                Ok(line) if line.trim() == "READY" => {
+                // libtest can prefix stdout with the test name after another test ran.
+                Ok(line) if line.trim_end().ends_with("READY") => {
                     let _ = ready_tx.send(());
                 }
                 Ok(_) => {}

@@ -45,7 +45,6 @@
         "max_file_rereads": 20,
         "max_identical_tool_call_repeats": 5,
         "max_no_progress_rounds": 100,
-        "max_tokens": 2000000,
         "max_tool_calls": 400
       }
     },
@@ -318,10 +317,12 @@
           "minimum": 0
         },
         "max_tokens": {
-          "description": "Cumulative input (including cached input) plus output tokens per run.",
-          "type": "integer",
+          "description": "Optional cumulative usage guard for operators who explicitly want a run-level cap.\nThis is not a context-window limit and is disabled by default.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
-          "default": 2000000,
           "minimum": 0
         },
         "max_tool_calls": {

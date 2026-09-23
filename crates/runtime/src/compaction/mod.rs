@@ -17,8 +17,7 @@ use crate::context::CompactionCheckpoint;
 use self::cut::select_cut;
 use self::estimator::estimate_tokens;
 use self::policy::{
-    GuardDecision, SummarizerKindSel, ThresholdDecision, guard_decision, resolve_window,
-    threshold_decision,
+    GuardDecision, SummarizerKindSel, ThresholdDecision, guard_decision, threshold_decision,
 };
 use self::summary::{
     ModelSummarizer, StructuralSummarizer, Summarizer, SummaryInput, enforce_max_bytes,
@@ -83,21 +82,25 @@ pub(crate) async fn compact_now(
 ) -> Result<CompactionOutcome, CompactionError> {
     state.activity(event_bus::RunActivity::Compaction);
     let settings = state.shared.compaction.clone();
-    if let Some(decision) = guard_decision(&state.compaction, &settings) {
-        return Err(error_from_guard(decision));
-    }
-
     let visible = state.context.visible_messages();
     let estimated_before = state.estimated_context_tokens(&visible);
-    let selected_model = selected_model(state);
-    let (window, window_source) = resolve_window(
-        &settings,
-        &selected_model,
-        state.shared.model.catalog_context_window(&selected_model),
-    );
+    let (window, window_source) = state.resolved_context_window();
+    let at_limit = estimated_before >= window;
+    if let Some(decision) = guard_decision(&state.compaction, &settings) {
+        // At the hard window boundary, cooldown and same-turn suppression are
+        // secondary to making the next request fit. The attempt budget remains.
+        if !(at_limit
+            && matches!(
+                decision,
+                GuardDecision::Cooldown | GuardDecision::AlreadyThisBoundary
+            ))
+        {
+            return Err(error_from_guard(decision));
+        }
+    }
     if reason == CompactionReason::Automatic {
-        // 圧縮成功直後は閾値未満の境界を一度観測するまで自動発火しない (ラチェット)。
-        if state.compaction.auto_suspended {
+        // The post-compaction latch is only for proactive compression.
+        if state.compaction.auto_suspended && !at_limit {
             return Err(CompactionError::TooSmall);
         }
         match threshold_decision(&settings, estimated_before, window) {

@@ -40,13 +40,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn prepare_codex_editor(&mut self) {
+        let store = self.credential_store.clone();
         let Some(editor) = self.provider_settings.codex_mut() else {
             return;
         };
+        // Load the provider's current limits when editing an existing profile.
+        // A failed fetch stays visible until the user explicitly retries.
+        if editor.original_name.is_some()
+            && matches!(
+                &editor.fetch.models_fetch_state,
+                crate::model::provider_settings::ModelsFetchState::Idle
+            )
+            && store.is_some()
+        {
+            editor.start_models_fetch_with_store(store.clone());
+        }
         if editor.auth.has_backend() && editor.auth.credential_account == editor.account {
             return;
         }
-        if let Some(store) = self.credential_store.clone() {
+        if let Some(store) = store {
             match crate::model::codex_auth_backend::ProviderCodexAuthBackend::production(
                 store,
                 editor.account.clone(),
@@ -140,7 +152,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 let input = config::CodexProviderInput {
                     name: editor.name.clone(),
                     account: editor.account.clone(),
-                    models: editor.models.clone(),
+                    base_url: editor.fetch.base_url.clone(),
+                    models: editor
+                        .models
+                        .iter()
+                        .map(|id| {
+                            editor
+                                .model_entries
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| config::ModelEntryConfig::enabled(id))
+                        })
+                        .collect(),
                     default_model: editor.default_model.clone(),
                 };
                 self.provider_operation(move || {

@@ -144,7 +144,7 @@ async fn checkpoint_precedes_one_shot_remaining_budget_warning_before_exhaustion
     // Given: 125 tool permits and independently ample progress/token budgets.
     let mut config = unlimited_progress();
     config.budget.max_tool_calls = 125;
-    config.budget.max_tokens = 10_000;
+    config.budget.max_tokens = Some(10_000);
     // When: the real runtime is asked to execute beyond the hard limit.
     let events = run_calls(130, config).await;
     // Then: checkpoints precede one correlated warning, followed by hard exhaustion.
@@ -204,7 +204,7 @@ async fn thresholds_do_not_fire_at_the_exact_limit() {
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
             max_tool_calls: 9,
-            max_tokens: 40,
+            max_tokens: Some(40),
             max_file_rereads: 7,
             max_no_progress_rounds: 8,
             ..Default::default()
@@ -232,7 +232,7 @@ async fn token_and_reread_thresholds_each_emit_once() {
     // Given: independent limits that both cross during repeated reads.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tokens: 10,
+            max_tokens: Some(10),
             max_file_rereads: 2,
             ..Default::default()
         },

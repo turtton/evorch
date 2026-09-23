@@ -7,7 +7,7 @@ type Requests = Arc<Mutex<Vec<ChatRequest>>>;
 
 fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
     let (mut model, _) = routed_model(Ok(response()), "model-a", None);
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     let mut profiles = Vec::new();
     let mut candidates = Vec::new();
     let mut recordings = Vec::new();

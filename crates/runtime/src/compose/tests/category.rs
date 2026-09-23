@@ -34,7 +34,9 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
             ),
         ]),
     };
-    model.router = Router::new(profiles, &routing, ModelCatalog::builtin()).expect("valid routes");
+    let mut catalog = ModelCatalog::new();
+    catalog.merge_discovered(vec!["gpt-5.5".into(), "claude-sonnet-4-5".into()]);
+    model.router = Router::new(profiles, &routing, catalog).expect("valid routes");
     model.tool_router = model
         .router
         .clone()

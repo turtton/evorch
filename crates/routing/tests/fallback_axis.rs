@@ -56,13 +56,13 @@ fn catalog_entry(model_id: &str) -> CatalogEntry {
         },
         price: None,
         availability: Availability::Available,
-        source: CatalogSource::Builtin,
+        source: CatalogSource::ModelsDev,
         attributes_confirmed: true,
     }
 }
 
 fn catalog(model_ids: &[&str]) -> ModelCatalog {
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     for model_id in model_ids {
         catalog.merge_models_dev(vec![catalog_entry(model_id)]);
     }

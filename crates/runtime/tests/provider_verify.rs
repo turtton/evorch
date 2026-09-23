@@ -41,7 +41,7 @@ fn model(urls: &[(&str, String)], bus: Arc<EventBus>) -> Arc<RoutedModel> {
             ),
             event_bus: Some(bus),
             env: Arc::new(MapEnv::from_iter([("KEY", "fixture-key")])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )
@@ -260,7 +260,7 @@ async fn codex_verification_uses_stored_oauth_and_account() {
             credential_store: store,
             event_bus: None,
             env: Arc::new(MapEnv::from_iter([] as [(&str, &str); 0])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

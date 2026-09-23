@@ -31,7 +31,7 @@ pub struct ComposeDeps {
     pub event_bus: Option<Arc<EventBus>>,
     /// API key用の環境変数ソース。
     pub env: Arc<dyn EnvLookup>,
-    /// 組み込み・外部取得済みモデルカタログ。
+    /// 外部取得済み・プロバイダ検出済みモデルカタログ。
     pub catalog: model::ModelCatalog,
     /// provider client factoryの上書き設定。
     pub factory: FactoryOptions,

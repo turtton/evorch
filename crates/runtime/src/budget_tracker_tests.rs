@@ -12,7 +12,7 @@ async fn token_warning_is_latched_without_stopping_execution() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_tokens: 100,
+        max_tokens: Some(100),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -52,7 +52,7 @@ async fn warning_is_suppressed_when_exhaustion_is_already_observed() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_tokens: 100,
+        max_tokens: Some(100),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -147,4 +147,29 @@ fn cumulative_budget_includes_cached_input_exactly_once() {
     }
     assert_eq!(counters.cumulative_input_tokens, 200);
     assert_eq!(counters.cumulative_output_tokens, 20);
+}
+
+#[tokio::test]
+async fn default_run_continues_past_two_million_cumulative_tokens() {
+    let bus = EventBus::new(8);
+    let mut receiver = bus.subscribe();
+    let settings = BudgetSettings::default();
+    let context = BudgetContext {
+        bus: &bus,
+        run_id: "run",
+        task_id: "run-62",
+        settings: &settings,
+    };
+    let mut counters = BudgetCounters::default();
+    for _ in 0..57 {
+        counters.usage(Usage {
+            input_tokens: 36_000,
+            output_tokens: 500,
+            cache_read_tokens: 34_000,
+            ..Default::default()
+        });
+    }
+    assert!(counters.cumulative_input_tokens + counters.cumulative_output_tokens > 2_000_000);
+    assert_eq!(counters.publish(65, &context), BudgetDecision::Continue);
+    assert_no_event(&mut receiver);
 }

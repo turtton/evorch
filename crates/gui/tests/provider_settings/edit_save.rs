@@ -149,6 +149,7 @@ fn replaces_profile_when_renaming_codex_profile() {
         &config::CodexProviderInput {
             name: "A".into(),
             account: "oauth-account".into(),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
             models: vec![],
             default_model: String::new(),
         },
@@ -180,4 +181,46 @@ fn replaces_profile_when_renaming_codex_profile() {
             account: "oauth-account".into()
         }
     );
+}
+
+#[test]
+fn codex_editor_saves_context_override_and_retains_model_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("evorch.toml");
+    let mut model = config::ModelEntryConfig::enabled("gpt-6-astra");
+    model.metadata_source = Some(config::MetadataSource::ModelsDev);
+    model.metadata_ref = Some("openai/gpt-6-astra".into());
+    model.input_price = Some(2.0);
+    config::save_codex_provider(
+        &path,
+        &config::CodexProviderInput {
+            name: "work".into(),
+            account: "oauth-account".into(),
+            base_url: "https://example.com/custom-codex".into(),
+            models: vec![model.clone()],
+            default_model: model.id.clone(),
+        },
+    )
+    .unwrap();
+    let mut harness = workbench_with_config_path(temp.path());
+    *harness.state_mut().provider_settings_mut() =
+        ProviderSettingsModel::seed_from_config(&load_config(temp.path()));
+    harness.state_mut().provider_settings_mut().edit("work");
+    let editor = harness
+        .state_mut()
+        .provider_settings_mut()
+        .codex_mut()
+        .unwrap();
+    assert_eq!(editor.model_entries["gpt-6-astra"], model);
+    editor
+        .model_entries
+        .get_mut("gpt-6-astra")
+        .unwrap()
+        .context_window = Some(272_000);
+    harness.state_mut().submit_provider_settings();
+    finish_save(&mut harness);
+    model.context_window = Some(272_000);
+    let saved = &load_config(temp.path()).providers["work"];
+    assert_eq!(saved.models, vec![model]);
+    assert_eq!(saved.base_url, "https://example.com/custom-codex");
 }

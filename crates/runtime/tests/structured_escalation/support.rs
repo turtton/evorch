@@ -71,7 +71,7 @@ pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness
             credential_store: store,
             event_bus: None,
             env: Arc::new(MapEnv::from_iter([(KEY_ENV, "test-key")])),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: FactoryOptions {
                 auth_base_url_override: Some(base_url.into()),
                 request_timeout: Some(timeout),

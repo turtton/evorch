@@ -45,11 +45,11 @@ async fn catalog_advertises_fast_support_leniently() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": [
-            {"slug": "priority", "service_tiers": [{"id": "priority", "cost": 2.5}], "extra": true},
-            {"slug": "legacy", "additional_speed_tiers": ["fast"]},
+            {"slug": "priority", "context_window": 272000, "service_tiers": [{"id": "priority", "cost": 2.5}], "extra": true},
+            {"slug": "legacy", "context_window": 0, "additional_speed_tiers": ["fast"]},
             {"slug": "standard"},
             {"slug": "other", "service_tiers": [{"id": "default"}], "additional_speed_tiers": ["slow"]},
-            {"slug": "null", "service_tiers": null, "additional_speed_tiers": null}
+            {"slug": "null", "context_window": null, "service_tiers": null, "additional_speed_tiers": null}
         ]})))
         .expect(1)
         .mount(&server).await;
@@ -77,6 +77,10 @@ async fn catalog_advertises_fast_support_leniently() {
             ("null", false)
         ]
     );
+    assert_eq!(models[0].context_window, Some(272_000));
+    assert_eq!(models[1].context_window, None); // Zero is not a usable window.
+    assert_eq!(models[2].context_window, None); // Older catalog may omit it.
+    assert_eq!(models[4].context_window, None);
 }
 
 #[tokio::test]

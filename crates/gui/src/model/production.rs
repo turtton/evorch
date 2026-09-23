@@ -20,7 +20,7 @@ pub fn compose_production_model(
             credential_store: context.credential_store.clone(),
             event_bus: Some(context.bus.clone()),
             env: context.env.clone(),
-            catalog: model::ModelCatalog::builtin(),
+            catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions::default(),
         },
     )

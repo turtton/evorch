@@ -96,7 +96,7 @@ fn routed_model(
         default_model,
         &[default_model, route_model.unwrap_or(default_model)],
     );
-    let mut catalog = ModelCatalog::builtin();
+    let mut catalog = ModelCatalog::new();
     catalog.merge_discovered(profile.models.clone());
     let router = Router::new(
         vec![profile.clone()],

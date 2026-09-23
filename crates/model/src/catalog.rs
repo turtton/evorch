@@ -1,8 +1,4 @@
-//! オフラインで完結するモデルカタログの実装です。
-//!
-//! ADR 0013 のハイブリッド 4 供給源のうち、組み込みデフォルト・外部カタログ
-//! (models.dev) のマージ・プロバイダ検出モデルのマージを担います。
-// allow: SIZE_OK — built-in model data table and existing catalog contract tests.
+//! 外部カタログ (models.dev) とプロバイダ検出モデルを統合するモデルカタログです。
 
 use std::collections::BTreeMap;
 
@@ -28,7 +24,7 @@ pub enum Capability {
 /// モデルカタログ。
 ///
 /// モデル ID をキーにしたカタログ項目の集合です (ADR 0013)。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModelCatalog {
     /// モデル ID をキーとしたカタログ項目。
     entries: BTreeMap<String, CatalogEntry>,
@@ -40,22 +36,14 @@ impl ModelCatalog {
         &self.entries
     }
 
-    /// 組み込みデフォルトのカタログを生成する。
-    ///
-    /// ADR 0013 の「組み込みデフォルト」供給源です。主要モデルの属性と
-    /// 価格をオフラインで参照できる最小構成を保持します。
-    pub fn builtin() -> Self {
-        Self {
-            entries: builtin_entries()
-                .into_iter()
-                .map(|entry| (entry.model_id.clone(), entry))
-                .collect(),
-        }
+    /// 外部ソースまたはプロバイダ検出で埋める空のカタログを生成する。
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// models.dev 等の外部カタログ取得結果をマージする。
     ///
-    /// 同一モデル ID の組み込み項目は上書きします。マージされた項目は
+    /// 同一モデル ID の既存項目は上書きします。マージされた項目は
     /// 供給源が `ModelsDev`・属性確定フラグが `true` に補正されます。
     pub fn merge_models_dev(&mut self, entries: Vec<CatalogEntry>) {
         for mut entry in entries {
@@ -108,191 +96,6 @@ impl ModelCatalog {
     }
 }
 
-fn builtin_entries() -> Vec<CatalogEntry> {
-    fn entry(
-        model_id: &str,
-        provider: ProviderType,
-        context_window: u64,
-        max_output_tokens: u64,
-        capabilities: CatalogCapabilities,
-        price: Option<ModelPrice>,
-    ) -> CatalogEntry {
-        CatalogEntry {
-            model_id: model_id.to_string(),
-            provider,
-            context_window,
-            max_output_tokens,
-            capabilities,
-            price,
-            availability: Availability::Available,
-            source: CatalogSource::Builtin,
-            attributes_confirmed: true,
-        }
-    }
-
-    vec![
-        entry(
-            "kimi-for-coding",
-            ProviderType::KimiSubscription,
-            256_000,
-            32_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: false,
-                prompt_cache: false,
-            },
-            None,
-        ),
-        entry(
-            "kimi-k2-thinking",
-            ProviderType::KimiSubscription,
-            256_000,
-            32_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: false,
-            },
-            None,
-        ),
-        entry(
-            "claude-sonnet-4-5",
-            ProviderType::Anthropic,
-            200_000,
-            64_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            Some(ModelPrice {
-                input_per_million_usd: 3.0,
-                output_per_million_usd: 15.0,
-            }),
-        ),
-        entry(
-            "claude-haiku-4-5",
-            ProviderType::Anthropic,
-            200_000,
-            64_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: false,
-                prompt_cache: true,
-            },
-            Some(ModelPrice {
-                input_per_million_usd: 1.0,
-                output_per_million_usd: 5.0,
-            }),
-        ),
-        entry(
-            "gpt-4o",
-            ProviderType::OpenAi,
-            128_000,
-            16_384,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: false,
-                prompt_cache: true,
-            },
-            Some(ModelPrice {
-                input_per_million_usd: 2.5,
-                output_per_million_usd: 10.0,
-            }),
-        ),
-        entry(
-            "gpt-4o-mini",
-            ProviderType::OpenAi,
-            128_000,
-            16_384,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: false,
-                prompt_cache: true,
-            },
-            Some(ModelPrice {
-                input_per_million_usd: 0.15,
-                output_per_million_usd: 0.6,
-            }),
-        ),
-        entry(
-            "o3-mini",
-            ProviderType::OpenAi,
-            200_000,
-            100_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: false,
-            },
-            Some(ModelPrice {
-                input_per_million_usd: 1.1,
-                output_per_million_usd: 4.4,
-            }),
-        ),
-        entry(
-            "gpt-6-astra",
-            ProviderType::OpenAiCodex,
-            272_000,
-            128_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            None,
-        ),
-        entry(
-            "gpt-5.6-sol",
-            ProviderType::OpenAiCodex,
-            272_000,
-            128_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            None,
-        ),
-        entry(
-            "gpt-5.6-terra",
-            ProviderType::OpenAiCodex,
-            272_000,
-            128_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            None,
-        ),
-        entry(
-            "gpt-5.6-luna",
-            ProviderType::OpenAiCodex,
-            272_000,
-            128_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            None,
-        ),
-        entry(
-            "gpt-5.5",
-            ProviderType::OpenAiCodex,
-            272_000,
-            128_000,
-            CatalogCapabilities {
-                tool_calling: true,
-                reasoning: true,
-                prompt_cache: true,
-            },
-            None,
-        ),
-    ]
-}
-
 // 検出モデルの属性未確定プレースホルダ。検出 = プロバイダで応答可能なため
 // availability は `Available` とする。
 fn discovered_placeholder(model_id: &str) -> CatalogEntry {
@@ -316,12 +119,7 @@ fn discovered_placeholder(model_id: &str) -> CatalogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        Availability, CatalogCapabilities, CatalogSource, ModelPrice, ProviderType,
-    };
 
-    // テスト用カタログ項目。source / attributes_confirmed はマージ時の補正を
-    // 確認するため、意図的に未確定の値を設定する。
     fn sample_entry(model_id: &str, availability: Availability, reasoning: bool) -> CatalogEntry {
         CatalogEntry {
             model_id: model_id.to_string(),
@@ -338,288 +136,88 @@ mod tests {
                 output_per_million_usd: 2.0,
             }),
             availability,
-            source: CatalogSource::Builtin,
+            source: CatalogSource::Discovered,
             attributes_confirmed: false,
         }
     }
 
-    // Given: オフライン環境で組み込みカタログを生成する
-    // When: 主要モデルのエントリを参照する
-    // Then: ネットワークなしで属性・機能・価格を参照できる
     #[test]
-    fn builtin_catalog_available_offline() {
-        let catalog = ModelCatalog::builtin();
-
-        let expected = [
-            (
-                "claude-sonnet-4-5",
-                ProviderType::Anthropic,
-                200_000_u64,
-                64_000_u64,
-                (true, true, true),
-                (3.0_f64, 15.0_f64),
-            ),
-            (
-                "claude-haiku-4-5",
-                ProviderType::Anthropic,
-                200_000,
-                64_000,
-                (true, false, true),
-                (1.0, 5.0),
-            ),
-            (
-                "gpt-4o",
-                ProviderType::OpenAi,
-                128_000,
-                16_384,
-                (true, false, true),
-                (2.5, 10.0),
-            ),
-            (
-                "gpt-4o-mini",
-                ProviderType::OpenAi,
-                128_000,
-                16_384,
-                (true, false, true),
-                (0.15, 0.6),
-            ),
-            (
-                "o3-mini",
-                ProviderType::OpenAi,
-                200_000,
-                100_000,
-                (true, true, false),
-                (1.1, 4.4),
-            ),
-        ];
-
-        for (
-            model_id,
-            provider,
-            context_window,
-            max_output_tokens,
-            (tool_calling, reasoning, prompt_cache),
-            (input, output),
-        ) in expected
-        {
-            let entry = catalog.get(model_id).expect("組み込みエントリが存在する");
-            assert_eq!(entry.provider, provider, "{model_id} の provider");
-            assert_eq!(
-                entry.context_window, context_window,
-                "{model_id} の context_window"
-            );
-            assert_eq!(
-                entry.max_output_tokens, max_output_tokens,
-                "{model_id} の max_output_tokens"
-            );
-            assert_eq!(
-                entry.capabilities.tool_calling, tool_calling,
-                "{model_id} の tool_calling"
-            );
-            assert_eq!(
-                entry.capabilities.reasoning, reasoning,
-                "{model_id} の reasoning"
-            );
-            assert_eq!(
-                entry.capabilities.prompt_cache, prompt_cache,
-                "{model_id} の prompt_cache"
-            );
-            assert_eq!(
-                entry.price,
-                Some(ModelPrice {
-                    input_per_million_usd: input,
-                    output_per_million_usd: output,
-                }),
-                "{model_id} の price"
-            );
-            assert_eq!(
-                entry.availability,
-                Availability::Available,
-                "{model_id} の availability"
-            );
-            assert_eq!(entry.source, CatalogSource::Builtin, "{model_id} の source");
-            assert!(entry.attributes_confirmed, "{model_id} は属性確定済み");
-        }
-        assert_eq!(catalog.entries().len(), 12, "組み込みカタログは 12 項目");
+    fn new_catalog_contains_no_hardcoded_models() {
+        let catalog = ModelCatalog::new();
+        assert!(catalog.entries().is_empty());
+        assert!(catalog.get("gpt-6-astra").is_none());
+        assert!(catalog.get("kimi-for-coding").is_none());
     }
 
-    // Given: 組み込みカタログと、組み込み項目を上書きする外部カタログのエントリ
-    // When: merge_models_dev でマージする
-    // Then: 同一 ID の項目が上書きされ、供給源と確定フラグが補正される
     #[test]
-    fn merge_models_dev_overrides_builtin_entry() {
-        let mut catalog = ModelCatalog::builtin();
-        let mut override_entry = sample_entry("gpt-4o", Availability::Available, true);
-        override_entry.context_window = 256_000;
+    fn merge_models_dev_confirms_and_replaces_discovered_entry() {
+        let mut catalog = ModelCatalog::new();
+        catalog.merge_discovered(vec!["custom".into()]);
+        let fetched = sample_entry("custom", Availability::Available, true);
+        catalog.merge_models_dev(vec![fetched]);
 
-        catalog.merge_models_dev(vec![override_entry]);
-
-        let entry = catalog.get("gpt-4o").expect("gpt-4o が存在する");
-        assert_eq!(entry.context_window, 256_000, "上書き後の属性が反映される");
-        assert!(entry.capabilities.reasoning, "上書き後の機能が反映される");
-        assert_eq!(
-            entry.source,
-            CatalogSource::ModelsDev,
-            "供給源が ModelsDev になる"
-        );
-        assert!(entry.attributes_confirmed, "属性確定フラグが true になる");
-        assert_eq!(
-            catalog.entries().len(),
-            12,
-            "追加ではなく上書きのため項目数は不変"
-        );
+        let entry = catalog.get("custom").expect("external entry");
+        assert_eq!(catalog.entries().len(), 1);
+        assert_eq!(entry.context_window, 64_000);
+        assert_eq!(entry.source, CatalogSource::ModelsDev);
+        assert!(entry.attributes_confirmed);
+        assert!(catalog.supports("custom", Capability::ToolCalling));
+        assert!(catalog.supports("custom", Capability::Reasoning));
     }
 
-    // Given: 組み込みカタログ
-    // When: 未知のモデル ID を merge_discovered でマージする
-    // Then: 属性未確定のプレースホルダとして登録される
     #[test]
     fn merge_discovered_marks_attributes_unconfirmed() {
-        let mut catalog = ModelCatalog::builtin();
-
+        let mut catalog = ModelCatalog::new();
         catalog.merge_discovered(vec!["deepseek-chat".to_string()]);
 
-        let entry = catalog
-            .get("deepseek-chat")
-            .expect("検出モデルが登録される");
+        let entry = catalog.get("deepseek-chat").expect("discovered model");
         assert_eq!(entry.provider, ProviderType::OpenAiCompatible);
         assert_eq!(entry.context_window, 0);
         assert_eq!(entry.max_output_tokens, 0);
-        assert!(!entry.capabilities.tool_calling);
-        assert!(!entry.capabilities.reasoning);
-        assert!(!entry.capabilities.prompt_cache);
         assert!(entry.price.is_none());
         assert_eq!(entry.source, CatalogSource::Discovered);
-        assert!(!entry.attributes_confirmed, "検出モデルは属性未確定");
+        assert!(!entry.attributes_confirmed);
+        assert!(catalog.is_available("deepseek-chat"));
+        assert!(!catalog.supports("deepseek-chat", Capability::ToolCalling));
     }
 
-    // Given: 属性確定済みの組み込みカタログ
-    // When: 既存 ID を含む検出結果を merge_discovered でマージする
-    // Then: 既存の確定済み項目は一切変更されない
     #[test]
     fn merge_discovered_does_not_downgrade_confirmed_entry() {
-        let mut catalog = ModelCatalog::builtin();
-        let before = catalog
-            .get("claude-sonnet-4-5")
-            .expect("claude-sonnet-4-5 が存在する")
-            .clone();
+        let mut catalog = ModelCatalog::new();
+        catalog.merge_models_dev(vec![sample_entry("custom", Availability::Available, true)]);
+        let before = catalog.get("custom").expect("external entry").clone();
+        catalog.merge_discovered(vec!["custom".to_string(), "unknown".to_string()]);
 
-        catalog.merge_discovered(vec!["claude-sonnet-4-5".to_string()]);
-
-        let after = catalog
-            .get("claude-sonnet-4-5")
-            .expect("claude-sonnet-4-5 が存在する");
-        assert_eq!(&before, after, "既存の確定済み項目は変更されない");
-    }
-
-    // Given: 組み込みカタログ (12 項目) と既存 ID・未知 ID の混在リスト
-    // When: merge_discovered でマージする
-    // Then: 未知 ID のみ挿入され、既存 ID は組み込みのまま残る
-    #[test]
-    fn merge_discovered_inserts_only_unknown_ids() {
-        let mut catalog = ModelCatalog::builtin();
-
-        catalog.merge_discovered(vec!["gpt-4o".to_string(), "llama-3-3-70b".to_string()]);
-
-        assert_eq!(catalog.entries().len(), 13, "未知 ID のみ追加される");
-        let discovered = catalog.get("llama-3-3-70b").expect("未知 ID が挿入される");
-        assert_eq!(discovered.source, CatalogSource::Discovered);
-        let existing = catalog.get("gpt-4o").expect("既存 ID が残る");
+        assert_eq!(catalog.get("custom"), Some(&before));
+        assert_eq!(catalog.entries().len(), 2);
         assert_eq!(
-            existing.source,
-            CatalogSource::Builtin,
-            "既存 ID は書き換えられない"
-        );
-        assert!(
-            existing.attributes_confirmed,
-            "既存 ID の確定フラグは維持される"
+            catalog.get("unknown").unwrap().source,
+            CatalogSource::Discovered
         );
     }
 
-    // Given: 利用不可エントリと検出モデルをマージしたカタログ
-    // When: 解決ヘルパー (is_available / price_of / supports) に問い合わせる
-    // Then: 利用可否・価格・機能対応を正しく報告する
     #[test]
-    fn resolve_helpers_report_availability_and_capability() {
-        let mut catalog = ModelCatalog::builtin();
-        catalog.merge_models_dev(vec![sample_entry(
-            "gpt-4.1-preview",
-            Availability::Unavailable,
-            true,
-        )]);
-        catalog.merge_discovered(vec!["mystery-model".to_string()]);
+    fn resolve_helpers_report_source_data_and_missing_values() {
+        let mut catalog = ModelCatalog::new();
+        catalog.merge_models_dev(vec![
+            sample_entry("available", Availability::Available, false),
+            sample_entry("unavailable", Availability::Unavailable, true),
+        ]);
+        catalog.merge_discovered(vec!["unknown".into()]);
 
-        assert!(
-            catalog.is_available("claude-sonnet-4-5"),
-            "組み込みモデルは利用可能"
-        );
-        assert!(
-            !catalog.is_available("gpt-4.1-preview"),
-            "Unavailable なモデルは利用不可"
-        );
-        assert!(
-            catalog.is_available("mystery-model"),
-            "検出モデルは利用可能"
-        );
-        assert!(
-            !catalog.is_available("missing-model"),
-            "存在しないモデルは利用不可"
-        );
-
+        assert!(catalog.is_available("available"));
+        assert!(!catalog.is_available("unavailable"));
+        assert!(catalog.is_available("unknown"));
+        assert!(!catalog.is_available("absent"));
         assert_eq!(
-            catalog.price_of("gpt-4o"),
-            Some(&ModelPrice {
-                input_per_million_usd: 2.5,
-                output_per_million_usd: 10.0,
-            }),
-            "組み込みモデルの価格を参照できる"
+            catalog.price_of("available").unwrap().input_per_million_usd,
+            1.0
         );
-        assert!(
-            catalog.price_of("mystery-model").is_none(),
-            "検出モデルは価格不明"
-        );
-        assert!(
-            catalog.price_of("missing-model").is_none(),
-            "存在しないモデルは価格なし"
-        );
-
-        assert!(catalog.supports("claude-sonnet-4-5", Capability::ToolCalling));
-        assert!(catalog.supports("claude-sonnet-4-5", Capability::Reasoning));
-        assert!(catalog.supports("claude-sonnet-4-5", Capability::PromptCache));
-        assert!(catalog.supports("o3-mini", Capability::ToolCalling));
-        assert!(catalog.supports("o3-mini", Capability::Reasoning));
-        assert!(
-            !catalog.supports("o3-mini", Capability::PromptCache),
-            "o3-mini はプロンプトキャッシュ非対応"
-        );
-        assert!(
-            !catalog.supports("gpt-4o", Capability::Reasoning),
-            "gpt-4o は推論非対応"
-        );
-        assert!(
-            !catalog.supports("missing-model", Capability::ToolCalling),
-            "存在しないモデルは非対応"
-        );
-        for codex_model in [
-            "gpt-6-astra",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-            "gpt-5.5",
-        ] {
-            assert!(
-                catalog.supports(codex_model, Capability::ToolCalling),
-                "{codex_model} はツール呼び出し対応"
-            );
-            assert!(
-                catalog.supports(codex_model, Capability::Reasoning),
-                "{codex_model} は推論対応"
-            );
-            assert_eq!(
-                catalog.get(codex_model).map(|entry| entry.context_window),
-                Some(272_000),
-                "{codex_model} のコンテキスト窓"
-            );
-        }
+        assert!(catalog.price_of("unknown").is_none());
+        assert!(catalog.price_of("absent").is_none());
+        assert!(catalog.supports("available", Capability::ToolCalling));
+        assert!(!catalog.supports("available", Capability::Reasoning));
+        assert!(!catalog.supports("unknown", Capability::ToolCalling));
+        assert!(!catalog.supports("absent", Capability::ToolCalling));
     }
 }
