@@ -60,6 +60,15 @@ pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness
     };
     let mut config = Config {
         providers: BTreeMap::from([("local".into(), profile)]),
+        routing: config::RoutingConfig {
+            routes: BTreeMap::from([(
+                "worker".into(),
+                vec![config::RouteCandidateConfig {
+                    profile: "local".into(),
+                    model: None,
+                }],
+            )]),
+        },
         ..Config::default()
     };
     // Nondefault settings make accidental regeneration of the fallback request visible.

@@ -10,6 +10,7 @@ pub struct RoutingSettingsModel {
     pub open: bool,
     pub routes: BTreeMap<String, Vec<RouteCandidateConfig>>,
     pub route_users: BTreeMap<String, Vec<String>>,
+    pub implicit_route_users: BTreeMap<String, Vec<String>>,
     pub routes_empty: bool,
     pub pending_new_route: Option<String>,
     pub origin_role_settings: bool,
@@ -53,6 +54,17 @@ impl RoutingSettingsModel {
                     )
                 })
                 .collect(),
+            implicit_route_users: config
+                .routing
+                .routes
+                .keys()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        config::types::agents::implicit_roles_using(name, &config.agents),
+                    )
+                })
+                .collect(),
             routes_empty: config.routing.routes.is_empty(),
             profile_names: profiles.into_iter().map(|(name, _)| name.clone()).collect(),
             profile_defaults: config
@@ -83,6 +95,10 @@ impl RoutingSettingsModel {
                     logical.into(),
                     config::types::agents::roles_using(logical, &config.agents),
                 );
+                model.implicit_route_users.insert(
+                    logical.into(),
+                    config::types::agents::implicit_roles_using(logical, &config.agents),
+                );
             }
             Err(error) => model.validation_error = Some(error.to_string()),
         }
@@ -107,12 +123,8 @@ impl RoutingSettingsModel {
             return Ok(());
         }
         self.validate_name(name)?;
-        if let Some(candidates) = self.routes.remove(old) {
-            self.routes.insert(name.into(), candidates);
-            if self.expanded.remove(old) {
-                self.expanded.insert(name.into());
-            }
-        }
+        self.route_name_edits
+            .insert(old.to_string(), name.to_string());
         Ok(())
     }
 
@@ -127,6 +139,15 @@ impl RoutingSettingsModel {
             });
         }
         Ok(())
+    }
+
+    /// 編集前の論理名から変更後の論理名への対応。未変更の名前は含めない。
+    pub fn route_renames(&self) -> BTreeMap<String, String> {
+        self.route_name_edits
+            .iter()
+            .filter(|(original, draft)| original != draft)
+            .map(|(original, draft)| (original.clone(), draft.clone()))
+            .collect()
     }
 
     /// 保存境界で検証し、空白だけのモデル指定を省略へ正規化する。
@@ -175,6 +196,38 @@ impl RoutingSettingsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_renames_is_empty_without_edits() {
+        let model = RoutingSettingsModel::default();
+        assert!(model.route_renames().is_empty());
+    }
+
+    #[test]
+    fn route_renames_skips_identity_edits() {
+        let model = RoutingSettingsModel {
+            route_name_edits: [("worker".into(), "worker".into())].into(),
+            ..Default::default()
+        };
+        assert!(model.route_renames().is_empty());
+    }
+
+    #[test]
+    fn route_renames_includes_only_real_renames() {
+        let model = RoutingSettingsModel {
+            route_name_edits: [
+                ("unchanged".into(), "unchanged".into()),
+                ("old".into(), "new".into()),
+                ("new".into(), "old".into()),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            model.route_renames(),
+            [("old".into(), "new".into()), ("new".into(), "old".into())].into()
+        );
+    }
 
     #[test]
     fn prefill_inserts_named_route_with_first_profile_candidate() {

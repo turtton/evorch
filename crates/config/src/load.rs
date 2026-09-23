@@ -43,6 +43,12 @@ pub struct LoadOptions {
     /// マージ済み設定値へ最後に深マージされる。
     pub cli_overrides: Option<toml::Value>,
 
+    /// パスが完全一致する設定ファイルの内容を、ディスクの代わりに使用する。
+    ///
+    /// 保存前の実効設定シミュレーション用。値は現行バージョンの形式で渡すこと。
+    /// 上書き値にはマイグレーションを適用しない。メインファイルは未作成でも使用できる。
+    pub file_overrides: BTreeMap<PathBuf, toml::Value>,
+
     /// 環境変数レイヤーを有効にするか。
     pub read_env: bool,
 
@@ -61,6 +67,7 @@ impl Default for LoadOptions {
             project_dir: None,
             user_config_dir: None,
             cli_overrides: None,
+            file_overrides: BTreeMap::new(),
             read_env: true,
             env: None,
         }
@@ -80,9 +87,9 @@ impl Config {
     ///    注入ソースを優先)。
     /// 5. CLI 上書き。
     ///
-    /// 各ファイルは TOML パース後、マージ前にかならず [`crate::migrate::run`] を
-    /// (ファイル単位で) 通す。存在しないファイル・ディレクトリは黙ってスキップ
-    /// する。
+    /// ディスクから読む各ファイルは TOML パース後、マージ前に [`crate::migrate::run`]
+    /// をファイル単位で通す。`file_overrides` の値は現行形式としてそのまま使用する。
+    /// 上書きのない、存在しないファイル・ディレクトリは黙ってスキップする。
     ///
     /// # Errors
     ///
@@ -105,11 +112,11 @@ impl Config {
 
         let user_dir = opts.user_config_dir.clone().or_else(user_config_dir);
         if let Some(dir) = user_dir {
-            merge_dir_layer(&mut merged, &dir, USER_MAIN_FILE)?;
+            merge_dir_layer(&mut merged, &dir, USER_MAIN_FILE, &opts.file_overrides)?;
         }
 
         if let Some(dir) = &opts.project_dir {
-            merge_dir_layer(&mut merged, dir, PROJECT_MAIN_FILE)?;
+            merge_dir_layer(&mut merged, dir, PROJECT_MAIN_FILE, &opts.file_overrides)?;
         }
 
         if opts.read_env {
@@ -172,11 +179,12 @@ fn merge_dir_layer(
     merged: &mut toml::Value,
     dir: &Path,
     main_file: &str,
+    file_overrides: &BTreeMap<PathBuf, toml::Value>,
 ) -> Result<(), ConfigError> {
     let mut paths = vec![dir.join(main_file)];
     paths.extend(collect_dropins(&dir.join(DROPIN_DIR))?);
     for path in paths {
-        if let Some(value) = read_file_migrated(&path)? {
+        if let Some(value) = read_file_migrated(&path, file_overrides)? {
             *merged = deep_merge(merged.clone(), value);
         }
     }
@@ -208,9 +216,16 @@ fn collect_dropins(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 
 /// 1 つの設定ファイルを読み、TOML パースとマイグレーションまで行う。
 ///
-/// ファイルが存在しない場合は `Ok(None)`。ルートがテーブルでないドキュメントも
-/// [`ConfigError::Parse`] として扱う。
-fn read_file_migrated(path: &Path) -> Result<Option<toml::Value>, ConfigError> {
+/// 上書き値がある場合は I/O とマイグレーションを省略する。
+/// 上書きもファイルも存在しない場合は `Ok(None)`。ディスク上のルートがテーブルでない
+/// ドキュメントも [`ConfigError::Parse`] として扱う。
+fn read_file_migrated(
+    path: &Path,
+    file_overrides: &BTreeMap<PathBuf, toml::Value>,
+) -> Result<Option<toml::Value>, ConfigError> {
+    if let Some(value) = file_overrides.get(path) {
+        return Ok(Some(value.clone()));
+    }
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -227,7 +242,36 @@ fn read_file_migrated(path: &Path) -> Result<Option<toml::Value>, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::user_config_dir_from;
+    use super::{read_file_migrated, user_config_dir_from};
+
+    #[test]
+    fn file_override_skips_migration_even_for_missing_file() {
+        // Given: a current-format override omits the optional version field.
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("evorch.toml");
+        let candidate: toml::Value =
+            toml::from_str("[metrics]\nenabled = false\n").expect("current-format candidate");
+        let overrides = [(path.clone(), candidate.clone())].into();
+        // When: resolving that exact path.
+        let loaded = read_file_migrated(&path, &overrides).expect("override");
+        // Then: unlike migration, the override path does not insert a version field.
+        assert_eq!(loaded, Some(candidate));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn file_override_requires_matching_path() {
+        // Given: an override targets a different directory's identically named file.
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("evorch.toml");
+        let other = temp.path().join("other/evorch.toml");
+        let candidate = toml::from_str("[metrics]\nenabled = false\n").expect("candidate");
+        let overrides = [(other, candidate)].into();
+        // When: resolving a missing file not in the map.
+        let loaded = read_file_migrated(&path, &overrides).expect("missing file");
+        // Then: a matching filename alone cannot replace a different path.
+        assert_eq!(loaded, None);
+    }
 
     #[test]
     fn user_config_dir_from_prefers_non_empty_xdg_config_home() {

@@ -49,6 +49,10 @@ base_url = "{}"
 api_key_env = "T4_STREAMING_KEY"
 models = ["gpt-4o"]
 default_model = "gpt-4o"
+[[routing.routes.orchestrator]]
+profile = "local"
+[[routing.routes.worker]]
+profile = "local"
 "#,
             mock.base_url()
         ),

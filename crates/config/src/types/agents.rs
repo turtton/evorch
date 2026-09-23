@@ -32,10 +32,91 @@ pub struct AgentsConfig {
     pub roles: AdditionalRoleBindings,
 }
 
+/// agents 内の明示的な logical_model 参照を旧名→新名で置き換える。
+///
+/// 各 role (orchestrator/explorer/worker/reviewer/roles.librarian/roles.planner/
+/// roles.oracle/roles.multimodal_looker) と worker.categories の全 category が対象。
+/// logical_model が None (暗黙の role 名参照) のものは変更しない。
+/// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
+pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
+    if renames.is_empty() {
+        return;
+    }
+
+    for logical in [
+        &mut agents.orchestrator.logical_model,
+        &mut agents.explorer.logical_model,
+        &mut agents.worker.base.logical_model,
+        &mut agents.reviewer.logical_model,
+        &mut agents.roles.librarian.logical_model,
+        &mut agents.roles.planner.logical_model,
+        &mut agents.roles.oracle.logical_model,
+        &mut agents.roles.multimodal_looker.logical_model,
+    ]
+    .into_iter()
+    .chain(
+        agents
+            .worker
+            .categories
+            .values_mut()
+            .map(|binding| &mut binding.logical_model),
+    )
+    .flatten()
+    {
+        if let Some(new_name) = renames.get(logical) {
+            *logical = new_name.clone();
+        }
+    }
+}
+
 /// 指定した論理モデルを明示的に使用するロールと worker カテゴリを返す。
 pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
-    let mut roles = BTreeSet::new();
-    for (display_name, binding) in [
+    explicit_refs(agents)
+        .into_iter()
+        .filter_map(|(address, name)| (name == logical).then_some(address))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// 明示的な logical_model 参照を、ロールまたはカテゴリのアドレスと組にして返す。
+///
+/// アドレスは [`roles_using`] と同じ表記。暗黙のロール名参照は含めない。
+pub fn explicit_refs(agents: &AgentsConfig) -> Vec<(String, String)> {
+    let mut refs: Vec<_> = role_bindings(agents)
+        .into_iter()
+        .filter_map(|(address, binding)| {
+            binding
+                .logical_model
+                .as_ref()
+                .map(|logical| (address.to_string(), logical.clone()))
+        })
+        .collect();
+    for (category, binding) in &agents.worker.categories {
+        if let Some(logical) = &binding.logical_model {
+            refs.push((format!("worker.categories.{category}"), logical.clone()));
+        }
+    }
+    refs
+}
+
+/// logical_model 未指定のため、ロール名へのフォールバックで指定論理名を使うロール。
+///
+/// アドレスは [`roles_using`] と同じ表記。カテゴリはロールの設定を継承するため含めない。
+pub fn implicit_roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
+    role_bindings(agents)
+        .into_iter()
+        .filter(|(address, binding)| {
+            binding.logical_model.is_none()
+                && address.strip_prefix("roles.").unwrap_or(address) == logical
+        })
+        .map(|(address, _)| address.to_string())
+        .collect()
+}
+
+/// 設定上のアドレスと全8ロールのバインディングを列挙する。
+fn role_bindings(agents: &AgentsConfig) -> [(&str, &RoleBindingConfig); 8] {
+    [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
         ("worker", &agents.worker.base),
@@ -44,17 +125,7 @@ pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
         ("roles.planner", &agents.roles.planner),
         ("roles.oracle", &agents.roles.oracle),
         ("roles.multimodal_looker", &agents.roles.multimodal_looker),
-    ] {
-        if binding.logical_model.as_deref() == Some(logical) {
-            roles.insert(display_name.to_string());
-        }
-    }
-    for (category, binding) in &agents.worker.categories {
-        if binding.logical_model.as_deref() == Some(logical) {
-            roles.insert(format!("worker.categories.{category}"));
-        }
-    }
-    roles.into_iter().collect()
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
@@ -233,6 +304,304 @@ pub struct ResolvedAgentBinding {
 mod tests {
     use super::*;
     use crate::{Config, ConfigError};
+
+    #[test]
+    fn explicit_refs_lists_all_roles_and_categories_with_matching_addresses() {
+        // Given: every role and category explicitly selects the same logical model.
+        let addresses = [
+            "orchestrator",
+            "explorer",
+            "worker",
+            "reviewer",
+            "roles.librarian",
+            "roles.planner",
+            "roles.oracle",
+            "roles.multimodal_looker",
+        ]
+        .into_iter()
+        .map(String::from)
+        .chain(
+            CATEGORY_NAMES
+                .iter()
+                .map(|name| format!("worker.categories.{name}")),
+        )
+        .collect::<Vec<_>>();
+        let document = addresses
+            .iter()
+            .map(|address| format!("[agents.{address}]\nlogical_model = 'shared'\n"))
+            .collect::<String>();
+        let agents = toml::from_str::<Config>(&document).expect("agents").agents;
+        // When: enumerating explicit references.
+        let refs = explicit_refs(&agents);
+        let expected: BTreeMap<_, _> = addresses
+            .iter()
+            .map(|address| (address.clone(), "shared".into()))
+            .collect();
+        // Then: every address occurs once and matches roles_using's naming.
+        assert_eq!(refs.len(), addresses.len());
+        assert_eq!(refs.into_iter().collect::<BTreeMap<_, _>>(), expected);
+        assert_eq!(
+            roles_using("shared", &agents),
+            expected.into_keys().collect::<Vec<_>>()
+        );
+        for logical in ["worker", "librarian", "shared"] {
+            assert!(implicit_roles_using(logical, &agents).is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_refs_excludes_implicit_roles_and_categories() {
+        // Given: a mixture of explicit and inherited references.
+        let mut agents = AgentsConfig::default();
+        agents
+            .worker
+            .categories
+            .insert("quick".into(), Default::default());
+        agents.explorer.logical_model = Some("explore".into());
+        agents.worker.categories.insert(
+            "deep".into(),
+            CategoryBindingConfig {
+                logical_model: Some("reason".into()),
+                ..Default::default()
+            },
+        );
+        // When: enumerating explicit references.
+        let refs: BTreeMap<_, _> = explicit_refs(&agents).into_iter().collect();
+        // Then: no implicit role or category is materialized.
+        assert_eq!(
+            refs,
+            BTreeMap::from([
+                ("explorer".into(), "explore".into()),
+                ("worker.categories.deep".into(), "reason".into()),
+            ])
+        );
+        assert!(explicit_refs(&AgentsConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn implicit_roles_using_matches_role_fallback_not_config_address_or_category() {
+        // Given: all role names are implicit, and a category inherits worker's fallback.
+        let mut agents = AgentsConfig::default();
+        agents
+            .worker
+            .categories
+            .insert("quick".into(), Default::default());
+        // When: looking up every role's fallback name.
+        for (logical, address) in [
+            ("orchestrator", "orchestrator"),
+            ("explorer", "explorer"),
+            ("worker", "worker"),
+            ("reviewer", "reviewer"),
+            ("librarian", "roles.librarian"),
+            ("planner", "roles.planner"),
+            ("oracle", "roles.oracle"),
+            ("multimodal_looker", "roles.multimodal_looker"),
+        ] {
+            // Then: only the role address is reported (not its inheriting categories).
+            assert_eq!(implicit_roles_using(logical, &agents), [address]);
+        }
+        for logical in ["quick", "roles.librarian", "unknown", "Worker"] {
+            assert!(implicit_roles_using(logical, &agents).is_empty());
+        }
+        // Given: an explicit reference equal to the fallback is still not implicit.
+        agents.worker.base.logical_model = Some("worker".into());
+        agents.roles.librarian.logical_model = Some("librarian".into());
+        // When/Then: explicit references suppress fallback warnings.
+        assert!(implicit_roles_using("worker", &agents).is_empty());
+        assert!(implicit_roles_using("librarian", &agents).is_empty());
+    }
+
+    #[test]
+    fn rename_logical_model_refs_updates_all_explicit_roles() {
+        // Given: 全 8 ロールが同じ論理モデルを明示的に指定する。
+        let doc = r#"
+[agents.orchestrator]
+logical_model = "old"
+[agents.explorer]
+logical_model = "old"
+preset = "old"
+[agents.worker]
+logical_model = "old"
+[agents.worker.generation]
+reasoning_effort = "old"
+[agents.reviewer]
+logical_model = "old"
+[agents.roles.librarian]
+logical_model = "old"
+[agents.roles.planner]
+logical_model = "old"
+[agents.roles.oracle]
+logical_model = "old"
+[agents.roles.multimodal_looker]
+logical_model = "old"
+"#;
+        let mut agents = toml::from_str::<Config>(doc)
+            .expect("agents fixture")
+            .agents;
+        let expected = toml::from_str::<Config>(
+            &doc.replace("logical_model = \"old\"", "logical_model = \"new\""),
+        )
+        .expect("expected agents")
+        .agents;
+
+        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+
+        // Then: logical_model のみ変更し、preset や generation は保持する。
+        assert_eq!(agents, expected);
+    }
+
+    #[test]
+    fn rename_logical_model_refs_updates_all_categories() {
+        let mut agents = AgentsConfig::default();
+        for category in CATEGORY_NAMES {
+            agents.worker.categories.insert(
+                (*category).into(),
+                CategoryBindingConfig {
+                    logical_model: Some("old".into()),
+                    preset: Some("old".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut expected = agents.clone();
+        for binding in expected.worker.categories.values_mut() {
+            binding.logical_model = Some("new".into());
+        }
+
+        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+
+        assert_eq!(agents, expected);
+    }
+
+    #[test]
+    fn rename_logical_model_refs_leaves_implicit_refs_untouched() {
+        // Given: 全ロールとカテゴリで logical_model が未指定。
+        let mut agents = AgentsConfig::default();
+        agents.worker.categories.insert(
+            "quick".into(),
+            CategoryBindingConfig {
+                preset: Some("quick-preset".into()),
+                ..Default::default()
+            },
+        );
+        let original = agents.clone();
+        let renames = [
+            "orchestrator",
+            "explorer",
+            "worker",
+            "reviewer",
+            "librarian",
+            "planner",
+            "oracle",
+            "multimodal_looker",
+            "quick",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), "renamed".into()))
+        .collect();
+
+        rename_logical_model_refs(&mut agents, &renames);
+
+        assert_eq!(agents, original);
+
+        // 明示的な worker 参照が変わっても、それを継承するカテゴリは未指定のまま。
+        agents.worker.base.logical_model = Some("worker".into());
+        let mut expected = agents.clone();
+        expected.worker.base.logical_model = Some("renamed".into());
+        rename_logical_model_refs(&mut agents, &renames);
+        assert_eq!(agents, expected);
+    }
+
+    fn agents_with_a_and_b_refs() -> AgentsConfig {
+        toml::from_str::<Config>(
+            r#"
+[agents.explorer]
+logical_model = "A"
+[agents.reviewer]
+logical_model = "B"
+[agents.worker.categories.quick]
+logical_model = "A"
+[agents.worker.categories.deep]
+logical_model = "B"
+"#,
+        )
+        .expect("agents fixture")
+        .agents
+    }
+
+    #[test]
+    fn rename_logical_model_refs_maps_chain_once() {
+        let mut agents = agents_with_a_and_b_refs();
+        let mut expected = agents.clone();
+        expected.explorer.logical_model = Some("B".into());
+        expected.reviewer.logical_model = Some("C".into());
+        expected
+            .worker
+            .categories
+            .get_mut("quick")
+            .unwrap()
+            .logical_model = Some("B".into());
+        expected
+            .worker
+            .categories
+            .get_mut("deep")
+            .unwrap()
+            .logical_model = Some("C".into());
+
+        rename_logical_model_refs(
+            &mut agents,
+            &[("A".into(), "B".into()), ("B".into(), "C".into())].into(),
+        );
+
+        assert_eq!(agents, expected);
+    }
+
+    #[test]
+    fn rename_logical_model_refs_swaps_original_refs() {
+        let mut agents = agents_with_a_and_b_refs();
+        let mut expected = agents.clone();
+        expected.explorer.logical_model = Some("B".into());
+        expected.reviewer.logical_model = Some("A".into());
+        expected
+            .worker
+            .categories
+            .get_mut("quick")
+            .unwrap()
+            .logical_model = Some("B".into());
+        expected
+            .worker
+            .categories
+            .get_mut("deep")
+            .unwrap()
+            .logical_model = Some("A".into());
+
+        rename_logical_model_refs(
+            &mut agents,
+            &[("A".into(), "B".into()), ("B".into(), "A".into())].into(),
+        );
+
+        assert_eq!(agents, expected);
+    }
+
+    #[test]
+    fn rename_logical_model_refs_empty_map_is_noop() {
+        let mut agents = agents_with_a_and_b_refs();
+        let original = agents.clone();
+
+        rename_logical_model_refs(&mut agents, &BTreeMap::new());
+
+        assert_eq!(agents, original);
+    }
+
+    #[test]
+    fn rename_logical_model_refs_leaves_unmapped_refs_untouched() {
+        let mut agents = agents_with_a_and_b_refs();
+        let original = agents.clone();
+
+        rename_logical_model_refs(&mut agents, &[("other".into(), "new".into())].into());
+
+        assert_eq!(agents, original);
+    }
 
     #[test]
     fn binding_for_rejects_category_when_role_is_not_worker() {

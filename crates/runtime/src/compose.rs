@@ -217,22 +217,20 @@ impl RoutedModel {
         session_id: &str,
         logical: &LogicalModelId,
         requires_tools: bool,
-    ) -> Result<routing::ResolvedRoute, RuntimeError> {
+    ) -> Result<routing::ResolvedRoute, routing::RoutingError> {
         let router = if requires_tools {
             &self.tool_router
         } else {
             &self.router
         };
-        router
-            .resolve(
-                &mut self
-                    .affinity
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-                session_id,
-                logical,
-            )
-            .map_err(model_error)
+        router.resolve(
+            &mut self
+                .affinity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            session_id,
+            logical,
+        )
     }
 }
 
@@ -285,11 +283,10 @@ impl RoutedModel {
                     .agents
                     .binding_for(role_key(role), invocation.category.as_deref())
                     .map_err(model_error)?;
-                let route = self.resolve(
-                    &invocation.run_id,
-                    &LogicalModelId::from(binding.logical_model),
-                    !tools.is_empty(),
-                )?;
+                let logical = LogicalModelId::from(binding.logical_model);
+                let route = self
+                    .resolve(&invocation.run_id, &logical, !tools.is_empty())
+                    .map_err(|error| route_resolution_error(error, role, invocation, &logical))?;
                 (route, binding.generation)
             }
         };
@@ -506,6 +503,7 @@ impl AgentModel for RoutedModel {
         };
         let logical = LogicalModelId::from(binding.logical_model);
         self.resolve("runtime-selected-model", &logical, false)
+            .map_err(model_error)
             .map(|route| format!("{}/{}", route.profile, route.model_id))
             .unwrap_or_else(|_| format!("unresolved:{}", logical.as_str()))
     }
@@ -532,6 +530,38 @@ pub struct ProfileSummary {
     pub provider_type: model::ProviderType,
     pub models: Vec<String>,
     pub default_model: Option<String>,
+}
+
+fn route_resolution_error(
+    error: routing::RoutingError,
+    role: Role,
+    invocation: &AgentInvocationContext,
+    logical: &LogicalModelId,
+) -> RuntimeError {
+    let role = role_key(role);
+    let category = invocation
+        .category
+        .as_deref()
+        .map_or_else(String::new, |category| format!(", category={category}"));
+    let logical = logical.as_str();
+    let reason = match &error {
+        RoutingError::UnknownLogicalModel(_) => format!(
+            "no route configured for logical model `{logical}` (role={role}{category}); \
+             add a [[routing.routes.{logical}]] entry: {error}"
+        ),
+        RoutingError::NoAvailableCandidate(_) => format!(
+            "route for logical model `{logical}` exists but has no available candidate \
+             (role={role}{category}); check the candidate profiles/models under \
+             [[routing.routes.{logical}]]: {error}"
+        ),
+        _ => format!(
+            "could not resolve route for logical model `{logical}` (role={role}{category}); \
+             check [[routing.routes.{logical}]]: {error}"
+        ),
+    };
+    RuntimeError::Model {
+        reason: reason.chars().take(500).collect(),
+    }
 }
 
 fn model_error(error: impl std::fmt::Display) -> RuntimeError {

@@ -39,27 +39,27 @@ pub fn role_settings_modal(
                     .show(ui, |ui| {
                         if model.routes_empty {
                             surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {
-                                let message = model.implicit_resolution.as_ref().map_or_else(
-                                    || "No explicit routes and no provider profile: logical models cannot resolve.".into(),
-                                    |resolved| format!("No explicit routes: all logical models implicitly resolve to {resolved}."),
+                                ui.colored_label(
+                                    palette().WARNING_FG,
+                                    "No routes configured. Roles without a matching route fail when used — assign models that have routes, or create routes in Routing settings.",
                                 );
-                                ui.colored_label(palette().WARNING_FG, message);
                             });
                         }
                         let agents = &mut model.agents;
-                        for (name, binding, categories) in [
-                            ("Orchestrator", &mut agents.orchestrator, None),
-                            ("Explorer", &mut agents.explorer, None),
+                        for (name, role_key, binding, categories) in [
+                            ("Orchestrator", "orchestrator", &mut agents.orchestrator, None),
+                            ("Explorer", "explorer", &mut agents.explorer, None),
                             (
                                 "Worker",
+                                "worker",
                                 &mut agents.worker.base,
                                 Some(&mut agents.worker.categories),
                             ),
-                            ("Reviewer", &mut agents.reviewer, None),
-                            ("Librarian", &mut agents.roles.librarian, None),
-                            ("Planner", &mut agents.roles.planner, None),
-                            ("Oracle", &mut agents.roles.oracle, None),
-                            ("Multimodal Looker", &mut agents.roles.multimodal_looker, None),
+                            ("Reviewer", "reviewer", &mut agents.reviewer, None),
+                            ("Librarian", "librarian", &mut agents.roles.librarian, None),
+                            ("Planner", "planner", &mut agents.roles.planner, None),
+                            ("Oracle", "oracle", &mut agents.roles.oracle, None),
+                            ("Multimodal Looker", "multimodal_looker", &mut agents.roles.multimodal_looker, None),
                         ] {
                             ui.push_id(name, |ui| {
                                 ui.collapsing(badge(name), |ui| {
@@ -68,7 +68,8 @@ pub fn role_settings_modal(
                                         &mut binding.logical_model,
                                         (&model.logical_models, "Role logical model"),
                                     );
-                                    if let Some(logical) = binding_status(ui, binding.logical_model.as_deref(), &model.route_names) {
+                                    let effective = effective_logical_model(binding.logical_model.as_deref(), None, role_key);
+                                    if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
                                         action = Some(RoleSettingsAction::CreateRoute(logical));
                                     }
                                     if let Some(Some(resolved)) = model.resolved_previews.get(name) {
@@ -98,7 +99,12 @@ pub fn role_settings_modal(
                                                         &format!("{category} logical model"),
                                                     ),
                                                 );
-                                                if let Some(logical) = binding_status(ui, draft.logical_model.as_deref(), &model.route_names) {
+                                                let effective = effective_logical_model(
+                                                    draft.logical_model.as_deref(),
+                                                    binding.logical_model.as_deref(),
+                                                    role_key,
+                                                );
+                                                if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
                                                     action = Some(RoleSettingsAction::CreateRoute(logical));
                                                 }
                                                 if let Some(Some(resolved)) = model.resolved_previews.get(category) {
@@ -151,6 +157,15 @@ pub fn role_settings_modal(
             });
         });
     action
+}
+
+/// `AgentsConfig::binding_for` と同じ優先順で、編集中の値を変更せず解決する。
+fn effective_logical_model<'a>(
+    explicit: Option<&'a str>,
+    inherited: Option<&'a str>,
+    role_key: &'a str,
+) -> &'a str {
+    explicit.or(inherited).unwrap_or(role_key)
 }
 
 fn model_picker(ui: &mut egui::Ui, value: &mut Option<String>, choices: (&[String], &str)) {

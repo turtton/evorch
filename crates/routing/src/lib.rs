@@ -11,9 +11,7 @@ mod profile;
 mod router;
 
 pub use affinity::SessionAffinity;
-pub use compose::{
-    ComposeDeps, ComposedProvider, ComposedProviders, compose_providers, default_logical_models,
-};
+pub use compose::{ComposeDeps, ComposedProvider, ComposedProviders, compose_providers};
 pub use credential::CredentialRef;
 pub use env::{EnvLookup, MapEnv, ProcessEnv};
 pub use error::RoutingError;

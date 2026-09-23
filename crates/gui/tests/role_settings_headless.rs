@@ -2,6 +2,8 @@
 mod effort;
 #[path = "role_settings_headless/evidence.rs"]
 mod evidence;
+#[path = "role_settings_headless/implicit.rs"]
+mod implicit;
 #[path = "role_settings_headless/legacy.rs"]
 mod legacy;
 #[path = "role_settings_headless/support.rs"]
@@ -162,7 +164,7 @@ fn resolved_preview_shows_profile_model_per_role() {
 }
 
 #[test]
-fn empty_routes_banner_in_role_settings_explains_implicit_resolution() {
+fn empty_routes_banner_in_role_settings_explains_missing_routes() {
     // Given: two profiles and no routes.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
@@ -176,9 +178,9 @@ fn empty_routes_banner_in_role_settings_explains_implicit_resolution() {
     // When: opening settings from the changed config.
     harness.state_mut().open_role_settings();
     harness.run();
-    // Then: the alphabetically first profile and its default are explained.
+    // Then: roles without matching routes fail on use rather than resolving implicitly.
     assert!(harness.has_label(
-        "No explicit routes: all logical models implicitly resolve to accelerated/fast."
+        "No routes configured. Roles without a matching route fail when used — assign models that have routes, or create routes in Routing settings."
     ));
 }
 

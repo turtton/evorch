@@ -167,10 +167,8 @@ async fn unknown_profile_emits_one_correlated_provider_unavailable_without_start
         event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE
     );
     assert_eq!(event.run_id.as_deref(), Some(run.to_string().as_str()));
-    let requests = server.recorded_requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/v1/models");
+    // An absent explicit profile fails before contacting unrelated configured providers.
+    assert!(server.recorded_requests().is_empty());
 }
 
 #[tokio::test]

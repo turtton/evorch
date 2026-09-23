@@ -31,6 +31,10 @@ base_url = "{}"
 credential = {{ type = "env", var = "TEAM_TEST_KEY" }}
 models = ["gpt-4o"]
 default_model = "gpt-4o"
+[[routing.routes.orchestrator]]
+profile = "local"
+[[routing.routes.worker]]
+profile = "local"
 [team]
 enabled = true
 "#,

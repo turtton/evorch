@@ -105,6 +105,13 @@ fn compose_builds_clients_and_router_with_discovered_models() {
         },
         ..config::WorkerBindingConfig::default()
     };
+    config.routing.routes.insert(
+        "coding".to_string(),
+        vec![RouteCandidateConfig {
+            profile: PROFILE.to_string(),
+            model: None,
+        }],
+    );
     let composed = compose_providers(&config, deps(populated_env())).expect("composeに成功する");
     let mut affinity = SessionAffinity::default();
 
@@ -119,25 +126,62 @@ fn compose_builds_clients_and_router_with_discovered_models() {
     assert!(!composed.is_empty());
 }
 
-// Given: routing.routesが空 / When: compose / Then: 4ロール名のdefault routeを合成する
+// Given: routing.routesが空 / When: compose後にresolve / Then: 起動を妨げず未設定のroleを拒否する
 #[test]
-fn compose_synthesizes_default_role_routes() {
+fn compose_does_not_synthesize_default_role_routes() {
     let composed = compose_providers(
         &config_with(ProviderTypeConfig::OpenAiCompatible),
         deps(populated_env()),
     )
-    .expect("composeに成功する");
+    .expect("空routeでもcomposeに成功する");
 
-    for logical in ["orchestrator", "explorer", "worker", "reviewer"] {
-        let resolved = composed
+    let error = composed
+        .router
+        .resolve(
+            &mut SessionAffinity::default(),
+            "session-default",
+            &LogicalModelId::from("orchestrator"),
+        )
+        .expect_err("default routeを合成しない");
+    assert_eq!(
+        error,
+        RoutingError::UnknownLogicalModel("orchestrator".to_string())
+    );
+}
+
+// Given: 有効なproviderと空route / When: role名や任意の名前を解決 / Then: 全てUnknownLogicalModelになる
+#[test]
+fn compose_with_empty_routes_rejects_role_and_arbitrary_names() {
+    let mut config = config_with(ProviderTypeConfig::OpenAiCompatible);
+    config.agents.worker.base.logical_model = Some("coding".to_string());
+    let composed = compose_providers(&config, deps(populated_env()))
+        .expect("agent bindingにrouteがなくてもcomposeに成功する");
+
+    assert!(composed.provider(PROFILE).is_some());
+    for logical in [
+        "orchestrator",
+        "explorer",
+        "worker",
+        "reviewer",
+        "librarian",
+        "planner",
+        "oracle",
+        "multimodal_looker",
+        "coding",
+        "arbitrary-model",
+    ] {
+        let error = composed
             .router
             .resolve(
                 &mut SessionAffinity::default(),
-                "session-default",
+                "session-empty",
                 &LogicalModelId::from(logical),
             )
-            .expect("default routeを解決できる");
-        assert_eq!(resolved.profile, PROFILE);
+            .expect_err("未設定の論理モデルを拒否する");
+        assert_eq!(
+            error,
+            RoutingError::UnknownLogicalModel(logical.to_string())
+        );
     }
 }
 

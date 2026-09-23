@@ -6,6 +6,13 @@ use runtime::compose::{SwitchableModel, UnconfiguredModel};
 pub(super) fn fixture(
     root: &std::path::Path,
 ) -> (WorkbenchState<DemoSource>, Arc<SwitchableModel>) {
+    fixture_with_options(root, |_| {})
+}
+
+pub(super) fn fixture_with_options(
+    root: &std::path::Path,
+    configure: impl FnOnce(&mut config::LoadOptions),
+) -> (WorkbenchState<DemoSource>, Arc<SwitchableModel>) {
     std::fs::write(
         root.join("evorch.toml"),
         r#"
@@ -24,13 +31,15 @@ default_model = "fast"
 "#,
     )
     .expect("fixture");
+    let mut load_options = config::LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join("user")),
+        read_env: false,
+        ..Default::default()
+    };
+    configure(&mut load_options);
     let context = gui::model::production::ProductionModel {
-        load_options: config::LoadOptions {
-            project_dir: Some(root.into()),
-            user_config_dir: Some(root.join("user")),
-            read_env: false,
-            ..Default::default()
-        },
+        load_options,
         credential_store: Arc::new(
             sandbox::credential::FileCredentialStore::open(root.join("credentials"))
                 .expect("store"),

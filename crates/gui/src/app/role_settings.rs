@@ -56,10 +56,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn seed_role_settings(&mut self, config: &config::Config) {
         use runtime::Role;
         self.role_settings = RoleSettingsModel::seed_from_config(config);
-        self.role_settings.implicit_resolution = config
-            .providers
-            .first_key_value()
-            .map(|(name, profile)| format!("{name}/{}", profile.default_model));
         let roles = [
             ("Orchestrator", Role::Orchestrator),
             ("Explorer", Role::Explorer),

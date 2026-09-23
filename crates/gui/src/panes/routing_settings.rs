@@ -56,19 +56,11 @@ ui.colored_label(palette().ERROR_FG, error);
 fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
     if model.routes_empty {
         surface_frame(palette().WARNING_SURFACE).show(ui, |ui| {
-            let message = model
-                .profile_defaults
-                .keys()
-                .next()
-                .and_then(|name| {
-                    model.profile_defaults.get(name).map(|default| format!(
-                    "No explicit routes: all logical models implicitly resolve to {name}/{default}."
-                ))
-                })
-                .unwrap_or_else(|| {
-                    "No explicit routes and no provider profile: logical models cannot resolve."
-                        .into()
-                });
+            let message = if model.profile_names.is_empty() {
+                "No provider profiles and no routes: logical models cannot resolve."
+            } else {
+                "No routes configured. Logical models without an explicit route fail when used. Add routes for each role or custom name below."
+            };
             ui.colored_label(palette().WARNING_FG, message);
         });
     }
@@ -166,10 +158,26 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     model.expanded.insert(name.clone());
                 }
             }
-            let draft = model.route_name_edits.get(name).unwrap_or(name);
+            if model
+                .route_name_edits
+                .get(name)
+                .is_some_and(|draft| draft != name)
+                && let Some(users) = model
+                    .implicit_route_users
+                    .get(name)
+                    .filter(|users| !users.is_empty())
+            {
+                ui.colored_label(
+                    palette().WARNING_FG,
+                    format!(
+                        "Renaming leaves implicit role-name lookups unrouted: {}. Assign them explicitly in Role settings to keep them working.",
+                        users.join(", ")
+                    ),
+                );
+            }
             let users = model
                 .route_users
-                .get(draft)
+                .get(name)
                 .filter(|users| !users.is_empty());
             ui.label(muted(users.map_or_else(
                 || "Used by: none".into(),

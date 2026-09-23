@@ -33,7 +33,7 @@ pub use save_agents::save_agent_bindings;
 pub use save_codex::{
     CodexProviderInput, delete_provider, save_codex_provider, save_codex_provider_edit,
 };
-pub use save_routing::save_routing;
+pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;
 pub use schema::json_schema;
 pub use types::BudgetConfig;

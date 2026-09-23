@@ -66,7 +66,6 @@ impl RoutedModel {
         invocation: &crate::AgentInvocationContext,
         role: agents::Role,
     ) -> Result<(), crate::RuntimeError> {
-        self.verify_candidates().await;
         let selected = match &invocation.model_preference {
             Some(preference) => {
                 let provider = self.providers.get(&preference.profile).ok_or_else(|| {
@@ -92,13 +91,14 @@ impl RoutedModel {
                     .agents
                     .binding_for(super::role_key(role), invocation.category.as_deref())
                     .map_err(super::model_error)?;
-                self.resolve(
-                    &invocation.run_id,
-                    &model::LogicalModelId::from(binding.logical_model),
-                    false,
-                )?
+                let logical = model::LogicalModelId::from(binding.logical_model);
+                self.resolve(&invocation.run_id, &logical, false)
+                    .map_err(|error| {
+                        super::route_resolution_error(error, role, invocation, &logical)
+                    })?
             }
         };
+        self.verify_candidates().await;
         self.verify_route(&selected, invocation)?;
         for route in &self.admission_routes {
             self.verify_route(route, invocation)?;

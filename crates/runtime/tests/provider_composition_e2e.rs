@@ -96,6 +96,10 @@ base_url = "{base_url}"
 api_key_env = "{KEY_ENV}"
 models = ["{MODEL}"]
 default_model = "{MODEL}"
+[[routing.routes.worker]]
+profile = "local"
+[[routing.routes.orchestrator]]
+profile = "local"
 "#
         ),
     )

@@ -67,6 +67,20 @@ fn configured() -> Config {
                 default_model: MODEL.to_string(),
             },
         )]),
+        routing: config::RoutingConfig {
+            routes: ["orchestrator", "explorer", "worker", "reviewer"]
+                .into_iter()
+                .map(|logical| {
+                    (
+                        logical.to_string(),
+                        vec![config::RouteCandidateConfig {
+                            profile: PROFILE.to_string(),
+                            model: None,
+                        }],
+                    )
+                })
+                .collect(),
+        },
         ..Config::default()
     }
 }

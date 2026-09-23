@@ -21,7 +21,6 @@ pub struct RoleSettingsModel {
     pub logical_models: Vec<String>,
     pub route_names: BTreeSet<String>,
     pub routes_empty: bool,
-    pub implicit_resolution: Option<String>,
     pub resolved_previews: BTreeMap<String, Option<String>>,
     pub effort_choices: BTreeMap<String, Vec<String>>,
     pub error: Option<String>,

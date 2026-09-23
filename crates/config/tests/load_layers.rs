@@ -193,6 +193,7 @@ fn cli_overrides_env() {
         project_dir: Some(project),
         user_config_dir: Some(empty_user_dir(&tmp)),
         cli_overrides: Some(cli_overrides),
+        file_overrides: BTreeMap::new(),
         read_env: true,
         env: Some(env_vars(&[(
             "EVORCH_DIAGNOSTICS__LOG_DIR",

@@ -1,7 +1,7 @@
 #[test]
 #[ignore = "writes PNG review evidence using an offscreen GPU adapter"]
 fn capture_role_routing_states() {
-    // Given: both supported viewport sizes with a legacy binding and implicit routing.
+    // Given: both supported viewport sizes with a legacy binding and no routes.
     for size in [[960.0, 600.0], [1200.0, 900.0]] {
         let temp = tempfile::tempdir().expect("temp");
         let (_, _) = super::fixture(temp.path());

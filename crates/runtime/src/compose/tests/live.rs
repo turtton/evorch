@@ -75,6 +75,20 @@ fn compose_routed_model_matches_compose_runtime_output() {
                 default_model: "live".into(),
             },
         )]),
+        routing: RoutingConfig {
+            routes: ["worker", "orchestrator"]
+                .into_iter()
+                .map(|logical| {
+                    (
+                        logical.into(),
+                        vec![RouteCandidateConfig {
+                            profile: "local".into(),
+                            model: None,
+                        }],
+                    )
+                })
+                .collect(),
+        },
         ..config::Config::default()
     };
     let dir = tempfile::tempdir().unwrap();

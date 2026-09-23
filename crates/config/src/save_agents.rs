@@ -15,6 +15,12 @@ use crate::types::agents::{
 /// [`Config::load`] と同じ strict 検証を通過させる。
 pub fn save_agent_bindings(path: &Path, agents: &AgentsConfig) -> Result<(), ConfigError> {
     let mut doc = super::save::read_document(path)?;
+    doc.insert("agents", Item::Table(agents_document_table(agents)));
+    super::save::write_document(path, &doc)
+}
+
+/// ロール・カテゴリ・追加ロールを含む agents セクションを構築する。
+pub(crate) fn agents_document_table(agents: &AgentsConfig) -> Table {
     let mut agents_table = Table::new();
     for (name, binding) in [
         ("orchestrator", &agents.orchestrator),
@@ -48,8 +54,7 @@ pub fn save_agent_bindings(path: &Path, agents: &AgentsConfig) -> Result<(), Con
     if !roles.is_empty() {
         agents_table.insert("roles", Item::Table(roles));
     }
-    doc.insert("agents", Item::Table(agents_table));
-    super::save::write_document(path, &doc)
+    agents_table
 }
 
 fn insert_binding(table: &mut Table, name: &str, binding: &RoleBindingConfig) {

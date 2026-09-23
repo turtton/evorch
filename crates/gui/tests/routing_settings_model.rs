@@ -128,6 +128,109 @@ fn draft_rename_preserves_candidates_and_rejects_collisions() {
 }
 
 #[test]
+fn route_renames_is_empty_without_edits() {
+    let model = RoutingSettingsModel::seed_from_config(&fixture());
+    assert!(model.route_renames().is_empty());
+}
+
+#[test]
+fn route_renames_skips_identity_edits() {
+    let mut model = RoutingSettingsModel::seed_from_config(&fixture());
+    model.route_name_edits = model
+        .routes
+        .keys()
+        .map(|name| (name.clone(), name.clone()))
+        .collect();
+    assert!(model.route_renames().is_empty());
+}
+
+#[test]
+fn route_renames_includes_only_real_renames() {
+    let mut model = RoutingSettingsModel::seed_from_config(&fixture());
+    model.route_name_edits = [
+        ("worker".into(), "renamed".into()),
+        ("other".into(), "other".into()),
+    ]
+    .into();
+    assert_eq!(
+        model.route_renames(),
+        [("worker".into(), "renamed".into())].into()
+    );
+    assert_eq!(model.routes, fixture().routing.routes);
+}
+
+#[test]
+fn rename_route_records_draft_without_rekeying_routes_or_expansion() {
+    // Given: the original route is expanded and has ordered candidates.
+    let config = fixture();
+    let mut model = RoutingSettingsModel::seed_from_config(&config);
+    model.expanded.insert("worker".into());
+    let expanded = model.expanded.clone();
+    // When: renaming via the model API.
+    model.rename_route("worker", "renamed").expect("rename");
+    // Then: only the draft changes until save.
+    assert_eq!(
+        model.route_renames(),
+        [("worker".into(), "renamed".into())].into()
+    );
+    assert_eq!(model.routes, config.routing.routes);
+    assert_eq!(model.expanded, expanded);
+    let saved = model.validated_routing().expect("valid");
+    assert_eq!(saved.routes["renamed"], config.routing.routes["worker"]);
+    assert!(!saved.routes.contains_key("worker"));
+}
+
+#[test]
+fn renaming_same_original_twice_replaces_draft_and_rejects_duplicate_target() {
+    // Given: an original route already has a pending rename.
+    let mut model = RoutingSettingsModel::seed_from_config(&fixture());
+    model.rename_route("worker", "first").expect("first");
+    // When: editing the same original again.
+    model.rename_route("worker", "latest").expect("latest");
+    // Then: there is one rename with the latest name; other routes cannot reuse it.
+    assert_eq!(
+        model.route_renames(),
+        [("worker".into(), "latest".into())].into()
+    );
+    assert_eq!(model.route_name_edits.len(), 1);
+    assert!(model.rename_route("other", "latest").is_err());
+    assert_eq!(model.route_name_edits.len(), 1);
+    assert!(model.rename_route("worker", "worker").is_ok());
+    assert_eq!(
+        model.route_renames(),
+        [("worker".into(), "latest".into())].into()
+    );
+}
+
+#[test]
+fn seed_tracks_implicit_users_only_for_role_name_fallbacks() {
+    // Given: worker falls back to its role name while other has no implicit users.
+    let mut config = fixture();
+    // When: seeding the routing editor.
+    let model = RoutingSettingsModel::seed_from_config(&config);
+    // Then: every existing route has an entry, independent of explicit route users.
+    assert_eq!(model.implicit_route_users["worker"], ["worker"]);
+    assert!(model.implicit_route_users["other"].is_empty());
+    assert!(model.route_users["worker"].is_empty());
+    config.agents.worker.base.logical_model = Some("worker".into());
+    let explicit = RoutingSettingsModel::seed_from_config(&config);
+    assert!(explicit.implicit_route_users["worker"].is_empty());
+    assert_eq!(explicit.route_users["worker"], ["worker"]);
+}
+
+#[test]
+fn prefill_seeds_implicit_users_for_new_role_named_route() {
+    // Given: a missing librarian route with an implicit librarian binding.
+    let config = fixture();
+    // When: prefilling a route from role settings.
+    let model = RoutingSettingsModel::seed_from_config_prefill(&config, "librarian");
+    // Then: the new route and existing routes both retain their fallback users.
+    assert_eq!(model.implicit_route_users["librarian"], ["roles.librarian"]);
+    assert_eq!(model.implicit_route_users["worker"], ["worker"]);
+    assert!(model.route_users["librarian"].is_empty());
+}
+
+#[test]
 fn draft_rename_rejects_blank_and_duplicate_names() {
     // Given: 空白または他ルートと衝突する編集中の名前。
     for name in [" ", "other"] {

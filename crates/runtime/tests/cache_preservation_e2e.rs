@@ -102,6 +102,10 @@ base_url = "{}"
 api_key_env = "{KEY_ENV}"
 models = ["{MODEL}"]
 default_model = "{MODEL}"
+[[routing.routes.orchestrator]]
+profile = "local"
+[[routing.routes.worker]]
+profile = "local"
 [compaction]
 context_window_tokens = {window}
 threshold = 0.5

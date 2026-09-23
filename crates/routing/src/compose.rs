@@ -9,10 +9,9 @@
 //! models = ["local-model"]
 //! default_model = "local-model"
 //! ```
-//! `routing.routes`が空なら、4つのrole論理モデルと`agents`で明示された論理モデルを
-//! BTreeMap順で先頭のprovider profileへ結ぶrouteを合成します。
+//! ルートは`routing.routes`で明示的に設定します。未設定の論理モデルは解決時に失敗します。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -78,34 +77,6 @@ impl ComposedProviders {
     }
 }
 
-/// `agents`設定から既定routeの対象となる論理モデル名を返します。
-pub fn default_logical_models(agents: &config::AgentsConfig) -> Vec<String> {
-    let mut names = BTreeSet::from([
-        "orchestrator".to_string(),
-        "explorer".to_string(),
-        "worker".to_string(),
-        "reviewer".to_string(),
-    ]);
-    for binding in [
-        &agents.orchestrator,
-        &agents.explorer,
-        &agents.worker,
-        &agents.reviewer,
-    ] {
-        if let Some(logical_model) = &binding.logical_model {
-            names.insert(logical_model.clone());
-        }
-    }
-    names.extend(
-        agents
-            .worker
-            .categories
-            .values()
-            .filter_map(|category| category.logical_model.clone()),
-    );
-    names.into_iter().collect()
-}
-
 /// 設定を検証し、利用可能な全providerとRouterを一括構築します。
 ///
 /// # Errors
@@ -115,9 +86,9 @@ pub fn compose_providers(
     config: &config::Config,
     deps: ComposeDeps,
 ) -> Result<ComposedProviders, RoutingError> {
-    let Some(first_profile_name) = config.providers.keys().next().cloned() else {
+    if config.providers.is_empty() {
         return Err(RoutingError::NoProviders);
-    };
+    }
     let mut catalog = deps.catalog;
     let mut profiles = Vec::with_capacity(config.providers.len());
     let mut providers = BTreeMap::new();
@@ -143,26 +114,8 @@ pub fn compose_providers(
         );
     }
 
-    let effective_routes = if config.routing.routes.is_empty() {
-        config::RoutingConfig {
-            routes: default_logical_models(&config.agents)
-                .into_iter()
-                .map(|logical| {
-                    (
-                        logical,
-                        vec![config::RouteCandidateConfig {
-                            profile: first_profile_name.clone(),
-                            model: None,
-                        }],
-                    )
-                })
-                .collect(),
-        }
-    } else {
-        config.routing.clone()
-    };
     let router =
-        Router::new(profiles, &effective_routes, catalog)?.with_event_bus(deps.event_bus.clone());
+        Router::new(profiles, &config.routing, catalog)?.with_event_bus(deps.event_bus.clone());
 
     Ok(ComposedProviders { router, providers })
 }

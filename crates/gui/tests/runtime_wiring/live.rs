@@ -50,6 +50,8 @@ default_model = "live-model"
 type = "keyring"
 service = "evorch"
 account = "live"
+[routing.routes]
+worker = [{{ profile = "live" }}]
 "#,
             server.base_url()
         ),
@@ -99,8 +101,13 @@ account = "live"
 
 #[test]
 fn provider_save_recomposes_live_model() {
-    // Given
+    // Given: an explicit worker route; saving its provider makes it usable.
     let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("evorch.toml"),
+        "[routing.routes]\nworker = [{ profile = 'live' }]\n",
+    )
+    .unwrap();
     let store = Arc::new(
         sandbox::credential::FileCredentialStore::open(temp.path().join("credentials")).unwrap(),
     );

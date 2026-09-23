@@ -1,6 +1,8 @@
 use gui::headless::HeadlessWorkbench;
 use runtime::{AgentModel, Role};
 
+#[path = "routing_settings_headless/saves.rs"]
+mod saves;
 #[path = "routing_settings_headless/support.rs"]
 mod support;
 #[path = "routing_settings_headless/ux.rs"]
@@ -29,6 +31,114 @@ fn route_row_lists_roles_using_that_name() {
 }
 
 #[test]
+fn route_row_keeps_users_visible_during_rename() {
+    // Given: a shared route whose name is being edited.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    let path = temp.path().join("evorch.toml");
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!(
+            "{text}\n[routing.routes]\nshared = [{{profile = 'local'}}]\n\
+             [agents.explorer]\nlogical_model = 'shared'\n\
+             [agents.worker.categories.quick]\nlogical_model = 'shared'\n"
+        ),
+    )
+    .expect("shared bindings");
+    state.open_routing_settings();
+    state
+        .routing_settings_mut()
+        .route_name_edits
+        .insert("shared".into(), "renamed".into());
+    // When: rendering the draft rename.
+    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    harness.run();
+    // Then: users are still looked up by the original route name.
+    assert!(harness.has_label("Used by: explorer, worker.categories.quick"));
+    assert!(!harness.has_label("Used by: none"));
+}
+
+#[test]
+fn draft_rename_warns_about_implicit_role_name_lookup_before_save() {
+    // Given: worker uses its implicit role-name fallback and has a route.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    let path = temp.path().join("evorch.toml");
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!("{text}\n[routing.routes]\nworker = [{{profile = 'local'}}]\n"),
+    )
+    .expect("route");
+    state.open_routing_settings();
+    let warning = "Renaming leaves implicit role-name lookups unrouted: worker. Assign them explicitly in Role settings to keep them working.";
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    assert!(!harness.has_label(warning));
+    // When: renaming the collapsed route in the draft, without saving.
+    harness
+        .state_mut()
+        .routing_settings_mut()
+        .rename_route("worker", "renamed")
+        .expect("rename");
+    harness.run();
+    // Then: the warning is rendered even when the candidate editor is collapsed.
+    assert!(harness.has_label(warning));
+    assert!(harness.state().routing_settings().expanded.is_empty());
+    // When: reverting the draft text.
+    harness
+        .state_mut()
+        .routing_settings_mut()
+        .route_name_edits
+        .insert("worker".into(), "worker".into());
+    harness.run();
+    // Then: identity edits do not warn.
+    assert!(!harness.has_label(warning));
+}
+
+#[test]
+fn draft_rename_of_explicit_role_reference_does_not_warn_about_fallback() {
+    // Given: worker explicitly references the route named worker.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    let path = temp.path().join("evorch.toml");
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!(
+            "{text}\n[routing.routes]\nworker = [{{profile = 'local'}}]\n\
+             [agents.worker]\nlogical_model = 'worker'\n"
+        ),
+    )
+    .expect("route and explicit binding");
+    state.open_routing_settings();
+    state
+        .routing_settings_mut()
+        .rename_route("worker", "renamed")
+        .expect("rename");
+    // When: rendering the rename that will rewrite the explicit binding.
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    // Then: only the explicit user label is shown; no fallback-breakage warning.
+    assert!(harness.has_label("Used by: worker"));
+    assert!(!harness.has_label("Renaming leaves implicit role-name lookups unrouted: worker. Assign them explicitly in Role settings to keep them working."));
+}
+
+#[test]
+fn empty_routes_without_providers_banner_in_routing_pane() {
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    std::fs::write(temp.path().join("evorch.toml"), "").expect("empty config");
+    state.open_routing_settings();
+    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
+    harness.run();
+    assert!(
+        harness.has_label("No provider profiles and no routes: logical models cannot resolve.")
+    );
+}
+
+#[test]
 fn empty_routes_banner_in_routing_pane() {
     // Given: codex が先頭で既定モデルが一覧の先頭と異なる設定。
     let temp = tempfile::tempdir().expect("temp");
@@ -47,9 +157,9 @@ default_model = "gpt-5.3-codex"
     // When: 明示ルートのない画面を描画する。
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
-    // Then: 全論理モデルの暗黙解決先を表示する。
+    // Then: 未定義の論理モデルは使用時に失敗することを説明する。
     assert!(harness.has_label(
-        "No explicit routes: all logical models implicitly resolve to codex/gpt-5.3-codex."
+        "No routes configured. Logical models without an explicit route fail when used. Add routes for each role or custom name below."
     ));
 }
 
