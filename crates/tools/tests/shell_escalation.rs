@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use event_bus::EventBus;
 use sandbox::{CommandSpec, DirectSandbox, Sandbox, SandboxError, WrappedCommand};
 use serde_json::{Value, json};
-use tools::tools::shell_escalation::{EscalationDecision, ShellEscalationGate};
+use tools::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
 use tools::{ToolExecutionContext, ToolExecutor, ToolResult};
 
 #[derive(Default)]
@@ -22,6 +22,7 @@ struct Gate {
     reason: Option<String>,
     calls: Mutex<Vec<(ToolExecutionContext, String, String)>>,
     cwd_calls: Mutex<Vec<Option<std::path::PathBuf>>>,
+    scopes: Mutex<Vec<ShellAccess>>,
 }
 
 #[async_trait]
@@ -57,6 +58,33 @@ impl ShellEscalationGate for Gate {
             .expect("gate lock")
             .push(cwd.map(std::path::Path::to_path_buf));
         self.decide(ctx, command, justification).await
+    }
+
+    async fn decide_scoped_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        cwd: Option<&std::path::Path>,
+        access: ShellAccess,
+    ) -> EscalationDecision {
+        self.scopes.lock().expect("gate lock").push(access);
+        self.decide_with_cwd(ctx, command, justification, cwd).await
+    }
+}
+
+struct NetworkSandbox {
+    isolated: Arc<ProbeSandbox>,
+    network: Arc<ProbeSandbox>,
+}
+
+impl Sandbox for NetworkSandbox {
+    fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        self.isolated.wrap(spec)
+    }
+
+    fn with_network_access(&self) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        Ok(self.network.clone())
     }
 }
 
@@ -238,4 +266,81 @@ async fn escalation_review_receives_resolved_working_directory() {
         *fixture.gate.cwd_calls.lock().expect("gate lock"),
         vec![Some(root.path().join("nested"))]
     );
+}
+
+// Network requests use the separate reviewed sandbox and never enter the host path.
+#[tokio::test]
+async fn network_only_request_keeps_the_host_path_unused() {
+    let isolated = Arc::new(ProbeSandbox::default());
+    let network = Arc::new(ProbeSandbox::default());
+    let host = Arc::new(ProbeSandbox::default());
+    let gate = Arc::new(Gate::default());
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::new(EventBus::new(16)),
+        Arc::new(NetworkSandbox {
+            isolated: isolated.clone(),
+            network: network.clone(),
+        }),
+    );
+    executor.set_shell_escalation(gate.clone(), host.clone());
+    let result = executor.execute(
+        &ToolExecutionContext { run_id: "run-network".into(), thread_id: None, call_id: None },
+        "shell", "call-network",
+        json!({"command":"printf network", "require_network":true, "justification":"fetch dependencies"}),
+    ).await.expect("tool result");
+    assert_eq!(result.content, "exit_code: 0\nnetwork");
+    assert!(isolated.0.lock().expect("probe").is_empty());
+    assert_eq!(network.0.lock().expect("probe").len(), 1);
+    assert!(host.0.lock().expect("probe").is_empty());
+    assert_eq!(
+        *gate.scopes.lock().expect("gate"),
+        vec![ShellAccess::Network]
+    );
+}
+
+#[tokio::test]
+async fn network_only_denial_and_ambiguous_scope_never_spawn() {
+    let isolated = Arc::new(ProbeSandbox::default());
+    let network = Arc::new(ProbeSandbox::default());
+    let host = Arc::new(ProbeSandbox::default());
+    let gate = Arc::new(Gate {
+        reason: Some("network refused".into()),
+        ..Gate::default()
+    });
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::new(EventBus::new(16)),
+        Arc::new(NetworkSandbox {
+            isolated: isolated.clone(),
+            network: network.clone(),
+        }),
+    );
+    executor.set_shell_escalation(gate.clone(), host.clone());
+    let ctx = ToolExecutionContext {
+        run_id: "run-network".into(),
+        thread_id: None,
+        call_id: None,
+    };
+    let denied = executor.execute(&ctx, "shell", "call-denied", json!({
+        "command":"printf denied", "require_network":true, "justification":"fetch dependencies"
+    })).await.expect("tool result");
+    assert!(denied.is_error);
+    assert_eq!(denied.content, "network refused");
+    let ambiguous = executor
+        .execute(
+            &ctx,
+            "shell",
+            "call-ambiguous",
+            json!({
+                "command":"printf denied", "require_network":true, "require_escalated":true,
+                "justification":"fetch dependencies"
+            }),
+        )
+        .await
+        .expect("tool result");
+    assert!(ambiguous.is_error);
+    assert!(ambiguous.content.contains("mutually exclusive"));
+    assert_eq!(gate.scopes.lock().expect("gate").len(), 1);
+    assert!(isolated.0.lock().expect("probe").is_empty());
+    assert!(network.0.lock().expect("probe").is_empty());
+    assert!(host.0.lock().expect("probe").is_empty());
 }

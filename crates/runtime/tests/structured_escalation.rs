@@ -228,7 +228,7 @@ async fn http_400_falls_back_to_next_candidate_and_approves() {
         let payload: Value = serde_json::from_str(content).unwrap();
         assert_eq!(
             payload,
-            json!({"command":"pwd","justification":"inspect directory"})
+            json!({"command":"pwd","justification":"inspect directory","access":"host_unsandboxed"})
         );
         assert_eq!(request["temperature"], 0.25);
         assert_eq!(request["max_tokens"], 321);

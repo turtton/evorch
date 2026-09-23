@@ -6,6 +6,13 @@ use sandbox::Sandbox;
 
 use crate::ToolExecutionContext;
 
+/// Shell command access requested for one reviewed invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellAccess {
+    Host,
+    Network,
+}
+
 /// 明示的な隔離解除の審査結果。
 pub enum EscalationDecision {
     Approve,
@@ -31,6 +38,17 @@ pub trait ShellEscalationGate: Send + Sync {
         _cwd: Option<&Path>,
     ) -> EscalationDecision {
         self.decide(ctx, command, justification).await
+    }
+
+    async fn decide_scoped_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        cwd: Option<&Path>,
+        _access: ShellAccess,
+    ) -> EscalationDecision {
+        self.decide_with_cwd(ctx, command, justification, cwd).await
     }
 }
 

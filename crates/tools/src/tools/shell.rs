@@ -18,7 +18,9 @@ use crate::output::Capture;
 use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 use crate::tools::shell_contract::{CommandVerdict, ShellCommandContract};
-use crate::tools::shell_escalation::{EscalationDecision, ShellEscalation, ShellEscalationGate};
+use crate::tools::shell_escalation::{
+    EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
+};
 
 #[cfg(test)]
 mod job_tests;
@@ -212,6 +214,8 @@ struct ShellArgs {
     #[serde(default)]
     require_escalated: bool,
     #[serde(default)]
+    require_network: bool,
+    #[serde(default)]
     justification: String,
     /// 作業ディレクトリ。
     cwd: Option<String>,
@@ -226,7 +230,7 @@ impl Tool for Shell {
     }
 
     fn description(&self) -> &str {
-        "Run a POSIX shell command. Without yield_ms, wait for completion. With yield_ms (0..60000), return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion."
+        "Run a POSIX shell command. Without yield_ms, wait for completion. With yield_ms (0..60000), return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. For dependency downloads or git pull when sandbox DNS/network access fails, request require_network with justification to keep filesystem isolation; require_escalated removes all isolation."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -237,7 +241,8 @@ impl Tool for Shell {
                 "command": {"type":"string", "minLength":1, "description":"POSIX shell command. Required for start."},
                 "args": {"type":"array", "items":{"type":"string"}, "deprecated":true, "description":"Deprecated shell fragments; put all shell syntax in command."},
                 "interactive": {"type":"boolean", "default":false, "description":"Use a PTY. With yield_ms, retain stdin for later input."},
-                "require_escalated": {"type":"boolean", "default":false},
+                "require_escalated": {"type":"boolean", "default":false, "description":"Run without filesystem or network sandbox after review."},
+                "require_network": {"type":"boolean", "default":false, "description":"Allow host networking for this command after review; retain sandbox filesystem mounts."},
                 "justification": {"type":"string"},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
@@ -250,7 +255,7 @@ impl Tool for Shell {
             "additionalProperties": false,
             "allOf": [{
                 "if": {"properties":{"action":{"enum":["poll", "stdin", "stop"]}}, "required":["action"]},
-                "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["require_escalated"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
+                "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["require_escalated"]},{"required":["require_network"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
                 "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
             }]
         })
@@ -403,13 +408,33 @@ impl Tool for Shell {
                 }
             })
             .or(root);
+        if args.require_escalated && args.require_network {
+            return Ok(ToolResult::error(
+                "shell access denied: require_escalated and require_network are mutually exclusive",
+            ));
+        }
         let mut escalated_input = None;
-        let sandbox = if args.require_escalated {
+        let sandbox = if args.require_escalated || args.require_network {
             if args.justification.trim().is_empty() {
                 return Ok(ToolResult::error(
                     "shell escalation denied: justification is required",
                 ));
             }
+            // Build the network-only variant from the existing sandbox so its
+            // filesystem mounts and private HOME remain identical.
+            let access = if args.require_network {
+                ShellAccess::Network
+            } else {
+                ShellAccess::Host
+            };
+            let network_sandbox = if args.require_network {
+                match self.sandbox.with_network_access() {
+                    Ok(sandbox) => Some(sandbox),
+                    Err(error) => return Ok(ToolResult::error(error.to_string())),
+                }
+            } else {
+                None
+            };
             // 審査中にロックを保持せず、gate と実行経路を同じスナップショットから使う。
             let escalation = self.escalation.read().ok().and_then(|slot| slot.clone());
             let Some(escalation) = escalation else {
@@ -419,7 +444,13 @@ impl Tool for Shell {
             };
             match escalation
                 .gate
-                .decide_with_cwd(ctx, &shell_args[1], &args.justification, cwd.as_deref())
+                .decide_scoped_with_cwd(
+                    ctx,
+                    &shell_args[1],
+                    &args.justification,
+                    cwd.as_deref(),
+                    access,
+                )
                 .await
             {
                 EscalationDecision::Approve => {
@@ -428,8 +459,9 @@ impl Tool for Shell {
                         command: shell_args[1].clone(),
                         justification: args.justification.clone(),
                         cwd: cwd.clone(),
+                        access,
                     });
-                    escalation.unsandboxed
+                    network_sandbox.unwrap_or(escalation.unsandboxed)
                 }
                 EscalationDecision::Deny { reason } => return Ok(ToolResult::error(reason)),
             }

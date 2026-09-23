@@ -199,6 +199,12 @@ fn bind_cache(args: &mut Vec<String>, source: &Path, destination: &Path) {
 }
 
 impl Sandbox for BwrapSandbox {
+    fn with_network_access(&self) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        let mut networked = self.clone();
+        networked.config.allow_network = true;
+        Ok(Arc::new(networked))
+    }
+
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
         let args = self.build_argv(&spec);
         let mut env = merge_environment(spec.extra_env);
@@ -287,6 +293,34 @@ mod tests {
         let argv = sandbox(BwrapConfig::new(PathBuf::from("/workspace")).allow_network(true))
             .build_argv(&spec(None));
         assert!(!argv.contains(&"--unshare-net".to_owned()));
+    }
+
+    #[test]
+    fn network_only_variant_preserves_every_other_boundary() {
+        let sandbox = sandbox(
+            BwrapConfig::new(PathBuf::from("/workspace"))
+                .ro_bind("/opt/readonly")
+                .rw_bind("/opt/writable"),
+        );
+        let command = spec(Some(PathBuf::from("/workspace/sub")));
+        let original = sandbox.wrap(command.clone()).expect("isolated wrap");
+        let network = sandbox
+            .with_network_access()
+            .expect("network variant")
+            .wrap(command)
+            .expect("network wrap");
+        assert!(original.args.contains(&"--unshare-net".to_owned()));
+        assert!(!network.args.contains(&"--unshare-net".to_owned()));
+        assert_eq!(
+            network.args,
+            original
+                .args
+                .into_iter()
+                .filter(|arg| arg != "--unshare-net")
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(network.program, original.program);
+        assert_eq!(network.env, original.env);
     }
 
     // Given: 個別作業ディレクトリ / When: 引数を構築 / Then: 指定ディレクトリへ移動する

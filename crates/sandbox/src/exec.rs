@@ -1,6 +1,6 @@
 //! コマンド仕様と隔離方式の共通抽象を定義します。
 
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, sync::Arc};
 
 use crate::error::SandboxError;
 
@@ -83,6 +83,14 @@ impl WrappedCommand {
 /// コマンドを実行環境へ包む境界。
 pub trait Sandbox: Send + Sync {
     fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError>;
+
+    /// Return the same filesystem sandbox with access to the host network.
+    /// Unsupported implementations fail closed instead of removing isolation.
+    fn with_network_access(&self) -> Result<Arc<dyn Sandbox>, SandboxError> {
+        Err(SandboxError::BwrapUnavailable {
+            detail: "network-only shell access is unavailable for this sandbox".into(),
+        })
+    }
 }
 
 /// OS 隔離を明示的に無効化する実行方式。

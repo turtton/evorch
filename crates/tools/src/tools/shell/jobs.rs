@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::io_failed;
 use crate::output::PREVIEW_BYTES;
-use crate::tools::shell_escalation::{EscalationDecision, ShellEscalationGate};
+use crate::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate};
 use crate::{ToolError, ToolExecutionContext, ToolResult};
 
 mod output;
@@ -55,6 +55,7 @@ pub(super) struct EscalatedInput {
     pub command: String,
     pub justification: String,
     pub cwd: Option<std::path::PathBuf>,
+    pub access: ShellAccess,
 }
 
 #[derive(Default)]
@@ -245,11 +246,12 @@ impl JobRegistry {
                     );
                     if let EscalationDecision::Deny { reason } = escalated
                         .gate
-                        .decide_with_cwd(
+                        .decide_scoped_with_cwd(
                             ctx,
                             &command,
                             &escalated.justification,
                             escalated.cwd.as_deref(),
+                            escalated.access,
                         )
                         .await
                     {

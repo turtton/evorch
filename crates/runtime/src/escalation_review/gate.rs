@@ -9,7 +9,7 @@ use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sandbox::approval::{ApprovalGate, ApprovalOutcome};
 use tools::{
     ToolExecutionContext,
-    tools::shell_escalation::{EscalationDecision, ShellEscalationGate},
+    tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscalationGate},
 };
 
 use super::{QuickModelReviewer, ReviewVerdict, review_context};
@@ -66,7 +66,12 @@ impl SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         command: &str,
         justification: &str,
+        access: ShellAccess,
     ) -> EscalationDecision {
+        let kind = match access {
+            ShellAccess::Host => "shell_escalation",
+            ShellAccess::Network => "shell_network",
+        };
         let call_id = format!(
             "{}:{}",
             ctx.run_id,
@@ -74,7 +79,7 @@ impl SandboxEscalationGate {
         );
         match ApprovalGate::new(self.bus.clone(), self.human_timeout).request_with_input(
             "shell", &call_id,
-            Some(serde_json::json!({"command":command, "justification":justification, "kind":"shell_escalation"})),
+            Some(serde_json::json!({"command":command, "justification":justification, "kind":kind})),
         ).await {
             ApprovalOutcome::Approved => EscalationDecision::Approve,
             ApprovalOutcome::Denied => EscalationDecision::Deny { reason: "shell escalation denied by user".into() },
@@ -91,7 +96,7 @@ impl ShellEscalationGate for SandboxEscalationGate {
         command: &str,
         justification: &str,
     ) -> EscalationDecision {
-        self.decide_with_cwd(ctx, command, justification, None)
+        self.decide_scoped_with_cwd(ctx, command, justification, None, ShellAccess::Host)
             .await
     }
 
@@ -102,6 +107,18 @@ impl ShellEscalationGate for SandboxEscalationGate {
         justification: &str,
         cwd: Option<&Path>,
     ) -> EscalationDecision {
+        self.decide_scoped_with_cwd(ctx, command, justification, cwd, ShellAccess::Host)
+            .await
+    }
+
+    async fn decide_scoped_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        cwd: Option<&Path>,
+        access: ShellAccess,
+    ) -> EscalationDecision {
         let settings = self.settings.lock().ok().map(|settings| *settings);
         let decision = match settings {
             None => EscalationDecision::Deny {
@@ -110,7 +127,9 @@ impl ShellEscalationGate for SandboxEscalationGate {
             Some((EscalationApproval::Off, _)) => EscalationDecision::Deny {
                 reason: "shell escalation is disabled".into(),
             },
-            Some((EscalationApproval::User, _)) => self.human(ctx, command, justification).await,
+            Some((EscalationApproval::User, _)) => {
+                self.human(ctx, command, justification, access).await
+            }
             Some((EscalationApproval::Auto, fallback)) => {
                 let verdict = match &self.reviewer {
                     Some(reviewer) => {
@@ -136,7 +155,13 @@ impl ShellEscalationGate for SandboxEscalationGate {
                                     ))
                                 });
                         reviewer
-                            .review_with_context(&ctx.run_id, command, justification, context)
+                            .review_scoped_with_context(
+                                &ctx.run_id,
+                                command,
+                                justification,
+                                context,
+                                access,
+                            )
                             .await
                     }
                     None => Err(super::ReviewError::Model),
@@ -149,8 +174,14 @@ impl ShellEscalationGate for SandboxEscalationGate {
                 match reason {
                     None => EscalationDecision::Approve,
                     Some(reason) if fallback => {
-                        self.diagnose(ctx, DiagnosticSeverity::Warning, &reason);
-                        self.human(ctx, command, justification).await
+                        self.diagnose(
+                            ctx,
+                            DiagnosticSeverity::Info,
+                            &format!(
+                                "automatic review declined; requesting user approval: {reason}"
+                            ),
+                        );
+                        self.human(ctx, command, justification, access).await
                     }
                     Some(reason) => EscalationDecision::Deny { reason },
                 }

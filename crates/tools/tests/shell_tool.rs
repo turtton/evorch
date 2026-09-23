@@ -21,6 +21,7 @@ fn shell() -> Shell {
 fn shell_schema_exposes_require_escalated_and_justification_when_requested() {
     let schema = shell().schema();
     assert_eq!(schema["properties"]["require_escalated"]["type"], "boolean");
+    assert_eq!(schema["properties"]["require_network"]["type"], "boolean");
     assert_eq!(schema["properties"]["justification"]["type"], "string");
     let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(validator.is_valid(&json!({"command":"true"})));
