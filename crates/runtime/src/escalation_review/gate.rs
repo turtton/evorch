@@ -1,5 +1,6 @@
 use std::{
-    sync::{Arc, Mutex},
+    path::Path,
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
@@ -11,7 +12,8 @@ use tools::{
     tools::shell_escalation::{EscalationDecision, ShellEscalationGate},
 };
 
-use super::{QuickModelReviewer, ReviewVerdict};
+use super::{QuickModelReviewer, ReviewVerdict, review_context};
+use crate::runtime::Shared;
 
 const HUMAN_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -20,6 +22,7 @@ pub struct SandboxEscalationGate {
     reviewer: Option<Arc<QuickModelReviewer>>,
     pub(super) bus: Arc<EventBus>,
     pub(super) human_timeout: Duration,
+    runtime: Option<Weak<Shared>>,
 }
 
 impl SandboxEscalationGate {
@@ -33,7 +36,13 @@ impl SandboxEscalationGate {
             reviewer,
             bus,
             human_timeout: HUMAN_APPROVAL_TIMEOUT,
+            runtime: None,
         }
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: Weak<Shared>) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     fn diagnose(&self, ctx: &ToolExecutionContext, severity: DiagnosticSeverity, verdict: &str) {
@@ -82,6 +91,17 @@ impl ShellEscalationGate for SandboxEscalationGate {
         command: &str,
         justification: &str,
     ) -> EscalationDecision {
+        self.decide_with_cwd(ctx, command, justification, None)
+            .await
+    }
+
+    async fn decide_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        cwd: Option<&Path>,
+    ) -> EscalationDecision {
         let settings = self.settings.lock().ok().map(|settings| *settings);
         let decision = match settings {
             None => EscalationDecision::Deny {
@@ -93,7 +113,32 @@ impl ShellEscalationGate for SandboxEscalationGate {
             Some((EscalationApproval::User, _)) => self.human(ctx, command, justification).await,
             Some((EscalationApproval::Auto, fallback)) => {
                 let verdict = match &self.reviewer {
-                    Some(reviewer) => reviewer.review(&ctx.run_id, command, justification).await,
+                    Some(reviewer) => {
+                        let context =
+                            self.runtime
+                                .as_ref()
+                                .and_then(Weak::upgrade)
+                                .and_then(|shared| {
+                                    let run_id = crate::RunId::new(
+                                        ctx.run_id.strip_prefix("run-")?.parse().ok()?,
+                                    );
+                                    let run = shared
+                                        .review_runs
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .get(&run_id)
+                                        .cloned()?;
+                                    Some(review_context(
+                                        run,
+                                        shared.rules.get().map(Arc::as_ref),
+                                        cwd,
+                                        command,
+                                    ))
+                                });
+                        reviewer
+                            .review_with_context(&ctx.run_id, command, justification, context)
+                            .await
+                    }
                     None => Err(super::ReviewError::Model),
                 };
                 let reason = match verdict {

@@ -80,6 +80,7 @@ pub(crate) struct Shared {
     pub(crate) compaction_configured: AtomicBool,
     pub(crate) escalation_settings: OnceLock<EscalationSettings>,
     pub(crate) escalations: Mutex<HashMap<RunId, EscalationMemo>>,
+    pub(crate) review_runs: Mutex<HashMap<RunId, crate::escalation_review::ReviewRunContext>>,
     /// goal gate (finish 判定 seam、issue #73 T1.3)。未設定なら finish は
     /// legacy の即時受理のまま残る (T3.1 が `meta::finish` から参照する)。
     pub(crate) goals: OnceLock<Arc<dyn GoalGate>>,
@@ -262,6 +263,7 @@ impl AgentRuntime {
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
+                review_runs: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
@@ -495,6 +497,7 @@ impl AgentRuntime {
                 compaction_configured: AtomicBool::new(false),
                 escalation_settings: OnceLock::new(),
                 escalations: Mutex::new(HashMap::new()),
+                review_runs: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 reviewer_results: Mutex::new(HashMap::new()),
                 workspace: Some(WorkspaceContext { manager, factory }),
@@ -705,6 +708,8 @@ impl AgentRuntime {
         continuation: RunContinuation,
     ) -> RunId {
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
+        let restored_run = matches!(continuation, RunContinuation::Restored(_));
+        let original_prompt = prompt.clone();
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
             RunContinuation::Awaited => (None, None),
@@ -776,6 +781,60 @@ impl AgentRuntime {
             );
         }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
+        let inherited_review = parent.or(escalated_from).and_then(|source| {
+            self.shared
+                .review_runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&source)
+                .cloned()
+        });
+        let review_run = match inherited_review {
+            Some(inherited) => {
+                let mut delegation_chain = inherited.delegation_chain;
+                delegation_chain.push(crate::escalation_review::bounded(&original_prompt, 1500));
+                if delegation_chain.len() > 4 {
+                    delegation_chain.remove(0);
+                }
+                let mut lineage_run_ids = inherited.lineage_run_ids;
+                lineage_run_ids.push(run_id.to_string());
+                crate::escalation_review::ReviewRunContext {
+                    root_run_id: inherited.root_run_id,
+                    lineage_run_ids,
+                    user_requests: inherited.user_requests,
+                    delegation_chain,
+                }
+            }
+            None => {
+                let requests = if parent.is_none()
+                    && escalated_from.is_none()
+                    && !restored_run
+                    && !original_prompt.trim().is_empty()
+                {
+                    vec![crate::escalation_review::UserRequest {
+                        target_run_id: run_id.to_string(),
+                        text: crate::escalation_review::bounded(&original_prompt, 1500),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                crate::escalation_review::ReviewRunContext {
+                    root_run_id: run_id.to_string(),
+                    lineage_run_ids: vec![run_id.to_string()],
+                    user_requests: Arc::new(Mutex::new(requests)),
+                    delegation_chain: if parent.is_some() || escalated_from.is_some() {
+                        vec![crate::escalation_review::bounded(&original_prompt, 1500)]
+                    } else {
+                        Vec::new()
+                    },
+                }
+            }
+        };
+        self.shared
+            .review_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id, review_run);
         let escalation_link = handoff
             .as_ref()
             .map(|handoff| (handoff.source_run_id, handoff.summary.clone()));
@@ -1028,6 +1087,24 @@ impl AgentRuntime {
         text: String,
         images: Vec<crate::DelegateImage>,
     ) -> Result<(), RuntimeError> {
+        self.send_inbox_message(run_id, text, images, true)
+    }
+
+    pub(crate) fn send_internal_message(
+        &self,
+        run_id: RunId,
+        text: String,
+    ) -> Result<(), RuntimeError> {
+        self.send_inbox_message(run_id, text, Vec::new(), false)
+    }
+
+    fn send_inbox_message(
+        &self,
+        run_id: RunId,
+        text: String,
+        images: Vec<crate::DelegateImage>,
+        trusted_user: bool,
+    ) -> Result<(), RuntimeError> {
         self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
         if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
@@ -1037,10 +1114,21 @@ impl AgentRuntime {
         }
         let sender = self.entry(run_id)?.inbox_tx.clone();
         sender
-            .try_send((text, images))
+            .try_send((text.clone(), images))
             .map_err(|_| RuntimeError::RunTerminated {
                 run_id: run_id.to_string(),
-            })
+            })?;
+        if trusted_user
+            && let Some(review) = self
+                .shared
+                .review_runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&run_id)
+        {
+            review.add_user_request(&run_id.to_string(), &text);
+        }
+        Ok(())
     }
 
     /// run が終端位相になるまで待機し、最終位相を返す。
@@ -1634,4 +1722,110 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
             .unwrap_or_default(),
         runtime: Arc::downgrade(&shared),
     })
+}
+
+#[cfg(test)]
+mod review_provenance_tests {
+    use super::*;
+
+    struct HangingModel;
+
+    #[async_trait::async_trait]
+    impl AgentModel for HangingModel {
+        fn selected_model(&self, _role: Role, _category: Option<&str>) -> String {
+            "hanging-test-model".into()
+        }
+
+        async fn complete(
+            &self,
+            _invocation: &crate::AgentInvocationContext,
+            _role: Role,
+            _messages: &[providers::Message],
+            _tools: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn child_inherits_only_real_user_requests_not_internal_notifications() {
+        let bus = Arc::new(EventBus::new(32));
+        let executor = Arc::new(ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        ));
+        let model = Arc::new(HangingModel);
+        let runtime = AgentRuntime::new(bus, executor, model);
+        let root = runtime.reserve_run_id();
+        runtime.spawn_reserved(
+            root,
+            None,
+            Role::Orchestrator,
+            "Investigate the cause",
+            RunConfig::default(),
+        );
+        let child = runtime.reserve_run_id();
+        runtime.spawn_reserved_child(
+            root,
+            child,
+            Role::Worker,
+            "git push origin main",
+            RunConfig::default(),
+        );
+
+        let grandchild = runtime.reserve_run_id();
+        runtime.spawn_reserved_child(
+            child,
+            grandchild,
+            Role::Worker,
+            "Verify and push",
+            RunConfig::default(),
+        );
+
+        runtime
+            .send_internal_message(root, "Team leases expired".into())
+            .expect("internal message");
+        runtime
+            .send_message(root, "Implement the fix".into())
+            .expect("real user message");
+        runtime
+            .send_message(child, "Only the child may do this".into())
+            .expect("child-directed message");
+
+        let runs = runtime.shared.review_runs.lock().expect("review runs");
+        let parent = runs.get(&root).expect("parent");
+        let delegated = runs.get(&child).expect("child");
+        let nested = runs.get(&grandchild).expect("grandchild");
+        assert!(Arc::ptr_eq(&parent.user_requests, &delegated.user_requests));
+        assert!(Arc::ptr_eq(&parent.user_requests, &nested.user_requests));
+        assert_eq!(
+            parent
+                .requests()
+                .iter()
+                .map(|request| request.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Investigate the cause", "Implement the fix"],
+        );
+        assert_eq!(
+            nested
+                .requests()
+                .iter()
+                .map(|request| request.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Investigate the cause",
+                "Implement the fix",
+                "Only the child may do this"
+            ],
+        );
+        assert_eq!(delegated.delegation_chain, vec!["git push origin main"]);
+        assert_eq!(
+            nested.delegation_chain,
+            vec!["git push origin main", "Verify and push"]
+        );
+        drop(runs);
+        let _ = runtime.cancel(root);
+        let _ = runtime.cancel(child);
+        let _ = runtime.cancel(grandchild);
+    }
 }

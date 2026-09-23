@@ -28,7 +28,7 @@ pub(crate) fn monitor(
             let now = team.now();
             match team.board.expire(now) {
                 Ok(expired) if !expired.is_empty() => {
-                    let _ = runtime.send_message(
+                    let _ = runtime.send_internal_message(
                         team.coordinator,
                         format!("Team leases expired; tasks ready: {}", expired.join(", ")),
                     );

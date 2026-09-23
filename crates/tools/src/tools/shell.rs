@@ -386,6 +386,23 @@ impl Tool for Shell {
                 )));
             }
         }
+        let root = self
+            .default_cwd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let cwd = args
+            .cwd
+            .as_ref()
+            .map(|cwd| {
+                let path = PathBuf::from(cwd);
+                if path.is_absolute() {
+                    path
+                } else {
+                    root.as_ref().map_or(path.clone(), |root| root.join(path))
+                }
+            })
+            .or(root);
         let mut escalated_input = None;
         let sandbox = if args.require_escalated {
             if args.justification.trim().is_empty() {
@@ -402,7 +419,7 @@ impl Tool for Shell {
             };
             match escalation
                 .gate
-                .decide(ctx, &shell_args[1], &args.justification)
+                .decide_with_cwd(ctx, &shell_args[1], &args.justification, cwd.as_deref())
                 .await
             {
                 EscalationDecision::Approve => {
@@ -410,6 +427,7 @@ impl Tool for Shell {
                         gate: escalation.gate,
                         command: shell_args[1].clone(),
                         justification: args.justification.clone(),
+                        cwd: cwd.clone(),
                     });
                     escalation.unsandboxed
                 }
@@ -422,24 +440,7 @@ impl Tool for Shell {
             .wrap(CommandSpec {
                 program: "sh".to_string(),
                 args: shell_args,
-                cwd: {
-                    let root = self
-                        .default_cwd
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
-                    args.cwd
-                        .as_ref()
-                        .map(|cwd| {
-                            let path = PathBuf::from(cwd);
-                            if path.is_absolute() {
-                                path
-                            } else {
-                                root.as_ref().map_or(path.clone(), |root| root.join(path))
-                            }
-                        })
-                        .or(root)
-                },
+                cwd,
                 extra_env: self.extra_env.clone(),
             })
             .map_err(|error| ToolError::SandboxUnavailable {

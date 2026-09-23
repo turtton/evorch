@@ -1,6 +1,6 @@
 //! 呼び出し単位の隔離解除を審査する境界。
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use sandbox::Sandbox;
 
@@ -21,6 +21,17 @@ pub trait ShellEscalationGate: Send + Sync {
         command: &str,
         justification: &str,
     ) -> EscalationDecision;
+
+    /// Supplies the resolved working directory when the reviewer can use it.
+    async fn decide_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        _cwd: Option<&Path>,
+    ) -> EscalationDecision {
+        self.decide(ctx, command, justification).await
+    }
 }
 
 #[derive(Clone)]

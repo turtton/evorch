@@ -86,7 +86,10 @@ fn assert_schema(format: &Value) {
     let required = schema["schema"]["required"]
         .as_array()
         .expect("required fields");
-    assert_eq!(required.len(), 2);
+    assert_eq!(required.len(), 4);
+    assert!(
+        required.contains(&json!("risk_level")) && required.contains(&json!("authorization_level"))
+    );
     assert!(required.contains(&json!("approve")) && required.contains(&json!("reason")));
 }
 
@@ -117,7 +120,7 @@ async fn compatible_schema_and_reasoning_reach_the_real_review_path() {
         let requests = requests(&server).await;
         assert_eq!(requests.len(), 1);
         assert_schema(&requests[0]["response_format"]);
-        assert_eq!(requests[0]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(requests[0]["messages"].as_array().unwrap().len(), 2);
         assert!(
             requests[0]
                 .get("tools")
@@ -214,11 +217,15 @@ async fn http_400_falls_back_to_next_candidate_and_approves() {
     for request in &requests {
         assert_schema(&request["response_format"]);
         let messages = request["messages"].as_array().expect("messages");
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
-        let content = messages[0]["content"].as_str().expect("review prompt");
-        assert!(content.starts_with(runtime::escalation_review::REVIEW_INSTRUCTION));
-        let payload: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[0]["content"],
+            runtime::escalation_review::REVIEW_INSTRUCTION
+        );
+        let content = messages[1]["content"].as_str().expect("review payload");
+        let payload: Value = serde_json::from_str(content).unwrap();
         assert_eq!(
             payload,
             json!({"command":"pwd","justification":"inspect directory"})
@@ -575,7 +582,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
         .expect("normal history and settings stay stable across review");
     assert!(requests[0].get("response_format").is_none());
     assert_schema(&requests[1]["response_format"]);
-    assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 2);
     assert!(
         !requests[1]
             .to_string()

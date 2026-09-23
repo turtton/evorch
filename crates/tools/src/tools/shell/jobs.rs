@@ -54,6 +54,7 @@ pub(super) struct EscalatedInput {
     pub gate: Arc<dyn ShellEscalationGate>,
     pub command: String,
     pub justification: String,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -244,7 +245,12 @@ impl JobRegistry {
                     );
                     if let EscalationDecision::Deny { reason } = escalated
                         .gate
-                        .decide(ctx, &command, &escalated.justification)
+                        .decide_with_cwd(
+                            ctx,
+                            &command,
+                            &escalated.justification,
+                            escalated.cwd.as_deref(),
+                        )
                         .await
                     {
                         return Ok(ToolResult::error(reason));

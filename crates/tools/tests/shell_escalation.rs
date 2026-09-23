@@ -21,6 +21,7 @@ impl Sandbox for ProbeSandbox {
 struct Gate {
     reason: Option<String>,
     calls: Mutex<Vec<(ToolExecutionContext, String, String)>>,
+    cwd_calls: Mutex<Vec<Option<std::path::PathBuf>>>,
 }
 
 #[async_trait]
@@ -42,6 +43,20 @@ impl ShellEscalationGate for Gate {
             },
             None => EscalationDecision::Approve,
         }
+    }
+
+    async fn decide_with_cwd(
+        &self,
+        ctx: &ToolExecutionContext,
+        command: &str,
+        justification: &str,
+        cwd: Option<&std::path::Path>,
+    ) -> EscalationDecision {
+        self.cwd_calls
+            .lock()
+            .expect("gate lock")
+            .push(cwd.map(std::path::Path::to_path_buf));
+        self.decide(ctx, command, justification).await
     }
 }
 
@@ -203,4 +218,24 @@ async fn non_escalated_call_uses_default_sandbox_when_escalation_is_false_or_omi
         fixture.assert_wraps(1, 0);
         assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
     }
+}
+
+// Given: a relative shell cwd / When: escalation is reviewed / Then: the gate sees the resolved path.
+#[tokio::test]
+async fn escalation_review_receives_resolved_working_directory() {
+    let fixture = Fixture::new(None);
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(root.path().join("nested")).expect("nested");
+    fixture.executor.set_default_cwd(root.path().to_path_buf());
+    let result = fixture
+        .execute(json!({
+            "command": "pwd", "cwd": "nested", "require_escalated": true,
+            "justification": "inspect worktree"
+        }))
+        .await;
+    assert!(!result.is_error);
+    assert_eq!(
+        *fixture.gate.cwd_calls.lock().expect("gate lock"),
+        vec![Some(root.path().join("nested"))]
+    );
 }

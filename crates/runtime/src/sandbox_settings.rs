@@ -26,13 +26,16 @@ impl AgentRuntime {
     pub fn shell_escalation_gate(
         &self,
     ) -> std::sync::Arc<crate::escalation_review::SandboxEscalationGate> {
-        std::sync::Arc::new(crate::escalation_review::SandboxEscalationGate::new(
-            self.shared.sandbox_escalation.clone(),
-            Some(std::sync::Arc::new(
-                crate::escalation_review::QuickModelReviewer::new(self.shared.model.clone()),
-            )),
-            self.shared.bus.clone(),
-        ))
+        std::sync::Arc::new(
+            crate::escalation_review::SandboxEscalationGate::new(
+                self.shared.sandbox_escalation.clone(),
+                Some(std::sync::Arc::new(
+                    crate::escalation_review::QuickModelReviewer::new(self.shared.model.clone()),
+                )),
+                self.shared.bus.clone(),
+            )
+            .with_runtime(std::sync::Arc::downgrade(&self.shared)),
+        )
     }
 
     /// Applies to newly started runs; running subprocesses retain their namespace.
