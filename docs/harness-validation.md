@@ -4,7 +4,7 @@ The implementation includes `main` commit `6f10ec1` (Tasks/Agents UI unification
 The operator explicitly approved the ADR 0027 revision and finalization correction
 on 2026-09-23, and authorized merging to main, pushing, and verifying CI.
 
-## Integration results
+## Integration results at `e2287e7`
 
 - `cargo test --workspace --no-fail-fast`: **3,439 passed, 0 failed, 48 ignored**.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
@@ -70,3 +70,37 @@ rendering, browser and Nix environments. Local tests call no external model.
 
 Reproduce with [the harness script](../scripts/check-harness.sh). Implementation
 limits, including PTY line buffering, are in [the runtime notes](harness-runtime-improvements.md).
+
+## CI follow-up: bounded GUI fixtures
+
+The first main CI run, [35809013943](https://github.com/turtton/evorch/actions/runs/35809013943),
+passed Nix build/checkPhase, offscreen rendering, Chromium E2E, workspace tests,
+lint, otel-exporter tests and schema drift checks. The operator cancelled it after
+the GUI browser-feature suite stalled in `runtime_wiring`.
+
+The test model subscribed to a 16-event queue before startup and only read it on
+its final turn. Startup/progress could overflow that queue; `recv().expect()` then
+panicked on `Lagged`, leaving the parent completion wait pending. The fixture now
+recovers from lag, returns a model error on closure/deadline, and bounds both run
+completion and GUI convergence waits. A deterministic overflow regression covers
+this case without changing production behavior or weakening task-row assertions.
+
+Parallel reproduction also exposed a separate OAuth fixture collision: separate
+workspace/browser test processes competed for the production callback ports. The
+fixture now binds an ephemeral callback port, and both mock issuer accept loops
+have deadlines. Production OAuth ports are unchanged.
+
+Validation after these test-only changes:
+
+- GUI browser-feature suite: **973 passed, 0 failed, 24 ignored**.
+- `runtime_wiring`: all four tests passed 30 times each with 1, 2 and 4 Tokio
+  workers (90 suite runs); default-feature execution also passed all four tests.
+- OAuth failure-path fixture: eight concurrent processes all passed. Before the
+  fix, the same reproduction left six processes waiting indefinitely.
+- GUI browser-feature Clippy with all targets and `-D warnings`: passed.
+- Format, diff and harness-script syntax checks: passed.
+
+The harness script now includes `runtime_wiring` in focused checks and executes
+the GUI browser-feature tests in full mode instead of only checking compilation.
+The full workspace figures above are from `e2287e7`, before this fixture follow-up;
+the next main CI run validates the complete tree again.

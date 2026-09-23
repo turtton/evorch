@@ -103,17 +103,33 @@ impl AgentModel for ScriptedModel {
             && self.scripts.lock().expect("script lock")["ORCH"].len() == 1;
         if final_orchestrator_turn {
             let mut events = self.events.lock().await;
-            loop {
-                let event = events.recv().await.expect("completion relay event");
-                if matches!(
-                    event.kind,
-                    event_bus::EventKind::AgentMessage(
-                        event_bus::AgentMessageEvent::Delivered { .. }
-                    )
-                ) {
-                    break;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let event = match events.recv().await {
+                        Ok(event) => event,
+                        // Startup/progress may exceed this observer's queue before
+                        // the second model turn. The completion remains queued.
+                        Err(event_bus::RecvError::Lagged(_)) => continue,
+                        Err(event_bus::RecvError::Closed) => {
+                            return Err(RuntimeError::Model {
+                                reason: "completion relay event stream closed".into(),
+                            });
+                        }
+                    };
+                    if matches!(
+                        event.kind,
+                        event_bus::EventKind::AgentMessage(
+                            event_bus::AgentMessageEvent::Delivered { .. }
+                        )
+                    ) {
+                        return Ok(());
+                    }
                 }
-            }
+            })
+            .await
+            .map_err(|_| RuntimeError::Model {
+                reason: "completion relay event deadline".into(),
+            })??;
         }
         let mut scripts = self.scripts.lock().expect("script lock must not poison");
         scripts
@@ -187,7 +203,11 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
         let _guard = rt.enter();
         runtime.delegate_background(Role::Orchestrator, "ORCH".to_string(), RunConfig::default())
     };
-    let phase = rt.block_on(async { runtime.wait(run_id).await });
+    let phase = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), runtime.wait(run_id))
+            .await
+            .expect("orchestrator completion deadline")
+    });
     assert_eq!(
         phase.expect("orchestrator run must finish"),
         AgentRunPhase::Done
@@ -201,9 +221,59 @@ fn runtime_wiring_shows_orchestrator_and_delegated_worker_in_tasks() {
         status: AgentRunPhase::Done,
         model: "test-worker".into(),
     }];
+    let deadline = Instant::now() + Duration::from_secs(10);
     while harness.state().tasks().rows() != expected.as_slice() {
-        repaint_rx.recv().expect("runtime event repaint");
+        repaint_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("runtime task rows must converge before the repaint deadline");
         harness.run_steps(4);
     }
     assert_eq!(harness.state().tasks().rows(), expected.as_slice());
+}
+
+#[tokio::test]
+async fn completion_barrier_survives_a_lagged_observer() {
+    let bus = event_bus::EventBus::new(16);
+    let model = ScriptedModel::new(&bus);
+    let messages = [Message {
+        role: MessageRole::User,
+        content: vec![ContentBlock::Text {
+            text: "ORCH".into(),
+        }],
+    }];
+    let invocation = AgentInvocationContext::default();
+    model
+        .complete(&invocation, Role::Orchestrator, &messages, &[])
+        .await
+        .unwrap();
+    // Deterministically reproduce a delayed second turn after the child's
+    // startup/progress fills the ring. Completion itself is still retained.
+    for _ in 0..17 {
+        bus.emit(event_bus::Event::new(
+            event_bus::MessageEvent::MessageDelta {
+                run_id: Some("run-2".into()),
+                delta: "progress".into(),
+            },
+        ));
+    }
+    bus.emit(event_bus::Event::new(
+        event_bus::AgentMessageEvent::Delivered {
+            message: event_bus::AgentMessage {
+                message_id: "completion".into(),
+                sender_run_id: "run-2".into(),
+                recipient_run_id: "run-1".into(),
+                kind: event_bus::AgentMessageKind::Send,
+                content: "worker finished".into(),
+                reply_to: None,
+            },
+            disposition: event_bus::DeliveryDisposition::Aside,
+        },
+    ));
+    let response = model
+        .complete(&invocation, Role::Orchestrator, &messages, &[])
+        .await
+        .unwrap();
+    assert!(
+        matches!(&response.message.content[0], ContentBlock::ToolUse { name, .. } if name == "finish")
+    );
 }

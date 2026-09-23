@@ -27,11 +27,11 @@ run providers cargo test -p providers --lib
 run tools cargo test -p tools -p sandbox
 run storage cargo test -p storage --test user_questions --test migration
 run gui cargo test -p gui --test user_questions_headless --test goal_restore_authority \
-    --test goal_restore_binding --lib
+    --test goal_restore_binding --test runtime_wiring --lib
 if [[ "$mode" == full ]]; then
     run workspace cargo test --workspace --no-fail-fast
     run lint cargo clippy --workspace --all-targets -- -D warnings
-    run browser cargo check -p gui --all-targets --features browser
+    run browser cargo test -p gui --features browser
     run otel cargo test -p event-bus --features otel-exporter
 fi
 printf 'Passed. Logs are temporary files in %s; remove this directory when no longer needed.\n' "$out"

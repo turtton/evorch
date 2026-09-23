@@ -58,7 +58,7 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
         for body in [
             serde_json::json!({"access_token":"sentinel-access-abc","refresh_token":"refresh-secret","id_token":DUMMY_JWT}).to_string(),
         ] {
-            let (mut socket, _) = listener.accept().expect("request");
+            let mut socket = accept_issuer_request(&listener);
             socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("timeout");
             let mut request = Vec::new();
             let mut byte = [0];
@@ -79,10 +79,12 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
     let dir = parent.path().join("store");
     let backup = parent.path().join("backup");
     let store = Arc::new(sandbox::FileCredentialStore::open(&dir).expect("store"));
-    let backend = Arc::new(
-        ProviderCodexAuthBackend::production(store, "codex".into(), &url).expect("backend"),
-    );
-    let mut model = CodexAuthModel::with_backend(backend, "codex");
+    let mut backend =
+        ProviderCodexAuthBackend::production(store, "codex".into(), &url).expect("backend");
+    // Workspace and browser-feature suites can run in separate processes together.
+    // Keep the real login wire flow without competing for production callback ports.
+    backend.callback_ports = vec![0];
+    let mut model = CodexAuthModel::with_backend(Arc::new(backend), "codex");
     std::fs::rename(&dir, &backup).expect("move directory");
     // When: login completes the exchange but cannot commit the credentials.
     model.start();
@@ -106,6 +108,29 @@ fn refresh_stays_unauthenticated_when_login_save_fails() {
     assert!(!format!("{:?}", model.state).contains("sentinel-access-abc"));
     model.refresh_from_store();
     assert_eq!(model.state, CodexAuthState::Unauthenticated);
+}
+
+fn accept_issuer_request(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                socket.set_nonblocking(false).expect("blocking request");
+                return socket;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "issuer request deadline"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("issuer accept: {error}"),
+        }
+    }
 }
 
 fn complete_callback(authorize_url: &str) {
@@ -134,7 +159,7 @@ fn authenticate_forwards_authorize_url_then_saves_bundle() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
     let issuer = format!("http://{}", listener.local_addr().expect("address"));
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().expect("exchange");
+        let mut socket = accept_issuer_request(&listener);
         socket
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .expect("timeout");
