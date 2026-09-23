@@ -292,4 +292,8 @@ impl AgentRuntime {
         self.user_answers(run)
             .is_ok_and(|questions| questions.iter().any(|q| q.blocking && q.answer.is_none()))
     }
+    pub(crate) fn has_unanswered_questions(&self, run: RunId) -> bool {
+        self.user_answers(run)
+            .is_ok_and(|questions| questions.iter().any(|q| q.answer.is_none()))
+    }
 }

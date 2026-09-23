@@ -247,7 +247,8 @@ fn satisfied(runs: &[Value], mode: WaitMode) -> bool {
 }
 
 fn needs_attention(runs: &[Value]) -> bool {
-    runs.iter().any(|run| run["needs_user_input"] == true)
+    runs.iter()
+        .any(|run| run["needs_user_input"] == true || run["has_pending_question"] == true)
 }
 
 fn response(runs: Vec<Value>, mode: WaitMode, inbox_ready: bool) -> Value {
@@ -255,7 +256,7 @@ fn response(runs: Vec<Value>, mode: WaitMode, inbox_ready: bool) -> Value {
         "timed_out": !satisfied(&runs, mode) && !needs_attention(&runs) && !inbox_ready,
         "inbox_ready": inbox_ready,
         "user_input_ready": false,
-        "attention_run_ids": runs.iter().filter(|run| run["needs_user_input"] == true).map(|run| &run["run_id"]).collect::<Vec<_>>(),
+        "attention_run_ids": runs.iter().filter(|run| run["needs_user_input"] == true || run["has_pending_question"] == true).map(|run| &run["run_id"]).collect::<Vec<_>>(),
         "completed_run_ids": runs.iter().filter(|run| terminal(run)).map(|run| &run["run_id"]).collect::<Vec<_>>(),
         "runs": runs,
     })
@@ -273,6 +274,8 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Ve
             })?;
             let mut value = serde_json::to_value(output).map_err(|error| error.to_string())?;
             value["needs_user_input"] = Value::Bool(!terminal(&value) && runtime.has_pending_user_questions(*run));
+            value["has_pending_question"] =
+                Value::Bool(runtime.has_unanswered_questions(*run));
             for (field, limit) in [("output", OUTPUT_BYTES), ("reason", REASON_BYTES)] {
                 let truncated = value[field].as_str().is_some_and(|text| text.len() > limit);
                 if truncated {

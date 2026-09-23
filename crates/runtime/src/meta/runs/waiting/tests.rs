@@ -423,6 +423,48 @@ async fn admission_failure_is_observable_without_a_registered_run() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn optional_child_question_wakes_parent_wait_for_orchestrator_resolution() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("questions.sqlite3"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let (runtime, _) = fixture(None);
+    let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+    let (parent, first, second) = spawn(&runtime);
+    let (_cancel, receiver) = watch::channel(false);
+    let request = request(vec![first, second], WaitMode::All, 60000);
+    let wait = observe(&runtime, parent, &request, receiver.clone());
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    let question = runtime
+        .request_user_question(second, "Optional preference".into(), vec![], false)
+        .unwrap();
+    let result = wait.await.unwrap();
+    assert_eq!(result["attention_run_ids"], json!([second.to_string()]));
+    assert_eq!(result["runs"][1]["needs_user_input"], false);
+    assert_eq!(result["runs"][1]["has_pending_question"], true);
+    assert_eq!(
+        runtime.subagent_questions(parent, second).unwrap(),
+        vec![question.clone()]
+    );
+    runtime
+        .answer_subagent_question(parent, &question.id, "Use A")
+        .unwrap();
+    let result = observe(
+        &runtime,
+        parent,
+        &self::request(vec![second], WaitMode::Any, 0),
+        receiver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["attention_run_ids"], json!([]));
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
     let directory = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
@@ -438,10 +480,6 @@ async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
     let began = tokio::time::Instant::now();
     let wait = observe(&runtime, parent, &request, receiver.clone());
     tokio::pin!(wait);
-    assert!(poll!(&mut wait).is_pending());
-    runtime
-        .request_user_question(second, "Optional preference".into(), vec![], false)
-        .unwrap();
     assert!(poll!(&mut wait).is_pending());
     let question = runtime
         .request_user_question(

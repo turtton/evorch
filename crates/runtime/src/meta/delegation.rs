@@ -210,13 +210,17 @@ pub(crate) async fn wait_delegates(
                     .as_array()
                     .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id.to_string()));
                 match run {
-                    Some(run) if run["status"] != "still_running" => {
+                    Some(run)
+                        if run["status"] != "still_running"
+                            && run["has_pending_question"] != true =>
+                    {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }
                     Some(run) => super::serialize(&serde_json::json!({
                         "run_id": run_id.to_string(),
                         "phase": run["phase"],
                         "needs_user_input": run["needs_user_input"],
+                        "has_pending_question": run["has_pending_question"],
                         "inbox_ready": snapshot["inbox_ready"],
                         "user_input_ready": snapshot["user_input_ready"],
                         "timed_out": snapshot["timed_out"],
