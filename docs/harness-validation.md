@@ -104,3 +104,46 @@ The harness script now includes `runtime_wiring` in focused checks and executes
 the GUI browser-feature tests in full mode instead of only checking compilation.
 The full workspace figures above are from `e2287e7`, before this fixture follow-up;
 the next main CI run validates the complete tree again.
+
+## Prompt-cache regression gate
+
+Run `scripts/check-cache-contracts.sh` for the offline cache contract. The same
+script runs in the Lefthook pre-push hook, the harness checks, and a named CI step.
+Hooks must be installed locally; CI provides the shared check. Repository branch
+protection is separate from this change.
+
+`StreamingMockOpenAi::spawn_with_prompt_cache` derives cached usage from the
+actual HTTP requests, instead of returning scripted high cache counts. It puts
+stable request settings before the conversation, canonicalizes JSON object keys,
+keeps array order and string bytes, and finds the longest prior input prefix for
+the same model and cache key. One UTF-8 byte is one synthetic token; this is a
+mutation detector, not a real tokenizer, cache TTL/routing simulator, or billing
+estimate. JSON and SSE return consistent input/cached/total usage.
+
+The runtime E2E exercises configuration, routing, provider HTTP/SSE, tool returns,
+compaction events, and usage aggregation. Twelve consecutive tool calls cross
+the former eight-result pruning boundary, including large output artifacts,
+errors, and multilingual text. Every ordinary turn must retain the full previous
+input prefix and report at least that much cached input. Raw request assertions
+use a separate test oracle, independent of both the mock cache calculation and
+the production warning logic. Actual provider clients also verify stable wire
+input for OpenAI, OpenAI Compatible, Codex Responses, and Anthropic, including
+images, multiple tool results, and changing tool registration order.
+
+A successful same-run `Compacted` event permits replacement only in the next
+request, with the matching new checkpoint and unchanged instructions/settings.
+Subsequent requests must preserve that new prefix. Both manual and automatic
+compaction are covered; checkpoint-like text alone grants no exemption.
+
+When adding a cache-affecting feature, extend the relevant E2E path and add a
+negative case for its unintended history mutation. Intentional boundaries need
+an explicit event and coverage showing reuse resumes afterward. Passing these
+contracts protects the exercised request construction paths; it does not promise
+production cache availability or automatically cover every future execution path.
+
+Local validation on 2026-09-23: the cache gate passed all 82 tests in 7.4 seconds
+with existing build artifacts (runtime E2E: three tests in 2.5 seconds). Temporarily
+reintroducing count-based rewriting after eight tool results made the ordinary
+E2E fail at request 9 with `previous conversation item 3 changed`. Production
+source was restored exactly, and the full gate then passed. Clean compilation
+adds normal Rust build time; these figures measure this local checkout, not CI.

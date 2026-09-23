@@ -139,3 +139,22 @@ mismatch. Revisit this policy before cutting a v1 release.
 domain. If you operate this domain from a different host repo, expect
 `intent-cli` to surface a structured wrong-host warning with remediation
 steps; do not silently proceed with parent-state mutation.
+
+## Cache correctness gate
+
+Prompt cache preservation is a cost-sensitive correctness contract. Before
+pushing changes, run `scripts/check-cache-contracts.sh`; the pre-push hook and
+CI run the same offline gate.
+
+- Normal turns must preserve the already-sent provider input prefix and stable
+  instructions, model/settings, tool schemas/order, and cache affinity key.
+- Bound tool output and create artifact references when returning the result.
+  Do not rewrite previously sent tool results based on age or result count.
+- A successful compaction is an explicit one-request history-replacement
+  boundary. Its system/tools remain stable, and later turns must preserve the
+  new prefix. A checkpoint-looking string alone is not permission to reset.
+- Cache-affecting features must extend the end-to-end scenarios for their
+  affected paths. Keep the input-derived mock cache and independent wire-prefix
+  assertions; fixed high cached-token fixtures alone cannot prove preservation.
+- Do not weaken or remove this contract to make a new feature pass. Intentional
+  invalidation requires a documented boundary and tests for reuse after it.

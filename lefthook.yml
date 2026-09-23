@@ -3,3 +3,8 @@ pre-commit:
     - name: cargo fmt
       run: cargo fmt --all
       stage_fixed: true
+
+pre-push:
+  jobs:
+    - name: Cache preservation contracts
+      run: scripts/check-cache-contracts.sh

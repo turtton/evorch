@@ -55,6 +55,12 @@ jobs:
           cargo test -p gui --features browser --no-run
           cargo test -p event-bus --features otel-exporter --no-run
           cargo build -p config --example dump_schema
+      # Cost-sensitive invariants also run in the local pre-push hook. The mock
+      # computes cache usage from received input; compaction has an explicit boundary.
+      - name: Cache preservation contracts (offline)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/check-cache-contracts.sh
       # 以降のテスト系 step は上で揃えた target dir を読み込み専用で共有し、
       # コンパイルを走らせずテスト実行のみを background で並列化する。
       - name: Workspace tests (nextest + doctest)

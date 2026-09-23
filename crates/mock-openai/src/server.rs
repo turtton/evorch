@@ -12,6 +12,10 @@ use serde_json::{Value, json};
 
 use crate::ScriptedResponse;
 
+mod prompt_cache;
+
+use prompt_cache::PromptCache;
+
 /// A parsed request, retained even when the response queue is exhausted.
 #[derive(Clone, Debug)]
 pub struct RecordedRequest {
@@ -51,6 +55,28 @@ impl StreamingMockOpenAi {
         Self::spawn_with(responses, WriteMode::default())
     }
 
+    /// Starts a fixture with deterministic prefix-cache usage in JSON and SSE.
+    ///
+    /// One UTF-8 byte of canonical request settings and messages is one synthetic
+    /// token. The longest input prefix among the last 64 requests with the same
+    /// model and `prompt_cache_key` is reported as cached. `stream` and
+    /// `stream_options` do not affect this prefix. Scripted completion usage is
+    /// preserved; scripted prompt usage is replaced.
+    ///
+    /// This fixture detects prompt-history mutations. It does not predict real
+    /// tokenization, provider cache TTL/routing/block sizes, or billing.
+    ///
+    /// # Panics
+    /// Panics if the OS cannot create the listener or accept thread.
+    pub fn spawn_with_prompt_cache(responses: Vec<ScriptedResponse>) -> Self {
+        Self::spawn_internal(
+            responses,
+            WriteMode::default(),
+            vec!["mock-model".to_owned()],
+            true,
+        )
+    }
+
     /// Starts a fixture with the selected SSE write strategy.
     ///
     /// # Panics
@@ -69,6 +95,17 @@ impl StreamingMockOpenAi {
         mode: WriteMode,
         models: Vec<String>,
     ) -> Self {
+        Self::spawn_internal(responses, mode, models, false)
+    }
+
+    fn spawn_internal(
+        responses: Vec<ScriptedResponse>,
+        mode: WriteMode,
+        models: Vec<String>,
+        simulate_prompt_cache: bool,
+    ) -> Self {
+        let prompt_cache =
+            simulate_prompt_cache.then(|| Arc::new(Mutex::new(PromptCache::default())));
         let models: Vec<_> = models
             .into_iter()
             .map(|id| json!({"id": id, "object": "model", "created": 0, "owned_by": "mock-openai"}))
@@ -103,6 +140,7 @@ impl StreamingMockOpenAi {
                 let queued = Arc::clone(&queued);
                 let models = models.clone();
                 let mode = mode.clone();
+                let prompt_cache = prompt_cache.clone();
                 connections.push(thread::spawn(move || {
                 let result = (|| -> io::Result<()> {
                     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -110,6 +148,10 @@ impl StreamingMockOpenAi {
                     let request = read_request(&mut stream)?;
                     let streaming = request.stream;
                     let listing_models = request.method == "GET" && request.path == "/v1/models";
+                    let prompt = (prompt_cache.is_some()
+                        && request.method == "POST"
+                        && request.path == "/v1/chat/completions")
+                        .then(|| request.body.clone());
                     // Poison recovery retains fixture evidence instead of panicking again.
                     recorded
                         .lock()
@@ -119,6 +161,17 @@ impl StreamingMockOpenAi {
                         return write_json(&mut stream, "200 OK", &models);
                     }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                    let response = response.map(|response| {
+                        if let (Some(cache), Some(prompt)) = (&prompt_cache, &prompt) {
+                            let (input_tokens, cached_tokens) = cache
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .observe(prompt);
+                            response.with_prompt_cache_usage(input_tokens, cached_tokens)
+                        } else {
+                            response
+                        }
+                    });
                     if let Some(response) = &response { thread::sleep(response.delay); }
                     match response {
                         Some(response) if streaming => write_sse(&mut stream, &response, mode),

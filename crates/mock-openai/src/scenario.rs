@@ -22,8 +22,9 @@ pub struct ScriptedResponse {
     model: String,
     fragments: Vec<String>,
     kind: ResponseKind,
-    prompt_tokens: u32,
+    prompt_tokens: u64,
     completion_tokens: u32,
+    cached_tokens: Option<u64>,
 }
 
 impl ScriptedResponse {
@@ -48,6 +49,7 @@ impl ScriptedResponse {
             kind: ResponseKind::Text,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: None,
         }
     }
 
@@ -75,8 +77,18 @@ impl ScriptedResponse {
     /// Overrides token counts in both encodings; total is their lossless sum.
     #[must_use]
     pub const fn with_usage(mut self, prompt_tokens: u32, completion_tokens: u32) -> Self {
-        self.prompt_tokens = prompt_tokens;
+        self.prompt_tokens = prompt_tokens as u64;
         self.completion_tokens = completion_tokens;
+        self
+    }
+
+    pub(crate) const fn with_prompt_cache_usage(
+        mut self,
+        prompt_tokens: u64,
+        cached_tokens: u64,
+    ) -> Self {
+        self.prompt_tokens = prompt_tokens;
+        self.cached_tokens = Some(cached_tokens);
         self
     }
 
@@ -157,10 +169,14 @@ impl ScriptedResponse {
     }
 
     fn usage(&self) -> Value {
-        json!({
+        let mut usage = json!({
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
-            "total_tokens": u64::from(self.prompt_tokens) + u64::from(self.completion_tokens)
-        })
+            "total_tokens": self.prompt_tokens + u64::from(self.completion_tokens)
+        });
+        if let Some(cached_tokens) = self.cached_tokens {
+            usage["prompt_tokens_details"] = json!({"cached_tokens": cached_tokens});
+        }
+        usage
     }
 }

@@ -240,3 +240,138 @@ fn drop_shuts_down_listener() {
     // Then
     assert!(TcpStream::connect(address).is_err());
 }
+
+fn prompt_cache_usage(server: &StreamingMockOpenAi, request: &Value) -> (u64, u64) {
+    let (headers, body) = post(server, request);
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+    let usage = if request["stream"] == true {
+        body.split("\n\n")
+            .filter_map(|frame| frame.strip_prefix("data: "))
+            .filter(|frame| *frame != "[DONE]")
+            .map(|frame| serde_json::from_str::<Value>(frame).unwrap())
+            .find_map(|chunk| chunk.get("usage").cloned())
+            .expect("SSE usage frame")
+    } else {
+        serde_json::from_str::<Value>(&body).unwrap()["usage"].clone()
+    };
+    let input = usage["prompt_tokens"].as_u64().unwrap();
+    let cached = usage["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    assert!(cached <= input);
+    assert_eq!(usage["completion_tokens"], 7);
+    assert_eq!(usage["total_tokens"], input + 7);
+    (input, cached)
+}
+
+fn cache_scripts(count: usize) -> Vec<ScriptedResponse> {
+    (0..count)
+        .map(|index| {
+            ScriptedResponse::text_stream(&format!("cache-{index}"), "m", ["ok"]).with_usage(999, 7)
+        })
+        .collect()
+}
+
+#[test]
+fn prompt_cache_reuses_append_loses_rewritten_history_and_rewarms() {
+    for streaming in [false, true] {
+        let server = StreamingMockOpenAi::spawn_with_prompt_cache(cache_scripts(4));
+        let mut request = json!({
+            "model": "m", "stream": streaming,
+            "messages": [
+                {"role": "system", "content": "Keep the existing transcript."},
+                {"role": "user", "content": "Read the tool result."},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "read", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "large output ".repeat(200)}
+            ]
+        });
+        let (first_input, first_cached) = prompt_cache_usage(&server, &request);
+        assert_eq!(first_cached, 0);
+
+        request["messages"].as_array_mut().unwrap().extend([
+            json!({"role": "assistant", "content": "Read."}),
+            json!({"role": "user", "content": "Continue."}),
+        ]);
+        let (appended_input, appended_cached) = prompt_cache_usage(&server, &request);
+        assert!(appended_input > first_input);
+        assert_eq!(appended_cached, first_input);
+
+        // Retroactive tool-result replacement breaks the reusable prefix.
+        request["messages"][3]["content"] = json!("Full output: /tmp/output.txt");
+        let (rewritten_input, rewritten_cached) = prompt_cache_usage(&server, &request);
+        assert!(rewritten_input < appended_input);
+        assert!(rewritten_cached < first_input);
+        assert!(rewritten_cached < rewritten_input);
+
+        // The new transcript becomes cacheable normally; compaction needs no bypass.
+        request["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role": "assistant", "content": "Continued."}));
+        let (_, warmed_cached) = prompt_cache_usage(&server, &request);
+        assert_eq!(warmed_cached, rewritten_input);
+        assert_eq!(server.remaining_scripts(), 0);
+    }
+}
+
+#[test]
+fn prompt_cache_is_shared_between_json_and_sse_transport() {
+    let server = StreamingMockOpenAi::spawn_with_prompt_cache(cache_scripts(3));
+    let mut request = json!({"model": "m", "messages": [{"role": "user", "content": "hello"}]});
+    let (input, cached) = prompt_cache_usage(&server, &request);
+    assert_eq!(cached, 0);
+    request["stream"] = json!(true);
+    request["stream_options"] = json!({"include_usage": true});
+    assert_eq!(prompt_cache_usage(&server, &request), (input, input));
+    request["stream"] = json!(false);
+    assert_eq!(prompt_cache_usage(&server, &request), (input, input));
+}
+
+#[test]
+fn prompt_cache_isolates_models_and_cache_keys() {
+    let server = StreamingMockOpenAi::spawn_with_prompt_cache(cache_scripts(7));
+    let original = json!({"model": "m", "messages": [{"role": "user", "content": "hello"}]});
+    let (input, cached) = prompt_cache_usage(&server, &original);
+    assert_eq!(cached, 0);
+    let mut request = original.clone();
+    request["model"] = json!("other-model");
+    assert_eq!(prompt_cache_usage(&server, &request).1, 0);
+    request = original.clone();
+    request["prompt_cache_key"] = json!("thread-a");
+    let (keyed_input, keyed_cached) = prompt_cache_usage(&server, &request);
+    assert_eq!(keyed_cached, 0);
+    request["prompt_cache_key"] = json!("thread-b");
+    assert_eq!(prompt_cache_usage(&server, &request).1, 0);
+    request["prompt_cache_key"] = json!("thread-a");
+    assert_eq!(
+        prompt_cache_usage(&server, &request),
+        (keyed_input, keyed_input)
+    );
+    assert_eq!(prompt_cache_usage(&server, &original), (input, input));
+    request["model"] = json!("other-model");
+    assert_eq!(prompt_cache_usage(&server, &request).1, 0);
+}
+
+#[test]
+fn prompt_cache_includes_tool_definitions_and_other_request_settings() {
+    for changed_field in ["tools", "temperature", "response_format"] {
+        let server = StreamingMockOpenAi::spawn_with_prompt_cache(cache_scripts(2));
+        let mut request = json!({
+            "model": "m", "temperature": 0,
+            "tools": [{"type": "function", "function": {"name": "read", "description": "Read data"}}],
+            "response_format": {"type": "text"},
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let (input, _) = prompt_cache_usage(&server, &request);
+        match changed_field {
+            "tools" => request["tools"][0]["function"]["description"] = json!("Changed tool"),
+            "temperature" => request["temperature"] = json!(1),
+            "response_format" => request["response_format"]["type"] = json!("json_object"),
+            _ => unreachable!(),
+        }
+        assert!(prompt_cache_usage(&server, &request).1 < input);
+    }
+}

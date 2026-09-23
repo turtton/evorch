@@ -17,6 +17,7 @@ run() {
     fi
 }
 run format cargo fmt --all --check
+run cache-contracts scripts/check-cache-contracts.sh
 run runtime cargo test -p runtime --test restore_expansion --test restore_tool_intent \
     --test shell_jobs_integration --test state_transitions --test background --test messaging_loop \
     --test workspace_cleanup \
