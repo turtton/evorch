@@ -14,11 +14,12 @@ use mock_openai::cache_contract::{
 use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
 use routing::MapEnv;
 use runtime::{
-    AgentRuntime, ModelSource, Role, RunConfig, RunId, RuntimeComposition, SystemPromptCatalog,
-    compose_runtime,
+    AgentRuntime, DelegateImage, ModelSource, Role, RunConfig, RunId, RuntimeComposition,
+    SystemPromptCatalog, compose_runtime,
 };
 use sandbox::credential::FileCredentialStore;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tools::{Permissions, Tool, ToolError, ToolExecutor, ToolResult};
 
 const MODEL: &str = "mock-model";
@@ -48,6 +49,35 @@ impl Tool for BulkRead {
     }
 }
 
+struct GatedRead {
+    started: Notify,
+    release: Notify,
+    child_started: Notify,
+}
+
+#[async_trait::async_trait]
+impl Tool for GatedRead {
+    fn name(&self) -> &'static str {
+        BulkRead.name()
+    }
+    fn schema(&self) -> Value {
+        BulkRead.schema()
+    }
+    fn permissions(&self) -> Permissions {
+        BulkRead.permissions()
+    }
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+        if input["index"] == 0 {
+            self.started.notify_one();
+            self.release.notified().await;
+        } else if input["index"] == 1 {
+            self.child_started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        BulkRead.execute(input).await
+    }
+}
+
 struct Harness {
     _directory: tempfile::TempDir,
     runtime: AgentRuntime,
@@ -56,6 +86,10 @@ struct Harness {
 }
 
 fn harness(script: Vec<ScriptedResponse>, window: u64) -> Harness {
+    harness_with_read(script, window, Arc::new(BulkRead))
+}
+
+fn harness_with_read(script: Vec<ScriptedResponse>, window: u64, read: Arc<dyn Tool>) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
     std::fs::write(
@@ -89,7 +123,7 @@ summarizer = "structural"
     let bus = Arc::new(EventBus::new(1024));
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
-    executor.register(Arc::new(BulkRead)).unwrap();
+    executor.register(read).unwrap();
     let mut prompts = SystemPromptCatalog::builder();
     for role in [
         Role::Orchestrator,
@@ -352,4 +386,137 @@ async fn manual_compaction_can_replace_history_then_warms_a_new_prefix() {
 #[tokio::test]
 async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;
+}
+
+#[tokio::test]
+async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
+    let read = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let mut harness = harness_with_read(
+        vec![
+            read_response(0),
+            read_response(1),
+            ScriptedResponse::tool_call(
+                "wait",
+                MODEL,
+                0,
+                "wait-call",
+                "wait",
+                [json!({"run_id":"run-2"}).to_string()],
+            ),
+            ScriptedResponse::tool_call(
+                "finish",
+                MODEL,
+                0,
+                "finish-call",
+                "finish",
+                [json!({"result":"done"}).to_string()],
+            ),
+        ],
+        1_000_000,
+        read.clone(),
+    );
+    let prompt = "Handle follow-up input";
+    let run = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        prompt.into(),
+        RunConfig::default(),
+    );
+    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
+        .await
+        .unwrap();
+    let child = harness
+        .runtime
+        .delegate_background_as_child(run, Role::Worker, "Blocked child", RunConfig::default())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), read.child_started.notified())
+        .await
+        .unwrap();
+    read.release.notify_one();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .send_message_with_images(
+            run,
+            "Inspect the attached image".into(),
+            vec![DelegateImage {
+                media_type: "image/png".into(),
+                data: "aW1hZ2U=".into(),
+            }],
+        )
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    harness.runtime.cancel(child).unwrap();
+    harness.runtime.wait(child).await.unwrap();
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .filter(|request| {
+            request.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "user" && message["content"] == prompt)
+        })
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(id),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) if id == &run.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) => {
+                assert_ne!(diagnostic.code, "CacheRegression", "{diagnostic:?}");
+                None
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), requests.len());
+    for (wire, tokens) in requests.windows(2).zip(usage.windows(2)) {
+        assert_append_only(CacheProtocol::OpenAi, &wire[0], &wire[1]).unwrap();
+        assert!(
+            tokens[1].1 >= tokens[0].0,
+            "previous wire input must remain cached"
+        );
+    }
+    let messages = requests[2]["messages"].as_array().unwrap();
+    let input_index = messages
+        .iter()
+        .position(|message| {
+            message["content"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block["text"] == "Inspect the attached image")
+            })
+        })
+        .expect("next wire request includes user input");
+    assert_eq!(messages[input_index]["role"], "user");
+    assert!(
+        messages[input_index]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["image_url"]["url"] == "data:image/png;base64,aW1hZ2U=")
+    );
+    assert_eq!(messages[input_index - 1]["role"], "tool");
+    let result: Value =
+        serde_json::from_str(messages[input_index - 1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["user_input_ready"], true);
+    assert_eq!(result["runs"][0]["status"], "still_running");
 }

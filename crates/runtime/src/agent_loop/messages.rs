@@ -5,9 +5,21 @@ use super::LoopState;
 const AGENT_MESSAGE_PREFIX: &str = "agent-message";
 
 impl LoopState {
-    pub(super) fn flush_aside(&mut self) -> bool {
-        let mut received = false;
-        while let Ok((text, images)) = self.channels.inbox_rx.try_recv() {
+    pub(crate) fn has_pending_user_messages(&self) -> bool {
+        !self.pending_user_messages.is_empty()
+    }
+
+    pub(crate) fn queue_user_message(&mut self, message: (String, Vec<crate::DelegateImage>)) {
+        self.pending_user_messages.push(message);
+    }
+
+    pub(super) fn flush_user_messages(&mut self) -> bool {
+        let mut messages = std::mem::take(&mut self.pending_user_messages);
+        while let Ok(message) = self.channels.inbox_rx.try_recv() {
+            messages.push(message);
+        }
+        let received = !messages.is_empty();
+        for (text, images) in messages {
             self.context.push_user(&text);
             if let Some(message) = self.context.messages.last_mut() {
                 message.content.extend(images.into_iter().map(|image| {
@@ -17,12 +29,16 @@ impl LoopState {
                     }
                 }));
             }
-            received = true;
         }
         if received {
             self.publish_message_count();
             self.resumed = true;
         }
+        received
+    }
+
+    pub(super) fn flush_aside(&mut self) -> bool {
+        let received = self.flush_user_messages();
         if self.task.mailbox.is_empty() {
             return received;
         }

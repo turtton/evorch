@@ -64,14 +64,14 @@ fn calls(inputs: &[u32]) -> Vec<ChatResponse> {
 }
 
 #[tokio::test]
-async fn stops_at_five_identical_calls_with_different_ids() {
+async fn stops_at_ten_identical_calls_with_different_ids() {
     // Given: identical calls with unique IDs across turns.
-    let script = calls(&[1; 6]);
+    let script = calls(&[1; 11]);
     // When: the real agent loop consumes the script.
     let (phase, events, requests) = run_script(script, config::Config::default()).await;
-    // Then: the fifth call stops the run with one correlated diagnostic.
+    // Then: the tenth call stops the run with one correlated diagnostic.
     assert_eq!(phase, AgentRunPhase::Error);
-    assert_eq!(requests, 5);
+    assert_eq!(requests, 10);
     let diagnostics: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -80,7 +80,7 @@ async fn stops_at_five_identical_calls_with_different_ids() {
         })
         .collect();
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].call_id.as_deref(), Some("4"));
+    assert_eq!(diagnostics[0].call_id.as_deref(), Some("9"));
     assert_eq!(
         diagnostics[0].severity,
         event_bus::DiagnosticSeverity::Error
@@ -124,9 +124,9 @@ async fn configured_limit_stops_at_two() {
 
 #[tokio::test]
 async fn stops_on_streak_inside_batch_even_when_tail_differs() {
-    // Given: five identical pairs followed by a different pair in one batch.
-    let mut script = calls(&[1, 1, 1, 1, 1, 2]);
-    let content = script.drain(..6).flat_map(|r| r.message.content).collect();
+    // Given: ten identical pairs followed by a different pair in one batch.
+    let mut script = calls(&[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
+    let content = script.drain(..11).flat_map(|r| r.message.content).collect();
     let mut batch = text_response("", FinishReason::ToolUse);
     batch.message.content = content;
     script.insert(0, batch);
@@ -135,7 +135,7 @@ async fn stops_on_streak_inside_batch_even_when_tail_differs() {
     // Then: the maximum streak is detected before the differing tail resets it.
     assert_eq!(phase, AgentRunPhase::Error);
     assert_eq!(requests, 1);
-    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls" && d.call_id.as_deref() == Some("4"))));
+    assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls" && d.call_id.as_deref() == Some("9"))));
 }
 
 #[tokio::test]

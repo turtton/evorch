@@ -43,7 +43,7 @@
       "default": {
         "max_elapsed_secs": 7200,
         "max_file_rereads": 20,
-        "max_identical_tool_call_repeats": 5,
+        "max_identical_tool_call_repeats": 10,
         "max_no_progress_rounds": 100,
         "max_tool_calls": 400
       }
@@ -303,10 +303,10 @@
           "minimum": 0
         },
         "max_identical_tool_call_repeats": {
-          "description": "同一の名前・引数の連続呼び出しがこの回数に達すると停止 (既定: 5)。\nID は比較対象外。0 でも最初の呼び出しで停止する。",
+          "description": "同一の名前・引数の連続呼び出しがこの回数に達すると停止 (既定: 10)。\nID は比較対象外。0 でも最初の呼び出しで停止する。",
           "type": "integer",
           "format": "uint32",
-          "default": 5,
+          "default": 10,
           "minimum": 0
         },
         "max_no_progress_rounds": {

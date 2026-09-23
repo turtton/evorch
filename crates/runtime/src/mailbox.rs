@@ -23,9 +23,15 @@ pub enum PushError {
 /// 単一の AgentRun が受け取るメッセージを保持する inbox。
 #[derive(Debug)]
 pub struct RunMailbox {
-    queue: Mutex<VecDeque<AgentMessage>>,
+    queue: Mutex<VecDeque<QueuedMessage>>,
     closed: Mutex<bool>,
     version: watch::Sender<u64>,
+}
+
+#[derive(Debug)]
+struct QueuedMessage {
+    message: AgentMessage,
+    interrupts_wait: bool,
 }
 
 impl RunMailbox {
@@ -44,6 +50,16 @@ impl RunMailbox {
     /// inbox が閉じている場合は [`PushError::Closed`]、容量一杯の場合は
     /// [`PushError::Full`] を返す。成功時にバージョンを単調増加させる。
     pub fn try_push(&self, message: AgentMessage) -> Result<(), PushError> {
+        self.push(message, true)
+    }
+
+    /// 自動完了通知を追加する。複数 run の `wait(mode=all)` はこの通知だけでは
+    /// 中断せず、対象 run の終端状態で完了条件を判定する。
+    pub(crate) fn try_push_completion(&self, message: AgentMessage) -> Result<(), PushError> {
+        self.push(message, false)
+    }
+
+    fn push(&self, message: AgentMessage, interrupts_wait: bool) -> Result<(), PushError> {
         let closed = self
             .closed
             .lock()
@@ -58,7 +74,10 @@ impl RunMailbox {
         if queue.len() >= MAILBOX_CAPACITY {
             return Err(PushError::Full);
         }
-        queue.push_back(message);
+        queue.push_back(QueuedMessage {
+            message,
+            interrupts_wait,
+        });
         drop(queue);
         drop(closed);
         self.version.send_modify(|value| *value += 1);
@@ -96,7 +115,7 @@ impl RunMailbox {
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let drained: Vec<AgentMessage> = queue.drain(..).collect();
+        let drained: Vec<AgentMessage> = queue.drain(..).map(|queued| queued.message).collect();
         drop(queue);
         self.version.send_modify(|value| *value += 1);
         drained
@@ -111,11 +130,11 @@ impl RunMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut matched = Vec::new();
         let mut remaining = VecDeque::with_capacity(queue.len());
-        while let Some(message) = queue.pop_front() {
-            if predicate(&message) {
-                matched.push(message);
+        while let Some(queued) = queue.pop_front() {
+            if predicate(&queued.message) {
+                matched.push(queued.message);
             } else {
-                remaining.push_back(message);
+                remaining.push_back(queued);
             }
         }
         *queue = remaining;
@@ -134,8 +153,10 @@ impl RunMailbox {
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let index = queue.iter().position(predicate);
-        let removed = index.and_then(|index| queue.remove(index));
+        let index = queue.iter().position(|queued| predicate(&queued.message));
+        let removed = index
+            .and_then(|index| queue.remove(index))
+            .map(|queued| queued.message);
         drop(queue);
         if removed.is_some() {
             self.version.send_modify(|value| *value += 1);
@@ -157,6 +178,16 @@ impl RunMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// 自動完了通知以外の未読メッセージがあり、run の待機を中断すべきか返す。
+    /// メッセージの内容や既読状態は変更しない。
+    pub(crate) fn has_interrupting_message(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|queued| queued.interrupts_wait)
     }
 
     /// バージョン変更通知を受け取る購読者を返す。

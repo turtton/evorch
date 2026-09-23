@@ -92,7 +92,7 @@ impl AgentRuntime {
             content,
             reply_to: None,
         };
-        match recipient.mailbox.try_push(message.clone()) {
+        match recipient.mailbox.try_push_completion(message.clone()) {
             Ok(()) => {
                 self.shared
                     .sent

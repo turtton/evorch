@@ -35,7 +35,7 @@ impl Default for BudgetSettings {
             max_tokens: None,
             max_file_rereads: 20,
             max_no_progress_rounds: 100,
-            max_identical_tool_call_repeats: 5,
+            max_identical_tool_call_repeats: 10,
         }
     }
 }

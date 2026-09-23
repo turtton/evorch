@@ -104,6 +104,7 @@ pub(crate) struct LoopState {
     pub(crate) last_usage: Option<Usage>,
     answered_questions: std::collections::HashSet<String>,
     resumed: bool,
+    pending_user_messages: Vec<(String, Vec<crate::DelegateImage>)>,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -192,6 +193,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         last_usage: None,
         answered_questions: Default::default(),
         resumed: is_restored,
+        pending_user_messages: Vec::new(),
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -664,6 +666,11 @@ impl LoopState {
             {
                 self.finish_error(error.to_string());
                 return;
+            }
+            // Only wait-interrupting input is delivered before the next model
+            // request. Ordinary UI follow-ups retain their existing Stop boundary.
+            if self.has_pending_user_messages() {
+                self.flush_user_messages();
             }
             if let Err(error) = self.flush_user_answers() {
                 self.finish_error(error);

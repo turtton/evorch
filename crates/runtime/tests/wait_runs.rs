@@ -11,6 +11,10 @@ use support::{ScriptedModel, text_response, tool_response};
 use tools::ToolExecutor;
 
 async fn execute_wait(arguments: Value) -> (String, bool) {
+    execute_wait_with_message(arguments, false).await
+}
+
+async fn execute_wait_with_message(arguments: Value, send_message: bool) -> (String, bool) {
     let model = Arc::new(ScriptedModel::new([]));
     model
         .add_keyed(
@@ -31,12 +35,16 @@ async fn execute_wait(arguments: Value) -> (String, bool) {
             ],
         )
         .await;
-    model
-        .add_keyed(
-            "CHILD",
-            [Ok(text_response("first completed", FinishReason::Stop))],
-        )
-        .await;
+    let mut child_responses = Vec::new();
+    if send_message {
+        child_responses.push(Ok(tool_response(
+            "message",
+            "send",
+            json!({"run_id":"run-1", "message":"Review this finding"}),
+        )));
+    }
+    child_responses.push(Ok(text_response("first completed", FinishReason::Stop)));
+    model.add_keyed("CHILD", child_responses).await;
     model
         .add_keyed(
             "CHILD2",
@@ -98,4 +106,13 @@ async fn invalid_self_wait_returns_error_and_keeps_parent_running() {
         serde_json::from_str::<Value>(&result).unwrap()["code"],
         "wait_denied"
     );
+}
+
+#[tokio::test]
+async fn legacy_wait_returns_a_structured_snapshot_for_an_inbox_message() {
+    let (result, failed) = execute_wait_with_message(json!({"run_id":"run-2"}), true).await;
+    assert!(!failed, "{result}");
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["inbox_ready"], true);
 }

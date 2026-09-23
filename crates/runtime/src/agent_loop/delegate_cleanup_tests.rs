@@ -80,6 +80,7 @@ fn fixture(cancel_rx: watch::Receiver<bool>) -> (AgentRuntime, LoopState) {
         last_usage: None,
         answered_questions: Default::default(),
         resumed: false,
+        pending_user_messages: Vec::new(),
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),

@@ -1373,6 +1373,11 @@ impl AgentRuntime {
         Ok((message_id, message, disposition))
     }
 
+    /// run 自身の待機で mailbox を非消費のまま監視するための参照を返す。
+    pub(crate) fn run_mailbox(&self, run_id: RunId) -> Result<Arc<RunMailbox>, RuntimeError> {
+        Ok(Arc::clone(&self.entry(run_id)?.mailbox))
+    }
+
     /// `run_id` の inbox に届いているすべての AgentMessage を FIFO 順で取り出す。
     ///
     /// # Errors

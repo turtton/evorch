@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use agents::Role;
-use event_bus::EventBus;
+use event_bus::{AgentMessageKind, EventBus};
 use futures_util::poll;
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
 use tokio::sync::Notify;
@@ -123,7 +123,8 @@ fn wait_schema_and_argument_validation_agree() {
     for input in [
         json!({"run_id":"run-1"}),
         json!({"run_ids":["run-1","run-2"],"mode":"all","timeout_ms":0}),
-        json!({"run_ids":["run-1"],"timeout_ms":60000}),
+        json!({"run_ids":["run-1"],"timeout_ms":60001}),
+        json!({"run_ids":["run-1"],"timeout_ms":600000}),
     ] {
         assert!(validator.is_valid(&input));
         assert!(parse::<WaitArgs>(input).unwrap().validate().is_ok());
@@ -133,7 +134,7 @@ fn wait_schema_and_argument_validation_agree() {
         json!({"run_id":"run-1","run_ids":["run-2"]}),
         json!({"run_ids":[]}),
         json!({"run_ids":["run-1","run-1"]}),
-        json!({"run_id":"run-1","timeout_ms":60001}),
+        json!({"run_id":"run-1","timeout_ms":600001}),
         json!({"run_id":"run-1","timeout_ms":-1}),
         json!({"run_id":"run-1","mode":"some"}),
         json!({"run_id":"run-1","poll_interval":1}),
@@ -182,6 +183,7 @@ async fn all_waits_for_every_completion_including_cancelled_children() {
     assert!(poll!(&mut wait).is_pending());
     model.first.notify_one();
     runtime.wait(first).await.unwrap();
+    // A completion relay is still queued but must not interrupt mode=all.
     assert!(poll!(&mut wait).is_pending());
     runtime.cancel(second).unwrap();
     runtime.wait(second).await.unwrap();
@@ -477,5 +479,117 @@ async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
         runtime.user_answers(first).unwrap()[0].answer.as_deref(),
         Some("A")
     );
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_wait_suspends_for_ten_minutes_without_polling_or_cancelling() {
+    let (runtime, _) = fixture(None);
+    let (parent, first, _) = spawn(&runtime);
+    let (_cancel, receiver) = watch::channel(false);
+    let request = parse::<WaitArgs>(json!({"run_ids":[first.to_string()]}))
+        .unwrap()
+        .validate()
+        .unwrap();
+    let began = tokio::time::Instant::now();
+    let wait = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(poll!(&mut wait).is_pending());
+    let result = wait.await.unwrap();
+    assert_eq!(began.elapsed(), Duration::from_secs(600));
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(result["inbox_ready"], false);
+    assert_eq!(result["runs"][0]["status"], "still_running");
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn message_interrupts_all_wait_without_consuming_or_copying_the_inbox() {
+    let (runtime, _) = fixture(None);
+    let (parent, first, second) = spawn(&runtime);
+    let (_cancel, receiver) = watch::channel(false);
+    let request = request(vec![first, second], WaitMode::All, MAX_WAIT_MS);
+    let began = tokio::time::Instant::now();
+    let wait = observe(&runtime, parent, &request, receiver.clone());
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    // Empty mailbox drains also publish version changes; they are not input.
+    assert!(runtime.take_inbox(parent).unwrap().is_empty());
+    assert!(poll!(&mut wait).is_pending());
+    let message_id = runtime
+        .send_agent_message(
+            second,
+            parent,
+            AgentMessageKind::Send,
+            "Need a decision",
+            None,
+        )
+        .unwrap();
+    let result = wait.await.unwrap();
+    assert_eq!(began.elapsed(), Duration::ZERO);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["inbox_ready"], true);
+    assert_eq!(result["completed_run_ids"], json!([]));
+    assert!(!result.to_string().contains("Need a decision"));
+    // Already queued input must also wake a later wait without a fresh event.
+    assert_eq!(
+        observe(&runtime, parent, &request, receiver.clone())
+            .await
+            .unwrap()["inbox_ready"],
+        true
+    );
+    let messages = runtime.take_inbox(parent).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message_id, message_id);
+    assert_eq!(messages[0].content, "Need a decision");
+    let result = observe(
+        &runtime,
+        parent,
+        &self::request(vec![first, second], WaitMode::All, 0),
+        receiver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["inbox_ready"], false);
+    assert_eq!(result["timed_out"], true);
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn messages_from_children_outside_wait_targets_interrupt_wait() {
+    let (runtime, _) = fixture(None);
+    let (parent, first, second) = spawn(&runtime);
+    let (_cancel, receiver) = watch::channel(false);
+    let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
+    let wait = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    runtime
+        .send_agent_message(second, parent, AgentMessageKind::Send, "Finding", None)
+        .unwrap();
+    let result = wait.await.unwrap();
+    assert_eq!(result["inbox_ready"], true);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["runs"][0]["status"], "still_running");
+    cleanup(&runtime).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_wins_over_a_simultaneous_inbox_message() {
+    let (runtime, _) = fixture(None);
+    let (parent, first, _) = spawn(&runtime);
+    let (cancel, receiver) = watch::channel(false);
+    let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
+    let wait = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    runtime
+        .send_agent_message(first, parent, AgentMessageKind::Send, "Finding", None)
+        .unwrap();
+    cancel.send_replace(true);
+    assert_eq!(wait.await.unwrap_err(), "wait cancelled");
+    assert_eq!(runtime.take_inbox(parent).unwrap().len(), 1);
     cleanup(&runtime).await;
 }

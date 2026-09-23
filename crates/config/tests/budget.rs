@@ -12,7 +12,7 @@ fn defaults_when_budget_is_missing() {
         value["budget"],
         serde_json::json!({
             "max_tool_calls": 400, "max_no_progress_rounds": 100,
-            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
+            "max_file_rereads": 20, "max_identical_tool_call_repeats": 10,
             "max_elapsed_secs": 7_200
         })
     );
@@ -30,7 +30,7 @@ fn defaults_merge_when_budget_is_partial() {
         value["budget"],
         serde_json::json!({
             "max_tool_calls": 17, "max_no_progress_rounds": 100,
-            "max_file_rereads": 20, "max_identical_tool_call_repeats": 5,
+            "max_file_rereads": 20, "max_identical_tool_call_repeats": 10,
             "max_elapsed_secs": 7_200
         })
     );
