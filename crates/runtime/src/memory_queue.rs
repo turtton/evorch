@@ -79,10 +79,11 @@ impl LearningQueue {
         let reviewer = self.runtime.delegate_background(
             Role::Reviewer,
             format!(
-                "Review the completed task and verify its evidence. Return a JSON object (a fenced json block is also accepted) with verdict (approve or request-update), findings, and criteria (id: exact verified evidence reference, status: met/unmet/unknown, note, evidence). Each evidence object has command, exit_status (integer), target_sha, and optional diff_ref, artifact_path, red_evidence strings. Use null when evidence is unavailable; never invent evidence or mark evidence met without checking it.\nTask: {}\nWorker report:\n{}",
+                "Verify existing evidence supporting durable memory lessons for FUTURE tasks. This is read-only evidence validation, not another attempt at the original task: do not reopen or re-execute the original task work. Mark unverifiable evidence as unknown rather than inventing it. Return a JSON object (a fenced json block is also accepted) with verdict (approve or request-update), findings, and criteria (id: exact verified evidence reference, status: met/unmet/unknown, note, evidence). Each evidence object has command, exit_status (integer), target_sha, and optional diff_ref, artifact_path, red_evidence strings. Use null when evidence is unavailable; never invent evidence or mark evidence met without checking it.\nTask: {}\nWorker report:\n{}",
                 task.prompt, worker_report
             ),
             RunConfig {
+                name: Some("learning-evidence-review".into()),
                 learning_internal: true,
                 interactive: false,
                 keep_alive: false,
@@ -90,16 +91,7 @@ impl LearningQueue {
                 ..task.config.clone()
             },
         );
-        if tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            self.runtime.wait(reviewer),
-        )
-        .await
-        .map_err(|_| {
-            let _ = self.runtime.cancel(reviewer);
-            InterviewError::Timeout
-        })?? != AgentRunPhase::Done
-        {
+        if self.runtime.wait(reviewer).await? != AgentRunPhase::Done {
             return Err(InterviewError::Incomplete);
         }
         let reviewer_report = self
