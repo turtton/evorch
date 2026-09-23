@@ -18,7 +18,7 @@ pub use auth::ProviderAuth;
 pub use client::ProviderClient;
 pub use error::ProviderError;
 pub use message::{
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, Message, ObservationContext,
+    ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
     ProviderCapabilities, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{

@@ -64,6 +64,18 @@ impl AgentModel for SwitchableModel {
             .await
     }
 
+    async fn complete_structured(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        schema: &providers::JsonSchema,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.current()
+            .complete_structured(invocation, role, messages, schema)
+            .await
+    }
+
     async fn complete_streaming(
         &self,
         invocation: &AgentInvocationContext,

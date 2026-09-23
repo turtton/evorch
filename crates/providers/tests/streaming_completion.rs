@@ -15,6 +15,7 @@ fn request() -> providers::ChatRequest {
         max_tokens: None,
         reasoning_effort: None,
         service_tier: None,
+        output_schema: None,
         observation: None,
     }
 }

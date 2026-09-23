@@ -81,6 +81,7 @@ impl AgentModel for ProviderCorrelatedModel {
             max_tokens: None,
             reasoning_effort: None,
             service_tier: None,
+            output_schema: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
             }),

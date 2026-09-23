@@ -76,6 +76,10 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ProviderClient for OpenAiClient {
+    fn supports_structured_output(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,

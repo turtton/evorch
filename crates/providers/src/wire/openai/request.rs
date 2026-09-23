@@ -9,8 +9,8 @@ mod reasoning;
 use reasoning::ReasoningReplay;
 
 use super::types::{
-    WireChatRequest, WireContent, WireFunction, WireFunctionDefinition, WireMessage,
-    WireStreamOptions, WireTextPart, WireTool, WireToolCall,
+    WireChatRequest, WireContent, WireFunction, WireFunctionDefinition, WireJsonSchema,
+    WireMessage, WireResponseFormat, WireStreamOptions, WireTextPart, WireTool, WireToolCall,
 };
 
 /// canonical リクエストを OpenAI Chat Completions リクエストへ変換します。
@@ -37,6 +37,15 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireChatRequest {
         max_tokens: request.max_tokens,
         reasoning_effort: request.reasoning_effort.clone(),
         service_tier: request.service_tier,
+        response_format: request.output_schema.as_ref().map(|schema| {
+            WireResponseFormat::JsonSchema {
+                json_schema: WireJsonSchema {
+                    name: schema.name.clone(),
+                    strict: true,
+                    schema: schema.schema.clone(),
+                },
+            }
+        }),
         stream,
         stream_options: stream.then_some(WireStreamOptions {
             include_usage: true,

@@ -140,6 +140,15 @@ pub enum ServiceTier {
     Priority,
 }
 
+/// 最終回答に要求する名前付き JSON Schema。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonSchema {
+    /// API に送信するスキーマ名。
+    pub name: String,
+    /// strict モードで検証する JSON Schema。
+    pub schema: serde_json::Value,
+}
+
 /// チャット完了リクエスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -162,6 +171,9 @@ pub struct ChatRequest {
     /// サービス階層。未指定なら標準処理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
+    /// 最終回答の構造制約。未指定なら通常のテキスト生成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<JsonSchema>,
     /// 観測相関コンテキスト。OpenAI では run ID が cache affinity にも使われる。
     #[serde(default, skip_serializing)]
     pub observation: Option<ObservationContext>,
@@ -289,6 +301,7 @@ mod tests {
             max_tokens: Some(256),
             reasoning_effort: None,
             service_tier: None,
+            output_schema: None,
             observation: None,
         };
 

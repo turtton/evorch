@@ -106,6 +106,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
                 &[],
                 &[],
                 streaming.then_some(bus.as_ref()),
+                None,
             )
             .await;
         // Then

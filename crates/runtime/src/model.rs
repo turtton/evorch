@@ -67,6 +67,19 @@ pub trait AgentModel: Send + Sync {
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError>;
 
+    /// Requests a schema-constrained final answer without tool access.
+    /// Implementations without structured output retain the prompt-only path.
+    /// Callers must still validate the response and handle incomplete/refused output.
+    async fn complete_structured(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        _schema: &providers::JsonSchema,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete(invocation, role, messages, &[]).await
+    }
+
     /// Completes with live deltas on `bus`; legacy models emit deferred deltas once.
     /// Overrides own delta emission; callers must never replay the canonical response.
     /// The canonical response alone supplies history and tools. Dropping cancels it,

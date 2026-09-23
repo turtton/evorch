@@ -26,11 +26,30 @@ pub struct WireChatRequest {
     /// サービス階層。未指定なら送信しない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
+    /// 最終回答の JSON Schema 制約。未指定なら送信しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<WireResponseFormat>,
     /// SSE ストリーミングを有効にするか。
     pub stream: bool,
     /// ストリーム固有設定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<WireStreamOptions>,
+}
+
+/// Chat Completions の最終回答形式。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireResponseFormat {
+    /// strict な名前付き JSON Schema に従う回答。
+    JsonSchema { json_schema: WireJsonSchema },
+}
+
+/// Chat Completions に渡す strict JSON Schema。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireJsonSchema {
+    pub name: String,
+    pub strict: bool,
+    pub schema: serde_json::Value,
 }
 
 /// ストリーム固有設定。

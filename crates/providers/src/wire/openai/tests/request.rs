@@ -89,6 +89,7 @@ fn canonical_request_maps_to_chat_completions_json() {
         max_tokens: Some(128),
         reasoning_effort: None,
         service_tier: None,
+        output_schema: None,
         observation: None,
     };
 

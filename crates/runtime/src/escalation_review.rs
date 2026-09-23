@@ -47,6 +47,21 @@ struct WireVerdict {
     reason: Option<String>,
 }
 
+fn verdict_schema() -> providers::JsonSchema {
+    providers::JsonSchema {
+        name: "sandbox_escalation_verdict".into(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "approve": {"type": "boolean"},
+                "reason": {"type": "string"}
+            },
+            "required": ["approve", "reason"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 impl QuickModelReviewer {
     pub const fn new(model: Arc<dyn AgentModel>) -> Self {
         Self {
@@ -86,7 +101,7 @@ impl QuickModelReviewer {
         let response = tokio::time::timeout(
             self.timeout,
             self.model
-                .complete(&invocation, Role::Worker, &messages, &[]),
+                .complete_structured(&invocation, Role::Worker, &messages, &verdict_schema()),
         )
         .await
         .map_err(|_| ReviewError::Timeout)?
@@ -98,9 +113,17 @@ impl QuickModelReviewer {
             | providers::FinishReason::ContentFilter
             | providers::FinishReason::Other(_) => return Err(ReviewError::InvalidVerdict),
         }
-        let [ContentBlock::Text { text }] = response.message.content.as_slice() else {
+        let mut answer = response
+            .message
+            .content
+            .iter()
+            .filter(|block| !matches!(block, ContentBlock::Reasoning { .. }));
+        let Some(ContentBlock::Text { text }) = answer.next() else {
             return Err(ReviewError::InvalidVerdict);
         };
+        if answer.next().is_some() {
+            return Err(ReviewError::InvalidVerdict);
+        }
         let verdict: WireVerdict =
             serde_json::from_str(text.trim()).map_err(|_| ReviewError::InvalidVerdict)?;
         Ok(if verdict.approve {
@@ -230,6 +253,24 @@ mod tests {
                 tokio::time::sleep(self.delay).await;
             }
             self.inner.complete(invocation, role, messages, tools).await
+        }
+
+        async fn complete_structured(
+            &self,
+            invocation: &AgentInvocationContext,
+            role: Role,
+            messages: &[Message],
+            schema: &providers::JsonSchema,
+        ) -> Result<ChatResponse, RuntimeError> {
+            assert_eq!(schema.name, "sandbox_escalation_verdict");
+            assert_eq!(schema.schema["properties"]["approve"]["type"], "boolean");
+            assert_eq!(schema.schema["properties"]["reason"]["type"], "string");
+            assert_eq!(
+                schema.schema["required"],
+                serde_json::json!(["approve", "reason"])
+            );
+            assert_eq!(schema.schema["additionalProperties"], false);
+            self.complete(invocation, role, messages, &[]).await
         }
 
         fn selected_model(&self, role: Role, category: Option<&str>) -> String {

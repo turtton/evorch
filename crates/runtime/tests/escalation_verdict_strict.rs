@@ -1,7 +1,7 @@
 mod support;
 
 use providers::{ChatResponse, ContentBlock, FinishReason};
-use runtime::escalation_review::{QuickModelReviewer, ReviewError};
+use runtime::escalation_review::{QuickModelReviewer, ReviewError, ReviewVerdict};
 use std::sync::Arc;
 use support::{ScriptedModel, text_response};
 
@@ -24,10 +24,44 @@ async fn reviewer_rejects_unknown_field_verdict_as_invalid() {
 }
 
 #[tokio::test]
-async fn reviewer_rejects_text_plus_reasoning_blocks_as_invalid() {
+async fn reviewer_uses_only_final_text_for_approval_and_denial() {
+    for (text, expected) in [
+        (r#"{"approve":true}"#, ReviewVerdict::Approve),
+        (
+            r#"{"approve":false,"reason":"unsafe"}"#,
+            ReviewVerdict::Deny {
+                reason: "unsafe".into(),
+            },
+        ),
+    ] {
+        // Given: reasoning disagrees with the final verdict and surrounds it.
+        let mut response = support::reasoning_response(
+            r#"{"approve":true} or {"approve":false}: intermediate reasoning"#,
+            text,
+            FinishReason::Stop,
+        );
+        response.message.content.push(ContentBlock::Reasoning {
+            text: "Additional reasoning must not change the decision".into(),
+        });
+        let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(response)])));
+        // When / Then: only the final text can approve or deny escalation.
+        assert_eq!(
+            reviewer.review("strict", "pwd", "inspect").await,
+            Ok(expected)
+        );
+    }
+}
+
+#[tokio::test]
+async fn reviewer_never_treats_reasoning_as_a_verdict() {
+    let mut response = text_response("", FinishReason::Stop);
+    response.message.content = vec![ContentBlock::Reasoning {
+        text: r#"{"approve":true}"#.into(),
+    }];
+    assert_invalid(response).await;
     assert_invalid(support::reasoning_response(
-        "review",
         r#"{"approve":true}"#,
+        "invalid final answer",
         FinishReason::Stop,
     ))
     .await;

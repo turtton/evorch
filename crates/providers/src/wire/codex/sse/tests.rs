@@ -107,6 +107,46 @@ fn interpreter_maps_response_failed_to_error() {
     );
 }
 
+// Given: schema validation or unsupported-format failures in SSE / When: parsed and classified
+// Then: validation errors retain fail-closed behavior even after the error code is flattened.
+#[test]
+fn response_failed_schema_errors_do_not_allow_structured_output_fallback() {
+    for (code, message, unsupported) in [
+        (
+            "invalid_json_schema",
+            "json_schema contains unsupported type integer",
+            false,
+        ),
+        (
+            "schema_validation_error",
+            "json_schema contains unsupported type integer",
+            false,
+        ),
+        (
+            "unsupported_parameter",
+            "json_schema is not supported with this model",
+            true,
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {"code": code, "message": message}},
+        });
+        let frames = fixture_frames(&format!("event: response.failed\ndata: {payload}\n\n"));
+        let mut interpreter = CodexStreamInterpreter::new();
+        let error = frames
+            .into_iter()
+            .find_map(|frame| interpreter.interpret(frame).err())
+            .unwrap();
+        assert!(matches!(error, ProviderError::Http { status: 400, .. }));
+        assert_eq!(
+            error.is_structured_output_unsupported(),
+            unsupported,
+            "{error}"
+        );
+    }
+}
+
 // Given: malformed JSON frame / When: interpreted / Then: the boundary returns InvalidJson
 #[test]
 fn interpreter_rejects_invalid_json_frame() {

@@ -64,6 +64,7 @@ pub(crate) async fn execute(
                 config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
                 config::types::provider::ModelSpeed::Standard => None,
             },
+            output_schema: None,
             observation: None,
         };
         let execution = trace

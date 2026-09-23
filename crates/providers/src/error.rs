@@ -1,5 +1,7 @@
 //! provider クライアントのエラー型を定義します。
 
+mod structured_output;
+
 /// プロバイダ呼び出しで発生しうるエラー。
 ///
 /// [`std::error::Error`] は thiserror により自動実装される。
@@ -60,6 +62,19 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// 接続先が Structured Outputs を明示的に未対応としたエラーか。
+    /// スキーマ不正や通信失敗を通常形式への再試行で隠さない。
+    pub fn is_structured_output_unsupported(&self) -> bool {
+        match self {
+            Self::Http {
+                status: 400 | 422 | 501,
+                body,
+            } => structured_output::is_unsupported(body),
+            Self::RetriesExhausted { last, .. } => last.is_structured_output_unsupported(),
+            _ => false,
+        }
+    }
+
     /// HTTP ステータスが対応するエラーではそのコード、それ以外では `None` を返す。
     ///
     /// [`ProviderError::RateLimited`] は常に `Some(429)`。

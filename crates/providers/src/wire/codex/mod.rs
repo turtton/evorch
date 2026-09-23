@@ -26,6 +26,21 @@ pub struct CodexResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<ServiceTier>,
     include: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<TextFormat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct TextFormat {
+    format: JsonSchemaFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct JsonSchemaFormat {
+    r#type: &'static str,
+    name: String,
+    strict: bool,
+    schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -179,6 +194,14 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         },
         include: Vec::new(),
         service_tier: request.service_tier,
+        text: request.output_schema.as_ref().map(|schema| TextFormat {
+            format: JsonSchemaFormat {
+                r#type: "json_schema",
+                name: schema.name.clone(),
+                strict: true,
+                schema: schema.schema.clone(),
+            },
+        }),
     }
 }
 

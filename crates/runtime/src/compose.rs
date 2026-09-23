@@ -242,6 +242,7 @@ impl RoutedModel {
         messages: &[Message],
         tools: &[ToolSpec],
         bus: Option<&EventBus>,
+        output_schema: Option<&providers::JsonSchema>,
     ) -> Result<ChatResponse, RuntimeError> {
         let (mut route, generation) = match &invocation.model_preference {
             Some(preference) => {
@@ -365,7 +366,8 @@ impl RoutedModel {
             } else {
                 Vec::new()
             };
-            let request = ChatRequest {
+            let mut request = ChatRequest {
+                output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
                 messages: messages.to_vec(),
                 tools,
@@ -382,15 +384,7 @@ impl RoutedModel {
                     run_id: invocation.run_id.clone(),
                 }),
             };
-            let result = match bus {
-                Some(bus) => {
-                    provider
-                        .client
-                        .send_streaming(&provider.auth, &request, bus)
-                        .await
-                }
-                None => provider.client.send(&provider.auth, &request).await,
-            };
+            let result = structured::send(provider, &mut request, bus).await;
             let error = match result {
                 Ok(response) => return Ok(response),
                 Err(error) => error,
@@ -477,7 +471,18 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, None)
+        self.complete_request(invocation, role, messages, tools, None, None)
+            .await
+    }
+
+    async fn complete_structured(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        schema: &providers::JsonSchema,
+    ) -> Result<ChatResponse, RuntimeError> {
+        self.complete_request(invocation, role, messages, &[], None, Some(schema))
             .await
     }
 
@@ -489,7 +494,7 @@ impl AgentModel for RoutedModel {
         tools: &[ToolSpec],
         bus: &EventBus,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, Some(bus))
+        self.complete_request(invocation, role, messages, tools, Some(bus), None)
             .await
     }
 
@@ -560,6 +565,7 @@ mod tests;
 
 mod fallback;
 mod live;
+mod structured;
 mod verification;
 pub use live::{SwitchableModel, UnconfiguredModel};
 

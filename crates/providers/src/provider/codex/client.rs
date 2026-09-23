@@ -198,6 +198,10 @@ impl CodexClient {
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    fn supports_structured_output(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,

@@ -114,6 +114,7 @@ fn representative_request() -> ChatRequest {
         max_tokens: Some(128),
         reasoning_effort: None,
         service_tier: None,
+        output_schema: None,
         observation: None,
     }
 }
@@ -263,6 +264,7 @@ fn openai_response_converts_to_anthropic_request_shape() {
         max_tokens: Some(64),
         reasoning_effort: None,
         service_tier: None,
+        output_schema: None,
         observation: None,
     };
     let anthropic = anthropic_wire::to_wire_request(&request, false);

@@ -18,6 +18,12 @@ pub trait ProviderClient: Send + Sync {
     /// このクライアントが対応する機能フラグを返す。
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// JSON Schema を wire に送信できるか。接続先・モデルの対応保証ではない。
+    /// 未対応のサーバー応答は呼び出し元が判定して通常形式へ切り替える。
+    fn supports_structured_output(&self) -> bool {
+        false
+    }
+
     /// transport 系失敗の bounded retry 方針 (issue #108、retry 責務は provider 層)。
     fn retry_policy(&self) -> crate::retry::RetryPolicy {
         crate::retry::RetryPolicy::default()
@@ -391,6 +397,7 @@ mod tests {
             max_tokens: None,
             reasoning_effort: None,
             service_tier: None,
+            output_schema: None,
             observation: None,
         }
     }
@@ -438,6 +445,7 @@ mod tests {
     #[test]
     fn trait_object_dispatches_capabilities() {
         let client: Box<dyn ProviderClient> = Box::new(FakeClient::succeeding());
+        assert!(!client.supports_structured_output());
 
         assert_eq!(
             client.capabilities(),

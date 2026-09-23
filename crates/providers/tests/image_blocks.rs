@@ -28,6 +28,7 @@ fn image_payload_reaches_each_wire_protocol() {
         max_tokens: None,
         reasoning_effort: None,
         service_tier: None,
+        output_schema: None,
         observation: None,
     };
     let openai = serde_json::to_value(providers::wire::openai::to_wire_request(&request, false))

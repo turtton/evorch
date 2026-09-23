@@ -20,6 +20,7 @@ mod fallback;
 mod live;
 mod preference;
 mod speed;
+mod structured;
 
 #[derive(Clone)]
 struct StubClient {
