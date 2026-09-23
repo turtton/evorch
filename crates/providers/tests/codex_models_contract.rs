@@ -36,7 +36,6 @@ async fn lists_new_slugs_using_resolved_catalog_version() {
             .collect::<Vec<_>>(),
         ["gpt-6-sol", "gpt-6-luna"]
     );
-    assert_eq!(providers::CODEX_INFERENCE_CLIENT_VERSION, "0.153.0");
 }
 
 #[tokio::test]

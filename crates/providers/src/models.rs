@@ -63,10 +63,6 @@ pub struct CodexModelInfo {
     pub supports_fast: bool,
 }
 
-/// Tested inference protocol version; deliberately independent of catalog discovery.
-/// Updating the catalog must not alter inference headers or prompt-cache affinity.
-pub const CODEX_INFERENCE_CLIENT_VERSION: &str = "0.153.0";
-
 /// OAuth の Bearer トークンとアカウント ID で Codex のモデルカタログを取得する。
 /// `client_version` は [`crate::CodexCatalogVersionResolver`] で解決した値を渡す。
 /// バージョン解決を分離し、GitHub へ Codex 認証情報を送らない。

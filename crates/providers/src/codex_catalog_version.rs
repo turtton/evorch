@@ -1,4 +1,7 @@
-//! Codex catalog client-version discovery. Never used by inference requests.
+//! Shared Codex client-version discovery for catalog and inference requests.
+//!
+//! Inference clients pin the resolved version for their lifetime to preserve
+//! prompt-cache affinity, even when the shared resolver cache expires.
 //!
 //! GitHub release titles are cosmetic (`0.156.1`); stable CLI tags are
 //! `rust-v0.156.1`. Resolve only those tags, without sending Codex credentials.
@@ -27,11 +30,36 @@ const MAX_PAGES: usize = 5;
 const PAGE_SIZE: usize = 10;
 const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Version actually used by a catalog request, with a visible fallback notice.
+/// Resolved Codex client version, with a visible fallback notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexCatalogVersion {
     pub version: String,
     pub warning: Option<String>,
+}
+
+/// Stable client version attached to Codex inference requests.
+/// Resolved once per client so request headers stay stable for prompt-cache affinity.
+#[derive(Clone, Debug)]
+pub enum CodexClientVersion {
+    /// Resolve the latest stable Codex CLI release once per client (production default).
+    Resolve(Arc<CodexCatalogVersionResolver>),
+    /// Pin an exact version (offline tests / pinned deployments).
+    Fixed(CodexCatalogVersion),
+}
+
+impl Default for CodexClientVersion {
+    fn default() -> Self {
+        Self::Resolve(CodexCatalogVersionResolver::shared())
+    }
+}
+
+impl CodexClientVersion {
+    pub async fn resolve(&self) -> CodexCatalogVersion {
+        match self {
+            Self::Fixed(version) => version.clone(),
+            Self::Resolve(resolver) => resolver.resolve().await,
+        }
+    }
 }
 
 #[derive(Debug)]

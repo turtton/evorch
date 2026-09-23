@@ -124,7 +124,8 @@ async fn factory_builds_codex_client_from_profile() {
         .and(header("chatgpt-account-id", "acc-123"))
         .and(header("originator", "codex_cli_rs"))
         .and(header("openai-beta", "responses=experimental"))
-        .and(header("version", providers::CODEX_INFERENCE_CLIENT_VERSION))
+        .and(header("version", "0.156.1"))
+        .and(header("user-agent", "codex_cli_rs/0.156.1"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(SSE_SUCCESS, "text/event-stream"))
         .expect(1)
         .mount(&server)
@@ -150,6 +151,12 @@ async fn factory_builds_codex_client_from_profile() {
     profile.base_url = server.uri();
     let options = FactoryOptions {
         auth_base_url_override: Some(server.uri()),
+        codex_client_version: Some(providers::CodexClientVersion::Fixed(
+            providers::CodexCatalogVersion {
+                version: "0.156.1".into(),
+                warning: None,
+            },
+        )),
         ..FactoryOptions::default()
     };
 

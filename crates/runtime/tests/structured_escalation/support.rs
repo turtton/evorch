@@ -84,13 +84,89 @@ pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness
             factory: FactoryOptions {
                 auth_base_url_override: Some(base_url.into()),
                 request_timeout: Some(timeout),
+                codex_client_version: Some(providers::CodexClientVersion::Fixed(
+                    providers::CodexCatalogVersion {
+                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                        warning: None,
+                    },
+                )),
             },
         },
     )
     .expect("routed model");
+    let model = if codex {
+        model.with_codex_version_resolver(Arc::new(providers::CodexCatalogVersionResolver::new(
+            format!("{base_url}/releases"),
+        )))
+    } else {
+        model
+    };
     Harness {
         _directory: directory,
         // Production UI wraps routed models; structured requests must cross this seam.
+        model: Arc::new(SwitchableModel::new(model)),
+    }
+}
+
+pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
+    const KEY0: &str = "EVORCH_STRUCTURED_REVIEW_KEY0";
+    const KEY1: &str = "EVORCH_STRUCTURED_REVIEW_KEY1";
+
+    let directory = tempfile::tempdir().expect("test directory");
+    let store = Arc::new(
+        FileCredentialStore::open(directory.path().join("credentials")).expect("credential store"),
+    );
+    let profiles = [("local-0", KEY0), ("local-1", KEY1)];
+    let mut config = Config {
+        providers: profiles
+            .iter()
+            .map(|(name, key)| {
+                (
+                    (*name).into(),
+                    ProviderProfileConfig {
+                        provider_type: ProviderTypeConfig::OpenAiCompatible,
+                        api_protocol: ApiProtocolConfig::OpenAiCompletions,
+                        base_url: base_url.into(),
+                        credential: CredentialRefConfig::Env { var: (*key).into() },
+                        models: vec![config::ModelEntryConfig::enabled(MODEL)],
+                        excluded_models: vec![],
+                        default_model: MODEL.into(),
+                    },
+                )
+            })
+            .collect(),
+        routing: config::RoutingConfig {
+            routes: BTreeMap::from([(
+                "worker".into(),
+                profiles
+                    .iter()
+                    .map(|(name, _)| config::RouteCandidateConfig {
+                        profile: (*name).into(),
+                        model: None,
+                    })
+                    .collect(),
+            )]),
+        },
+        ..Config::default()
+    };
+    config.agents.worker.base.generation.temperature = Some(0.25);
+    config.agents.worker.base.generation.max_tokens = Some(321);
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        ComposeDeps {
+            credential_store: store,
+            event_bus: None,
+            env: Arc::new(MapEnv::from_iter([(KEY0, "key-0"), (KEY1, "key-1")])),
+            catalog: model::ModelCatalog::new(),
+            factory: FactoryOptions {
+                request_timeout: Some(timeout),
+                ..FactoryOptions::default()
+            },
+        },
+    )
+    .expect("routed fallback model");
+    Harness {
+        _directory: directory,
         model: Arc::new(SwitchableModel::new(model)),
     }
 }

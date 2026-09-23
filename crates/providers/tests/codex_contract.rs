@@ -31,7 +31,7 @@ async fn mount(server: &MockServer, response: ResponseTemplate) {
         .and(header("originator", "codex_cli_rs"))
         .and(header(
             "user-agent",
-            format!("codex_cli_rs/{}", providers::CODEX_INFERENCE_CLIENT_VERSION),
+            format!("codex_cli_rs/{}", providers::CODEX_MODELS_FALLBACK_VERSION),
         ))
         .and(header("accept", "text/event-stream"))
         .and(CodexIdMatcher)
@@ -85,6 +85,63 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
 }
 
 #[tokio::test]
+async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
+    // Given: release discovery and inference both use offline mock endpoints.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "tag_name": "rust-v0.156.1",
+            "draft": false,
+            "prerelease": false,
+        }])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .and(header("version", "0.156.1"))
+        .and(header("user-agent", "codex_cli_rs/0.156.1"))
+        .respond_with(sse_response(&fixture("codex", "responses_success.sse")))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = CodexClient::with_config(
+        CodexConfig {
+            base_url: server.uri(),
+            auth_base_url: server.uri(),
+            client_version: providers::CodexClientVersion::Resolve(Arc::new(
+                providers::CodexCatalogVersionResolver::new(format!("{}/releases", server.uri())),
+            )),
+            ..CodexConfig::default()
+        },
+        seeded_store(),
+    )
+    .expect("Codex client can be built");
+
+    // When: two turns are sent by the same client.
+    for _ in 0..2 {
+        let response = client
+            .send(&ProviderAuth::new(""), &request())
+            .await
+            .expect("send succeeds with the resolved version");
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
+
+    // Then: both inference requests carry the resolved headers, and discovery
+    // happens once without receiving any Codex credentials.
+    server.verify().await;
+    let requests = server.received_requests().await.expect("requests recorded");
+    assert_eq!(requests.len(), 3);
+    let discovery = requests
+        .iter()
+        .find(|request| request.url.path() == "/releases")
+        .expect("release lookup was recorded");
+    assert!(!discovery.headers.contains_key("authorization"));
+    assert!(!discovery.headers.contains_key("chatgpt-account-id"));
+}
+
+#[tokio::test]
 async fn send_sets_codex_headers_and_aggregates_stream() {
     let server = MockServer::start().await;
     mount(
@@ -101,6 +158,10 @@ async fn send_sets_codex_headers_and_aggregates_stream() {
             auth_base_url: server.uri(),
             timeout: Duration::from_secs(1),
             event_bus: Some(bus),
+            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
+                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                warning: None,
+            }),
         },
         seeded_store(),
     )

@@ -97,6 +97,12 @@ async fn codex_tokens_never_reach_sandbox_child_env() {
         None,
         &FactoryOptions {
             auth_base_url_override: Some(server.uri()),
+            codex_client_version: Some(providers::CodexClientVersion::Fixed(
+                providers::CodexCatalogVersion {
+                    version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                    warning: None,
+                },
+            )),
             ..FactoryOptions::default()
         },
     )

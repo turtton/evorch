@@ -231,6 +231,16 @@ async fn codex_verification_uses_stored_oauth_and_account() {
         .expect(1)
         .mount(&server)
         .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/releases"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"tag_name":"rust-v0.156.1","draft":false,"prerelease":false}
+            ])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     use sandbox::credential::CredentialStore;
@@ -264,7 +274,10 @@ async fn codex_verification_uses_stored_oauth_and_account() {
             factory: routing::factory::FactoryOptions::default(),
         },
     )
-    .unwrap();
+    .unwrap()
+    .with_codex_version_resolver(Arc::new(providers::CodexCatalogVersionResolver::new(
+        format!("{}/releases", server.uri()),
+    )));
     // When: checking the Codex profile.
     let verified = model.verify_candidates().await;
     // Then: OAuth-authenticated discovery verifies it.

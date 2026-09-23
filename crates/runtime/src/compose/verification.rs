@@ -13,6 +13,7 @@ impl RoutedModel {
             .get_or_init(|| async {
                 let mut endpoints = BTreeMap::new();
                 let mut profiles = BTreeMap::new();
+                let mut codex_version: Option<providers::CodexCatalogVersion> = None;
                 for (name, provider) in &self.providers {
                     let (auth, account) = match self.verification_auth(provider) {
                         Ok(auth) => auth,
@@ -30,14 +31,24 @@ impl RoutedModel {
                         Some(result) => result,
                         None => {
                             let result = match account {
-                                Some(account) => providers::list_codex_models(
-                                    &key.0,
-                                    &auth,
-                                    &account,
-                                    providers::CODEX_MODELS_FALLBACK_VERSION,
-                                )
-                                .await
-                                .map(|models| models.into_iter().map(|model| model.slug).collect()),
+                                Some(account) => {
+                                    // Resolve once, only when a Codex catalog is actually needed.
+                                    let catalog_version = match &codex_version {
+                                        Some(version) => version,
+                                        None => codex_version
+                                            .insert(self.codex_version_resolver.resolve().await),
+                                    };
+                                    providers::list_codex_models(
+                                        &key.0,
+                                        &auth,
+                                        &account,
+                                        &catalog_version.version,
+                                    )
+                                    .await
+                                    .map(|models| {
+                                        models.into_iter().map(|model| model.slug).collect()
+                                    })
+                                }
                                 None => providers::list_models(&key.0, &auth).await,
                             }
                             .map_err(|error| match error {

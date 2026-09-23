@@ -13,6 +13,7 @@ use super::session::CodexSessionManager;
 use super::tokens::CodexTokenStore;
 use crate::auth::ProviderAuth;
 use crate::client::ProviderClient;
+use crate::codex_catalog_version::{CodexCatalogVersion, CodexClientVersion};
 use crate::error::ProviderError;
 use crate::http::stream::{FrameInterpretation, WireStreamInterpreter, adapt_sse_stream};
 use crate::http::{UsageEmitter, build_http_client, map_request_error, map_response_error};
@@ -56,6 +57,8 @@ pub struct CodexConfig {
     pub timeout: Duration,
     /// usage と attempt 観測イベントの発行先。
     pub event_bus: Option<Arc<EventBus>>,
+    /// 推論ヘッダーに付与するバージョン。クライアントごとに一度だけ解決する。
+    pub client_version: CodexClientVersion,
 }
 
 impl Default for CodexConfig {
@@ -65,6 +68,7 @@ impl Default for CodexConfig {
             auth_base_url: DEFAULT_AUTH_BASE_URL.to_string(),
             timeout: DEFAULT_TIMEOUT,
             event_bus: None,
+            client_version: CodexClientVersion::default(),
         }
     }
 }
@@ -75,6 +79,9 @@ pub struct CodexClient {
     endpoint: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
+    client_version: CodexClientVersion,
+    /// 解決結果を固定し、ターン間の prompt-cache affinity を維持する。
+    resolved_client_version: tokio::sync::OnceCell<CodexCatalogVersion>,
     session: CodexSessionManager,
     /// クライアントの生存期間を通じて維持するセッション識別子。
     session_id: String,
@@ -91,6 +98,8 @@ impl CodexClient {
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
+            client_version: config.client_version,
+            resolved_client_version: tokio::sync::OnceCell::new(),
             session,
             session_id: Uuid::new_v4().to_string(),
         })
@@ -114,6 +123,8 @@ impl CodexClient {
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
+            client_version: config.client_version,
+            resolved_client_version: tokio::sync::OnceCell::new(),
             session,
             session_id: Uuid::new_v4().to_string(),
         })
@@ -152,6 +163,10 @@ impl CodexClient {
         let mut observer = self
             .observer(request, streaming)
             .with_cache_observation(&wire_request);
+        let client_version = self
+            .resolved_client_version
+            .get_or_init(|| self.client_version.resolve())
+            .await;
         let mut builder = self
             .http_client
             .post(&self.endpoint)
@@ -159,10 +174,10 @@ impl CodexClient {
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
             .header("OpenAI-Beta", "responses=experimental")
-            .header("version", crate::CODEX_INFERENCE_CLIENT_VERSION)
+            .header("version", &client_version.version)
             .header(
                 reqwest::header::USER_AGENT,
-                format!("codex_cli_rs/{}", crate::CODEX_INFERENCE_CLIENT_VERSION),
+                format!("codex_cli_rs/{}", client_version.version),
             )
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .header("session-id", &self.session_id)

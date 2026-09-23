@@ -34,6 +34,10 @@ pub fn client(server: &MockServer, store: Arc<dyn CodexTokenStore>) -> CodexClie
             auth_base_url: server.uri(),
             timeout: Duration::from_secs(1),
             event_bus: None,
+            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
+                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                warning: None,
+            }),
         },
         store,
     )

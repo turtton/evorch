@@ -177,6 +177,7 @@ pub struct RoutedModel {
     admission_routes: Vec<routing::ResolvedRoute>,
     verification:
         tokio::sync::OnceCell<BTreeMap<String, Result<Vec<String>, providers::ProviderError>>>,
+    codex_version_resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
     event_bus: Option<Arc<EventBus>>,
     credential_store: Option<Arc<dyn CredentialStore>>,
 }
@@ -207,9 +208,22 @@ impl RoutedModel {
             agents,
             admission_routes: Vec::new(),
             verification: tokio::sync::OnceCell::new(),
+            codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
             event_bus: None,
             credential_store: None,
         }
+    }
+
+    /// Codex カタログ検証に使う client バージョン解決を差し替える (offline tests)。
+    #[must_use]
+    pub fn with_codex_version_resolver(
+        self: std::sync::Arc<Self>,
+        resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
+    ) -> std::sync::Arc<Self> {
+        let mut model =
+            std::sync::Arc::into_inner(self).expect("freshly composed model has a single owner");
+        model.codex_version_resolver = resolver;
+        std::sync::Arc::new(model)
     }
 
     fn resolve(

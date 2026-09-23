@@ -48,6 +48,10 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
             base_url: server.uri(),
             auth_base_url: server.uri(),
             event_bus: Some(Arc::clone(&bus)),
+            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
+                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                warning: None,
+            }),
             ..CodexConfig::default()
         },
         store,

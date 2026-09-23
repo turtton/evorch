@@ -37,6 +37,10 @@ async fn empty_deltas_are_noops_and_reasoning_alone_has_no_ttft() {
             base_url: server.uri(),
             auth_base_url: server.uri(),
             event_bus: Some(bus.clone()),
+            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
+                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
+                warning: None,
+            }),
             ..CodexConfig::default()
         },
         store,

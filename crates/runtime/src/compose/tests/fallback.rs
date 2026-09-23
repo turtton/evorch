@@ -151,7 +151,7 @@ async fn fallback_classifies_direct_and_exhausted_failures() {
             let result = complete(&model, "session").await;
             // Then
             // Auth failures and exhausted quota leave this candidate unusable, so try another.
-            let eligible = matches!(status, 401 | 402 | 403 | 408 | 429 | 500..=599);
+            let eligible = matches!(status, 400 | 401 | 402 | 403 | 408 | 429 | 500..=599);
             assert_eq!(
                 result.is_ok(),
                 eligible,
@@ -205,6 +205,29 @@ async fn explicit_preference_never_falls_back_on_timeout() {
     let result = model.complete(&invocation, Role::Worker, &[], &[]).await;
     // Then
     assert!(result.is_err());
+    assert!(requests[1].lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_preference_never_falls_back_on_http_400() {
+    let (model, requests) = fixture(vec![
+        Some(ProviderError::Http {
+            status: 400,
+            body: "model not available for client".into(),
+        }),
+        None,
+    ]);
+    let invocation = AgentInvocationContext {
+        run_id: "session".into(),
+        category: None,
+        model_preference: Some(crate::ModelPreference {
+            profile: "profile-0".into(),
+            model: None,
+        }),
+    };
+    let result = model.complete(&invocation, Role::Worker, &[], &[]).await;
+    assert!(result.is_err());
+    assert_eq!(requests[0].lock().unwrap().len(), 1);
     assert!(requests[1].lock().unwrap().is_empty());
 }
 

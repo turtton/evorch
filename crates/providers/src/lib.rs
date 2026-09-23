@@ -19,15 +19,13 @@ pub use auth::ProviderAuth;
 pub use client::ProviderClient;
 pub use codex_catalog_version::{
     CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
+    CodexClientVersion,
 };
 pub use error::ProviderError;
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
     ProviderCapabilities, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
-pub use models::{
-    CODEX_INFERENCE_CLIENT_VERSION, CodexModelInfo, list_codex_models, list_models,
-    verify_connectivity,
-};
+pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
 pub use retry::RetryPolicy;
 pub use stream::{DeltaStream, StreamAccumulator, StreamEvent};

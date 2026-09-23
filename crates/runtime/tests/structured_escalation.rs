@@ -12,8 +12,8 @@ use providers::{ContentBlock, Message, Role as MessageRole, ToolSpec};
 use runtime::escalation_review::{QuickModelReviewer, ReviewError, ReviewVerdict};
 use runtime::{AgentInvocationContext, Role};
 use serde_json::{Value, json};
-use support::harness;
-use wiremock::matchers::{method, path};
+use support::{harness, harness_fallback};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MODEL: &str = "gpt-4o";
@@ -31,6 +31,16 @@ async fn server(codex: bool) -> MockServer {
         }))
         .mount(&server)
         .await;
+    if codex {
+        Mock::given(method("GET"))
+            .and(path("/releases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"tag_name":"rust-v0.156.1","draft":false,"prerelease":false}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
     server
 }
 
@@ -164,6 +174,159 @@ async fn unsupported_format_falls_back_once_with_identical_input_and_settings() 
         assert_eq!(requests[1]["temperature"], 0.25);
         assert_eq!(requests[1]["max_tokens"], 321);
     }
+}
+
+fn client_unavailable() -> ResponseTemplate {
+    ResponseTemplate::new(400)
+        .set_body_json(json!({"error":{"message":"model not available for client"}}))
+}
+
+async fn mount_review_candidates(server: &MockServer, fallback: ResponseTemplate) {
+    for (key, response) in [("key-0", client_unavailable()), ("key-1", fallback)] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", format!("Bearer {key}")))
+            .respond_with(response)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn http_400_falls_back_to_next_candidate_and_approves() {
+    let server = server(false).await;
+    mount_review_candidates(&server, completion(APPROVE)).await;
+    let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Ok(ReviewVerdict::Approve)
+    );
+    let requests = requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["messages"], requests[1]["messages"]);
+    assert_eq!(
+        requests[0]["response_format"],
+        requests[1]["response_format"]
+    );
+    for request in &requests {
+        assert_schema(&request["response_format"]);
+        let messages = request["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_str().expect("review prompt");
+        assert!(content.starts_with(runtime::escalation_review::REVIEW_INSTRUCTION));
+        let payload: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            json!({"command":"pwd","justification":"inspect directory"})
+        );
+        assert_eq!(request["temperature"], 0.25);
+        assert_eq!(request["max_tokens"], 321);
+        assert!(request.get("tools").is_none_or(|tools| tools == &json!([])));
+    }
+}
+
+#[tokio::test]
+async fn http_400_then_valid_deny_is_final_no_retry() {
+    let server = server(false).await;
+    mount_review_candidates(&server, completion(DENY)).await;
+    let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Ok(ReviewVerdict::Deny {
+            reason: "unsafe effects".into(),
+        })
+    );
+    assert_eq!(requests(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn http_400_on_all_candidates_fails_closed() {
+    let server = server(false).await;
+    mount_review_candidates(&server, client_unavailable()).await;
+    let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Err(ReviewError::Model)
+    );
+    let requests = requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_schema(&request["response_format"]);
+    }
+}
+
+#[tokio::test]
+async fn invalid_verdict_on_fallback_candidate_is_final() {
+    let server = server(false).await;
+    mount_review_candidates(&server, completion("```json\n{\"approve\":true}\n```")).await;
+    let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Err(ReviewError::InvalidVerdict)
+    );
+    assert_eq!(requests(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn structured_unsupported_400_keeps_same_provider_downgrade_precedence() {
+    let server = server(false).await;
+    for structured in [true, false] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer key-0"))
+            .and(move |request: &wiremock::Request| {
+                request
+                    .body_json::<Value>()
+                    .unwrap()
+                    .get("response_format")
+                    .is_some()
+                    == structured
+            })
+            .respond_with(if structured {
+                unsupported(400, "response_format")
+            } else {
+                completion(APPROVE)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let harness = harness_fallback(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Ok(ReviewVerdict::Approve)
+    );
+    let captured = server.received_requests().await.expect("recorded requests");
+    let posts: Vec<_> = captured
+        .iter()
+        .filter(|request| request.method == "POST")
+        .collect();
+    assert_eq!(posts.len(), 2);
+    assert!(
+        posts
+            .iter()
+            .all(|request| request.headers["authorization"] == "Bearer key-0")
+    );
+    let requests = requests(&server).await;
+    assert_schema(&requests[0]["response_format"]);
+    let mut original = requests[0].clone();
+    original.as_object_mut().unwrap().remove("response_format");
+    assert_eq!(
+        original, requests[1],
+        "only the unsupported format may change"
+    );
 }
 
 #[tokio::test]
