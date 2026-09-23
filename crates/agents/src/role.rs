@@ -112,6 +112,8 @@ impl Role {
                     "cancel",
                     "list_agents",
                     "inspect_agent",
+                    "subagent_questions",
+                    "answer_subagent_question",
                     "read",
                     "grep",
                     "git_diff",

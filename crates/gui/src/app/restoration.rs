@@ -3,6 +3,26 @@ use crate::model::tasks::AgentRunSource;
 use event_bus::{Event, EventKind, OrchestratorEvent};
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn bind_goal_event(&mut self, event: &Event) {
+        if let EventKind::Lifecycle(event_bus::LifecycleEvent::EscalationRequested {
+            new_run_id,
+            ..
+        }) = &event.kind
+            && let Some(thread) = self.sidebar.threads.iter().find(|thread| {
+                thread.escalation_source_run_id.is_some()
+                    && thread.run_ids.contains(new_run_id)
+                    && self
+                        .sidebar
+                        .projects
+                        .iter()
+                        .any(|project| project.id == thread.project_id)
+            })
+        {
+            self.sink.bind_goal_context(
+                &thread.id.to_string(),
+                &thread.project_id.to_string(),
+                new_run_id,
+            );
+        }
         if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
             thread_id,
             project_id,

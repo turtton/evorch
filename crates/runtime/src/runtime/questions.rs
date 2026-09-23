@@ -1,6 +1,6 @@
 //! Durable, non-blocking clarification requests. These never grant tool permissions.
 use crate::{AgentRuntime, RunId};
-use event_bus::{Event, ToolEvent, UserQuestion};
+use event_bus::{AgentRunPhase, Event, ToolEvent, UserQuestion};
 
 impl AgentRuntime {
     pub fn request_user_question(
@@ -70,6 +70,45 @@ impl AgentRuntime {
             .question_version
             .send_modify(|version| *version = version.wrapping_add(1));
         Ok(question)
+    }
+
+    /// Read clarification requests owned by one direct child. The parent can
+    /// answer from task context or ask the user on its own run.
+    pub fn subagent_questions(
+        &self,
+        caller: RunId,
+        child: RunId,
+    ) -> Result<Vec<UserQuestion>, String> {
+        self.validate_question_parent(caller, child)?;
+        self.user_answers(child)
+    }
+
+    /// Answer a direct child's question without granting any tool permission.
+    /// The host-facing answer API remains the only way to answer root questions.
+    pub fn answer_subagent_question(
+        &self,
+        caller: RunId,
+        id: &str,
+        answer: &str,
+    ) -> Result<UserQuestion, String> {
+        let question = self.user_question(id)?.ok_or("unknown question")?;
+        let child = crate::meta::parse_run_id(&question.run_id)?;
+        self.validate_question_parent(caller, child)?;
+        self.answer_user_question(id, answer)
+    }
+
+    fn validate_question_parent(&self, caller: RunId, child: RunId) -> Result<(), String> {
+        self.validate_run_mutation(caller)
+            .map_err(|e| e.to_string())?;
+        let parent = self.entry(caller).map_err(|e| e.to_string())?;
+        if parent.role != crate::Role::Orchestrator {
+            return Err("only an orchestrator can resolve subagent questions".into());
+        }
+        drop(parent);
+        if self.entry(child).map_err(|e| e.to_string())?.parent != Some(caller) {
+            return Err("question requester is not a direct child of this orchestrator".into());
+        }
+        Ok(())
     }
 
     pub fn user_question(&self, id: &str) -> Result<Option<UserQuestion>, String> {
@@ -207,6 +246,38 @@ impl AgentRuntime {
             question.answer.as_deref().unwrap_or_default()
         );
         messages.iter().any(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text {text:existing} if existing == &text)))
+    }
+
+    /// Blocking child questions that require this parent to make a decision.
+    pub(crate) fn pending_direct_child_questions(
+        &self,
+        parent: RunId,
+    ) -> Result<Vec<RunId>, String> {
+        let children = {
+            let runs = super::lock_runs(&self.shared.runs);
+            runs.iter()
+                .filter_map(|(id, entry)| {
+                    (entry.parent == Some(parent)
+                        && !matches!(
+                            *entry.phase_rx.borrow(),
+                            AgentRunPhase::Done | AgentRunPhase::Error
+                        ))
+                    .then_some(*id)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut pending = Vec::new();
+        for child in children {
+            if self
+                .user_answers(child)?
+                .iter()
+                .any(|question| question.blocking && question.answer.is_none())
+            {
+                pending.push(child);
+            }
+        }
+        pending.sort_by_key(|id| id.get());
+        Ok(pending)
     }
 
     /// Models can inspect their own questions and explicitly inherited questions.

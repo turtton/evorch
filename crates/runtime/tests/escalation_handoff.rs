@@ -162,7 +162,20 @@ async fn escalate_spawns_orchestrator_root_run_with_memo_prompt() {
             ..
         }) if role == "orchestrator"
     ));
-    assert!(source_done < started);
+    let requested = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                    source_run_id,
+                    new_run_id,
+                    ..
+                }) if source_run_id == &source.to_string() && new_run_id == &new_run.to_string()
+            )
+        })
+        .expect("escalation link event");
+    assert!(source_done < requested && requested < started);
 
     let observed = model.observed().await;
     let prompt = observed

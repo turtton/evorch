@@ -32,7 +32,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let questions: Vec<_> = self
             .user_questions
             .values()
-            .filter(|q| belongs_to_thread(q, &thread_id, &roots))
+            .filter(|q| user_visible(q) && belongs_to_thread(q, &thread_id, &roots))
             .cloned()
             .collect();
         if questions.is_empty() {
@@ -91,6 +91,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             });
         }
     }
+}
+
+// Child questions are addressed to their orchestrator. Only root questions,
+// including explicit ask_user requests, are addressed to the person at the UI.
+fn user_visible(question: &UserQuestion) -> bool {
+    question.run_id == question.root_run_id
 }
 
 // The durable question remains discoverable even if its run-start event was

@@ -5,6 +5,7 @@ mod attention;
 pub mod auto_title;
 mod composer;
 mod conversation;
+mod escalation;
 mod external_commands;
 mod frame;
 mod history;

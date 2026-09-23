@@ -20,7 +20,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
 
 use agents::Role;
-use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent};
+use event_bus::{
+    AgentRunPhase, CompactionReason, EscalationMemoSummary, Event, EventBus, LifecycleEvent,
+};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
@@ -61,6 +63,7 @@ pub(crate) struct RunTask {
 pub(crate) struct RunHandoff {
     pub(crate) source_run_id: RunId,
     pub(crate) worktree: Option<OwnedWorktree>,
+    pub(crate) summary: EscalationMemoSummary,
 }
 
 pub(crate) struct LoopChannels {
@@ -884,6 +887,23 @@ impl LoopState {
                         Err(error) => {
                             self.finish_error(error);
                             return;
+                        }
+                    }
+                    if let Some(runtime) = self.runtime() {
+                        match runtime.pending_direct_child_questions(self.task.run_id) {
+                            Ok(children) if !children.is_empty() => {
+                                self.context.push_user(&format!(
+                                    "Direct children need answers: {}. Use subagent_questions, then answer_subagent_question or ask_user before finishing.",
+                                    children.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                                ));
+                                self.publish_message_count();
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                self.finish_error(error);
+                                return;
+                            }
                         }
                     }
                     if !self.task.config.interactive

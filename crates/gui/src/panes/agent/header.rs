@@ -29,6 +29,29 @@ pub(super) fn header_strip(
                 ui.label(h3(format!("Thread: {title}")));
             }
         });
+        if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty()) {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(parent) = ctx.parent_thread
+                    && ui
+                        .small_button(format!("← 親 thread: {}", parent.title))
+                        .clicked()
+                {
+                    *action = Some(AgentPaneAction::Sidebar(
+                        crate::panes::sidebar::SidebarAction::SwitchThread(parent.id.clone()),
+                    ));
+                }
+                for child in &ctx.child_threads {
+                    if ui
+                        .small_button(format!("↳ 子 thread: {}", child.title))
+                        .clicked()
+                    {
+                        *action = Some(AgentPaneAction::Sidebar(
+                            crate::panes::sidebar::SidebarAction::SwitchThread(child.id.clone()),
+                        ));
+                    }
+                }
+            });
+        }
     });
 }
 

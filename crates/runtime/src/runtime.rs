@@ -776,6 +776,9 @@ impl AgentRuntime {
             );
         }
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
+        let escalation_link = handoff
+            .as_ref()
+            .map(|handoff| (handoff.source_run_id, handoff.summary.clone()));
         let prompt = match &config.memory {
             Some(memory) if handoff.is_none() => memory.augment(prompt),
             Some(_) | None => prompt,
@@ -856,6 +859,15 @@ impl AgentRuntime {
                 _join: None,
             },
         );
+        if let Some((source_run_id, summary)) = escalation_link {
+            self.shared
+                .bus
+                .emit(Event::new(LifecycleEvent::EscalationRequested {
+                    source_run_id: source_run_id.to_string(),
+                    new_run_id: run_id.to_string(),
+                    summary,
+                }));
+        }
         if task.restored.is_some() {
             self.shared
                 .bus
@@ -970,6 +982,7 @@ impl AgentRuntime {
             source.worktree_path = None;
         }
         before_spawn();
+        let summary = memo.summary();
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,
@@ -979,6 +992,7 @@ impl AgentRuntime {
             RunContinuation::Handoff(RunHandoff {
                 source_run_id,
                 worktree: worktree.take(),
+                summary,
             }),
         ))
     }

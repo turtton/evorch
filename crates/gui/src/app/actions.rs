@@ -129,6 +129,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn switch_thread(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
         self.sidebar.switch_thread(&thread_id)?;
         self.transcripts.select_thread(Some(thread_id.to_string()));
+        if self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| thread.id == thread_id && thread.escalation_source_run_id.is_some())
+        {
+            self.composer.role = crate::model::composer::ComposerRole::Orchestrator;
+        }
         self.focus = ConversationFocus::Thread;
         self.save_sidebar();
         Ok(())

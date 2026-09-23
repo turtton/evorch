@@ -69,6 +69,9 @@ pub struct ThreadRecord {
     pub model_preference: Option<ModelPreference>,
     #[serde(default)]
     pub parent_thread_id: Option<ThreadId>,
+    /// Worker run that requested this independent orchestrator conversation.
+    #[serde(default)]
+    pub escalation_source_run_id: Option<String>,
     #[serde(default)]
     pub fork_event_id: Option<i64>,
 }
@@ -91,6 +94,7 @@ impl ThreadRecord {
             worktree_path: None,
             model_preference: None,
             parent_thread_id: None,
+            escalation_source_run_id: None,
             fork_event_id: None,
         }
     }

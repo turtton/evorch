@@ -23,6 +23,8 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     phase_unread: true,
                     has_project: true,
                     active_thread_title: Some("Status test"),
+                    parent_thread: None,
+                    child_threads: Vec::new(),
                     thread_metrics: Some(ThreadMetrics {
                         cost: Some(0.125),
                         cache_hit_rate: Some(50.0),

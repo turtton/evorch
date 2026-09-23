@@ -621,3 +621,214 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
         runtime.cancel(run).unwrap();
     }
 }
+
+struct ResolvingParentModel {
+    parent_turns: std::sync::atomic::AtomicUsize,
+    child_turns: std::sync::atomic::AtomicUsize,
+    ask_user: bool,
+}
+
+fn question_id_from_tool_result(messages: &[providers::Message]) -> String {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } if tool_call_id == "questions" => content.iter().find_map(|content| {
+                let providers::ToolResultContent::Text { text } = content;
+                serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .and_then(|value| value[0]["id"].as_str().map(str::to_owned))
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("parent did not receive child question: {messages:?}"))
+}
+
+#[async_trait::async_trait]
+impl runtime::AgentModel for ResolvingParentModel {
+    async fn complete(
+        &self,
+        _: &runtime::AgentInvocationContext,
+        role: Role,
+        messages: &[providers::Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        if role == Role::Worker {
+            return Ok(
+                match self
+                    .child_turns
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                {
+                    0 => tool_response(
+                        "child-question",
+                        "ask_user",
+                        serde_json::json!({"title":"Which implementation?","blocking":true}),
+                    ),
+                    1 => text_response("Waiting for the answer", FinishReason::Stop),
+                    _ => {
+                        assert!(serde_json::to_string(messages).unwrap().contains("Use A"));
+                        text_response("Child applied answer", FinishReason::Stop)
+                    }
+                },
+            );
+        }
+        assert_eq!(role, Role::Orchestrator);
+        let turn = self
+            .parent_turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let answer_turn = if self.ask_user { 4 } else { 3 };
+        Ok(match turn {
+            0 => tool_response(
+                "delegate",
+                "delegate",
+                serde_json::json!({"role":"worker","prompt":"CHILD"}),
+            ),
+            1 if !self.ask_user => text_response("I am done", FinishReason::Stop),
+            n if n == (if self.ask_user { 1 } else { 2 }) => {
+                let history = serde_json::to_string(messages).unwrap();
+                assert!(history.contains("needs_user_input"));
+                if !self.ask_user {
+                    assert!(history.contains("Direct children need answers"));
+                }
+                tool_response(
+                    "questions",
+                    "subagent_questions",
+                    serde_json::json!({"run_id":"run-2"}),
+                )
+            }
+            2 if self.ask_user => tool_response(
+                "parent-question",
+                "ask_user",
+                serde_json::json!({"title":"Which implementation?","blocking":true}),
+            ),
+            3 if self.ask_user => text_response("Waiting for user judgment", FinishReason::Stop),
+            n if n == answer_turn => {
+                if self.ask_user {
+                    assert!(serde_json::to_string(messages).unwrap().contains("Use A"));
+                }
+                tool_response(
+                    "answer-child",
+                    "answer_subagent_question",
+                    serde_json::json!({
+                        "question_id":question_id_from_tool_result(messages),
+                        "answer":"Use A"
+                    }),
+                )
+            }
+            n if n == answer_turn + 1 => {
+                tool_response("wait-child", "wait", serde_json::json!({"run_id":"run-2"}))
+            }
+            _ => text_response("Parent completed", FinishReason::Stop),
+        })
+    }
+
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "question-routing-fixture".into()
+    }
+}
+
+async fn resolve_child_question_through_parent(ask_user: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("questions.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let model = Arc::new(ResolvingParentModel {
+        parent_turns: std::sync::atomic::AtomicUsize::new(0),
+        child_turns: std::sync::atomic::AtomicUsize::new(0),
+        ask_user,
+    });
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
+    if ask_user {
+        let question = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) =
+                    events.recv().await.unwrap().kind
+                    && question.run_id == parent.to_string()
+                {
+                    break question;
+                }
+            }
+        })
+        .await
+        .expect("parent asked the user");
+        runtime.answer_user_question(&question.id, "Use A").unwrap();
+    }
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(parent))
+            .await
+            .expect("parent no longer deadlocks")
+            .unwrap(),
+        AgentRunPhase::Done
+    );
+    let child = runtime::RunId::new(2);
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let child_question = runtime.user_answers(child).unwrap().remove(0);
+    assert_eq!(child_question.answer.as_deref(), Some("Use A"));
+    assert_eq!(
+        runtime.user_answers(parent).unwrap().len(),
+        usize::from(ask_user)
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_answers_child_question_without_user_round_trip() {
+    resolve_child_question_through_parent(false).await;
+}
+
+#[tokio::test]
+async fn orchestrator_can_request_user_judgment_then_answer_child() {
+    resolve_child_question_through_parent(true).await;
+}
+
+#[tokio::test]
+async fn only_direct_orchestrator_parent_can_read_or_answer_child_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("questions.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(128));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let model = Arc::new(ScriptedModel::gated([], gate));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let unrelated =
+        runtime.delegate_background(Role::Orchestrator, "other".into(), RunConfig::default());
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "child", RunConfig::default())
+        .unwrap();
+    let question = runtime
+        .request_user_question(child, "Choose?".into(), Vec::new(), true)
+        .unwrap();
+
+    assert_eq!(
+        runtime.subagent_questions(parent, child).unwrap(),
+        vec![question.clone()]
+    );
+    assert!(runtime.subagent_questions(unrelated, child).is_err());
+    assert!(
+        runtime
+            .answer_subagent_question(unrelated, &question.id, "A")
+            .is_err()
+    );
+    assert!(
+        runtime
+            .answer_subagent_question(child, &question.id, "A")
+            .is_err()
+    );
+    assert_eq!(runtime.user_question(&question.id).unwrap(), Some(question));
+}

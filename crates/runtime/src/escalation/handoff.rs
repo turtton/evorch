@@ -2,7 +2,7 @@
 
 use std::sync::Weak;
 
-use event_bus::{AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event, LifecycleEvent};
+use event_bus::{AgentRunPhase, DiagnosticEvent, DiagnosticSeverity, Event};
 
 use super::EscalationMemo;
 use crate::agent_loop::{LoopState, cleanup_worktree};
@@ -31,12 +31,11 @@ pub(crate) async fn complete(
         return;
     };
     let source_run_id = memo.source_run_id;
-    let summary = memo.summary();
     let config = state.run_config().clone();
-    let new_run_id = match runtime.spawn_escalated_root(memo, &config, &mut worktree, || {
+    match runtime.spawn_escalated_root(memo, &config, &mut worktree, || {
         state.publish_terminal();
     }) {
-        Ok(run) => run,
+        Ok(_) => {}
         Err(reason) => {
             state.shared.bus.emit(Event::new(DiagnosticEvent {
                 source: "escalation_handoff".into(),
@@ -48,15 +47,6 @@ pub(crate) async fn complete(
                 call_id: None,
             }));
             cleanup_worktree(&state.shared, source_run_id, worktree).await;
-            return;
         }
-    };
-    state
-        .shared
-        .bus
-        .emit(Event::new(LifecycleEvent::EscalationRequested {
-            source_run_id: source_run_id.to_string(),
-            new_run_id: new_run_id.to_string(),
-            summary,
-        }));
+    }
 }

@@ -64,6 +64,8 @@ pub(crate) async fn dispatch(
     match name {
         "ask_user" => questions::ask_user(state, &runtime, input),
         "user_answers" => questions::user_answers(state, &runtime, input),
+        "subagent_questions" => questions::subagent_questions(state, &runtime, input),
+        "answer_subagent_question" => questions::answer_subagent_question(state, &runtime, input),
         "delegate" => delegation::delegate(state, &runtime, input).await,
         "send" => messaging::send(state, &runtime, input),
         "send_message" => messaging::send_message(state, &runtime, input),
@@ -111,6 +113,20 @@ async fn finish(
     }
     if let Err(error) = state.user_question_completion_check() {
         return self::error(error);
+    }
+    match runtime.pending_direct_child_questions(state.caller_run_id()) {
+        Ok(children) if !children.is_empty() => {
+            return error(format!(
+                "Direct children need answers: {}. Use subagent_questions, then answer_subagent_question or ask_user.",
+                children
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(_) => {}
+        Err(reason) => return error(reason),
     }
     let Some(gate) = runtime.goal_gate() else {
         return DispatchResult {

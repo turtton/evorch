@@ -303,6 +303,19 @@ impl TranscriptRegistry {
         self.active_thread = id;
     }
 
+    pub(crate) fn push_to_thread(&mut self, thread: &str, entry: TranscriptEntry) {
+        self.threads.entry(thread.into()).or_default().push(entry);
+    }
+
+    /// Adopt output that may arrive before the escalation event names its owner.
+    pub(crate) fn adopt_thread_root(&mut self, thread: &str, run: &str) {
+        if !self.thread_roots.contains_key(thread) {
+            let transcript = self.runs.get(run).cloned().unwrap_or_default();
+            self.threads.insert(thread.into(), transcript);
+        }
+        self.bind_thread_root(thread, run);
+    }
+
     pub fn bind_run(&mut self, run: &str, thread: &str) {
         self.run_threads.insert(run.into(), thread.into());
     }
@@ -312,7 +325,7 @@ impl TranscriptRegistry {
         self.thread_roots.insert(thread.into(), run.into());
     }
 
-    fn is_thread_root(&self, run: &str) -> bool {
+    pub(crate) fn is_thread_root(&self, run: &str) -> bool {
         self.run_threads
             .get(run)
             .and_then(|thread| self.thread_roots.get(thread))

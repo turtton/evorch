@@ -42,6 +42,18 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .any(|((id, _), ack)| id == tab && ack.is_unread()),
             has_project: self.sidebar.selected_project.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
+            parent_thread: active_thread
+                .and_then(|thread| thread.parent_thread_id.as_ref())
+                .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id)),
+            child_threads: self
+                .sidebar
+                .threads
+                .iter()
+                .filter(|thread| {
+                    active_thread
+                        .is_some_and(|parent| thread.parent_thread_id.as_ref() == Some(&parent.id))
+                })
+                .collect(),
             thread_metrics: active_thread.map(|thread| {
                 let mut metrics = self.telemetry.thread_metrics(&thread.run_ids);
                 if let ConversationFocus::Agent(run_id) = self.focus {

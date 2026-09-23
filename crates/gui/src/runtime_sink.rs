@@ -394,7 +394,11 @@ impl RuntimeCommandSink {
                 Vec::new()
             }
             WorkbenchCommand::CancelChat { thread_id } => {
-                let Some(&run_id) = self.chat_runs.get(&thread_id) else {
+                let Some(&run_id) = self
+                    .chat_runs
+                    .get(&thread_id)
+                    .or_else(|| self.goal_runs.get(&thread_id))
+                else {
                     return vec![LoopEvent::ChatRejected {
                         thread_id,
                         reason: "No chat run to cancel".into(),
@@ -1059,6 +1063,29 @@ mod tests {
                 .expect("run exists")
         });
         assert_eq!(phase, event_bus::AgentRunPhase::Error);
+    }
+
+    #[test]
+    fn cancel_bound_orchestrator_before_first_follow_up() {
+        let (rt, mut sink, runtime, _) = build_sink();
+        let root = rt.block_on(async {
+            runtime.delegate_background(Role::Orchestrator, "inspect".into(), RunConfig::default())
+        });
+        sink.bind_goal_context("child-thread", "project", &root.to_string());
+        assert!(
+            sink.submit(WorkbenchCommand::CancelChat {
+                thread_id: "child-thread".into()
+            })
+            .is_empty()
+        );
+        let phase = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        assert_eq!(phase, event_bus::AgentRunPhase::Error);
+        assert_eq!(sink.goal_runs["child-thread"], root);
     }
 
     #[test]

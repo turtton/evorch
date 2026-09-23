@@ -1,6 +1,5 @@
 //! delegate メタ操作のハンドラ。
 
-use event_bus::AgentRunPhase;
 use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
@@ -71,18 +70,18 @@ pub(super) async fn delegate(
         Ok(child) => child,
         Err(result) => return result,
     };
-    if state.transition(AgentRunPhase::Waiting, None).is_err() {
+    // A child may ask for a decision before it can finish. Use the same
+    // attention-aware wait exposed to the model, so the parent can answer it.
+    let result = super::runs::waiting::wait(
+        state,
+        runtime,
+        serde_json::json!({"run_id": child.to_string()}),
+    )
+    .await;
+    if result.result.is_error {
         cleanup_delegates(runtime, std::iter::once(child)).await;
-        return error("parent run could not enter Waiting");
     }
-    let result = runtime.wait(child).await;
-    if state.transition(AgentRunPhase::Running, None).is_err() {
-        return error("parent run could not resume Running");
-    }
-    match result {
-        Ok(phase) => success(format!("{phase:?}")),
-        Err(runtime_error) => error(runtime_error.to_string()),
-    }
+    result
 }
 
 pub(crate) fn spawn_delegate(
@@ -159,10 +158,23 @@ pub(crate) async fn wait_delegates(
     runtime: &AgentRuntime,
     children: Vec<Result<crate::RunId, DispatchResult>>,
 ) -> Vec<DispatchResult> {
-    if !children.iter().any(Result::is_ok) {
+    let run_ids = children
+        .iter()
+        .filter_map(|child| child.as_ref().ok())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if run_ids.is_empty() {
         return children.into_iter().filter_map(Result::err).collect();
     }
-    if state.transition(AgentRunPhase::Waiting, None).is_err() {
+    // One wait covers the whole wave and returns when any child needs a
+    // decision, while preserving each delegate call's own tool result.
+    let waited = super::runs::waiting::wait(
+        state,
+        runtime,
+        serde_json::json!({"run_ids":run_ids, "mode":"all"}),
+    )
+    .await;
+    if waited.result.is_error {
         cleanup_delegates(
             runtime,
             children
@@ -170,43 +182,48 @@ pub(crate) async fn wait_delegates(
                 .filter_map(|child| child.as_ref().ok().copied()),
         )
         .await;
+        let message = waited.result.content;
         return children
             .into_iter()
-            .map(|child| {
-                child
-                    .err()
-                    .unwrap_or_else(|| error("parent run could not enter Waiting"))
-            })
+            .map(|child| child.err().unwrap_or_else(|| error(message.clone())))
             .collect();
     }
-    let cancel = state.channels.cancel_rx.clone();
-    let results = futures_util::future::join_all(children.into_iter().map(|child| {
-        let mut cancel = cancel.clone();
-        async move {
-            match child {
-                Ok(child) => Ok(tokio::select! {
-                    biased;
-                    _ = async { drop(cancel.wait_for(|cancelled| *cancelled).await); } => {
-                        match runtime.cancel(child) {
-                            Ok(()) => runtime.wait(child).await,
-                            Err(error) => Err(error),
-                        }
-                    }
-                    result = runtime.wait(child) => result,
-                }),
-                Err(result) => Err(result),
-            }
+    let snapshot: serde_json::Value = match serde_json::from_str(&waited.result.content) {
+        Ok(snapshot) => snapshot,
+        Err(parse_error) => {
+            return children
+                .into_iter()
+                .map(|child| {
+                    child.err().unwrap_or_else(|| {
+                        error(format!("invalid child wait result: {parse_error}"))
+                    })
+                })
+                .collect();
         }
-    }))
-    .await;
-    let resumed = state.transition(AgentRunPhase::Running, None).is_ok();
-    results
+    };
+    children
         .into_iter()
-        .map(|result| match result {
+        .map(|child| match child {
             Err(result) => result,
-            Ok(_) if !resumed => error("parent run could not resume Running"),
-            Ok(Ok(phase)) => success(format!("{phase:?}")),
-            Ok(Err(runtime_error)) => error(runtime_error.to_string()),
+            Ok(run_id) => {
+                let run = snapshot["runs"]
+                    .as_array()
+                    .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id.to_string()));
+                match run {
+                    Some(run) if run["status"] != "still_running" => {
+                        success(run["phase"].as_str().unwrap_or("Error"))
+                    }
+                    Some(run) => super::serialize(&serde_json::json!({
+                        "run_id": run_id.to_string(),
+                        "phase": run["phase"],
+                        "needs_user_input": run["needs_user_input"],
+                        "inbox_ready": snapshot["inbox_ready"],
+                        "user_input_ready": snapshot["user_input_ready"],
+                        "timed_out": snapshot["timed_out"],
+                    })),
+                    None => error(format!("missing child wait result for {run_id}")),
+                }
+            }
         })
         .collect()
 }

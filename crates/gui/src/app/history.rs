@@ -71,7 +71,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.restore_user_message(message);
                 }
             }
-            self.bind_goal_event(&stored.event);
             let at = replay_end
                 .and_then(|end| end.duration_since(stored.event.meta.wall_clock).ok())
                 .and_then(|age| replay_now.checked_sub(age))
@@ -79,6 +78,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.telemetry.apply_event_at(&stored.event, at);
             self.transcripts.select_thread(None);
             self.apply_conversation_event(&stored.event);
+            self.bind_goal_event(&stored.event);
         }
         for message in messages {
             self.restore_user_message(message);

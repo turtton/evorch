@@ -126,10 +126,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_event(&mut self, event: &Event) {
         self.fold_user_question(event);
         self.invalidate_restore_diagnostics(event);
-        self.bind_goal_event(event);
         if self.apply_conversation_event(event) {
             self.save_sidebar();
         }
+        self.bind_goal_event(event);
         self.apply_runtime_event(event);
         self.pending_approvals.apply_event(
             event,
@@ -169,6 +169,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     fn apply_runtime_event(&mut self, event: &Event) {
         match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                source_run_id,
+                new_run_id,
+                ..
+            }) => {
+                if self.is_conversation_run(new_run_id) {
+                    self.prepare_escalation_thread(source_run_id, new_run_id);
+                }
+            }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
                 self.open_subagent_pane(run_id);
             }

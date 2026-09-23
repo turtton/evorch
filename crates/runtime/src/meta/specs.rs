@@ -5,7 +5,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
     match name {
         "delegate" => ToolSpec {
             name: name.into(),
-            description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase; background=true returns immediately with a run_id. interactive=true requires background=true. Category is worker-only; images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
+            description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Category is worker-only; images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -125,11 +125,17 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
                 }}
             }), &["verdict"], true),
         "ask_user" => object_spec(name,
-            "Ask a focused scope question and return {question_id, status:pending, blocking, delivery} immediately. Answers clarify the task and never grant execution permissions. title is required (1-2048 UTF-8 bytes); options is optional (up to 3 nonempty choices, each up to 256 UTF-8 bytes). blocking defaults to true: finish is refused until required answers arrive and are observed in a subsequent model turn. Continue independent work while the question is pending; answers are injected automatically, so do not poll for progress. Unknown arguments, invalid sizes, unavailable storage, more than 32 questions per recipient, or more than 1024 pending questions overall fail.",
+            "Ask a focused scope question and return {question_id, status:pending, blocking, delivery} immediately. For a subagent this asks its Orchestrator parent; a root asks the user. Answers clarify the task and never grant execution permissions. title is required (1-2048 UTF-8 bytes); options is optional (up to 3 nonempty choices, each up to 256 UTF-8 bytes). blocking defaults to true: finish is refused until required answers arrive and are observed in a subsequent model turn. Continue independent work while the question is pending; answers are injected automatically, so do not poll for progress. Unknown arguments, invalid sizes, unavailable storage, more than 32 questions per recipient, or more than 1024 pending questions overall fail.",
             json!({"title":{"type":"string","minLength":1,"maxLength":2048},"options":{"type":"array","maxItems":3,"items":{"type":"string","minLength":1,"maxLength":256}},"blocking":{"type":"boolean","default":true}}), &["title"], true),
         "user_answers" => object_spec(name,
             "Return up to 32 questions created by this run or explicitly inherited from its resumed conversation, with pending/answered state and original requester provenance. This read does not consume answers. Answers are also injected automatically into the run, so use this for recovery or inspection rather than repeated polling. An unconfigured store returns an empty list; unknown arguments or durable storage read failures return an error.",
             json!({}), &[], true),
+        "subagent_questions" => object_spec(name,
+            "Read questions from one direct child run, including pending state and original requester. Use after wait reports attention for that child. Decide whether to answer from available context or ask the user on your own run. Only the direct Orchestrator parent may read these questions.",
+            json!({"run_id":run_id()}), &["run_id"], true),
+        "answer_subagent_question" => object_spec(name,
+            "Answer one direct child's pending question. The answer is delivered to that child at its next model turn and wakes it from Waiting. Only the direct Orchestrator parent may answer; this never grants tool permissions. If user judgment is needed, ask_user on your own run first, then pass that answer here.",
+            json!({"question_id":{"type":"string"},"answer":{"type":"string","minLength":1,"maxLength":4096}}), &["question_id","answer"], true),
         _ => panic!("missing meta tool contract: {name}"),
     }
 }

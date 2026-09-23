@@ -28,6 +28,8 @@ pub const META_OPS: &[&str] = &[
     "submit_review",
     "ask_user",
     "user_answers",
+    "subagent_questions",
+    "answer_subagent_question",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -273,9 +275,11 @@ mod tests {
             "submit_review",
             "ask_user",
             "user_answers",
+            "subagent_questions",
+            "answer_subagent_question",
         ];
 
-        assert_eq!(META_OPS.len(), 19);
+        assert_eq!(META_OPS.len(), 21);
         assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");

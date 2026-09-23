@@ -89,6 +89,14 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "ask_user",
         json!({"title":"Choose implementation scope", "options":["A","B"], "blocking":false}),
     );
+    contract::<meta::questions::SubagentQuestionsArgs>(
+        "subagent_questions",
+        json!({"run_id":"run-2"}),
+    );
+    contract::<meta::questions::AnswerSubagentQuestionArgs>(
+        "answer_subagent_question",
+        json!({"question_id":"question-1","answer":"Use A"}),
+    );
     contract::<meta::FinishArgs>(
         "finish",
         json!({"result":"Completed, files x, tested y, no open blockers."}),

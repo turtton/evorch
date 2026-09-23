@@ -1,7 +1,7 @@
 //! Shared conversation projection for live delivery and persisted event replay.
 //!
 //! Run ownership and root changes must be applied before transcript routing.
-//! This module mutates only the sidebar's run index and transcripts: callers
+//! This module projects sidebar conversations and transcripts: callers
 //! decide whether to persist or perform live UI effects.
 
 use event_bus::{Event, EventKind, LifecycleEvent, OrchestratorEvent};
@@ -13,6 +13,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Returns whether the sidebar's run index changed. Never performs I/O.
     pub(super) fn apply_conversation_event(&mut self, event: &Event) -> bool {
         let changed = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                source_run_id,
+                new_run_id,
+                summary,
+            }) => self.bind_escalation_thread(source_run_id, new_run_id, summary),
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                 run_id,
                 parent_run_id,
@@ -45,6 +50,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => false,
         };
         self.transcripts.apply(event);
+        self.project_escalation_result(event);
         changed
     }
 
@@ -73,7 +79,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         changed
     }
 
-    fn thread_for_run(&self, run_id: &str) -> Option<String> {
+    pub(super) fn thread_for_run(&self, run_id: &str) -> Option<String> {
         self.sidebar
             .threads
             .iter()
