@@ -338,30 +338,29 @@ fn strip_role_binding(
             ignored,
         );
     }
-    if worker {
-        if let Some(categories) = binding
+    if worker
+        && let Some(categories) = binding
             .get_mut("categories")
             .and_then(toml::Value::as_table_mut)
-        {
-            let categories_path = format!("{path}.categories");
-            retain_known(categories, &categories_path, CATEGORY_NAMES, ignored);
-            for (name, value) in categories {
-                let Some(category) = value.as_table_mut() else {
-                    continue;
-                };
-                let category_path = format!("{categories_path}.{name}");
-                retain_known(category, &category_path, CATEGORY_BINDING_KEYS, ignored);
-                if let Some(generation) = category
-                    .get_mut("generation")
-                    .and_then(toml::Value::as_table_mut)
-                {
-                    retain_known(
-                        generation,
-                        &format!("{category_path}.generation"),
-                        GENERATION_KEYS,
-                        ignored,
-                    );
-                }
+    {
+        let categories_path = format!("{path}.categories");
+        retain_known(categories, &categories_path, CATEGORY_NAMES, ignored);
+        for (name, value) in categories {
+            let Some(category) = value.as_table_mut() else {
+                continue;
+            };
+            let category_path = format!("{categories_path}.{name}");
+            retain_known(category, &category_path, CATEGORY_BINDING_KEYS, ignored);
+            if let Some(generation) = category
+                .get_mut("generation")
+                .and_then(toml::Value::as_table_mut)
+            {
+                retain_known(
+                    generation,
+                    &format!("{category_path}.generation"),
+                    GENERATION_KEYS,
+                    ignored,
+                );
             }
         }
     }
