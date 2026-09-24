@@ -95,6 +95,22 @@ const ORCHESTRATION_KEYS: &[&str] = &[
     "ci_poll_secs",
     "ci_timeout_secs",
 ];
+const BUDGET_KEYS: &[&str] = &[
+    "max_tool_calls",
+    "max_tokens",
+    "max_elapsed_secs",
+    "max_no_progress_rounds",
+    "max_file_rereads",
+    "max_identical_tool_call_repeats",
+];
+const OWNERSHIP_KEYS: &[&str] = &["heartbeat_ms", "lease_ms", "grace_ms"];
+const TEAM_KEYS: &[&str] = &["enabled", "max_workers"];
+const SANDBOX_KEYS: &[&str] = &[
+    "allow_network",
+    "web_tool_access",
+    "escalation_approval",
+    "escalate_to_user_on_deny",
+];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens", "reasoning_effort"];
@@ -155,31 +171,233 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "metrics", METRICS_KEYS)?;
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
-    validate_section(
-        root,
-        "budget",
-        &[
-            "max_tool_calls",
-            "max_tokens",
-            "max_elapsed_secs",
-            "max_no_progress_rounds",
-            "max_file_rereads",
-            "max_identical_tool_call_repeats",
-        ],
-    )?;
-    validate_section(root, "ownership", &["heartbeat_ms", "lease_ms", "grace_ms"])?;
-    validate_section(root, "team", &["enabled", "max_workers"])?;
-    validate_section(
-        root,
-        "sandbox",
-        &[
-            "allow_network",
-            "web_tool_access",
-            "escalation_approval",
-            "escalate_to_user_on_deny",
-        ],
-    )?;
+    validate_section(root, "budget", BUDGET_KEYS)?;
+    validate_section(root, "ownership", OWNERSHIP_KEYS)?;
+    validate_section(root, "team", TEAM_KEYS)?;
+    validate_section(root, "sandbox", SANDBOX_KEYS)?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
+}
+
+/// 読み込み時に未対応のキーだけを取り除く。値はログに出さず、パスのみ返す。
+/// 平文 credential に見えるキーは従来どおり拒否する。
+pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<String>, ConfigError> {
+    let mut ignored = Vec::new();
+    let Some(root) = merged.as_table_mut() else {
+        return Ok(ignored);
+    };
+    retain_known(root, "", ROOT_KEYS, &mut ignored);
+
+    if let Some(presets) = root
+        .get_mut("model_presets")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (name, value) in presets {
+            if let Some(preset) = value.as_table_mut() {
+                retain_known(
+                    preset,
+                    &format!("model_presets.{name}"),
+                    MODEL_PRESET_KEYS,
+                    &mut ignored,
+                );
+            }
+        }
+    }
+
+    if let Some(providers) = root
+        .get_mut("providers")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (name, value) in providers {
+            let Some(profile) = value.as_table_mut() else {
+                continue;
+            };
+            let path = format!("providers.{name}");
+            reject_plaintext_keys(profile, &path, PROVIDER_KEYS)?;
+            retain_known(profile, &path, PROVIDER_KEYS, &mut ignored);
+            if let Some(credential) = profile
+                .get_mut("credential")
+                .and_then(toml::Value::as_table_mut)
+            {
+                let allowed = match credential.get("type").and_then(toml::Value::as_str) {
+                    Some("keyring") => Some(KEYRING_KEYS),
+                    Some("env") => Some(ENV_KEYS),
+                    _ => None,
+                };
+                if let Some(allowed) = allowed {
+                    let credential_path = format!("{path}.credential");
+                    reject_plaintext_keys(credential, &credential_path, allowed)?;
+                    retain_known(credential, &credential_path, allowed, &mut ignored);
+                }
+            }
+            if let Some(models) = profile
+                .get_mut("models")
+                .and_then(toml::Value::as_array_mut)
+            {
+                for (index, model) in models.iter_mut().enumerate() {
+                    if let Some(table) = model.as_table_mut() {
+                        retain_known(
+                            table,
+                            &format!("{path}.models[{index}]"),
+                            MODEL_ENTRY_KEYS,
+                            &mut ignored,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(routing) = root.get_mut("routing").and_then(toml::Value::as_table_mut) {
+        retain_known(routing, "routing", ROUTING_KEYS, &mut ignored);
+        if let Some(routes) = routing
+            .get_mut("routes")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (name, candidates) in routes {
+                if let Some(candidates) = candidates.as_array_mut() {
+                    for (index, candidate) in candidates.iter_mut().enumerate() {
+                        if let Some(table) = candidate.as_table_mut() {
+                            retain_known(
+                                table,
+                                &format!("routing.routes.{name}[{index}]"),
+                                ROUTE_CANDIDATE_KEYS,
+                                &mut ignored,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(agents) = root.get_mut("agents").and_then(toml::Value::as_table_mut) {
+        retain_known(agents, "agents", AGENTS_KEYS, &mut ignored);
+        for (role, value) in agents {
+            if role == "roles" {
+                if let Some(roles) = value.as_table_mut() {
+                    retain_known(roles, "agents.roles", ADDITIONAL_ROLE_KEYS, &mut ignored);
+                    for (name, binding) in roles {
+                        strip_role_binding(
+                            binding,
+                            &format!("agents.roles.{name}"),
+                            false,
+                            &mut ignored,
+                        );
+                    }
+                }
+            } else {
+                strip_role_binding(
+                    value,
+                    &format!("agents.{role}"),
+                    role == "worker",
+                    &mut ignored,
+                );
+            }
+        }
+    }
+
+    let sections: &[(&str, &[&str])] = &[
+        ("panel", PANEL_KEYS),
+        ("diagnostics", DIAGNOSTICS_KEYS),
+        ("permissions", PERMISSIONS_KEYS),
+        ("metrics", METRICS_KEYS),
+        ("rules", RULES_KEYS),
+        ("compaction", COMPACTION_KEYS),
+        ("budget", BUDGET_KEYS),
+        ("ownership", OWNERSHIP_KEYS),
+        ("team", TEAM_KEYS),
+        ("sandbox", SANDBOX_KEYS),
+        ("orchestration", ORCHESTRATION_KEYS),
+    ];
+    for &(name, allowed) in sections {
+        if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
+            retain_known(table, name, allowed, &mut ignored);
+        }
+    }
+    Ok(ignored)
+}
+
+fn strip_role_binding(
+    value: &mut toml::Value,
+    path: &str,
+    worker: bool,
+    ignored: &mut Vec<String>,
+) {
+    let Some(binding) = value.as_table_mut() else {
+        return;
+    };
+    retain_known(binding, path, ROLE_BINDING_KEYS, ignored);
+    if let Some(generation) = binding
+        .get_mut("generation")
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(
+            generation,
+            &format!("{path}.generation"),
+            GENERATION_KEYS,
+            ignored,
+        );
+    }
+    if worker {
+        if let Some(categories) = binding
+            .get_mut("categories")
+            .and_then(toml::Value::as_table_mut)
+        {
+            let categories_path = format!("{path}.categories");
+            retain_known(categories, &categories_path, CATEGORY_NAMES, ignored);
+            for (name, value) in categories {
+                let Some(category) = value.as_table_mut() else {
+                    continue;
+                };
+                let category_path = format!("{categories_path}.{name}");
+                retain_known(category, &category_path, CATEGORY_BINDING_KEYS, ignored);
+                if let Some(generation) = category
+                    .get_mut("generation")
+                    .and_then(toml::Value::as_table_mut)
+                {
+                    retain_known(
+                        generation,
+                        &format!("{category_path}.generation"),
+                        GENERATION_KEYS,
+                        ignored,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn retain_known(
+    table: &mut toml::value::Table,
+    prefix: &str,
+    allowed: &[&str],
+    ignored: &mut Vec<String>,
+) {
+    table.retain(|key, _| {
+        if allowed.contains(&key) {
+            true
+        } else {
+            ignored.push(field_path(prefix, key));
+            false
+        }
+    });
+}
+
+fn reject_plaintext_keys(
+    table: &toml::value::Table,
+    prefix: &str,
+    allowed: &[&str],
+) -> Result<(), ConfigError> {
+    if let Some(key) = table
+        .keys()
+        .find(|key| !allowed.contains(&key.as_str()) && is_credential_like(key))
+    {
+        return Err(ConfigError::InvalidField {
+            path: field_path(prefix, key),
+            message: CREDENTIAL_MESSAGE.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_provider(profile: &toml::value::Table, path: &str) -> Result<(), ConfigError> {
@@ -456,6 +674,19 @@ mod tests {
         // When: denylist と照合する
         // Then: 平文 credential-like key とは判定されない
         assert!(!is_credential_like("credential"));
+    }
+
+    #[test]
+    fn unknown_fields_are_removed_without_exposing_values() {
+        let mut merged: toml::Value = toml::from_str(
+            "[agents.roles.librarian]\nlogical_model = 'secret-value'\n[diagnostics]\nunknown = 'secret-value'\n",
+        )
+        .expect("TOML");
+        let ignored =
+            remove_unknown_fields(&mut merged).expect("unknown fields are safe to ignore");
+        assert_eq!(ignored, ["agents.roles.librarian", "diagnostics.unknown"]);
+        assert!(!format!("{ignored:?}").contains("secret-value"));
+        validate_strict(&merged).expect("remaining fields are valid");
     }
 
     #[test]

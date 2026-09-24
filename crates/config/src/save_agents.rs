@@ -11,8 +11,8 @@ use crate::types::agents::{
 
 /// agents セクションを置き換え、ロールとカテゴリのバインディングを保存する。
 ///
-/// 対象セクション以外の TOML 表現 (コメントを含む) は保持し、保存結果は通常の
-/// [`Config::load`] と同じ strict 検証を通過させる。
+/// 対象セクション以外の TOML 表現 (コメントを含む) は保持し、保存結果は
+/// strict 検証を通過させる。
 pub fn save_agent_bindings(path: &Path, agents: &AgentsConfig) -> Result<(), ConfigError> {
     let mut doc = super::save::read_document(path)?;
     doc.insert("agents", Item::Table(agents_document_table(agents)));

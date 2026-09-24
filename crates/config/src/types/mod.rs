@@ -44,9 +44,10 @@ pub const CURRENT_VERSION: u32 = 2;
 
 /// 設定ファイルのルート構造。
 ///
-/// 各セクションは [`serde(default)`] により省略可能ですが、未知のキーは拒否します。
-/// ロード経路では [`crate::strict`] がドット区切りの設定パスを報告し、直接の serde
-/// パースでも `deny_unknown_fields` により拒否します。
+/// 各セクションは [`serde(default)`] により省略可能です。
+/// 通常の [`Config::load`] は未知キーを警告して無視し、[`Config::load_strict`] は
+/// ドット区切りの設定パス付きで拒否します。直接の serde パースも
+/// `deny_unknown_fields` により拒否します。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {

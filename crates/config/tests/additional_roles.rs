@@ -9,7 +9,7 @@ fn named_roles_reject_category_overrides_when_loaded() {
             "[agents.roles.{role}]\nlogical_model = 'role-model'\n[agents.roles.{role}.categories.visual]\nlogical_model = 'visual-model'\n"
         );
         // When: loading through strict validation.
-        let error = Config::load(&config::LoadOptions {
+        let error = Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(directory.path().to_path_buf()),
             read_env: false,
             cli_overrides: Some(toml::from_str(&doc).expect("TOML")),
@@ -50,7 +50,7 @@ fn layered_loading_validates_closed_role_bindings() {
         ),
     ] {
         // When: the merged configuration crosses the strict boundary.
-        let result = Config::load(&config::LoadOptions {
+        let result = Config::load_strict(&config::LoadOptions {
             user_config_dir: Some(directory.path().to_path_buf()),
             read_env: false,
             cli_overrides: Some(toml::from_str(document).expect("TOML")),

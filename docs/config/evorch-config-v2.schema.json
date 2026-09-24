@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "設定ファイルのルート構造。\n\n各セクションは [`serde(default)`] により省略可能ですが、未知のキーは拒否します。\nロード経路では [`crate::strict`] がドット区切りの設定パスを報告し、直接の serde\nパースでも `deny_unknown_fields` により拒否します。",
+  "description": "設定ファイルのルート構造。\n\n各セクションは [`serde(default)`] により省略可能です。\n通常の [`Config::load`] は未知キーを警告して無視し、[`Config::load_strict`] は\nドット区切りの設定パス付きで拒否します。直接の serde パースも\n`deny_unknown_fields` により拒否します。",
   "type": "object",
   "properties": {
     "agents": {

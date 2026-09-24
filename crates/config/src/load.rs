@@ -102,12 +102,24 @@ impl Config {
     /// - ファイルの `version` が現行より大きい、または整数として読み取れない
     ///   場合 ([`ConfigError::UnsupportedVersion`] / [`ConfigError::Migration`])。
     /// - 環境変数のパスが衝突する場合 ([`ConfigError::InvalidEnvValue`])。
-    /// - マージ済み設定に未知フィールドまたは平文 credential フィールドがある場合
-    ///   ([`ConfigError::InvalidField`])。
+    /// - マージ済み設定に平文 credential フィールドがある場合
+    ///   ([`ConfigError::InvalidField`])。未知フィールドは警告して無視する。
     /// - マージ済みの値を [`Config`] にデシリアライズできない場合 (該当する
     ///   エラーバリアントが存在しないため、経緯を文字列に載せた
     ///   [`ConfigError::Migration`] として報告する)。
     pub fn load(opts: &LoadOptions) -> Result<Config, ConfigError> {
+        Self::load_with_unknown_field_policy(opts, false)
+    }
+
+    /// 未知フィールドもエラーにする厳格な読み込み。設定の検証に使う。
+    pub fn load_strict(opts: &LoadOptions) -> Result<Config, ConfigError> {
+        Self::load_with_unknown_field_policy(opts, true)
+    }
+
+    fn load_with_unknown_field_policy(
+        opts: &LoadOptions,
+        reject_unknown_fields: bool,
+    ) -> Result<Config, ConfigError> {
         let mut merged = builtin_layer()?;
 
         let user_dir = opts.user_config_dir.clone().or_else(user_config_dir);
@@ -131,6 +143,11 @@ impl Config {
             merged = deep_merge(merged, overrides.clone());
         }
 
+        if !reject_unknown_fields {
+            for path in crate::strict::remove_unknown_fields(&mut merged)? {
+                tracing::warn!(field = %path, "ignoring unknown config field");
+            }
+        }
         crate::strict::validate_strict(&merged)?;
         merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))

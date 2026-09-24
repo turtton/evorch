@@ -26,9 +26,9 @@ version = 2          # スキーマバージョン（現在 2。ADR 0014。大�
 [metrics]
 ```
 
-未知キー・typo キーはロード時に拒否される。拒否は parse error になり、`diagnotics`（ルート直下の typo）、`diagnostics.log_lvl`、`providers.foo.timeout` のような dotted config path を含む。strictness は全ソース層（組み込み既定値 / ユーザ / プロジェクト / drop-in / 環境変数 / CLI 上書き）に一様に適用される。検証は deep merge と version migration の後のマージ済み値に対して走るため、どの層由来のキーでも同じエラーになる。
+通常の `Config::load` は未知キー・typo キーだけを無視し、`diagnotics`（ルート直下の typo）、`diagnostics.log_lvl`、`providers.foo.timeout` のような config path を警告ログへ出す。値はログに出さない。有効な provider・routing などの設定はそのまま読み込む。`Config::load_strict` と保存前の検証では未知キーも拒否する。いずれも deep merge と version migration の後のマージ済み値を検証する。
 
-任意キーを許容するマップは `providers` のプロファイル名、`routing.routes` の route 名、`panel.keybinds` のキーのみ。これら以外のテーブルに定義済み以外のキーを書くとエラーになる。
+任意キーを許容するマップは `providers` のプロファイル名、`routing.routes` の route 名、`panel.keybinds` のキーのみ。未知キー以外の不正な値や平文 credential は通常の読み込みでもエラーになる。
 
 version 管理 migration は起動時に適用（`migrate.rs`。古い version は現在値へ変換、未来の version はエラー）。
 

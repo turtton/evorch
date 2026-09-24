@@ -28,7 +28,7 @@ fn env_vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn load_project(tmp: &tempfile::TempDir, content: &str) -> Result<Config, ConfigError> {
     let project = tmp.path().join("project");
     write_file(&project.join("evorch.toml"), content);
-    Config::load(&LoadOptions {
+    Config::load_strict(&LoadOptions {
         project_dir: Some(project),
         user_config_dir: Some(empty_user_dir(tmp)),
         read_env: false,
