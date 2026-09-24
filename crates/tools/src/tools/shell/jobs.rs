@@ -22,7 +22,8 @@ use process::{run_pipe, run_pty};
 const MAX_RUNNING: usize = 8;
 const MAX_RETAINED: usize = 32;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
-const MAX_YIELD_MS: u64 = 60_000;
+pub(super) const MAX_YIELD_MS: u64 = 60_000;
+pub(super) const MAX_POLL_YIELD_MS: u64 = 30 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +131,7 @@ impl JobRegistry {
         if ctx.run_id.is_empty() {
             return Err(invalid("asynchronous shell requires a nonempty run_id"));
         }
-        validate_yield(yield_ms)?;
+        validate_yield(yield_ms, "start")?;
         let (cancel, cancel_rx) = watch::channel(false);
         let (input, input_rx) = mpsc::channel(4);
         let (changed, _) = watch::channel(0);
@@ -212,7 +213,7 @@ impl JobRegistry {
         ctx: &ToolExecutionContext,
         args: ControlArgs,
     ) -> Result<ToolResult, ToolError> {
-        validate_yield(args.yield_ms)?;
+        validate_yield(args.yield_ms, &args.action)?;
         let _ = args.cwd; // Existing jobs retain their original wrapped command.
         let job = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&args.job_id)
             .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
@@ -417,9 +418,16 @@ fn invalid(detail: &str) -> ToolError {
         detail: detail.into(),
     }
 }
-fn validate_yield(ms: u64) -> Result<(), ToolError> {
-    if ms > MAX_YIELD_MS {
-        Err(invalid("yield_ms must be between 0 and 60000"))
+fn validate_yield(ms: u64, action: &str) -> Result<(), ToolError> {
+    let max_ms = if action == "poll" {
+        MAX_POLL_YIELD_MS
+    } else {
+        MAX_YIELD_MS
+    };
+    if ms > max_ms {
+        Err(invalid(&format!(
+            "yield_ms must be between 0 and {max_ms} for {action}"
+        )))
     } else {
         Ok(())
     }

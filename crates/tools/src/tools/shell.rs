@@ -230,7 +230,7 @@ impl Tool for Shell {
     }
 
     fn description(&self) -> &str {
-        "Run a POSIX shell command. Without yield_ms, wait for completion. With yield_ms (0..60000), return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. For dependency downloads or git pull when sandbox DNS/network access fails, request require_network with justification to keep filesystem isolation; require_escalated removes all isolation."
+        "Run a POSIX shell command. Without yield_ms, wait for completion. Start with yield_ms (0..60000) to return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Poll accepts yield_ms up to 1800000 (30 minutes) and returns early on new output or completion; stdin/stop accept up to 60000. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. For dependency downloads or git pull when sandbox DNS/network access fails, request require_network with justification to keep filesystem isolation; require_escalated removes all isolation."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -246,7 +246,7 @@ impl Tool for Shell {
                 "justification": {"type":"string"},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
-                "yield_ms": {"type":"integer", "minimum":0, "maximum":60000, "description":"Start async job or wait for new output/completion, at most this many milliseconds."},
+                "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start async job or wait for new output/completion, returning early when either is available. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
                 "job_id": {"type":"string", "minLength":1, "description":"ID returned by this run's asynchronous shell start."},
                 "cursor": {"type":"integer", "minimum":0, "default":0, "description":"Returned output cursor, in redacted UTF-8 bytes. Older live output may expire."},
                 "input": {"type":"string", "maxLength":16384, "description":"stdin only: bytes to write, at most 16 KiB. Timeout may mean a partial write: inspect output before retrying."},
@@ -257,6 +257,9 @@ impl Tool for Shell {
                 "if": {"properties":{"action":{"enum":["poll", "stdin", "stop"]}}, "required":["action"]},
                 "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["require_escalated"]},{"required":["require_network"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
                 "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
+            }, {
+                "if": {"properties":{"action":{"enum":["start", "stdin", "stop"]}}},
+                "then": {"properties":{"yield_ms":{"maximum":jobs::MAX_YIELD_MS}}}
             }]
         })
     }
@@ -353,7 +356,7 @@ impl Tool for Shell {
                 detail: "start requires a nonempty command".into(),
             });
         }
-        if args.yield_ms.is_some_and(|ms| ms > 60_000)
+        if args.yield_ms.is_some_and(|ms| ms > jobs::MAX_YIELD_MS)
             || args.timeout_ms == Some(0)
             || args.timeout_ms.is_some_and(|ms| {
                 tokio::time::Instant::now()
@@ -362,7 +365,8 @@ impl Tool for Shell {
             })
         {
             return Err(ToolError::InvalidArgs {
-                detail: "yield_ms must be 0..60000 and timeout_ms must be positive".into(),
+                detail: "yield_ms must be 0..60000 for start and timeout_ms must be positive"
+                    .into(),
             });
         }
         // 契約判定はサンドボックスの wrap より先に行い、拒否時は子プロセスを

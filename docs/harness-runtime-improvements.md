@@ -10,8 +10,10 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   deserialization are checked together, including roles and structured failures.
 - `shell` without `yield_ms` retains synchronous execution. `yield_ms: 0..60000`
   starts a bounded background job; `action: poll | stdin | stop` uses its `job_id`
-  and output cursor. A job belongs to its launching run and retains its sandbox
-  and cwd. It is not a durable task and cannot survive process restart.
+  and output cursor. A poll can wait up to 1,800,000 ms (30 minutes) for new
+  output or completion; other uses of `yield_ms` remain capped at 60,000 ms.
+  A job belongs to its launching run and retains its sandbox and cwd. It is not
+  a durable task and cannot survive process restart.
 - At most 8 running jobs / 32 retained handles per executor registry, 64 KiB live output per job, and
   an 8 MiB output artifact bound resource usage. Large output uses the existing
   private `/var/tmp` artifact facility. Truncation and the file path remain visible.

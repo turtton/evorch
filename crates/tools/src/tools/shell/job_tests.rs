@@ -224,8 +224,13 @@ fn job_schema_distinguishes_start_and_control() {
     let validator = jsonschema::validator_for(&shell().schema()).unwrap();
     for input in [
         json!({"command":"true", "yield_ms":0}),
+        json!({"command":"true", "yield_ms":60000}),
+        json!({"action":"start", "command":"true", "yield_ms":60000}),
         json!({"action":"poll", "job_id":"x", "cursor":3}),
+        json!({"action":"poll", "job_id":"x", "yield_ms":1800000}),
         json!({"action":"stdin", "job_id":"x", "input":"a"}),
+        json!({"action":"stdin", "job_id":"x", "input":"a", "yield_ms":60000}),
+        json!({"action":"stop", "job_id":"x", "yield_ms":60000}),
     ] {
         assert!(validator.is_valid(&input), "{input}");
     }
@@ -233,11 +238,81 @@ fn job_schema_distinguishes_start_and_control() {
         json!({}),
         json!({"action":"poll"}),
         json!({"action":"poll", "job_id":"x", "command":"pwd"}),
+        json!({"action":"poll", "job_id":"x", "yield_ms":1800001}),
         json!({"command":"true", "yield_ms":60001}),
+        json!({"action":"start", "command":"true", "yield_ms":60001}),
+        json!({"action":"stdin", "job_id":"x", "input":"a", "yield_ms":60001}),
+        json!({"action":"stop", "job_id":"x", "yield_ms":60001}),
         json!({"command":"true", "input":"a"}),
     ] {
         assert!(!validator.is_valid(&input), "{input}");
     }
+}
+
+#[tokio::test]
+async fn yield_limits_are_enforced_without_schema_validation() {
+    let shell = shell();
+    for (input, limit) in [
+        (json!({"command":"true", "yield_ms":60001}), "60000"),
+        (
+            json!({"action":"start", "command":"true", "yield_ms":60001}),
+            "60000",
+        ),
+        (
+            json!({"action":"poll", "job_id":"unused", "yield_ms":1800001}),
+            "1800000",
+        ),
+        (
+            json!({"action":"stdin", "job_id":"unused", "input":"a", "yield_ms":60001}),
+            "60000",
+        ),
+        (
+            json!({"action":"stop", "job_id":"unused", "yield_ms":60001}),
+            "60000",
+        ),
+    ] {
+        let error = shell
+            .execute_with_context(&context("owner"), input)
+            .await
+            .expect_err("yield limit is checked before a job is started or looked up");
+        assert!(
+            matches!(error, ToolError::InvalidArgs { ref detail } if detail.contains("yield_ms") && detail.contains(limit))
+        );
+    }
+}
+
+#[tokio::test]
+async fn thirty_minute_poll_returns_early_when_job_finishes() {
+    let shell = shell();
+    let start = invoke(
+        &shell,
+        "owner",
+        json!({"command":"read value", "yield_ms":0}),
+    )
+    .await;
+    let poll = invoke(
+        &shell,
+        "owner",
+        json!({"action":"poll", "job_id":id(&start), "yield_ms":1800000}),
+    );
+    tokio::pin!(poll);
+    // Ensure a long poll remains pending until the blocked command is released.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut poll)
+            .await
+            .is_err()
+    );
+    invoke(
+        &shell,
+        "owner",
+        json!({"action":"stdin", "job_id":id(&start), "input":"done\n"}),
+    )
+    .await;
+    let end = tokio::time::timeout(Duration::from_secs(5), poll)
+        .await
+        .expect("poll returns on completion without waiting for its 30-minute deadline");
+    assert_eq!(job(&end)["status"], "completed");
+    assert_eq!(job(&end)["exit_code"], 0);
 }
 
 #[tokio::test]
