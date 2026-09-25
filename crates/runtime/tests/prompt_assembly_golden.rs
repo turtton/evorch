@@ -119,6 +119,55 @@ fn orchestrator_prompt_disambiguates_role_purposes_before_delegation() {
 }
 
 #[test]
+fn orchestrator_prompt_delegates_detailed_work_to_children() {
+    // Given: the shared orchestrator role baseline.
+    let catalog = orchestrator_catalog().expect("catalog");
+    // When: assembling the prompt with its family and routing sections.
+    let prompt = catalog
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+        .expect("prompt");
+    // Then: the parent manages the goal rather than solving delegated work itself.
+    for guidance in [
+        "親は目的達成・優先順位付け・依存管理・受け入れ判断に集中し、詳細調査・比較検討・詳細計画は子ロールへ委譲する",
+        "委譲前に自分で問題を解き切らず、自身の詳細調査・比較検討に時間を使わず委譲へ進む",
+        "範囲が不明なら、範囲特定・分割案を explorer / planner へ委譲する",
+        "目的・問い・制約・成果物・完了条件を明記し、手順の過固定を避ける",
+        "委譲済み領域を親が並行して再調査しない",
+        "管理上の判断に足る情報が揃ったら探索を止める",
+    ] {
+        assert!(
+            prompt.contains(guidance),
+            "delegation guidance missing: {guidance}"
+        );
+    }
+}
+
+#[test]
+fn orchestrator_prompt_bounds_direct_work_and_acceptance_verification() {
+    // Given: the orchestrator's limited direct-work exception.
+    let catalog = orchestrator_catalog().expect("catalog");
+    // When: assembling the prompt used for delegation and acceptance decisions.
+    let prompt = catalog
+        .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
+        .expect("prompt");
+    // Then: delegated reports suffice, while verification remains focused and required.
+    for guidance in [
+        "単純な局所作業の直接実行は例外として許容する",
+        "「単一ファイルの明白な変更」かつ「全体コンテキストを把握済み」の場合に限り、ロールの権限範囲を守る",
+        "「把握済み」には委譲報告による把握を含み、親自身の事前深掘りを必要条件にしない",
+        "作業中に範囲が拡大したら委譲に切り替える",
+        "報告の不足・矛盾には、問いを絞った追加調査の委譲または reviewer による独立レビューで対応する",
+        "自己申告だけを信用せず、変更ファイルとテスト結果を自分で検証する",
+        "完了条件を満たす根拠の確認に絞り、受け入れ検証を全面再調査にしない",
+    ] {
+        assert!(
+            prompt.contains(guidance),
+            "direct-work or acceptance guidance missing: {guidance}"
+        );
+    }
+}
+
+#[test]
 fn orchestrator_prompt_exposes_typed_reviewer_tools() {
     let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
     let prompt = catalog
