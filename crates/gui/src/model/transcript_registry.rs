@@ -125,9 +125,10 @@ impl TranscriptRegistry {
                     None => vec![TranscriptKey::Thread],
                 }
             }
-            EventKind::Message(MessageEvent::FinalResultPublished { run_id, .. }) => {
-                self.route_run(run_id)
-            }
+            EventKind::Message(
+                MessageEvent::FinalResultPublished { run_id, .. }
+                | MessageEvent::MessageCompleted { run_id, .. },
+            ) => self.route_run(run_id),
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
             | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
                 Some(run_id) => self.route_run(run_id),
@@ -187,7 +188,8 @@ impl TranscriptRegistry {
                 | MessageEvent::ReasoningDelta {
                     run_id: Some(_), ..
                 }
-                | MessageEvent::FinalResultPublished { .. },
+                | MessageEvent::FinalResultPublished { .. }
+                | MessageEvent::MessageCompleted { .. },
             )
             | EventKind::Lifecycle(_)
             | EventKind::Ledger(_)

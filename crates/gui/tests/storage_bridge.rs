@@ -138,3 +138,81 @@ async fn dropping_bus_drains_pending_events_and_flushes_usage() {
     assert_eq!(metrics[0].request_count, 2);
     assert!(db.events_all_ordered().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
+    // Given: SQLite cannot accept the bridge's writes until another durable write finishes.
+    let (_dir, storage, db) = fixture();
+    let bus = Arc::new(EventBus::new(32));
+    let task = tokio::spawn(storage_bridge::run(
+        bus.clone(),
+        StorageBridge::new(storage.handle(), "session"),
+        Duration::from_millis(10),
+    ));
+    wait_for_subscription(&bus).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, released) = std::sync::mpsc::channel();
+    let released = std::sync::Mutex::new(released);
+    let blocker_bus = EventBus::new(1);
+    let started = entered.clone();
+    blocker_bus.register_mutation_fence(
+        "blocked".into(),
+        Arc::new(move || {
+            started.notify_one();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .is_ok()
+        }),
+    );
+    let writer = storage.handle();
+    let validator = blocker_bus.mutation_validator();
+    let blocked = tokio::task::spawn_blocking(move || {
+        writer.append_fenced_event(
+            Some("blocked"),
+            &Event::new(LifecycleEvent::Started {
+                session_id: "blocked".into(),
+            }),
+            validator,
+        )
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+
+    // When: many broadcast-ring capacities arrive while storage remains blocked.
+    let mut expected = Vec::new();
+    for batch in 0..40 {
+        for token in 0..16 {
+            let event = Event::new(event_bus::MessageEvent::MessageDelta {
+                run_id: Some("run".into()),
+                delta: format!("{batch}:{token} "),
+            });
+            bus.emit(event.clone());
+            expected.push(event);
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    release.send(()).unwrap();
+    blocked.await.unwrap().unwrap();
+    drop(bus);
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Then: orderly shutdown includes every original event, with no subscriber lag.
+    let stored = db.events_all_ordered().unwrap();
+    assert!(!stored.iter().any(|row| matches!(
+        row.event.kind,
+        event_bus::EventKind::Fault(event_bus::FaultEvent::SubscriberLagged { .. })
+    )));
+    let messages: Vec<_> = stored
+        .into_iter()
+        .filter_map(|row| {
+            matches!(row.event.kind, event_bus::EventKind::Message(_)).then_some(row.event)
+        })
+        .collect();
+    assert_eq!(messages, expected);
+}

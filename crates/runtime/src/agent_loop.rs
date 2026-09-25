@@ -819,7 +819,24 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
+            // Keep a complete observational copy: display/storage subscribers can
+            // lose individual deltas, while the provider response remains intact.
+            let text = response
+                .message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
             self.context.push_assistant(response.message);
+            self.shared
+                .bus
+                .emit(Event::new(MessageEvent::MessageCompleted {
+                    run_id: self.task.run_id.to_string(),
+                    text,
+                }));
             self.compaction.last_usage_estimated_tokens = Some(
                 compaction::estimator::estimate_tokens(&self.context.visible_messages()),
             );

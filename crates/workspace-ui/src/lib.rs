@@ -29,7 +29,9 @@ pub use settings::{
     UI_SETTINGS_VERSION, UiSettings,
 };
 pub use sidebar::{SIDEBAR_SCHEMA_VERSION, SidebarState};
-pub use thread::{ModelPreference, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};
+pub use thread::{
+    ModelPreference, ThreadChatRole, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
+};
 pub use types::{
     Floating, FloatingPane, InsertPosition, LayoutNode, Split, SplitDirection, Tabs,
     WORKSPACE_SCHEMA_VERSION, Window, WindowRect, WindowState, Workspace,

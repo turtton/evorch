@@ -245,6 +245,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn with_sidebar(mut self, sidebar: SidebarState) -> Self {
+        if let Some(thread) = sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == sidebar.active_thread.as_ref())
+        {
+            self.composer.role = if thread.escalation_source_run_id.is_some() {
+                crate::model::composer::ComposerRole::Orchestrator
+            } else {
+                thread.chat_role.map(Into::into).unwrap_or_default()
+            };
+        }
         self.transcripts
             .select_thread(sidebar.active_thread.as_ref().map(ToString::to_string));
         for thread in &sidebar.threads {

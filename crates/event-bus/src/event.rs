@@ -445,6 +445,9 @@ pub enum LifecycleEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum MessageEvent {
+    /// Canonical text of one accepted model response, replacing its streamed deltas.
+    /// This is observational only and does not mark the run as finished.
+    MessageCompleted { run_id: String, text: String },
     /// 受理された finish 操作の最終結果を観測用に公開した。
     FinalResultPublished {
         /// 結果を返した run の ID。

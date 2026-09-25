@@ -111,6 +111,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         let title_chat = self
                             .title_candidate(&submission)
                             .then(|| submission.clone());
+                        if let Some(thread) = self
+                            .sidebar
+                            .threads
+                            .iter_mut()
+                            .find(|thread| thread.id.to_string() == submission.thread_id)
+                        {
+                            thread.chat_role = Some(self.composer.role.into());
+                        }
                         self.history.push(super::history::UserMessage {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),

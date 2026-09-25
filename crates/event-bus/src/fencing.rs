@@ -116,9 +116,10 @@ impl MutationFences {
                 | ProviderEvent::RequestCompleted { run_id, .. }
                 | ProviderEvent::RequestFailed { run_id, .. },
             ) => run_id.as_deref().is_none_or(accepts),
-            EventKind::Message(MessageEvent::FinalResultPublished { run_id, .. }) => {
-                accepts(run_id)
-            }
+            EventKind::Message(
+                MessageEvent::FinalResultPublished { run_id, .. }
+                | MessageEvent::MessageCompleted { run_id, .. },
+            ) => accepts(run_id),
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
                 accepts(&question.run_id)
             }
@@ -165,6 +166,10 @@ mod question_tests {
                     agent_name: "Worker".into(),
                     role: "worker".into(),
                     prompt: "task".into(),
+                }),
+                Event::new(MessageEvent::MessageCompleted {
+                    run_id: run.into(),
+                    text: "answer".into(),
                 }),
                 Event::new(MessageEvent::FinalResultPublished {
                     run_id: run.into(),

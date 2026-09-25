@@ -81,6 +81,8 @@ pub struct TranscriptModel {
     view_len: usize,
     first_entry_id: usize,
     thinking: std::collections::BTreeMap<Option<String>, usize>,
+    streaming_messages: std::collections::BTreeMap<Option<String>, Vec<usize>>,
+    completed_messages: std::collections::BTreeMap<String, event_bus::EventMeta>,
     agent_names: std::collections::BTreeMap<String, String>,
 }
 
@@ -103,6 +105,8 @@ impl TranscriptModel {
             view_len: capacity,
             first_entry_id: 0,
             thinking: std::collections::BTreeMap::new(),
+            streaming_messages: std::collections::BTreeMap::new(),
+            completed_messages: std::collections::BTreeMap::new(),
             agent_names: std::collections::BTreeMap::new(),
         }
     }
@@ -130,6 +134,7 @@ impl TranscriptModel {
     }
 
     pub fn push_user_message(&mut self, text: impl Into<String>) {
+        self.streaming_messages.clear();
         self.push(TranscriptEntry::UserMessage { text: text.into() });
     }
 
@@ -224,21 +229,29 @@ impl TranscriptModel {
                     self.push(entry);
                 }
             }
+            event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
+                self.complete_message(run_id, text, &event.meta);
+            }
             event_bus::EventKind::Message(message) => self.append_text(message),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
                 input,
-                ..
-            }) => self.push(TranscriptEntry::Tool {
-                tool_name: tool_name.clone(),
-                call_id: call_id.clone(),
-                input: input.clone(),
-                output: None,
-                detail: None,
-                is_error: false,
-                status: ToolStatus::Running,
-            }),
+                run_id,
+            }) => {
+                // Older ledgers have no completion events. Tool execution still
+                // closes the preceding response before the next answer streams.
+                self.streaming_messages.remove(run_id);
+                self.push(TranscriptEntry::Tool {
+                    tool_name: tool_name.clone(),
+                    call_id: call_id.clone(),
+                    input: input.clone(),
+                    output: None,
+                    detail: None,
+                    is_error: false,
+                    status: ToolStatus::Running,
+                });
+            }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
                 call_id,
@@ -317,7 +330,9 @@ impl TranscriptModel {
         let (delta, run_id) = match message {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
+            MessageEvent::MessageCompleted { .. } => return,
             MessageEvent::FinalResultPublished { text, run_id } => {
+                self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
                 let last_message = self.entries.iter().rev().find_map(|entry| match entry {
                     TranscriptEntry::Message {
@@ -343,7 +358,11 @@ impl TranscriptModel {
             self.thinking.remove(run_id);
         }
         let matching = self.entries.last().is_some_and(|entry| {
-            matches!(
+            let open_message = !matches!(message, MessageEvent::MessageDelta { .. })
+                || self.streaming_messages.get(run_id).is_some_and(|ids| {
+                    ids.last() == Some(&(self.first_entry_id + self.entries.len() - 1))
+                });
+            open_message && matches!(
                 (message, entry),
                 (MessageEvent::ReasoningDelta { .. }, TranscriptEntry::Reasoning { run_id: previous, .. })
                     | (MessageEvent::MessageDelta { .. }, TranscriptEntry::Message { run_id: previous, .. })
@@ -365,21 +384,83 @@ impl TranscriptModel {
             }
         } else {
             self.push(match message {
-                MessageEvent::MessageDelta { .. } | MessageEvent::FinalResultPublished { .. } => {
-                    TranscriptEntry::Message {
-                        text: delta.clone(),
-                        run_id: run_id.clone(),
-                    }
-                }
+                MessageEvent::MessageDelta { .. }
+                | MessageEvent::FinalResultPublished { .. }
+                | MessageEvent::MessageCompleted { .. } => TranscriptEntry::Message {
+                    text: delta.clone(),
+                    run_id: run_id.clone(),
+                },
                 MessageEvent::ReasoningDelta { .. } => TranscriptEntry::Reasoning {
                     text: delta.clone(),
                     run_id: run_id.clone(),
                 },
             });
         }
+        if matches!(message, MessageEvent::MessageDelta { .. }) && !self.entries.is_empty() {
+            let id = self.first_entry_id + self.entries.len() - 1;
+            let ids = self.streaming_messages.entry(run_id.clone()).or_default();
+            if ids.last() != Some(&id) {
+                ids.push(id);
+            }
+        }
         if matches!(message, MessageEvent::ReasoningDelta { .. }) && !self.entries.is_empty() {
             self.thinking
                 .insert(run_id.clone(), self.first_entry_id + self.entries.len() - 1);
+        }
+    }
+
+    fn complete_message(&mut self, run_id: &str, text: &str, meta: &event_bus::EventMeta) {
+        if self.completed_messages.get(run_id) == Some(meta) {
+            return;
+        }
+        self.completed_messages.insert(run_id.into(), meta.clone());
+        let key = Some(run_id.to_owned());
+        self.thinking.remove(&key);
+        let ids = self.streaming_messages.remove(&key).unwrap_or_default();
+        let mut indices = ids.into_iter().filter_map(|id| {
+            let index = id.checked_sub(self.first_entry_id)?;
+            matches!(self.entries.get(index), Some(TranscriptEntry::Message { run_id, .. }) if run_id == &key)
+                .then_some(index)
+        }).collect::<Vec<_>>();
+        if !text.is_empty() {
+            if let Some(&index) = indices.first() {
+                if let TranscriptEntry::Message { text: current, .. } = &mut self.entries[index] {
+                    text.clone_into(current);
+                }
+                indices.remove(0);
+            } else {
+                self.push(TranscriptEntry::Message {
+                    text: text.into(),
+                    run_id: key,
+                });
+            }
+        }
+        // Reasoning or diagnostics may split one response into several display
+        // entries. Keep one canonical answer, retaining the intervening entries.
+        for index in indices.into_iter().rev() {
+            self.remove_entry(index);
+        }
+    }
+
+    fn remove_entry(&mut self, index: usize) {
+        self.entries.remove(index);
+        let removed_id = self.first_entry_id + index;
+        self.thinking.retain(|_, id| *id != removed_id);
+        for id in self.thinking.values_mut() {
+            if *id > removed_id {
+                *id -= 1;
+            }
+        }
+        for ids in self.streaming_messages.values_mut() {
+            ids.retain(|id| *id != removed_id);
+            for id in ids {
+                if *id > removed_id {
+                    *id -= 1;
+                }
+            }
+        }
+        if self.view_start > index {
+            self.view_start -= 1;
         }
     }
 
@@ -411,6 +492,10 @@ impl TranscriptModel {
             self.entries.remove(0);
             self.first_entry_id += 1;
             self.thinking.retain(|_, id| *id >= self.first_entry_id);
+            self.streaming_messages.retain(|_, ids| {
+                ids.retain(|id| *id >= self.first_entry_id);
+                !ids.is_empty()
+            });
         }
         self.view_start = self.view_start.min(self.entries.len());
     }

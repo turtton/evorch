@@ -69,7 +69,9 @@ async fn interleaved_deltas_from_two_runs_are_attributed_by_payload_run_id() {
         let (run_id, kind, delta) = match message {
             MessageEvent::MessageDelta { delta, run_id } => (run_id, "Message", delta),
             MessageEvent::ReasoningDelta { delta, run_id } => (run_id, "Reasoning", delta),
-            MessageEvent::FinalResultPublished { .. } => panic!("expected a delta event"),
+            MessageEvent::FinalResultPublished { .. } | MessageEvent::MessageCompleted { .. } => {
+                panic!("expected a delta event")
+            }
         };
         by_run
             .entry(run_id.expect("delta is attributed"))

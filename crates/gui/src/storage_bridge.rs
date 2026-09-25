@@ -55,6 +55,15 @@ impl StorageBridge {
     }
 }
 
+// Absorb stream bursts while the single SQLite writer is busy with a checkpoint.
+// Bound memory independently of the broadcast ring, which must be drained promptly.
+const WRITE_QUEUE_CAPACITY: usize = 16_384;
+
+enum WriteRequest {
+    Event(Event),
+    FlushUsage,
+}
+
 /// Persists events without blocking the caller's runtime, flushing on ticks and shutdown.
 ///
 /// `flush_every` must be nonzero. Bus ownership is released after subscribing so
@@ -64,6 +73,25 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
     let mut subscriber = bus.subscribe();
     let bus_lifetime = Arc::downgrade(&bus);
     drop(bus);
+    let (requests, mut pending) = tokio::sync::mpsc::channel(WRITE_QUEUE_CAPACITY);
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    // Keep draining the event bus while SQLite writes complete. A blocking worker
+    // owns the bridge for its whole lifetime, avoiding one task hop per token.
+    let writer = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            while let Some(request) = pending.blocking_recv() {
+                match request {
+                    WriteRequest::Event(event) => {
+                        if let Err(error) = bridge.handle_event(&event) {
+                            tracing::warn!(%error, "failed to persist event");
+                        }
+                    }
+                    WriteRequest::FlushUsage => bridge.flush_usage(),
+                }
+            }
+            bridge.flush_usage();
+        });
+    });
     let mut ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -87,8 +115,8 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
                 _ = ticker.tick() => None,
             }
         };
-        let event = match received {
-            Some(Ok(event)) => Some(event),
+        let request = match received {
+            Some(Ok(event)) => WriteRequest::Event(event),
             Some(Err(RecvError::Lagged(skipped))) => {
                 tracing::warn!(skipped, "storage bridge lagged");
                 continue;
@@ -97,39 +125,18 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
             None if draining => break,
             None => {
                 draining = bus_lifetime.strong_count() == 0;
-                None
+                WriteRequest::FlushUsage
             }
         };
-        let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        let result = tokio::task::spawn_blocking(move || {
-            tracing::dispatcher::with_default(&dispatch, || {
-                match event {
-                    Some(event) => {
-                        if let Err(error) = bridge.handle_event(&event) {
-                            tracing::warn!(%error, "failed to persist event");
-                        }
-                    }
-                    None => bridge.flush_usage(),
-                }
-                bridge
-            })
-        })
-        .await;
-        match result {
-            Ok(returned) => bridge = returned,
-            Err(error) => {
-                tracing::error!(%error, "storage bridge worker failed");
-                return;
-            }
+        if requests.send(request).await.is_err() {
+            break;
         }
     }
-    let dispatch = tracing::dispatcher::get_default(Clone::clone);
-    if let Err(error) = tokio::task::spawn_blocking(move || {
-        tracing::dispatcher::with_default(&dispatch, || bridge.flush_usage())
-    })
-    .await
-    {
-        tracing::error!(%error, "storage bridge final flush worker failed");
+    // Closing the queue lets the worker finish all accepted writes and the final
+    // usage flush before shutdown is reported to the caller.
+    drop(requests);
+    if let Err(error) = writer.await {
+        tracing::error!(%error, "storage bridge worker failed");
     }
 }
 

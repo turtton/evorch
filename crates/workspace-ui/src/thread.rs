@@ -51,6 +51,13 @@ pub struct ModelPreference {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadChatRole {
+    Worker,
+    Orchestrator,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: ThreadId,
@@ -67,6 +74,8 @@ pub struct ThreadRecord {
     pub worktree_path: Option<PathBuf>,
     #[serde(default)]
     pub model_preference: Option<ModelPreference>,
+    #[serde(default)]
+    pub chat_role: Option<ThreadChatRole>,
     #[serde(default)]
     pub parent_thread_id: Option<ThreadId>,
     /// Worker run that requested this independent orchestrator conversation.
@@ -93,6 +102,7 @@ impl ThreadRecord {
             branch: None,
             worktree_path: None,
             model_preference: None,
+            chat_role: None,
             parent_thread_id: None,
             escalation_source_run_id: None,
             fork_event_id: None,

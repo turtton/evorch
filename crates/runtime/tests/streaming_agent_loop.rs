@@ -190,3 +190,69 @@ async fn partial_eof_deltas_visible_but_response_not_committed() {
         model.buffered.observed().await[0].len()
     );
 }
+
+#[tokio::test]
+async fn canonical_response_is_published_before_waiting_and_preserves_provider_history() {
+    // Given: display deltas omit text that is present in the accepted model response.
+    let canonical = text_response("first missing second", FinishReason::Stop);
+    let model = Arc::new(LiveModel {
+        buffered: ScriptedModel::new([
+            Ok(canonical.clone()),
+            Ok(text_response("follow-up answer", FinishReason::Stop)),
+        ]),
+        gate: None,
+    });
+    let bus = Arc::new(EventBus::new(64));
+    let mut receiver = bus.subscribe();
+    let runtime = runtime(model.clone(), &bus);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "go".into(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut completed = Vec::new();
+    let mut streamed = String::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match receiver.recv().await.unwrap().kind {
+                EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
+                    streamed.push_str(&delta)
+                }
+                EventKind::Message(MessageEvent::MessageCompleted { run_id, text }) => {
+                    assert_eq!(run_id, run.to_string());
+                    completed.push(text);
+                }
+                EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Waiting,
+                    ..
+                }) => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("waiting after a completed response");
+    assert_eq!(streamed, "first second");
+    assert_eq!(completed, ["first missing second"]);
+
+    // When: a follow-up resumes that same interactive run.
+    runtime.send_message(run, "continue".into()).unwrap();
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
+    for event in support::drain_events(&mut receiver).await {
+        if let EventKind::Message(MessageEvent::MessageCompleted { text, .. }) = event.kind {
+            completed.push(text);
+        }
+    }
+    assert_eq!(completed, ["first missing second", "follow-up answer"]);
+    let requests = model.buffered.observed().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1][1], canonical.message);
+    assert_eq!(
+        requests[1].len(),
+        3,
+        "completion publication does not alter provider input"
+    );
+}
