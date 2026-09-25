@@ -6,5 +6,7 @@ pre-commit:
 
 pre-push:
   jobs:
+    - name: Workspace clippy
+      run: cargo clippy --workspace --all-targets -- -D warnings
     - name: Cache preservation contracts
       run: scripts/check-cache-contracts.sh

@@ -60,7 +60,7 @@ impl StorageBridge {
 const WRITE_QUEUE_CAPACITY: usize = 16_384;
 
 enum WriteRequest {
-    Event(Event),
+    Event(Box<Event>),
     FlushUsage,
 }
 
@@ -82,7 +82,7 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
             while let Some(request) = pending.blocking_recv() {
                 match request {
                     WriteRequest::Event(event) => {
-                        if let Err(error) = bridge.handle_event(&event) {
+                        if let Err(error) = bridge.handle_event(event.as_ref()) {
                             tracing::warn!(%error, "failed to persist event");
                         }
                     }
@@ -116,7 +116,7 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
             }
         };
         let request = match received {
-            Some(Ok(event)) => WriteRequest::Event(event),
+            Some(Ok(event)) => WriteRequest::Event(Box::new(event)),
             Some(Err(RecvError::Lagged(skipped))) => {
                 tracing::warn!(skipped, "storage bridge lagged");
                 continue;
