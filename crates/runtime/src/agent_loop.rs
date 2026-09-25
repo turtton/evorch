@@ -328,7 +328,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     if let Some(root) = &active_root {
         let workspace_note = format!(
-            "Current workspace (evorch): {}. Relative file paths and shell cwd are resolved from this directory. Use read for bounded file ranges, write for create/full replacement, edit for non-empty exact replacements. Large outputs are returned as previews with temporary artifact paths; use read/grep to inspect them. Artifacts may expire without affecting conversation restore.",
+            "Current workspace (evorch): {}.",
             root.display()
         );
         if let Some(message) = state
