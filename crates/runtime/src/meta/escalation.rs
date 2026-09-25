@@ -46,6 +46,9 @@ pub(super) async fn escalate(
     runtime: &crate::AgentRuntime,
     input: serde_json::Value,
 ) -> DispatchResult {
+    if state.task.parent.is_some() {
+        return error("escalate is only available to root Worker runs");
+    }
     let args = match parse::<EscalateArgs>(input) {
         Ok(args) => args,
         Err(message) => return error(message),

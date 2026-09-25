@@ -982,16 +982,18 @@ pub(super) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate
 /// ランタイムからは `skill_load` を除く。`skill_load` は capability 上
 /// Orchestrator/Worker に許可されているが、レジストリなしでは呼び出しが
 /// 必ず失敗するため、失敗前提の定義をモデルに見せない (model only sees
-/// tools that can work)。
+/// tools that can work)。子 run では Direct 専用の escalate も除く。
 pub(super) fn visible_tool_specs(
     specs: Vec<ToolSpec>,
     policy: &ExecutionPolicy,
     skills_configured: bool,
+    is_child: bool,
 ) -> Vec<ToolSpec> {
     policy
         .filter_tool_specs(specs)
         .into_iter()
         .filter(|spec| skills_configured || spec.name != "skill_load")
+        .filter(|spec| !is_child || spec.name != "escalate")
         .collect()
 }
 
@@ -1055,7 +1057,7 @@ mod tests {
     fn visible_tool_specs_exposes_both_web_tools_for_web_researcher() {
         let policy = ExecutionPolicy::for_role(Role::WebResearcher);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
         let tool_names = names(&specs);
 
         assert!(tool_names.contains(&"web_search"));
@@ -1069,7 +1071,7 @@ mod tests {
     fn visible_tool_specs_exposes_only_web_fetch_for_orchestrator() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
         let tool_names = names(&specs);
 
         assert!(tool_names.contains(&"web_fetch"));
@@ -1084,7 +1086,7 @@ mod tests {
         for role in [Role::Explorer, Role::Worker, Role::Reviewer] {
             let policy = ExecutionPolicy::for_role(role);
 
-            let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+            let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
             let tool_names = names(&specs);
 
             assert!(!tool_names.contains(&"web_search"));
@@ -1099,7 +1101,7 @@ mod tests {
     fn visible_tool_specs_keeps_skill_load_for_worker_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
 
         assert!(names(&specs).contains(&"skill_load"));
     }
@@ -1111,9 +1113,20 @@ mod tests {
     fn visible_tool_specs_exposes_escalate_for_worker() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
 
         assert!(names(&specs).contains(&"escalate"));
+    }
+
+    // A child Worker cannot hand off into another Orchestrator root.
+    #[test]
+    fn visible_tool_specs_hides_escalate_for_child_worker() {
+        let policy = ExecutionPolicy::for_role(Role::Worker);
+
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, true);
+
+        assert!(!names(&specs).contains(&"escalate"));
+        assert!(names(&specs).contains(&"shell"));
     }
 
     // Given: Worker のポリシーと skills 未設定
@@ -1123,7 +1136,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_worker_when_skills_not_configured() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
 
         assert!(!names(&specs).contains(&"skill_load"));
         assert!(names(&specs).contains(&"edit"));
@@ -1137,7 +1150,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_explorer_even_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Explorer);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
 
         assert!(!names(&specs).contains(&"skill_load"));
     }
@@ -1149,7 +1162,7 @@ mod tests {
     fn visible_tool_specs_keeps_skill_load_for_orchestrator_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
 
         assert!(names(&specs).contains(&"skill_load"));
     }
@@ -1161,7 +1174,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_orchestrator_when_skills_not_configured() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
 
         assert!(!names(&specs).contains(&"skill_load"));
     }

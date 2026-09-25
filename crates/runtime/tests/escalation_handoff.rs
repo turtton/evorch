@@ -198,6 +198,54 @@ async fn escalate_spawns_orchestrator_root_run_with_memo_prompt() {
     }
 }
 
+#[tokio::test]
+async fn child_worker_cannot_escalate_into_a_new_root() {
+    let model = Arc::new(ScriptedModel::new([]));
+    model
+        .add_keyed(
+            "PARENT",
+            [Ok(text_response("parent done", FinishReason::Stop))],
+        )
+        .await;
+    model
+        .add_keyed(
+            "CHILD",
+            [
+                Ok(escalation_response()),
+                Ok(text_response("child continued", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    let (runtime, bus) = runtime_with(model);
+    let mut receiver = bus.subscribe();
+    let parent = runtime.delegate_background(
+        Role::Orchestrator,
+        "PARENT".to_string(),
+        RunConfig::default(),
+    );
+    let child = runtime
+        .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+        .expect("parent run exists");
+
+    assert_eq!(
+        timeout(Duration::from_secs(5), runtime.wait(child)).await,
+        Ok(Ok(AgentRunPhase::Done))
+    );
+    assert_eq!(
+        runtime.run_result(child),
+        Ok(Some("child continued".to_string()))
+    );
+    assert!(runtime.escalation_memo(child).is_none());
+    let events = drain_events(&mut receiver).await;
+    assert!(!events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { source_run_id, .. })
+                if source_run_id == &child.to_string()
+        )
+    }));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes() {
     // Given: isolated Worker の昇格先だけを gate する共有モデルと recording factory

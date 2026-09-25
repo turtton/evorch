@@ -51,7 +51,7 @@ pub fn render_key_triggers(sources: &[TriggerSource]) -> String {
 
 /// ADR 0002 の 8 ロールからデフォルトの keyTriggers を構築する。
 ///
-/// 各エントリはロール名とその [`agents::RoleCapabilities`] の要約からなる。
+/// 各エントリはロール名と担当目的だけを持ち、ツール定義は含めない。
 pub fn default_role_triggers() -> Vec<TriggerSource> {
     const ROLES: [agents::Role; 8] = [
         agents::Role::Orchestrator,
@@ -67,26 +67,23 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
         .iter()
         .map(|role| TriggerSource {
             name: role.name().to_owned(),
-            description: capability_summary(&role.capabilities()),
+            description: role_purpose(*role).to_owned(),
         })
         .collect()
 }
 
-/// RoleCapabilities を keyTriggers の説明文 1 行に要約する。
-fn capability_summary(caps: &agents::RoleCapabilities) -> String {
-    let network = match caps.network {
-        agents::NetworkAccess::Denied => "拒否",
-        agents::NetworkAccess::OptIn => "明示的オプトイン時のみ許可",
-        agents::NetworkAccess::Allowed => "許可",
-    };
-    let can_delegate = if caps.can_delegate { "可" } else { "不可" };
-    let tools = caps
-        .allowed_tools
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("許可ツール: {tools} / ネットワーク: {network} / 委譲: {can_delegate}")
+/// Role の担当目的だけを示す。ツールの仕様と可用性は各 ToolSpec に任せる。
+fn role_purpose(role: agents::Role) -> &'static str {
+    match role {
+        agents::Role::Orchestrator => "目的・優先順位・依存関係を管理する",
+        agents::Role::Explorer => "ローカルの情報を調査する",
+        agents::Role::Worker => "具体的な実装と検証を担当する",
+        agents::Role::Reviewer => "実装結果を独立に検証する",
+        agents::Role::WebResearcher => "外部情報を調査して出典を報告する",
+        agents::Role::Planner => "依存順序と実行計画を組み立てる",
+        agents::Role::Oracle => "難しい設計判断を分析する",
+        agents::Role::MultimodalLooker => "画像や文書の内容を解釈する",
+    }
 }
 
 /// assembly 時点で利用可能な agent の metadata。
@@ -205,9 +202,9 @@ mod tests {
 
     // Given: ADR 0002 の 8 ロール
     // When: default_role_triggers を構築する
-    // Then: 全ロール分のエントリがケイパビリティ要約付きで固定順に並ぶ
+    // Then: 全ロール分のエントリがツール一覧なしの用途説明で固定順に並ぶ
     #[test]
-    fn default_role_triggers_lists_fixed_roles_with_capability_summary() {
+    fn default_role_triggers_lists_fixed_roles_with_purposes() {
         let triggers = default_role_triggers();
 
         let names: Vec<&str> = triggers.iter().map(|t| t.name.as_str()).collect();
@@ -225,13 +222,11 @@ mod tests {
             ]
         );
         for trigger in &triggers {
-            assert!(
-                trigger.description.contains("ネットワーク")
-                    && trigger.description.contains("委譲"),
-                "ケイパビリティ要約が含まれるはずです: {}",
-                trigger.description
-            );
+            assert!(!trigger.description.is_empty());
+            assert!(!trigger.description.contains("許可ツール"));
+            assert!(!trigger.description.contains("ネットワーク:"));
         }
+        assert_eq!(triggers[2].description, "具体的な実装と検証を担当する");
     }
 
     fn agent(name: &str, description: &str) -> AvailableAgent {

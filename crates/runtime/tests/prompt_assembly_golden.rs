@@ -1,4 +1,4 @@
-//! システムプロンプトの組立とロール別ツール公開契約のテスト。
+//! システムプロンプトの組立とロール別用途案内のテスト。
 
 use agents::Role;
 use runtime::prompt::default_role_triggers;
@@ -74,7 +74,7 @@ fn orchestrator_prompt_structure_matches_golden_fixture() {
     let prompt = catalog
         .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
         .expect("prompt");
-    // Then: section routing and the capability roster match without pinning prose.
+    // Then: section routing and role purposes match without pinning all prose.
     let sections = |text: &str| {
         text.lines()
             .filter(|line| line.starts_with('#'))
@@ -82,21 +82,14 @@ fn orchestrator_prompt_structure_matches_golden_fixture() {
             .collect::<Vec<_>>()
     };
     assert_eq!(sections(&prompt), sections(expected));
-    let tools = |text: &str| {
+    let role_purposes = |text: &str| {
         text.lines()
-            .find(|line| line.starts_with("- Orchestrator:"))
-            .expect("orchestrator roster")
-            .split(':')
-            .nth(2)
-            .expect("tools")
-            .split('/')
-            .next()
-            .expect("tool list")
-            .split(',')
-            .map(|tool| tool.trim().to_owned())
+            .filter(|line| line.starts_with("- Orchestrator:") || line.starts_with("- Worker:"))
+            .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    assert_eq!(tools(&prompt), tools(expected));
+    assert_eq!(role_purposes(&prompt), role_purposes(expected));
+    assert!(!prompt.contains("許可ツール:"));
 }
 
 #[test]
@@ -168,32 +161,14 @@ fn orchestrator_prompt_bounds_direct_work_and_acceptance_verification() {
 }
 
 #[test]
-fn orchestrator_prompt_exposes_typed_reviewer_tools() {
-    let catalog = orchestrator_catalog().expect("カタログは構築できるはずです");
+fn orchestrator_prompt_describes_reviewer_purpose_without_tool_roster() {
+    let catalog = orchestrator_catalog().expect("catalog");
     let prompt = catalog
         .system_prompt_for(Role::Orchestrator, None, "claude-opus-4-1")
-        .expect("登録済みの部品のみを参照するはずです");
+        .expect("prompt");
 
-    let reviewer = prompt
-        .lines()
-        .find(|line| line.starts_with("- Reviewer:"))
-        .expect("reviewer routing trigger");
-    let (_, capabilities) = reviewer.split_once(':').expect("role separator");
-    let (_, tools) = capabilities.split_once(':').expect("tool list separator");
-    let tools = tools.split('/').next().expect("tool list");
-    assert_eq!(
-        tools.split(',').map(str::trim).collect::<Vec<_>>(),
-        [
-            "ask_user",
-            "git_diff",
-            "grep",
-            "ledger_append",
-            "ledger_read",
-            "read",
-            "submit_review",
-            "user_answers"
-        ]
-    );
+    assert!(prompt.contains("- Reviewer: 実装結果を独立に検証する"));
+    assert!(!prompt.contains("submit_review"));
 }
 
 // Given: quick overlay を登録した完全なカタログ
