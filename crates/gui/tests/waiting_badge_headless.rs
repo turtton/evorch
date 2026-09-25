@@ -5,6 +5,29 @@ use workspace_ui::ThreadRunPhase;
 
 type Workbench = WorkbenchState<runtime::AgentRuntime>;
 
+fn waiting_transcript() -> WorkbenchState<gui::fixture::DemoSource> {
+    let mut state = WorkbenchState::new(
+        gui::fixture::DemoSource(Vec::new()),
+        &workspace_ui::UiSettings::default(),
+    )
+    .expect("workbench");
+    state.add_project(std::env::current_dir().unwrap()).unwrap();
+    state.create_thread("waiting transcript").unwrap();
+    let mut sidebar = state.sidebar().clone();
+    sidebar.threads[0].run_ids = vec!["waiting-run".into()];
+    let mut state = state.with_sidebar(sidebar);
+    state.open_agent_pane("waiting-run");
+    state.apply_events([event_bus::Event::new(
+        event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: "waiting-run".into(),
+            from: event_bus::AgentRunPhase::Running,
+            to: event_bus::AgentRunPhase::Waiting,
+            reason: None,
+        },
+    )]);
+    state
+}
+
 #[test]
 fn unread_waiting_badge_filled_info_accent() {
     // Given: a waiting revision that has not been displayed.
@@ -45,17 +68,9 @@ if rect.fill == Color32::TRANSPARENT && rect.stroke.color == palette().INFO && r
 }
 
 #[test]
-fn dock_tab_quiet_after_ack() {
-    // Given: a waiting agent in the visible Agents pane.
-    let mut runs = gui::fixture::demo_runs();
-    for run in &mut runs {
-        run.phase = event_bus::AgentRunPhase::Waiting;
-    }
-    let state = WorkbenchState::new(
-        gui::fixture::DemoSource(runs),
-        &workspace_ui::UiSettings::default(),
-    )
-    .expect("workbench");
+fn transcript_tab_quiet_after_ack() {
+    // Given: a waiting run's transcript is selected in its owning thread.
+    let state = waiting_transcript();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 720.0))
         .build_ui_state(
@@ -76,24 +91,16 @@ fn dock_tab_quiet_after_ack() {
     assert_eq!(
         harness
             .state()
-            .pane_attention(&workspace_ui::PanelId::new("agents-main")),
+            .pane_attention(&workspace_ui::PanelId::new("agent-waiting-run")),
         None
     );
 }
 
 #[test]
-fn visible_tab_stays_unread_without_outer_focus() {
+fn visible_transcript_stays_unread_without_outer_focus() {
     // Given: a waiting run in a visible pane, without explicit focus.
     for focused in [None, Some(false)] {
-        let mut runs = gui::fixture::demo_runs();
-        for run in &mut runs {
-            run.phase = event_bus::AgentRunPhase::Waiting;
-        }
-        let state = WorkbenchState::new(
-            gui::fixture::DemoSource(runs),
-            &workspace_ui::UiSettings::default(),
-        )
-        .expect("state");
+        let state = waiting_transcript();
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1280.0, 720.0))
             .build_ui_state(
@@ -114,7 +121,7 @@ fn visible_tab_stays_unread_without_outer_focus() {
         assert_eq!(
             harness
                 .state()
-                .pane_attention(&workspace_ui::PanelId::new("agents-main")),
+                .pane_attention(&workspace_ui::PanelId::new("agent-waiting-run")),
             Some(palette().INFO)
         );
     }
@@ -159,21 +166,13 @@ fn capture_waiting_read_unread_png_evidence() {
 }
 
 #[test]
-fn hidden_tab_stays_unread_in_focused_window() {
-    // Given: waiting Agents hidden behind the Notifications tab.
-    let mut runs = gui::fixture::demo_runs();
-    for run in &mut runs {
-        run.phase = event_bus::AgentRunPhase::Waiting;
-    }
-    let mut state = WorkbenchState::new(
-        gui::fixture::DemoSource(runs),
-        &workspace_ui::UiSettings::default(),
-    )
-    .expect("state");
+fn hidden_transcript_stays_unread_in_focused_window() {
+    // Given: a waiting transcript hidden behind Conversation in the same leaf.
+    let mut state = waiting_transcript();
     let path = state
         .dock()
-        .find_tab(&workspace_ui::PanelId::new("notifications-main"))
-        .expect("notifications tab");
+        .find_tab(&workspace_ui::PanelId::new("agent-main"))
+        .expect("conversation tab");
     state.dock_mut().set_active_tab(path).expect("activate");
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 720.0))
@@ -195,7 +194,7 @@ fn hidden_tab_stays_unread_in_focused_window() {
     assert_eq!(
         harness
             .state()
-            .pane_attention(&workspace_ui::PanelId::new("agents-main")),
+            .pane_attention(&workspace_ui::PanelId::new("agent-waiting-run")),
         Some(palette().INFO)
     );
 }

@@ -33,11 +33,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 };
                 runtime::AgentModel::selected_model(model.as_ref(), role, None)
             });
-        self.ownership_ui(ui);
+        egui::Panel::bottom("workbench-footer")
+            .resizable(false)
+            .frame(egui::Frame::NONE.inner_margin(egui::vec2(6.0, 3.0)))
+            .show(ui, |ui| self.ownership_ui(ui));
+        let inactive_runs: std::collections::BTreeSet<_> = self
+            .sidebar
+            .threads
+            .iter()
+            .filter(|thread| Some(&thread.id) != self.sidebar.active_thread.as_ref())
+            .flat_map(|thread| thread.run_ids.iter().cloned())
+            .collect();
         let mut subagent_closed = false;
         self.panels.retain(|panel_id, panel| {
             let retained = !panel_id.as_str().starts_with("agent-run-")
-                || self.dock.find_tab(panel_id).is_some();
+                || self.dock.find_tab(panel_id).is_some()
+                || panel
+                    .target
+                    .as_ref()
+                    .is_some_and(|run| inactive_runs.contains(run));
             subagent_closed |= !retained
                 && matches!(
                     panel.kind,

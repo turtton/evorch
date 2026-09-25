@@ -49,7 +49,7 @@ fn activate<S: AgentRunSource>(state: &mut WorkbenchState<S>, id: &str) {
 fn run_done_event_surfaces_unread_notification_and_read_after_display() {
     // Given: the Notifications tab is hidden in an explicitly focused viewport.
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).unwrap();
-    activate(&mut state, "agents-main");
+    activate(&mut state, "subagents-home");
     let mut harness = harness(state);
     harness
         .input_mut()
@@ -84,18 +84,8 @@ fn notification_click_opens_run_transcript() {
     let mut harness = harness(state);
     harness.run_steps(3);
     let panel = PanelId::new("agent-run-X");
-    let parked = harness
-        .state()
-        .dock()
-        .find_tab(&panel)
-        .expect("parked transcript");
-    let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
-    assert_ne!(leaf.active, parked.tab);
-    if let Some(conversation_index) = leaf.tabs.iter().position(|id| id.as_str() == "agent-main") {
-        assert_eq!(parked.tab.0, conversation_index + 1);
-    } else {
-        assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
-    }
+    // Unowned background runs do not create a thread-local right-side tab.
+    assert!(harness.state().dock().find_tab(&panel).is_none());
     // When: the actual notification row is clicked.
     harness.get_by_label("Run run-X completed").click();
     harness.run_steps(3);
@@ -288,7 +278,7 @@ fn background_run_then_completion_notification_end_to_end() {
                 .apply_events([transition(&run_id, AgentRunPhase::Done)]);
             harness.run();
         }
-        // Then: completion adds an inactive tab without stealing conversation focus.
+        // Then: unowned background runs do not alter the thread-local dock.
         assert_eq!(harness.state().focus(), &focus);
         let current: Vec<_> = harness
             .state()
@@ -296,38 +286,14 @@ fn background_run_then_completion_notification_end_to_end() {
             .iter_all_tabs()
             .map(|(path, panel)| (path, panel.clone()))
             .collect();
-        if completed {
-            let id = PanelId::new(format!("agent-{run_id}"));
-            let parked = harness
+        assert_eq!(current, panels);
+        assert!(
+            harness
                 .state()
                 .dock()
-                .find_tab(&id)
-                .expect("parked transcript");
-            let leaf = harness.state().dock().leaf(parked.node_path()).unwrap();
-            assert_ne!(leaf.active, parked.tab);
-            if let Some(conversation_index) = leaf
-                .tabs
-                .iter()
-                .position(|panel| panel.as_str() == "agent-main")
-            {
-                assert_eq!(parked.tab.0, conversation_index + 1);
-            } else {
-                assert_eq!(parked.tab.0, leaf.tabs.len() - 1);
-            }
-            assert_eq!(
-                current
-                    .iter()
-                    .filter(|(_, panel)| panel != &id && panel.as_str() != "subagents-home")
-                    .map(|(_, panel)| panel.clone())
-                    .collect::<Vec<_>>(),
-                panels
-                    .iter()
-                    .map(|(_, panel)| panel.clone())
-                    .collect::<Vec<_>>()
-            );
-        } else {
-            assert_eq!(current, panels);
-        }
+                .find_tab(&PanelId::new(format!("agent-{run_id}")))
+                .is_none()
+        );
         for ((_, panel), active) in panels.iter().zip(&active_tabs) {
             let path = harness
                 .state()

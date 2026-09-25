@@ -140,15 +140,20 @@ fn demo_state_has_no_duplicate_interactive_labels() {
         "New thread",
         "Go to Projects",
         "Start a thread",
-        "Open default panes",
         "Working tree",
         "Branch vs main",
         "← Thread",
         "Projects",
         "Conversation",
-        "Agents",
+        "Subagents",
     ];
-    const RIGHT_TABS: &[&str] = &["agents-main", "diff-main", "terminal-main"];
+    const TABS: &[&str] = &[
+        "subagents-home",
+        "diff-main",
+        "terminal-main",
+        "tasks-main",
+        "notifications-main",
+    ];
 
     let dir = tempfile::tempdir().expect("temp dir");
     let demo = populate(
@@ -159,12 +164,12 @@ fn demo_state_has_no_duplicate_interactive_labels() {
     let empty = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("default state builds");
 
-    // When: each state renders with every right-area tab active in turn.
+    // When: each state renders with every local and global tab active in turn.
     for state in [empty, demo] {
         let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
         workbench.run();
         assert_unique_labels(&workbench, LABELS);
-        for tab in RIGHT_TABS {
+        for tab in TABS {
             activate_tab(&mut workbench, tab);
             workbench.run();
             // Then: no label binds to two or more nodes in any frame.

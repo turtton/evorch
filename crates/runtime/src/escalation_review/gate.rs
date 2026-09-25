@@ -50,11 +50,7 @@ impl SandboxEscalationGate {
             source: "sandbox".into(),
             severity,
             code: "escalation_review".into(),
-            detail: format!(
-                "run_id={} call_id={}: {verdict}",
-                ctx.run_id,
-                ctx.call_id.as_deref().unwrap_or_default()
-            ),
+            detail: verdict.to_owned(),
             run_id: Some(ctx.run_id.clone()),
             thread_id: ctx.thread_id.clone(),
             call_id: ctx.call_id.clone(),
@@ -202,9 +198,11 @@ impl ShellEscalationGate for SandboxEscalationGate {
         };
         match &decision {
             EscalationDecision::Approve => self.diagnose(ctx, DiagnosticSeverity::Info, "approved"),
-            EscalationDecision::Deny { reason } => {
-                self.diagnose(ctx, DiagnosticSeverity::Warning, reason)
-            }
+            EscalationDecision::Deny { reason } => self.diagnose(
+                ctx,
+                DiagnosticSeverity::Warning,
+                &format!("denied: {reason}"),
+            ),
         }
         decision
     }

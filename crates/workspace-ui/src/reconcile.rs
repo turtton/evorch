@@ -1,8 +1,9 @@
-use crate::{LayoutNode, Panel, PanelId, PanelKind, Tabs, Workspace};
+use crate::{LayoutNode, Panel, PanelId, PanelKind, Split, SplitDirection, Tabs, Workspace};
 
 pub(crate) fn notifications(workspace: &mut Workspace) {
     let id = PanelId::new("notifications-main");
     if find_tabs(workspace, &|tabs| tabs.panels.contains(&id)).is_some() {
+        retire_agents(workspace);
         return;
     }
     let anchors: Vec<_> = workspace
@@ -34,6 +35,7 @@ pub(crate) fn notifications(workspace: &mut Workspace) {
         title: PanelKind::Notifications.default_title().into(),
         target: None,
     });
+    retire_agents(workspace);
 }
 
 fn find_tabs<'a>(
@@ -57,5 +59,162 @@ fn find_node_tabs<'a>(
         LayoutNode::Split(split) => find_node_tabs(&mut split.first, matches)
             .or_else(|| find_node_tabs(&mut split.second, matches)),
         LayoutNode::Tabs(tabs) => matches(tabs).then_some(tabs),
+    }
+}
+
+// Update the former Agents-based arrangement once. Custom layouts saved after
+// this change keep their chosen positions when reopened.
+fn retire_agents(workspace: &mut Workspace) {
+    let obsolete: Vec<_> = workspace
+        .panels
+        .values()
+        .filter(|panel| panel.kind == PanelKind::Agents)
+        .map(|panel| panel.id.clone())
+        .collect();
+    if obsolete.is_empty() {
+        return;
+    }
+    let globals: Vec<_> = workspace
+        .panels
+        .values()
+        .filter(|panel| {
+            matches!(
+                panel.kind,
+                PanelKind::Tasks | PanelKind::Notifications | PanelKind::Memory | PanelKind::Arena
+            )
+        })
+        .map(|panel| panel.id.clone())
+        .collect();
+    let removed: Vec<_> = obsolete.iter().chain(&globals).cloned().collect();
+    let fallback = || {
+        LayoutNode::Tabs(Tabs {
+            panels: vec![PanelId::new("subagents-home")],
+            active: 0,
+        })
+    };
+    workspace.main.root = prune(workspace.main.root.clone(), &removed).unwrap_or_else(fallback);
+    workspace.main.floating.retain_mut(|pane| {
+        if let Some(node) = prune(pane.node.clone(), &removed) {
+            pane.node = node;
+            true
+        } else {
+            false
+        }
+    });
+    workspace.extra_windows.retain_mut(|window| {
+        window.floating.retain_mut(|pane| {
+            if let Some(node) = prune(pane.node.clone(), &removed) {
+                pane.node = node;
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(node) = prune(window.root.clone(), &removed) {
+            window.root = node;
+            true
+        } else if !window.floating.is_empty() {
+            window.root = window.floating.remove(0).node;
+            true
+        } else {
+            false
+        }
+    });
+    for id in obsolete {
+        workspace.panels.remove(&id);
+    }
+    let home = PanelId::new("subagents-home");
+    workspace
+        .panels
+        .entry(home.clone())
+        .or_insert_with(|| Panel {
+            id: home.clone(),
+            kind: PanelKind::SubagentRegion,
+            title: "Subagents".into(),
+            target: None,
+        });
+    if find_tabs(workspace, &|tabs| tabs.panels.contains(&home)).is_none()
+        && !split_anchor(
+            &mut workspace.main.root,
+            "diff-main",
+            vec![home.clone()],
+            false,
+        )
+    {
+        let root = workspace.main.root.clone();
+        workspace.main.root = LayoutNode::Split(Split {
+            direction: SplitDirection::Horizontal,
+            fraction: 0.7,
+            first: Box::new(root),
+            second: Box::new(fallback()),
+        });
+    }
+    if !globals.is_empty()
+        && !split_anchor(
+            &mut workspace.main.root,
+            "sidebar-main",
+            globals.clone(),
+            true,
+        )
+    {
+        let root = workspace.main.root.clone();
+        workspace.main.root = LayoutNode::Split(Split {
+            direction: SplitDirection::Horizontal,
+            fraction: 0.2,
+            first: Box::new(LayoutNode::Tabs(Tabs {
+                panels: globals,
+                active: 0,
+            })),
+            second: Box::new(root),
+        });
+    }
+}
+
+fn prune(node: LayoutNode, removed: &[PanelId]) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Tabs(mut tabs) => {
+            let active = tabs.panels.get(tabs.active).cloned();
+            tabs.panels.retain(|id| !removed.contains(id));
+            tabs.active = active
+                .and_then(|id| tabs.panels.iter().position(|candidate| candidate == &id))
+                .unwrap_or(0);
+            (!tabs.panels.is_empty()).then_some(LayoutNode::Tabs(tabs))
+        }
+        LayoutNode::Split(mut split) => {
+            match (prune(*split.first, removed), prune(*split.second, removed)) {
+                (Some(first), Some(second)) => {
+                    split.first = Box::new(first);
+                    split.second = Box::new(second);
+                    Some(LayoutNode::Split(split))
+                }
+                (first, second) => first.or(second),
+            }
+        }
+    }
+}
+
+fn split_anchor(node: &mut LayoutNode, anchor: &str, panels: Vec<PanelId>, below: bool) -> bool {
+    match node {
+        LayoutNode::Tabs(tabs) if tabs.panels.iter().any(|id| id.as_str() == anchor) => {
+            let original = node.clone();
+            let inserted = LayoutNode::Tabs(Tabs { panels, active: 0 });
+            let (first, second) = if below {
+                (original, inserted)
+            } else {
+                (inserted, original)
+            };
+            *node = LayoutNode::Split(Split {
+                direction: SplitDirection::Vertical,
+                fraction: if below { 0.65 } else { 0.5 },
+                first: Box::new(first),
+                second: Box::new(second),
+            });
+            true
+        }
+        LayoutNode::Tabs(_) => false,
+        LayoutNode::Split(split) => {
+            split_anchor(&mut split.first, anchor, panels.clone(), below)
+                || split_anchor(&mut split.second, anchor, panels, below)
+        }
     }
 }

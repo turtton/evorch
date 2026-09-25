@@ -51,7 +51,7 @@ fn right_panes_expose_landmarks_without_headings() {
 
     // Then: each right pane title resolves to exactly one Pane landmark when active.
     {
-        let (tab_id, title) = ("agents-main", "Agents");
+        let (tab_id, title) = ("subagents-home", "Subagents");
         activate_tab(&mut harness, tab_id);
         harness.run_steps(4);
         harness.get_by_label(title);
@@ -89,4 +89,10 @@ fn workbench_tabs_exclude_goal_and_merge() {
     // Then: neither removed surface is registered in the dock.
     assert!(state.dock().find_tab(&PanelId::new("goal-main")).is_none());
     assert!(state.dock().find_tab(&PanelId::new("merge-main")).is_none());
+    assert!(
+        state
+            .dock()
+            .find_tab(&PanelId::new("agents-main"))
+            .is_none()
+    );
 }

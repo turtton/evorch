@@ -33,7 +33,7 @@ fn manually_opened_root_is_not_a_subagent_region() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut h, _rt) = workbench(temp.path());
     h.state_mut().open_agent_pane("root");
-    let agents = PanelId::new("agents-main");
+    let agents = PanelId::new("diff-main");
     let path = h.state().dock().find_tab(&agents).expect("agents");
     let leaf = h.state().dock().leaf(path.node_path()).expect("leaf");
     let before = (leaf.tabs.clone(), leaf.active);
@@ -116,12 +116,18 @@ fn workbench(root: &std::path::Path) -> (HeadlessWorkbench<AgentRuntime>, tokio:
     sidebar
         .switch_thread(&ThreadId::new("thread-1"))
         .expect("thread selected");
-    let state = WorkbenchState::new(runtime, &UiSettings::default())
+    sidebar.threads[0].run_ids = vec!["root".into(), "missing".into()];
+    let mut state = WorkbenchState::new(runtime, &UiSettings::default())
         .expect("default state builds")
         .with_sidebar(sidebar)
         .with_save_path(root.join("workspace.json"))
         .with_provider_status(ProviderStatus::Configured)
         .with_command_sink(Box::new(sink));
+    // These dock geometry tests exercise the legacy dynamic subagent region.
+    // Remove the new permanent Subagents tab while keeping the selected thread.
+    if let Some(path) = state.dock().find_tab(&PanelId::new("subagents-home")) {
+        state.dock_mut().remove_tab(path);
+    }
     (HeadlessWorkbench::new(state, [1200.0, 900.0]), rt)
 }
 
@@ -143,10 +149,11 @@ fn background_run_submission_keeps_focus_and_opens_pane_in_subagent_region() {
     assert_eq!(harness.focused_id(), keyboard_focus);
     assert_eq!(pane_node(&harness, "run-1"), egui_dock::NodeIndex(2));
     assert!(harness.state().composer().input.is_empty());
-    assert!(matches!(
-        harness.state().transcripts().thread().entries(),
-        [TranscriptEntry::Notice { text }] if text.contains("run-")
-    ));
+    assert!(
+        harness.state().transcripts().thread().entries().iter().any(
+            |entry| matches!(entry, TranscriptEntry::Notice { text } if text.contains("run-"))
+        )
+    );
     assert!(harness.state().issued().is_empty());
 }
 
@@ -500,7 +507,9 @@ fn parked_membership_and_order_survive_workspace_reload_and_tab_activation() {
         Arc::new(ToolExecutor::new(bus)),
         Arc::new(PendingModel),
     );
-    let state = WorkbenchState::new(runtime, &settings).expect("restored state");
+    let state = WorkbenchState::new(runtime, &settings)
+        .expect("restored state")
+        .with_sidebar(h.state().sidebar().clone());
     let mut restored = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     let c = restored
         .state()

@@ -130,7 +130,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let workbench_panels: &[&str] = &["agents-main", "tasks-main", "notifications-main"];
+        let global_panels: &[&str] = &["tasks-main", "notifications-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,
@@ -139,7 +139,12 @@ impl Workspace {
                 root: LayoutNode::Split(Split {
                     direction: SplitDirection::Horizontal,
                     fraction: 0.2,
-                    first: Box::new(tabs(sidebar_panels)),
+                    first: Box::new(LayoutNode::Split(Split {
+                        direction: SplitDirection::Vertical,
+                        fraction: 0.65,
+                        first: Box::new(tabs(sidebar_panels)),
+                        second: Box::new(tabs(global_panels)),
+                    })),
                     second: Box::new(LayoutNode::Split(Split {
                         direction: SplitDirection::Horizontal,
                         fraction: 0.625,
@@ -152,7 +157,7 @@ impl Workspace {
                         second: Box::new(LayoutNode::Split(Split {
                             direction: SplitDirection::Vertical,
                             fraction: 0.5,
-                            first: Box::new(tabs(workbench_panels)),
+                            first: Box::new(tabs(&["subagents-home"])),
                             second: Box::new(tabs(&["diff-main"])),
                         })),
                     })),

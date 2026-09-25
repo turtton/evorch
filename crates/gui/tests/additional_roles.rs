@@ -1,7 +1,7 @@
 use event_bus::AgentRunPhase;
 use gui::{app::WorkbenchState, headless::HeadlessWorkbench, model::tasks::AgentRunSource};
 use runtime::{AgentSummary, RunId};
-use workspace_ui::UiSettings;
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[derive(Clone)]
 struct Source(Vec<AgentSummary>);
@@ -28,11 +28,29 @@ fn agents_display_additional_role_names() {
             })
             .collect(),
     );
-    let state = WorkbenchState::new(source, &UiSettings::default()).expect("workbench");
+    let root = tempfile::tempdir().expect("project root");
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("demo");
+    sidebar
+        .add_project(project.clone(), "demo", root.path())
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    let thread_id = ThreadId::new("role-thread");
+    sidebar
+        .create_thread(thread_id.clone(), project, "Roles")
+        .unwrap();
+    sidebar.switch_thread(&thread_id).unwrap();
+    sidebar.threads[0].run_ids = roles.iter().map(|(id, _)| format!("run-{id}")).collect();
+    let state = WorkbenchState::new(source, &UiSettings::default())
+        .expect("workbench")
+        .with_sidebar(sidebar);
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
     for (_, role) in roles {
-        assert!(harness.has_label(role), "missing role {role}");
+        assert!(
+            harness.has_label(&format!("{role} · Running")),
+            "missing role {role}"
+        );
     }
     for (id, role) in roles {
         let run_id = format!("run-{id}");
@@ -45,7 +63,7 @@ fn agents_display_additional_role_names() {
             },
         )]);
         harness.run();
-        harness.click_label(&run_id);
+        harness.state_mut().drill_down(&run_id);
         harness.step();
         harness.run();
         assert!(harness.has_label(&format!("{run_id} / agent-{id} / {role}")));

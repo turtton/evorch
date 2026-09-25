@@ -83,15 +83,11 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                         .is_some_and(|parent| thread.parent_thread_id.as_ref() == Some(&parent.id))
                 })
                 .collect(),
-            thread_metrics: active_thread.map(|thread| {
-                let mut metrics = self.telemetry.thread_metrics(&thread.run_ids);
-                if let ConversationFocus::Agent(run_id) = self.focus {
-                    metrics.context_pressure = self
-                        .telemetry
-                        .row(run_id)
-                        .and_then(crate::model::telemetry::TelemetryRow::context_pressure);
+            thread_metrics: active_thread.map(|thread| match self.focus {
+                ConversationFocus::Thread => self.telemetry.thread_metrics(&thread.run_ids),
+                ConversationFocus::Agent(run_id) => {
+                    self.telemetry.thread_metrics(std::slice::from_ref(run_id))
                 }
-                metrics
             }),
             phase: self
                 .attention_acks

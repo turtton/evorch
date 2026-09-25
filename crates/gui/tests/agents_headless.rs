@@ -50,10 +50,18 @@ impl Fixture {
         );
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let workspace_path = temp_dir.path().join("workspace.json");
-        let state = WorkbenchState::new(MockSource(runs), &UiSettings::default())
+        let run_ids = runs.iter().map(|run| run.run_id.to_string()).collect();
+        let mut state = WorkbenchState::new(MockSource(runs), &UiSettings::default())
             .expect("default state builds")
             .with_pump(pump)
             .with_save_path(&workspace_path);
+        state
+            .add_project(std::env::current_dir().expect("cwd"))
+            .expect("project");
+        state.create_thread("agent fixture").expect("thread");
+        let mut sidebar = state.sidebar().clone();
+        sidebar.threads[0].run_ids = run_ids;
+        let state = state.with_sidebar(sidebar);
         let mut workbench = HeadlessWorkbench::new(state, [1200.0, 800.0]);
         workbench.run();
         Self {
@@ -180,7 +188,7 @@ fn default_panes_pick_orchestrator_latest_worker_reviewer_only_if_present() {
     ]);
 
     // When: default transcript panes are opened.
-    fixture.workbench.click_label("Open default panes");
+    fixture.workbench.state_mut().open_default_agent_panes();
     fixture.workbench.run();
 
     // Then: the orchestrator, latest worker, and latest reviewer panes are present.
@@ -193,7 +201,7 @@ fn default_panes_pick_orchestrator_latest_worker_reviewer_only_if_present() {
     ]);
 
     // When: default transcript panes are opened.
-    fixture.workbench.click_label("Open default panes");
+    fixture.workbench.state_mut().open_default_agent_panes();
     fixture.workbench.run();
 
     // Then: exactly two real panes are created, with no reviewer placeholder.
@@ -227,7 +235,7 @@ fn three_transcript_panes_do_not_mix_run_events() {
     fixture.emit(delivered("run-2", "run-3", "two-to-three"));
 
     // When: all three default transcript panes are opened.
-    fixture.workbench.click_label("Open default panes");
+    fixture.workbench.state_mut().open_default_agent_panes();
     fixture.workbench.run();
 
     // Then: each registry model contains only its own call and directed messages.
@@ -429,7 +437,7 @@ fn close_and_reopen_pane_does_not_duplicate_entries() {
         .workbench
         .state()
         .dock()
-        .find_tab(&PanelId::new("agents-main"))
+        .find_tab(&PanelId::new("subagents-home"))
         .expect("agents tab");
     fixture
         .workbench
@@ -596,6 +604,7 @@ fn assert_run_entries(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }
@@ -609,6 +618,7 @@ fn assert_run_entries(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::Error { .. }

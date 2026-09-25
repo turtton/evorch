@@ -44,6 +44,8 @@ pub struct TelemetryRow {
     latest_context: Option<context_pressure::RequestContext>,
     in_flight: bool,
     context_order: u64,
+    parent_run_id: Option<String>,
+    conversation_root: bool,
     context_window: Option<u64>,
     pub requests: u32,
     pub last_finish_reason: Option<String>,
@@ -65,6 +67,11 @@ impl TelemetryRow {
     }
 
     pub fn tok_s_at(&self, now: Instant) -> Option<f64> {
+        // Text/reasoning deltas are estimates; tool arguments have no GUI delta.
+        // Until any output is observable, displaying 0 tok/s invents a sample.
+        if self.output_tokens == 0 {
+            return None;
+        }
         let elapsed = self.elapsed_at(now)?;
         // Duration converts the u64 count without a lossy integer narrowing cast.
         (!elapsed.is_zero())
@@ -72,6 +79,10 @@ impl TelemetryRow {
     }
 
     pub fn average_ttft_ms(&self) -> Option<u64> {
+        (self.ttft_count > 0).then(|| self.ttft_sum_ms / self.ttft_count)
+    }
+
+    pub fn latest_ttft_ms(&self) -> Option<u64> {
         self.ttft_ms
     }
 }
@@ -87,11 +98,13 @@ pub struct TelemetryOverlay {
     context_order: u64,
 }
 
-/// スレッドに紐づく全 run の累計メトリクス。
+/// Thread totals plus the conversation root's latest request measurements.
+/// Costs and wall time include owned children; cache and model performance do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThreadMetrics {
     pub cost: Option<f64>,
     pub cache_hit_rate: Option<f64>,
+    pub average_cache_hit_rate: Option<f64>,
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
     pub ttft: Option<Duration>,
@@ -160,6 +173,7 @@ impl TelemetryOverlay {
                 row.requests = row.requests.saturating_add(1);
                 row.request_started_at = Some(now);
                 row.request_duration = None;
+                row.ttft_ms = None;
                 row.output_tokens = 0;
                 row.streamed_chars = 0;
             }
@@ -171,7 +185,7 @@ impl TelemetryOverlay {
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.ttft_sum_ms = row.ttft_sum_ms.saturating_add(*ttft_ms);
                 row.ttft_count = row.ttft_count.saturating_add(1);
-                row.ttft_ms = Some(row.ttft_sum_ms / row.ttft_count);
+                row.ttft_ms = Some(*ttft_ms);
             }
             EventKind::Message(
                 MessageEvent::MessageDelta {
@@ -273,12 +287,36 @@ impl TelemetryOverlay {
             }) => {
                 self.rows.entry(run_id.clone()).or_default().current_tool = None;
             }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) => {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id,
+                parent_run_id,
+                agent_name,
+                ..
+            }) => {
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.ttft_ms = None;
+                row.parent_run_id.clone_from(parent_run_id);
+                row.conversation_root |= agent_name.starts_with("chat:");
                 row.ttft_sum_ms = 0;
                 row.ttft_count = 0;
                 self.accumulated_running.entry(run_id.clone()).or_default();
+            }
+            EventKind::Orchestrator(event_bus::OrchestratorEvent::GoalCreated {
+                root_run_id: run_id,
+                ..
+            })
+            | EventKind::Orchestrator(event_bus::OrchestratorEvent::ContinuationDispatched {
+                new_run_id: run_id,
+                ..
+            })
+            | EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                new_run_id: run_id,
+                ..
+            }) => {
+                self.rows
+                    .entry(run_id.clone())
+                    .or_default()
+                    .conversation_root = true;
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 match to {
@@ -331,3 +369,7 @@ impl TelemetryOverlay {
 #[cfg(test)]
 #[path = "telemetry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "telemetry_request_tests.rs"]
+mod request_tests;

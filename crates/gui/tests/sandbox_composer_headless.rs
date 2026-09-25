@@ -20,26 +20,46 @@ fn workbench(
 }
 
 #[test]
-fn composer_exposes_sandbox_left_and_model_right_when_rendered() {
-    // Given: a closed settings modal and the composer.
+fn composer_selectors_wrap_above_input_without_exceeding_conversation_width() {
     let dir = tempfile::tempdir().expect("temp");
-    let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
-    // When: rendering the app.
-    harness.run();
-    // Then: both selectors occupy the same row, above the input, at opposite edges.
-    assert!(harness.has_label("Sandbox: auto"));
-    let sandbox = harness.label_rects("Sandbox: auto")[0];
-    let model = harness.label_rects("Select model")[0];
-    let input = harness.label_rects("Message or /command")[0];
-    assert!(
-        (sandbox.center().y - model.center().y).abs() < 1.0,
-        "sandbox={sandbox:?}, model={model:?}"
-    );
-    assert!(sandbox.right() < model.left());
-    assert!(sandbox.bottom() < input.top());
-    assert!((sandbox.left() - input.left()).abs() < 20.0);
-    let send = harness.label_rects("Send")[0];
-    assert!((model.right() - send.right()).abs() < 1.0);
+    for width in [680.0, 960.0, 1280.0] {
+        let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
+        harness.input_mut().screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 600.0),
+        ));
+        harness.run();
+        let sandbox = harness.label_rects("Sandbox: auto")[0];
+        let model = harness.label_rects("Select model")[0];
+        let input = harness.label_rects("Message or /command")[0];
+        let path = harness
+            .state()
+            .dock()
+            .find_tab(&workspace_ui::PanelId::new("agent-main"))
+            .unwrap();
+        let viewport = harness
+            .state()
+            .dock()
+            .leaf(path.node_path())
+            .unwrap()
+            .viewport;
+        for selector in [sandbox, model] {
+            assert!(
+                selector.left() >= viewport.left() && selector.right() <= viewport.right(),
+                "selector={selector:?}, viewport={viewport:?}"
+            );
+            assert!(
+                selector.bottom() < input.top(),
+                "selector={selector:?}, input={input:?}"
+            );
+        }
+        // The model follows Sandbox on the row or wraps underneath when narrow.
+        assert!(
+            sandbox.right() <= model.left() || sandbox.bottom() <= model.top(),
+            "sandbox={sandbox:?}, model={model:?}"
+        );
+        assert!(input.left() >= viewport.left() && input.right() <= viewport.right());
+    }
 }
 
 #[test]

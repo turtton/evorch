@@ -105,7 +105,7 @@ pub fn default_panels_v02() -> BTreeMap<PanelId, Panel> {
     [
         ("sidebar-main", PanelKind::Sidebar, "Projects"),
         ("agent-main", PanelKind::Agent, "Conversation"),
-        ("agents-main", PanelKind::Agents, "Agents"),
+        ("subagents-home", PanelKind::SubagentRegion, "Subagents"),
         ("tasks-main", PanelKind::Tasks, "Tasks"),
         (
             "notifications-main",

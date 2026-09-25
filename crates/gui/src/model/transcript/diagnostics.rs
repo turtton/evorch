@@ -5,6 +5,24 @@ use super::TranscriptEntry;
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
         EventKind::Diagnostic(event) if event.code == "ContextCheckpointSaved" => None,
+        EventKind::Diagnostic(event)
+            if event.source == "sandbox" && event.code == "escalation_review" =>
+        {
+            // Older diagnostic text included the IDs as well as structured fields.
+            let detail = event
+                .detail
+                .strip_prefix("run_id=")
+                .and_then(|detail| detail.split_once(": ").map(|(_, verdict)| verdict))
+                .unwrap_or(&event.detail);
+            Some(TranscriptEntry::SandboxReview {
+                text: format!(
+                    "[{}] sandbox (escalation_review): {detail}",
+                    event.severity.as_str()
+                ),
+                run_id: event.run_id.clone(),
+                call_id: event.call_id.clone(),
+            })
+        }
         EventKind::Diagnostic(event) => {
             let text = format!(
                 "[{}] {} ({}): {}",

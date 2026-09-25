@@ -173,7 +173,8 @@ fn new_request_resets_live_metrics_without_resetting_usage() {
     let row = telemetry.row("run-1").expect("row");
     assert_eq!(row.average_ttft_ms(), Some(800));
     assert_eq!(row.tok_s_at(now), None);
-    assert_eq!(row.tok_s_at(now + Duration::from_secs(1)), Some(0.0));
+    assert_eq!(row.tok_s_at(now + Duration::from_secs(1)), None);
+    assert_eq!(row.latest_ttft_ms(), None);
     assert_eq!(row.usage.output, 226);
 }
 

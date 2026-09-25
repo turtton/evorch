@@ -204,6 +204,13 @@ async fn approved_and_denied_decisions_emit_escalation_diagnostics() {
         assert_eq!(event.severity, severity);
         assert_eq!(event.run_id.as_deref(), Some("run-review"));
         assert_eq!(event.call_id.as_deref(), Some("call-review"));
+        assert!(!event.detail.contains("run_id="));
+        assert!(!event.detail.contains("call_id="));
+        if severity == event_bus::DiagnosticSeverity::Info {
+            assert_eq!(event.detail, "approved");
+        } else {
+            assert!(event.detail.starts_with("denied: "));
+        }
     }
 }
 

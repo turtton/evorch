@@ -1,7 +1,7 @@
 use egui_kittest::{Harness, kittest::Queryable};
 use gui::fixture::DemoSource;
 use gui::model::telemetry::quota::{QuotaBackend, QuotaState};
-use gui::model::{tasks::TasksModel, telemetry::TelemetryOverlay};
+
 use providers::provider::codex::quota::QuotaError;
 use providers::provider::codex::quota::{CodexQuota, QuotaSnapshot, QuotaSource, QuotaWindow};
 use std::sync::{
@@ -86,7 +86,6 @@ fn workbench_with_calls(calls: usize) -> gui::headless::HeadlessWorkbench<DemoSo
         harness.step();
         std::thread::yield_now();
     }
-    harness.click_label("Agents");
     harness.run();
     harness
 }
@@ -94,7 +93,7 @@ fn workbench_with_calls(calls: usize) -> gui::headless::HeadlessWorkbench<DemoSo
 #[test]
 fn frame_loop_polls_injected_source_and_displays_quota() {
     let harness = workbench();
-    assert!(harness.has_label("Codex quota · Plan: plus"));
+    assert!(harness.has_label("Codex · 75% 5h · 40% wk"));
 }
 
 #[test]
@@ -102,7 +101,12 @@ fn frame_loop_polls_injected_source_and_displays_quota() {
 fn capture_codex_quota_png_evidence() {
     for (name, calls) in [("codex-quota", 0), ("codex-quota-stale", 1)] {
         let mut harness = workbench_with_calls(calls);
-        assert!(harness.has_label("Codex quota · Plan: plus"));
+        let label = if calls == 1 {
+            "Codex · 75% 5h · 40% wk · stale"
+        } else {
+            "Codex · 75% 5h · 40% wk"
+        };
+        assert!(harness.has_label(label));
         if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
             let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/gui-evidence/codex-quota");
@@ -140,114 +144,93 @@ fn snapshot(stale: bool) -> QuotaSnapshot {
     }
 }
 
-#[test]
-fn quota_snapshot_renders_both_windows_and_plan() {
-    // Given: a quota snapshot and the real Agents pane.
-    let mut telemetry = TelemetryOverlay::new();
-    telemetry.quota.accept(Ok(snapshot(false)));
-    let tasks = TasksModel::new(DemoSource(Vec::new()));
-    let mut harness = Harness::builder()
+fn quota_harness(state: QuotaState) -> Harness<'static> {
+    Harness::builder()
         .with_size(egui::vec2(900.0, 400.0))
         .build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
-        });
-    // When: the pane renders headlessly.
-    harness.run();
-    // Then: both windows include usage and their reset time, with the plan.
-    harness.get_by_label("Codex quota · Plan: plus");
-    harness.get_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC");
-    harness.get_by_label("7d: 60.0% used · resets 2026-09-13 12:00 UTC");
+            ui.ctx().global_style_mut(|style| {
+                style.interaction.tooltip_delay = 0.0;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+            gui::panes::quota_footer::quota_footer(ui, &state);
+        })
 }
 
 #[test]
-fn stale_indicator_shown_when_refresh_failed() {
-    // Given: successful quota followed by a failed refresh.
-    let mut telemetry = TelemetryOverlay::new();
-    let mut cached = snapshot(true);
-    cached.last_error = Some(QuotaError::Timeout);
-    telemetry.quota.accept(Ok(cached));
-    let tasks = TasksModel::new(DemoSource(Vec::new()));
-    let mut harness = Harness::builder().build_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
-    });
-    // When: rendering cached data after the failure.
+fn quota_snapshot_renders_compact_remaining_windows_with_hover_details() {
+    let mut state = QuotaState::default();
+    state.accept(Ok(snapshot(false)));
+    let mut harness = quota_harness(state);
     harness.run();
-    // Then: stale is explicit and the last successful usage remains visible.
+    harness.get_by_label("Codex · 75% 5h · 40% wk").hover();
+    harness.run_steps(3);
+    harness.get_by_label("Codex · plus · remaining quota");
+    harness.get_by_label("5h: 75.0% remaining · 25.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label("wk: 40.0% remaining · 60.0% used · resets 2026-09-13 12:00 UTC");
+}
+
+#[test]
+fn stale_indicator_keeps_cached_remaining_quota_and_error_details() {
+    let mut state = QuotaState::default();
+    state.accept(Ok(snapshot(false)));
+    state.accept(Err(QuotaError::Timeout));
+    let mut harness = quota_harness(state);
+    harness.run();
+    harness
+        .get_by_label("Codex · 75% 5h · 40% wk · stale")
+        .hover();
+    harness.run_steps(3);
     harness.get_by_label("Stale · quota refresh failed");
     harness.get_by_label("Quota error: quota request timed out");
-    harness.get_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC");
 }
 
 #[test]
 fn first_failure_shows_unavailable_without_fabricated_usage() {
-    let mut telemetry = TelemetryOverlay::new();
-    telemetry.quota.accept(Err(QuotaError::Timeout));
-    let tasks = TasksModel::new(DemoSource(Vec::new()));
-    let mut harness = Harness::builder().build_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
-    });
+    let mut state = QuotaState::default();
+    state.accept(Err(QuotaError::Timeout));
+    let mut harness = quota_harness(state);
     harness.run();
-    harness.get_by_label("Codex quota unavailable · refresh failed");
-    harness.get_by_label("Quota error: quota request timed out");
-    assert!(harness.query_by_label("Codex quota · Plan: plus").is_none());
+    harness.get_by_label("Codex · unavailable").hover();
+    harness.run_steps(3);
+    harness.get_by_label("quota request timed out");
+    assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
 }
 
 #[test]
 fn reauth_required_shows_relogin_message() {
     for cached in [false, true] {
-        // Given: authentication is rejected, with or without cached usage.
-        let mut telemetry = TelemetryOverlay::new();
+        let mut state = QuotaState::default();
         if cached {
-            telemetry.quota.accept(Ok(snapshot(false)));
+            state.accept(Ok(snapshot(false)));
         }
-        telemetry
-            .quota
-            .accept(Err(QuotaError::ReauthenticationRequired));
-        let tasks = TasksModel::new(DemoSource(Vec::new()));
-        let mut harness = Harness::builder().build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
-        });
-        // When: the real Agents pane renders the authentication failure.
+        state.accept(Err(QuotaError::ReauthenticationRequired));
+        let mut harness = quota_harness(state);
         harness.run();
-        // Then: re-login is actionable and cached usage is not discarded.
-        harness
-            .get_by_label("Quota error: quota authentication expired or rejected; re-login needed");
-        if cached {
-            harness.get_by_label("Stale · quota refresh failed");
-            harness.get_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC");
+        let label = if cached {
+            "Codex · 75% 5h · 40% wk · stale"
         } else {
-            harness.get_by_label("Codex quota unavailable · refresh failed");
-        }
+            "Codex · unavailable"
+        };
+        harness.get_by_label(label).hover();
+        harness.run_steps(3);
+        let error = if cached {
+            "Quota error: quota authentication expired or rejected; re-login needed"
+        } else {
+            "quota authentication expired or rejected; re-login needed"
+        };
+        harness.get_by_label(error);
     }
 }
 
 #[test]
 fn weekly_only_plan_labels_primary_window_by_its_duration() {
-    // Given: a Pro+ plan whose only limit is weekly, delivered in `primary`.
-    let mut telemetry = TelemetryOverlay::new();
+    let mut state = QuotaState::default();
     let mut weekly = snapshot(false);
-    weekly.quota.primary = Some(QuotaWindow {
-        used_percent: 25.0,
-        remaining_percent: 75.0,
-        window_duration: Duration::from_secs(604800),
-        resets_at: "2026-09-13T12:00:00Z".parse().expect("timestamp"),
-    });
+    weekly.quota.primary.as_mut().unwrap().window_duration = Duration::from_secs(604800);
     weekly.quota.secondary = None;
-    telemetry.quota.accept(Ok(weekly));
-    let tasks = TasksModel::new(DemoSource(Vec::new()));
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(900.0, 400.0))
-        .build_ui(move |ui| {
-            gui::panes::agents::agents_pane(ui, &tasks, &telemetry, &Default::default());
-        });
-    // When: the pane renders headlessly.
+    state.accept(Ok(weekly));
+    let mut harness = quota_harness(state);
     harness.run();
-    // Then: the weekly window is labeled by its own duration, not "5h".
-    harness.get_by_label("7d: 25.0% used · resets 2026-09-13 12:00 UTC");
-    assert!(
-        harness
-            .query_by_label("5h: 25.0% used · resets 2026-09-13 12:00 UTC")
-            .is_none()
-    );
-    harness.get_by_label("secondary: unavailable");
+    harness.get_by_label("Codex · 75% wk");
+    assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
 }

@@ -160,7 +160,9 @@ async fn factory_builds_codex_client_from_profile() {
         ..FactoryOptions::default()
     };
 
-    let client = build_provider_client(&profile, store, None, &options)
+    let bus = Arc::new(event_bus::EventBus::new(16));
+    let mut events = bus.subscribe();
+    let client = build_provider_client(&profile, store, Some(bus), &options)
         .expect("factory は codex client を構築できる");
 
     assert_eq!(
@@ -193,6 +195,34 @@ async fn factory_builds_codex_client_from_profile() {
         }
     );
     assert_eq!(response.finish_reason, FinishReason::Stop);
+    let mut observed = 0;
+    while observed < 2 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("provider observations arrive")
+            .expect("event bus remains open");
+        let event_bus::EventKind::Provider(event) = &event.kind else {
+            continue;
+        };
+        match event {
+            event_bus::ProviderEvent::RequestStarted {
+                profile: observed_profile,
+                ..
+            }
+            | event_bus::ProviderEvent::RequestCompleted {
+                profile: observed_profile,
+                ..
+            } => {
+                assert_eq!(observed_profile.as_deref(), Some(profile.name.as_str()));
+                observed += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        observed, 2,
+        "start and completion preserve the configured profile"
+    );
 }
 
 // Given: 環境変数参照の認証情報を持つ codex プロファイル

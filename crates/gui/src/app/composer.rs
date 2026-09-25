@@ -209,10 +209,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.push_notice(self.composer.registry.help_text());
                     self.composer.input.clear();
                 }
-                "new" => match self.create_thread("New thread") {
-                    Ok(_) => self.composer.input.clear(),
-                    Err(error) => self.push_notice(format!("failed to create thread: {error}")),
-                },
+                "new" => {
+                    let command = std::mem::take(&mut self.composer.input);
+                    if let Err(error) = self.create_thread("New thread") {
+                        self.composer.input = command;
+                        self.push_notice(format!("failed to create thread: {error}"));
+                    }
+                }
                 name => self.push_notice(format!("unknown command /{name} — type /help")),
             },
             ComposerInput::UnknownCommand { name } => {
@@ -245,6 +248,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        self.persist_composer_draft();
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {

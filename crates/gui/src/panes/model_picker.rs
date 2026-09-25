@@ -24,6 +24,8 @@ pub fn model_picker(
         .add_enabled_ui(context.enabled && !context.profiles.is_empty(), |ui| {
             egui::ComboBox::from_id_salt("model-picker")
                 .selected_text(&label)
+                .width(ui.available_width().min(200.0))
+                .truncate()
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_label(context.preference.is_none(), "Automatic routing")

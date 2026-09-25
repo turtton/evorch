@@ -138,6 +138,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .find(|thread| thread.id == previous)
         {
             thread.chat_role = Some(previous_role.into());
+            thread.draft_input = std::mem::take(&mut self.composer.input);
+            self.composer_attachments
+                .insert(previous, std::mem::take(&mut self.composer.attachments));
         }
         self.transcripts.select_thread(Some(thread_id.to_string()));
         if let Some(thread) = self
@@ -151,10 +154,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             } else {
                 thread.chat_role.map(Into::into).unwrap_or_default()
             };
+            self.composer.input.clone_from(&thread.draft_input);
+            self.composer.attachments = self
+                .composer_attachments
+                .remove(&thread_id)
+                .unwrap_or_default();
+            self.composer.completions_dismissed_for = None;
         }
         self.focus = ConversationFocus::Thread;
+        self.sync_subagent_thread_panes();
         self.save_sidebar();
         Ok(())
+    }
+
+    pub(super) fn persist_composer_draft(&mut self) {
+        let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+        else {
+            return;
+        };
+        if thread.draft_input != self.composer.input {
+            thread.draft_input.clone_from(&self.composer.input);
+            self.save_sidebar();
+        }
     }
 
     pub fn toggle_pin(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
@@ -199,8 +224,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn open_agent_pane(&mut self, run_id: &str) {
         let panel_id = PanelId::new(format!("agent-{run_id}"));
         if self.panels.contains_key(&panel_id) {
-            self.focus_panel(panel_id.as_str());
-            return;
+            if self.dock.find_tab(&panel_id).is_none()
+                && let Some(thread_id) = self.thread_for_run(run_id)
+            {
+                let _ = self.switch_thread(ThreadId::new(thread_id));
+            }
+            if self.dock.find_tab(&panel_id).is_some() {
+                self.focus_panel(panel_id.as_str());
+                return;
+            }
+            // A completed run may have been registered while its owner was
+            // unknown. Explicit navigation must still open a visible pane.
+            self.panels.remove(&panel_id);
         }
         let title = self
             .tasks

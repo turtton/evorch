@@ -8,7 +8,7 @@ pub(super) fn row(
     picker: (ModelPickerContext<'_>, &mut ModelPickerState),
 ) -> Option<ComposerAction> {
     let mut action = None;
-    ui.horizontal_top(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(sandbox.enabled, |ui| {
             let label = match sandbox.mode {
                 config::EscalationApproval::Auto => "Sandbox: auto",
@@ -23,11 +23,9 @@ pub(super) fn row(
                 action = Some(ComposerAction::OpenSandboxSettings);
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if let Some(preference) = model_picker(ui, picker.0, picker.1) {
-                action = Some(ComposerAction::ModelPreference(preference));
-            }
-        });
+        if let Some(preference) = model_picker(ui, picker.0, picker.1) {
+            action = Some(ComposerAction::ModelPreference(preference));
+        }
     });
     action
 }

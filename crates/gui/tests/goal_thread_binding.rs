@@ -197,8 +197,8 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         "missing status line {cost_label}"
     );
     assert!(
-        gui.has_label("cache 100%"),
-        "missing status line cache 100%"
+        gui.has_label("cache 100% (Δ100%)"),
+        "missing current and average cache hit rates"
     );
     for (index, run) in runs.iter().enumerate() {
         assert_eq!(gui.has_label(&format!("content-{run}")), index == 0);

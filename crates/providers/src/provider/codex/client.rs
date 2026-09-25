@@ -79,6 +79,7 @@ pub struct CodexClient {
     endpoint: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
+    profile: Option<String>,
     client_version: CodexClientVersion,
     /// 解決結果を固定し、ターン間の prompt-cache affinity を維持する。
     resolved_client_version: tokio::sync::OnceCell<CodexCatalogVersion>,
@@ -98,6 +99,7 @@ impl CodexClient {
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
+            profile: None,
             client_version: config.client_version,
             resolved_client_version: tokio::sync::OnceCell::new(),
             session,
@@ -123,6 +125,7 @@ impl CodexClient {
             endpoint: resolve_endpoint(&config.base_url),
             timeout: config.timeout,
             event_bus: config.event_bus,
+            profile: None,
             client_version: config.client_version,
             resolved_client_version: tokio::sync::OnceCell::new(),
             session,
@@ -130,11 +133,17 @@ impl CodexClient {
         })
     }
 
+    /// Associates telemetry with the configured profile without changing the wire request.
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
     fn observer(&self, request: &ChatRequest, streaming: bool) -> AttemptObserver {
         AttemptObserver::new(
             self.event_bus.clone(),
             PROVIDER_LABEL,
-            None,
+            self.profile.clone(),
             PROTOCOL,
             request.model.clone(),
             streaming,

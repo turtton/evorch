@@ -224,6 +224,7 @@ fn run_detail_body(
                         TranscriptEntry::Error { .. }
                         | TranscriptEntry::UserMessage { .. }
                         | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Tool { .. }
                         | TranscriptEntry::AgentMessage { .. } => {}
@@ -234,6 +235,24 @@ fn run_detail_body(
                             text,
                             &format!("msg-{entry_idx}"),
                         );
+                        return;
+                    }
+                    if let TranscriptEntry::SandboxReview {
+                        text,
+                        run_id,
+                        call_id,
+                    } = entry
+                    {
+                        egui::CollapsingHeader::new(text)
+                            .id_salt(("sandbox-review", model.visible_entry_id(entry_idx)))
+                            .show(ui, |ui| {
+                                if let Some(run_id) = run_id {
+                                    ui.label(format!("run_id: {run_id}"));
+                                }
+                                if let Some(call_id) = call_id {
+                                    ui.label(format!("call_id: {call_id}"));
+                                }
+                            });
                         return;
                     }
                     if let TranscriptEntry::Reasoning { text, run_id } = entry {
@@ -265,7 +284,9 @@ fn entry_accent(entry: &TranscriptEntry) -> Color32 {
     match entry {
         TranscriptEntry::Error { .. } => palette().ERROR_FG,
         TranscriptEntry::UserMessage { .. } => palette().TEXT,
-        TranscriptEntry::Notice { .. } | TranscriptEntry::Compaction { .. } => palette().TEXT_MUTED,
+        TranscriptEntry::Notice { .. }
+        | TranscriptEntry::SandboxReview { .. }
+        | TranscriptEntry::Compaction { .. } => palette().TEXT_MUTED,
         TranscriptEntry::Message { .. } => palette().ACCENT,
         TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
         TranscriptEntry::Tool { .. } => palette().INFO,
@@ -279,7 +300,9 @@ fn entry_accent(entry: &TranscriptEntry) -> Color32 {
 fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
         TranscriptEntry::UserMessage { text } => format!("You: {text}"),
-        TranscriptEntry::Notice { text } | TranscriptEntry::Error { text } => text.clone(),
+        TranscriptEntry::Notice { text }
+        | TranscriptEntry::SandboxReview { text, .. }
+        | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
         TranscriptEntry::Reasoning { text, .. } => text.clone(),
         TranscriptEntry::Compaction {

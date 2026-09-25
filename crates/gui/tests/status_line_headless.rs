@@ -29,6 +29,7 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     thread_metrics: Some(ThreadMetrics {
                         cost: Some(0.125),
                         cache_hit_rate: Some(50.0),
+                        average_cache_hit_rate: Some(25.0),
                         context_pressure: Some(25),
                         wall_time: std::time::Duration::from_secs(12),
                         ttft: phase.map(|_| std::time::Duration::from_millis(240)),
@@ -58,7 +59,7 @@ fn status_line_renders_below_composer_with_metrics_order() {
     // Then: the status dot precedes ordered metrics below the composer.
     let labels = [
         "$0.125",
-        "cache 50%",
+        "cache 50% (Δ25%)",
         "TTFT —",
         "— tok/s",
         "ctx 25%",

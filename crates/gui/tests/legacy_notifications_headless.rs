@@ -8,9 +8,23 @@ fn saved_legacy_layout_exposes_notification_row_and_opens_run_transcript() {
     // Given: an actual saved settings file from before notifications were registered.
     let mut legacy = Workspace::default();
     legacy.panels.remove(&PanelId::new("notifications-main"));
+    let agents = PanelId::new("agents-main");
+    legacy.panels.insert(
+        agents.clone(),
+        workspace_ui::Panel {
+            id: agents,
+            kind: workspace_ui::PanelKind::Agents,
+            title: "Agents".into(),
+            target: None,
+        },
+    );
     let LayoutNode::Split(root) = &mut legacy.main.root else {
         panic!("split")
     };
+    *root.first = LayoutNode::Tabs(workspace_ui::Tabs {
+        panels: vec![PanelId::new("sidebar-main")],
+        active: 0,
+    });
     let LayoutNode::Split(content) = root.second.as_mut() else {
         panic!("split")
     };
@@ -37,14 +51,14 @@ fn notification_opens_transcript_when_saved_layout_has_only_tasks_and_terminal()
 }
 
 #[test]
-fn transcript_opens_beside_agents_added_to_legacy_layout() {
+fn transcript_opens_beside_subagents_added_to_minimal_layout() {
     // Given: a layout with no Agents, Agent, or Notifications tab.
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(tasks_and_terminal());
     let mut state = WorkbenchState::new(DemoSource(Vec::new()), &settings).unwrap();
     // When: a transcript is opened directly.
     state.open_agent_pane("fallback-run");
-    // Then: it is appended and selected beside the restored Agents tab.
+    // Then: it is appended and selected beside the restored Subagents tab.
     let dock = state.dock();
     let path = dock
         .find_tab(&PanelId::new("agent-fallback-run"))
@@ -56,7 +70,7 @@ fn transcript_opens_beside_agents_added_to_legacy_layout() {
         vec![
             PanelId::new("tasks-main"),
             PanelId::new("terminal-main"),
-            PanelId::new("agents-main"),
+            PanelId::new("subagents-home"),
             PanelId::new("agent-fallback-run")
         ]
     );
