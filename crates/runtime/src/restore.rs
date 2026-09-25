@@ -248,6 +248,10 @@ fn write_snapshot(
         (config.delegation_value.is_some(), "delegation_value"),
         (config.memory.is_some(), "memory"),
         (config.learning_internal, "learning_internal"),
+        (
+            config.purpose != crate::RunPurpose::General,
+            "learning_purpose",
+        ),
         (config.ownership.is_some(), "ownership"),
         (config.workspace_branch.is_some(), "workspace_branch"),
     ] {

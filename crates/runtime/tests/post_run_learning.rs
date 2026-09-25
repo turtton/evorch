@@ -1,31 +1,95 @@
-use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
+use providers::{
+    ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, ToolSpec, Usage,
+};
 use runtime::{
     AgentInvocationContext, AgentModel, AgentRunPhase, AgentRuntime, ModelPreference, Role,
-    RunConfig, RunId, RuntimeError,
+    RunConfig, RunId, RunStore, RuntimeError,
 };
-use std::path::PathBuf;
+use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::memory::MemoryStatus;
 use storage::{Database, Storage, StorageConfig};
 use tokio::sync::Notify;
 
-enum ReviewerBehavior {
-    Immediate,
-    Delayed(Duration),
+#[derive(Clone, Copy)]
+enum ReviewMode {
+    Approve,
+    Reject,
+    FinalTextOnly,
+    PartialReview,
     WaitForCancel,
-    RepeatRead(PathBuf),
 }
 
 struct Model {
-    calls: Mutex<Vec<Role>>,
-    approve: bool,
-    invalid_interview: bool,
-    raw_review: bool,
-    reviewer_behavior: ReviewerBehavior,
+    mode: ReviewMode,
     reviewer_started: Notify,
     reviewer_calls: AtomicUsize,
+}
+
+fn text_response(text: &str) -> ChatResponse {
+    ChatResponse {
+        message: Message {
+            role: providers::Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        },
+        usage: Usage::default(),
+        finish_reason: FinishReason::Stop,
+    }
+}
+
+fn tool_response(id: &str, name: &str, input: Value) -> ChatResponse {
+    ChatResponse {
+        message: Message {
+            role: providers::Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+            }],
+        },
+        usage: Usage::default(),
+        finish_reason: FinishReason::ToolUse,
+    }
+}
+
+fn tool_result(messages: &[Message], id: &str) -> Option<Value> {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } if tool_call_id == id => {
+                assert!(!is_error, "learning tool {id} failed: {content:?}");
+                let ToolResultContent::Text { text } = &content[0];
+                Some(serde_json::from_str(text).expect("learning tool JSON"))
+            }
+            _ => None,
+        })
+}
+
+fn source_run(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.role == providers::Role::User)
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => text
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+                .find(|token| {
+                    token.strip_prefix("run-").is_some_and(|number| {
+                        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                })
+                .map(str::to_owned),
+            _ => None,
+        })
+        .next()
+        .expect("internal learning prompt identifies source run")
 }
 
 #[async_trait::async_trait]
@@ -37,83 +101,126 @@ impl AgentModel for Model {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.calls.lock().unwrap().push(role);
-        let text = if invocation.run_id.starts_with("interview:") {
-            assert!(tools.is_empty());
-            assert_eq!(
-                invocation.model_preference.as_ref().unwrap().profile,
-                "quick"
-            );
-            if self.invalid_interview && role == Role::Reviewer {
-                r#"{"content":"Bound work","evidence":""}"#
-            } else {
-                r#"{"content":"Bound work","evidence":"test:bound"}"#
-            }
-        } else if role == Role::Reviewer {
-            let call = self.reviewer_calls.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                let prompt = messages
-                    .iter()
-                    .filter(|message| message.role == providers::Role::User)
-                    .flat_map(|message| &message.content)
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(prompt.contains("durable memory lessons for FUTURE tasks"));
-                assert!(prompt.contains("do not reopen or re-execute the original task work"));
-                assert!(prompt.contains("Mark unverifiable evidence as unknown"));
-                // Preserve the exact output contract while changing only its framing.
-                assert!(prompt.contains("Return a JSON object (a fenced json block is also accepted) with verdict (approve or request-update), findings, and criteria (id: exact verified evidence reference, status: met/unmet/unknown, note, evidence). Each evidence object has command, exit_status (integer), target_sha, and optional diff_ref, artifact_path, red_evidence strings. Use null when evidence is unavailable; never invent evidence or mark evidence met without checking it."));
-                let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
-                for required in ["read", "grep", "git_diff", "submit_review"] {
-                    assert!(names.contains(&required));
+        let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        match invocation.category.as_deref() {
+            Some("lesson") => {
+                assert_eq!(role, Role::Worker);
+                assert_eq!(
+                    invocation.model_preference.as_ref().unwrap().profile,
+                    "quick"
+                );
+                assert!(names.contains(&"inspect_learning_source"));
+                assert!(names.contains(&"stack_lesson_candidate"));
+                assert!(!names.contains(&"shell"));
+                assert!(!names.contains(&"submit_lesson_review"));
+                if tool_result(messages, "extract-source").is_none() {
+                    return Ok(tool_response(
+                        "extract-source",
+                        "inspect_learning_source",
+                        json!({"run_id":source_run(messages)}),
+                    ));
                 }
-                for forbidden in ["write", "edit", "shell", "delegate"] {
-                    assert!(!names.contains(&forbidden));
+                if tool_result(messages, "stack-lesson").is_none() {
+                    let source = tool_result(messages, "extract-source").unwrap();
+                    let reference = source["records"]
+                        .as_array()
+                        .and_then(|records| records.last())
+                        .and_then(|record| record["reference"].as_str())
+                        .expect("source evidence reference");
+                    return Ok(tool_response(
+                        "stack-lesson",
+                        "stack_lesson_candidate",
+                        json!({
+                            "content":"Keep the bounded completion check for future tasks",
+                            "evidence_refs":[reference]
+                        }),
+                    ));
                 }
-                self.reviewer_started.notify_one();
-            }
-            match &self.reviewer_behavior {
-                ReviewerBehavior::Immediate => {}
-                ReviewerBehavior::Delayed(delay) => tokio::time::sleep(*delay).await,
-                ReviewerBehavior::WaitForCancel => std::future::pending::<()>().await,
-                ReviewerBehavior::RepeatRead(path) => {
-                    return Ok(ChatResponse {
-                        message: Message {
-                            role: providers::Role::Assistant,
-                            content: vec![ContentBlock::ToolUse {
-                                id: format!("repeat-{call}"),
-                                name: "read".into(),
-                                input: serde_json::json!({"path": path}),
-                            }],
-                        },
-                        usage: Usage::default(),
-                        finish_reason: FinishReason::ToolUse,
-                    });
+                if matches!(self.mode, ReviewMode::PartialReview)
+                    && tool_result(messages, "stack-second").is_none()
+                {
+                    let source = tool_result(messages, "extract-source").unwrap();
+                    let reference = source["records"]
+                        .as_array()
+                        .and_then(|records| records.last())
+                        .and_then(|record| record["reference"].as_str())
+                        .expect("source evidence reference");
+                    return Ok(tool_response(
+                        "stack-second",
+                        "stack_lesson_candidate",
+                        json!({
+                            "content":"Keep a second distinct bounded check for future tasks",
+                            "evidence_refs":[reference]
+                        }),
+                    ));
                 }
+                Ok(text_response(
+                    "Extraction complete. This final text is deliberately not JSON.",
+                ))
             }
-            if self.approve && self.raw_review {
-                r#"{"verdict":"approve","criteria":[{"id":"test:bound","status":"met","note":"checked","evidence":{"command":"cargo test","exit_status":0,"target_sha":"abc","artifact_path":"test.log"}}]}"#
-            } else if self.approve {
-                "```json\n{\"verdict\":\"approve\",\"criteria\":[{\"id\":\"test:bound\",\"status\":\"met\",\"note\":\"Verified bounded execution\"}]}\n```"
-            } else {
-                "```json\n{\"verdict\":\"request-update\",\"findings\":[\"Missing proof\"]}\n```"
+            Some("lesson_review") => {
+                assert_eq!(role, Role::Reviewer);
+                assert!(names.contains(&"inspect_learning_source"));
+                assert!(names.contains(&"list_lesson_candidates"));
+                assert!(names.contains(&"submit_lesson_review"));
+                assert!(!names.contains(&"shell"));
+                assert!(!names.contains(&"stack_lesson_candidate"));
+                if self.reviewer_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.reviewer_started.notify_one();
+                }
+                if matches!(self.mode, ReviewMode::WaitForCancel) {
+                    std::future::pending::<()>().await
+                }
+                if tool_result(messages, "review-list").is_none() {
+                    return Ok(tool_response(
+                        "review-list",
+                        "list_lesson_candidates",
+                        json!({}),
+                    ));
+                }
+                if tool_result(messages, "review-source").is_none() {
+                    return Ok(tool_response(
+                        "review-source",
+                        "inspect_learning_source",
+                        json!({"run_id":source_run(messages)}),
+                    ));
+                }
+                if matches!(self.mode, ReviewMode::FinalTextOnly) {
+                    return Ok(text_response("{\"verdict\":\"approve\"}"));
+                }
+                if tool_result(messages, "review-submit").is_none() {
+                    let listed = tool_result(messages, "review-list").unwrap();
+                    let candidate = &listed["candidates"][0];
+                    let verdict =
+                        if matches!(self.mode, ReviewMode::Approve | ReviewMode::PartialReview) {
+                            "approve"
+                        } else {
+                            "reject"
+                        };
+                    return Ok(tool_response(
+                        "review-submit",
+                        "submit_lesson_review",
+                        json!({
+                            "candidate_id": candidate["id"],
+                            "verdict": verdict,
+                            "rationale": "Checked the cited source record",
+                            "evidence_refs": candidate["evidence_refs"]
+                        }),
+                    ));
+                }
+                Ok(text_response(
+                    "Review complete. This final text is deliberately not JSON.",
+                ))
             }
-        } else {
-            "Completed with evidence test:bound"
-        };
-        Ok(ChatResponse {
-            message: Message {
-                role: providers::Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.into() }],
-            },
-            usage: Usage::default(),
-            finish_reason: FinishReason::Stop,
-        })
+            _ => {
+                assert_eq!(role, Role::Worker);
+                assert!(!names.contains(&"inspect_learning_source"));
+                assert!(!names.contains(&"stack_lesson_candidate"));
+                Ok(text_response("Completed with evidence test:bound"))
+            }
+        }
     }
+
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "fixture".into()
     }
@@ -124,17 +231,11 @@ struct Fixture {
     _store: Storage,
     config: StorageConfig,
     model: Arc<Model>,
-    bus: Arc<event_bus::EventBus>,
     runtime: AgentRuntime,
 }
 
 impl Fixture {
-    fn new(
-        approve: bool,
-        invalid_interview: bool,
-        raw_review: bool,
-        reviewer_behavior: ReviewerBehavior,
-    ) -> Self {
+    fn new(mode: ReviewMode) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("memory.db"),
@@ -142,11 +243,7 @@ impl Fixture {
         };
         let store = Storage::open(config.clone()).unwrap();
         let model = Arc::new(Model {
-            calls: Mutex::new(Vec::new()),
-            approve,
-            invalid_interview,
-            raw_review,
-            reviewer_behavior,
+            mode,
             reviewer_started: Notify::new(),
             reviewer_calls: AtomicUsize::new(0),
         });
@@ -155,8 +252,9 @@ impl Fixture {
             bus.clone(),
             Arc::new(sandbox::DirectSandbox::new_unchecked()),
         ));
-        let runtime = AgentRuntime::new(bus.clone(), executor, model.clone()).with_learning(
-            runtime::memory_queue::LearningSettings {
+        let runtime = AgentRuntime::new(bus, executor, model.clone())
+            .with_run_store(RunStore::open(&config, store.handle()).unwrap())
+            .with_learning(runtime::memory_queue::LearningSettings {
                 writer: store.handle(),
                 storage: config.clone(),
                 project: "p".into(),
@@ -164,56 +262,36 @@ impl Fixture {
                     profile: "quick".into(),
                     model: None,
                 },
-            },
-        );
+            });
         Self {
             _dir: dir,
             _store: store,
             config,
             model,
-            bus,
             runtime,
         }
     }
 
     async fn start(&self) -> RunId {
-        let id = self.runtime.delegate_background(
+        let run = self.runtime.delegate_background(
             Role::Worker,
             "Complete bounded work".into(),
             RunConfig::default(),
         );
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), self.runtime.wait(id))
+            tokio::time::timeout(Duration::from_secs(5), self.runtime.wait(run))
                 .await
-                .expect("worker must finish")
+                .unwrap()
                 .unwrap(),
             AgentRunPhase::Done
         );
-        id
+        run
     }
 
-    async fn reviewer(&self) -> RunId {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.model.reviewer_started.notified(),
-        )
-        .await
-        .expect("learning reviewer must start");
-        let reviewers: Vec<_> = self
-            .runtime
-            .list_agents()
-            .into_iter()
-            .filter(|agent| agent.role_name == Role::Reviewer.name())
-            .collect();
-        assert_eq!(reviewers.len(), 1);
-        assert_eq!(reviewers[0].name, "learning-evidence-review");
-        reviewers[0].run_id
-    }
-
-    async fn learning(&self, worker: RunId, deadline: Duration) -> Result<(), String> {
-        tokio::time::timeout(deadline, self.runtime.wait_learning(worker))
+    async fn learning(&self, source: RunId) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(5), self.runtime.wait_learning(source))
             .await
-            .expect("learning must finish without hanging")
+            .expect("learning must finish")
             .unwrap()
     }
 
@@ -223,205 +301,86 @@ impl Fixture {
             .search_memory("p", "", None)
             .unwrap()
     }
-
-    fn assert_incomplete(&self, outcome: Result<(), String>) {
-        assert_eq!(
-            outcome,
-            Err(runtime::memory::InterviewError::Incomplete.to_string())
-        );
-        assert!(self.entries().is_empty(), "no lessons may be promoted");
-        assert_eq!(
-            self.runtime.list_agents().len(),
-            2,
-            "learning must not recurse"
-        );
-        assert_eq!(
-            self.model.calls.lock().unwrap().len(),
-            1 + self.model.reviewer_calls.load(Ordering::SeqCst),
-            "an incomplete review must not reach the interviewer"
-        );
-    }
-}
-
-async fn run(
-    approve: bool,
-    invalid_interview: bool,
-    raw_review: bool,
-) -> (
-    Vec<storage::memory::MemoryEntry>,
-    Vec<Role>,
-    Result<(), String>,
-) {
-    let fixture = Fixture::new(
-        approve,
-        invalid_interview,
-        raw_review,
-        ReviewerBehavior::Immediate,
-    );
-    let id = fixture.start().await;
-    fixture.reviewer().await;
-    let outcome = fixture.learning(id, Duration::from_secs(5)).await;
-    let entries = fixture.entries();
-    let calls = fixture.model.calls.lock().unwrap().clone();
-    (entries, calls, outcome)
-}
-
-#[tokio::test(start_paused = true)]
-async fn reviewer_can_exceed_120_seconds_and_promote_verified_lessons() {
-    // Given: a legitimate evidence review taking longer than the old outer timeout.
-    let fixture = Fixture::new(
-        true,
-        false,
-        true,
-        ReviewerBehavior::Delayed(Duration::from_secs(121)),
-    );
-    let worker = fixture.start().await;
-    let reviewer = fixture.reviewer().await;
-    let started = tokio::time::Instant::now();
-
-    // When: Tokio's paused clock advances automatically; no real-time sleep is used.
-    assert_eq!(
-        fixture.learning(worker, Duration::from_secs(180)).await,
-        Ok(())
-    );
-
-    // Then: the reviewer finishes normally and both evidence-matched lessons promote.
-    assert!(started.elapsed() >= Duration::from_secs(121));
-    assert_eq!(
-        fixture.runtime.inspect_agent(reviewer).unwrap().phase,
-        AgentRunPhase::Done
-    );
-    let entries = fixture.entries();
-    assert_eq!(entries.len(), 2);
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.status == MemoryStatus::Promoted)
-    );
-    assert_eq!(
-        *fixture.model.calls.lock().unwrap(),
-        vec![Role::Worker, Role::Reviewer, Role::Worker, Role::Reviewer]
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn cancelling_learning_reviewer_returns_incomplete_without_promotion() {
-    // Given: a reviewer suspended inside the mock provider, with no response forthcoming.
-    let fixture = Fixture::new(true, false, true, ReviewerBehavior::WaitForCancel);
-    let worker = fixture.start().await;
-    let reviewer = fixture.reviewer().await;
-
-    // When: explicit cancellation interrupts that in-flight provider call.
-    fixture.runtime.cancel(reviewer).unwrap();
-    let outcome = fixture.learning(worker, Duration::from_secs(5)).await;
-
-    // Then: the reviewer is non-Done, learning fails promptly, and nothing is promoted.
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), fixture.runtime.wait(reviewer))
-            .await
-            .expect("cancelled reviewer must terminate")
-            .unwrap(),
-        AgentRunPhase::Error
-    );
-    assert_eq!(
-        fixture.runtime.inspect_agent(worker).unwrap().phase,
-        AgentRunPhase::Done
-    );
-    fixture.assert_incomplete(outcome);
 }
 
 #[tokio::test]
-async fn identical_reviewer_tool_calls_hard_stop_without_promotion() {
-    // Given: a reviewer repeatedly reading the same local evidence with fresh call IDs.
-    let dir = tempfile::tempdir().unwrap();
-    let evidence = dir.path().join("evidence.txt");
-    std::fs::write(&evidence, "test:bound passed\n").unwrap();
-    let fixture = Fixture::new(true, false, true, ReviewerBehavior::RepeatRead(evidence));
-    let mut events = fixture.bus.subscribe();
-    let worker = fixture.start().await;
-    let reviewer = fixture.reviewer().await;
-
-    // When: the ordinary, unmodified identical-call guard observes the tenth call.
-    let outcome = fixture.learning(worker, Duration::from_secs(5)).await;
-
-    // Then: the normal guard, not a learning deadline, hard-stops the reviewer.
+async fn typed_approval_promotes_despite_non_json_final_text() {
+    let fixture = Fixture::new(ReviewMode::Approve);
+    let source = fixture.start().await;
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, MemoryStatus::Promoted);
     assert_eq!(
-        RunConfig::default().budget.max_identical_tool_call_repeats,
-        10
+        fixture.runtime.list_agents().len(),
+        3,
+        "learning must not recurse"
     );
-    assert_eq!(fixture.model.reviewer_calls.load(Ordering::SeqCst), 10);
+}
+
+#[tokio::test]
+async fn typed_rejection_keeps_lesson_as_candidate() {
+    let fixture = Fixture::new(ReviewMode::Reject);
+    let source = fixture.start().await;
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, MemoryStatus::Candidate);
+}
+
+#[tokio::test]
+async fn json_looking_final_text_without_typed_review_cannot_promote() {
+    let fixture = Fixture::new(ReviewMode::FinalTextOnly);
+    let source = fixture.start().await;
     assert_eq!(
-        fixture.runtime.inspect_agent(reviewer).unwrap().phase,
-        AgentRunPhase::Error
+        fixture.learning(source).await,
+        Err(runtime::memory_queue::LearningError::Incomplete.to_string())
     );
-    let diagnostic = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let event_bus::EventKind::Diagnostic(diagnostic) = events.recv().await.unwrap().kind
-                && diagnostic.code == "IdenticalToolCalls"
-            {
-                break diagnostic;
-            }
-        }
-    })
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, MemoryStatus::Candidate);
+}
+
+#[tokio::test]
+async fn cancelling_lesson_reviewer_does_not_promote() {
+    let fixture = Fixture::new(ReviewMode::WaitForCancel);
+    let source = fixture.start().await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.model.reviewer_started.notified(),
+    )
     .await
-    .expect("the identical-call guard must emit its diagnostic");
-    assert_eq!(diagnostic.run_id, Some(reviewer.to_string()));
-    assert_eq!(diagnostic.call_id.as_deref(), Some("repeat-9"));
-    assert_eq!(diagnostic.severity, event_bus::DiagnosticSeverity::Error);
-    fixture.assert_incomplete(outcome);
-}
-
-#[tokio::test]
-async fn ordinary_run_automatically_interviews_and_promotes_verified_lessons() {
-    // Given / When: run through the ordinary runtime surface with verified evidence.
-    let (entries, calls, outcome) = run(true, false, false).await;
-    // Then: both lessons are promoted and learning does not recurse.
-    assert!(outcome.is_ok());
-    assert_eq!(entries.len(), 2);
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.status == MemoryStatus::Promoted)
-    );
+    .expect("reviewer started");
+    let reviewer = fixture
+        .runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.name == "learning-evidence-review")
+        .unwrap()
+        .run_id;
+    fixture.runtime.cancel(reviewer).unwrap();
     assert_eq!(
-        calls,
-        vec![Role::Worker, Role::Reviewer, Role::Worker, Role::Reviewer]
+        fixture.learning(source).await,
+        Err(runtime::memory_queue::LearningError::Incomplete.to_string())
     );
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, MemoryStatus::Candidate);
 }
 
 #[tokio::test]
-async fn rejected_review_keeps_lessons_as_candidates() {
-    // Given / When: a completed run whose reviewer rejects the evidence.
-    let (entries, _, outcome) = run(false, false, false).await;
-    // Then: interview still runs, without bypassing promotion authority.
-    assert!(outcome.is_ok());
+async fn incomplete_candidate_review_batch_promotes_none() {
+    let fixture = Fixture::new(ReviewMode::PartialReview);
+    let source = fixture.start().await;
+    assert_eq!(
+        fixture.learning(source).await,
+        Err(runtime::memory_queue::LearningError::Incomplete.to_string())
+    );
+    let entries = fixture.entries();
     assert_eq!(entries.len(), 2);
     assert!(
         entries
             .iter()
             .all(|entry| entry.status == MemoryStatus::Candidate)
-    );
-}
-
-#[tokio::test]
-async fn invalid_second_interview_does_not_persist_partial_lessons() {
-    // Given / When: the second interview has invalid evidence.
-    let (entries, _, outcome) = run(true, true, false).await;
-    // Then: learning failure is observable without failing the completed task.
-    assert!(outcome.is_err());
-    assert!(entries.is_empty());
-}
-
-#[tokio::test]
-async fn raw_typed_review_promotes_lessons_with_matching_evidence_reference() {
-    // Given / When: the runtime receives raw JSON with criterion evidence.
-    let (entries, _, outcome) = run(true, false, true).await;
-    // Then: the unchanged lesson reference matching promotes both lessons.
-    assert_eq!(outcome, Ok(()));
-    assert_eq!(entries.len(), 2);
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.status == MemoryStatus::Promoted)
     );
 }

@@ -58,6 +58,7 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 pub(crate) struct Shared {
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
+    pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     spawn_intents: Mutex<HashMap<RunId, cancellation::SpawnIntent>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
@@ -241,6 +242,7 @@ impl AgentRuntime {
             shared: Arc::new(Shared {
                 question_version: watch::channel(0).0,
                 reviewer_results: Mutex::new(HashMap::new()),
+                lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
@@ -500,6 +502,7 @@ impl AgentRuntime {
                 review_runs: Mutex::new(HashMap::new()),
                 goals: OnceLock::new(),
                 reviewer_results: Mutex::new(HashMap::new()),
+                lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 workspace: Some(WorkspaceContext { manager, factory }),
                 learning: OnceLock::new(),
                 learning_runs: Mutex::new(HashMap::new()),

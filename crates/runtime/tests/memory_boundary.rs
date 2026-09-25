@@ -1,4 +1,4 @@
-use runtime::memory::{InterviewAnswer, MemoryBoundary};
+use runtime::memory::MemoryBoundary;
 use storage::memory::Lesson;
 use storage::{Storage, StorageConfig};
 
@@ -37,16 +37,5 @@ fn boundary_snapshot_does_not_change_after_later_promotion() {
             .unwrap()
             .entries()
             .is_empty()
-    );
-}
-
-#[test]
-fn interview_answer_rejects_model_supplied_promotion() {
-    // Given / When / Then: models may propose content, never promotion state.
-    assert!(
-        serde_json::from_str::<InterviewAnswer>(
-            r#"{"content":"x","evidence":"test:x","status":"promoted"}"#
-        )
-        .is_err()
     );
 }

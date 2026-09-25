@@ -89,6 +89,14 @@ const BUNDLED: &[(&str, &str)] = &[
         "category-research",
         include_str!("../assets/presets/category-research.md"),
     ),
+    (
+        "category-lesson",
+        include_str!("../assets/presets/category-lesson.md"),
+    ),
+    (
+        "category-lesson-review",
+        include_str!("../assets/presets/category-lesson-review.md"),
+    ),
 ];
 
 /// 同梱プリセットとユーザー上書きを 2 層で解決するストア。
@@ -170,7 +178,7 @@ fn bundled(name: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    // Given: 同梱 16 プリセット名の完全なリスト / When: ユーザー上書きなしで解決する
+    // Given: 同梱 role / family / category プリセットの一覧 / When: ユーザー上書きなしで解決する
     // Then: すべて解決でき、本文が空でない
     #[test]
     fn bundled_store_contains_all_role_family_category_presets() {
@@ -191,6 +199,8 @@ mod tests {
             "category-visual",
             "category-writing",
             "category-research",
+            "category-lesson",
+            "category-lesson-review",
         ];
 
         for name in bundled_names {

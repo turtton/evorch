@@ -177,3 +177,10 @@ fn prompt_sources_error_never_leaks_override_body() {
         "エラーに本文が漏れた: {message}"
     );
 }
+
+#[test]
+fn internal_lesson_prompt_overlays_resolve_by_runtime_category_name() {
+    let sources = resolve_prompt_sources(&Config::default(), None).unwrap();
+    assert!(sources.category_overlays["lesson"].contains("stack_lesson_candidate"));
+    assert!(sources.category_overlays["lesson_review"].contains("submit_lesson_review"));
+}

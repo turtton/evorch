@@ -115,6 +115,45 @@ impl Database {
         run_context::get(&self.conn, run_id)
     }
 
+    /// Read one consistent, bounded snapshot of a root and its persisted descendants.
+    /// Limits fail closed rather than silently omitting potential evidence.
+    pub fn learning_source_contexts(
+        &self,
+        root: &str,
+    ) -> Result<Vec<RunContextRecord>, StorageError> {
+        const MAX_RUNS: usize = 128;
+        const MAX_BYTES: i64 = 16 * 1024 * 1024;
+        let transaction = self.conn.unchecked_transaction()?;
+        let ids = {
+            let mut statement = transaction.prepare(
+                "WITH RECURSIVE tree(run_id) AS (SELECT run_id FROM run_contexts WHERE run_id = ?1 \
+                 UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id) \
+                 SELECT context.run_id, (length(CAST(context.messages_json AS BLOB)) + length(CAST(context.checkpoints_json AS BLOB)) + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
+                 ORDER BY CAST(substr(context.run_id, 5) AS INTEGER) LIMIT ?2",
+            )?;
+            statement
+                .query_map(rusqlite::params![root, (MAX_RUNS + 1) as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if ids.len() > MAX_RUNS || ids.iter().map(|(_, bytes)| *bytes).sum::<i64>() > MAX_BYTES {
+            return Err(StorageError::Serialization(
+                "learning source exceeds snapshot limit (128 runs / 16 MiB)".into(),
+            ));
+        }
+        let records = ids
+            .into_iter()
+            .map(|(id, _)| {
+                run_context::get(&transaction, &id)?.ok_or_else(|| {
+                    StorageError::Serialization("learning source disappeared".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit()?;
+        Ok(records)
+    }
+
     /// 識別子に一致するセッションを返します。
     ///
     /// # Errors

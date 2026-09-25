@@ -1,9 +1,8 @@
-use std::sync::{Arc, Weak};
+use std::sync::Weak;
 
 use tokio::sync::watch;
 
 use crate::agent_loop::RunTask;
-use crate::memory::Interviewer;
 use crate::memory_queue::{LearningQueue, LearningSettings, QueuedTask};
 use crate::runtime::Shared;
 use crate::{AgentRuntime, RunConfig, RunId, RuntimeError};
@@ -75,9 +74,20 @@ impl PendingLearning {
         run: RunId,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(async move {
-            let result = self.execute(weak, run).await;
+            let result = self.execute(weak.clone(), run).await;
             if result.is_err() {
                 tracing::warn!(%run, "post-run learning failed; completed run result retained");
+                if let Some(shared) = weak.upgrade() {
+                    shared.bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                        source: "learning".into(),
+                        severity: event_bus::DiagnosticSeverity::Warning,
+                        code: "LearningPipelineFailed".into(),
+                        detail: "Lesson extraction or review failed; unapproved candidates remain unpromoted. Inspect the learning runs for details.".into(),
+                        run_id: Some(run.to_string()),
+                        thread_id: None,
+                        call_id: None,
+                    }));
+                }
             }
             self.result.send_replace(Some(result));
         })
@@ -95,18 +105,18 @@ impl PendingLearning {
         {
             return Ok(());
         }
-        let Some(report) = runtime.run_result(run).map_err(|error| error.to_string())? else {
+        // Escalated runs can be Done without publishing a completed task result.
+        if runtime
+            .run_result(run)
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
             return Ok(());
-        };
-        let interviewer = Interviewer::new(
-            Arc::clone(&runtime.shared.model),
-            self.settings.quick.clone(),
-            self.settings.writer.clone(),
-        );
+        }
         let queue = LearningQueue::new(
             runtime,
             (self.settings.writer.clone(), self.settings.storage.clone()),
-            interviewer,
+            self.settings.quick.clone(),
         );
         queue
             .complete_task(
@@ -116,7 +126,7 @@ impl PendingLearning {
                     prompt: &self.prompt,
                     config: RunConfig::default(),
                 },
-                &report,
+                run,
             )
             .await
             .map_err(|error| error.to_string())?;

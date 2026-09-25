@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
-/// agents バインディングで許可されるカテゴリ名 (固定 6 種)。
+/// Worker バインディングで許可されるカテゴリ名。`lesson` は内部起動専用。
 pub(crate) const CATEGORY_NAMES: &[&str] = &[
     "quick",
     "deep",
@@ -15,6 +15,7 @@ pub(crate) const CATEGORY_NAMES: &[&str] = &[
     "visual",
     "writing",
     "research",
+    "lesson",
 ];
 
 /// ロール別のエージェントバインディング設定。
@@ -146,15 +147,16 @@ impl AgentsConfig {
     /// 設定に含まれない。
     ///
     /// # Errors
-    /// worker 以外へのカテゴリ指定は [`ConfigError::CategoryNotAllowedForRole`]、
-    /// ロール名が固定 8 ロール外なら [`ConfigError::UnknownAgentRole`]、
-    /// カテゴリ名が固定 6 カテゴリ外なら [`ConfigError::UnknownCategory`] を返す。
+    /// worker と内部 `reviewer/lesson_review` 以外へのカテゴリ指定は
+    /// [`ConfigError::CategoryNotAllowedForRole`] を返す。
+    /// 未知のロール・カテゴリは型付きエラーになる。
     pub fn binding_for(
         &self,
         role: &str,
         category: Option<&str>,
     ) -> Result<ResolvedAgentBinding, ConfigError> {
         if role != "worker"
+            && !(role == "reviewer" && category == Some("lesson_review"))
             && let Some(category) = category
         {
             return Err(ConfigError::CategoryNotAllowedForRole {
@@ -179,13 +181,18 @@ impl AgentsConfig {
         };
         if let Some(category) = category
             && !CATEGORY_NAMES.contains(&category)
+            && !(role == "reviewer" && category == "lesson_review")
         {
             return Err(ConfigError::UnknownCategory {
                 role: role.to_string(),
                 category: category.to_string(),
             });
         }
-        let category_binding = category.and_then(|name| self.worker.categories.get(name));
+        let category_binding = if role == "worker" {
+            category.and_then(|name| self.worker.categories.get(name))
+        } else {
+            None
+        };
         let logical_model = category_binding
             .and_then(|found| found.logical_model.clone())
             .or_else(|| binding.logical_model.clone())
@@ -620,6 +627,33 @@ logical_model = "B"
     }
 
     #[test]
+    fn private_lesson_categories_route_only_to_their_roles() {
+        let agents = AgentsConfig::default();
+        assert_eq!(
+            agents
+                .binding_for("worker", Some("lesson"))
+                .unwrap()
+                .logical_model,
+            "worker"
+        );
+        assert_eq!(
+            agents
+                .binding_for("reviewer", Some("lesson_review"))
+                .unwrap()
+                .logical_model,
+            "reviewer"
+        );
+        assert!(matches!(
+            agents.binding_for("worker", Some("lesson_review")),
+            Err(ConfigError::UnknownCategory { .. })
+        ));
+        assert!(matches!(
+            agents.binding_for("reviewer", Some("lesson")),
+            Err(ConfigError::CategoryNotAllowedForRole { .. })
+        ));
+    }
+
+    #[test]
     fn agents_binding_rejects_categories_when_role_is_not_worker() {
         // Given: explorer にカテゴリを設定した TOML。
         let doc = "[agents.explorer.categories.quick]\nlogical_model = \"fast\"\n";
@@ -764,7 +798,7 @@ temperature = 0.9
         assert_eq!(resolved.generation.top_p, None);
     }
 
-    // Given: 固定 6 カテゴリ以外のカテゴリ名 / When: binding_for を呼ぶ
+    // Given: 既知カテゴリ以外のカテゴリ名 / When: binding_for を呼ぶ
     // Then: UnknownCategory の型付きエラーになる
     #[test]
     fn binding_for_unknown_category_is_typed_error() {

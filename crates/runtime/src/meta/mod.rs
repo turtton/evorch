@@ -62,6 +62,29 @@ pub(crate) async fn dispatch(
         state.activity(event_bus::RunActivity::Children);
     }
     match name {
+        "inspect_learning_source"
+        | "stack_lesson_candidate"
+        | "list_lesson_candidates"
+        | "submit_lesson_review" => {
+            let result = match name {
+                "inspect_learning_source" => parse(input).and_then(|args| {
+                    runtime.inspect_learning_source(state.caller_run_id(), state.run_config(), args)
+                }),
+                "stack_lesson_candidate" => parse(input).and_then(|args| {
+                    runtime.stack_lesson_candidate(state.caller_run_id(), state.run_config(), args)
+                }),
+                "list_lesson_candidates" => parse(input).and_then(|args| {
+                    runtime.list_lesson_candidates(state.caller_run_id(), state.run_config(), args)
+                }),
+                _ => parse(input).and_then(|args| {
+                    runtime.submit_lesson_review(state.caller_run_id(), state.run_config(), args)
+                }),
+            };
+            match result {
+                Ok(value) => success(value.to_string()),
+                Err(reason) => error(reason),
+            }
+        }
         "ask_user" => questions::ask_user(state, &runtime, input),
         "user_answers" => questions::user_answers(state, &runtime, input),
         "subagent_questions" => questions::subagent_questions(state, &runtime, input),
@@ -225,5 +248,14 @@ pub(super) fn error(content: impl Into<String>) -> DispatchResult {
     DispatchResult {
         result: ToolResult::error(content),
         terminal: Terminal::Continue,
+    }
+}
+
+#[cfg(test)]
+mod private_category_tests {
+    #[test]
+    fn normal_delegation_rejects_internal_lesson_categories() {
+        assert!(super::parse_category("lesson").is_err());
+        assert!(super::parse_category("lesson_review").is_err());
     }
 }

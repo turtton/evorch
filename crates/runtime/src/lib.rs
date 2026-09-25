@@ -23,6 +23,7 @@ pub mod entry_routing;
 pub mod error;
 pub mod escalation;
 pub mod escalation_review;
+pub mod learning;
 pub mod mailbox;
 pub mod memory;
 mod memory_lifecycle;
@@ -87,8 +88,8 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, WorkspaceInspection,
-    WorkspaceMode,
+    AgentInspection, AgentSummary, DelegateImage, MergeMode, RunConfig, RunId, RunPurpose,
+    WorkspaceInspection, WorkspaceMode,
 };
 pub use run_store::RunStore;
 pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};

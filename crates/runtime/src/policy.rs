@@ -30,6 +30,10 @@ pub const META_OPS: &[&str] = &[
     "user_answers",
     "subagent_questions",
     "answer_subagent_question",
+    "inspect_learning_source",
+    "stack_lesson_candidate",
+    "list_lesson_candidates",
+    "submit_lesson_review",
 ];
 
 /// 名前がメタ操作かどうかを判定する。
@@ -53,6 +57,33 @@ pub struct ExecutionPolicy {
 }
 
 impl ExecutionPolicy {
+    /// A category or name alone never grants the tools of an internal stage.
+    pub fn for_run_config(mut self, config: &crate::RunConfig) -> Self {
+        use crate::RunPurpose;
+        let tools: &[&str] = match config.purpose {
+            RunPurpose::General => return self,
+            RunPurpose::LessonExtract { .. }
+                if config.learning_internal && self.role_name == Role::Worker.name() =>
+            {
+                &["inspect_learning_source", "stack_lesson_candidate"]
+            }
+            RunPurpose::LessonReview { .. }
+                if config.learning_internal && self.role_name == Role::Reviewer.name() =>
+            {
+                &[
+                    "inspect_learning_source",
+                    "list_lesson_candidates",
+                    "submit_lesson_review",
+                ]
+            }
+            _ => &[],
+        };
+        self.capabilities =
+            RoleCapabilities::new(tools.iter().copied(), agents::NetworkAccess::Denied, false);
+        self.sandbox_allow_network = false;
+        self
+    }
+
     /// ロールからポリシーを構築する。
     pub fn for_role(role: Role) -> Self {
         Self {
@@ -277,9 +308,13 @@ mod tests {
             "user_answers",
             "subagent_questions",
             "answer_subagent_question",
+            "inspect_learning_source",
+            "stack_lesson_candidate",
+            "list_lesson_candidates",
+            "submit_lesson_review",
         ];
 
-        assert_eq!(META_OPS.len(), 21);
+        assert_eq!(META_OPS.len(), 25);
         assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");

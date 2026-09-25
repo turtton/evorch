@@ -24,7 +24,7 @@ pub struct AgentPromptSources {
     pub role_baselines: BTreeMap<String, String>,
     /// モデルファミリー別セクション (キー: ファミリー名、generic を含む全 6 種)。
     pub family_sections: BTreeMap<String, String>,
-    /// カテゴリ別オーバーレイ (キー: カテゴリ名、全 6 種)。
+    /// カテゴリ別オーバーレイ (公開 Worker カテゴリと内部学習カテゴリ)。
     pub category_overlays: BTreeMap<String, String>,
     /// agents 設定が参照する appendix プリセット本文 (キー: プリセット名)。
     pub appendices: BTreeMap<String, String>,
@@ -33,7 +33,7 @@ pub struct AgentPromptSources {
 /// 設定からエージェントプロンプトに必要な全文ソースをすべて収集する。
 ///
 /// ロール別ベースライン 8 種、モデルファミリー別セクション 6 種 (generic を
-/// 含む)、カテゴリ別オーバーレイ 6 種、および agents 設定の `preset` 参照が
+/// 含む)、カテゴリ別オーバーレイ、および agents 設定の `preset` 参照が
 /// 指す appendix 本文を解決する。1 つでも解決できなければプロバイダに到達
 /// 可能になる前にエラーで失敗する (fail-closed)。エラーにプリセット本文は
 /// 含まれない。
@@ -103,6 +103,10 @@ fn resolve_categories(presets_dir: Option<&Path>) -> Result<BTreeMap<String, Str
         let body = PresetStore::resolve(&name, presets_dir)?;
         sources.insert((*category).to_string(), body);
     }
+    sources.insert(
+        "lesson_review".to_string(),
+        PresetStore::resolve("category-lesson-review", presets_dir)?,
+    );
     Ok(sources)
 }
 

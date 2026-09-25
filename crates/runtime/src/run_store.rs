@@ -16,6 +16,16 @@ pub struct RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn learning_source_contexts(
+        &self,
+        root: RunId,
+    ) -> Result<Vec<RunContextRecord>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|error| StorageError::Io(error.to_string()))?
+            .learning_source_contexts(&root.to_string())
+    }
+
     pub(crate) fn user_question(
         &self,
         id: &str,

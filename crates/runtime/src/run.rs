@@ -55,6 +55,20 @@ pub enum MergeMode {
     Branch,
 }
 
+/// Internal learning stages are assigned by the runtime, never by delegate arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunPurpose {
+    #[default]
+    General,
+    LessonExtract {
+        source_run_id: RunId,
+    },
+    LessonReview {
+        source_run_id: RunId,
+        extraction_run_id: RunId,
+    },
+}
+
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
@@ -69,6 +83,8 @@ pub struct RunConfig {
     pub delegation_value: Option<String>,
     pub memory: Option<crate::memory::MemoryBoundary>,
     pub learning_internal: bool,
+    /// Trusted runtime authority; not accepted by model-facing delegation tools.
+    pub purpose: RunPurpose,
     pub ownership: Option<crate::ownership::OwnerPermit>,
     pub images: Vec<DelegateImage>,
     /// Explicit model selection for this run; absent means normal routing.

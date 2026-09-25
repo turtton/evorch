@@ -27,7 +27,8 @@ struct FindingArgs {
 
 impl LoopState {
     pub(super) fn team_worker(&self) -> bool {
-        self.task.role == agents::Role::Worker
+        self.task.config.purpose == crate::RunPurpose::General
+            && self.task.role == agents::Role::Worker
             && self.task.config.topology.worker_limit().is_some()
             && self.task.config.team.is_some()
     }
