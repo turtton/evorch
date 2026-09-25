@@ -35,7 +35,6 @@ impl LoopState {
                 .executor
                 .classify_tool(name)
                 .unwrap_or(PolicyDecision::Deny),
-            self.task.config.network_access,
         ) {
             ScopeDecision::Allow => NetworkAccessDecision::Allow,
             ScopeDecision::Deny { reason, .. } => NetworkAccessDecision::Deny { reason },

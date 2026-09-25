@@ -113,15 +113,22 @@ claude-main = [
 
 ## Web ツールのネットワーク設定
 
-`[sandbox]` の `web_tool_access` は `denied`（既定）または `opt-in`。
-`opt-in` にすると、GUI では Web ツールの呼び出しごとに Approvals パネルで判断し、
-CLI の `evorch run` では端末で `y/N` を尋ねる。CLI では
-`--web-tool-access opt-in` で当該 run だけ上書きできる。
+`[sandbox]` の `web_tools_enabled` は既定で `true`。`false` にすると、
+新規 run の Web ツール一覧から `web_search` / `web_fetch` を外し、既存 run の
+呼び出しも実行時に拒否する。CLI では `--web-tools-enabled true|false` で
+起動時の設定を上書きできる。
 
-`allow_network` は shell の sandbox 通信を制御する別設定。
-WebResearcher に委譲した子 run は、専用ロール選択により既定で Web ツールの
-ネットワークを許可する。明示的な `network_access = "opt_in"` を
-delegate に渡した場合は、その子の呼び出しごとに承認を求める。
+Web ツールの権限は run 全体ではなく呼び出しごとに判定する。
+ロールが `web_search` を持ち、ツールポリシーが自動許可なら検索を実行する。
+`web_fetch` は実際の URL・selector・format と利用者の依頼を自動審査し、
+許可された呼び出しだけを実行する。ツールポリシーが `Ask` の場合は
+引数を添えて利用者承認を求め、`Deny` は実行前に拒否する。
+各判断は run ID、call ID、引数、判定元とともに診断イベントへ記録する。
+
+`shell` の通信はコマンドの `sandbox_access = "network"` で要求する。
+既定の `isolated` は通信を分離する。`network` はファイルシステムの分離を
+保ったまま当該コマンドだけ通信を許可し、`unsandboxed` は両方の分離を外す。
+後者 2 つは理由とコマンド単位の審査を要する。
 
 ## JSON Schema
 

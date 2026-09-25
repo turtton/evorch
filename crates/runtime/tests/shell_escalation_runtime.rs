@@ -60,7 +60,7 @@ impl Fixture {
         self.executor.execute(
             &ToolExecutionContext { run_id: "run-shell".into(), thread_id: None, call_id: None },
             "shell", "call-shell",
-            json!({"command":"printf approved", "require_escalated":true, "justification":"host inspection"}),
+            json!({"command":"printf approved", "sandbox_access":"unsandboxed", "justification":"host inspection"}),
         ).await.expect("execute")
     }
 
@@ -157,7 +157,7 @@ async fn composed_executor_escalates_when_auto_reviewer_approves() {
     })
     .expect("compose")
     .runtime;
-    let result = executor.execute(&ToolExecutionContext { run_id: "composed".into(), thread_id: None, call_id: None }, "shell", "call", json!({"command":"printf composed", "require_escalated":true,"justification":"inspect"})).await.expect("execute");
+    let result = executor.execute(&ToolExecutionContext { run_id: "composed".into(), thread_id: None, call_id: None }, "shell", "call", json!({"command":"printf composed", "sandbox_access":"unsandboxed","justification":"inspect"})).await.expect("execute");
     assert_eq!(result.content, "exit_code: 0\ncomposed");
     assert_eq!(
         runtime.execution_policy(agents::Role::Worker),

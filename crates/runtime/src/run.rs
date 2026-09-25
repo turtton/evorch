@@ -3,7 +3,6 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use agents::NetworkAccess;
 use event_bus::AgentRunPhase;
 use serde::{Deserialize, Serialize};
 
@@ -105,9 +104,6 @@ pub struct RunConfig {
     pub workspace_mode: WorkspaceMode,
     /// isolated workspace の変更を統合する方法。
     pub merge_mode: MergeMode,
-    /// この run の session ネットワーク要件 (3 層 AND の session 層)。既定は Denied (fail-closed)。
-    /// network 権限を持つツール (web_search / web_fetch) にのみ作用する。
-    pub network_access: NetworkAccess,
     /// isolated workspace で checkout する既存 branch。`None` なら run 専用の新規
     /// branch (`evorch/task/run-N`) を作成する。既定は `None`。worktree path は
     /// この値からは導出されず、常に run 名 (`run-N`) から決まる (issue #73 D2)。
@@ -169,7 +165,6 @@ pub struct AgentInspection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agents::NetworkAccess;
 
     // Given: 数値 7 と 0 の RunId / When: Display / Then: "run-{n}" 形式 (イベント run_id と同一形式)
     #[test]
@@ -226,12 +221,6 @@ mod tests {
     #[test]
     fn merge_mode_on_config_defaults_to_branch() {
         assert_eq!(RunConfig::default().merge_mode, MergeMode::Branch);
-    }
-
-    // Given: RunConfig / When: Default / Then: network_access は Denied (fail-closed) が既定
-    #[test]
-    fn default_network_access_is_denied() {
-        assert_eq!(RunConfig::default().network_access, NetworkAccess::Denied);
     }
 
     // Given: RunConfig / When: Default / Then: workspace_branch は None (専用 branch 新規作成が既定)

@@ -117,7 +117,7 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
                 "shell",
                 "call",
                 serde_json::json!({
-                    "command":"printf composed", "require_escalated":true, "justification":"inspect"
+                    "command":"printf composed", "sandbox_access":"unsandboxed", "justification":"inspect"
                 }),
             )
             .await

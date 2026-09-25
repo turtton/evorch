@@ -193,6 +193,15 @@ impl Shell {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SandboxAccess {
+    #[default]
+    Isolated,
+    Network,
+    Unsandboxed,
+}
+
 /// shell ツールの引数。
 ///
 /// スキーマ検証は wave 3 の ToolExecutor が担うため、ここでは JSON からの
@@ -212,9 +221,7 @@ struct ShellArgs {
     #[serde(default)]
     interactive: bool,
     #[serde(default)]
-    require_escalated: bool,
-    #[serde(default)]
-    require_network: bool,
+    sandbox_access: SandboxAccess,
     #[serde(default)]
     justification: String,
     /// 作業ディレクトリ。
@@ -230,7 +237,7 @@ impl Tool for Shell {
     }
 
     fn description(&self) -> &str {
-        "Run a POSIX shell command. Without yield_ms, wait for completion. Start with yield_ms (0..60000) to return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Poll accepts yield_ms up to 1800000 (30 minutes) and returns early on new output or completion; stdin/stop accept up to 60000. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. For dependency downloads or git pull when sandbox DNS/network access fails, request require_network with justification to keep filesystem isolation; require_escalated removes all isolation."
+        "Run a POSIX shell command. Without yield_ms, wait for completion. Start with yield_ms (0..60000) to return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Poll accepts yield_ms up to 1800000 (30 minutes) and returns early on new output or completion; stdin/stop accept up to 60000. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. Start defaults to sandbox_access=isolated. For dependency downloads or git pull when sandbox DNS/network access fails, request sandbox_access=network with justification to retain filesystem isolation; sandbox_access=unsandboxed removes filesystem and network isolation after review. Both non-isolated modes require a nonempty justification. Control actions retain the job's original access and cannot set sandbox_access; stdin for a reviewed job requires a fresh review."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -241,9 +248,8 @@ impl Tool for Shell {
                 "command": {"type":"string", "minLength":1, "description":"POSIX shell command. Required for start."},
                 "args": {"type":"array", "items":{"type":"string"}, "deprecated":true, "description":"Deprecated shell fragments; put all shell syntax in command."},
                 "interactive": {"type":"boolean", "default":false, "description":"Use a PTY. With yield_ms, retain stdin for later input."},
-                "require_escalated": {"type":"boolean", "default":false, "description":"Run without filesystem or network sandbox after review."},
-                "require_network": {"type":"boolean", "default":false, "description":"Allow host networking for this command after review; retain sandbox filesystem mounts."},
-                "justification": {"type":"string"},
+                "sandbox_access": {"type":"string", "enum":["isolated", "network", "unsandboxed"], "default":"isolated", "description":"Start only. isolated: use the default sandbox; network: allow host networking for this command after review while retaining filesystem isolation; unsandboxed: remove filesystem and network isolation after review. network and unsandboxed require a nonempty justification."},
+                "justification": {"type":"string", "description":"Why this command needs network or unsandboxed access. Required and nonempty for either mode."},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
                 "yield_ms": {"type":"integer", "minimum":0, "maximum":jobs::MAX_POLL_YIELD_MS, "description":"Start async job or wait for new output/completion, returning early when either is available. Poll: 0..1800000 (30 minutes); start/stdin/stop: 0..60000."},
@@ -255,7 +261,7 @@ impl Tool for Shell {
             "additionalProperties": false,
             "allOf": [{
                 "if": {"properties":{"action":{"enum":["poll", "stdin", "stop"]}}, "required":["action"]},
-                "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["require_escalated"]},{"required":["require_network"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
+                "then": {"required":["job_id"], "not":{"anyOf":[{"required":["command"]},{"required":["args"]},{"required":["interactive"]},{"required":["sandbox_access"]},{"required":["justification"]},{"required":["timeout_ms"]}]}},
                 "else": {"required":["command"], "not":{"anyOf":[{"required":["job_id"]},{"required":["cursor"]},{"required":["input"]},{"required":["close_stdin"]}]}}
             }, {
                 "if": {"properties":{"action":{"enum":["start", "stdin", "stop"]}}},
@@ -412,13 +418,13 @@ impl Tool for Shell {
                 }
             })
             .or(root);
-        if args.require_escalated && args.require_network {
-            return Ok(ToolResult::error(
-                "shell access denied: require_escalated and require_network are mutually exclusive",
-            ));
-        }
+        let access = match args.sandbox_access {
+            SandboxAccess::Isolated => None,
+            SandboxAccess::Network => Some(ShellAccess::Network),
+            SandboxAccess::Unsandboxed => Some(ShellAccess::Host),
+        };
         let mut escalated_input = None;
-        let sandbox = if args.require_escalated || args.require_network {
+        let sandbox = if let Some(access) = access {
             if args.justification.trim().is_empty() {
                 return Ok(ToolResult::error(
                     "shell escalation denied: justification is required",
@@ -426,12 +432,7 @@ impl Tool for Shell {
             }
             // Build the network-only variant from the existing sandbox so its
             // filesystem mounts and private HOME remain identical.
-            let access = if args.require_network {
-                ShellAccess::Network
-            } else {
-                ShellAccess::Host
-            };
-            let network_sandbox = if args.require_network {
+            let network_sandbox = if access == ShellAccess::Network {
                 match self.sandbox.with_network_access() {
                     Ok(sandbox) => Some(sandbox),
                     Err(error) => return Ok(ToolResult::error(error.to_string())),

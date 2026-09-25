@@ -159,7 +159,7 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
             approved: false,
         })]);
     harness.run_steps(3);
-    assert!(harness.query_by_label("コマンドの承認待ち").is_none());
+    assert!(harness.query_by_label("ツールの承認待ち").is_none());
     assert_eq!(harness.query_all_by_label("Approve").count(), 0);
 }
 
@@ -302,7 +302,7 @@ fn nested_subagent_approval_belongs_to_parent_conversation_not_selected_thread()
             call_id: "run-12:call:0007:opaque".into(),
             tool_name: "shell".into(),
             input: Some(
-                json!({"command": command, "cwd": "/tmp/approval-test", "require_escalated": true}),
+                json!({"command": command, "cwd": "/tmp/approval-test", "sandbox_access": "unsandboxed"}),
             ),
         }),
         requested("run-99:unknown:1", "unknown-owner"),
@@ -328,7 +328,7 @@ fn nested_subagent_approval_belongs_to_parent_conversation_not_selected_thread()
     assert!(h.get_by_label("Approve").rect().bottom() < composer.top());
     assert!(h.query_by_label("run-12 · call · attempt 7").is_some());
     let rest = serde_json::to_string_pretty(
-        &json!({"cwd": "/tmp/approval-test", "require_escalated": true}),
+        &json!({"cwd": "/tmp/approval-test", "sandbox_access": "unsandboxed"}),
     )
     .unwrap();
     assert!(h.query_by_label(&rest).is_some());

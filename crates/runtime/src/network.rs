@@ -1,88 +1,32 @@
-//! ネットワーク境界のサンドボックス実行モードへの純粋マッピングとサンドボックス構築
-//! (ADR 0002 / 0021)。
-//!
-//! このモジュールは [`NetworkAccess`] 要件を [`SandboxNetworkMode`] へ解決する
-//! 純粋な写像と、その解決結果を [`build_sandbox`] で bwrap 構成へ伝達するシームを
-//! 提供する。サンドボックス化コマンドの実行方法 (executor) は扱わない。
+//! Process sandboxes keep network isolation; reviewed shell calls select a
+//! network-enabled variant for one invocation. Web tools use a separate
+//! tool-call authorization gate.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agents::NetworkAccess;
 use sandbox::{BwrapConfig, BwrapSandbox, Sandbox, SandboxError};
 
 use crate::policy::ExecutionPolicy;
 use crate::runtime::{IsolatedMounts, SandboxFactory};
 use crate::workspace::OwnedWorktree;
 
-/// サンドボックスのネットワーク実行モード (issue #19 / ADR 0021)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxNetworkMode {
-    /// 新規ネットワーク名前空間 (`--unshare-net`)。v0.1 の deny 相当。
-    Unshared,
-    /// 親ネットワーク名前空間で実行する。完全開放である。
-    ///
-    /// bwrap は宛先フィルタを持たず、v0.1 はバイナリポリシーのため
-    /// 許可した場合の通信先制限は存在しない (ADR 0021 参照)。
-    ParentNetns,
-}
-
-/// [`NetworkAccess`] 要件から [`SandboxNetworkMode`] への純粋マッピング。
-///
-/// - [`NetworkAccess::Allowed`] はオプトインの有無に依らず [`SandboxNetworkMode::ParentNetns`]
-/// - [`NetworkAccess::OptIn`] は明示的オプトインがある場合のみ
-///   [`SandboxNetworkMode::ParentNetns`]、それ以外は [`SandboxNetworkMode::Unshared`]
-/// - [`NetworkAccess::Denied`] はオプトインの有無に依らず [`SandboxNetworkMode::Unshared`]
-pub fn sandbox_network_mode(access: NetworkAccess, explicit_opt_in: bool) -> SandboxNetworkMode {
-    match access {
-        NetworkAccess::Allowed => SandboxNetworkMode::ParentNetns,
-        NetworkAccess::OptIn if explicit_opt_in => SandboxNetworkMode::ParentNetns,
-        NetworkAccess::OptIn => SandboxNetworkMode::Unshared,
-        NetworkAccess::Denied => SandboxNetworkMode::Unshared,
-    }
-}
-
-impl ExecutionPolicy {
-    /// このポリシーのネットワーク要件をサンドボックスモードへ解決する。
-    ///
-    /// Global opt-in affects only OptIn roles; Denied remains isolated.
-    pub fn sandbox_network_mode(&self) -> SandboxNetworkMode {
-        sandbox_network_mode(self.capabilities.network, self.sandbox_allow_network)
-    }
-}
-
-/// [`ExecutionPolicy`] のネットワーク境界を強制する bwrap サンドボックスを構築する。
-///
-/// [`ExecutionPolicy::sandbox_network_mode`] の解決結果を
-/// [`BwrapConfig::allow_network`] へ伝達する。[`SandboxNetworkMode::Unshared`]
-/// は `--unshare-net` 付き、[`SandboxNetworkMode::ParentNetns`] はネットワーク
-/// 分離なしの構成になる。検証や構築のエラーはそのまま伝播する (fail-closed)。
-/// サンドボックスなしでの実行へのフォールバックは存在しない (ADR 0021)。
-///
-/// これは構成時点 (composition-time) のシームである。1 つの ToolExecutor /
-/// AgentRuntime インスタンスは 1 つのポリシーから構築された 1 つのサンドボックスを
-/// 受け取る。実行ごと・ロールごとのサンドボックス切替には executor API の
-/// 再設計が必要であり、それは v0.1 のスコープ外である (issue #19)。
+/// Build the default process sandbox with networking isolated. A reviewed
+/// shell invocation may request a network-only variant through `Sandbox`.
 pub fn build_sandbox(
-    policy: &ExecutionPolicy,
+    _policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-    let config = base_config(policy, workspace_root)?;
+    let config = base_config(workspace_root)?;
     BwrapSandbox::detect(config).map(|detected| Arc::new(detected) as Arc<dyn Sandbox>)
 }
 
-fn base_config(
-    policy: &ExecutionPolicy,
-    workspace_root: PathBuf,
-) -> Result<BwrapConfig, SandboxError> {
+fn base_config(workspace_root: PathBuf) -> Result<BwrapConfig, SandboxError> {
     let outputs = tools::output::output_root().map_err(|error| SandboxError::BwrapUnavailable {
         detail: format!("一時ツール出力ディレクトリを作成できません: {error}"),
     })?;
     Ok(BwrapConfig::new(workspace_root)
-        .allow_network(matches!(
-            policy.sandbox_network_mode(),
-            SandboxNetworkMode::ParentNetns
-        ))
+        .allow_network(false)
         .ro_bind(outputs))
 }
 
@@ -112,10 +56,10 @@ pub(crate) struct BwrapFactory;
 impl SandboxFactory for BwrapFactory {
     fn build(
         &self,
-        policy: &ExecutionPolicy,
+        _policy: &ExecutionPolicy,
         mounts: &IsolatedMounts,
     ) -> Result<Arc<dyn Sandbox>, SandboxError> {
-        let mut config = base_config(policy, mounts.workspace_root.clone())?;
+        let mut config = base_config(mounts.workspace_root.clone())?;
         for path in &mounts.ro_binds {
             config = config.ro_bind(path.clone());
         }
@@ -126,34 +70,23 @@ impl SandboxFactory for BwrapFactory {
     }
 }
 
-/// role・tool・session の3層AND判定結果。
+/// Authorization outcome for one network-capable tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkAccessDecision {
-    /// 全層が自動許可した。
     Allow,
-    /// deny はないが、少なくとも1層で承認が必要。
-    Ask {
-        /// 承認が必要な理由。
-        reason: String,
-    },
-    /// いずれかの層が拒否した。
-    Deny {
-        /// 最初に拒否した層の理由。
-        reason: String,
-    },
+    Ask { reason: String },
+    Deny { reason: String },
 }
 
-/// web network tool に対する role・tool・session の3層AND判定を行う。
-///
-/// deny は role → tool → session の順で最優先し、deny がなければ ask 理由を結合する。
-/// role 層で [`NetworkAccess::OptIn`] は通過扱いとし、明示的オプトインの ask 表現は
-/// session 層の [`NetworkAccess::OptIn`] が担う（契約の層割り当てに従う）。
+/// Decide a Web tool call using the role allowlist and per-tool policy.
+/// `enabled` is a global deny ceiling, never a grant. Fetch reviews its URL
+/// on every call; search may proceed automatically when the policy allows it.
 pub fn judge_web_network_access(
     role: &agents::RoleCapabilities,
     role_name: &str,
     tool: &str,
     per_tool: sandbox::PolicyDecision,
-    session: NetworkAccess,
+    enabled: bool,
 ) -> NetworkAccessDecision {
     match role.check_tool(role_name, tool) {
         agents::CapabilityDecision::Allowed => {}
@@ -161,171 +94,89 @@ pub fn judge_web_network_access(
             return NetworkAccessDecision::Deny { reason };
         }
     }
-    match role.network {
-        NetworkAccess::Denied => {
-            return NetworkAccessDecision::Deny {
-                reason: format!(
-                    "role '{role_name}' のネットワーク利用は禁止されています (ADR 0002)"
-                ),
-            };
-        }
-        NetworkAccess::OptIn | NetworkAccess::Allowed => {}
+    if !enabled {
+        return NetworkAccessDecision::Deny {
+            reason: "Web tools are disabled".into(),
+        };
     }
-
-    let mut ask_reasons = Vec::new();
     match per_tool {
-        sandbox::PolicyDecision::AutoAllow => {}
-        sandbox::PolicyDecision::Ask => {
-            ask_reasons.push(format!("ツール '{tool}' の実行には承認が必要です"));
-        }
-        sandbox::PolicyDecision::Deny => {
-            return NetworkAccessDecision::Deny {
-                reason: format!("ツール '{tool}' のネットワーク権限は拒否されています"),
-            };
-        }
-    }
-    match session {
-        NetworkAccess::Allowed => {}
-        NetworkAccess::OptIn => {
-            ask_reasons.push("session のネットワーク利用には承認が必要です".to_owned());
-        }
-        NetworkAccess::Denied => {
-            return NetworkAccessDecision::Deny {
-                reason: "session のネットワーク利用は禁止されています".to_owned(),
-            };
-        }
-    }
-
-    if ask_reasons.is_empty() {
-        NetworkAccessDecision::Allow
-    } else {
-        NetworkAccessDecision::Ask {
-            reason: ask_reasons.join(" / "),
-        }
+        sandbox::PolicyDecision::Deny => NetworkAccessDecision::Deny {
+            reason: format!("tool '{tool}' is denied by policy"),
+        },
+        sandbox::PolicyDecision::Ask => NetworkAccessDecision::Ask {
+            reason: format!("tool '{tool}' requires review"),
+        },
+        sandbox::PolicyDecision::AutoAllow if tool == "web_fetch" => NetworkAccessDecision::Ask {
+            reason: "web_fetch URL requires review".into(),
+        },
+        sandbox::PolicyDecision::AutoAllow => NetworkAccessDecision::Allow,
     }
 }
 
 #[cfg(test)]
-mod network_access_tests {
+mod tests {
     use super::*;
-    use agents::RoleCapabilities;
+    use agents::Role;
     use sandbox::PolicyDecision;
 
-    #[derive(Clone, Copy)]
-    enum Expected {
-        Allow,
-        Ask,
-        Deny,
-    }
-
-    // Given: 各層の allow・ask・deny 組合せ / When: 3層AND判定 / Then: deny優先・ask集約・全通過allowになる
     #[test]
-    fn judges_all_three_layers_fail_closed() {
-        let cases = [
-            (
-                "worker network deny",
-                true,
-                NetworkAccess::Denied,
+    fn web_search_can_run_but_fetch_requires_call_review() {
+        let role = Role::WebResearcher.capabilities();
+        assert_eq!(
+            judge_web_network_access(
+                &role,
+                "WebResearcher",
+                "web_search",
                 PolicyDecision::AutoAllow,
-                NetworkAccess::Allowed,
-                Expected::Deny,
+                true
             ),
-            (
-                "tool missing",
-                false,
-                NetworkAccess::Allowed,
-                PolicyDecision::AutoAllow,
-                NetworkAccess::Allowed,
-                Expected::Deny,
-            ),
-            (
-                "per-tool deny",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::Deny,
-                NetworkAccess::Allowed,
-                Expected::Deny,
-            ),
-            (
-                "session deny",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::AutoAllow,
-                NetworkAccess::Denied,
-                Expected::Deny,
-            ),
-            (
-                "session opt-in",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::AutoAllow,
-                NetworkAccess::OptIn,
-                Expected::Ask,
-            ),
-            (
-                "per-tool ask",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::Ask,
-                NetworkAccess::Allowed,
-                Expected::Ask,
-            ),
-            (
-                "ask plus deny",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::Ask,
-                NetworkAccess::Denied,
-                Expected::Deny,
-            ),
-            (
-                "all pass",
-                true,
-                NetworkAccess::Allowed,
-                PolicyDecision::AutoAllow,
-                NetworkAccess::Allowed,
-                Expected::Allow,
-            ),
-        ];
-
-        for (name, has_tool, role_network, per_tool, session, expected) in cases {
-            let tools = if has_tool {
-                &["web_fetch"][..]
-            } else {
-                &[][..]
-            };
-            let role = RoleCapabilities::new(tools.iter().copied(), role_network, false);
-            let decision =
-                judge_web_network_access(&role, "TestRole", "web_fetch", per_tool, session);
-            match expected {
-                Expected::Allow => assert_eq!(decision, NetworkAccessDecision::Allow, "{name}"),
-                Expected::Ask => assert!(
-                    matches!(decision, NetworkAccessDecision::Ask { .. }),
-                    "{name}"
-                ),
-                Expected::Deny => assert!(
-                    matches!(decision, NetworkAccessDecision::Deny { .. }),
-                    "{name}"
-                ),
-            }
-        }
-    }
-
-    // Given: per-tool ask と session OptIn / When: 3層AND判定 / Then: 両方の承認理由が結合される
-    #[test]
-    fn combines_ask_reasons() {
-        let role = RoleCapabilities::new(["web_fetch"], NetworkAccess::Allowed, false);
-        let decision = judge_web_network_access(
-            &role,
-            "WebResearcher",
-            "web_fetch",
-            PolicyDecision::Ask,
-            NetworkAccess::OptIn,
+            NetworkAccessDecision::Allow,
         );
-        let NetworkAccessDecision::Ask { reason } = decision else {
-            panic!("ask 判定でなければならない");
-        };
-        assert!(reason.contains("ツール 'web_fetch'"));
-        assert!(reason.contains("session"));
+        assert!(matches!(
+            judge_web_network_access(
+                &role,
+                "WebResearcher",
+                "web_fetch",
+                PolicyDecision::AutoAllow,
+                true
+            ),
+            NetworkAccessDecision::Ask { .. },
+        ));
+    }
+
+    #[test]
+    fn role_and_global_ceiling_deny_before_tool_policy() {
+        let role = Role::Worker.capabilities();
+        assert!(matches!(
+            judge_web_network_access(
+                &role,
+                "Worker",
+                "web_search",
+                PolicyDecision::AutoAllow,
+                true
+            ),
+            NetworkAccessDecision::Deny { .. },
+        ));
+        let role = Role::WebResearcher.capabilities();
+        assert!(matches!(
+            judge_web_network_access(
+                &role,
+                "WebResearcher",
+                "web_search",
+                PolicyDecision::AutoAllow,
+                false
+            ),
+            NetworkAccessDecision::Deny { .. },
+        ));
+        assert!(matches!(
+            judge_web_network_access(
+                &role,
+                "WebResearcher",
+                "web_search",
+                PolicyDecision::Deny,
+                true
+            ),
+            NetworkAccessDecision::Deny { .. },
+        ));
     }
 }

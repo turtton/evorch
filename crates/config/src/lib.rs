@@ -44,5 +44,5 @@ pub use types::{
     MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
     PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
     RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
-    SummarizerKind, WebToolAccess, WorkerBindingConfig,
+    SummarizerKind, WorkerBindingConfig,
 };

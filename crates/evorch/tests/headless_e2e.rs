@@ -36,15 +36,15 @@ fn parse_args_accepts_full_form() {
         "hello world",
         "--user-config",
         "/tmp/user-config",
-        "--web-tool-access",
-        "opt-in",
+        "--web-tools-enabled",
+        "false",
     ]))
     .expect("妥当な引数はパースできる");
 
     assert_eq!(parsed.project_dir, PathBuf::from("/tmp/project"));
     assert_eq!(parsed.role, Role::Worker);
     assert_eq!(parsed.prompt, "hello world");
-    assert_eq!(parsed.web_tool_access, Some(config::WebToolAccess::OptIn));
+    assert_eq!(parsed.web_tools_enabled, Some(false));
     assert_eq!(
         parsed.user_config_dir,
         Some(PathBuf::from("/tmp/user-config"))
@@ -72,6 +72,7 @@ fn parse_args_maps_role_names() {
         ]))
         .unwrap_or_else(|error| panic!("role {text} はパースできる: {error}"));
         assert_eq!(parsed.role, expected);
+        assert_eq!(parsed.web_tools_enabled, None);
     }
 }
 
@@ -104,7 +105,7 @@ fn parse_args_rejects_unknown_flag() {
 }
 
 #[test]
-fn parse_args_rejects_automatic_web_access_for_root_runs() {
+fn parse_args_rejects_non_boolean_web_tools_override() {
     let error = parse_args(argv(&[
         "run",
         "--project",
@@ -113,10 +114,10 @@ fn parse_args_rejects_automatic_web_access_for_root_runs() {
         "orchestrator",
         "--prompt",
         "x",
-        "--web-tool-access",
+        "--web-tools-enabled",
         "allowed",
     ]))
-    .expect_err("CLI は都度承認のみ選択可能");
+    .expect_err("Web tool availability must be a boolean");
     assert!(matches!(error, HeadlessError::Usage(_)));
 }
 
@@ -158,6 +159,9 @@ default_model = "{MODEL}"
 
 [[routing.routes.worker]]
 profile = "local"
+
+[[routing.routes.web_researcher]]
+profile = "local"
 "#
         ),
     )
@@ -170,7 +174,7 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
         role: Role::Worker,
         prompt: PROMPT.to_string(),
         user_config_dir,
-        web_tool_access: None,
+        web_tools_enabled: None,
     }
 }
 
@@ -227,4 +231,64 @@ async fn headless_run_completes_with_single_mock_response() {
     assert_eq!(completion_requests[0].body["model"], MODEL);
     assert!(completion_requests[0].stream);
     assert_eq!(completion_requests[0].body["stream"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headless_web_tools_follow_saved_setting_and_cli_override() {
+    for (saved, override_enabled, expected) in [
+        (true, None, true),
+        (false, None, false),
+        (true, Some(false), false),
+        (false, Some(true), true),
+    ] {
+        let directory = tempfile::tempdir().expect("project directory");
+        let mock = StreamingMockOpenAi::spawn_with_models(
+            vec![ScriptedResponse::text_stream("text", MODEL, ["done"]).with_usage(1, 1)],
+            mock_openai::WriteMode::default(),
+            vec![MODEL.to_owned()],
+        );
+        write_project_config(directory.path(), &mock.base_url());
+        config::save_sandbox(
+            &directory.path().join("evorch.toml"),
+            config::SandboxConfig {
+                web_tools_enabled: saved,
+                ..Default::default()
+            },
+        )
+        .expect("save sandbox");
+        let mut args = headless_args(
+            directory.path().to_path_buf(),
+            Some(directory.path().join("user-config")),
+        );
+        args.role = Role::WebResearcher;
+        args.web_tools_enabled = override_enabled;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_headless(
+                args,
+                Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+                SandboxChoice::DirectUnchecked,
+            ),
+        )
+        .await
+        .expect("headless run completes")
+        .expect("headless run succeeds");
+        assert_eq!(outcome.phase, AgentRunPhase::Done);
+        let requests = mock.recorded_requests();
+        let completion = requests
+            .iter()
+            .find(|request| request.path == "/v1/chat/completions")
+            .expect("completion request");
+        let tools = completion.body["tools"].as_array().expect("tools");
+        for tool_name in ["web_search", "web_fetch"] {
+            assert_eq!(
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == tool_name),
+                expected,
+                "{tool_name}: saved={saved}, override={override_enabled:?}",
+            );
+        }
+        assert!(tools.iter().any(|tool| tool["function"]["name"] == "read"));
+    }
 }

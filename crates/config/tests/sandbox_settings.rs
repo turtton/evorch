@@ -1,16 +1,22 @@
-use config::{Config, EscalationApproval, LoadOptions, SandboxConfig, WebToolAccess, save_sandbox};
+use config::{Config, EscalationApproval, LoadOptions, SandboxConfig, save_sandbox};
 
 #[test]
-fn web_tool_access_defaults_to_denied_and_round_trips_opt_in() {
-    let defaults: Config = toml::from_str("version = 2").expect("defaults");
-    assert_eq!(defaults.sandbox.web_tool_access, WebToolAccess::Denied);
+fn web_tools_default_to_enabled_and_round_trip_disabled() {
+    for input in [
+        "version = 2",
+        "[sandbox]",
+        "[sandbox]\nescalation_approval = \"user\"",
+    ] {
+        let defaults: Config = toml::from_str(input).expect("defaults");
+        assert!(defaults.sandbox.web_tools_enabled);
+    }
 
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("evorch.toml");
     save_sandbox(
         &path,
         SandboxConfig {
-            web_tool_access: WebToolAccess::OptIn,
+            web_tools_enabled: false,
             ..Default::default()
         },
     )
@@ -22,53 +28,35 @@ fn web_tool_access_defaults_to_denied_and_round_trips_opt_in() {
         ..Default::default()
     })
     .expect("load");
-    assert_eq!(loaded.sandbox.web_tool_access, WebToolAccess::OptIn);
-    assert!(
-        std::fs::read_to_string(&path)
-            .expect("read")
-            .contains("web_tool_access = \"opt-in\"")
-    );
+    assert!(!loaded.sandbox.web_tools_enabled);
+    let saved = std::fs::read_to_string(&path).expect("read");
+    assert!(saved.contains("web_tools_enabled = false"));
+    assert!(!saved.contains("allow_network"));
+    assert!(!saved.contains("web_tool_access"));
 }
 
 #[test]
-fn sandbox_allow_network_defaults_to_false_when_section_absent() {
-    // Given: a configuration without a sandbox section.
-    let config: Config = toml::from_str("version = 2").expect("config");
-    // When: inspecting the serialized configuration boundary.
-    let value = toml::Value::try_from(config).expect("serialize");
-    // Then: the default is explicitly false.
-    assert_eq!(
-        value
-            .get("sandbox")
-            .and_then(|v| v.get("allow_network"))
-            .and_then(toml::Value::as_bool),
-        Some(false)
-    );
-}
-
-#[test]
-fn sandbox_allow_network_round_trips_when_true() {
-    // Given: an explicit global opt-in on disk.
-    let dir = tempfile::tempdir().expect("temp");
-    std::fs::write(
-        dir.path().join("evorch.toml"),
-        "[sandbox]\nallow_network = true\n",
-    )
-    .expect("write");
-    // When: loading through the strict boundary and serializing again.
-    let config = Config::load(&LoadOptions {
-        project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join("user")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("sandbox setting accepted");
-    let text = toml::to_string(&config).expect("serialize");
-    let reparsed: Config = toml::from_str(&text).expect("reparse");
-    // Then: the opt-in survives the round trip.
-    assert_eq!(config, reparsed);
-    let value = toml::Value::try_from(reparsed).expect("value");
-    assert_eq!(value["sandbox"]["allow_network"].as_bool(), Some(true));
+fn removed_network_settings_are_rejected_at_the_strict_boundary() {
+    for setting in ["allow_network = true", "web_tool_access = \"opt-in\""] {
+        let dir = tempfile::tempdir().expect("temp");
+        std::fs::write(
+            dir.path().join("evorch.toml"),
+            format!("[sandbox]\n{setting}\n"),
+        )
+        .expect("write");
+        let error = Config::load_strict(&LoadOptions {
+            project_dir: Some(dir.path().into()),
+            user_config_dir: Some(dir.path().join("user")),
+            read_env: false,
+            ..Default::default()
+        })
+        .expect_err("removed keys must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(setting.split(' ').next().unwrap())
+        );
+    }
 }
 
 #[test]
@@ -150,8 +138,7 @@ fn save_sandbox_persists_escalation_fields_and_keeps_other_sections() {
     )
     .expect("write");
     let sandbox = SandboxConfig {
-        allow_network: true,
-        web_tool_access: WebToolAccess::OptIn,
+        web_tools_enabled: false,
         escalation_approval: EscalationApproval::User,
         escalate_to_user_on_deny: true,
     };

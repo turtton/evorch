@@ -62,8 +62,8 @@ fn chatbox_button_opens_modal_with_approval_controls() {
     // When: clicking the chatbox sandbox button.
     harness.click_label("Sandbox: auto");
     harness.run();
-    // Then: networking and approval controls are available together in the modal.
-    assert!(harness.has_label("Allow network inside sandbox"));
+    // Then: Web tool visibility and shell approval controls are available in the modal.
+    assert!(harness.has_label("Enable web tools"));
     for label in [
         "審査で拒否された場合はユーザー承認へ昇格",
         "auto",

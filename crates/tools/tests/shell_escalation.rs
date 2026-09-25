@@ -141,21 +141,23 @@ impl Fixture {
 
 // Given: an approving gate / When: justification is absent or blank / Then: no review or wrap occurs.
 #[tokio::test]
-async fn escalated_call_errors_before_any_review_when_justification_is_absent_or_blank() {
-    for justification in [None, Some(""), Some(" \t\n")] {
-        let fixture = Fixture::new(None);
-        let mut args = json!({"command": "printf forbidden", "require_escalated": true});
-        if let Some(justification) = justification {
-            args["justification"] = json!(justification);
+async fn reviewed_call_errors_before_any_review_when_justification_is_absent_or_blank() {
+    for access in ["network", "unsandboxed"] {
+        for justification in [None, Some(""), Some(" \t\n")] {
+            let fixture = Fixture::new(None);
+            let mut args = json!({"command": "printf forbidden", "sandbox_access": access});
+            if let Some(justification) = justification {
+                args["justification"] = json!(justification);
+            }
+            let result = fixture.execute(args).await;
+            assert!(result.is_error);
+            assert_eq!(
+                result.content,
+                "shell escalation denied: justification is required"
+            );
+            assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
+            fixture.assert_wraps(0, 0);
         }
-        let result = fixture.execute(args).await;
-        assert!(result.is_error);
-        assert_eq!(
-            result.content,
-            "shell escalation denied: justification is required"
-        );
-        assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
-        fixture.assert_wraps(0, 0);
     }
 }
 
@@ -167,7 +169,7 @@ async fn approved_escalation_wraps_with_unsandboxed_sandbox_when_gate_approves()
         let result = fixture
             .execute(json!({
                 "command": "printf", "args": ["approved"], "interactive": interactive,
-                "require_escalated": true, "justification": "host access", "timeout_ms": 1000
+                "sandbox_access": "unsandboxed", "justification": "host access", "timeout_ms": 1000
             }))
             .await;
         assert!(!result.is_error);
@@ -180,6 +182,10 @@ async fn approved_escalation_wraps_with_unsandboxed_sandbox_when_gate_approves()
             "approved"
         );
         fixture.assert_wraps(0, 1);
+        assert_eq!(
+            *fixture.gate.scopes.lock().expect("gate lock"),
+            vec![ShellAccess::Host]
+        );
         assert_eq!(
             *fixture.gate.calls.lock().expect("gate lock"),
             vec![(
@@ -201,7 +207,7 @@ async fn denied_escalation_surfaces_reason_without_spawn_when_gate_denies() {
     let fixture = Fixture::new(Some("operator refused"));
     let result = fixture
         .execute(json!({
-            "command": "printf forbidden", "require_escalated": true, "justification": "host access"
+            "command": "printf forbidden", "sandbox_access": "unsandboxed", "justification": "host access"
         }))
         .await;
     assert!(result.is_error);
@@ -218,7 +224,7 @@ async fn contract_denial_precedes_escalation_review_when_command_is_forbidden() 
         let result = fixture
             .execute(json!({
                 "command": "gh pr", "args": ["merge", "123"],
-                "require_escalated": true, "justification": justification
+                "sandbox_access": "unsandboxed", "justification": justification
             }))
             .await;
         assert!(result.is_error);
@@ -232,14 +238,14 @@ async fn contract_denial_precedes_escalation_review_when_command_is_forbidden() 
     }
 }
 
-// Given: a configured gate / When: escalation is false or omitted / Then: only the default sandbox wraps.
+// Given: a configured gate / When: access is isolated or omitted / Then: only the default sandbox wraps.
 #[tokio::test]
-async fn non_escalated_call_uses_default_sandbox_when_escalation_is_false_or_omitted() {
-    for require_escalated in [None, Some(false)] {
+async fn isolated_or_omitted_access_uses_default_sandbox_without_review() {
+    for access in [None, Some("isolated")] {
         let fixture = Fixture::new(Some("must not review"));
         let mut args = json!({"command": "printf normal"});
-        if let Some(value) = require_escalated {
-            args["require_escalated"] = json!(value);
+        if let Some(value) = access {
+            args["sandbox_access"] = json!(value);
         }
         let result = fixture.execute(args).await;
         assert_eq!(result.content, "exit_code: 0\nnormal");
@@ -257,7 +263,7 @@ async fn escalation_review_receives_resolved_working_directory() {
     fixture.executor.set_default_cwd(root.path().to_path_buf());
     let result = fixture
         .execute(json!({
-            "command": "pwd", "cwd": "nested", "require_escalated": true,
+            "command": "pwd", "cwd": "nested", "sandbox_access": "unsandboxed",
             "justification": "inspect worktree"
         }))
         .await;
@@ -286,7 +292,7 @@ async fn network_only_request_keeps_the_host_path_unused() {
     let result = executor.execute(
         &ToolExecutionContext { run_id: "run-network".into(), thread_id: None, call_id: None },
         "shell", "call-network",
-        json!({"command":"printf network", "require_network":true, "justification":"fetch dependencies"}),
+        json!({"command":"printf network", "sandbox_access":"network", "justification":"fetch dependencies"}),
     ).await.expect("tool result");
     assert_eq!(result.content, "exit_code: 0\nnetwork");
     assert!(isolated.0.lock().expect("probe").is_empty());
@@ -299,7 +305,7 @@ async fn network_only_request_keeps_the_host_path_unused() {
 }
 
 #[tokio::test]
-async fn network_only_denial_and_ambiguous_scope_never_spawn() {
+async fn network_only_denial_and_invalid_scope_never_spawn() {
     let isolated = Arc::new(ProbeSandbox::default());
     let network = Arc::new(ProbeSandbox::default());
     let host = Arc::new(ProbeSandbox::default());
@@ -321,24 +327,23 @@ async fn network_only_denial_and_ambiguous_scope_never_spawn() {
         call_id: None,
     };
     let denied = executor.execute(&ctx, "shell", "call-denied", json!({
-        "command":"printf denied", "require_network":true, "justification":"fetch dependencies"
+        "command":"printf denied", "sandbox_access":"network", "justification":"fetch dependencies"
     })).await.expect("tool result");
     assert!(denied.is_error);
     assert_eq!(denied.content, "network refused");
-    let ambiguous = executor
+    let invalid = executor
         .execute(
             &ctx,
             "shell",
-            "call-ambiguous",
+            "call-invalid",
             json!({
-                "command":"printf denied", "require_network":true, "require_escalated":true,
+                "command":"printf denied", "sandbox_access":"network_and_unsandboxed",
                 "justification":"fetch dependencies"
             }),
         )
         .await
-        .expect("tool result");
-    assert!(ambiguous.is_error);
-    assert!(ambiguous.content.contains("mutually exclusive"));
+        .expect_err("invalid access value");
+    assert!(matches!(invalid, tools::ToolError::InvalidArgs { .. }));
     assert_eq!(gate.scopes.lock().expect("gate").len(), 1);
     assert!(isolated.0.lock().expect("probe").is_empty());
     assert!(network.0.lock().expect("probe").is_empty());

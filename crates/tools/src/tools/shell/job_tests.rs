@@ -393,7 +393,7 @@ async fn escalated_stdin_requires_a_fresh_review() {
     let shell = shell();
     let gate = Arc::new(Gate(std::sync::atomic::AtomicUsize::new(0)));
     shell.set_shell_escalation(gate.clone(), Arc::new(DirectSandbox::new_unchecked()));
-    let start = invoke(&shell, "owner", json!({"command":"read value", "require_escalated":true, "justification":"test", "yield_ms":0})).await;
+    let start = invoke(&shell, "owner", json!({"command":"read value", "sandbox_access":"unsandboxed", "justification":"test", "yield_ms":0})).await;
     let denied = invoke(
         &shell,
         "owner",

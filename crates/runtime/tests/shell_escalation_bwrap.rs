@@ -71,7 +71,7 @@ async fn scenario(approved: bool) {
             &ctx,
             "shell",
             "escalated",
-            json!({"command":command,"require_escalated":true,"justification":"read host marker"}),
+            json!({"command":command,"sandbox_access":"unsandboxed","justification":"read host marker"}),
         )
         .await
         .expect("escalation");

@@ -67,7 +67,13 @@ async fn mcp_scope_emits_diagnostic_when_communication_fails() {
 #[tokio::test]
 async fn mcp_scope_has_no_execution_lifecycle_when_denied() {
     // Given/When: scope denies the call before the adapter can run.
-    let (server, events, _) = scenario(Role::Worker, Failure::None, None).await;
+    let (server, events, _) = scenario_with_policy(
+        Role::Worker,
+        Failure::None,
+        None,
+        sandbox::PolicyDecision::Deny,
+    )
+    .await;
     // Then: denial has no Started/Completed events or network traffic.
     assert!(server.captured_requests().is_empty());
     assert!(!events.iter().any(|event| matches!(

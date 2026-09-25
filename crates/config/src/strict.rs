@@ -106,8 +106,7 @@ const BUDGET_KEYS: &[&str] = &[
 const OWNERSHIP_KEYS: &[&str] = &["heartbeat_ms", "lease_ms", "grace_ms"];
 const TEAM_KEYS: &[&str] = &["enabled", "max_workers"];
 const SANDBOX_KEYS: &[&str] = &[
-    "allow_network",
-    "web_tool_access",
+    "web_tools_enabled",
     "escalation_approval",
     "escalate_to_user_on_deny",
 ];

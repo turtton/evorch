@@ -136,7 +136,7 @@ fn approvals_and_questions_share_conversation_without_a_floating_window() {
         );
     use egui_kittest::kittest::Queryable;
     h.run_steps(4);
-    let approval = h.get_by_label("コマンドの承認待ち").rect();
+    let approval = h.get_by_label("ツールの承認待ち").rect();
     let question = h.get_by_label("Which output format?").rect();
     let composer = h.get_by_label("Message or /command").rect();
     assert!((approval.left() - question.left()).abs() < 1.0);

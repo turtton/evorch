@@ -38,11 +38,15 @@ impl AgentRuntime {
         )
     }
 
-    /// Applies to newly started runs; running subprocesses retain their namespace.
-    pub fn set_sandbox_network(&self, allow_network: bool) {
+    /// New runs see the configured Web tools; calls from existing runs are gated too.
+    pub fn set_web_tools_enabled(&self, enabled: bool) {
         self.shared
-            .sandbox_allow_network
-            .store(allow_network, Ordering::Release);
+            .web_tools_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub fn web_tools_enabled(&self) -> bool {
+        self.shared.web_tools_enabled.load(Ordering::Acquire)
     }
 
     pub fn execution_policy(&self, role: Role) -> ExecutionPolicy {
@@ -54,7 +58,6 @@ impl AgentRuntime {
                 *settings
             });
         ExecutionPolicy::for_role(role)
-            .with_sandbox_network(self.shared.sandbox_allow_network.load(Ordering::Acquire))
             .with_escalation_approval(approval)
             .with_escalate_to_user_on_deny(fallback)
     }

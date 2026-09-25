@@ -454,16 +454,18 @@ impl LoopState {
                     Err(error) => ReadyCall::Rejected(ToolResult::error(error)),
                     Ok(()) => match validation {
                         None => ReadyCall::Local,
-                        Some(Err(error)) => match self.gate_network_tool(&name, &id).await {
-                            NetworkGate::Cancelled => return false,
-                            NetworkGate::Reject(result) => ReadyCall::Rejected(result),
-                            NetworkGate::Proceed => ReadyCall::Invalid(error),
-                        },
-                        Some(Ok(call)) => match self.gate_network_tool(&name, &id).await {
+                        Some(Err(error)) => ReadyCall::Invalid(error),
+                        Some(Ok(call)) => match self.gate_network_tool(&name, &id, &input).await {
                             NetworkGate::Cancelled => return false,
                             NetworkGate::Reject(result) => ReadyCall::Rejected(result),
                             NetworkGate::Proceed => {
-                                if self.shared.executor.requires_scope_gate(&name) {
+                                if self.shared.executor.requires_scope_gate(&name)
+                                    || self
+                                        .shared
+                                        .executor
+                                        .tool_permissions(&name)
+                                        .is_some_and(|permissions| permissions.network)
+                                {
                                     calls.push_back(BatchCall {
                                         id,
                                         name,
@@ -863,12 +865,8 @@ impl LoopState {
             && self.shared.executor.tool_execution_mode(&call.name) == ToolExecutionMode::Shared
     }
 
-    /// network 権限を持つツールに 3 層 AND 判定 (role / per-tool / session) を適用する。
-    /// 非 network ツール・未登録ツールはそのまま通す (UnknownTool は executor 側で処理)。
-    /// Ask は ApprovalGate (EventBus ApprovalRequested/ApprovalResolved) で 1 回だけ承認を求める。
-    /// 承認相関キーは `{run_id}:{call_id}` に run スコープ化する (call_id は
-    /// model 由来で run-local のため、同一 EventBus 上の並列 run と衝突しうる)。
-    async fn gate_network_tool(&mut self, name: &str, call_id: &str) -> NetworkGate {
+    /// Network tools are gated by role and tool policy. Fetch also reviews the actual input.
+    async fn gate_network_tool(&mut self, name: &str, call_id: &str, input: &Value) -> NetworkGate {
         let Some(permissions) = self.shared.executor.tool_permissions(name) else {
             return NetworkGate::Proceed;
         };
@@ -888,22 +886,91 @@ impl LoopState {
                 &self.policy.role_name,
                 name,
                 per_tool,
-                self.task.config.network_access,
+                self.runtime()
+                    .is_some_and(|runtime| runtime.web_tools_enabled()),
             )
         };
         match decision {
-            NetworkAccessDecision::Allow => NetworkGate::Proceed,
+            NetworkAccessDecision::Allow => {
+                self.audit_network_call(name, call_id, input, "allow", "tool_policy", "");
+                NetworkGate::Proceed
+            }
             NetworkAccessDecision::Deny { reason } => {
+                self.audit_network_call(name, call_id, input, "deny", "tool_policy", &reason);
                 if self.shared.executor.requires_scope_gate(name) {
                     self.emit_mcp_scope_denial(name, call_id, &reason);
                 }
                 NetworkGate::Reject(ToolResult::error(reason))
             }
             NetworkAccessDecision::Ask { reason } => {
+                if name == "web_fetch" && per_tool == PolicyDecision::AutoAllow {
+                    let context = self
+                        .runtime()
+                        .and_then(|runtime| {
+                            runtime
+                                .shared
+                                .review_runs
+                                .lock()
+                                .ok()
+                                .and_then(|runs| runs.get(&self.task.run_id).cloned())
+                        })
+                        .map(|run| {
+                            crate::escalation_review::review_context(
+                                run,
+                                self.shared.rules.as_deref(),
+                                None,
+                                "",
+                            )
+                        });
+                    let reviewer = crate::escalation_review::QuickModelReviewer::new(Arc::clone(
+                        &self.shared.model,
+                    ));
+                    let review_run_id = self.task.run_id.to_string();
+                    let verdict = tokio::select! {
+                        biased;
+                        changed = self.channels.cancel_rx.changed() => {
+                            if changed.is_ok() && self.cancelled() {
+                                self.finish_cancelled();
+                                return NetworkGate::Cancelled;
+                            }
+                            return NetworkGate::Reject(ToolResult::error("review was interrupted"));
+                        }
+                        verdict = reviewer.review_web_fetch(&review_run_id, input, context) => verdict,
+                    };
+                    return match verdict {
+                        Ok(crate::escalation_review::ReviewVerdict::Approve) => {
+                            self.audit_network_call(
+                                name,
+                                call_id,
+                                input,
+                                "allow",
+                                "auto_review",
+                                "approved",
+                            );
+                            NetworkGate::Proceed
+                        }
+                        outcome => {
+                            let error = match outcome {
+                                Ok(crate::escalation_review::ReviewVerdict::Deny { reason }) => {
+                                    reason
+                                }
+                                Err(error) => error.to_string(),
+                                _ => unreachable!(),
+                            };
+                            self.audit_network_call(
+                                name,
+                                call_id,
+                                input,
+                                "deny",
+                                "auto_review",
+                                &error,
+                            );
+                            NetworkGate::Reject(ToolResult::error(error))
+                        }
+                    };
+                }
                 let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
-                // 承認相関キーは run スコープ化する: 同一 EventBus 上の並列 run が
-                // 同一 call_id (model 由来で run-local) を使いうるため、run_id を
-                // 前置して他 run 宛ての ApprovalResolved を受け付けない。
+                // Model call IDs are run-local. Scope approval IDs to the run.
                 let correlation_id = format!("{}:{}", self.task.run_id, call_id);
                 let outcome = tokio::select! {
                     biased;
@@ -912,42 +979,81 @@ impl LoopState {
                             self.finish_cancelled();
                             return NetworkGate::Cancelled;
                         }
-                        // executor 実行の select と同じガードだが、承認待ちを破棄した
-                        // 後に無承認で実行されないよう fail-closed で拒否する。
-                        return NetworkGate::Reject(ToolResult::error(
-                            "cancel 監視が変化したため承認待ちを中止しました",
-                        ));
+                        return NetworkGate::Reject(ToolResult::error("approval wait was interrupted"));
                     }
-                    outcome = gate.request(name, &correlation_id) => outcome,
+                    outcome = gate.request_with_input(name, &correlation_id, Some(input.clone())) => outcome,
                 };
                 match outcome {
-                    ApprovalOutcome::Approved => NetworkGate::Proceed,
-                    ApprovalOutcome::Denied => {
-                        if self.shared.executor.requires_scope_gate(name) {
-                            self.emit_mcp_scope_denial(name, call_id, &reason);
-                        }
-                        NetworkGate::Reject(ToolResult::error(format!(
-                            "承認要求が拒否されました: {reason}"
-                        )))
+                    ApprovalOutcome::Approved => {
+                        self.audit_network_call(
+                            name,
+                            call_id,
+                            input,
+                            "allow",
+                            "user_review",
+                            "approved",
+                        );
+                        NetworkGate::Proceed
                     }
-                    ApprovalOutcome::TimedOut => {
+                    ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => {
+                        let error = if matches!(outcome, ApprovalOutcome::TimedOut) {
+                            format!("approval timed out: {reason}")
+                        } else {
+                            format!("approval denied: {reason}")
+                        };
+                        self.audit_network_call(
+                            name,
+                            call_id,
+                            input,
+                            "deny",
+                            "user_review",
+                            &error,
+                        );
                         if self.shared.executor.requires_scope_gate(name) {
                             self.emit_mcp_scope_denial(name, call_id, &reason);
                         }
-                        NetworkGate::Reject(ToolResult::error(format!(
-                            "承認応答がタイムアウトしました: {reason}"
-                        )))
+                        NetworkGate::Reject(ToolResult::error(error))
                     }
                 }
             }
         }
     }
+
+    fn audit_network_call(
+        &self,
+        name: &str,
+        call_id: &str,
+        input: &Value,
+        decision: &str,
+        reviewer: &str,
+        reason: &str,
+    ) {
+        let detail = serde_json::json!({
+            "tool": name,
+            "input": input,
+            "decision": decision,
+            "reviewer": reviewer,
+            "reason": reason,
+        })
+        .to_string();
+        self.shared.bus.emit(Event::new(DiagnosticEvent {
+            source: "network_access".into(),
+            severity: if decision == "allow" {
+                DiagnosticSeverity::Info
+            } else {
+                DiagnosticSeverity::Warning
+            },
+            code: "tool_call_access".into(),
+            detail,
+            run_id: Some(self.task.run_id.to_string()),
+            thread_id: None,
+            call_id: Some(call_id.into()),
+        }));
+    }
 }
 
 /// 標準ツール定義を返す。
-/// Web ツールの露出ゲートは [`ExecutionPolicy::filter_tool_specs`] が担い、
-/// 実行時には network 権限ツールへの 3 層 AND 判定 (role / per-tool / session、
-/// session OptIn は承認プロンプト) が execute_tools の network gate で行われる。
+/// Web tools are filtered by role and the current Web tool switch.
 pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
     let mut specs: Vec<_> = executor
         .tool_specs()
@@ -988,12 +1094,16 @@ pub(super) fn visible_tool_specs(
     policy: &ExecutionPolicy,
     skills_configured: bool,
     is_child: bool,
+    web_tools_enabled: bool,
 ) -> Vec<ToolSpec> {
     policy
         .filter_tool_specs(specs)
         .into_iter()
         .filter(|spec| skills_configured || spec.name != "skill_load")
         .filter(|spec| !is_child || spec.name != "escalate")
+        .filter(|spec| {
+            web_tools_enabled || !matches!(spec.name.as_str(), "web_search" | "web_fetch")
+        })
         .collect()
 }
 
@@ -1057,7 +1167,7 @@ mod tests {
     fn visible_tool_specs_exposes_both_web_tools_for_web_researcher() {
         let policy = ExecutionPolicy::for_role(Role::WebResearcher);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
         let tool_names = names(&specs);
 
         assert!(tool_names.contains(&"web_search"));
@@ -1071,7 +1181,7 @@ mod tests {
     fn visible_tool_specs_exposes_only_web_fetch_for_orchestrator() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
         let tool_names = names(&specs);
 
         assert!(tool_names.contains(&"web_fetch"));
@@ -1086,7 +1196,7 @@ mod tests {
         for role in [Role::Explorer, Role::Worker, Role::Reviewer] {
             let policy = ExecutionPolicy::for_role(role);
 
-            let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+            let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
             let tool_names = names(&specs);
 
             assert!(!tool_names.contains(&"web_search"));
@@ -1101,7 +1211,7 @@ mod tests {
     fn visible_tool_specs_keeps_skill_load_for_worker_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false, true);
 
         assert!(names(&specs).contains(&"skill_load"));
     }
@@ -1113,7 +1223,7 @@ mod tests {
     fn visible_tool_specs_exposes_escalate_for_worker() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
 
         assert!(names(&specs).contains(&"escalate"));
     }
@@ -1123,7 +1233,7 @@ mod tests {
     fn visible_tool_specs_hides_escalate_for_child_worker() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, true);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, true, true);
 
         assert!(!names(&specs).contains(&"escalate"));
         assert!(names(&specs).contains(&"shell"));
@@ -1136,7 +1246,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_worker_when_skills_not_configured() {
         let policy = ExecutionPolicy::for_role(Role::Worker);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
 
         assert!(!names(&specs).contains(&"skill_load"));
         assert!(names(&specs).contains(&"edit"));
@@ -1150,7 +1260,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_explorer_even_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Explorer);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false, true);
 
         assert!(!names(&specs).contains(&"skill_load"));
     }
@@ -1162,9 +1272,18 @@ mod tests {
     fn visible_tool_specs_keeps_skill_load_for_orchestrator_when_skills_configured() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, true, false, true);
 
         assert!(names(&specs).contains(&"skill_load"));
+    }
+
+    #[test]
+    fn visible_tool_specs_hides_web_tools_when_disabled() {
+        let policy = ExecutionPolicy::for_role(Role::WebResearcher);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, false);
+        let tool_names = names(&specs);
+        assert!(!tool_names.contains(&"web_search"));
+        assert!(!tool_names.contains(&"web_fetch"));
     }
 
     // Given: Orchestrator のポリシーと skills 未設定
@@ -1174,7 +1293,7 @@ mod tests {
     fn visible_tool_specs_drops_skill_load_for_orchestrator_when_skills_not_configured() {
         let policy = ExecutionPolicy::for_role(Role::Orchestrator);
 
-        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false);
+        let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, true);
 
         assert!(!names(&specs).contains(&"skill_load"));
     }

@@ -4,7 +4,7 @@ mod common;
 mod diagnostics;
 use diagnostics::Failure;
 
-use agents::{NetworkAccess, Role};
+use agents::Role;
 use common::{FixtureServer, response_with_status};
 use event_bus::{EventBus, EventKind, ToolEvent};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec, Usage};
@@ -69,6 +69,15 @@ async fn scenario(
     failure: Failure,
     approval: Option<bool>,
 ) -> (FixtureServer, Vec<event_bus::Event>, String) {
+    scenario_with_policy(role, failure, approval, sandbox::PolicyDecision::AutoAllow).await
+}
+
+async fn scenario_with_policy(
+    role: Role,
+    failure: Failure,
+    approval: Option<bool>,
+    policy: sandbox::PolicyDecision,
+) -> (FixtureServer, Vec<event_bus::Event>, String) {
     // Given: a fresh HTTPS server logging every request, and a dormant MCP registration.
     let count = AtomicUsize::new(0);
     let server = FixtureServer::start(move |_| {
@@ -131,26 +140,23 @@ async fn scenario(
             registry.tool(definition).with_event_bus(bus.clone()),
         ))
         .expect("register");
-    if approval.is_some() {
-        executor.set_policy(
-            sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest)
-                .with_override("read", sandbox::PolicyDecision::Ask),
-        );
-    }
+    executor.set_policy(
+        sandbox::ApprovalPolicy::standard(sandbox::ApprovalMode::OnRequest).with_override(
+            "read",
+            if approval.is_some() {
+                sandbox::PolicyDecision::Ask
+            } else {
+                policy
+            },
+        ),
+    );
     let runtime = AgentRuntime::new(
         bus,
         Arc::new(executor),
         Arc::new(Model(AtomicUsize::new(0))),
     );
     // When: the actual runtime dispatches the model's MCP call.
-    let run = runtime.delegate_background(
-        role,
-        "test".into(),
-        RunConfig {
-            network_access: NetworkAccess::Allowed,
-            ..RunConfig::default()
-        },
-    );
+    let run = runtime.delegate_background(role, "test".into(), RunConfig::default());
     tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
         .await
         .expect("bounded run")
@@ -168,20 +174,26 @@ async fn scenario(
 }
 
 #[tokio::test]
-async fn denies_without_communication_when_role_has_no_network_grant() {
-    let (server, events, run) = scenario(Role::Worker, Failure::None, None).await;
+async fn denies_without_communication_when_tool_policy_denies() {
+    let (server, events, run) = scenario_with_policy(
+        Role::Worker,
+        Failure::None,
+        None,
+        sandbox::PolicyDecision::Deny,
+    )
+    .await;
     // Then: even initialize never reached the server, and denial is correlated.
     assert!(
         server.captured_requests().is_empty(),
         "denial must produce ZERO HTTP requests"
     );
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ExecutionDenied { call_id, reason, .. }) if call_id == "mcp-call" && reason == "role_network.network")));
-    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Diagnostic(d) if d.call_id.as_deref() == Some("mcp-call") && d.run_id.as_deref() == Some(&run) && d.detail.contains("role_network") && d.detail.contains("network"))));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ExecutionDenied { call_id, reason, .. }) if call_id == "mcp-call" && reason == "per_tool_policy.network")));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Diagnostic(d) if d.call_id.as_deref() == Some("mcp-call") && d.run_id.as_deref() == Some(&run) && d.detail.contains("per_tool_policy") && d.detail.contains("network"))));
 }
 
 #[tokio::test]
-async fn completes_with_correlation_when_scope_allows() -> common::TestResult {
-    let (server, events, run) = scenario(Role::WebResearcher, Failure::None, None).await;
+async fn worker_mcp_network_call_completes_when_tool_policy_allows() -> common::TestResult {
+    let (server, events, run) = scenario(Role::Worker, Failure::None, None).await;
     // Then: initialize, initialized, list and call all happen, with one lifecycle pair.
     assert_eq!(server.captured_requests().len(), 4);
     assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Tool(ToolEvent::ToolStarted { call_id, run_id, .. }) if call_id == "mcp-call" && run_id.as_deref() == Some(&run))));

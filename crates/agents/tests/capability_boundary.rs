@@ -1,14 +1,13 @@
 //! ADR 0002 ケイパビリティ境界の完全マトリックステスト。
 //!
 //! v0.2 の 5 ロール (Orchestrator / Explorer / Worker / Reviewer / WebResearcher) について
-//! 許可ツール集合・拒否ツール・ネットワーク要件・委譲可否を検証する。
+//! 許可ツール集合・拒否ツール・委譲可否を検証する。
 //! WebResearcher は v0.2 で `Role` variant として追加され、
-//! Orchestrator は web_fetch を持ちネットワークが OptIn になった
-//! (ADR 0002 2026-09-03 補足)。
+//! Orchestrator は web_fetch を持つ (ADR 0002 2026-09-03 補足)。
 
 use std::collections::BTreeSet;
 
-use agents::{CapabilityDecision, NetworkAccess, Role, RoleCapabilities};
+use agents::{CapabilityDecision, Role, RoleCapabilities};
 
 #[path = "support/capability_tools.rs"]
 mod capability_tools;
@@ -37,14 +36,6 @@ fn assert_denied(decision: CapabilityDecision, expected_role: &str, expected_too
 /// 期待値のツール集合を BTreeSet<String> として構築する。
 fn tool_set(tools: &[&str]) -> BTreeSet<String> {
     tools.iter().map(|&tool| tool.to_string()).collect()
-}
-
-#[test]
-fn network_access_default_is_denied_fail_closed() {
-    // Given: NetworkAccess の既定値
-    // When: Default を構築する
-    // Then: Denied (fail-closed) になる
-    assert_eq!(NetworkAccess::default(), NetworkAccess::Denied);
 }
 
 #[test]
@@ -88,7 +79,7 @@ fn orchestrator_denies_mutation_tools() {
 #[test]
 fn orchestrator_denies_web_search_but_allows_web_fetch() {
     // Given: Orchestrator ロール (ADR 0002 2026-09-03 補足: web_fetch のみ持ち、
-    //        web_search は WebResearcher 専用、ネットワークは OptIn)
+    //        web_search は WebResearcher 専用)
     // When: web_search / web_fetch の使用可否を問い合わせる
     // Then: web_search は Denied、web_fetch は Allowed になる
     let caps = Role::Orchestrator.capabilities();
@@ -297,26 +288,6 @@ fn web_researcher_denies_mutation_and_delegation_tools() {
 }
 
 #[test]
-fn network_access_defaults_match_adr_matrix() {
-    // Given: v0.2 の 5 ロール
-    // When: 各ロールのネットワーク要件を参照する
-    // Then: Worker / Reviewer は Denied (ADR 0008 default-deny)、
-    //       Explorer / Orchestrator は OptIn、WebResearcher は Allowed になる
-    //       (Orchestrator の OptIn は web_fetch のみを対象とする ADR 0002 2026-09-03 補足)
-    assert_eq!(
-        Role::Orchestrator.capabilities().network,
-        NetworkAccess::OptIn
-    );
-    assert_eq!(Role::Explorer.capabilities().network, NetworkAccess::OptIn);
-    assert_eq!(Role::Worker.capabilities().network, NetworkAccess::Denied);
-    assert_eq!(Role::Reviewer.capabilities().network, NetworkAccess::Denied);
-    assert_eq!(
-        Role::WebResearcher.capabilities().network,
-        NetworkAccess::Allowed
-    );
-}
-
-#[test]
 fn only_orchestrator_can_delegate() {
     // Given: v0.2 の 5 ロール
     // When: 各ロールの委譲可否を参照する
@@ -330,22 +301,20 @@ fn only_orchestrator_can_delegate() {
 
 #[test]
 fn role_capabilities_new_collects_tools_into_a_btreeset() {
-    // Given: &str ツール名のイテレータとネットワーク要件
+    // Given: &str ツール名のイテレータ
     // When: RoleCapabilities::new でケイパビリティを構築する
-    // Then: ツールは BTreeSet<String> に収集され、network / can_delegate が反映される
-    let caps = RoleCapabilities::new(["read", "grep"], NetworkAccess::OptIn, false);
+    // Then: ツールは BTreeSet<String> に収集され、can_delegate が反映される
+    let caps = RoleCapabilities::new(["read", "grep"], false);
     assert_eq!(caps.allowed_tools, tool_set(&["read", "grep"]));
-    assert_eq!(caps.network, NetworkAccess::OptIn);
     assert!(!caps.can_delegate);
 }
 
 #[test]
 fn web_researcher_role_is_defined_via_capabilities_only() {
     // Given: v0.2 の WebResearcher ロール (ADR 0002 2026-09-03 補足: read / grep と
-    //        web_search / web_fetch を持ち、network は Allowed、委譲は不可)
+    //        web_search / web_fetch を持ち、委譲は不可)
     // When: Role::WebResearcher のケイパビリティを参照する
-    // Then: 境界チェックは RoleCapabilities 経由で機能し、network は Allowed、
-    //       委譲は不可になる (ランタイムの強制は RoleCapabilities のみを消費する)
+    // Then: 境界チェックは RoleCapabilities 経由で機能し、委譲は不可になる
     let caps = Role::WebResearcher.capabilities();
     assert_eq!(
         caps.check_tool("WebResearcher", "read"),
@@ -356,6 +325,5 @@ fn web_researcher_role_is_defined_via_capabilities_only() {
         "WebResearcher",
         "edit",
     );
-    assert_eq!(caps.network, NetworkAccess::Allowed);
     assert!(!caps.can_delegate);
 }

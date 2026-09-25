@@ -1,7 +1,7 @@
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 
 #[test]
-fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
+fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     // Given: an existing project configuration and the chatbox sandbox button.
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("evorch.toml");
@@ -15,18 +15,17 @@ fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
         )),
         std::sync::Arc::new(runtime::compose::UnconfiguredModel),
     );
+    runtime.set_web_tools_enabled(true);
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
         .with_provider_settings_path(path.clone())
         .with_sandbox_runtime(runtime.clone());
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
-    // When: enabling sandbox networking through the real checkbox and saving.
+    // When: disabling Web tools through the real checkbox and saving.
     harness.click_label("Sandbox: auto");
     harness.run();
-    harness.click_label("Allow network inside sandbox");
-    harness.run();
-    harness.click_label("Ask for each web request");
+    harness.click_label("Enable web tools");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
@@ -38,32 +37,20 @@ fn sandbox_settings_network_toggle_persists_and_applies_live_when_saved() {
         ..Default::default()
     })
     .expect("load");
-    assert!(saved.sandbox.allow_network);
-    assert_eq!(saved.sandbox.web_tool_access, config::WebToolAccess::OptIn);
+    assert!(!saved.sandbox.web_tools_enabled);
     assert!(!saved.metrics.enabled);
-    assert_eq!(
-        runtime
-            .execution_policy(runtime::Role::Explorer)
-            .sandbox_network_mode(),
-        runtime::SandboxNetworkMode::ParentNetns
-    );
-    assert_eq!(
-        runtime
-            .execution_policy(runtime::Role::Worker)
-            .sandbox_network_mode(),
-        runtime::SandboxNetworkMode::Unshared
-    );
+    assert!(!runtime.web_tools_enabled());
 }
 
 #[test]
-fn sandbox_settings_cancel_keeps_network_unchanged_when_reopened() {
+fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
     // Given: an enabled persisted setting.
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("evorch.toml");
     config::save_sandbox(
         &path,
         config::SandboxConfig {
-            allow_network: true,
+            web_tools_enabled: true,
             ..Default::default()
         },
     )
@@ -76,7 +63,7 @@ fn sandbox_settings_cancel_keeps_network_unchanged_when_reopened() {
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
     // When: editing and cancelling instead of saving.
-    harness.click_label("Allow network inside sandbox");
+    harness.click_label("Enable web tools");
     harness.run();
     harness.click_label("Cancel");
     harness.run();
@@ -92,7 +79,7 @@ fn sandbox_settings_cancel_keeps_network_unchanged_when_reopened() {
         ..Default::default()
     })
     .expect("load");
-    assert!(saved.sandbox.allow_network);
+    assert!(saved.sandbox.web_tools_enabled);
 }
 
 fn escalation_fixture(
@@ -110,6 +97,7 @@ fn escalation_fixture(
         )),
         std::sync::Arc::new(runtime::compose::UnconfiguredModel),
     );
+    runtime.set_web_tools_enabled(initial.web_tools_enabled);
     runtime.set_sandbox_escalation(
         initial.escalation_approval,
         initial.escalate_to_user_on_deny,
@@ -143,13 +131,13 @@ fn chatbox_sandbox_button_opens_restored_modal() {
     let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
     harness.click_label("Cancel");
     harness.run();
-    assert!(!harness.has_label("Allow network inside sandbox"));
+    assert!(!harness.has_label("Enable web tools"));
     // When: opening settings from the chatbox.
     harness.click_label("Sandbox: auto");
     harness.run();
     // Then: the modal exposes all sandbox settings.
     for label in [
-        "Allow network inside sandbox",
+        "Enable web tools",
         "審査で拒否された場合はユーザー承認へ昇格",
         "auto",
         "user",
@@ -207,8 +195,8 @@ fn sandbox_settings_save_preserves_persisted_escalation_fields() {
         ..Default::default()
     };
     let (mut harness, runtime) = escalation_fixture(dir.path(), initial);
-    // When: changing only networking and saving the loaded configuration.
-    harness.click_label("Allow network inside sandbox");
+    // When: changing only Web tool availability and saving the loaded configuration.
+    harness.click_label("Enable web tools");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
@@ -216,7 +204,7 @@ fn sandbox_settings_save_preserves_persisted_escalation_fields() {
     assert_eq!(
         reload_sandbox(dir.path()),
         config::SandboxConfig {
-            allow_network: true,
+            web_tools_enabled: false,
             ..initial
         }
     );
@@ -243,7 +231,7 @@ fn capture_sandbox_settings() {
         .save_png(std::path::Path::new("/tmp/opencode/sandbox-settings.png"))
         .expect("PNG");
     // Then: controls fit within the viewport.
-    for label in ["Allow network inside sandbox", "Save sandbox", "Cancel"] {
+    for label in ["Enable web tools", "Save sandbox", "Cancel"] {
         assert!(
             harness
                 .label_rects(label)

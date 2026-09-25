@@ -65,7 +65,6 @@ impl Fixture {
             "goal".into(),
             RunConfig {
                 name: Some("goal-1".into()),
-                network_access: agents::NetworkAccess::Allowed,
                 ..RunConfig::default()
             },
         );
@@ -95,7 +94,6 @@ async fn current_authority_replaces_old_authority_when_goal_restored() {
         .unwrap();
     // Then: no old capability is granted to the new execution.
     let entry = runtime.entry(run).unwrap();
-    assert_eq!(entry.config.network_access, agents::NetworkAccess::Denied);
     assert!(entry.config.load_skills.is_empty());
     assert!(entry.config.finding_store.is_none());
     assert!(entry.config.delegation_value.is_none());
@@ -299,19 +297,13 @@ async fn explicit_current_authority_is_preserved_when_goal_restored() {
     // Given: a terminal goal with default in-memory permissions.
     let fixture = Fixture::new();
     let run = fixture.terminal().await;
-    lock_runs(&fixture.runtime.shared.runs)
-        .get_mut(&run)
-        .unwrap()
-        .config
-        .network_access = agents::NetworkAccess::Denied;
-    // When: the current sender explicitly grants network access and a finding store.
+    // When: the current sender explicitly grants a finding store.
     fixture
         .runtime
         .continue_goal(
             run,
             "continue".into(),
             RunConfig {
-                network_access: agents::NetworkAccess::Allowed,
                 finding_store: Some(fixture._dir.path().into()),
                 ..RunConfig::default()
             },
@@ -319,7 +311,6 @@ async fn explicit_current_authority_is_preserved_when_goal_restored() {
         .unwrap();
     // Then: current grants are retained, rather than replaced with old authority.
     let entry = fixture.runtime.entry(run).unwrap();
-    assert_eq!(entry.config.network_access, agents::NetworkAccess::Allowed);
     assert_eq!(
         entry.config.finding_store.as_deref(),
         Some(fixture._dir.path())

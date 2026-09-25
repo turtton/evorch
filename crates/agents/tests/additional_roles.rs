@@ -1,4 +1,4 @@
-use agents::{NetworkAccess, Role};
+use agents::Role;
 
 #[test]
 fn additional_roles_have_least_privilege_capabilities() {
@@ -7,21 +7,15 @@ fn additional_roles_have_least_privilege_capabilities() {
         (
             "WebResearcher",
             vec!["read", "grep", "web_search", "web_fetch"],
-            NetworkAccess::Allowed,
         ),
         (
             "Planner",
             vec!["read", "grep", "git_diff", "skill_load", "web_fetch"],
-            NetworkAccess::OptIn,
         ),
-        (
-            "Oracle",
-            vec!["read", "grep", "git_diff"],
-            NetworkAccess::Denied,
-        ),
-        ("MultimodalLooker", vec!["read"], NetworkAccess::Denied),
+        ("Oracle", vec!["read", "grep", "git_diff"]),
+        ("MultimodalLooker", vec!["read"]),
     ];
-    for (name, tools, network) in cases {
+    for (name, tools) in cases {
         // When: a role is parsed at the boundary.
         let role = Role::from_name(name).expect("known role");
         let capabilities = role.capabilities();
@@ -35,7 +29,6 @@ fn additional_roles_have_least_privilege_capabilities() {
                 .map(String::from)
                 .collect()
         );
-        assert_eq!(capabilities.network, network);
         assert!(!capabilities.can_delegate);
     }
 }

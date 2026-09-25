@@ -245,6 +245,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         &state.policy,
         state.skills().is_some(),
         state.task.parent.is_some(),
+        state.runtime().is_some_and(|runtime| runtime.web_tools_enabled()),
     );
     if !is_restored {
         state.add_team_tools();

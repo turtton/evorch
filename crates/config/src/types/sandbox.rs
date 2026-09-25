@@ -13,23 +13,23 @@ pub enum EscalationApproval {
     Off,
 }
 
-/// Session policy for web_search and web_fetch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum WebToolAccess {
-    #[default]
-    Denied,
-    OptIn,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxConfig {
-    pub allow_network: bool,
-    #[serde(default)]
-    pub web_tool_access: WebToolAccess,
+    /// Enables Web tools exposed by a role; each call still follows its tool policy.
+    pub web_tools_enabled: bool,
     #[serde(default)]
     pub escalation_approval: EscalationApproval,
     #[serde(default)]
     pub escalate_to_user_on_deny: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            web_tools_enabled: true,
+            escalation_approval: EscalationApproval::default(),
+            escalate_to_user_on_deny: false,
+        }
+    }
 }

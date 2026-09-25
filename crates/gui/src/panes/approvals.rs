@@ -10,7 +10,7 @@ use super::requests::{RequestAction, request_card};
 pub fn approval_card(ui: &mut Ui, item: &PendingApproval) -> Option<RequestAction> {
     let mut action = None;
     ui.push_id(("approval", &item.call_id), |ui| {
-        request_card(ui, "コマンドの承認待ち", |ui| {
+        request_card(ui, "ツールの承認待ち", |ui| {
             ui.add(egui::Label::new(RichText::new(&item.tool_name).strong()).wrap());
             let original = parse_scoped_call_id(&item.call_id)
                 .map(|(_, call, _)| call)

@@ -75,7 +75,7 @@ pub(crate) struct Shared {
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
-    pub(crate) sandbox_allow_network: AtomicBool,
+    pub(crate) web_tools_enabled: AtomicBool,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
     pub(crate) compaction_configured: AtomicBool,
@@ -259,7 +259,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
-                sandbox_allow_network: AtomicBool::new(false),
+                web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
@@ -304,7 +304,7 @@ impl AgentRuntime {
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
     ) -> Self {
         let _ = self.shared.budget.set((&config.budget).into());
-        self.set_sandbox_network(config.sandbox.allow_network);
+        self.set_web_tools_enabled(config.sandbox.web_tools_enabled);
         self.set_sandbox_escalation(
             config.sandbox.escalation_approval,
             config.sandbox.escalate_to_user_on_deny,
@@ -493,7 +493,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
-                sandbox_allow_network: AtomicBool::new(false),
+                web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
                 compaction_configured: AtomicBool::new(false),
@@ -1032,7 +1032,6 @@ impl AgentRuntime {
             load_skills: Vec::new(),
             workspace_mode: source_config.workspace_mode,
             merge_mode: source_config.merge_mode,
-            network_access: Default::default(),
             workspace_branch: worktree.as_ref().map(|owned| owned.branch.clone()),
             ..RunConfig::default()
         };

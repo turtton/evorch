@@ -632,8 +632,7 @@ fn run() -> Result<(), GuiError> {
             let seam = WorkspaceSeam::production(demo_repo.clone())?;
             let executor = production_executor(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator)
-                    .with_sandbox_network(composition_config.sandbox.allow_network),
+                &ExecutionPolicy::for_role(Role::Orchestrator),
                 seam.repo_root().to_path_buf(),
             )?;
             let demo_model: Arc<dyn AgentModel> =
@@ -664,8 +663,7 @@ fn run() -> Result<(), GuiError> {
             )?;
             let executor = production_executor(
                 Arc::clone(&bus),
-                &ExecutionPolicy::for_role(Role::Orchestrator)
-                    .with_sandbox_network(composition_config.sandbox.allow_network),
+                &ExecutionPolicy::for_role(Role::Orchestrator),
                 sidebar
                     .resolved_primary_project()
                     .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
@@ -881,7 +879,7 @@ fn run() -> Result<(), GuiError> {
         .with_ownership(Arc::clone(&ownership))
         .with_command_sink(Box::new(
             RuntimeCommandSink::new(runtime.clone(), handle.clone(), supervisor)
-                .with_web_tool_access(composition_config.sandbox.web_tool_access)
+                .with_web_tools_enabled(composition_config.sandbox.web_tools_enabled)
                 .with_event_bus(Arc::clone(&bus))
                 .with_ownership(ownership)
                 .with_memory_storage(storage_config.clone())

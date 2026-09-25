@@ -69,7 +69,7 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
         "shell",
         "call",
         serde_json::json!({
-            "command":"printf approved", "require_escalated":true, "justification":"inspect"
+            "command":"printf approved", "sandbox_access":"unsandboxed", "justification":"inspect"
         }),
     );
     let update = async {

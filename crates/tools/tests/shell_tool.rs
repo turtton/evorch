@@ -16,18 +16,83 @@ fn shell() -> Shell {
     Shell::new(Arc::new(DirectSandbox::new_unchecked()))
 }
 
-// Given: shell / When: schema is requested / Then: escalation fields are optional and typed.
+// The schema and direct deserialization both reject unsupported access requests.
 #[test]
-fn shell_schema_exposes_require_escalated_and_justification_when_requested() {
+fn shell_schema_exposes_sandbox_access_modes() {
     let schema = shell().schema();
-    assert_eq!(schema["properties"]["require_escalated"]["type"], "boolean");
-    assert_eq!(schema["properties"]["require_network"]["type"], "boolean");
+    assert_eq!(schema["properties"]["sandbox_access"]["type"], "string");
+    assert_eq!(
+        schema["properties"]["sandbox_access"]["default"],
+        "isolated"
+    );
+    assert_eq!(
+        schema["properties"]["sandbox_access"]["enum"],
+        json!(["isolated", "network", "unsandboxed"])
+    );
     assert_eq!(schema["properties"]["justification"]["type"], "string");
     let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(validator.is_valid(&json!({"command":"true"})));
     assert!(!validator.is_valid(&json!({})));
+    for access in ["isolated", "network", "unsandboxed"] {
+        assert!(validator.is_valid(&json!({
+            "command":"true", "sandbox_access":access, "justification":"test access"
+        })));
+        for action in ["poll", "stdin", "stop"] {
+            assert!(!validator.is_valid(&json!({
+                "action":action, "job_id":"job", "sandbox_access":access
+            })));
+        }
+    }
+    for args in invalid_access_arguments() {
+        assert!(!validator.is_valid(&args), "{args}");
+    }
     assert!(validator.is_valid(&json!({"action":"poll", "job_id":"job"})));
     assert_eq!(schema["additionalProperties"], false);
+}
+
+fn invalid_access_arguments() -> Vec<serde_json::Value> {
+    let mut inputs = vec![
+        json!({"command":"true", "sandbox_access":"host"}),
+        json!({"command":"true", "sandbox_access":true}),
+        json!({"command":"true", "sandbox_access":null}),
+    ];
+    for field in ["require_network", "require_escalated"] {
+        for value in [true, false] {
+            let mut args = json!({"command":"true"});
+            args[field] = json!(value);
+            inputs.push(args);
+        }
+    }
+    inputs
+}
+
+#[tokio::test]
+async fn direct_shell_rejects_legacy_fields_and_invalid_access_values() {
+    for args in invalid_access_arguments() {
+        let error = shell().execute(args).await.expect_err("invalid access");
+        assert!(matches!(error, tools::ToolError::InvalidArgs { .. }));
+    }
+}
+
+#[tokio::test]
+async fn direct_shell_control_actions_cannot_change_sandbox_access() {
+    for action in ["poll", "stdin", "stop"] {
+        for access in ["isolated", "network", "unsandboxed"] {
+            let error = shell()
+                .execute(json!({"action":action, "job_id":"job", "sandbox_access":access}))
+                .await
+                .expect_err("control action cannot set access");
+            match error {
+                tools::ToolError::InvalidArgs { detail } => {
+                    assert!(
+                        detail.contains("unknown field `sandbox_access`"),
+                        "{detail}"
+                    );
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+        }
+    }
 }
 
 // Given: no gate / When: escalation is requested / Then: execution is denied.
@@ -35,7 +100,7 @@ fn shell_schema_exposes_require_escalated_and_justification_when_requested() {
 async fn escalated_call_is_denied_when_gate_is_absent() {
     let result = shell()
         .execute(json!({
-            "command": "printf forbidden", "require_escalated": true,
+            "command": "printf forbidden", "sandbox_access": "unsandboxed",
             "justification": "needs host access"
         }))
         .await

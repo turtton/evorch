@@ -20,7 +20,6 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
                     "category": {"type": "string", "enum": super::CATEGORIES, "description": "Worker-only task category for model routing."},
                     "workspace_mode": {"type": "string", "enum": ["shared", "isolated"], "default": "shared"},
                     "workspace_branch": {"type": "string", "description": "Existing branch for an isolated workspace."},
-                    "network_access": {"type": "string", "enum": ["denied", "opt_in", "allowed"], "description": "Defaults to allowed for web_researcher; its explicit values may reduce access. Other roles inherit the parent run's network access and cannot exceed the parent permission (denied < opt_in < allowed)."},
                     "load_skills": {"type": "array", "items": {"type": "string"}, "description": "Registered skills to load into the child."},
                     "task": {
                         "type": "object", "description": "Team-mode task assignment.",
@@ -178,21 +177,6 @@ fn object_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn delegate_schema_advertises_optional_network_access_levels() {
-        let schema = tool_spec("delegate").input_schema;
-        assert_eq!(
-            schema["properties"]["network_access"]["enum"],
-            json!(["denied", "opt_in", "allowed"])
-        );
-        let validator = jsonschema::validator_for(&schema).expect("valid schema");
-        assert!(validator.is_valid(&json!({"prompt":"child"})));
-        for access in ["denied", "opt_in", "allowed"] {
-            assert!(validator.is_valid(&json!({"prompt":"child", "network_access":access})));
-        }
-        assert!(!validator.is_valid(&json!({"prompt":"child", "network_access":"unrestricted"})));
-    }
 
     #[test]
     fn delegate_schema_exposes_optional_role_and_execution_flags() {

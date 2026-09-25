@@ -2,7 +2,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agents::NetworkAccess;
 use event_bus::AgentRunPhase;
 use serde::{Deserialize, Serialize};
 use storage::{RunContextRecord, StorageError};
@@ -109,7 +108,6 @@ pub struct RunRestoreDescriptor {
     pub category: Option<String>,
     pub load_skills: Vec<String>,
     pub workspace_mode: WorkspaceMode,
-    pub network_access: NetworkAccess,
     pub model_preference: Option<ModelPreference>,
     pub restorable: bool,
     pub non_restorable_reason: Option<String>,
@@ -340,7 +338,6 @@ fn write_snapshot(
         category: config.category.clone(),
         load_skills: config.load_skills.clone(),
         workspace_mode: config.workspace_mode,
-        network_access: config.network_access,
         model_preference: state.channels.model_preference_rx.borrow().clone(),
         restorable: non_restorable_reason.is_none(),
         non_restorable_reason,

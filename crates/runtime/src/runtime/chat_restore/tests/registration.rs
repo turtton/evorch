@@ -59,7 +59,6 @@ async fn restored_event_observes_registered_entry_before_execution() {
     );
     let entry = fixture.runtime.entry(run).unwrap();
     assert_eq!(*entry.phase_rx.borrow(), AgentRunPhase::Pending);
-    assert_eq!(entry.config.network_access, agents::NetworkAccess::Denied);
     assert!(entry.config.interactive && entry.config.keep_alive);
 }
 

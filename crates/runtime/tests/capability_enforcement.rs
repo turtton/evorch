@@ -2,11 +2,11 @@ mod support;
 
 use std::sync::Arc;
 
-use agents::{NetworkAccess, Role};
+use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, ToolEvent};
 use providers::FinishReason;
 use runtime::{AgentRuntime, RunConfig};
-use sandbox::DirectSandbox;
+use sandbox::{ApprovalPolicy, DirectSandbox, PolicyDecision};
 use serde_json::json;
 use tools::ToolExecutor;
 
@@ -32,16 +32,17 @@ fn runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
 /// 承認は loop 側ゲートが担うため executor 側の設定は不要である。
 fn web_runtime_with(model: ScriptedModel) -> (AgentRuntime, Arc<EventBus>) {
     let bus = Arc::new(EventBus::new(64));
-    let executor = ToolExecutor::with_standard_tools(
+    let mut executor = ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     )
     .with_web_tools()
     .expect("NetworkGuard 初期化");
-    (
-        AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), Arc::new(model)),
-        bus,
-    )
+    executor
+        .set_policy(ApprovalPolicy::allow_all().with_override("web_fetch", PolicyDecision::Ask));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), Arc::new(model));
+    runtime.set_web_tools_enabled(true);
+    (runtime, bus)
 }
 
 #[tokio::test]
@@ -130,8 +131,8 @@ async fn explorer_shell_is_denied_without_execution() {
 }
 
 #[tokio::test]
-async fn orchestrator_web_fetch_default_session_is_denied_before_executor() {
-    // Given: session の NetworkAccess が既定 (Denied) の run
+async fn disabled_web_tools_are_denied_before_executor() {
+    // Given: Web tools are disabled for the runtime.
     let (runtime, bus) = web_runtime_with(ScriptedModel::new([
         Ok(tool_response(
             "fetch-1",
@@ -140,6 +141,7 @@ async fn orchestrator_web_fetch_default_session_is_denied_before_executor() {
         )),
         Ok(text_response("finished", FinishReason::Stop)),
     ]));
+    runtime.set_web_tools_enabled(false);
     let mut events = bus.subscribe();
 
     // When
@@ -151,8 +153,7 @@ async fn orchestrator_web_fetch_default_session_is_denied_before_executor() {
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = drain_events(&mut events).await;
 
-    // Then: session 層の拒否が executor 到達前に行われ、承認要求も ToolStarted も
-    // 発行されない (AC2)。
+    // Then: no approval or execution is started for a disabled Web tool.
     assert!(!events.iter().any(|event| matches!(
         &event.kind,
         EventKind::Tool(ToolEvent::ApprovalRequested { .. })
@@ -164,10 +165,82 @@ async fn orchestrator_web_fetch_default_session_is_denied_before_executor() {
 }
 
 #[tokio::test]
-async fn orchestrator_web_fetch_session_opt_in_executes_only_after_approval() {
-    // Given: session の NetworkAccess が OptIn の run と、承認する応答者
+async fn web_fetch_auto_review_audits_actual_url_and_verdict() {
+    for (approve, should_start) in [(true, true), (false, false)] {
+        let bus = Arc::new(EventBus::new(128));
+        let executor = ToolExecutor::with_standard_tools(
+            Arc::clone(&bus),
+            Arc::new(DirectSandbox::new_unchecked()),
+        )
+        .with_web_tools()
+        .expect("Web tools");
+        let model = Arc::new(ScriptedModel::new([
+            Ok(tool_response(
+                "fetch-auto",
+                "web_fetch",
+                json!({"url":"http://127.0.0.1/"}),
+            )),
+            Ok(text_response(
+                &format!(
+                    r#"{{"approve":{approve},"reason":"reviewed","risk_level":"low","authorization_level":"medium"}}"#
+                ),
+                FinishReason::Stop,
+            )),
+            Ok(text_response("finished", FinishReason::Stop)),
+        ]));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+        let mut events = bus.subscribe();
+        let run_id = runtime.delegate_background(
+            Role::Orchestrator,
+            "Read a public page".into(),
+            RunConfig::default(),
+        );
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+        let events = drain_events(&mut events).await;
+        let audits: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Diagnostic(diag)
+                    if diag.code == "tool_call_access"
+                        && diag.call_id.as_deref() == Some("fetch-auto") =>
+                {
+                    Some(diag)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audits.len(), 1);
+        let audit: serde_json::Value = serde_json::from_str(&audits[0].detail).expect("audit JSON");
+        assert_eq!(audit["input"]["url"], "http://127.0.0.1/");
+        assert_eq!(audit["decision"], if approve { "allow" } else { "deny" });
+        assert_eq!(audit["reviewer"], "auto_review");
+        assert_eq!(
+            events.iter().any(|event| matches!(
+                &event.kind, EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. })
+                    if tool_name == "web_fetch" && call_id == "fetch-auto"
+            )),
+            should_start
+        );
+        assert!(!events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Tool(ToolEvent::ApprovalRequested { .. })
+        )));
+        let calls = model.observed().await;
+        assert!(calls.iter().any(|messages| messages.iter().any(|message|
+            message.content.iter().any(|content| matches!(content, providers::ContentBlock::Text { text } if text.contains("http://127.0.0.1/") && text.contains("real_user_requests"))
+        ))));
+    }
+}
+
+#[tokio::test]
+async fn web_fetch_user_review_executes_only_after_approval() {
+    // Given: per-call user review with an approving responder.
     let (runtime, bus) = web_runtime_with(ScriptedModel::new([
-        Ok(tool_response("fetch-1", "web_fetch", json!({}))),
+        Ok(tool_response(
+            "fetch-1",
+            "web_fetch",
+            json!({"url":"http://127.0.0.1/"}),
+        )),
         Ok(text_response("finished", FinishReason::Stop)),
     ]));
     let mut events = bus.subscribe();
@@ -177,17 +250,14 @@ async fn orchestrator_web_fetch_session_opt_in_executes_only_after_approval() {
     let run_id = runtime.delegate_background(
         Role::Orchestrator,
         "fetch".to_string(),
-        RunConfig {
-            network_access: NetworkAccess::OptIn,
-            ..RunConfig::default()
-        },
+        RunConfig::default(),
     );
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = drain_events(&mut events).await;
 
     // Then: 承認要求 (相関キーは run スコープの `{run_id}:{call_id}`) が
-    // ToolStarted より前に発行され、承認後の実行は {} が
-    // url 必須のスキーマ違反のためネットワーク I/O なしでエラー完了する (AC6)。
+    // ToolStarted より前に発行され、承認後も private-address guard が
+    // ローカルアドレスへのネットワーク I/O を拒否する。
     let approval_position = events
         .iter()
         .position(|event| {
@@ -218,8 +288,8 @@ async fn orchestrator_web_fetch_session_opt_in_executes_only_after_approval() {
 }
 
 #[tokio::test]
-async fn orchestrator_web_fetch_session_opt_in_denied_approval_never_starts() {
-    // Given: session の NetworkAccess が OptIn の run と、拒否する応答者
+async fn web_fetch_denied_user_review_never_starts() {
+    // Given: per-call user review with a denying responder.
     let (runtime, bus) = web_runtime_with(ScriptedModel::new([
         Ok(tool_response(
             "fetch-1",
@@ -235,10 +305,7 @@ async fn orchestrator_web_fetch_session_opt_in_denied_approval_never_starts() {
     let run_id = runtime.delegate_background(
         Role::Orchestrator,
         "fetch".to_string(),
-        RunConfig {
-            network_access: NetworkAccess::OptIn,
-            ..RunConfig::default()
-        },
+        RunConfig::default(),
     );
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = drain_events(&mut events).await;
@@ -247,8 +314,9 @@ async fn orchestrator_web_fetch_session_opt_in_denied_approval_never_starts() {
     // 拒否されたため executor に到達しない (AC6)。
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, input: Some(input) })
             if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-1")
+                && input == &json!({"url": "https://example.invalid/"})
     )));
     assert!(!events.iter().any(|event| matches!(
         &event.kind,
@@ -258,8 +326,8 @@ async fn orchestrator_web_fetch_session_opt_in_denied_approval_never_starts() {
 }
 
 #[tokio::test]
-async fn parallel_optin_runs_do_not_cross_accept_approval_resolutions() {
-    // Given: 同一 EventBus を共有する 1 ランタイム上の 2 つの OptIn run が
+async fn parallel_runs_do_not_cross_accept_approval_resolutions() {
+    // Given: 同一 EventBus を共有する 1 ランタイム上の 2 つの run が
     // 同一 model call_id "fetch-1" (run-local) で web_fetch を要求し、応答者は
     // run A の run スコープ相関キーだけを 1 回承認する (run B には応答しない)。
     let model = ScriptedModel::new([]);
@@ -267,7 +335,11 @@ async fn parallel_optin_runs_do_not_cross_accept_approval_resolutions() {
         .add_keyed(
             "RUN-A",
             [
-                Ok(tool_response("fetch-1", "web_fetch", json!({}))),
+                Ok(tool_response(
+                    "fetch-1",
+                    "web_fetch",
+                    json!({"url":"http://127.0.0.1/"}),
+                )),
                 Ok(text_response("finished", FinishReason::Stop)),
             ],
         )
@@ -276,17 +348,18 @@ async fn parallel_optin_runs_do_not_cross_accept_approval_resolutions() {
         .add_keyed(
             "RUN-B",
             [
-                Ok(tool_response("fetch-1", "web_fetch", json!({}))),
+                Ok(tool_response(
+                    "fetch-1",
+                    "web_fetch",
+                    json!({"url":"http://127.0.0.1/"}),
+                )),
                 Ok(text_response("finished", FinishReason::Stop)),
             ],
         )
         .await;
     let (runtime, bus) = web_runtime_with(model);
     let mut events = bus.subscribe();
-    let config = RunConfig {
-        network_access: NetworkAccess::OptIn,
-        ..RunConfig::default()
-    };
+    let config = RunConfig::default();
 
     // When: 2 run を同一バス上で並列に起動し、run A の完了のみを待つ
     let run_a =
@@ -340,45 +413,6 @@ async fn parallel_optin_runs_do_not_cross_accept_approval_resolutions() {
 }
 
 #[tokio::test]
-async fn orchestrator_web_fetch_session_allowed_executes_without_prompt() {
-    // Given: session の NetworkAccess が Allowed の run
-    let (runtime, bus) = web_runtime_with(ScriptedModel::new([
-        Ok(tool_response("fetch-1", "web_fetch", json!({}))),
-        Ok(text_response("finished", FinishReason::Stop)),
-    ]));
-    let mut events = bus.subscribe();
-
-    // When
-    let run_id = runtime.delegate_background(
-        Role::Orchestrator,
-        "fetch".to_string(),
-        RunConfig {
-            network_access: NetworkAccess::Allowed,
-            ..RunConfig::default()
-        },
-    );
-    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
-    let events = drain_events(&mut events).await;
-
-    // Then: 承認要求なしで実行が開始され、{} が url 必須のスキーマ違反のため
-    // ネットワーク I/O なしでエラー完了する (AC2)。
-    assert!(!events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalRequested { .. })
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::Tool(ToolEvent::ToolStarted { tool_name, call_id, .. })
-            if tool_name == "web_fetch" && call_id == "fetch-1"
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::Tool(ToolEvent::ToolCompleted { tool_name, call_id, is_error: true, .. })
-            if tool_name == "web_fetch" && call_id == "fetch-1"
-    )));
-}
-
-#[tokio::test]
 async fn orchestrator_web_search_is_denied_without_tool_started() {
     // Given
     let (runtime, bus) = web_runtime_with(ScriptedModel::new([
@@ -421,10 +455,7 @@ async fn web_researcher_web_search_reaches_executor() {
     let run_id = runtime.delegate_background(
         Role::WebResearcher,
         "search".to_string(),
-        RunConfig {
-            network_access: NetworkAccess::Allowed,
-            ..RunConfig::default()
-        },
+        RunConfig::default(),
     );
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let events = drain_events(&mut events).await;

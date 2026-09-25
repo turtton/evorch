@@ -5,5 +5,5 @@
 pub mod capability;
 pub mod role;
 
-pub use capability::{CapabilityDecision, NetworkAccess, RoleCapabilities};
+pub use capability::{CapabilityDecision, RoleCapabilities};
 pub use role::Role;

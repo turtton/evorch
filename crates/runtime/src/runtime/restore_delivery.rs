@@ -136,7 +136,6 @@ impl AgentRuntime {
                 category: descriptor.category,
                 load_skills: descriptor.load_skills,
                 workspace_mode: descriptor.workspace_mode,
-                network_access: descriptor.network_access,
                 model_preference: descriptor.model_preference,
                 ..RunConfig::default()
             };

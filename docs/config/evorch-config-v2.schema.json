@@ -154,10 +154,9 @@
     "sandbox": {
       "$ref": "#/$defs/SandboxConfig",
       "default": {
-        "allow_network": false,
         "escalate_to_user_on_deny": false,
         "escalation_approval": "auto",
-        "web_tool_access": "denied"
+        "web_tools_enabled": true
       }
     },
     "team": {
@@ -1068,10 +1067,6 @@
     "SandboxConfig": {
       "type": "object",
       "properties": {
-        "allow_network": {
-          "type": "boolean",
-          "default": false
-        },
         "escalate_to_user_on_deny": {
           "type": "boolean",
           "default": false
@@ -1080,9 +1075,10 @@
           "$ref": "#/$defs/EscalationApproval",
           "default": "auto"
         },
-        "web_tool_access": {
-          "$ref": "#/$defs/WebToolAccess",
-          "default": "denied"
+        "web_tools_enabled": {
+          "description": "Enables Web tools exposed by a role; each call still follows its tool policy.",
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false
@@ -1118,14 +1114,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "WebToolAccess": {
-      "description": "Session policy for web_search and web_fetch.",
-      "type": "string",
-      "enum": [
-        "denied",
-        "opt-in"
-      ]
     },
     "WorkerBindingConfig": {
       "description": "worker 専用のロール設定とカテゴリ別バインディング。",

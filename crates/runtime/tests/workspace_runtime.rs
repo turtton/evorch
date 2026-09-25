@@ -3,7 +3,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agents::{NetworkAccess, Role};
+use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::FinishReason;
 use runtime::workspace::{Project, WorktreeManager};
@@ -262,28 +262,28 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn isolated_run_executor_registers_web_tools() {
     // Given: isolated run では setup_isolated_workspace が executor を再構築する。
-    // WebResearcher は web_fetch を capability に持つ
+    // WebResearcher は web_search を capability に持つ
     let (_temp, repo) = init_git_repo();
     let model = Arc::new(ScriptedModel::new([
-        Ok(tool_response("fetch-1", "web_fetch", json!({}))),
+        Ok(tool_response("search-1", "web_search", json!({}))),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
     let (runtime, _mounts, bus) = runtime_with_workspace(&repo, model);
+    runtime.set_web_tools_enabled(true);
     let mut events = bus.subscribe();
 
     // When
     let run_id = runtime.delegate_background(
         Role::WebResearcher,
-        "fetch".to_string(),
+        "search".to_string(),
         RunConfig {
             workspace_mode: WorkspaceMode::Isolated,
-            network_access: NetworkAccess::Allowed,
             ..RunConfig::default()
         },
     );
 
-    // Then: 再構築された executor が web_fetch を登録済みなら ToolStarted が
-    // 観測され、引数スキーマ検証 (url 必須) で is_error 完了する
+    // Then: 再構築された executor が web_search を登録済みなら ToolStarted が
+    // 観測され、引数スキーマ検証 (query 必須) で is_error 完了する
     // (検証は実行前のためネットワーク I/O は発生しない)
     assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
     let target = run_id.to_string();
@@ -296,7 +296,7 @@ async fn isolated_run_executor_registers_web_tools() {
                     call_id,
                     run_id: Some(event_run),
                     ..
-                }) if tool_name == "web_fetch" && call_id == "fetch-1" && event_run == target => {
+                }) if tool_name == "web_search" && call_id == "search-1" && event_run == target => {
                     started = true;
                 }
                 EventKind::Tool(ToolEvent::ToolCompleted {
@@ -305,12 +305,12 @@ async fn isolated_run_executor_registers_web_tools() {
                     run_id: Some(event_run),
                     is_error,
                     ..
-                }) if tool_name == "web_fetch" && call_id == "fetch-1" && event_run == target => {
+                }) if tool_name == "web_search" && call_id == "search-1" && event_run == target => {
                     assert!(
                         started,
                         "registered tool must emit Started before Completed"
                     );
-                    assert!(is_error, "missing url must fail argument validation");
+                    assert!(is_error, "missing query must fail argument validation");
                     break;
                 }
                 _ => {}
@@ -318,7 +318,7 @@ async fn isolated_run_executor_registers_web_tools() {
         }
     })
     .await
-    .expect("web_fetch completion must be observed independently of progress event count");
+    .expect("web_search completion must be observed independently of progress event count");
 }
 
 #[tokio::test]
