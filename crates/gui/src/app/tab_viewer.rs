@@ -16,7 +16,7 @@ use crate::model::terminal::TerminalBuffer;
 use crate::model::transcript_registry::TranscriptRegistry;
 use crate::panes::{
     agent_transcript::agent_transcript_pane_with_repo_root,
-    agents::{AgentsAction, agents_pane},
+    agents::{AgentsAction, subagents_pane},
     composer::ComposerAction,
     diff::diff_pane,
     notifications::{NotificationsAction, notifications_pane},
@@ -115,7 +115,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Arena => None,
                 };
                 match owner {
-                    Some(thread) => format!("{} · thread: {}", panel.title, thread.title),
+                    Some(thread) => format!("{} · {}", panel.title, thread.id),
                     None => panel.title.clone(),
                 }
             })
@@ -141,11 +141,18 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .map(|color| crate::theme::dock::attention_tab_style(self.dock_tab_style, color))
     }
 
+    // Each pane owns its scroll viewport. An outer dock ScrollArea gives the
+    // conversation unbounded width and captures wheel input across nested panes.
+    fn scroll_bars(&self, _tab: &Self::Tab) -> [bool; 2] {
+        [false, false]
+    }
+
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
         tab.as_str().starts_with("agent-run-")
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
         let Some(panel) = self.panels.get(tab) else {
             return;
         };
@@ -157,20 +164,28 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .collect();
         let surface_visible = ui.is_visible() && ui.clip_rect().intersects(ui.max_rect());
         match panel.kind {
-            PanelKind::SubagentRegion => {
-                ui.label("Completed subagent logs are available in the tabs above.");
+            PanelKind::SubagentRegion | PanelKind::Agents => {
+                let thread = self
+                    .sidebar
+                    .threads
+                    .iter()
+                    .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref());
+                if let Some(action) = subagents_pane(
+                    ui,
+                    self.tasks,
+                    self.telemetry,
+                    self.durable_tasks,
+                    thread
+                        .map(|thread| thread.run_ids.as_slice())
+                        .unwrap_or_default(),
+                ) {
+                    *self.agents_action = Some(action);
+                }
             }
             PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {
                 if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases, self.telemetry) {
                     *self.sidebar_action = Some(action);
-                }
-            }
-            PanelKind::Agents => {
-                if let Some(action) =
-                    agents_pane(ui, self.tasks, self.telemetry, self.durable_tasks)
-                {
-                    *self.agents_action = Some(action);
                 }
             }
             PanelKind::Notifications => {

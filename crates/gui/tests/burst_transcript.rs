@@ -109,6 +109,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
             TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }

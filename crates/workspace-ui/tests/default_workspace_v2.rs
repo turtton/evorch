@@ -18,11 +18,25 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
     };
     assert_eq!(root.direction, SplitDirection::Horizontal);
     assert_eq!(root.fraction, 0.2);
+    let LayoutNode::Split(left) = root.first.as_ref() else {
+        panic!("left split")
+    };
+    assert_eq!(left.direction, SplitDirection::Vertical);
     assert_eq!(
-        root.first.as_ref(),
-        &LayoutNode::Tabs(Tabs {
+        *left.first,
+        LayoutNode::Tabs(Tabs {
             panels: vec![PanelId::new("sidebar-main")],
-            active: 0,
+            active: 0
+        })
+    );
+    assert_eq!(
+        *left.second,
+        LayoutNode::Tabs(Tabs {
+            panels: vec![
+                PanelId::new("tasks-main"),
+                PanelId::new("notifications-main")
+            ],
+            active: 0
         })
     );
     let LayoutNode::Split(content) = root.second.as_ref() else {
@@ -57,11 +71,7 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
     assert_eq!(
         right.first.as_ref(),
         &LayoutNode::Tabs(Tabs {
-            panels: vec![
-                PanelId::new("agents-main"),
-                PanelId::new("tasks-main"),
-                PanelId::new("notifications-main"),
-            ],
+            panels: vec![PanelId::new("subagents-home")],
             active: 0,
         })
     );
@@ -77,8 +87,8 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
         PanelKind::Sidebar
     );
     assert_eq!(
-        workspace.panels[&PanelId::new("agents-main")].kind,
-        PanelKind::Agents
+        workspace.panels[&PanelId::new("subagents-home")].kind,
+        PanelKind::SubagentRegion
     );
     assert_eq!(
         workspace.panels[&PanelId::new("tasks-main")].kind,

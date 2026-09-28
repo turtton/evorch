@@ -25,6 +25,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 target: Some(run_id.to_owned()),
             },
         );
+        if !self.subagent_run_is_visible(run_id) {
+            return;
+        }
         let bottom = self.subagent_leaves().last().copied();
         let tree = self.dock.main_surface_mut();
         if tree.is_empty() {
@@ -47,9 +50,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !self.panels.contains_key(&id) {
             self.open_subagent_pane(run_id);
         }
+        if !self.subagent_run_is_visible(run_id) {
+            let order = self
+                .panels
+                .values()
+                .filter_map(|panel| match panel.kind {
+                    PanelKind::ParkedAgentTranscript(order) => Some(order),
+                    _ => None,
+                })
+                .max()
+                .map_or(0, |order| order + 1);
+            if let Some(panel) = self.panels.get_mut(&id) {
+                panel.kind = PanelKind::ParkedAgentTranscript(order);
+            }
+            return;
+        }
         let mut parked: Vec<_> = self
             .panels
             .iter()
+            .filter(|(_, panel)| {
+                panel
+                    .target
+                    .as_deref()
+                    .is_none_or(|run| self.subagent_run_is_visible(run))
+            })
             .filter_map(|(id, panel)| match panel.kind {
                 PanelKind::ParkedAgentTranscript(order) => Some((order, id.clone())),
                 _ => None,
@@ -140,6 +164,57 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .splice(index..index, parked.into_iter().map(|(_, id)| id));
         }
         self.restore_subagent_focus(focus);
+        self.equalize_subagent_panes();
+    }
+
+    pub(super) fn subagent_run_is_visible(&self, run_id: &str) -> bool {
+        self.sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.run_ids.iter().any(|run| run == run_id))
+            .is_some_and(|owner| Some(&owner.id) == self.sidebar.active_thread.as_ref())
+    }
+
+    /// Keep each thread's registered transcript panes available without showing
+    /// another thread's runs in the current right-hand dock.
+    pub(super) fn sync_subagent_thread_panes(&mut self) {
+        let panes: Vec<_> = self
+            .panels
+            .values()
+            .filter(|panel| {
+                matches!(
+                    panel.kind,
+                    PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_)
+                )
+            })
+            .cloned()
+            .collect();
+        for panel in &panes {
+            if panel
+                .target
+                .as_deref()
+                .is_some_and(|run| !self.subagent_run_is_visible(run))
+                && let Some(path) = self.dock.find_tab(&panel.id)
+            {
+                self.dock.remove_tab(path);
+            }
+        }
+        for panel in panes {
+            let Some(run_id) = panel.target.as_deref() else {
+                continue;
+            };
+            if !self.subagent_run_is_visible(run_id) || self.dock.find_tab(&panel.id).is_some() {
+                continue;
+            }
+            self.panels.remove(&panel.id);
+            self.open_subagent_pane(run_id);
+            if matches!(panel.kind, PanelKind::ParkedAgentTranscript(_)) {
+                if let Some(restored) = self.panels.get_mut(&panel.id) {
+                    restored.kind = panel.kind;
+                }
+                self.park_completed_subagent(run_id);
+            }
+        }
         self.equalize_subagent_panes();
     }
 

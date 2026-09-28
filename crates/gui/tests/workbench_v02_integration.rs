@@ -242,7 +242,7 @@ fn assert_default_v02_layout(workbench: &HeadlessWorkbench<MockSource>) {
     for id in [
         "sidebar-main",
         "agent-main",
-        "agents-main",
+        "subagents-home",
         "diff-main",
         "terminal-main",
         "notifications-main",
@@ -324,6 +324,7 @@ fn assert_run_transcript(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }
@@ -337,6 +338,7 @@ fn assert_run_transcript(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::Error { .. }
@@ -495,7 +497,7 @@ fn v02_end_to_end_chained_scenario() {
     assert!(fixture.workbench.has_label("thread-only progress"));
 
     // When: the default agent panes open for the three roles.
-    fixture.workbench.click_label("Open default panes");
+    fixture.workbench.state_mut().open_default_agent_panes();
     fixture.workbench.run();
 
     // Then: three transcript tabs exist and each registry model holds only its
@@ -654,16 +656,13 @@ fn v02_end_to_end_chained_scenario() {
         leaf_sets,
         vec![
             BTreeSet::from(["sidebar-main".to_string()]),
+            BTreeSet::from(["notifications-main".to_string(), "tasks-main".to_string()]),
             BTreeSet::from(["agent-main".to_string(), "agent-run-1".to_string()]),
             BTreeSet::from(["terminal-main".to_string()]),
-            BTreeSet::from([
-                "agents-main".to_string(),
-                "notifications-main".to_string(),
-                "tasks-main".to_string(),
-            ]),
-            BTreeSet::from(["diff-main".to_string()]),
+            BTreeSet::from(["subagents-home".to_string()]),
             BTreeSet::from(["agent-run-2".to_string()]),
             BTreeSet::from(["agent-run-3".to_string()]),
+            BTreeSet::from(["diff-main".to_string()]),
         ],
         "saved tree must keep the v0.2 regions and dynamic transcript tabs"
     );
@@ -767,7 +766,12 @@ fn v1_settings_file_end_to_end_migration() {
 
     // Then: the legacy tabs render without panic. Tab titles are painted text,
     // so the body content proves each migrated pane actually rendered.
-    for id in ["tasks-main", "agents-main", "agent-main", "terminal-main"] {
+    for id in [
+        "tasks-main",
+        "subagents-home",
+        "agent-main",
+        "terminal-main",
+    ] {
         assert!(
             workbench
                 .state()

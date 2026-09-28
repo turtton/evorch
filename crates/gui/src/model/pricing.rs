@@ -13,6 +13,22 @@ pub(super) struct ModelKey {
     pub model: String,
 }
 
+impl ModelKey {
+    pub(super) fn provider_type(
+        &self,
+        settings: &ProviderSettingsModel,
+    ) -> Option<config::ProviderTypeConfig> {
+        settings
+            .provider_type(Some(self.profile.as_deref().unwrap_or(&self.provider)))
+            .or(match self.provider.as_str() {
+                // Direct clients and saved Codex observations can lack a profile.
+                "openai" => Some(config::ProviderTypeConfig::OpenAi),
+                "openai-codex" => Some(config::ProviderTypeConfig::OpenAiCodex),
+                _ => None,
+            })
+    }
+}
+
 fn tokens(value: u64) -> f64 {
     Duration::from_secs(value).as_secs_f64()
 }
@@ -114,7 +130,7 @@ impl TelemetryOverlay {
             .iter()
             .try_fold(0.0, |total, (key, usage)| {
                 let fallback = ModelEntryConfig::enabled(&key.model);
-                let provider_type = settings.provider_type(key.profile.as_deref());
+                let provider_type = key.provider_type(settings);
                 let entry = settings
                     .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
                     .unwrap_or(&fallback);

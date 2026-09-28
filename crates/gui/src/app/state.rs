@@ -84,6 +84,8 @@ pub struct WorkbenchState<S> {
     pub(super) diff_source: Arc<dyn DiffSource>,
     pub(super) goal_form: GoalFormModel,
     pub(super) composer: ComposerModel,
+    pub(super) composer_attachments:
+        BTreeMap<workspace_ui::ThreadId, Vec<crate::model::composer::ImageAttachment>>,
     pub(super) model_picker: crate::model::model_picker::ModelPickerState,
     pub(super) provider_status: ProviderStatus,
     pub(super) provider_settings: ProviderSettingsModel,
@@ -172,6 +174,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             diff_source: Arc::new(GitCliDiffSource),
             goal_form: GoalFormModel::default(),
             composer: ComposerModel::default(),
+            composer_attachments: BTreeMap::new(),
             model_picker: crate::model::model_picker::ModelPickerState::default(),
             provider_status: ProviderStatus::default(),
             provider_settings: ProviderSettingsModel::default(),
@@ -228,7 +231,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         target: None,
                     },
                 );
-                self.dock.push_to_focused_leaf(id);
+                if let Some(path) = self.dock.find_tab(&PanelId::new("tasks-main"))
+                    && let Ok(leaf) = self.dock.leaf_mut(path.node_path())
+                {
+                    leaf.tabs.push(id);
+                } else {
+                    self.dock.push_to_focused_leaf(id);
+                }
             }
         }
         self
@@ -255,6 +264,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             } else {
                 thread.chat_role.map(Into::into).unwrap_or_default()
             };
+            self.composer.input = thread.draft_input.clone();
         }
         self.transcripts
             .select_thread(sidebar.active_thread.as_ref().map(ToString::to_string));
@@ -264,6 +274,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.sidebar = sidebar;
+        self.sync_subagent_thread_panes();
         self
     }
 

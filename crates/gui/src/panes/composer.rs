@@ -45,7 +45,7 @@ pub fn composer_strip(
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
             let candidates = completions(&model.input);
             if model.completions_visible() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for spec in candidates {
                         let label = match spec.argument_hint {
                             Some(hint) => format!("/{} {hint}", spec.name),
@@ -99,6 +99,7 @@ ui.add(egui::Button::new(egui::RichText::new("Cancel").color(palette().ERROR_FG)
                 });
                 let input = egui::ScrollArea::vertical()
                     .id_salt("composer-scroll")
+                    .min_scrolled_width(0.0)
                     .min_scrolled_height(COMPOSER_MIN_HEIGHT - 2.0 * SP_2)
                     .max_height(COMPOSER_MAX_HEIGHT)
                     .auto_shrink([false, true])

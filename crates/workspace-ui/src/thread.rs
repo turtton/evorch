@@ -76,6 +76,8 @@ pub struct ThreadRecord {
     pub model_preference: Option<ModelPreference>,
     #[serde(default)]
     pub chat_role: Option<ThreadChatRole>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub draft_input: String,
     #[serde(default)]
     pub parent_thread_id: Option<ThreadId>,
     /// Worker run that requested this independent orchestrator conversation.
@@ -103,6 +105,7 @@ impl ThreadRecord {
             worktree_path: None,
             model_preference: None,
             chat_role: None,
+            draft_input: String::new(),
             parent_thread_id: None,
             escalation_source_run_id: None,
             fork_event_id: None,

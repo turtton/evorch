@@ -359,8 +359,8 @@ fn goal_command_without_args_shows_usage_without_focusing_a_tab() {
     let path = harness
         .state()
         .dock()
-        .find_tab(&PanelId::new("agents-main"))
-        .expect("agents tab");
+        .find_tab(&PanelId::new("subagents-home"))
+        .expect("subagents tab");
     let before = harness
         .state()
         .dock()

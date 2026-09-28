@@ -54,10 +54,9 @@ impl ProviderTypeConfig {
     pub const fn models_dev_provider_candidates(self) -> &'static [&'static str] {
         match self {
             Self::KimiSubscription => &["kimi-code-plan-global", "kimi-code-plan-cn"],
+            Self::OpenAi | Self::OpenAiCodex => &["openai"],
             Self::Anthropic
             | Self::AnthropicSubscription
-            | Self::OpenAi
-            | Self::OpenAiCodex
             | Self::GithubCopilot
             | Self::Openrouter
             | Self::OpenAiCompatible => &[],
@@ -597,15 +596,20 @@ mod tests {
         assert_eq!(candidates, ["kimi-code-plan-global", "kimi-code-plan-cn"]);
     }
 
-    // Given: Kimi 以外の全プロバイダ種別 / When: models.dev 候補を取得する
+    #[test]
+    fn openai_provider_types_use_openai_catalog_metadata() {
+        for provider_type in [ProviderTypeConfig::OpenAi, ProviderTypeConfig::OpenAiCodex] {
+            assert_eq!(provider_type.models_dev_provider_candidates(), ["openai"]);
+        }
+    }
+
+    // Given: 既知の対応がないプロバイダ種別 / When: models.dev 候補を取得する
     // Then: 既知の候補がなく空スライスを返す
     #[test]
     fn other_provider_types_have_no_models_dev_candidates() {
         let provider_types = [
             ProviderTypeConfig::Anthropic,
             ProviderTypeConfig::AnthropicSubscription,
-            ProviderTypeConfig::OpenAi,
-            ProviderTypeConfig::OpenAiCodex,
             ProviderTypeConfig::GithubCopilot,
             ProviderTypeConfig::Openrouter,
             ProviderTypeConfig::OpenAiCompatible,

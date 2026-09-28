@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{ProjectRecord, SidebarState, ThreadRecord, ThreadRunPhase, ThreadState};
@@ -47,12 +47,13 @@ pub fn render(
         );
     }
 
-    for thread in project_threads {
+    for (thread, depth) in nested_threads(&project_threads) {
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
         let state = thread.state(phases);
         compact_row(ui, active, |ui| {
             ui.spacing_mut().item_spacing.x = SP_1;
             ui.spacing_mut().button_padding.x = SP_1;
+            ui.add_space(depth as f32 * 16.0);
             let pin = if thread.pinned { "★" } else { "☆" };
             if ui.button(pin).clicked() {
                 *action = Some(SidebarAction::TogglePin(thread.id.clone()));
@@ -76,21 +77,23 @@ pub fn render(
                     *action = Some(SidebarAction::ForkThread(thread.id.clone()));
                 }
                 ui.label(thread_state_label(state));
-                let title_response = ui.add_sized(
-                    egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
-                    egui::Label::new(format!(
-                        "{}{}",
-                        if thread.parent_thread_id.is_some() {
-                            "↳ "
-                        } else {
-                            ""
-                        },
-                        thread.title
-                    ))
-                    .truncate()
-                    .halign(Align::LEFT)
-                    .sense(Sense::click()),
-                );
+                let title_response = ui
+                    .add_sized(
+                        egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
+                        egui::Label::new(format!(
+                            "{}{}",
+                            if thread.parent_thread_id.is_some() {
+                                "↳ "
+                            } else {
+                                ""
+                            },
+                            thread.title
+                        ))
+                        .truncate()
+                        .halign(Align::LEFT)
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_text(format!("thread ID: {}", thread.id));
                 if title_response.clicked() {
                     *action = Some(SidebarAction::SwitchThread(thread.id.clone()));
                 }
@@ -125,6 +128,7 @@ pub fn render(
                                 .halign(Align::LEFT)
                                 .sense(Sense::click()),
                         )
+                        .on_hover_text(format!("thread ID: {}", thread.id))
                         .clicked()
                     {
                         *action = Some(SidebarAction::SwitchThread(thread.id.clone()));
@@ -133,6 +137,45 @@ pub fn render(
             }
         });
     ui.add_space(SP_2);
+}
+
+fn nested_threads<'a>(threads: &[&'a ThreadRecord]) -> Vec<(&'a ThreadRecord, usize)> {
+    fn append<'a>(
+        thread: &'a ThreadRecord,
+        depth: usize,
+        threads: &[&'a ThreadRecord],
+        seen: &mut BTreeSet<workspace_ui::ThreadId>,
+        output: &mut Vec<(&'a ThreadRecord, usize)>,
+    ) {
+        if !seen.insert(thread.id.clone()) {
+            return;
+        }
+        output.push((thread, depth));
+        for child in threads
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.parent_thread_id.as_ref() == Some(&thread.id))
+        {
+            append(child, depth + 1, threads, seen, output);
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut output = Vec::with_capacity(threads.len());
+    for thread in threads.iter().copied() {
+        if thread
+            .parent_thread_id
+            .as_ref()
+            .is_none_or(|parent| !threads.iter().any(|candidate| &candidate.id == parent))
+        {
+            append(thread, 0, threads, &mut seen, &mut output);
+        }
+    }
+    // Corrupt or cyclic parent links still leave every thread reachable.
+    for thread in threads.iter().copied() {
+        append(thread, 0, threads, &mut seen, &mut output);
+    }
+    output
 }
 
 fn archive_button(ui: &mut Ui) -> egui::Response {
@@ -174,5 +217,33 @@ const fn thread_state_label(state: ThreadState) -> &'static str {
         ThreadState::Waiting => "Waiting",
         ThreadState::Done => "Done",
         ThreadState::Error => "Error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nested_threads;
+    use workspace_ui::{ProjectId, ThreadId, ThreadRecord};
+
+    #[test]
+    fn escalation_children_follow_parent_at_each_depth() {
+        let project = ProjectId::new("demo");
+        let parent = ThreadRecord::new(ThreadId::new("parent"), project.clone(), "Parent");
+        let mut child = ThreadRecord::new(ThreadId::new("child"), project.clone(), "Child");
+        child.parent_thread_id = Some(parent.id.clone());
+        child.escalation_source_run_id = Some("run-worker".into());
+        let mut grandchild = ThreadRecord::new(ThreadId::new("grandchild"), project, "Grandchild");
+        grandchild.parent_thread_id = Some(child.id.clone());
+        let rows = nested_threads(&[&grandchild, &child, &parent]);
+        assert_eq!(
+            rows.iter()
+                .map(|(thread, depth)| (thread.id.to_string(), *depth))
+                .collect::<Vec<_>>(),
+            [
+                ("parent".into(), 0),
+                ("child".into(), 1),
+                ("grandchild".into(), 2)
+            ]
+        );
     }
 }

@@ -5,8 +5,8 @@ use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn register_work_panels(&mut self) {
-        self.register_work_panel("tasks-main", PanelKind::Tasks, "agents-main");
-        self.register_work_panel("agents-main", PanelKind::Agents, "tasks-main");
+        self.register_work_panel("tasks-main", PanelKind::Tasks, "sidebar-main");
+        self.register_work_panel("subagents-home", PanelKind::SubagentRegion, "diff-main");
     }
 
     fn register_work_panel(&mut self, id: &str, kind: PanelKind, neighbor: &str) {

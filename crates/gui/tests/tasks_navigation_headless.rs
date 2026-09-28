@@ -14,6 +14,45 @@ fn summary(id: u64, name: &str) -> AgentSummary {
     }
 }
 
+fn bind_runs<S: gui::model::tasks::AgentRunSource>(
+    mut state: WorkbenchState<S>,
+    runs: &[&str],
+) -> WorkbenchState<S> {
+    state.add_project(std::env::current_dir().unwrap()).unwrap();
+    state.create_thread("task navigation").unwrap();
+    let mut sidebar = state.sidebar().clone();
+    sidebar.threads[0].run_ids = runs.iter().map(|run| (*run).into()).collect();
+    state.with_sidebar(sidebar)
+}
+
+// Tasks and Subagents stay visible together; choose the run link in the left pane.
+fn click_task_run<S: gui::model::tasks::AgentRunSource + 'static>(
+    workbench: &mut HeadlessWorkbench<S>,
+    run: &str,
+) {
+    let rect = workbench
+        .label_rects(run)
+        .into_iter()
+        .min_by(|a, b| a.left().total_cmp(&b.left()))
+        .expect("task run link");
+    let pos = rect.center();
+    workbench.input_mut().events.extend([
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+}
+
 fn progress() -> Event {
     Event::new(OrchestratorEvent::TaskProgressed {
         task_id: "ship-ui".into(),
@@ -61,6 +100,7 @@ fn agents_open_related_task_and_task_opens_each_retry_run() {
         &UiSettings::default(),
     )
     .expect("workbench");
+    state = bind_runs(state, &["run-1", "run-2"]);
     state.apply_events([
         progress(),
         retry(),
@@ -84,7 +124,21 @@ fn agents_open_related_task_and_task_opens_each_retry_run() {
     assert!(workbench.has_label("retrying"));
     assert!(workbench.has_label("retry 1"));
     assert!(workbench.has_label("artifacts/layout.png"));
-    assert!(!workbench.has_label("current-worker"));
+    assert!(workbench.has_label("current-worker"));
+    let task_tab = workbench
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("tasks-main"))
+        .unwrap();
+    assert_eq!(
+        workbench
+            .state()
+            .dock()
+            .leaf(task_tab.node_path())
+            .unwrap()
+            .active,
+        task_tab.tab
+    );
     assert!(
         workbench
             .state()
@@ -99,7 +153,7 @@ fn agents_open_related_task_and_task_opens_each_retry_run() {
         ("run-1", "First attempt output", "Retry attempt output"),
         ("run-2", "Retry attempt output", "First attempt output"),
     ] {
-        workbench.click_label(run);
+        click_task_run(&mut workbench, run);
         workbench.run();
         assert!(
             workbench
@@ -120,6 +174,7 @@ fn agents_keep_task_links_for_previous_attempts() {
         &UiSettings::default(),
     )
     .expect("workbench");
+    state = bind_runs(state, &["run-1", "run-2"]);
     state.apply_events([progress(), retry()]);
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 900.0]);
     workbench.run();
@@ -168,6 +223,7 @@ fn reopening_same_task_reveals_it_after_manual_scroll() {
         &UiSettings::default(),
     )
     .expect("workbench");
+    state = bind_runs(state, &["run-1", "run-2"]);
     state.apply_events([progress()]);
     state.apply_events((0..30).map(|index| {
         Event::new(OrchestratorEvent::TaskProgressed {
@@ -181,16 +237,16 @@ fn reopening_same_task_reveals_it_after_manual_scroll() {
     workbench.run();
     workbench.click_label("Task: ship-ui");
     workbench.run();
-    assert!(workbench.label_rects("ship-ui")[0].top() < 1000.0);
+    assert!(workbench.label_rects("Tasks")[0].intersects(workbench.label_rects("ship-ui")[0]));
     workbench.scroll_label_into_view("earlier-00");
     workbench.run();
-    assert!(workbench.label_rects("ship-ui")[0].top() > 1000.0);
-    activate(workbench.state_mut(), "agents-main");
+    assert!(!workbench.label_rects("Tasks")[0].intersects(workbench.label_rects("ship-ui")[0]));
+    activate(workbench.state_mut(), "subagents-home");
     workbench.run();
     workbench.click_label("Task: ship-ui");
     workbench.run();
     assert!(
-        workbench.label_rects("ship-ui")[0].top() < 1000.0,
+        workbench.label_rects("Tasks")[0].intersects(workbench.label_rects("ship-ui")[0]),
         "navigating again must reveal the selected task"
     );
 }
@@ -219,13 +275,14 @@ fn agents_link_to_claimed_team_task_and_task_opens_owner() {
         &UiSettings::default(),
     )
     .expect("workbench");
+    let state = bind_runs(state, &["run-3"]);
     let mut workbench = HeadlessWorkbench::new(state, [1280.0, 1000.0]);
     workbench.run();
     workbench.click_label("Team task: team-layout");
     workbench.run();
     assert!(workbench.has_label("team-layout"));
     assert!(workbench.has_label("Claimed"));
-    workbench.click_label("run-3");
+    click_task_run(&mut workbench, "run-3");
     workbench.run();
     assert!(
         workbench

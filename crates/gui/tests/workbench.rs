@@ -79,7 +79,7 @@ fn three_panes_render_with_titles() {
     // Then: the v0.2 region titles are present
     harness.get_by_label("Projects");
     harness.get_by_label("Conversation");
-    harness.get_by_label("Agents");
+    harness.get_by_label("Subagents");
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn dock_undock_and_tab_move_operations_update_state() {
 
     // When: the terminal tab is moved into the agents tab group
     let terminal_id = PanelId::new("terminal-main");
-    let agents_id = PanelId::new("agents-main");
+    let agents_id = PanelId::new("subagents-home");
     let terminal_path = harness
         .state()
         .dock()
@@ -287,5 +287,5 @@ fn save_layout_keybind_persists_workspace_json() {
     assert!(panels.contains(&PanelId::new("agent-main")));
     assert!(panels.contains(&PanelId::new("terminal-main")));
     assert!(panels.contains(&PanelId::new("sidebar-main")));
-    assert!(panels.contains(&PanelId::new("agents-main")));
+    assert!(panels.contains(&PanelId::new("subagents-home")));
 }

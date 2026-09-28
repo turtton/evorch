@@ -72,24 +72,32 @@ fn painted_text<'a>(harness: &'a Harness<'_, WorkbenchState<DemoSource>>) -> Vec
 }
 
 #[test]
-fn started_tab_shows_owner_not_active_thread() {
-    // Given: another thread is selected.
+fn started_tab_uses_owner_id_only_when_owner_thread_is_selected() {
     let mut state = state();
-    // When: the owner's child starts and the actual dock is rendered.
     state.apply_events([started()]);
-    let harness = render(state);
-    // Then: the tab identifies its owner, not the selected thread.
+
+    // A child run belongs to its owner thread, so it must not appear on another thread.
+    let mut harness = render(state);
+    assert!(
+        !painted_text(&harness)
+            .iter()
+            .any(|title| title.contains("worker-1"))
+    );
+
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("owner"))
+        .unwrap();
+    harness.run_steps(3);
     let text = painted_text(&harness);
     assert!(
         text.iter()
-            .any(|title| title.contains("worker-1") && title.contains("thread: fix-login")),
+            .any(|title| title.contains("worker-1") && title.contains("owner")),
         "{text:?}"
     );
-    assert!(
-        !text
-            .iter()
-            .any(|title| title.contains("worker-1") && title.contains("other-work"))
-    );
+    assert!(!text.iter().any(|title| {
+        title.contains("worker-1") && (title.contains("fix-login") || title.contains("other-work"))
+    }));
 }
 
 #[test]
@@ -106,22 +114,23 @@ fn parked_tab_keeps_owner_but_placeholder_has_no_badge_after_reload() {
     let workspace = workspace_ui::load_from(&path).unwrap();
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(workspace);
-    // When: a new workbench renders the persisted pane without replayed events.
-    let restored = WorkbenchState::new(DemoSource(Vec::new()), &settings)
+    // A new workbench restores the pane for the owner thread without replayed events.
+    let mut restored = WorkbenchState::new(DemoSource(Vec::new()), &settings)
         .unwrap()
         .with_sidebar(sidebar);
+    restored.switch_thread(ThreadId::new("owner")).unwrap();
     let harness = render(restored);
-    // Then: the parked tab retains attribution and the region stays global.
+    // The parked tab carries the owner ID, while the region title remains generic.
     let text = painted_text(&harness);
     assert!(
         text.iter()
-            .any(|title| title.contains("worker-1") && title.contains("thread: fix-login")),
+            .any(|title| title.contains("worker-1") && title.contains("owner")),
         "{text:?}"
     );
     assert!(text.contains(&"Subagents"));
     assert!(
         !text
             .iter()
-            .any(|title| title.contains("Subagents") && title.contains("thread:"))
+            .any(|title| title.contains("Subagents") && title.contains("owner"))
     );
 }

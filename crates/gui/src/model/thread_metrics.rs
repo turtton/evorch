@@ -1,5 +1,17 @@
-use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
+use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
 use std::time::{Duration, Instant};
+
+impl ThreadMetrics {
+    pub fn cache_hit_rate_label(&self) -> String {
+        let current = self
+            .cache_hit_rate
+            .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.0}%"));
+        match self.average_cache_hit_rate {
+            Some(average) => format!("{current} (Δ{average:.0}%)"),
+            None => current,
+        }
+    }
+}
 
 impl TelemetryOverlay {
     pub fn thread_metrics(&self, run_ids: &[String]) -> ThreadMetrics {
@@ -22,19 +34,36 @@ impl TelemetryOverlay {
                 wall_time += now.saturating_duration_since(*start);
             }
         }
-        let latest = run_ids
+        // A thread owns its subagents for costs, but model performance and
+        // context must describe the conversation's own requests.
+        let roots = run_ids
             .iter()
             .filter_map(|id| self.rows.get(id))
-            .max_by_key(|row| row.context_order);
+            .filter(|row| {
+                row.conversation_root
+                    || row
+                        .parent_run_id
+                        .as_ref()
+                        .is_none_or(|parent| !run_ids.contains(parent))
+            });
+        let mut usage = TokenUsage::default();
+        let mut has_usage = false;
+        for row in roots.clone() {
+            has_usage |= row.latest_context.is_some();
+            usage.input = usage.input.saturating_add(row.usage.input);
+            usage.cache_read = usage.cache_read.saturating_add(row.usage.cache_read);
+        }
+        let latest = roots.max_by_key(|row| row.context_order);
         ThreadMetrics {
             cost: has_cost.then_some(cost_total),
             cache_hit_rate: latest
                 .and_then(|row| row.latest_context.as_ref())
                 .map(|request| request.usage.cache_hit_rate()),
+            average_cache_hit_rate: has_usage.then(|| usage.cache_hit_rate()),
             wall_time,
             context_pressure: latest.and_then(TelemetryRow::context_pressure),
             ttft: latest
-                .and_then(TelemetryRow::average_ttft_ms)
+                .and_then(TelemetryRow::latest_ttft_ms)
                 .map(Duration::from_millis),
             tok_s: latest.and_then(|row| row.tok_s_at(now)),
         }

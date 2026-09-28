@@ -162,3 +162,50 @@ fn metrics_render_in_status_line_below_composer() {
         "title={title:?}, composer={composer:?}, metrics={metrics:?}"
     );
 }
+
+#[test]
+fn conversation_and_focused_agent_show_their_own_request_metrics() {
+    for focused_agent in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        if focused_agent {
+            // Select the conversation focus before automatic child tabs exist.
+            state.drill_down("child");
+        }
+        state.apply_events([
+            started("a", "chat:one", None),
+            started("child", "worker", Some("a")),
+        ]);
+        for (run, output, ttft) in [("a", 40, 200), ("child", 400, 900)] {
+            state.apply_events([Event::new(ProviderEvent::FirstTokenObserved {
+                request_id: format!("request-{run}"),
+                provider: "local".into(),
+                profile: None,
+                protocol: "openai-completions".into(),
+                model: "base".into(),
+                ttft_ms: ttft,
+                run_id: Some(run.into()),
+            })]);
+            let mut completion = billed(run, 1_000);
+            if let event_bus::EventKind::Provider(ProviderEvent::RequestCompleted {
+                duration_ms,
+                output_tokens,
+                ..
+            }) = &mut completion.kind
+            {
+                *duration_ms = 2_000;
+                *output_tokens = output;
+            }
+            state.apply_events([completion]);
+        }
+        let mut gui = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
+        gui.run();
+        let (ttft, rate) = if focused_agent {
+            ("TTFT 900ms", "200.0 tok/s")
+        } else {
+            ("TTFT 200ms", "20.0 tok/s")
+        };
+        assert!(gui.has_label(ttft), "missing {ttft}");
+        assert!(gui.has_label(rate), "missing {rate}");
+    }
+}

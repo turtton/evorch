@@ -41,39 +41,6 @@ pub fn agents_pane<S: AgentRunSource>(
             .then_some(AgentsAction::OpenDefaultPanes);
         ui.add_space(SP_1);
 
-        if let Some(snapshot) = &telemetry.quota.snapshot {
-            ui.label(muted(format!(
-                "Codex quota · Plan: {}",
-                snapshot.quota.plan.as_deref().unwrap_or("unknown")
-            )));
-            if snapshot.stale {
-                ui.label(muted("Stale · quota refresh failed"));
-            }
-            for (label, window) in [
-                ("primary", &snapshot.quota.primary),
-                ("secondary", &snapshot.quota.secondary),
-            ] {
-                match window {
-                    Some(window) => {
-                        ui.label(muted(format!(
-                            "{}: {:.1}% used · resets {}",
-                            window.duration_label(),
-                            window.used_percent,
-                            window.resets_at.format("%Y-%m-%d %H:%M UTC")
-                        )));
-                    }
-                    None => {
-                        ui.label(muted(format!("{label}: unavailable")));
-                    }
-                }
-            }
-        } else if telemetry.quota.error.is_some() {
-            ui.label(muted("Codex quota unavailable · refresh failed"));
-        }
-        if let Some(error) = &telemetry.quota.error {
-            ui.label(muted(format!("Quota error: {error}")));
-        }
-
         if tasks.rows().is_empty() {
             empty_state(
                 ui,
@@ -269,4 +236,90 @@ fn render_data_row(
             response.on_hover_text(value.diagnostics_label());
         }
     });
+}
+
+/// Runs belonging to the selected conversation, including its delegated work.
+pub fn subagents_pane<S: AgentRunSource>(
+    ui: &mut egui::Ui,
+    tasks: &TasksModel<S>,
+    telemetry: &TelemetryOverlay,
+    durable_tasks: &DurableTasksModel,
+    run_ids: &[String],
+) -> Option<AgentsAction> {
+    pane_root(ui, "Subagents", |ui| {
+        let mut action = None;
+        let rows: Vec<_> = tasks
+            .rows()
+            .iter()
+            .filter(|row| run_ids.contains(&row.run_id.to_string()))
+            .collect();
+        if rows.is_empty() {
+            empty_state(
+                ui,
+                "No runs in this thread",
+                "Start a conversation to see its agent runs.",
+                None,
+            );
+            return None;
+        }
+        let teams = tasks.teams();
+        egui::ScrollArea::vertical()
+            .id_salt("thread-runs")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in rows {
+                    let run_id = row.run_id.to_string();
+                    ui.push_id(&run_id, |ui| {
+                        crate::theme::widgets::surface_frame(palette().SURFACE).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                status_dot(ui, agent_phase_color(row.status));
+                                ui.label(egui::RichText::new(&row.name).strong());
+                                ui.label(muted(format!("{} · {:?}", row.role, row.status)));
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .link(&run_id)
+                                    .on_hover_text("Show this run in Conversation")
+                                    .clicked()
+                                {
+                                    action = Some(AgentsAction::DrillDown(run_id.clone()));
+                                }
+                                if ui.small_button("Open pane").clicked() {
+                                    action = Some(AgentsAction::OpenPane(run_id.clone()));
+                                }
+                                for task in durable_tasks.tasks_for_run(&run_id) {
+                                    if ui
+                                        .link(format!("Task: {}", task.id))
+                                        .on_hover_text(&task.title)
+                                        .clicked()
+                                    {
+                                        action = Some(AgentsAction::OpenTask(task.id.clone()));
+                                    }
+                                }
+                                for (coordinator, team_tasks) in &teams {
+                                    for task in team_tasks {
+                                        if matches!(&task.state, runtime::team::ClaimState::Claimed(lease)
+                                            if lease.owner_id == run_id)
+                                            && ui.link(format!("Team task: {}", task.spec.id)).clicked()
+                                        {
+                                            action = Some(AgentsAction::OpenTask(format!(
+                                                "team:{coordinator}:{}", task.spec.id
+                                            )));
+                                        }
+                                    }
+                                }
+                            });
+                            if let Some(value) = telemetry.row(&run_id) {
+                                ui.label(muted(value.model.as_deref().unwrap_or("unknown")));
+                                ui.label(muted(value.provider.as_deref().unwrap_or("unknown")));
+                                ui.label(muted(value.activity_label()));
+                                ui.label(muted(value.tokens_label()))
+                                    .on_hover_text(value.diagnostics_label());
+                            }
+                        });
+                    });
+                }
+            });
+        action
+    })
 }

@@ -69,6 +69,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .response
             .on_hover_text("Workbench settings");
+            crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
             let Some(host) = self.ownership.clone() else {
                 return;
             };

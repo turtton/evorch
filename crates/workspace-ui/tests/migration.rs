@@ -11,18 +11,19 @@ fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
     // Then: surviving panels remain and the newly available notification tab is added.
     assert_eq!(ws.version, 3);
     assert_eq!(ws.panels.len(), 6);
-    let mut expected = Workspace::default_v02();
-    expected.panels.remove(&PanelId::new("tasks-main"));
-    expected.main.root = serde_json::from_value(serde_json::json!({
-        "type": "split", "direction": "horizontal", "fraction": 0.2,
-        "first": {"type": "tabs", "panels": ["sidebar-main"], "active": 0},
-        "second": {
-            "type": "split", "direction": "horizontal", "fraction": 0.625,
-            "first": {"type": "tabs", "panels": ["agent-main"], "active": 0},
-            "second": {"type": "tabs", "panels": ["agents-main", "diff-main", "terminal-main", "notifications-main"], "active": 0}
-        }
-    })).expect("frozen migrated tree");
-    assert_eq!(ws, expected);
+    assert!(!ws.panels.contains_key(&PanelId::new("agents-main")));
+    assert!(ws.panels.contains_key(&PanelId::new("subagents-home")));
+    let root = serde_json::to_value(&ws.main.root).unwrap();
+    assert!((root["fraction"].as_f64().unwrap() - 0.2).abs() < 0.0001);
+    assert_eq!(
+        root["first"]["first"]["panels"],
+        serde_json::json!(["sidebar-main"])
+    );
+    assert_eq!(
+        root["first"]["second"]["panels"],
+        serde_json::json!(["notifications-main"])
+    );
+    ws.validate().unwrap();
 }
 
 #[test]
@@ -39,16 +40,21 @@ fn v2_layout_whose_tabs_node_only_held_goal_collapses_split() {
     let ws = from_json(&value.to_string()).expect("split migrates");
     // Then: the surviving tabs become the root and active is clamped.
     assert_eq!(ws.version, 3);
+    let root = serde_json::to_value(&ws.main.root).unwrap();
     assert_eq!(
-        ws.main.root,
-        workspace_ui::LayoutNode::Tabs(workspace_ui::Tabs {
-            panels: vec![
-                PanelId::new("agent-main"),
-                PanelId::new("notifications-main")
-            ],
-            active: 0,
-        })
+        root["first"]["panels"],
+        serde_json::json!(["notifications-main"])
     );
+    assert_eq!(
+        root["second"]["first"]["panels"],
+        serde_json::json!(["agent-main"])
+    );
+    assert_eq!(root["second"]["first"]["active"], 0);
+    assert_eq!(
+        root["second"]["second"]["panels"],
+        serde_json::json!(["subagents-home"])
+    );
+    ws.validate().unwrap();
 }
 
 #[test]

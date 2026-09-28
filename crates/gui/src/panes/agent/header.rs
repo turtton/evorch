@@ -12,7 +12,7 @@ pub(super) fn header_strip(
         return;
     }
     surface_frame(palette().SURFACE).show(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
             if let Some(identity) = identity {
                 let label = match (identity.name, identity.role) {
@@ -66,16 +66,14 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
     } else {
         format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
     };
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
         for segment in [
             metrics
                 .cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-            metrics
-                .cache_hit_rate
-                .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.0}%")),
+            metrics.cache_hit_rate_label(),
             metrics.ttft.map_or_else(
                 || "TTFT —".into(),
                 |ttft| format!("TTFT {}ms", ttft.as_millis()),
@@ -89,7 +87,7 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
             format!("wall {wall}"),
         ] {
             ui.label(muted("·"));
-            ui.add(egui::Label::new(muted(segment)).extend());
+            ui.add(egui::Label::new(muted(segment)));
         }
     });
 }

@@ -89,7 +89,11 @@ fn conversation_with_messages_hides_placeholders() {
 #[test]
 fn agent_focus_header_keeps_identity_label_and_return_button() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    let mut sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
+    sidebar.threads[0].run_ids = demo_runs()
+        .iter()
+        .map(|run| run.run_id.to_string())
+        .collect();
     let workbench = WorkbenchState::new(DemoSource(demo_runs()), &UiSettings::default())
         .expect("default state builds")
         .with_sidebar(sidebar);
@@ -209,10 +213,10 @@ fn capture_empty_composer_evidence() {
 fn empty_monitoring_panes_explain_what_will_appear() {
     for (panel, title, hint, action) in [
         (
-            "agents-main",
-            "No agent runs yet",
-            "Send a message or /goal in Conversation to start an agent run.",
-            Some("Open default panes"),
+            "subagents-home",
+            "No runs in this thread",
+            "Start a conversation to see its agent runs.",
+            None,
         ),
         (
             "notifications-main",

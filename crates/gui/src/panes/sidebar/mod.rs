@@ -47,21 +47,26 @@ pub fn sidebar_pane(
     let mut action = None;
 
     pane_root(ui, "Projects", |ui| {
-        surface_frame(palette().SIDEBAR).show(ui, |ui| {
-            let selected = selected_project(sidebar);
-            projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
-            if let Some(project) = selected {
-                threads::render(
-                    ui,
-                    sidebar,
-                    project,
-                    phases,
-                    telemetry,
-                    &mut pane_state,
-                    &mut action,
-                );
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                surface_frame(palette().SIDEBAR).show(ui, |ui| {
+                    let selected = selected_project(sidebar);
+                    projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
+                    if let Some(project) = selected {
+                        threads::render(
+                            ui,
+                            sidebar,
+                            project,
+                            phases,
+                            telemetry,
+                            &mut pane_state,
+                            &mut action,
+                        );
+                    }
+                });
+            });
     });
 
     ui.ctx().data_mut(|data| data.insert_temp(id, pane_state));

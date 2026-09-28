@@ -43,7 +43,13 @@ impl TelemetryRow {
 
     pub fn context_pressure(&self) -> Option<u128> {
         let usage = self.latest_context.as_ref()?.usage;
-        let window = u128::from(self.context_window.filter(|window| *window > 0)?);
+        let window = u128::from(
+            self.context_composition
+                .as_ref()
+                .map(|context| context.window_tokens)
+                .filter(|window| *window > 0)
+                .or(self.context_window.filter(|window| *window > 0))?,
+        );
         let output = if self.in_flight {
             self.output_tokens
         } else {
@@ -79,7 +85,7 @@ impl TelemetryOverlay {
                 let entry = settings
                     .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
                     .unwrap_or(&fallback);
-                let provider_type = settings.provider_type(key.profile.as_deref());
+                let provider_type = key.provider_type(settings);
                 sources
                     .resolve(
                         entry,

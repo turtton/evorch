@@ -33,7 +33,15 @@ fn assert_content_layout(root: &LayoutNode) {
             active: 0,
         })
     };
-    assert_eq!(*root.first, tabs(&["sidebar-main"]));
+    assert_eq!(
+        *root.first,
+        LayoutNode::Split(Split {
+            direction: SplitDirection::Vertical,
+            fraction: 0.65,
+            first: Box::new(tabs(&["sidebar-main"])),
+            second: Box::new(tabs(&["tasks-main", "notifications-main"])),
+        })
+    );
     assert_eq!(
         *content.first,
         LayoutNode::Split(Split {
@@ -43,7 +51,7 @@ fn assert_content_layout(root: &LayoutNode) {
             second: Box::new(tabs(&["terminal-main"])),
         })
     );
-    let right_tabs = &["agents-main", "tasks-main", "notifications-main"];
+    let right_tabs = &["subagents-home"];
     assert_eq!(
         *content.second,
         LayoutNode::Split(Split {
@@ -62,7 +70,7 @@ fn default_layout_has_bottom_terminal_and_split_right_pane() {
     // When: the actual egui_dock tree is built and extracted
     let dock = gui::dock::to_dock_state(&workspace).expect("dock");
     let extracted = gui::dock::from_dock_state(&dock, &workspace.panels).expect("workspace");
-    // Then: Terminal is below Conversation and Diff is below Agents/Notifications
+    // Then: Terminal is below Conversation and Diff is below the thread-local Subagents list
     assert_content_layout(&extracted.main.root);
 }
 
@@ -126,7 +134,7 @@ fn reset_layout_restores_v02_default() {
     for id in [
         "sidebar-main",
         "agent-main",
-        "agents-main",
+        "subagents-home",
         "tasks-main",
         "diff-main",
         "terminal-main",
@@ -155,6 +163,12 @@ fn dynamic_agent_pane_roundtrips_through_save_load() {
         .expect("build workbench")
         .with_save_path(&path);
 
+    state.add_project(temp_dir.path()).expect("project");
+    state.create_thread("pane roundtrip").expect("thread");
+    let mut sidebar = state.sidebar().clone();
+    sidebar.threads[0].run_ids = (1..=4).map(|id| format!("run-{id}")).collect();
+    state = state.with_sidebar(sidebar.clone());
+
     // When: default agent panes are opened twice and the layout is saved
     state.open_default_agent_panes();
     state.open_default_agent_panes();
@@ -181,7 +195,9 @@ fn dynamic_agent_pane_roundtrips_through_save_load() {
 
     let mut settings = UiSettings::default();
     settings.layout.workspace = Some(loaded);
-    let reloaded = WorkbenchState::new(source, &settings).expect("reload workbench");
+    let reloaded = WorkbenchState::new(source, &settings)
+        .expect("reload workbench")
+        .with_sidebar(sidebar);
     assert_work_tabs(&reloaded);
     for id in ["agent-run-1", "agent-run-3", "agent-run-4"] {
         assert!(reloaded.dock().find_tab(&PanelId::new(id)).is_some());
@@ -217,7 +233,7 @@ fn undock_to_floating_and_reload_preserves_v02_panels() {
     for id in [
         "sidebar-main",
         "agent-main",
-        "agents-main",
+        "subagents-home",
         "tasks-main",
         "diff-main",
         "terminal-main",
@@ -246,7 +262,7 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
 }
 
 fn assert_work_tabs<S: AgentRunSource>(state: &WorkbenchState<S>) {
-    for id in ["agents-main", "tasks-main"] {
+    for id in ["subagents-home", "tasks-main"] {
         assert_eq!(
             state
                 .dock()
@@ -281,5 +297,20 @@ fn memory_storage_keeps_one_tasks_tab_in_current_and_legacy_layouts() {
             .with_memory_storage(config.clone())
             .with_memory_storage(config);
         assert_work_tabs(&state);
+        let tasks = state
+            .dock()
+            .find_tab(&PanelId::new("tasks-main"))
+            .unwrap()
+            .node_path();
+        for global in ["memory-main", "arena-main"] {
+            assert_eq!(
+                state
+                    .dock()
+                    .find_tab(&PanelId::new(global))
+                    .unwrap()
+                    .node_path(),
+                tasks
+            );
+        }
     }
 }

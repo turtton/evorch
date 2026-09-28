@@ -90,6 +90,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.restore_status = None;
         }
         self.render(ui);
+        self.persist_composer_draft();
         self.render_restore_diagnostics(&ctx);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(
@@ -149,6 +150,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Error { .. }
                         | TranscriptEntry::UserMessage { .. }
                         | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }

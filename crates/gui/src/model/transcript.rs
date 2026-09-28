@@ -37,6 +37,11 @@ pub enum TranscriptEntry {
     Notice {
         text: String,
     },
+    SandboxReview {
+        text: String,
+        run_id: Option<String>,
+        call_id: Option<String>,
+    },
     Compaction {
         reason: CompactionReason,
         threshold: f64,
@@ -377,6 +382,7 @@ impl TranscriptModel {
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. } => {}

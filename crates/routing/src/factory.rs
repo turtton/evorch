@@ -152,7 +152,7 @@ fn build_codex(
             reason: format!("codex client の構築に失敗しました: {error}"),
         }
     })?;
-    Ok(Box::new(client))
+    Ok(Box::new(client.with_profile(&profile.name)))
 }
 
 fn build_openai_compatible(
