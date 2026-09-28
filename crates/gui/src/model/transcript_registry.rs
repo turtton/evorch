@@ -1,7 +1,7 @@
 //! Transcript 配送の責務を集約し、run ID ごとにイベントを分離する。
 //!
-//! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら thread と
-//! 該当 run の両 transcript へ決定的に配送する。`run_id` が `None` の delta は
+//! `MessageDelta` / `ReasoningDelta` は payload の `run_id` が `Some` なら該当 run へ、
+//! conversation root の場合だけ thread にも配送する。`run_id` が `None` の delta は
 //! 警告して完全に破棄し、Running の run 数にかかわらず配送先を推測しない。
 //!
 //! Subscriber lag is diagnostic-only: the event bus reports each episode.
@@ -74,7 +74,18 @@ impl TranscriptRegistry {
     pub fn route(&self, event: &Event) -> Vec<TranscriptKey> {
         match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
-                self.route_run(&question.run_id)
+                if question.run_id == question.root_run_id {
+                    self.route_run(&question.run_id)
+                } else {
+                    let mut route = Vec::new();
+                    if self.run_threads.contains_key(&question.run_id)
+                        || self.run_threads.contains_key(&question.root_run_id)
+                    {
+                        route.push(TranscriptKey::Thread);
+                    }
+                    route.push(TranscriptKey::Run(question.run_id.clone()));
+                    route
+                }
             }
             EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
                 self.route_run(run_id)
@@ -88,18 +99,11 @@ impl TranscriptRegistry {
                 || vec![TranscriptKey::Thread],
                 |run_id| self.route_run(run_id),
             ),
-            EventKind::Lifecycle(
-                event_bus::LifecycleEvent::AgentRunStarted {
-                    run_id,
-                    parent_run_id,
-                    ..
-                }
-                | event_bus::LifecycleEvent::TaskPromptPublished {
-                    run_id,
-                    parent_run_id,
-                    ..
-                },
-            ) => {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStarted {
+                run_id,
+                parent_run_id,
+                ..
+            }) => {
                 let mut route = Vec::new();
                 if parent_run_id.is_some() {
                     route.push(TranscriptKey::Thread);
@@ -107,6 +111,9 @@ impl TranscriptRegistry {
                 route.push(TranscriptKey::Run(run_id.clone()));
                 route
             }
+            EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
+                run_id, ..
+            }) => vec![TranscriptKey::Run(run_id.clone())],
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
                 to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error,
@@ -256,12 +263,19 @@ impl TranscriptRegistry {
             | EventKind::Orchestrator(_)
             | EventKind::Snapshot(_) => None,
         };
-        let owner = explicit_thread.or_else(|| {
-            route.iter().find_map(|key| match key {
-                TranscriptKey::Run(id) => self.run_threads.get(id).cloned(),
-                TranscriptKey::Thread => None,
+        let owner = explicit_thread
+            .or_else(|| {
+                route.iter().find_map(|key| match key {
+                    TranscriptKey::Run(id) => self.run_threads.get(id).cloned(),
+                    TranscriptKey::Thread => None,
+                })
             })
-        });
+            .or_else(|| match &event.kind {
+                EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
+                    self.run_threads.get(&question.root_run_id).cloned()
+                }
+                _ => None,
+            });
         let attributed = route.iter().any(|key| matches!(key, TranscriptKey::Run(_)));
         let child_terminal = matches!(&event.kind,
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })

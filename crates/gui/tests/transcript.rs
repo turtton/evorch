@@ -1,6 +1,6 @@
 use event_bus::{
     Event, FaultEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    SkillDiagnosticKind,
+    SkillDiagnosticKind, ToolEvent, UserQuestion,
 };
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::{TranscriptKey, TranscriptRegistry};
@@ -169,7 +169,7 @@ fn task_prompt(run: &str, parent: Option<&str>, prompt: &str) -> Event {
 }
 
 #[test]
-fn task_prompt_routes_root_only_to_run_and_child_to_owning_thread() {
+fn task_prompt_stays_in_its_run_transcript() {
     let mut registry = TranscriptRegistry::new();
     registry.bind_thread_root("owner", "root");
     registry.bind_run("child", "owner");
@@ -182,17 +182,76 @@ fn task_prompt_routes_root_only_to_run_and_child_to_owning_thread() {
     );
     assert_eq!(
         registry.route(&child),
-        vec![TranscriptKey::Thread, TranscriptKey::Run("child".into())]
+        vec![TranscriptKey::Run("child".into())]
     );
     registry.apply(&root);
     registry.apply(&child);
     assert!(registry.thread().entries().is_empty());
     registry.select_thread(Some("owner".into()));
+    assert!(registry.thread().entries().is_empty());
     assert_eq!(
-        registry.thread().entries(),
+        registry.run("child").unwrap().entries(),
         &[TranscriptEntry::UserMessage {
             text: "child instruction".into()
         }]
+    );
+}
+
+#[test]
+fn child_question_and_answer_notify_only_the_owning_conversation() {
+    let mut registry = TranscriptRegistry::new();
+    registry.bind_thread_root("owner", "root");
+    registry.select_thread(Some("other".into()));
+    let mut question = UserQuestion {
+        id: "question-1".into(),
+        run_id: "child".into(),
+        root_run_id: "root".into(),
+        root_name: "orchestrator".into(),
+        title: "Which API?".into(),
+        options: Vec::new(),
+        blocking: true,
+        answer: None,
+    };
+    let asked = Event::new(ToolEvent::UserQuestionUpdated {
+        question: question.clone(),
+    });
+    assert_eq!(
+        TranscriptRegistry::new().route(&asked),
+        vec![TranscriptKey::Run("child".into())],
+        "an unowned question must not reach an arbitrary conversation"
+    );
+    assert_eq!(
+        registry.route(&asked),
+        vec![TranscriptKey::Thread, TranscriptKey::Run("child".into())]
+    );
+    registry.apply(&asked);
+    question.answer = Some("Use the public API".into());
+    registry.apply(&Event::new(ToolEvent::UserQuestionUpdated { question }));
+
+    assert!(registry.thread().entries().is_empty());
+    registry.select_thread(Some("owner".into()));
+    assert_eq!(
+        registry.thread().entries(),
+        &[
+            TranscriptEntry::Notice {
+                text: "Subagent question from child reached orchestrator [question-1]: Which API?"
+                    .into()
+            },
+            TranscriptEntry::Notice {
+                text: "Answer sent to subagent child [question-1]: Use the public API".into()
+            },
+        ]
+    );
+    assert_eq!(
+        registry.run("child").unwrap().entries(),
+        &[
+            TranscriptEntry::Notice {
+                text: "Question [question-1]: Which API?".into()
+            },
+            TranscriptEntry::Notice {
+                text: "Answer [question-1]: Use the public API".into()
+            },
+        ]
     );
 }
 

@@ -319,8 +319,26 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     }
     let mut gui = HeadlessWorkbench::new(state, [1600.0, 1400.0]);
     gui.run();
+    assert!(gui.has_label(
+        "Subagent question from run-3 reached orchestrator [run-3]: Subagent asks orchestrator"
+    ));
     assert!(!gui.has_label("Subagent asks orchestrator"));
     assert!(gui.has_label("Orchestrator asks user"));
+    gui.state_mut()
+        .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: UserQuestion {
+                id: "run-3".into(),
+                run_id: "run-3".into(),
+                root_run_id: "run-2".into(),
+                root_name: "escalation-orchestrator".into(),
+                title: "Subagent asks orchestrator".into(),
+                options: Vec::new(),
+                blocking: true,
+                answer: Some("Use the existing API".into()),
+            },
+        })]);
+    gui.run();
+    assert!(gui.has_label("Answer sent to subagent run-3 [run-3]: Use the existing API"));
     gui.state_mut()
         .switch_thread(ThreadId::new("parent"))
         .unwrap();

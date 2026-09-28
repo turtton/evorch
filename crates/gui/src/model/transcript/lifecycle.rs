@@ -4,7 +4,21 @@ use super::{TranscriptEntry, TranscriptModel};
 
 impl TranscriptModel {
     pub(crate) fn apply_thread(&mut self, event: &Event, child_terminal: bool) {
-        if child_terminal {
+        if let EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) = &event.kind
+            && question.run_id != question.root_run_id
+        {
+            let text = match &question.answer {
+                Some(answer) => format!(
+                    "Answer sent to subagent {} [{}]: {}",
+                    question.run_id, question.id, answer
+                ),
+                None => format!(
+                    "Subagent question from {} reached orchestrator [{}]: {}",
+                    question.run_id, question.id, question.title
+                ),
+            };
+            self.push_notice(text);
+        } else if child_terminal {
             self.finish_thinking(event);
             if let Some(entry) = self.terminal_notice(event) {
                 self.push(entry);

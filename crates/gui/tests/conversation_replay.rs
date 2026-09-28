@@ -303,6 +303,9 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
         Some(TranscriptEntry::Message { text, .. }) if text == "Canonical review report"),
         "result is visible before the terminal event"
     );
+    assert!(!live.transcript().entries().iter().any(|entry| matches!(
+        entry, TranscriptEntry::UserMessage { text } if text == "Review the implementation"
+    )));
     // A restore reuses the same run and must not duplicate its initial instruction.
     persist_and_apply(
         &storage,
