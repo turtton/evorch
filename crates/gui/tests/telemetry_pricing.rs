@@ -154,7 +154,7 @@ async fn catalog_fills_missing_fields_but_static_prices_win() {
 }
 
 #[test]
-fn telemetry_cost_renders_in_agents_pane() {
+fn telemetry_usage_renders_in_thread_subagents_pane() {
     use egui_kittest::{Harness, kittest::Queryable};
     use gui::model::tasks::{AgentRunSource, TasksModel};
     struct Source;
@@ -176,11 +176,16 @@ fn telemetry_cost_renders_in_agents_pane() {
     overlay.apply_event(&completed("model"));
     overlay.refresh_costs(&settings());
     let mut harness = Harness::new_ui(move |ui| {
-        gui::panes::agents::agents_pane(ui, &tasks, &overlay, &Default::default());
+        gui::panes::agents::subagents_pane(
+            ui,
+            &tasks,
+            &overlay,
+            &Default::default(),
+            &["run-1".into()],
+        );
     });
     harness.run();
-    // Cache reads and writes are already included in input: 78300 / 98300.
-    for label in ["$0.041", "113.7K tok", "3080.0 tok/s", "cache 79.7%"] {
+    for label in ["worker", "98300 / 15400"] {
         assert!(harness.query_by_label(label).is_some(), "missing {label}");
     }
 }
@@ -189,6 +194,7 @@ fn telemetry_cost_renders_in_agents_pane() {
 #[ignore = "L4 offscreen PNG evidence; requires a graphics adapter"]
 fn capture_telemetry_cost_png() {
     use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
+    use workspace_ui::{ProjectId, SidebarState, ThreadId};
     let source = DemoSource(vec![runtime::AgentSummary {
         run_id: runtime::RunId::new(1),
         parent_run_id: Some(runtime::RunId::new(0)),
@@ -197,22 +203,35 @@ fn capture_telemetry_cost_png() {
         phase: event_bus::AgentRunPhase::Running,
         model: "model".into(),
     }]);
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("demo");
+    sidebar
+        .add_project(project.clone(), "demo", std::path::Path::new("/tmp"))
+        .expect("project");
+    sidebar.select_project(&project).expect("select project");
+    let thread = ThreadId::new("cost-evidence");
+    sidebar
+        .create_thread(thread.clone(), project, "Cost evidence")
+        .expect("thread");
+    sidebar.switch_thread(&thread).expect("select thread");
+    sidebar.threads[0].run_ids.push("run-1".into());
     let mut state = WorkbenchState::new(source, &workspace_ui::UiSettings::default())
         .expect("state")
+        .with_sidebar(sidebar)
         .with_provider_settings(settings());
     state.apply_events([completed("model")]);
     let path = state
         .dock()
-        .find_tab(&workspace_ui::PanelId::new("agents-main"))
-        .expect("agents tab");
+        .find_tab(&workspace_ui::PanelId::new("agent-main"))
+        .expect("conversation tab");
     state
         .dock_mut()
         .set_active_tab(path)
-        .expect("activate agents");
+        .expect("activate conversation");
     let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     harness.run();
     assert!(harness.has_label("$0.041"));
-    assert!(harness.has_label("cache 79.7%"));
+    assert!(harness.has_label("cache 80% (Δ80%)"));
     if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
         let path = std::env::var_os("EVORCH_TELEMETRY_PNG")
             .map(std::path::PathBuf::from)
