@@ -1,7 +1,7 @@
 # GUI 検証ガイド
 
-evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1 から L6 は
-コマンドで再現可能で、L7 のみオペレータの実ディスプレイ上での手動確認となる。
+evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1 から L7 は
+コマンドで再現可能で、L8 はオペレータの実ディスプレイ上で確認する。
 
 ## 検証レイヤー
 
@@ -29,7 +29,7 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 
 ### L3: サイズ x DPI ジオメトリマトリクス
 
-- 役割: 4 状態 (empty / demo / error-thread / edit-profile) x 複数フレーム
+- 役割: 5 状態 (empty / demo / error-thread / edit-profile / theme-settings) x 複数フレーム
   サイズで、主要コントロールがビューポート内に到達可能であることを
   `label_rects` の矩形で検証する。最小サイズ 960x600 が実アプリの
   `gui::window::MIN_INNER_SIZE` と一致することも確認する。
@@ -48,8 +48,10 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 - コマンド:
   -  ignored テスト一括: `cargo test -p gui --tests -- --ignored --nocapture`
   -  証跡マトリクス: `scripts/gui-evidence-matrix.sh [OUT]`
-     (デフォルト出力 `target/gui-evidence`、5 状態 x 4 サイズ @1.0 と
-     demo / edit-profile @1.5, @2.0 の計 24 PNG を生成し、枚数を検査する)
+     (デフォルト出力 `target/gui-evidence`。3 テーマそれぞれで 6 状態 x 4 サイズ、
+     demo / edit-profile x 2 DPI、既定の 7 パネルと Memory/Arena の 2 パネル、
+     追加の 4 設定画面を撮影し、
+     テーマごとに 41 枚、合計 123 PNG の枚数を検査する)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
@@ -73,18 +75,33 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
   `CHROME` (chromiumoxide の実行ファイル検出が参照。CI で設定)
 - CI ジョブ: `browser-e2e` (アーティファクト `browser-e2e-evidence`)
 
-### L7: 実機起動スモーク (手動)
+### L7: Linux 仮想 X11 実ウィンドウ操作
 
-- 役割: eframe が実ウィンドウを生成し、WM が最小サイズを強制し、アプリが
-  正常終了することを、オペレータの実ディスプレイで確認する。
+- 役割: 専用 Xvfb と Openbox 内で `evorch-gui --demo` を起動し、実際の
+  ウィンドウへキーボードとマウスを入力する。Ctrl+1/2/3 のタブ移動、
+  レイアウト保存・リセット、最小サイズの強制、正常終了を検証する。
+  各操作の PNG、保存レイアウト、ログを証跡として残す。
+- コマンド: `cargo build -p gui --bin evorch-gui` の後に
+  `scripts/check-gui-native.sh [OUT]`。既定出力は `target/gui-native`。
+- 必要コマンド: `Xvfb`、`openbox`、`xdotool`、ImageMagick、`jq`、
+  `bwrap`。Nix 開発環境では例えば
+  `nix develop -c nix shell nixpkgs#xorg-server nixpkgs#openbox nixpkgs#xdotool nixpkgs#imagemagick nixpkgs#bubblewrap nixpkgs#jq -c scripts/check-gui-native.sh`。
+- 環境変数: `GUI_BIN` (既定 `target/debug/evorch-gui`)、
+  `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
+- CI ジョブ: `offscreen-gate` (`gui-evidence` artifact の `native/`)
+
+### L8: 実機起動スモーク (手動)
+
+- 役割: eframe がオペレータの実ディスプレイで起動し、ウィンドウ管理・
+  フォーカス・終了がその環境で正しく動くことを確認する。
 - コマンド: 下記「実機スモーク手順」を参照。
-- CI ジョブ: なし (手動のみ、CI では絶対に実行しない)
+- CI ジョブ: なし (手動のみ)
 
 ## 実機スモーク手順 (AC6)
 
-この手順はオペレータの実ディスプレイに実ウィンドウを開く。CI でも
+この L8 手順はオペレータの実ディスプレイにウィンドウを開く。CI でも
 エージェントでも実行してはならない。実行は人間のオペレータが自分の
-マシンで行う。
+マシンで行う。L7 は専用の仮想 X11 ディスプレイだけを使用する。
 
 1. 一意なタイトル付きでデモ状態を起動する。
 
@@ -149,7 +166,7 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 | テーマ | L2 | `theme_headless.rs::install_applies_dark_design_tokens`, `theme_headless.rs::workbench_installs_theme_on_first_frame`, `theme_headless.rs::dock_style_distinguishes_tab_states` |
 | Dock レイアウト | L2 | `dock_roundtrip.rs::workspace_dock_workspace_round_trip_preserves_nested_structure`, `dock_roundtrip.rs::complex_nested_split_round_trip_preserves_tree_and_active_tabs`, `layout_v02.rs::default_layout_is_sidebar_center_right_tabs`, `layout_v02.rs::v1_layout_file_loads_via_migration_into_workbench` |
 | Empty ステート | L2, L3, L4 | `empty_states_headless.rs::conversation_without_project_offers_go_to_projects`, `empty_states_headless.rs::composer_is_docked_at_bottom_in_empty_state`, `sidebar_headless.rs::sidebar_without_projects_shows_placeholder_and_single_add_project_cta`, `size_dpi_matrix.rs::empty_geometry_matrix`, `empty_states_headless.rs::capture_empty_composer_evidence` |
-| 最小ウィンドウサイズ | L2, L3, L7 | `window_options.rs::native_options_set_layout_sizes_when_created`, `window_options.rs::minimum_fits_default_when_sizes_are_compared`, `size_dpi_matrix.rs::min_size_matches_real_app_viewport`, L7 実機スモーク手順 4 |
+| 最小ウィンドウサイズ | L2, L3, L7, L8 | `window_options.rs::native_options_set_layout_sizes_when_created`, `window_options.rs::minimum_fits_default_when_sizes_are_compared`, `size_dpi_matrix.rs::min_size_matches_real_app_viewport`, L7 ネイティブ QA、L8 実機スモーク手順 4 |
 | ツール承認 (相関 ID 表示・個別承認/拒否) | L1, L2, L4 | `pending_approvals.rs::pending_approvals_removes_only_exact_resolved_key`, `pending_approvals.rs::pending_approvals_ignores_unknown_and_other_scope_resolutions`, `pending_approvals.rs::pending_approvals_workbench_removes_only_resolved_request`, `approvals_panel_headless.rs::displays_correlations_and_arguments_when_requests_are_pending`, `approvals_panel_headless.rs::approves_exact_scope_when_second_row_is_clicked`, `approvals_panel_headless.rs::removes_only_resolved_row_when_resolution_arrives`, `pending_approvals_capture.rs::capture_pending_approvals_png_evidence` |
 
 テストファイルは特記なき限り `crates/gui/tests/` 配下。
@@ -164,7 +181,9 @@ evorch-gui の検証は 7 つのレイヤー (L1 から L7) で構成する。L1
 | `CHROME` | 環境変数 | chromiumoxide の実行ファイル検出が参照する Chromium パス。browser-e2e で設定 | L6 |
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
-| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 24 PNG のサイズ x DPI 証跡マトリクスを生成し枚数を検査。内部で `headless_capture --size WxH --dpi F --demo/--error-thread/--edit-profile/--pending-approvals --out` を使用 | L4 |
+| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 41 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
 | `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
 | `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
-| `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L7 |
+| `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |
+| `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の起動バイナリと出力ディレクトリを指定する | L7 |
+| `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L8 |

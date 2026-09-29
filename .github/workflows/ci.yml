@@ -156,8 +156,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os }}-cargo
-      - name: Install headless rendering deps (Vulkan lavapipe / GL / mold)
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold
+      - name: Install headless rendering and isolated X11 deps
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq bubblewrap libx11-6 libxcursor1 libxi6 libxrandr2
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - name: Run all ignored GUI tests (required real render)
@@ -171,9 +171,15 @@ jobs:
         run: scripts/gui-evidence-matrix.sh
         env:
           WGPU_BACKEND: vulkan
+      - name: Build native desktop app
+        run: cargo build -p gui --bin evorch-gui
+      - name: Exercise native GUI in a private Xvfb
+        run: scripts/check-gui-native.sh target/gui-evidence/native
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: gui-evidence
+          if-no-files-found: warn
           include-hidden-files: true
           path: |
             target/gui-evidence

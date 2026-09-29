@@ -1,4 +1,4 @@
-// allow: SIZE_OK - Keep the existing capture parser and its private BDD tests together; T3 adds only one capture mode.
+// allow: SIZE_OK - Keep the capture parser and its private BDD tests together.
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
@@ -16,11 +16,15 @@ const DEFAULT_OUTPUT: &str = "target/headless-capture.png";
 struct CaptureArgs {
     output: PathBuf,
     demo: bool,
+    with_memory: bool,
     error_thread: bool,
     pending_approvals: bool,
     provider_configured: bool,
     open_settings: bool,
     open_theme_settings: bool,
+    open_role_settings: bool,
+    open_routing_settings: bool,
+    open_sandbox_settings: bool,
     edit_profile: bool,
     activate: Option<String>,
     pointer: Option<(f32, f32)>,
@@ -37,7 +41,7 @@ enum CaptureArgumentError {
     SizeDimensions,
     #[error("--dpi requires a positive number")]
     Dpi,
-    #[error("--theme requires graphite or tokyo-night")]
+    #[error("--theme requires graphite, tokyo-night, or high-contrast")]
     Theme,
 }
 
@@ -52,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let capture = parse_args(arguments.into_iter())?;
     let demo_dir = capture.demo.then(tempfile::tempdir).transpose()?;
+    let memory_dir = capture.with_memory.then(tempfile::tempdir).transpose()?;
     let mut state = match demo_dir.as_ref() {
         Some(dir) => {
             let sidebar = demo_sidebar(dir.path())?;
@@ -62,8 +67,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())?,
     };
+    if let Some(dir) = memory_dir.as_ref() {
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("memory.db"),
+            ..Default::default()
+        };
+        storage::Storage::open(config.clone())?.close();
+        state = state.with_memory_storage(config);
+    }
     if capture.provider_configured {
         state = state.with_provider_status(ProviderStatus::Configured);
+    }
+    if let Some(dir) = demo_dir.as_ref() {
+        state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
     }
     if capture.open_settings {
         let config = gui::fixture::demo_provider_config();
@@ -77,8 +93,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if capture.open_theme_settings {
         state.open_theme_settings();
     }
-    if let Some(dir) = demo_dir.as_ref() {
-        state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
+    if capture.open_role_settings {
+        state.open_role_settings();
+    }
+    if capture.open_routing_settings {
+        state.open_routing_settings();
+    }
+    if capture.open_sandbox_settings {
+        state.open_sandbox_settings();
     }
     if capture.error_thread {
         state.apply_events(demo_error_events());
@@ -125,11 +147,15 @@ fn parse_args(
 ) -> Result<CaptureArgs, Box<dyn Error>> {
     let mut output: Option<PathBuf> = None;
     let mut demo = false;
+    let mut with_memory = false;
     let mut error_thread = false;
     let mut pending_approvals = false;
     let mut provider_configured = false;
     let mut open_settings = false;
     let mut open_theme_settings = false;
+    let mut open_role_settings = false;
+    let mut open_routing_settings = false;
+    let mut open_sandbox_settings = false;
     let mut edit_profile = false;
     let mut activate: Option<String> = None;
     let mut pointer: Option<(f32, f32)> = None;
@@ -146,6 +172,7 @@ fn parse_args(
                 theme = Some(match value.to_str() {
                     Some("graphite") => ThemePreset::Graphite,
                     Some("tokyo-night") => ThemePreset::TokyoNight,
+                    Some("high-contrast") => ThemePreset::HighContrast,
                     _ => return Err(CaptureArgumentError::Theme.into()),
                 });
             }
@@ -216,6 +243,10 @@ fn parse_args(
             }
             Some("--demo") if demo => return Err("unexpected additional arguments".into()),
             Some("--demo") => demo = true,
+            Some("--with-memory") if with_memory => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--with-memory") => with_memory = true,
             Some("--error-thread") if error_thread => {
                 return Err("unexpected additional arguments".into());
             }
@@ -236,6 +267,18 @@ fn parse_args(
                 return Err("unexpected additional arguments".into());
             }
             Some("--open-theme-settings") => open_theme_settings = true,
+            Some("--open-role-settings") if open_role_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-role-settings") => open_role_settings = true,
+            Some("--open-routing-settings") if open_routing_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-routing-settings") => open_routing_settings = true,
+            Some("--open-sandbox-settings") if open_sandbox_settings => {
+                return Err("unexpected additional arguments".into());
+            }
+            Some("--open-sandbox-settings") => open_sandbox_settings = true,
             Some("--edit-profile") => {
                 open_settings = true;
                 edit_profile = true;
@@ -257,14 +300,32 @@ fn parse_args(
     if pending_approvals && !demo {
         return Err("--pending-approvals requires --demo".into());
     }
+    if [
+        open_settings,
+        open_theme_settings,
+        open_role_settings,
+        open_routing_settings,
+        open_sandbox_settings,
+    ]
+    .into_iter()
+    .filter(|open| *open)
+    .count()
+        > 1
+    {
+        return Err("choose one settings modal to capture".into());
+    }
     Ok(CaptureArgs {
         output: output.unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT)),
         demo,
+        with_memory,
         error_thread,
         pending_approvals,
         provider_configured,
         open_settings,
         open_theme_settings,
+        open_role_settings,
+        open_routing_settings,
+        open_sandbox_settings,
         edit_profile,
         activate,
         pointer,
@@ -276,19 +337,23 @@ fn parse_args(
 
 fn print_help() {
     println!(
-        r#"Usage: headless_capture [--demo] [--error-thread] [--pending-approvals] [--provider-configured] [--open-settings] [--activate ID] [--pointer X Y] [--size WxH] [--dpi F] [--out PATH] [PATH]
+        r#"Usage: headless_capture [OPTIONS] [PATH]
 
 Captures a headless workbench frame as PNG.
 
 Modes:
-   --theme NAME   graphite (default) or tokyo-night
+   --theme NAME   graphite (default), tokyo-night, or high-contrast
    (default)      empty workbench state
    --demo         deterministic populated workbench (fixture::populate)
+   --with-memory  register the Memory and Arena panels with an isolated SQLite fixture
    --error-thread  with --demo: mark the active demo thread as Error (red status dot)
    --pending-approvals  with --demo: show two requests in Conversation (overrides --activate)
    --provider-configured  enable the composer without provider setup guidance (capture only)
    --open-settings  show the registered demo profile list
    --open-theme-settings  show the theme picker
+   --open-role-settings  show agent role settings
+   --open-routing-settings  show routing settings
+   --open-sandbox-settings  show sandbox settings
    --edit-profile   open the local demo profile editor
    --activate ID  activate the given panel tab before capturing (e.g. diff-main)
   --pointer X Y  move the pointer to (X, Y) before capturing (hover-state captures)
@@ -316,11 +381,45 @@ mod tests {
     use super::{DEFAULT_OUTPUT, parse_args};
 
     #[test]
+    fn parse_args_enables_isolated_memory_panels() {
+        let capture = parse_args(args([
+            "--demo",
+            "--with-memory",
+            "--activate",
+            "memory-main",
+        ]))
+        .expect("memory panel fixture must parse");
+        assert!(capture.with_memory);
+        assert_eq!(capture.activate.as_deref(), Some("memory-main"));
+    }
+
+    #[test]
+    fn parse_args_selects_each_settings_surface() {
+        for (flag, selected) in [
+            ("--open-role-settings", "role"),
+            ("--open-routing-settings", "routing"),
+            ("--open-sandbox-settings", "sandbox"),
+        ] {
+            let capture = parse_args(args(["--demo", flag])).unwrap();
+            assert_eq!(capture.open_role_settings, selected == "role");
+            assert_eq!(capture.open_routing_settings, selected == "routing");
+            assert_eq!(capture.open_sandbox_settings, selected == "sandbox");
+        }
+        let error = parse_args(args(["--open-theme-settings", "--open-role-settings"]))
+            .expect_err("only one settings modal can be visible");
+        assert_eq!(error.to_string(), "choose one settings modal to capture");
+    }
+
+    #[test]
     fn parse_args_selects_theme() {
         // Given: each supported theme name; When: parsing; Then: select its preset.
         for (name, expected) in [
             ("graphite", gui::theme::style::ThemePreset::Graphite),
             ("tokyo-night", gui::theme::style::ThemePreset::TokyoNight),
+            (
+                "high-contrast",
+                gui::theme::style::ThemePreset::HighContrast,
+            ),
         ] {
             assert_eq!(parse_args(args(["--theme", name])).unwrap().theme, expected);
         }
