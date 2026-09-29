@@ -155,6 +155,64 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
 }
 
 #[test]
+fn past_subagents_remain_browsable_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut original = state(dir.path(), &["one", "two"]);
+    persist_and_apply(
+        &storage,
+        &mut original,
+        vec![
+            started("run-1", None, "chat:one"),
+            started("run-2", Some("run-1"), "agent one"),
+            delta("run-2", "result from first child"),
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Done,
+                reason: None,
+            }),
+            started("run-3", None, "chat:two"),
+            started("run-4", Some("run-3"), "agent two"),
+            delta("run-4", "result from second child"),
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-4".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Done,
+                reason: None,
+            }),
+        ],
+    );
+    original.switch_thread(ThreadId::new("two")).unwrap();
+    storage.close();
+
+    let sidebar = workspace_ui::load_sidebar(&dir.path().join("sidebar.json")).unwrap();
+    let mut reopened = state(dir.path(), &["one", "two"]).with_sidebar(sidebar);
+    let database = Database::open(&config).unwrap();
+    reopened.restore_history(&database).unwrap();
+    reopened.restore_history(&database).unwrap();
+
+    let mut gui = gui::headless::HeadlessWorkbench::new(reopened, [1200.0, 900.0]);
+    gui.run();
+    assert!(gui.has_label("agent two"));
+    assert!(gui.has_label("run-4"));
+    assert!(!gui.has_label("agent one"));
+    gui.click_label("run-4");
+    gui.run();
+    assert!(gui.has_label("result from second child"));
+
+    gui.state_mut().switch_thread(ThreadId::new("one")).unwrap();
+    gui.run();
+    assert!(gui.has_label("agent one"));
+    assert!(gui.has_label("run-2"));
+    assert!(!gui.has_label("agent two"));
+}
+
+#[test]
 fn goal_children_and_continuation_replay_in_their_owning_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {

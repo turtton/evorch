@@ -34,6 +34,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
         let events = db.events_all_ordered()?;
+        self.tasks
+            .restore_events(events.iter().map(|stored| &stored.event));
         // A legacy event subscriber could drop stream deltas under load. The
         // context snapshot still contains the complete accepted response.
         // Repair the final waiting turn at its original position in the replay.

@@ -67,6 +67,42 @@ mod tests {
     }
 
     #[test]
+    fn restored_child_survives_refresh_and_live_summary_replaces_it() {
+        let mut model = TasksModel::new(Source(Vec::new()));
+        let events = [
+            Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: "run-1".into(),
+                parent_run_id: None,
+                agent_name: "root".into(),
+                role: "orchestrator".into(),
+            }),
+            Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: "run-2".into(),
+                parent_run_id: Some("run-1".into()),
+                agent_name: "older child".into(),
+                role: "reviewer".into(),
+            }),
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Done,
+                reason: None,
+            }),
+        ];
+        model.restore_events(events.iter());
+        assert_eq!(model.rows().len(), 1);
+        assert_eq!(model.rows()[0].name, "older child");
+        assert_eq!(model.rows()[0].status, AgentRunPhase::Done);
+        model.refresh();
+        assert_eq!(model.rows().len(), 1);
+
+        model.update(&[summary(2, AgentRunPhase::Running)]);
+        assert_eq!(model.rows().len(), 1);
+        assert_eq!(model.rows()[0].name, "custom-name");
+        assert_eq!(model.rows()[0].status, AgentRunPhase::Running);
+    }
+
+    #[test]
     fn state_change_updates_known_row_and_unknown_refreshes() {
         // Given: a refreshed row built from a summary with distinct identity values
         let source = Source(vec![summary(2, AgentRunPhase::Running)]);
@@ -124,6 +160,7 @@ pub struct TaskRow {
 pub struct TasksModel<S> {
     source: S,
     rows: Vec<TaskRow>,
+    history_rows: Vec<TaskRow>,
 }
 
 pub fn role_for_run<'a>(rows: &'a [TaskRow], run_id: &str) -> Option<&'a str> {
@@ -140,6 +177,7 @@ impl<S: AgentRunSource> TasksModel<S> {
         Self {
             source,
             rows: Vec::new(),
+            history_rows: Vec::new(),
         }
     }
 
@@ -157,7 +195,8 @@ impl<S: AgentRunSource> TasksModel<S> {
     }
 
     pub fn update(&mut self, summaries: &[AgentSummary]) {
-        self.rows = summaries
+        self.rows = self.history_rows.clone();
+        for live in summaries
             .iter()
             .filter(|summary| summary.parent_run_id.is_some())
             .map(|summary| TaskRow {
@@ -167,24 +206,80 @@ impl<S: AgentRunSource> TasksModel<S> {
                 status: summary.phase,
                 model: summary.model.clone(),
             })
-            .collect();
+        {
+            if let Some(row) = self.rows.iter_mut().find(|row| row.run_id == live.run_id) {
+                *row = live;
+            } else {
+                self.rows.push(live);
+            }
+        }
         self.rows.sort_by_key(|row| row.run_id.get());
     }
 
+    /// Rebuild the delegated-run index from durable events on startup.
+    pub fn restore_events<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) {
+        let mut restored = std::collections::BTreeMap::<u64, TaskRow>::new();
+        for event in events {
+            match &event.kind {
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                    run_id,
+                    parent_run_id: Some(_),
+                    agent_name,
+                    role,
+                }) => {
+                    let Some(id) = parse_run_id(run_id) else {
+                        continue;
+                    };
+                    restored.entry(id.get()).or_insert_with(|| TaskRow {
+                        run_id: id,
+                        name: agent_name.clone(),
+                        role: role.clone(),
+                        status: AgentRunPhase::Pending,
+                        model: String::new(),
+                    });
+                }
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id, to, ..
+                }) => {
+                    if let Some(row) =
+                        parse_run_id(run_id).and_then(|id| restored.get_mut(&id.get()))
+                    {
+                        row.status = *to;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.history_rows = restored.into_values().collect();
+        self.refresh();
+    }
+
     pub fn apply_event(&mut self, event: &Event) {
-        let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
-            &event.kind
-        else {
-            return;
-        };
-        if let Some(row) = self
-            .rows
-            .iter_mut()
-            .find(|row| row.run_id.to_string() == *run_id)
-        {
-            row.status = *to;
-        } else {
-            self.refresh();
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { .. }) => self.refresh(),
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+                if let Some(row) = self
+                    .history_rows
+                    .iter_mut()
+                    .find(|row| row.run_id.to_string() == *run_id)
+                {
+                    row.status = *to;
+                }
+                if let Some(row) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.run_id.to_string() == *run_id)
+                {
+                    row.status = *to;
+                } else {
+                    self.refresh();
+                }
+            }
+            _ => {}
         }
     }
+}
+
+fn parse_run_id(value: &str) -> Option<RunId> {
+    value.strip_prefix("run-")?.parse().ok().map(RunId::new)
 }
