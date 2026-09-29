@@ -157,7 +157,7 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-cargo
       - name: Install headless rendering and isolated X11 deps
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq libx11-6 libxcursor1 libxi6 libxrandr2
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq libx11-6 libxcursor1 libxi6 libxrandr2 libxkbcommon-x11-0
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - name: Run all ignored GUI tests (required real render)
