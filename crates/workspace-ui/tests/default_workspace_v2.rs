@@ -4,7 +4,7 @@ use workspace_ui::{
 };
 
 #[test]
-fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
+fn default_v02_places_diff_in_left_global_tabs_and_subagents_on_right() {
     // Given: the current default workspace constructor.
     // When: the framework-independent workspace is built.
     let workspace = Workspace::default_v02();
@@ -34,7 +34,8 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
         LayoutNode::Tabs(Tabs {
             panels: vec![
                 PanelId::new("tasks-main"),
-                PanelId::new("notifications-main")
+                PanelId::new("notifications-main"),
+                PanelId::new("diff-main")
             ],
             active: 0
         })
@@ -63,22 +64,10 @@ fn default_v02_places_terminal_below_center_and_diff_below_right_tabs() {
             active: 0,
         })
     );
-    let LayoutNode::Split(right) = content.second.as_ref() else {
-        panic!("right must split agents/notifications above diff");
-    };
-    assert_eq!(right.direction, SplitDirection::Vertical);
-    assert_eq!(right.fraction, 0.5);
     assert_eq!(
-        right.first.as_ref(),
-        &LayoutNode::Tabs(Tabs {
-            panels: vec![PanelId::new("subagents-home")],
-            active: 0,
-        })
-    );
-    assert_eq!(
-        *right.second,
+        *content.second,
         LayoutNode::Tabs(Tabs {
-            panels: vec![PanelId::new("diff-main")],
+            panels: vec![PanelId::new("subagents-home")],
             active: 0,
         })
     );

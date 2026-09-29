@@ -120,7 +120,7 @@ impl Workspace {
         }
     }
 
-    /// Sidebar・中央下部 Terminal・右側上下ペインの既定レイアウトを構築します。
+    /// 左側のグローバル領域・中央の会話と Terminal・右側の Subagents を構築します。
     pub fn default_v02() -> Self {
         let tabs = |panels: &[&str]| {
             LayoutNode::Tabs(Tabs {
@@ -130,7 +130,7 @@ impl Workspace {
         };
         let sidebar_panels: &[&str] = &["sidebar-main"];
         let conversation_panels: &[&str] = &["agent-main"];
-        let global_panels: &[&str] = &["tasks-main", "notifications-main"];
+        let global_panels: &[&str] = &["tasks-main", "notifications-main", "diff-main"];
 
         Self {
             version: WORKSPACE_SCHEMA_VERSION,
@@ -154,12 +154,7 @@ impl Workspace {
                             first: Box::new(tabs(conversation_panels)),
                             second: Box::new(tabs(&["terminal-main"])),
                         })),
-                        second: Box::new(LayoutNode::Split(Split {
-                            direction: SplitDirection::Vertical,
-                            fraction: 0.5,
-                            first: Box::new(tabs(&["subagents-home"])),
-                            second: Box::new(tabs(&["diff-main"])),
-                        })),
+                        second: Box::new(tabs(&["subagents-home"])),
                     })),
                 }),
                 floating: Vec::new(),

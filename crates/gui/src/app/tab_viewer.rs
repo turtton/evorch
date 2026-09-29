@@ -32,6 +32,7 @@ mod conversation;
 pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) pending_approvals: &'a PendingApprovalsModel,
     pub(super) request_action: &'a mut Option<RequestAction>,
+    pub(super) diagnostics_request: &'a mut bool,
     pub(super) user_questions: &'a BTreeMap<String, event_bus::UserQuestion>,
     pub(super) question_drafts: &'a mut BTreeMap<String, String>,
     pub(super) notifications: &'a mut NotificationsModel,

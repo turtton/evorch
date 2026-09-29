@@ -21,7 +21,7 @@ fn v2_layout_with_goal_and_merge_panels_migrates_to_v3_pruned() {
     );
     assert_eq!(
         root["first"]["second"]["panels"],
-        serde_json::json!(["notifications-main"])
+        serde_json::json!(["notifications-main", "diff-main"])
     );
     ws.validate().unwrap();
 }

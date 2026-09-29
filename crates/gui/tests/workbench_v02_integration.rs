@@ -656,13 +656,16 @@ fn v02_end_to_end_chained_scenario() {
         leaf_sets,
         vec![
             BTreeSet::from(["sidebar-main".to_string()]),
-            BTreeSet::from(["notifications-main".to_string(), "tasks-main".to_string()]),
+            BTreeSet::from([
+                "notifications-main".to_string(),
+                "tasks-main".to_string(),
+                "diff-main".to_string(),
+            ]),
             BTreeSet::from(["agent-main".to_string(), "agent-run-1".to_string()]),
             BTreeSet::from(["terminal-main".to_string()]),
             BTreeSet::from(["subagents-home".to_string()]),
             BTreeSet::from(["agent-run-2".to_string()]),
             BTreeSet::from(["agent-run-3".to_string()]),
-            BTreeSet::from(["diff-main".to_string()]),
         ],
         "saved tree must keep the v0.2 regions and dynamic transcript tabs"
     );

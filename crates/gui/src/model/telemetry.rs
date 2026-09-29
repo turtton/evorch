@@ -54,6 +54,7 @@ pub struct TelemetryRow {
     ttft_sum_ms: u64,
     ttft_count: u64,
     pub request_duration: Option<Duration>,
+    completed_request_duration: Duration,
     pub output_tokens: u64,
     streamed_chars: u64,
 }
@@ -98,7 +99,7 @@ pub struct TelemetryOverlay {
     context_order: u64,
 }
 
-/// Thread totals plus the conversation root's latest request measurements.
+/// Thread totals plus the conversation roots' latest and average request measurements.
 /// Costs and wall time include owned children; cache and model performance do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThreadMetrics {
@@ -108,7 +109,11 @@ pub struct ThreadMetrics {
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
     pub ttft: Option<Duration>,
+    /// Mean of the first-token observations across the conversation requests.
+    pub average_ttft: Option<Duration>,
     pub tok_s: Option<f64>,
+    /// Completed output tokens divided by completed provider request duration.
+    pub average_tok_s: Option<f64>,
 }
 
 impl TelemetryOverlay {
@@ -261,7 +266,10 @@ impl TelemetryOverlay {
                 row.in_flight = false;
                 row.last_finish_reason = Some(finish_reason.clone());
                 row.output_tokens = *output_tokens;
-                row.request_duration = Some(Duration::from_millis(*duration_ms));
+                let duration = Duration::from_millis(*duration_ms);
+                row.request_duration = Some(duration);
+                row.completed_request_duration =
+                    row.completed_request_duration.saturating_add(duration);
             }
             EventKind::Provider(ProviderEvent::RequestFailed {
                 duration_ms,

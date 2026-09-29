@@ -80,15 +80,13 @@ fn persisted_old_right_group_reconciles_global_tabs_and_keeps_terminal_selection
     };
     assert!(globals.panels.contains(&PanelId::new("tasks-main")));
     assert!(globals.panels.contains(&PanelId::new("notifications-main")));
+    assert!(globals.panels.contains(&PanelId::new("diff-main")));
     assert!(dock.find_tab(&PanelId::new("agents-main")).is_none());
     let terminal = dock
         .find_tab(&PanelId::new("terminal-main"))
         .expect("terminal");
     let leaf = dock.leaf(terminal.node_path()).expect("terminal leaf");
-    assert_eq!(
-        leaf.tabs,
-        vec![PanelId::new("diff-main"), PanelId::new("terminal-main")]
-    );
+    assert_eq!(leaf.tabs, vec![PanelId::new("terminal-main")]);
     assert_eq!(leaf.active, terminal.tab);
     assert_eq!(
         workspace_ui::from_json(&workspace_ui::to_json(&restored).unwrap()).unwrap(),

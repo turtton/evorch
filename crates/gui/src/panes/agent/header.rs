@@ -12,9 +12,9 @@ pub(super) fn header_strip(
         return;
     }
     surface_frame(palette().SURFACE).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
-            if let Some(identity) = identity {
+        if let Some(identity) = identity {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
                 let label = match (identity.name, identity.role) {
                     (Some(name), Some(role)) => format!("{} / {name} / {role}", identity.run_id),
                     (Some(name), None) => format!("{} / {name}", identity.run_id),
@@ -25,10 +25,22 @@ pub(super) fn header_strip(
                 if ui.button("← Thread").clicked() {
                     *action = Some(AgentPaneAction::Agents(AgentsAction::ReturnToThread));
                 }
-            } else if let Some(title) = ctx.active_thread_title {
-                ui.label(h3(format!("Thread: {title}")));
-            }
-        });
+            });
+        } else if let Some(title) = ctx.active_thread_title {
+            ui.horizontal(|ui| {
+                ui.set_min_height(ROW_COMPACT - 2.0 * SP_2);
+                if ui.small_button("ℹ").on_hover_text("実行の診断").clicked() {
+                    *action = Some(AgentPaneAction::OpenDiagnostics);
+                }
+                let width = ui.available_width().max(0.0);
+                ui.add_sized(
+                    [width, ROW_DENSE],
+                    egui::Label::new(h3(format!("Thread: {title}")))
+                        .truncate()
+                        .halign(egui::Align::LEFT),
+                );
+            });
+        }
         if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty()) {
             ui.horizontal_wrapped(|ui| {
                 if let Some(parent) = ctx.parent_thread
@@ -74,13 +86,8 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
                 .cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
             metrics.cache_hit_rate_label(),
-            metrics.ttft.map_or_else(
-                || "TTFT —".into(),
-                |ttft| format!("TTFT {}ms", ttft.as_millis()),
-            ),
-            metrics
-                .tok_s
-                .map_or_else(|| "— tok/s".into(), |rate| format!("{rate:.1} tok/s")),
+            metrics.ttft_label(),
+            metrics.tok_s_label(),
             metrics
                 .context_pressure
                 .map_or_else(|| "ctx —".into(), |pressure| format!("ctx {pressure}%")),

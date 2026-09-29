@@ -39,7 +39,7 @@ fn assert_content_layout(root: &LayoutNode) {
             direction: SplitDirection::Vertical,
             fraction: 0.65,
             first: Box::new(tabs(&["sidebar-main"])),
-            second: Box::new(tabs(&["tasks-main", "notifications-main"])),
+            second: Box::new(tabs(&["tasks-main", "notifications-main", "diff-main"])),
         })
     );
     assert_eq!(
@@ -51,26 +51,17 @@ fn assert_content_layout(root: &LayoutNode) {
             second: Box::new(tabs(&["terminal-main"])),
         })
     );
-    let right_tabs = &["subagents-home"];
-    assert_eq!(
-        *content.second,
-        LayoutNode::Split(Split {
-            direction: SplitDirection::Vertical,
-            fraction: 0.5,
-            first: Box::new(tabs(right_tabs)),
-            second: Box::new(tabs(&["diff-main"])),
-        })
-    );
+    assert_eq!(*content.second, tabs(&["subagents-home"]));
 }
 
 #[test]
-fn default_layout_has_bottom_terminal_and_split_right_pane() {
+fn default_layout_has_bottom_terminal_left_diff_and_thread_local_right_pane() {
     // Given: the default v0.2 workspace
     let workspace = Workspace::default();
     // When: the actual egui_dock tree is built and extracted
     let dock = gui::dock::to_dock_state(&workspace).expect("dock");
     let extracted = gui::dock::from_dock_state(&dock, &workspace.panels).expect("workspace");
-    // Then: Terminal is below Conversation and Diff is below the thread-local Subagents list
+    // Then: Terminal is below Conversation, Diff is global, and Subagents is thread-local
     assert_content_layout(&extracted.main.root);
 }
 

@@ -4,6 +4,7 @@ pub(crate) fn notifications(workspace: &mut Workspace) {
     let id = PanelId::new("notifications-main");
     if find_tabs(workspace, &|tabs| tabs.panels.contains(&id)).is_some() {
         retire_agents(workspace);
+        move_main_diff_to_globals(workspace);
         return;
     }
     let anchors: Vec<_> = workspace
@@ -36,6 +37,44 @@ pub(crate) fn notifications(workspace: &mut Workspace) {
         target: None,
     });
     retire_agents(workspace);
+    move_main_diff_to_globals(workspace);
+}
+
+// Diff describes the project checkout, so main-window Diff tabs share the global
+// leaf. Detached panes retain their explicit floating-window placement.
+fn move_main_diff_to_globals(workspace: &mut Workspace) {
+    let anchors: Vec<_> = workspace
+        .panels
+        .values()
+        .filter(|panel| matches!(panel.kind, PanelKind::Tasks | PanelKind::Notifications))
+        .map(|panel| panel.id.clone())
+        .collect();
+    let Some(globals) = find_node_tabs(&mut workspace.main.root, &|tabs| {
+        tabs.panels.iter().any(|id| anchors.contains(id))
+    }) else {
+        return;
+    };
+    let global_ids = globals.panels.clone();
+    let diff_ids: Vec<_> = workspace
+        .panels
+        .values()
+        .filter(|panel| panel.kind == PanelKind::Diff && !global_ids.contains(&panel.id))
+        .map(|panel| panel.id.clone())
+        .filter(|id| {
+            find_node_tabs(&mut workspace.main.root, &|tabs| tabs.panels.contains(id)).is_some()
+        })
+        .collect();
+    if diff_ids.is_empty() {
+        return;
+    }
+    // A global anchor remains, so removing Diff cannot empty the main tree.
+    workspace.main.root = prune(workspace.main.root.clone(), &diff_ids)
+        .expect("global tabs remain after moving Diff");
+    if let Some(globals) = find_node_tabs(&mut workspace.main.root, &|tabs| {
+        tabs.panels.iter().any(|id| anchors.contains(id))
+    }) {
+        globals.panels.extend(diff_ids);
+    }
 }
 
 fn find_tabs<'a>(
