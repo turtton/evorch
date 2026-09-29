@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Real Linux window/input regression in a private Xvfb; never uses the caller's display.
-# Build first: cargo build -p gui --bin evorch-gui
-# Usage: GUI_BIN=target/debug/evorch-gui scripts/check-gui-native.sh [OUTPUT_DIR]
-# Dependencies: Xvfb, Openbox, xdotool, ImageMagick, jq, bubblewrap, git, coreutils.
+# Build first: cargo build -p gui --bin native_qa_window
+# Usage: scripts/check-gui-native.sh [OUTPUT_DIR]
+# GUI_QA_MODE=runtime uses evorch-gui --demo and requires working bubblewrap.
+# Dependencies: Xvfb, Openbox, xdotool, ImageMagick, jq, git, coreutils.
 set -Eeuo pipefail
 
 fail() { printf 'Native GUI QA: %s\n' "$*" >&2; exit 1; }
@@ -12,7 +13,7 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
 fi
 [[ $# -le 1 ]] || fail 'Expected at most one output directory.'
 [[ $(uname -s) == Linux ]] || fail 'This check requires Linux.'
-for dependency in Xvfb openbox xdotool jq bwrap git timeout mktemp realpath; do
+for dependency in Xvfb openbox xdotool jq git timeout mktemp realpath; do
     command -v "$dependency" >/dev/null || fail "Missing dependency: $dependency"
 done
 # Support ImageMagick 7 and the ImageMagick 6 packages on Ubuntu CI runners.
@@ -28,8 +29,17 @@ else
 fi
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-gui_bin=$(realpath -- "${GUI_BIN:-$repo_root/target/debug/evorch-gui}")
-[[ -x "$gui_bin" ]] || fail "GUI_BIN is not executable: $gui_bin (build evorch-gui first)."
+mode=${GUI_QA_MODE:-fixture}
+case "$mode" in
+    fixture) default_bin=$repo_root/target/debug/native_qa_window ;;
+    runtime)
+        default_bin=$repo_root/target/debug/evorch-gui
+        command -v bwrap >/dev/null || fail "Missing dependency: bwrap"
+        ;;
+    *) fail "GUI_QA_MODE must be fixture or runtime, got: $mode" ;;
+esac
+gui_bin=$(realpath -- "${GUI_BIN:-$default_bin}")
+[[ -x "$gui_bin" ]] || fail "GUI_BIN is not executable: $gui_bin (build the selected GUI_QA_MODE binary first)."
 out=$(realpath -m -- "${1:-${GUI_QA_OUTPUT_DIR:-$repo_root/target/gui-native}}")
 mkdir -p -- "$out"
 # Each run owns a new evidence directory, so stale screenshots cannot satisfy checks.
@@ -138,18 +148,20 @@ cat > "$out/input-layout.json" <<'JSON'
 }
 JSON
 window_title="evorch-native-qa-$$-${RANDOM}"
+app_args=(--window-title "$window_title" --layout "$out/input-layout.json"
+    --save-layout "$qa_tmp/saved-layout.json")
+if [[ "$mode" == runtime ]]; then
+    app_args+=(--demo --settings "$qa_tmp/ui.toml" --state "$qa_tmp/sidebar.json")
+fi
 (
     cd "$qa_tmp/work"
-    exec timeout --kill-after=3s 90s "${qa_env[@]}" "$gui_bin" --demo \
-        --window-title "$window_title" --settings "$qa_tmp/ui.toml" \
-        --state "$qa_tmp/sidebar.json" --layout "$out/input-layout.json" \
-        --save-layout "$qa_tmp/saved-layout.json"
+    exec timeout --kill-after=3s 90s "${qa_env[@]}" "$gui_bin" "${app_args[@]}"
 ) >"$out/app.log" 2>&1 &
 app_pid=$!
 for ((attempt=0; attempt<150; attempt++)); do
     window=$(run xdotool search --onlyvisible --name "^${window_title}$" 2>/dev/null || true)
     [[ "$window" =~ ^[0-9]+$ ]] && break
-    kill -0 "$app_pid" 2>/dev/null || fail 'evorch-gui exited before creating its window.'
+    kill -0 "$app_pid" 2>/dev/null || fail 'GUI executable exited before creating its window.'
     sleep 0.1
 done
 [[ "$window" =~ ^[0-9]+$ ]] || fail 'Expected one visible GUI window within 15 seconds.'

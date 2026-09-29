@@ -157,7 +157,7 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-cargo
       - name: Install headless rendering and isolated X11 deps
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq bubblewrap libx11-6 libxcursor1 libxi6 libxrandr2
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libegl1 libgl1-mesa-dri libglx-mesa0 mold xvfb openbox xdotool imagemagick jq libx11-6 libxcursor1 libxi6 libxrandr2
       - name: Prepare evidence directories
         run: mkdir -p target/gui-evidence/model-metadata /tmp/opencode
       - name: Run all ignored GUI tests (required real render)
@@ -171,8 +171,8 @@ jobs:
         run: scripts/gui-evidence-matrix.sh
         env:
           WGPU_BACKEND: vulkan
-      - name: Build native desktop app
-        run: cargo build -p gui --bin evorch-gui
+      - name: Build native GUI fixture window
+        run: cargo build -p gui --bin native_qa_window
       - name: Exercise native GUI in a private Xvfb
         run: scripts/check-gui-native.sh target/gui-evidence/native
       - uses: actions/upload-artifact@v4

@@ -77,16 +77,22 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 
 ### L7: Linux 仮想 X11 実ウィンドウ操作
 
-- 役割: 専用 Xvfb と Openbox 内で `evorch-gui --demo` を起動し、実際の
-  ウィンドウへキーボードとマウスを入力する。Ctrl+1/2/3 のタブ移動、
-  レイアウト保存・リセット、最小サイズの強制、正常終了を検証する。
-  各操作の PNG、保存レイアウト、ログを証跡として残す。
-- コマンド: `cargo build -p gui --bin evorch-gui` の後に
+- 役割: 専用 Xvfb と Openbox 内で GUI 本体と同じ `WorkbenchApp` を使う
+  `native_qa_window` を起動し、実際のウィンドウへキーボードとマウスを入力する。
+  Ctrl+1/2/3 のタブ移動、レイアウト保存・リセット、最小サイズの強制、
+  正常終了を検証する。各操作の PNG、保存レイアウト、ログを証跡として残す。
+  この fixture はランタイムとサンドボックスを起動しない。
+- コマンド: `cargo build -p gui --bin native_qa_window` の後に
   `scripts/check-gui-native.sh [OUT]`。既定出力は `target/gui-native`。
-- 必要コマンド: `Xvfb`、`openbox`、`xdotool`、ImageMagick、`jq`、
-  `bwrap`。Nix 開発環境では例えば
-  `nix develop -c nix shell nixpkgs#xorg-server nixpkgs#openbox nixpkgs#xdotool nixpkgs#imagemagick nixpkgs#bubblewrap nixpkgs#jq -c scripts/check-gui-native.sh`。
-- 環境変数: `GUI_BIN` (既定 `target/debug/evorch-gui`)、
+- 必要コマンド: `Xvfb`、`openbox`、`xdotool`、ImageMagick、`jq`。
+  Nix 開発環境では例えば
+  `nix develop -c nix shell nixpkgs#xorg-server nixpkgs#openbox nixpkgs#xdotool nixpkgs#imagemagick nixpkgs#jq -c scripts/check-gui-native.sh`。
+- 実アプリまで通す場合: `cargo build -p gui --bin evorch-gui` の後、
+  bubblewrap が動作する Linux ホストで `GUI_QA_MODE=runtime scripts/check-gui-native.sh [OUT]`。
+  GitHub Actions ランナーでは bubblewrap のネットワーク名前空間作成が拒否されるため、
+  CI では fixture モードを使用する。
+- 環境変数: `GUI_QA_MODE` (`fixture` / `runtime`、既定 `fixture`)、
+  `GUI_BIN` (モードに応じた既定バイナリを上書き)、
   `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
 - CI ジョブ: `offscreen-gate` (`gui-evidence` artifact の `native/`)
 
@@ -185,5 +191,5 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
 | `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
 | `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |
-| `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の起動バイナリと出力ディレクトリを指定する | L7 |
+| `GUI_QA_MODE` / `GUI_BIN` / `GUI_QA_OUTPUT_DIR` | 環境変数 | L7 の fixture / 実アプリ、起動バイナリ、出力ディレクトリを指定する | L7 |
 | `cargo run -p gui --bin evorch-gui -- --demo --window-title <text>` | コマンド | 実機スモーク起動。既定タイトル `evorch`、最小サイズ 960x600 | L8 |
