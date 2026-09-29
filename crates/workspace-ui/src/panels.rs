@@ -39,6 +39,7 @@ pub enum PanelKind {
     ParkedAgentTranscript(u64),
     SubagentRegion,
     Diff,
+    FileViewer,
     Terminal,
     Tasks,
     Notifications,
@@ -58,6 +59,7 @@ impl PanelKind {
             }
             Self::SubagentRegion => "Subagents",
             Self::Diff => "Diff",
+            Self::FileViewer => "File",
             Self::Terminal => "Terminal",
             Self::Tasks => "Tasks",
             Self::Notifications => "Notifications",

@@ -28,6 +28,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 parent.project_id,
                 format!("Orchestrator · {}", parent.title),
             );
+            child.archived = parent.archived;
             child.parent_thread_id = Some(parent.id.clone());
             child.escalation_source_run_id = Some(source_run_id.into());
             self.sidebar.threads.push(child);

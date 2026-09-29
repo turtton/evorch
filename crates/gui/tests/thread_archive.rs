@@ -142,7 +142,7 @@ fn restore_click_returns_archived_thread_to_main_and_persists() {
 }
 
 #[test]
-fn fork_is_visible_and_new_when_source_is_archived_legacy() {
+fn fork_inherits_parent_archive_state_and_has_a_new_creation_date() {
     // Given: an archived source with a legacy creation date.
     let temp = tempfile::tempdir().unwrap();
     let mut harness = fixture(temp.path(), true);
@@ -151,7 +151,7 @@ fn fork_is_visible_and_new_when_source_is_archived_legacy() {
         .state_mut()
         .fork_thread(ThreadId::new("target"))
         .unwrap();
-    // Then: the fork is a new visible thread, not a copy of archive metadata.
+    // Then: the new child inherits its family's archive state and is persisted.
     let fork = harness
         .state()
         .sidebar()
@@ -159,8 +159,29 @@ fn fork_is_visible_and_new_when_source_is_archived_legacy() {
         .iter()
         .find(|t| t.id == id)
         .unwrap();
-    assert!(!fork.archived);
+    assert!(fork.archived);
     assert!(fork.created_at > 0);
+    let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    assert!(
+        saved
+            .threads
+            .iter()
+            .find(|thread| thread.id == id)
+            .unwrap()
+            .archived
+    );
+    harness
+        .state_mut()
+        .toggle_archive(ThreadId::new("target"))
+        .unwrap();
+    assert!(
+        harness
+            .state()
+            .sidebar()
+            .threads
+            .iter()
+            .all(|thread| !thread.archived)
+    );
 }
 
 #[test]

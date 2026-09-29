@@ -231,10 +231,11 @@ fn run_detail_body(
                         | TranscriptEntry::AgentMessage { .. } => {}
                     }
                     if let TranscriptEntry::Message { text, .. } = entry {
-                        crate::panes::markdown_render::render_markdown(
+                        crate::panes::markdown_render::render_markdown_with_base(
                             ui,
                             text,
                             &format!("msg-{entry_idx}"),
+                            repo_root,
                         );
                         return;
                     }
