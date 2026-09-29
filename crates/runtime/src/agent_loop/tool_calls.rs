@@ -19,6 +19,7 @@ use crate::escalation::detector::{EscalationDetector, ToolObservation};
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
 use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
 
+mod ledger_events;
 mod mcp_scope;
 
 #[cfg(test)]
@@ -724,6 +725,9 @@ impl LoopState {
                         self.finish_error(error.to_string());
                         return false;
                     }
+                    // Runtime-owned ledger calls need the same transcript lifecycle,
+                    // including calls rejected by preflight before dispatch.
+                    self.ledger_tool_started(&name, &id, &input);
                     let observed = matches!(&ready, ReadyCall::Executed(_) | ReadyCall::Invalid(_));
                     let result =
                         if let ReadyCall::Rejected(result) | ReadyCall::Executed(result) = ready {
@@ -748,6 +752,7 @@ impl LoopState {
                             ToolResult::error(error.to_string())
                         } else if is_meta_op(&name) {
                             let dispatch = meta::dispatch(self, &name, input).await;
+                            self.ledger_tool_completed(&name, &id, &dispatch.result);
                             self.context.push_tool_result(id, dispatch.result);
                             self.publish_message_count();
                             match dispatch.terminal {
@@ -767,6 +772,7 @@ impl LoopState {
                         } else {
                             ToolResult::error("invalid prepared local call")
                         };
+                    self.ledger_tool_completed(&name, &id, &result);
                     let rule_target = matches!(name.as_str(), "read" | "write" | "edit" | "grep")
                         .then(|| input.get("path").and_then(Value::as_str).map(Into::into))
                         .flatten();
