@@ -181,6 +181,11 @@ fn create_switch_pin_thread_via_ui_clicks() {
     // When: a thread is created, selected by title, and pinned through the UI
     harness.click_label("New thread");
     harness.run();
+    let pin = harness.label_rects("☆")[0];
+    let archive = harness.label_rects("Archive")[0];
+    let title = harness.label_rects("thread-1")[0];
+    assert!(pin.right() <= title.left());
+    assert!(archive.right() <= title.left());
     harness.click_label("thread-1");
     harness.run();
     harness.click_label("☆");
@@ -254,6 +259,8 @@ fn thread_state_follows_lifecycle_events() {
         harness.run();
         assert!(harness.has_label(badge), "missing {badge} badge");
     }
+    harness.click_label("⋯");
+    harness.run();
     harness.click_label("Pause");
     harness.run();
 
@@ -357,7 +364,7 @@ fn sidebar_thread_rows_expose_state_text() {
 }
 
 #[test]
-fn sidebar_rows_are_single_line_dense_rows() {
+fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
     // Given: a demo sidebar populated with lifecycle events
     let temp = tempfile::tempdir().expect("temp dir");
     let mut sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
@@ -377,14 +384,14 @@ fn sidebar_rows_are_single_line_dense_rows() {
     // When: the populated sidebar layout settles
     harness.run();
 
-    // Then: project and thread titles are dense and controls stay on the title line
+    // Then: titles stay dense, while narrow rows expose actions through a menu
     let project = harness.label_rects("evorch")[0];
     let title = harness.label_rects("Refine GUI design system")[0];
-    let pauses = harness.label_rects("Pause");
+    let menus = harness.label_rects("⋯");
     let running = harness.label_rects("Running");
     assert!(
         (project.height() - ROW_DENSE).abs() <= 0.5,
-        "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, pauses={pauses:?}, running={running:?}",
+        "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, menus={menus:?}, running={running:?}",
         project.height()
     );
     assert!(
@@ -393,16 +400,14 @@ fn sidebar_rows_are_single_line_dense_rows() {
         title.height()
     );
     assert!(
-        pauses
+        menus
             .iter()
             .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
-        "Pause must share the title line: title={title:?}, pauses={pauses:?}"
+        "Actions menu must share the title line: title={title:?}, menus={menus:?}"
     );
     assert!(
-        running
-            .iter()
-            .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
-        "Running must share the title line: title={title:?}, running={running:?}"
+        running.iter().any(|rect| rect.top() >= title.bottom()),
+        "Running status must be below a narrow title row: title={title:?}, running={running:?}"
     );
 }
 

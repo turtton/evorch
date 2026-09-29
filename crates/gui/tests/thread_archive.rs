@@ -134,7 +134,7 @@ fn restore_click_returns_archived_thread_to_main_and_persists() {
     // Then: the main row and its original actions return, with no duplicate title.
     assert_eq!(harness.count_labels("Target"), 1);
     assert!(harness.has_label("Archive"));
-    assert!(harness.has_label("Pause"));
+    assert!(harness.has_label("⋯"));
     assert!(!harness.has_label("Restore"));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();

@@ -79,6 +79,7 @@ fn render_tree(
         let mut expansion =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
+        let mut state_below = None;
         ui.push_id(&thread.id, |ui| {
             compact_row(ui, active, |ui| {
                 ui.spacing_mut().item_spacing.x = SP_1;
@@ -107,17 +108,21 @@ fn render_tree(
                         if expansion.is_open() { 1.0 } else { 0.0 },
                         &toggle.with_new_rect(rect.shrink(2.0)),
                     );
-                } else {
-                    ui.add_space(16.0);
                 }
                 if archived {
                     archived_row(ui, thread, action);
                 } else {
-                    active_row(ui, thread, thread.state(phases), action);
+                    let state = thread.state(phases);
+                    if active_row(ui, thread, state, action) {
+                        state_below = Some(state);
+                    }
                 }
             });
         });
         expansion.store(ui.ctx());
+        if let Some(state) = state_below {
+            ui.label(crate::theme::text::muted(thread_state_label(state)));
+        }
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
         }
@@ -136,7 +141,7 @@ fn active_row(
     thread: &ThreadRecord,
     state: ThreadState,
     action: &mut Option<SidebarAction>,
-) {
+) -> bool {
     let pin = if thread.pinned { "★" } else { "☆" };
     if ui.button(pin).clicked() {
         *action = Some(SidebarAction::TogglePin(thread.id.clone()));
@@ -155,17 +160,38 @@ fn active_row(
     } else {
         ui.add_space(ui.text_style_height(&egui::TextStyle::Small) + SP_2);
     }
+    // At the minimum window size the state and two action buttons leave no
+    // room for the title, and egui's minimum Label width overlaps earlier
+    // controls. Keep the title and controls in distinct hit regions.
+    let narrow = ui.available_width() < 180.0;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let pause = if thread.paused { "Resume" } else { "Pause" };
-        if ui.button(pause).clicked() {
-            *action = Some(SidebarAction::TogglePause(thread.id.clone()));
+        if narrow {
+            ui.menu_button("⋯", |ui| {
+                let pause = if thread.paused { "Resume" } else { "Pause" };
+                if ui.button(pause).clicked() {
+                    *action = Some(SidebarAction::TogglePause(thread.id.clone()));
+                    ui.close();
+                }
+                if ui.button("Fork").clicked() {
+                    *action = Some(SidebarAction::ForkThread(thread.id.clone()));
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("Thread actions");
+        } else {
+            let pause = if thread.paused { "Resume" } else { "Pause" };
+            if ui.button(pause).clicked() {
+                *action = Some(SidebarAction::TogglePause(thread.id.clone()));
+            }
+            if ui.small_button("Fork").clicked() {
+                *action = Some(SidebarAction::ForkThread(thread.id.clone()));
+            }
+            ui.label(thread_state_label(state));
         }
-        if ui.small_button("Fork").clicked() {
-            *action = Some(SidebarAction::ForkThread(thread.id.clone()));
-        }
-        ui.label(thread_state_label(state));
         thread_title(ui, thread, action);
     });
+    narrow
 }
 
 fn archived_row(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarAction>) {

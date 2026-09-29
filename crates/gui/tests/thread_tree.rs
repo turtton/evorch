@@ -16,7 +16,7 @@ impl AgentRunSource for EmptySource {
     }
 }
 
-fn fixture(root: &std::path::Path) -> HeadlessWorkbench<EmptySource> {
+fn fixture_with_size(root: &std::path::Path, size: [f32; 2]) -> HeadlessWorkbench<EmptySource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
     sidebar
@@ -38,7 +38,28 @@ fn fixture(root: &std::path::Path) -> HeadlessWorkbench<EmptySource> {
         .unwrap()
         .with_sidebar(sidebar)
         .with_sidebar_path(root.join("sidebar.json"));
-    HeadlessWorkbench::new(state, [1600.0, 900.0])
+    HeadlessWorkbench::new(state, size)
+}
+
+fn fixture(root: &std::path::Path) -> HeadlessWorkbench<EmptySource> {
+    fixture_with_size(root, [1600.0, 900.0])
+}
+
+#[test]
+fn family_rows_keep_title_and_actions_separate_at_minimum_width() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut gui = fixture_with_size(temp.path(), gui::window::MIN_INNER_SIZE);
+    gui.run();
+    let root_title = gui.label_rects("Parent")[0];
+    let root_pin = gui.label_rects("☆")[0];
+    let archive = gui.label_rects("Archive")[0];
+    let root_toggle = gui.label_rects("Collapse children of root")[0];
+    assert!(root_toggle.right() <= root_pin.left());
+    assert!(root_pin.right() <= archive.left());
+    assert!(archive.right() <= root_title.left());
+    let child_title = gui.label_rects("↳ Child")[0];
+    let child_pin = gui.label_rects("★")[0];
+    assert!(child_pin.right() <= child_title.left());
 }
 
 #[test]
