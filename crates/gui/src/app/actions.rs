@@ -108,6 +108,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.sidebar.threads.len() + 1
         ));
         let mut fork = workspace_ui::ThreadRecord {
+            archived: original.archived,
             pinned: original.pinned,
             paused: original.paused,
             model_preference: original.model_preference,

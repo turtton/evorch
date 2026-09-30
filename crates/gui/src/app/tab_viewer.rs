@@ -19,6 +19,7 @@ use crate::panes::{
     agents::{AgentsAction, subagents_pane},
     composer::ComposerAction,
     diff::diff_pane,
+    file_viewer::{FileLink, file_viewer_pane, take_file_links},
     notifications::{NotificationsAction, notifications_pane},
     requests::RequestAction,
     sidebar::{SidebarAction, sidebar_pane},
@@ -58,6 +59,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) agents_action: &'a mut Option<AgentsAction>,
     pub(super) focus: &'a ConversationFocus,
     pub(super) diff: &'a DiffModel,
+    pub(super) file_requests: &'a mut Vec<FileLink>,
     pub(super) diff_request: &'a mut Option<DiffMode>,
     pub(super) composer: &'a mut ComposerModel,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
@@ -110,6 +112,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Sidebar
                     | PanelKind::Agents
                     | PanelKind::Notifications
+                    | PanelKind::FileViewer
                     | PanelKind::Diff
                     | PanelKind::Terminal
                     | PanelKind::Tasks
@@ -151,6 +154,10 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
 
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
         tab.as_str().starts_with("agent-run-")
+            || self
+                .panels
+                .get(tab)
+                .is_some_and(|panel| panel.kind == PanelKind::FileViewer)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -158,6 +165,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
         let Some(panel) = self.panels.get(tab) else {
             return;
         };
+        let command_start = ui.ctx().output(|output| output.commands.len());
         let displayed: Vec<_> = self
             .attention_acks
             .iter()
@@ -214,6 +222,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     self.repo_root,
                 );
             }
+            PanelKind::FileViewer => {
+                if let Some(path) = panel.target.as_deref() {
+                    file_viewer_pane(ui, Path::new(path));
+                }
+            }
             PanelKind::Diff => {
                 if let Some(mode) = diff_pane(ui, self.diff) {
                     *self.diff_request = Some(mode);
@@ -253,6 +266,16 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .render(ui, self.memory.config.as_ref().zip(project.as_deref()));
             }
         }
+        let link_base = if panel.kind == PanelKind::FileViewer {
+            panel
+                .target
+                .as_deref()
+                .and_then(|path| Path::new(path).parent())
+        } else {
+            self.repo_root
+        };
+        self.file_requests
+            .extend(take_file_links(ui.ctx(), command_start, link_base));
         if surface_visible {
             let focused = ui.input(|input| input.viewport().focused);
             for (key, revision) in displayed {

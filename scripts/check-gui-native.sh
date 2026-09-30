@@ -178,21 +178,24 @@ capture() {
     [[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 16 ]] || fail "Blank/unrendered screenshot: $name"
 }
 save_and_assert_active() {
-    local panel=$1 name=$2
+    local panel=$1 name=$2 retry_key=${3:-}
     rm -f "$qa_tmp/saved-layout.json"
-    # The app dispatches one shortcut per frame. Give the preceding focus/click
-    # its own frame before saving, and retry the idempotent save if rendering lags.
+    # The app dispatches one shortcut per frame. On a slow software-rendered
+    # frame, focus and save can land in the same frame; retry the focus key too.
     sleep 0.25
-    run xdotool key --clearmodifiers ctrl+s
     for ((attempt=0; attempt<40; attempt++)); do
+        if (( attempt > 0 )) && [[ -n "$retry_key" ]]; then
+            run xdotool key --clearmodifiers "$retry_key"
+            sleep 0.5
+        fi
+        run xdotool key --clearmodifiers ctrl+s
+        sleep 0.2
         if [[ -s "$qa_tmp/saved-layout.json" ]] && jq -e --arg panel "$panel" \
             '[.. | objects | select(.type? == "tabs") | .panels[.active]] | index($panel) != null' \
             "$qa_tmp/saved-layout.json" >/dev/null 2>&1; then
             cp "$qa_tmp/saved-layout.json" "$out/$name.json"
             return
         fi
-        sleep 0.2
-        run xdotool key --clearmodifiers ctrl+s
     done
     fail "Expected selected panel $panel after input; layout was not saved or tab did not change."
 }
@@ -207,18 +210,18 @@ assert_changed() {
 
 # Ctrl+1/2/3 must reach real GUI input dispatch, and Ctrl+S must persist the result.
 run xdotool key --clearmodifiers ctrl+1
-save_and_assert_active agent-main 01-conversation
+save_and_assert_active agent-main 01-conversation ctrl+1
 capture 01-conversation
 run xdotool key --clearmodifiers ctrl+2
-save_and_assert_active terminal-main 02-terminal
+save_and_assert_active terminal-main 02-terminal ctrl+2
 capture 02-terminal
 assert_changed 01-conversation 02-terminal
 run xdotool key --clearmodifiers ctrl+3
-save_and_assert_active tasks-main 03-tasks
+save_and_assert_active tasks-main 03-tasks ctrl+3
 capture 03-tasks
 assert_changed 02-terminal 03-tasks
 run xdotool key --clearmodifiers ctrl+1
-save_and_assert_active agent-main 04-conversation
+save_and_assert_active agent-main 04-conversation ctrl+1
 capture 04-conversation
 assert_changed 03-tasks 04-conversation
 
@@ -232,7 +235,7 @@ assert_changed 04-conversation 05-mouse-terminal
 
 run xdotool key --clearmodifiers ctrl+shift+r
 sleep 0.5
-save_and_assert_active agent-main 06-default-workbench
+save_and_assert_active agent-main 06-default-workbench ctrl+shift+r
 jq -e '.main.root.type == "split"' "$out/06-default-workbench.json" >/dev/null \
     || fail 'Ctrl+Shift+R did not restore the default split layout.'
 capture 06-default-workbench

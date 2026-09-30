@@ -359,3 +359,37 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     assert!(gui.has_label("Direct worker asks user"));
     assert!(!gui.has_label("Orchestrator asks user"));
 }
+
+#[test]
+fn escalation_from_archived_parent_inherits_family_archive_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidebar_path = dir.path().join("sidebar.json");
+    let mut state = state(dir.path(), Bindings::default()).with_sidebar_path(sidebar_path.clone());
+    state.toggle_archive(ThreadId::new("parent")).unwrap();
+    state.apply_events(events());
+    let child = state
+        .sidebar()
+        .threads
+        .iter()
+        .find(|thread| thread.id == ThreadId::new("escalation-run-2"))
+        .unwrap();
+    assert!(child.archived);
+    assert_eq!(child.parent_thread_id, Some(ThreadId::new("parent")));
+    let saved = workspace_ui::load_sidebar(&sidebar_path).unwrap();
+    assert!(
+        saved
+            .threads
+            .iter()
+            .find(|thread| thread.id == child.id)
+            .unwrap()
+            .archived
+    );
+    state.toggle_archive(ThreadId::new("parent")).unwrap();
+    assert!(
+        state
+            .sidebar()
+            .threads
+            .iter()
+            .all(|thread| !thread.archived)
+    );
+}

@@ -9,6 +9,7 @@ pub mod arena;
 pub mod codex_auth;
 pub mod composer;
 pub mod diff;
+pub mod file_viewer;
 mod ledger;
 pub mod markdown_render;
 pub mod memory;
