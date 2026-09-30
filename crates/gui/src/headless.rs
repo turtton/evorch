@@ -162,7 +162,7 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
 
     /// 指定ラベルの UI node が存在するか返します。
     pub fn has_label(&self, label: &str) -> bool {
-        self.harness.query_by_label(label).is_some()
+        self.harness.query_all_by_label(label).next().is_some()
     }
 
     /// 指定ラベルに一致する UI node の数を返します。

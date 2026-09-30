@@ -47,7 +47,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn footer_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.menu_button("⚙", |ui| {
                 if ui.button("Theme").clicked() {
@@ -70,6 +70,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .response
             .on_hover_text("Workbench settings");
             crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
+        });
+    }
+
+    pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
             let Some(host) = self.ownership.clone() else {
                 return;
             };

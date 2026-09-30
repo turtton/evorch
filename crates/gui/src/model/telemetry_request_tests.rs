@@ -60,6 +60,8 @@ fn child_samples_do_not_replace_conversation_metrics_but_keep_their_cost() {
     assert_eq!(metrics.context_pressure, Some(10));
     assert_eq!(metrics.cache_hit_rate, Some(10.0));
     assert_eq!(metrics.average_cache_hit_rate, Some(10.0));
+    assert_eq!(metrics.average_ttft, Some(Duration::from_millis(200)));
+    assert_eq!(metrics.average_tok_s, Some(20.0));
     // Selecting a child conversation shows the child's own observations.
     let child = telemetry.thread_metrics(&["child".into()]);
     assert_eq!(child.ttft, Some(Duration::from_millis(900)));
@@ -141,6 +143,10 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
     let pending = telemetry.thread_metrics_at(&["run".into()], start + Duration::from_secs(202));
     assert_eq!(pending.ttft, None);
     assert_eq!(pending.tok_s, None);
+    assert_eq!(pending.average_ttft, Some(Duration::from_millis(200)));
+    assert_eq!(pending.average_tok_s, Some(20.0));
+    assert_eq!(pending.ttft_label(), "TTFT — (Δ200ms)");
+    assert_eq!(pending.tok_s_label(), "— tok/s (Δ20.0 tok/s)");
     for event in observed("run", 1_000, 500, 100, 600) {
         telemetry.apply_event_at(&event, start + Duration::from_secs(203));
     }
@@ -148,6 +154,10 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
     assert_eq!(next.ttft, Some(Duration::from_millis(600)));
     assert_eq!(next.tok_s, Some(50.0));
     assert_eq!(telemetry.row("run").unwrap().average_ttft_ms(), Some(400));
+    assert_eq!(next.average_ttft, Some(Duration::from_millis(400)));
+    assert_eq!(next.average_tok_s, Some(35.0));
+    assert_eq!(next.ttft_label(), "TTFT 600ms (Δ400ms)");
+    assert_eq!(next.tok_s_label(), "50.0 tok/s (Δ35.0 tok/s)");
 }
 
 #[test]
@@ -174,4 +184,84 @@ fn continuation_is_a_conversation_root_even_when_it_has_an_owned_parent() {
     let metrics = telemetry.thread_metrics(&["root".into(), "continuation".into()]);
     assert_eq!(metrics.ttft, Some(Duration::from_millis(600)));
     assert_eq!(metrics.tok_s, Some(50.0));
+}
+
+#[test]
+fn performance_averages_weight_requests_and_duration_across_root_runs() {
+    let mut telemetry = TelemetryOverlay::new();
+    for (run, output, ttft, duration) in [
+        ("one", 80, 100, 1_000),
+        ("one", 60, 500, 3_000),
+        ("two", 40, 900, 2_000),
+    ] {
+        let [first_token, mut completed] = observed(run, 1_000, 0, output, ttft);
+        if let EventKind::Provider(ProviderEvent::RequestCompleted { duration_ms, .. }) =
+            &mut completed.kind
+        {
+            *duration_ms = duration;
+        }
+        telemetry.apply_event(&first_token);
+        telemetry.apply_event(&completed);
+    }
+    let metrics = telemetry.thread_metrics(&["one".into(), "two".into()]);
+    assert_eq!(metrics.ttft, Some(Duration::from_millis(900)));
+    assert_eq!(metrics.average_ttft, Some(Duration::from_millis(500)));
+    assert_eq!(metrics.tok_s, Some(20.0));
+    assert_eq!(metrics.average_tok_s, Some(30.0));
+}
+
+#[test]
+fn streaming_estimates_and_failed_requests_do_not_change_average_throughput() {
+    let mut telemetry = TelemetryOverlay::new();
+    for event in observed("run", 1_000, 0, 40, 200) {
+        telemetry.apply_event(&event);
+    }
+    telemetry.apply_event(&Event::new(ProviderEvent::RequestStarted {
+        request_id: "pending".into(),
+        provider: "provider".into(),
+        profile: None,
+        protocol: "fixture".into(),
+        model: "model".into(),
+        streaming: true,
+        run_id: Some("run".into()),
+    }));
+    telemetry.apply_event(&Event::new(MessageEvent::MessageDelta {
+        delta: "a".repeat(1_000),
+        run_id: Some("run".into()),
+    }));
+    assert_eq!(
+        telemetry.thread_metrics(&["run".into()]).average_tok_s,
+        Some(20.0)
+    );
+    telemetry.apply_event(&Event::new(ProviderEvent::RequestFailed {
+        request_id: "failed".into(),
+        provider: "provider".into(),
+        profile: None,
+        protocol: "fixture".into(),
+        model: "model".into(),
+        streaming: true,
+        duration_ms: 10_000,
+        failure: event_bus::ProviderFailureKind::Timeout,
+        run_id: Some("run".into()),
+    }));
+    let metrics = telemetry.thread_metrics(&["run".into()]);
+    assert_eq!(metrics.tok_s, None);
+    assert_eq!(metrics.average_tok_s, Some(20.0));
+}
+
+#[test]
+fn zero_duration_never_invents_average_throughput() {
+    let mut telemetry = TelemetryOverlay::new();
+    let [_, mut completed] = observed("run", 1_000, 0, 40, 200);
+    if let EventKind::Provider(ProviderEvent::RequestCompleted { duration_ms, .. }) =
+        &mut completed.kind
+    {
+        *duration_ms = 0;
+    }
+    telemetry.apply_event(&completed);
+    let metrics = telemetry.thread_metrics(&["run".into()]);
+    assert_eq!(metrics.average_ttft, None);
+    assert_eq!(metrics.average_tok_s, None);
+    assert_eq!(metrics.ttft_label(), "TTFT —");
+    assert_eq!(metrics.tok_s_label(), "— tok/s");
 }

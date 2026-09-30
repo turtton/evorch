@@ -1,6 +1,6 @@
 use crate::model::durable_tasks::DurableTasksModel;
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
-use crate::model::telemetry::{TelemetryOverlay, TelemetryRow};
+use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
 use crate::panes::agents_columns::fit_columns;
 use crate::theme::text::muted;
 use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, agent_phase_color, palette};
@@ -316,10 +316,43 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 ui.label(muted(value.tokens_label()))
                                     .on_hover_text(value.diagnostics_label());
                             }
+                            render_run_metrics(
+                                ui,
+                                telemetry.thread_metrics(std::slice::from_ref(&run_id)),
+                            );
                         });
                     });
                 }
             });
         action
     })
+}
+
+fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
+    ui.horizontal_wrapped(|ui| {
+        for (index, label) in [
+            metrics
+                .cost
+                .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
+            metrics
+                .average_cache_hit_rate
+                .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.1}%")),
+            metrics.average_tok_s.map_or_else(
+                || "avg — tok/s".into(),
+                |rate| format!("avg {rate:.1} tok/s"),
+            ),
+            metrics.average_ttft.map_or_else(
+                || "avg TTFT —".into(),
+                |ttft| format!("avg TTFT {}ms", ttft.as_millis()),
+            ),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if index > 0 {
+                ui.label(muted("·"));
+            }
+            ui.label(muted(label));
+        }
+    });
 }

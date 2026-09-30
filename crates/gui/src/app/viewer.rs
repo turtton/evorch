@@ -48,7 +48,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         egui::Panel::bottom("workbench-footer")
             .resizable(false)
             .frame(egui::Frame::NONE.inner_margin(egui::vec2(6.0, 3.0)))
-            .show(ui, |ui| self.ownership_ui(ui));
+            .show(ui, |ui| self.footer_ui(ui));
         let inactive_runs: std::collections::BTreeSet<_> = self
             .sidebar
             .threads
@@ -82,6 +82,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut tasks_action = None;
         let mut notifications_action = None;
         let mut request_action = None;
+        let mut diagnostics_request = false;
         let mut diff_request = None;
         let mut composer_action = None;
         let mut focus_request = None;
@@ -99,6 +100,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 sandbox_picker,
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
+                diagnostics_request: &mut diagnostics_request,
                 user_questions: &self.user_questions,
                 question_drafts: &mut self.question_drafts,
                 notifications: &mut self.notifications,
@@ -136,6 +138,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             DockArea::new(&mut self.dock)
                 .style(dock_style)
                 .show_inside(ui, &mut viewer);
+        }
+        if diagnostics_request {
+            self.diagnostics_open = true;
+            self.restore_status = None;
         }
         if let Some(id) = focus_request {
             self.focus_panel(id);

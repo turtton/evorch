@@ -21,7 +21,13 @@ source files remain unchanged; persisted event/context copies are sanitized.
 Large results return the last 300 lines / 16 KiB plus an artifact reference.
 Artifacts live in private `/var/tmp/evorch-output-<uid>/<slot>/<uuid>.txt` files,
 are mounted read-only into sandboxed shells, and can be inspected with `read`
-or `grep`. If the capture limit is exceeded, the result explicitly reports that
+or `grep`. Set `EVORCH_OUTPUT_DIR` to a nonempty absolute base directory to use
+`<base>/evorch-output-<uid>/<slot>/<uuid>.txt` instead. An unset or empty value
+keeps `/var/tmp`; relative paths are rejected, and `TMPDIR` is never consulted.
+Missing base directories are created recursively. The per-user output directory
+is still created with mode 0700 and checked for current-user ownership, no group
+or other permissions, and no symlinks, including with a custom base.
+If the capture limit is exceeded, the result explicitly reports that
 only the initial portion was saved, and previews the end of that saved portion.
 Timeout is an error result containing the captured partial output.
 

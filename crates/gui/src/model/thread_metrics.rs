@@ -2,6 +2,27 @@ use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
 use std::time::{Duration, Instant};
 
 impl ThreadMetrics {
+    pub fn ttft_label(&self) -> String {
+        let current = self.ttft.map_or_else(
+            || "TTFT —".into(),
+            |ttft| format!("TTFT {}ms", ttft.as_millis()),
+        );
+        match self.average_ttft {
+            Some(average) => format!("{current} (Δ{}ms)", average.as_millis()),
+            None => current,
+        }
+    }
+
+    pub fn tok_s_label(&self) -> String {
+        let current = self
+            .tok_s
+            .map_or_else(|| "— tok/s".into(), |rate| format!("{rate:.1} tok/s"));
+        match self.average_tok_s {
+            Some(average) => format!("{current} (Δ{average:.1} tok/s)"),
+            None => current,
+        }
+    }
+
     pub fn cache_hit_rate_label(&self) -> String {
         let current = self
             .cache_hit_rate
@@ -48,9 +69,16 @@ impl TelemetryOverlay {
             });
         let mut usage = TokenUsage::default();
         let mut has_usage = false;
+        let mut ttft_sum_ms = 0_u64;
+        let mut ttft_count = 0_u64;
+        let mut provider_duration = Duration::ZERO;
         for row in roots.clone() {
             has_usage |= row.latest_context.is_some();
             usage.input = usage.input.saturating_add(row.usage.input);
+            usage.output = usage.output.saturating_add(row.usage.output);
+            ttft_sum_ms = ttft_sum_ms.saturating_add(row.ttft_sum_ms);
+            ttft_count = ttft_count.saturating_add(row.ttft_count);
+            provider_duration = provider_duration.saturating_add(row.completed_request_duration);
             usage.cache_read = usage.cache_read.saturating_add(row.usage.cache_read);
         }
         let latest = roots.max_by_key(|row| row.context_order);
@@ -65,7 +93,13 @@ impl TelemetryOverlay {
             ttft: latest
                 .and_then(TelemetryRow::latest_ttft_ms)
                 .map(Duration::from_millis),
+            average_ttft: (ttft_count > 0).then(|| Duration::from_millis(ttft_sum_ms / ttft_count)),
             tok_s: latest.and_then(|row| row.tok_s_at(now)),
+            // RequestCompleted has provider duration, which excludes tool execution
+            // and idle time between requests. Streaming estimates never enter this sum.
+            average_tok_s: (!provider_duration.is_zero()).then(|| {
+                Duration::from_secs(usage.output).as_secs_f64() / provider_duration.as_secs_f64()
+            }),
         }
     }
 }

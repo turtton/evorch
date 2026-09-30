@@ -27,7 +27,7 @@ fn notifications_append_to_global_tasks_leaf_when_missing() {
     assert_eq!(
         *left.second,
         LayoutNode::Tabs(Tabs {
-            panels: vec![PanelId::new("tasks-main"), id],
+            panels: vec![PanelId::new("tasks-main"), PanelId::new("diff-main"), id],
             active: 0
         })
     );
@@ -59,14 +59,12 @@ fn legacy_agents_layout_moves_global_panels_below_projects() {
     let LayoutNode::Split(content) = root.second.as_mut() else {
         panic!("split")
     };
-    let LayoutNode::Split(right) = content.second.as_mut() else {
-        panic!("split")
-    };
-    *right.first = LayoutNode::Tabs(Tabs {
+    *content.second = LayoutNode::Tabs(Tabs {
         panels: vec![
             old.clone(),
             PanelId::new("tasks-main"),
             PanelId::new("notifications-main"),
+            PanelId::new("diff-main"),
         ],
         active: 0,
     });
@@ -85,6 +83,7 @@ fn legacy_agents_layout_moves_global_panels_below_projects() {
     };
     assert!(globals.panels.contains(&PanelId::new("tasks-main")));
     assert!(globals.panels.contains(&PanelId::new("notifications-main")));
+    assert!(globals.panels.contains(&PanelId::new("diff-main")));
     assert_eq!(from_json(&to_json(&loaded).unwrap()).unwrap(), loaded);
 }
 
@@ -155,4 +154,67 @@ fn retiring_floating_agents_preserves_other_floating_panels() {
             active: 0
         })
     );
+}
+
+#[test]
+fn previous_subagents_layout_moves_diff_left_and_collapses_empty_right_split() {
+    use workspace_ui::{Split, SplitDirection};
+
+    let mut workspace = Workspace::default();
+    let LayoutNode::Split(root) = &mut workspace.main.root else {
+        panic!("root split")
+    };
+    root.fraction = 0.3;
+    let LayoutNode::Split(left) = root.first.as_mut() else {
+        panic!("left split")
+    };
+    let LayoutNode::Tabs(globals) = left.second.as_mut() else {
+        panic!("global tabs")
+    };
+    globals.panels.retain(|id| id.as_str() != "diff-main");
+    globals.active = 1;
+    let LayoutNode::Split(content) = root.second.as_mut() else {
+        panic!("content split")
+    };
+    *content.second = LayoutNode::Split(Split {
+        direction: SplitDirection::Vertical,
+        fraction: 0.4,
+        first: content.second.clone(),
+        second: Box::new(LayoutNode::Tabs(Tabs {
+            panels: vec![PanelId::new("diff-main")],
+            active: 0,
+        })),
+    });
+
+    let loaded = from_json(&to_json(&workspace).unwrap()).unwrap();
+    loaded.validate().unwrap();
+    let LayoutNode::Split(root) = &loaded.main.root else {
+        panic!("root split")
+    };
+    assert_eq!(root.fraction, 0.3);
+    let LayoutNode::Split(left) = root.first.as_ref() else {
+        panic!("left split")
+    };
+    assert_eq!(
+        *left.second,
+        LayoutNode::Tabs(Tabs {
+            panels: vec![
+                PanelId::new("tasks-main"),
+                PanelId::new("notifications-main"),
+                PanelId::new("diff-main"),
+            ],
+            active: 1,
+        })
+    );
+    let LayoutNode::Split(content) = root.second.as_ref() else {
+        panic!("content split")
+    };
+    assert_eq!(
+        *content.second,
+        LayoutNode::Tabs(Tabs {
+            panels: vec![PanelId::new("subagents-home")],
+            active: 0,
+        })
+    );
+    assert_eq!(from_json(&to_json(&loaded).unwrap()).unwrap(), loaded);
 }

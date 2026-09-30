@@ -51,6 +51,15 @@ fn narrow_conversation_keeps_message_input_and_send_inside_its_width() {
                 ),
             );
         harness.run_steps(4);
+        let info = harness.get_by_label("ℹ").rect();
+        let title = harness
+            .get_by_label("Thread: A conversation with a fairly long title")
+            .rect();
+        assert!(
+            info.right() < title.left()
+                && (info.center().y - title.center().y).abs() < title.height(),
+            "info and title should share a row at width {width}: {info:?}, {title:?}"
+        );
         for label in ["Message or /command", "Send"] {
             let rect = harness.get_by_label(label).rect();
             assert!(

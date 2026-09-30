@@ -201,9 +201,9 @@ fn conversation_and_focused_agent_show_their_own_request_metrics() {
         let mut gui = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
         gui.run();
         let (ttft, rate) = if focused_agent {
-            ("TTFT 900ms", "200.0 tok/s")
+            ("TTFT 900ms (Δ900ms)", "200.0 tok/s (Δ200.0 tok/s)")
         } else {
-            ("TTFT 200ms", "20.0 tok/s")
+            ("TTFT 200ms (Δ200ms)", "20.0 tok/s (Δ20.0 tok/s)")
         };
         assert!(gui.has_label(ttft), "missing {ttft}");
         assert!(gui.has_label(rate), "missing {rate}");

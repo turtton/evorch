@@ -33,7 +33,9 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                         context_pressure: Some(25),
                         wall_time: std::time::Duration::from_secs(12),
                         ttft: phase.map(|_| std::time::Duration::from_millis(240)),
+                        average_ttft: phase.map(|_| std::time::Duration::from_millis(400)),
                         tok_s: phase.map(|_| 40.0),
+                        average_tok_s: phase.map(|_| 35.0),
                     }),
                     phase,
                     next_thread_title: String::new(),
@@ -87,9 +89,10 @@ fn running_phase_shows_spinner_without_badge_text() {
     // Then: the spinner is at the left of the status row with no running text.
     assert!(h.query_by_label("running").is_none());
     let cost = h.get_by_label("$0.125").rect();
-    assert!(h.get_by_label("TTFT 240ms").rect().left() > cost.right());
+    assert!(h.get_by_label("TTFT 240ms (Δ400ms)").rect().left() > cost.right());
     assert!(
-        h.get_by_label("40.0 tok/s").rect().left() > h.get_by_label("TTFT 240ms").rect().right()
+        h.get_by_label("40.0 tok/s (Δ35.0 tok/s)").rect().left()
+            > h.get_by_label("TTFT 240ms (Δ400ms)").rect().right()
     );
     assert!(
         h.output().shapes.iter().any(|shape| matches!(&shape.shape,

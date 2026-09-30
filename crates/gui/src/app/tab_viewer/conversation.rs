@@ -115,6 +115,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),
+                AgentPaneAction::OpenDiagnostics => *self.diagnostics_request = true,
                 AgentPaneAction::Composer(a) => *self.composer_action = Some(a),
                 AgentPaneAction::ModelPreference(preference) => {
                     *self.preference_action = Some(preference)

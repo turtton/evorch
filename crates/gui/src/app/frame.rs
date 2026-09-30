@@ -85,10 +85,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .quota
             .configure(account, self.credential_store.clone());
         self.telemetry.quota.poll(std::time::Instant::now());
-        if ui.small_button("実行の診断").clicked() {
-            self.diagnostics_open = true;
-            self.restore_status = None;
-        }
+        self.ownership_ui(ui);
         self.render(ui);
         self.persist_composer_draft();
         self.render_restore_diagnostics(&ctx);
