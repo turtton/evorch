@@ -4,7 +4,7 @@
 //! 混入を、型へのデシリアライズより前に完全な config path 付きで拒否します。
 
 use crate::ConfigError;
-use crate::types::agents::CATEGORY_NAMES;
+use crate::agent_categories::{categories_for_role, category_for_role};
 
 const ROOT_KEYS: &[&str] = &[
     "version",
@@ -356,7 +356,10 @@ fn strip_role_binding(
             .and_then(toml::Value::as_table_mut)
     {
         let categories_path = format!("{path}.categories");
-        retain_known(categories, &categories_path, CATEGORY_NAMES, ignored);
+        let category_names: Vec<_> = categories_for_role("worker")
+            .map(|category| category.name)
+            .collect();
+        retain_known(categories, &categories_path, &category_names, ignored);
         for (name, value) in categories {
             let Some(category) = value.as_table_mut() else {
                 continue;
@@ -582,12 +585,15 @@ fn validate_role_categories(
     };
     for (category, value) in categories {
         let category_path = format!("{role_path}.categories.{category}");
-        if !CATEGORY_NAMES.contains(&category.as_str()) {
+        if category_for_role("worker", category).is_none() {
             return Err(ConfigError::InvalidField {
                 path: category_path,
                 message: format!(
                     "unknown category, expected one of: {}",
-                    CATEGORY_NAMES.join(", ")
+                    categories_for_role("worker")
+                        .map(|category| category.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             });
         }

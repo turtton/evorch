@@ -507,6 +507,39 @@ fn agents_category_unknown_name_is_rejected_with_path() {
     assert_error_contains(result, &["agents.worker.categories.quick.weight"]);
 }
 
+#[test]
+fn worker_category_config_accepts_public_categories_and_internal_lesson() {
+    let tmp = tempfile::tempdir().expect("temporary directory");
+    let names: Vec<_> = config::agent_categories::public_worker_categories()
+        .map(|category| category.name)
+        .chain(["lesson"])
+        .collect();
+    let document = names
+        .iter()
+        .map(|name| format!("[agents.worker.categories.{name}]\nlogical_model = '{name}-model'\n"))
+        .collect::<String>();
+
+    let config = load_project(&tmp, &document).expect("all worker category bindings are valid");
+
+    assert_eq!(config.agents.worker.categories.len(), 7);
+    for name in names {
+        assert_eq!(
+            config
+                .agents
+                .binding_for("worker", Some(name))
+                .unwrap()
+                .logical_model,
+            format!("{name}-model")
+        );
+    }
+    for name in ["lesson_review", "unknown"] {
+        let document = format!("[agents.worker.categories.{name}]\nlogical_model = 'invalid'\n");
+        let error = load_project(&tmp, &document).expect_err("not a worker category");
+        assert!(matches!(error, ConfigError::InvalidField { path, .. }
+            if path == format!("agents.worker.categories.{name}")));
+    }
+}
+
 fn assert_worker_only_categories(role_path: &str, category: &str) {
     // Given: worker 以外のロールにカテゴリを指定した設定。
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");

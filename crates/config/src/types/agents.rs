@@ -6,17 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
-
-/// Worker バインディングで許可されるカテゴリ名。`lesson` は内部起動専用。
-pub(crate) const CATEGORY_NAMES: &[&str] = &[
-    "quick",
-    "deep",
-    "high-reasoning",
-    "visual",
-    "writing",
-    "research",
-    "lesson",
-];
+use crate::agent_categories::category_for_role;
 
 /// ロール別のエージェントバインディング設定。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
@@ -156,8 +146,8 @@ impl AgentsConfig {
         category: Option<&str>,
     ) -> Result<ResolvedAgentBinding, ConfigError> {
         if role != "worker"
-            && !(role == "reviewer" && category == Some("lesson_review"))
             && let Some(category) = category
+            && category_for_role(role, category).is_none()
         {
             return Err(ConfigError::CategoryNotAllowedForRole {
                 role: role.to_string(),
@@ -180,8 +170,7 @@ impl AgentsConfig {
             }
         };
         if let Some(category) = category
-            && !CATEGORY_NAMES.contains(&category)
-            && !(role == "reviewer" && category == "lesson_review")
+            && category_for_role(role, category).is_none()
         {
             return Err(ConfigError::UnknownCategory {
                 role: role.to_string(),
@@ -310,6 +299,7 @@ pub struct ResolvedAgentBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_categories::categories_for_role;
     use crate::{Config, ConfigError};
 
     #[test]
@@ -328,9 +318,8 @@ mod tests {
         .into_iter()
         .map(String::from)
         .chain(
-            CATEGORY_NAMES
-                .iter()
-                .map(|name| format!("worker.categories.{name}")),
+            categories_for_role("worker")
+                .map(|category| format!("worker.categories.{}", category.name)),
         )
         .collect::<Vec<_>>();
         let document = addresses
@@ -460,9 +449,9 @@ logical_model = "old"
     #[test]
     fn rename_logical_model_refs_updates_all_categories() {
         let mut agents = AgentsConfig::default();
-        for category in CATEGORY_NAMES {
+        for category in categories_for_role("worker") {
             agents.worker.categories.insert(
-                (*category).into(),
+                category.name.into(),
                 CategoryBindingConfig {
                     logical_model: Some("old".into()),
                     preset: Some("old".into()),

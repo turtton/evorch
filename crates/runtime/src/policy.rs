@@ -5,40 +5,12 @@ use providers::ToolSpec;
 
 use crate::error::RuntimeError;
 
-/// ランタイムが定義するメタ操作 (ツールではない run 制御操作) の正規名集合。
-///
-/// メタ操作の解決・dispatch は T5 が担う。ここでは名前の正規集合のみを定義する。
-pub const META_OPS: &[&str] = &[
-    "delegate",
-    "send_message",
-    "skill_load",
-    "wait",
-    "run_output",
-    "cancel",
-    "list_agents",
-    "inspect_agent",
-    "compact",
-    "finish",
-    "send",
-    "wait_reply",
-    "inbox",
-    "escalate",
-    "ledger_append",
-    "ledger_read",
-    "submit_review",
-    "ask_user",
-    "user_answers",
-    "subagent_questions",
-    "answer_subagent_question",
-    "inspect_learning_source",
-    "stack_lesson_candidate",
-    "list_lesson_candidates",
-    "submit_lesson_review",
-];
+pub use crate::meta::META_OPS;
+use crate::meta::MetaOp;
 
 /// 名前がメタ操作かどうかを判定する。
 pub fn is_meta_op(name: &str) -> bool {
-    META_OPS.contains(&name)
+    MetaOp::from_name(name).is_some()
 }
 
 /// ロールの capability boundary を実行時に強制するポリシー。

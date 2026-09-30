@@ -5,6 +5,7 @@
 //! 追加されます (ADR 0014)。model クレートに依存しないリーフ構造を維持するため、
 //! 列挙型はこのクレート内で独自に定義します (ADR 0004)。
 
+pub mod agent_categories;
 mod env;
 pub mod error;
 pub mod load;

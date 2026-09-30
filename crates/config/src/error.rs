@@ -53,9 +53,13 @@ pub enum ConfigError {
         /// 指定されたロール名。
         role: String,
     },
-    /// agents セクションのバインディング解決で固定 6 カテゴリ外のカテゴリ名が指定された。
+    /// agents セクションのバインディング解決で未登録のカテゴリ名が指定された。
     #[error(
-        "unknown agent category `{category}` for role `{role}`, expected one of: quick, deep, high-reasoning, visual, writing, research"
+        "unknown agent category `{category}` for role `{role}`, expected one of: {}",
+        crate::agent_categories::categories_for_role(role)
+            .map(|category| category.name)
+            .collect::<Vec<_>>()
+            .join(", ")
     )]
     UnknownCategory {
         /// カテゴリを要求したロール名。

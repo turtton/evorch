@@ -101,3 +101,45 @@ fn plaintext_credential_still_fails() {
         matches!(error, ConfigError::InvalidField { path, .. } if path == "providers.primary.api_key")
     );
 }
+
+#[test]
+fn tolerant_category_pruning_preserves_internal_worker_bindings() {
+    let document = r#"
+[agents.worker.categories.quick]
+logical_model = "quick-model"
+[agents.worker.categories.lesson]
+logical_model = "lesson-model"
+[agents.worker.categories.lesson_review]
+logical_model = "wrong-role-model"
+[agents.worker.categories.unknown]
+logical_model = "unknown-model"
+"#;
+
+    let config = load(document, false).expect("invalid categories are ignored");
+
+    assert_eq!(config.agents.worker.categories.len(), 2);
+    assert_eq!(
+        config
+            .agents
+            .binding_for("worker", Some("quick"))
+            .unwrap()
+            .logical_model,
+        "quick-model"
+    );
+    assert_eq!(
+        config
+            .agents
+            .binding_for("worker", Some("lesson"))
+            .unwrap()
+            .logical_model,
+        "lesson-model"
+    );
+    assert!(
+        !config
+            .agents
+            .worker
+            .categories
+            .contains_key("lesson_review")
+    );
+    assert!(!config.agents.worker.categories.contains_key("unknown"));
+}

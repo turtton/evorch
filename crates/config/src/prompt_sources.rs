@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::agent_categories::CATEGORIES;
 use crate::presets::PresetStore;
-use crate::types::agents::{AgentsConfig, CATEGORY_NAMES, RoleBindingConfig};
+use crate::types::agents::{AgentsConfig, RoleBindingConfig};
 use crate::{Config, ConfigError};
 
 /// モデルファミリー名 (固定 6 種、generic を含む)。
@@ -98,15 +99,10 @@ fn resolve_families(presets_dir: Option<&Path>) -> Result<BTreeMap<String, Strin
 /// カテゴリ別オーバーレイ (`category-<name>`) を解決する。
 fn resolve_categories(presets_dir: Option<&Path>) -> Result<BTreeMap<String, String>, ConfigError> {
     let mut sources = BTreeMap::new();
-    for category in CATEGORY_NAMES {
-        let name = format!("category-{category}");
-        let body = PresetStore::resolve(&name, presets_dir)?;
-        sources.insert((*category).to_string(), body);
+    for category in CATEGORIES {
+        let body = PresetStore::resolve(category.overlay_preset, presets_dir)?;
+        sources.insert(category.name.to_string(), body);
     }
-    sources.insert(
-        "lesson_review".to_string(),
-        PresetStore::resolve("category-lesson-review", presets_dir)?,
-    );
     Ok(sources)
 }
 

@@ -11,6 +11,9 @@ mod escalation;
 mod ledger;
 mod messaging;
 mod questions;
+mod registry;
+pub use registry::META_OPS;
+pub(crate) use registry::MetaOp;
 #[cfg(test)]
 mod role_tests;
 mod runs;
@@ -58,62 +61,13 @@ pub(crate) async fn dispatch(
     let Some(runtime) = state.runtime() else {
         return error("runtime is unavailable");
     };
-    if matches!(name, "wait" | "wait_reply" | "delegate") {
+    let Some(op) = MetaOp::from_name(name) else {
+        return error(format!("unknown meta-op: {name}"));
+    };
+    if matches!(op, MetaOp::Wait | MetaOp::WaitReply | MetaOp::Delegate) {
         state.activity(event_bus::RunActivity::Children);
     }
-    match name {
-        "inspect_learning_source"
-        | "stack_lesson_candidate"
-        | "list_lesson_candidates"
-        | "submit_lesson_review" => {
-            let result = match name {
-                "inspect_learning_source" => parse(input).and_then(|args| {
-                    runtime.inspect_learning_source(state.caller_run_id(), state.run_config(), args)
-                }),
-                "stack_lesson_candidate" => parse(input).and_then(|args| {
-                    runtime.stack_lesson_candidate(state.caller_run_id(), state.run_config(), args)
-                }),
-                "list_lesson_candidates" => parse(input).and_then(|args| {
-                    runtime.list_lesson_candidates(state.caller_run_id(), state.run_config(), args)
-                }),
-                _ => parse(input).and_then(|args| {
-                    runtime.submit_lesson_review(state.caller_run_id(), state.run_config(), args)
-                }),
-            };
-            match result {
-                Ok(value) => success(value.to_string()),
-                Err(reason) => error(reason),
-            }
-        }
-        "ask_user" => questions::ask_user(state, &runtime, input),
-        "user_answers" => questions::user_answers(state, &runtime, input),
-        "subagent_questions" => questions::subagent_questions(state, &runtime, input),
-        "answer_subagent_question" => questions::answer_subagent_question(state, &runtime, input),
-        "delegate" => delegation::delegate(state, &runtime, input).await,
-        "send" => messaging::send(state, &runtime, input),
-        "send_message" => messaging::send_message(state, &runtime, input),
-        "wait_reply" => messaging::wait_reply(state, &runtime, input).await,
-        "inbox" => messaging::inbox(state, &runtime, input),
-        "ledger_append" => ledger::append(state, &runtime, input),
-        "ledger_read" => ledger::read(state, &runtime, input),
-        "wait" => runs::wait(state, &runtime, input).await,
-        "run_output" => runs::run_output(state, &runtime, input),
-        "cancel" => runs::cancel(&runtime, input),
-        "list_agents" => runs::list_agents(&runtime, input),
-        "inspect_agent" => runs::inspect_agent(&runtime, input),
-        "skill_load" => skills::skill_load(state, input),
-        "compact" => compaction::compact(state, input).await,
-        "finish" => finish(state, &runtime, input).await,
-        "submit_review" => match parse(input) {
-            Ok(result) => {
-                runtime.submit_review(state.caller_run_id(), result);
-                success("review submitted")
-            }
-            Err(message) => error(message),
-        },
-        "escalate" => escalation::escalate(state, &runtime, input).await,
-        _ => error(format!("unknown meta-op: {name}")),
-    }
+    op.handle(state, &runtime, input).await
 }
 
 async fn finish(
@@ -198,22 +152,9 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
     }
 }
 
-/// delegate 系 op が受け付けるタスクカテゴリ (issue #49)。
-const CATEGORIES: [&str; 6] = [
-    "quick",
-    "deep",
-    "high-reasoning",
-    "visual",
-    "writing",
-    "research",
-];
-
-/// カテゴリ名を 6 種の既知名に検証する。
-///
-/// 未知の名前は子 run の生成・モデル呼び出しより前にエラーで拒否する
-/// (fail-closed)。名前の照合は既知名との完全一致で行う。
+/// Reject categories that are not exposed by the public worker delegation contract.
 pub(super) fn parse_category(name: &str) -> Result<String, String> {
-    if CATEGORIES.contains(&name) {
+    if config::agent_categories::is_public_worker_category(name) {
         Ok(name.to_owned())
     } else {
         Err(format!("unknown category: {name}"))

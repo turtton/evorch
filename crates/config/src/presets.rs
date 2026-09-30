@@ -65,38 +65,6 @@ const BUNDLED: &[(&str, &str)] = &[
         "family-generic",
         include_str!("../assets/presets/family-generic.md"),
     ),
-    (
-        "category-quick",
-        include_str!("../assets/presets/category-quick.md"),
-    ),
-    (
-        "category-deep",
-        include_str!("../assets/presets/category-deep.md"),
-    ),
-    (
-        "category-high-reasoning",
-        include_str!("../assets/presets/category-high-reasoning.md"),
-    ),
-    (
-        "category-visual",
-        include_str!("../assets/presets/category-visual.md"),
-    ),
-    (
-        "category-writing",
-        include_str!("../assets/presets/category-writing.md"),
-    ),
-    (
-        "category-research",
-        include_str!("../assets/presets/category-research.md"),
-    ),
-    (
-        "category-lesson",
-        include_str!("../assets/presets/category-lesson.md"),
-    ),
-    (
-        "category-lesson-review",
-        include_str!("../assets/presets/category-lesson-review.md"),
-    ),
 ];
 
 /// 同梱プリセットとユーザー上書きを 2 層で解決するストア。
@@ -172,6 +140,12 @@ fn bundled(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, body)| *body)
+        .or_else(|| {
+            crate::agent_categories::CATEGORIES
+                .iter()
+                .find(|category| category.overlay_preset == name)
+                .map(|category| category.overlay_body)
+        })
 }
 
 #[cfg(test)]
