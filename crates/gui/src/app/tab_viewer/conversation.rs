@@ -86,7 +86,9 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             thread_metrics: active_thread.map(|thread| match self.focus {
                 ConversationFocus::Thread => self.telemetry.thread_metrics(&thread.run_ids),
                 ConversationFocus::Agent(run_id) => {
-                    self.telemetry.thread_metrics(std::slice::from_ref(run_id))
+                    let mut metrics = self.telemetry.thread_metrics(std::slice::from_ref(run_id));
+                    metrics.conversation_cost = metrics.cost;
+                    metrics
                 }
             }),
             phase: self

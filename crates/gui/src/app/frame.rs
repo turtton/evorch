@@ -86,6 +86,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .quota
             .configure(account, self.credential_store.clone());
         self.telemetry.quota.poll(std::time::Instant::now());
+        self.telemetry
+            .kimi_quota
+            .configure(&self.provider_settings, self.credential_store.clone());
+        self.telemetry
+            .kimi_quota
+            .state
+            .poll(std::time::Instant::now());
         self.ownership_ui(ui);
         self.render(ui);
         self.persist_composer_draft();

@@ -1,6 +1,10 @@
 use super::{AgentIdentity, AgentPaneAction, ConversationContext};
 use crate::panes::agents::AgentsAction;
-use crate::theme::{text::h3, tokens::*, widgets::surface_frame};
+use crate::theme::{
+    text::{h3, muted},
+    tokens::*,
+    widgets::surface_frame,
+};
 
 pub(super) fn header_strip(
     ui: &mut egui::Ui,
@@ -40,6 +44,10 @@ pub(super) fn header_strip(
                         .halign(egui::Align::LEFT),
                 );
             });
+            if let Some(cost) = ctx.thread_metrics.and_then(|metrics| metrics.cost) {
+                ui.label(muted(format!("Total cost ${cost:.3}")))
+                    .on_hover_text("Main agent and subagents");
+            }
         }
         if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty()) {
             ui.horizontal_wrapped(|ui| {
@@ -83,14 +91,12 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
         for segment in [
             metrics
-                .cost
+                .conversation_cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
             metrics.cache_hit_rate_label(),
             metrics.ttft_label(),
             metrics.tok_s_label(),
-            metrics
-                .context_pressure
-                .map_or_else(|| "ctx —".into(), |pressure| format!("ctx {pressure}%")),
+            metrics.context_label(),
             format!("wall {wall}"),
         ] {
             ui.label(muted("·"));

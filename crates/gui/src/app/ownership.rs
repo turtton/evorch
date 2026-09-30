@@ -70,6 +70,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .response
             .on_hover_text("Workbench settings");
             crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
+            if self.telemetry.kimi_quota.configured() {
+                ui.separator();
+                crate::panes::quota_footer::kimi_quota_footer(ui, &self.telemetry.kimi_quota.state);
+            }
         });
     }
 

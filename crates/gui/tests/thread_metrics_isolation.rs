@@ -164,6 +164,31 @@ fn metrics_render_in_status_line_below_composer() {
 }
 
 #[test]
+fn conversation_status_excludes_child_cost_while_header_shows_thread_total() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.apply_events([
+        started("a", "chat:one", None),
+        billed("a", 1_000_000),
+        started("child", "worker", Some("a")),
+        billed("child", 3_000_000),
+    ]);
+    let mut gui = HeadlessWorkbench::new(state, [1600.0, 1000.0]);
+    gui.run();
+    let runs = &gui.state().sidebar().threads[0].run_ids;
+    let metrics = gui.state().telemetry().thread_metrics(runs);
+    assert_eq!(metrics.conversation_cost, Some(1.0));
+    assert_eq!(metrics.cost, Some(4.0));
+    let title = gui.label_rects("Thread: one")[0];
+    let total = gui.label_rects("Total cost $4.000")[0];
+    let main = gui.label_rects("$1.000")[0];
+    let composer = gui.label_rects("Message or /command")[0];
+    assert!(total.top() >= title.bottom());
+    assert!(total.bottom() < composer.top());
+    assert!(main.top() > composer.bottom());
+}
+
+#[test]
 fn conversation_and_focused_agent_show_their_own_request_metrics() {
     for focused_agent in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -207,5 +232,7 @@ fn conversation_and_focused_agent_show_their_own_request_metrics() {
         };
         assert!(gui.has_label(ttft), "missing {ttft}");
         assert!(gui.has_label(rate), "missing {rate}");
+        let own_cost = if focused_agent { "$0.002" } else { "$0.001" };
+        assert!(gui.has_label(own_cost), "missing {own_cost}");
     }
 }

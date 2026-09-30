@@ -188,6 +188,12 @@ impl ProviderSettingsModel {
         self.confirm_delete = None;
     }
 
+    pub fn base_url(&self, name: &str) -> Option<&str> {
+        self.entries
+            .get(name)
+            .map(|profile| profile.base_url.as_str())
+    }
+
     pub fn credential(&self, name: &str) -> Option<&config::CredentialRefConfig> {
         self.entries.get(name).map(|profile| &profile.credential)
     }

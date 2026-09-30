@@ -41,8 +41,18 @@ impl TelemetryRow {
         text
     }
 
-    pub fn context_pressure(&self) -> Option<u128> {
+    pub fn context_used_tokens(&self) -> Option<u128> {
         let usage = self.latest_context.as_ref()?.usage;
+        let output = if self.in_flight {
+            self.output_tokens
+        } else {
+            usage.output
+        };
+        Some(u128::from(usage.input) + u128::from(output))
+    }
+
+    pub fn context_pressure(&self) -> Option<u128> {
+        self.latest_context.as_ref()?;
         let window = u128::from(
             self.context_composition
                 .as_ref()
@@ -50,12 +60,7 @@ impl TelemetryRow {
                 .filter(|window| *window > 0)
                 .or(self.context_window.filter(|window| *window > 0))?,
         );
-        let output = if self.in_flight {
-            self.output_tokens
-        } else {
-            usage.output
-        };
-        let used = u128::from(usage.input) + u128::from(output);
+        let used = self.context_used_tokens()?;
         Some((used * 100 + window / 2) / window)
     }
 

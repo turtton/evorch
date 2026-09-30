@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use egui_dock::TabViewer;
@@ -73,6 +73,37 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
+    fn subagent_count(&self) -> usize {
+        let Some(thread) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+        else {
+            return 0;
+        };
+        // The task index retains completed runs and restored history. Transcript
+        // panels also retain runs when restoring a saved workspace on its own.
+        self.tasks
+            .rows()
+            .iter()
+            .map(|row| row.run_id.to_string())
+            .chain(
+                self.panels
+                    .values()
+                    .filter(|panel| {
+                        matches!(
+                            panel.kind,
+                            PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_)
+                        )
+                    })
+                    .filter_map(|panel| panel.target.clone()),
+            )
+            .filter(|run| thread.run_ids.contains(run) && !self.transcripts.is_thread_root(run))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
     fn attention_for_tab(&self, tab: &PanelId) -> PaneAttention {
         if tab.as_str() == "notifications-main" {
             return if self.notifications.unread_count() > 0 {
@@ -97,6 +128,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             .panels
             .get(tab)
             .map(|panel| {
+                if panel.kind == PanelKind::SubagentRegion {
+                    return format!("Subagents({})", self.subagent_count());
+                }
                 let owner = match panel.kind {
                     PanelKind::SubagentTranscript | PanelKind::ParkedAgentTranscript(_) => {
                         panel.target.as_ref().and_then(|run| {
@@ -194,7 +228,29 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Agent => self.agent_tab_ui(ui, tab),
             PanelKind::Sidebar => {
-                if let Some(action) = sidebar_pane(ui, self.sidebar, self.phases, self.telemetry) {
+                let question_threads = self
+                    .sidebar
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        self.user_questions.values().any(|question| {
+                            super::questions::user_visible(question)
+                                && super::questions::belongs_to_thread(
+                                    question,
+                                    &thread.id.to_string(),
+                                    &thread.run_ids,
+                                )
+                        })
+                    })
+                    .map(|thread| thread.id.clone())
+                    .collect();
+                if let Some(action) = sidebar_pane(
+                    ui,
+                    self.sidebar,
+                    self.phases,
+                    self.telemetry,
+                    &question_threads,
+                ) {
                     *self.sidebar_action = Some(action);
                 }
             }

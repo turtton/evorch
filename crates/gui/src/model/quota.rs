@@ -7,8 +7,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[async_trait::async_trait]
-pub trait QuotaBackend: Send {
-    async fn fetch(&mut self) -> Result<QuotaSnapshot, QuotaError>;
+pub trait QuotaBackend<T = QuotaSnapshot>: Send {
+    async fn fetch(&mut self) -> Result<T, QuotaError>;
     fn interval(&self) -> Duration;
 }
 
@@ -22,28 +22,42 @@ impl QuotaBackend for CodexQuotaClient {
     }
 }
 
-type Update = (Result<QuotaSnapshot, QuotaError>, Duration);
+pub trait QuotaData: std::fmt::Debug + Send + 'static {
+    fn last_error(&self) -> Option<QuotaError>;
+    fn mark_stale(&mut self, error: QuotaError);
+}
 
-struct Job {
+impl QuotaData for QuotaSnapshot {
+    fn last_error(&self) -> Option<QuotaError> {
+        self.last_error.clone()
+    }
+    fn mark_stale(&mut self, error: QuotaError) {
+        self.stale = true;
+        self.last_error = Some(error);
+    }
+}
+
+type Update<T> = (Result<T, QuotaError>, Duration);
+
+struct Job<T> {
     thread: std::thread::JoinHandle<()>,
     requests: mpsc::SyncSender<()>,
-    updates: mpsc::Receiver<Update>,
+    updates: mpsc::Receiver<Update<T>>,
     stopping: Arc<AtomicBool>,
 }
 
-#[derive(Default)]
-pub struct QuotaState {
-    pub snapshot: Option<QuotaSnapshot>,
+pub struct QuotaState<T: QuotaData = QuotaSnapshot> {
+    pub snapshot: Option<T>,
     pub error: Option<QuotaError>,
-    backend: Option<Box<dyn QuotaBackend>>,
-    job: Option<Job>,
+    backend: Option<Box<dyn QuotaBackend<T>>>,
+    job: Option<Job<T>>,
     next_refresh: Option<Instant>,
     account: Option<String>,
     injected: bool,
     in_flight: bool,
 }
 
-impl std::fmt::Debug for QuotaState {
+impl<T: QuotaData> std::fmt::Debug for QuotaState<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuotaState")
             .field("snapshot", &self.snapshot)
@@ -52,14 +66,14 @@ impl std::fmt::Debug for QuotaState {
     }
 }
 
-impl Drop for QuotaState {
+impl<T: QuotaData> Drop for QuotaState<T> {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-impl QuotaState {
-    pub fn with_backend(backend: Box<dyn QuotaBackend>) -> Self {
+impl<T: QuotaData> QuotaState<T> {
+    pub fn with_backend(backend: Box<dyn QuotaBackend<T>>) -> Self {
         Self {
             backend: Some(backend),
             injected: true,
@@ -72,42 +86,15 @@ impl QuotaState {
         }
     }
 
-    pub fn configure(
-        &mut self,
-        account: Option<&str>,
-        store: Option<Arc<dyn sandbox::CredentialStore>>,
-    ) {
-        if self.injected || self.account.as_deref() == account {
-            return;
-        }
-        self.stop();
-        self.snapshot = None;
-        self.error = None;
-        self.account = None;
-        let (Some(account), Some(store)) = (account, store) else {
-            return;
-        };
-        self.account = Some(account.into());
-        let store = Arc::new(routing::factory::CredentialStoreTokenStore::new(
-            store,
-            account.into(),
-        ));
-        match CodexQuotaClient::new(QuotaConfig::default(), store) {
-            Ok(client) => self.backend = Some(Box::new(client)),
-            Err(error) => self.error = Some(error),
-        }
-    }
-
-    pub fn accept(&mut self, result: Result<QuotaSnapshot, QuotaError>) {
+    pub fn accept(&mut self, result: Result<T, QuotaError>) {
         match result {
             Ok(snapshot) => {
-                self.error = snapshot.last_error.clone();
+                self.error = snapshot.last_error();
                 self.snapshot = Some(snapshot);
             }
             Err(error) => {
                 if let Some(snapshot) = &mut self.snapshot {
-                    snapshot.stale = true;
-                    snapshot.last_error = Some(error.clone());
+                    snapshot.mark_stale(error.clone());
                 }
                 self.error = Some(error);
             }
@@ -170,7 +157,7 @@ impl QuotaState {
     }
 }
 
-fn start_worker(mut backend: Box<dyn QuotaBackend>) -> Job {
+fn start_worker<T: QuotaData>(mut backend: Box<dyn QuotaBackend<T>>) -> Job<T> {
     let (requests, rx) = mpsc::sync_channel(1);
     let (tx, updates) = mpsc::channel();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -207,5 +194,48 @@ fn start_worker(mut backend: Box<dyn QuotaBackend>) -> Job {
         requests,
         updates,
         stopping,
+    }
+}
+
+impl<T: QuotaData> Default for QuotaState<T> {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            error: None,
+            backend: None,
+            job: None,
+            next_refresh: None,
+            account: None,
+            injected: false,
+            in_flight: false,
+        }
+    }
+}
+
+impl QuotaState {
+    pub fn configure(
+        &mut self,
+        account: Option<&str>,
+        store: Option<Arc<dyn sandbox::CredentialStore>>,
+    ) {
+        if self.injected || self.account.as_deref() == account {
+            return;
+        }
+        self.stop();
+        self.snapshot = None;
+        self.error = None;
+        self.account = None;
+        let (Some(account), Some(store)) = (account, store) else {
+            return;
+        };
+        self.account = Some(account.into());
+        let store = Arc::new(routing::factory::CredentialStoreTokenStore::new(
+            store,
+            account.into(),
+        ));
+        match CodexQuotaClient::new(QuotaConfig::default(), store) {
+            Ok(client) => self.backend = Some(Box::new(client)),
+            Err(error) => self.error = Some(error),
+        }
     }
 }

@@ -27,10 +27,12 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     parent_thread: None,
                     child_threads: Vec::new(),
                     thread_metrics: Some(ThreadMetrics {
-                        cost: Some(0.125),
+                        cost: Some(0.225),
+                        conversation_cost: Some(0.125),
                         cache_hit_rate: Some(50.0),
                         average_cache_hit_rate: Some(25.0),
                         context_pressure: Some(25),
+                        context_used_tokens: Some(200_900),
                         wall_time: std::time::Duration::from_secs(12),
                         ttft: phase.map(|_| std::time::Duration::from_millis(240)),
                         average_ttft: phase.map(|_| std::time::Duration::from_millis(400)),
@@ -64,7 +66,7 @@ fn status_line_renders_below_composer_with_metrics_order() {
         "cache 50% (Δ25%)",
         "TTFT —",
         "— tok/s",
-        "ctx 25%",
+        "ctx 200K(25%)",
         "wall 12s",
     ];
     let rects: Vec<_> = labels
@@ -102,18 +104,14 @@ fn running_phase_shows_spinner_without_badge_text() {
 }
 
 #[test]
-fn header_no_longer_shows_metrics() {
+fn header_shows_thread_total_below_title() {
     // Given / When: the thread with metrics is rendered.
     let mut h = harness(Some(ThreadRunPhase::Done));
     h.run_steps(4);
-    // Then: no metric glyphs share the header's vertical region.
+    // Then: the family total is below the title; the composer shows only the main cost.
     let title = h.get_by_label("Thread: Status test").rect();
-    for shape in &h.output().shapes {
-        if let Shape::Text(text) = &shape.shape {
-            let value = text.galley.text();
-            if value.contains('$') || value.contains('%') || value.contains("tok/s") {
-                assert!(text.pos.y > title.bottom(), "metric in header: {value}");
-            }
-        }
-    }
+    let total = h.get_by_label("Total cost $0.225").rect();
+    let main = h.get_by_label("$0.125").rect();
+    assert!(total.top() >= title.bottom());
+    assert!(main.top() > h.get_by_label("Message or /command").rect().bottom());
 }

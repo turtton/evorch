@@ -26,3 +26,5 @@ pub mod telemetry;
 pub mod terminal;
 pub mod transcript;
 pub mod transcript_registry;
+
+pub mod kimi_quota;

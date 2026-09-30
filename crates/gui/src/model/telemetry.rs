@@ -91,6 +91,7 @@ impl TelemetryRow {
 #[derive(Debug, Default)]
 pub struct TelemetryOverlay {
     pub quota: quota::QuotaState,
+    pub kimi_quota: super::kimi_quota::KimiQuotaState,
     rows: BTreeMap<String, TelemetryRow>,
     billed: BTreeMap<String, BTreeMap<pricing::ModelKey, TokenUsage>>,
     costs: BTreeMap<String, f64>,
@@ -103,11 +104,15 @@ pub struct TelemetryOverlay {
 /// Costs and wall time include owned children; cache and model performance do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ThreadMetrics {
+    /// Sum across the conversation and every subagent owned by this thread.
     pub cost: Option<f64>,
+    /// Only the conversation roots, excluding launched subagents.
+    pub conversation_cost: Option<f64>,
     pub cache_hit_rate: Option<f64>,
     pub average_cache_hit_rate: Option<f64>,
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
+    pub context_used_tokens: Option<u128>,
     pub ttft: Option<Duration>,
     /// Mean of the first-token observations across the conversation requests.
     pub average_ttft: Option<Duration>,

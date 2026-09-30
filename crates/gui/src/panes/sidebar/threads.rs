@@ -5,11 +5,11 @@ use workspace_ui::{ProjectRecord, SidebarState, ThreadRecord, ThreadRunPhase, Th
 
 use crate::model::telemetry::TelemetryOverlay;
 use crate::theme::text::h4;
-use crate::theme::tokens::state_color;
 use crate::theme::tokens::{ROW_DENSE, SP_1, SP_2};
+use crate::theme::tokens::{palette, state_color};
 use crate::theme::widgets::{compact_row, empty_state, primary_button, status_dot};
 
-use super::{SidebarAction, SidebarUiState};
+use super::SidebarAction;
 
 pub fn render(
     ui: &mut Ui,
@@ -17,7 +17,7 @@ pub fn render(
     project: &ProjectRecord,
     phases: &BTreeMap<String, ThreadRunPhase>,
     _telemetry: &TelemetryOverlay,
-    _pane_state: &mut SidebarUiState,
+    question_threads: &BTreeSet<workspace_ui::ThreadId>,
     action: &mut Option<SidebarAction>,
 ) {
     let (project_threads, archived) =
@@ -47,12 +47,28 @@ pub fn render(
         );
     }
 
-    render_tree(ui, sidebar, &project_threads, phases, false, action);
+    render_tree(
+        ui,
+        sidebar,
+        &project_threads,
+        phases,
+        question_threads,
+        false,
+        action,
+    );
 
     egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
         .id_salt(("archived-threads", &project.id))
         .show(ui, |ui| {
-            render_tree(ui, sidebar, &archived, phases, true, action);
+            render_tree(
+                ui,
+                sidebar,
+                &archived,
+                phases,
+                question_threads,
+                true,
+                action,
+            );
         });
     ui.add_space(SP_2);
 }
@@ -62,6 +78,7 @@ fn render_tree(
     sidebar: &SidebarState,
     threads: &[&ThreadRecord],
     phases: &BTreeMap<String, ThreadRunPhase>,
+    question_threads: &BTreeSet<workspace_ui::ThreadId>,
     archived: bool,
     action: &mut Option<SidebarAction>,
 ) {
@@ -113,7 +130,13 @@ fn render_tree(
                     archived_row(ui, thread, action);
                 } else {
                     let state = thread.state(phases);
-                    if active_row(ui, thread, state, action) {
+                    if active_row(
+                        ui,
+                        thread,
+                        state,
+                        question_threads.contains(&thread.id),
+                        action,
+                    ) {
                         state_below = Some(state);
                     }
                 }
@@ -140,13 +163,23 @@ fn active_row(
     ui: &mut Ui,
     thread: &ThreadRecord,
     state: ThreadState,
+    has_question: bool,
     action: &mut Option<SidebarAction>,
 ) -> bool {
     let pin = if thread.pinned { "★" } else { "☆" };
     if ui.button(pin).clicked() {
         *action = Some(SidebarAction::TogglePin(thread.id.clone()));
     }
-    status_dot(ui, state_color(state));
+    // Match the inline question card while a user answer is still pending,
+    // including when the runtime continues independent work in Running.
+    status_dot(
+        ui,
+        if has_question {
+            palette().WARNING_FG
+        } else {
+            state_color(state)
+        },
+    );
     if thread.parent_thread_id.is_none() {
         let archive = ui
             .add_enabled(!thread.pinned, archive_button)

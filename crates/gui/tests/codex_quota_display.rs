@@ -1,4 +1,7 @@
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use gui::fixture::DemoSource;
 use gui::model::telemetry::quota::{QuotaBackend, QuotaState};
 
@@ -231,6 +234,12 @@ fn weekly_only_plan_labels_primary_window_by_its_duration() {
     state.accept(Ok(weekly));
     let mut harness = quota_harness(state);
     harness.run();
-    harness.get_by_label("Codex · 75% wk");
+    harness.get_by_label("Codex");
+    harness.get_by_label("wk");
+    let bar = harness.get_by_role(egui::accesskit::Role::ProgressIndicator);
+    assert_eq!(bar.accesskit_node().numeric_value(), Some(75.0));
+    bar.hover();
+    harness.run_steps(3);
+    harness.get_by_label_contains("wk: 75.0% remaining");
     assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
 }

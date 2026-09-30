@@ -173,6 +173,8 @@ fn thread_pressure_uses_latest_request_instead_of_run_list_order() {
     // Then: pressure (600 + 200 + 100 + 900 output of 1000) is neither summed
     // nor selected by run-list order.
     assert_eq!(metrics.context_pressure, Some(180));
+    assert_eq!(metrics.context_used_tokens, Some(1_800));
+    assert_eq!(metrics.context_label(), "ctx 1K(180%)");
 }
 
 #[test]
@@ -268,13 +270,13 @@ fn conversation_status_line_shows_context_when_window_is_known() {
     // When: the conversation renders.
     gui.run();
     // Then: context lives in the status line below the composer, not the header.
-    let status = gui.label_rects("ctx 130%")[0];
+    let status = gui.label_rects("ctx 1K(130%)")[0];
     let composer = gui.label_rects("Message or /command")[0];
     assert!(
         status.min.y > composer.max.y,
         "status={status:?} composer={composer:?}"
     );
-    assert!(gui.label_rects("ctx 130%").len() == 1);
+    assert!(gui.label_rects("ctx 1K(130%)").len() == 1);
     if let Some(path) = std::env::var_os("CONTEXT_PRESSURE_CAPTURE") {
         gui.capture()
             .unwrap()

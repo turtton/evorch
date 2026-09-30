@@ -36,6 +36,7 @@ fn sidebar_header_uses_h4_when_project_is_selected() {
                 &sidebar,
                 &Default::default(),
                 &gui::model::telemetry::TelemetryOverlay::new(),
+                &Default::default(),
             );
         });
     // When: the sidebar renders.

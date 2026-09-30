@@ -101,7 +101,7 @@ fn started_tab_uses_owner_id_only_when_owner_thread_is_selected() {
 }
 
 #[test]
-fn parked_tab_keeps_owner_but_placeholder_has_no_badge_after_reload() {
+fn parked_tab_keeps_owner_and_subagent_count_after_workspace_reload() {
     // Given: a completed child and durable sidebar/workspace state.
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("workspace.json");
@@ -120,17 +120,110 @@ fn parked_tab_keeps_owner_but_placeholder_has_no_badge_after_reload() {
         .with_sidebar(sidebar);
     restored.switch_thread(ThreadId::new("owner")).unwrap();
     let harness = render(restored);
-    // The parked tab carries the owner ID, while the region title remains generic.
+    // The parked tab carries the owner ID; the region has its run count without an owner suffix.
     let text = painted_text(&harness);
     assert!(
         text.iter()
             .any(|title| title.contains("worker-1") && title.contains("owner")),
         "{text:?}"
     );
-    assert!(text.contains(&"Subagents"));
+    assert!(text.contains(&"Subagents(1)"));
     assert!(
         !text
             .iter()
             .any(|title| title.contains("Subagents") && title.contains("owner"))
     );
+}
+
+#[test]
+fn subagent_count_is_live_thread_local_and_retains_completed_nested_runs() {
+    let mut harness = render(state());
+    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+    harness.state_mut().apply_events([started(), started()]);
+    harness.run_steps(3);
+    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("owner"))
+        .unwrap();
+    harness.run_steps(3);
+    assert!(painted_text(&harness).contains(&"Subagents(1)"));
+
+    harness.state_mut().apply_events([
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "nested-worker".into(),
+            parent_run_id: Some("worker-1".into()),
+            agent_name: "nested-worker".into(),
+            role: "worker".into(),
+        }),
+        completed(),
+    ]);
+    harness.run_steps(3);
+    assert!(painted_text(&harness).contains(&"Subagents(2)"));
+
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("other"))
+        .unwrap();
+    harness.run_steps(3);
+    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+}
+
+#[test]
+fn completed_subagent_count_survives_history_restore_without_transcript_panels() {
+    let mut sidebar = state().sidebar().clone();
+    sidebar.switch_thread(&ThreadId::new("owner")).unwrap();
+    let events = [
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-101".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:owner".into(),
+            role: "worker".into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-102".into(),
+            parent_run_id: Some("run-101".into()),
+            agent_name: "reviewer".into(),
+            role: "reviewer".into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-102".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Done,
+            reason: None,
+        }),
+    ];
+    let source = DemoSource(vec![runtime::AgentSummary {
+        run_id: runtime::RunId::new(102),
+        parent_run_id: Some(runtime::RunId::new(101)),
+        name: "reviewer".into(),
+        role_name: "reviewer".into(),
+        phase: AgentRunPhase::Done,
+        model: "demo".into(),
+    }]);
+    let mut live = WorkbenchState::new(source, &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar);
+    live.apply_events(events.clone());
+    let sidebar = live.sidebar().clone();
+    // A live task row and its parked pane represent the same launched agent.
+    assert!(painted_text(&render(live)).contains(&"Subagents(1)"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    for event in &events {
+        storage.handle().append_event(Some("gui"), event).unwrap();
+    }
+    let mut restored = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar);
+    restored
+        .restore_history(&storage::Database::open(&config).unwrap())
+        .unwrap();
+    assert!(painted_text(&render(restored)).contains(&"Subagents(1)"));
 }

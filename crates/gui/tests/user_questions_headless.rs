@@ -183,3 +183,120 @@ fn restored_question_is_visible_without_any_run_start_event() {
         |c| matches!(c, WorkbenchCommand::AnswerUserQuestion { answer, .. } if answer == "JSON")
     ));
 }
+
+fn thread_dot_color(
+    harness: &egui_kittest::Harness<'_, WorkbenchState<DemoSource>>,
+    title: &str,
+) -> egui::Color32 {
+    use egui::epaint::Shape;
+    let label = harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            Shape::Text(text) if text.galley.text() == title => Some(text),
+            _ => None,
+        })
+        .min_by(|a, b| a.pos.x.total_cmp(&b.pos.x))
+        .expect("sidebar thread title is painted");
+    harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            Shape::Circle(dot)
+                if dot.radius == gui::theme::tokens::DOT_SIZE / 2.0
+                    && dot.center.x < label.pos.x
+                    && (dot.center.y - label.visual_bounding_rect().center().y).abs() < 6.0 =>
+            {
+                Some(dot.fill)
+            }
+            _ => None,
+        })
+        .expect("thread status dot is painted beside its title")
+}
+
+#[test]
+fn pending_user_question_overrides_running_color_until_answered() {
+    use gui::theme::tokens::{palette, state_color};
+    let running = state_color(workspace_ui::ThreadState::Running);
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let mut sidebar = state.sidebar().clone();
+    sidebar.select_project(&ProjectId::new("project")).unwrap();
+    let mut state = state.with_sidebar(sidebar);
+    state.apply_events([
+        started(),
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-2".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:two".into(),
+            role: "worker".into(),
+        }),
+    ]);
+    for run_id in ["run-1", "run-2"] {
+        state.apply_events([Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: run_id.into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+        })]);
+    }
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1600.0, 900.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(thread_dot_color(&harness, "two"), running);
+
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: question(),
+        })]);
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+    assert_eq!(thread_dot_color(&harness, "two"), running);
+    harness
+        .state_mut()
+        .switch_thread(ThreadId::new("two"))
+        .unwrap();
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+
+    let mut answered = question();
+    answered.answer = Some("JSON".into());
+    let mut child = question();
+    child.id = "child-question".into();
+    child.run_id = "child-run".into();
+    harness.state_mut().apply_events([
+        Event::new(ToolEvent::UserQuestionUpdated { question: answered }),
+        Event::new(ToolEvent::UserQuestionUpdated { question: child }),
+    ]);
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+
+    // A pending row can recover its owner from durable chat identity even if
+    // the matching run-start event was lost, just like the conversation card.
+    let mut recovered = question();
+    recovered.id = "recovered".into();
+    recovered.run_id = "missing-root".into();
+    recovered.root_run_id = "missing-root".into();
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: recovered,
+        })]);
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+    harness
+        .state_mut()
+        .apply_loop_event(gui::model::commands::LoopEvent::UserAnswerSaved {
+            question_id: "recovered".into(),
+        });
+    harness.run_steps(3);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+}

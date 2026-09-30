@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase, TrustState};
@@ -38,6 +38,7 @@ pub fn sidebar_pane(
     sidebar: &SidebarState,
     phases: &BTreeMap<String, ThreadRunPhase>,
     telemetry: &crate::model::telemetry::TelemetryOverlay,
+    question_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
     let id = egui::Id::new(UI_STATE_ID);
     let mut pane_state = ui
@@ -61,7 +62,7 @@ pub fn sidebar_pane(
                             project,
                             phases,
                             telemetry,
-                            &mut pane_state,
+                            question_threads,
                             &mut action,
                         );
                     }
