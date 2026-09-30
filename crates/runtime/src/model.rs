@@ -51,6 +51,18 @@ pub trait AgentModel: Send + Sync {
         Ok(())
     }
 
+    /// provider が公式 compaction を提供する場合のみ利用する。
+    /// 非対応は None、失敗は Err とし、呼び出し元が既存の要約へフォールバックする。
+    async fn compact_context(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+    ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
+        Ok(None)
+    }
+
     /// ロールの会話履歴に対して補完を要求する。
     ///
     /// `invocation` は呼び出し元 run の相関文脈である。実装側は観測相関
@@ -107,6 +119,10 @@ pub trait AgentModel: Send + Sync {
                         delta: text.clone(),
                         run_id: Some(invocation.run_id.clone()),
                     }
+                }
+                providers::ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    continue;
                 }
                 providers::ContentBlock::Image { .. }
                 | providers::ContentBlock::Text { .. }

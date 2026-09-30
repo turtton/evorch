@@ -90,6 +90,10 @@ fn generate(context: ProductionModel, chat: ChatSubmission) -> Result<String, St
             .map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
         Ok(response.message.content.iter().filter_map(|block| match block {
             providers::ContentBlock::Text { text } => Some(text.as_str()),
+            providers::ContentBlock::Compaction { .. } => {
+ tracing::warn!("テキスト抽出では compaction block をスキップします");
+ None
+ }
             _ => None,
         }).collect::<String>())
     })

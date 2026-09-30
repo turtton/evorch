@@ -27,6 +27,10 @@ impl ReasoningReplay {
                     output.push_str(text);
                     Some(output)
                 }
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    output
+                }
                 ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
                 | ContentBlock::ToolUse { .. }

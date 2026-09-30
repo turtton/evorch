@@ -32,6 +32,10 @@ pub enum ContentBlock {
         /// 思考の本文。
         text: String,
     },
+    /// 公式 compaction の暗号化状態。内容を解釈せず後続リクエストへ再生する。
+    Compaction {
+        encrypted_content: String,
+    },
     /// ツール呼び出し要求。
     ToolUse {
         /// 呼び出し識別子。

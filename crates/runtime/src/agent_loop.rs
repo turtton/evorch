@@ -102,7 +102,7 @@ pub(crate) struct LoopState {
     pub(crate) run_state: RunState,
     pub(crate) context: AgentContext,
     policy: ExecutionPolicy,
-    tool_specs: Vec<ToolSpec>,
+    pub(crate) tool_specs: Vec<ToolSpec>,
     pub(crate) rules_session: Option<RulesSession>,
     pub(crate) compaction: CompactionLoopState,
     pub(crate) last_usage: Option<Usage>,
@@ -841,6 +841,10 @@ impl LoopState {
                     ContentBlock::ToolUse { id, name, input } => {
                         Some((id.clone(), name.clone(), input.clone()))
                     }
+                    ContentBlock::Compaction { .. } => {
+                        tracing::warn!("この処理では compaction block をスキップします");
+                        None
+                    }
                     ContentBlock::Image { .. }
                     | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
@@ -865,6 +869,10 @@ impl LoopState {
                 .iter()
                 .filter_map(|block| match block {
                     ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Compaction { .. } => {
+                        tracing::warn!("テキスト抽出では compaction block をスキップします");
+                        None
+                    }
                     _ => None,
                 })
                 .collect::<String>();
@@ -1205,6 +1213,10 @@ impl LoopState {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    None
+                }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }

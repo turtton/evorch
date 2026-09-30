@@ -219,3 +219,19 @@ fn canonical_input_includes_cache_reads_and_writes_once() {
         );
     }
 }
+
+#[test]
+fn unsupported_compaction_blocks_do_not_leak_into_wire() {
+    let request: ChatRequest = serde_json::from_value(json!({
+        "model":"test-model",
+        "messages":[
+            {"role":"system", "content":[{"type":"compaction", "encrypted_content":"opaque-secret"},{"type":"text", "text":"instructions"}]},
+            {"role":"user", "content":[{"type":"compaction", "encrypted_content":"opaque-secret"},{"type":"text", "text":"visible"}]}
+        ]
+    })).unwrap();
+    let wire = serde_json::to_string(&to_wire_request(&request, true)).unwrap();
+    assert!(!wire.contains("opaque-secret"));
+    assert!(!wire.contains("compaction"));
+    assert!(wire.contains("visible"));
+    assert!(wire.contains("instructions"));
+}

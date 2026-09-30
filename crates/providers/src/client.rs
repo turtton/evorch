@@ -15,6 +15,11 @@ use crate::stream::DeltaStream;
 /// クライアントの状態として保持しない。
 #[async_trait]
 pub trait ProviderClient: Send + Sync {
+    /// 公式 compaction が利用可能な場合に専用境界を返します。
+    fn compactor(&self) -> Option<&dyn crate::Compactor> {
+        None
+    }
+
     /// このクライアントが対応する機能フラグを返す。
     fn capabilities(&self) -> ProviderCapabilities;
 

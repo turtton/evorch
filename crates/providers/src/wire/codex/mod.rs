@@ -57,6 +57,13 @@ struct InputMessage {
 #[serde(untagged)]
 enum InputItem {
     Message(InputMessage),
+    Compaction {
+        r#type: &'static str,
+        encrypted_content: String,
+    },
+    CompactionTrigger {
+        r#type: &'static str,
+    },
     FunctionCall {
         r#type: &'static str,
         call_id: String,
@@ -151,6 +158,10 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         .filter(|message| message.role == Role::System)
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("system instructions 内の compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
@@ -205,6 +216,16 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
     }
 }
 
+/// 公式 compaction を要求するトリガーを入力末尾に追加します。
+#[must_use]
+pub fn to_wire_compaction_request(request: &ChatRequest) -> CodexResponsesRequest {
+    let mut wire = to_wire_request(request);
+    wire.input.push(InputItem::CompactionTrigger {
+        r#type: "compaction_trigger",
+    });
+    wire
+}
+
 fn to_input_items(
     message: &crate::message::Message,
     role: InputRole,
@@ -248,6 +269,13 @@ fn to_input_items(
                     r#type: "function_call_output",
                     call_id: tool_call_id.clone(),
                     output,
+                });
+            }
+            ContentBlock::Compaction { encrypted_content } => {
+                flush_message(&mut items, &mut content, role);
+                items.push(InputItem::Compaction {
+                    r#type: "compaction",
+                    encrypted_content: encrypted_content.clone(),
                 });
             }
             ContentBlock::Reasoning { .. } => {}

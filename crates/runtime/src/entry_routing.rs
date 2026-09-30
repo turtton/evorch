@@ -270,6 +270,10 @@ mod tests {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("テキスト抽出では compaction block をスキップします");
+                    None
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()

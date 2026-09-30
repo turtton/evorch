@@ -143,6 +143,10 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -161,6 +165,10 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
                     arguments: input.to_string(),
                 },
             }),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
@@ -176,6 +184,10 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
             content: result_wire_content(content),
             tool_call_id: tool_call_id.clone(),
         }),
+        ContentBlock::Compaction { .. } => {
+            tracing::warn!("この処理では compaction block をスキップします");
+            None
+        }
         ContentBlock::Image { .. }
         | ContentBlock::Text { .. }
         | ContentBlock::Reasoning { .. }
@@ -206,6 +218,10 @@ fn to_wire_messages(message: &Message, reasoning: ReasoningReplay) -> Vec<WireMe
                                         url: format!("data:{media_type};base64,{data}"),
                                     },
                                 })
+                            }
+                            ContentBlock::Compaction { .. } => {
+                                tracing::warn!("この処理では compaction block をスキップします");
+                                None
                             }
                             ContentBlock::Reasoning { .. }
                             | ContentBlock::ToolUse { .. }

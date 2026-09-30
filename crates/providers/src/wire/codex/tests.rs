@@ -191,3 +191,48 @@ fn wire_request_replays_tool_round_trip() {
         "空の content を持つ message 項目を送らない"
     );
 }
+
+#[test]
+fn compaction_blob_round_trip_preserves_bytes_and_message_order() {
+    let mut request = request();
+    let blob = "opaque+/=\n暗号文";
+    request.messages[1].content = vec![
+        ContentBlock::Text {
+            text: "before".into(),
+        },
+        ContentBlock::Compaction {
+            encrypted_content: blob.into(),
+        },
+        ContentBlock::Text {
+            text: "after".into(),
+        },
+    ];
+    let restored: ChatRequest =
+        serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+    assert_eq!(restored, request);
+    let wire = serde_json::to_value(to_wire_request(&restored)).unwrap();
+    assert_eq!(wire["input"][0]["content"][0]["text"], "before");
+    assert_eq!(
+        wire["input"][1],
+        json!({"type":"compaction", "encrypted_content":blob})
+    );
+    assert_eq!(wire["input"][2]["content"][0]["text"], "after");
+    assert_eq!(
+        serde_json::to_value(to_wire_request(&request)).unwrap(),
+        wire
+    );
+}
+
+#[test]
+fn compaction_trigger_is_the_only_change_and_is_last() {
+    let request = request();
+    let mut expected = serde_json::to_value(to_wire_request(&request)).unwrap();
+    expected["input"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"compaction_trigger"}));
+    assert_eq!(
+        serde_json::to_value(super::to_wire_compaction_request(&request)).unwrap(),
+        expected
+    );
+}

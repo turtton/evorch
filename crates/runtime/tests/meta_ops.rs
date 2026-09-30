@@ -60,6 +60,10 @@ fn tool_result(messages: &[providers::Message], call_id: &str) -> Option<(String
             } if tool_call_id == call_id => content.first().map(|item| match item {
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
             }),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }

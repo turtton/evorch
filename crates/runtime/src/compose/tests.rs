@@ -18,6 +18,7 @@ mod category;
 mod compaction_window;
 mod fallback;
 mod live;
+mod official_compaction;
 mod preference;
 mod speed;
 mod structured;

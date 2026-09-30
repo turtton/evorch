@@ -45,6 +45,10 @@ fn text_of_role(messages: &[Message], role: MessageRole) -> Option<&str> {
         .and_then(|message| {
             message.content.iter().find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    None
+                }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
@@ -61,6 +65,10 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
         .filter_map(|block| match block {
             ContentBlock::Text { text } if text.starts_with("[project-rules]") => {
                 Some(text.as_str())
+            }
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
             }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }

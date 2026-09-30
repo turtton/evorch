@@ -57,6 +57,10 @@ fn rules_texts(messages: &[Message]) -> Vec<&str> {
             ContentBlock::Text { text } if text.starts_with("[project-rules]") => {
                 Some(text.as_str())
             }
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
@@ -360,6 +364,10 @@ async fn run_read_fixture(
                 content,
                 is_error: false,
             } if tool_call_id == "call-1" => Some(content.clone()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }

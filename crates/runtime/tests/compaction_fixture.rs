@@ -11,6 +11,10 @@ fn joined_text(message: &Message) -> String {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -26,6 +30,10 @@ fn tool_use_ids(message: &Message) -> Vec<&str> {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
@@ -40,6 +48,10 @@ fn tool_result_ids(message: &Message) -> Vec<&str> {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
@@ -62,6 +74,10 @@ fn tool_result_text(message: &Message) -> String {
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }

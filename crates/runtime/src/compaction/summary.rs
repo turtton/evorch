@@ -187,6 +187,10 @@ fn summary_text(response: &ChatResponse) -> Result<String, SummarizeError> {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -225,6 +229,10 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
         .flat_map(|message| &message.content)
         .find_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -239,6 +247,10 @@ fn assistant_lines(messages: &[Message], predicate: impl Fn(&str) -> bool) -> Ve
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -304,6 +316,10 @@ fn verification_lines(messages: &[Message]) -> Vec<&str> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::ToolResult { content, .. } => Some(content),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
@@ -323,6 +339,10 @@ fn recent_context(messages: &[Message]) -> Vec<String> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -348,6 +368,10 @@ fn agent_messages(messages: &[Message]) -> Vec<&str> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } if text.starts_with(&prefix) => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
@@ -462,6 +486,10 @@ mod tests {
             .iter()
             .find_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    None
+                }
                 ContentBlock::Image { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. }
@@ -516,6 +544,10 @@ mod tests {
                 ContentBlock::Text { text } if text.starts_with("[agent-message ") => text
                     .split_whitespace()
                     .find(|token| token.starts_with("id=")),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    None
+                }
                 ContentBlock::Image { .. }
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
@@ -534,6 +566,10 @@ mod tests {
             .flat_map(|message| &message.content)
             .filter_map(|block| match block {
                 ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id),
+                ContentBlock::Compaction { .. } => {
+                    tracing::warn!("この処理では compaction block をスキップします");
+                    None
+                }
                 ContentBlock::Image { .. }
                 | ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }

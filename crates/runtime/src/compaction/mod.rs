@@ -132,26 +132,53 @@ pub(crate) async fn compact_now(
     state.compaction.in_flight = true;
     state.channels.compaction_busy.store(true, Ordering::SeqCst);
     let model_preference = state.channels.model_preference_rx.borrow().clone();
-    let (summary_result, summary_usage) = match settings.summarizer {
-        SummarizerKindSel::Model => {
-            ModelSummarizer {
-                model: state.shared.model.clone(),
-                role: state.run_role(),
-                run_id: state.caller_run_id().to_string(),
-                category: state.task.config.category.clone(),
-                model_preference,
-                idle_timeout: std::time::Duration::from_secs(settings.summary_idle_timeout_secs),
-                timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
-            }
-            .summarize_with_usage(&SummaryInput { goal, compacted })
-            .await
+    let invocation = crate::AgentInvocationContext {
+        run_id: state.caller_run_id().to_string(),
+        category: state.task.config.category.clone(),
+        model_preference: model_preference.clone(),
+    };
+    let official = state
+        .shared
+        .model
+        .compact_context(&invocation, state.run_role(), compacted, &state.tool_specs)
+        .await;
+    let official = match official {
+        Ok(result) => result,
+        Err(_) => {
+            state.compaction.record_failure(&settings);
+            tracing::warn!("公式 compaction に失敗したため Summarizer へフォールバックします");
+            None
         }
-        SummarizerKindSel::Structural => (
-            StructuralSummarizer
-                .summarize(&SummaryInput { goal, compacted })
-                .await,
-            None,
-        ),
+    };
+    let (summary_result, summary_usage) = if let Some(result) = &official {
+        (
+            Ok("[provider-side API compaction]".to_owned()),
+            Some(result.usage),
+        )
+    } else {
+        match settings.summarizer {
+            SummarizerKindSel::Model => {
+                ModelSummarizer {
+                    model: state.shared.model.clone(),
+                    role: state.run_role(),
+                    run_id: state.caller_run_id().to_string(),
+                    category: state.task.config.category.clone(),
+                    model_preference,
+                    idle_timeout: std::time::Duration::from_secs(
+                        settings.summary_idle_timeout_secs,
+                    ),
+                    timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
+                }
+                .summarize_with_usage(&SummaryInput { goal, compacted })
+                .await
+            }
+            SummarizerKindSel::Structural => (
+                StructuralSummarizer
+                    .summarize(&SummaryInput { goal, compacted })
+                    .await,
+                None,
+            ),
+        }
     };
     if let Some(usage) = summary_usage {
         state.budget.usage(usage);
@@ -162,6 +189,7 @@ pub(crate) async fn compact_now(
         .compaction_busy
         .store(false, Ordering::SeqCst);
     let summary = match summary_result {
+        Ok(summary) if official.is_some() => summary,
         Ok(summary) => enforce_max_bytes(&summary, settings.max_summary_bytes),
         Err(error) => {
             state.compaction.record_failure(&settings);
@@ -183,8 +211,13 @@ pub(crate) async fn compact_now(
     );
     let summary_message = Message {
         role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: format!("[COMPACTION CHECKPOINT {checkpoint_id}]\n{summary}"),
+        content: vec![match official {
+            Some(result) => ContentBlock::Compaction {
+                encrypted_content: result.encrypted_content,
+            },
+            None => ContentBlock::Text {
+                text: format!("[COMPACTION CHECKPOINT {checkpoint_id}]\n{summary}"),
+            },
         }],
     };
     let estimated_after = estimate_checkpoint(
@@ -257,6 +290,10 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
         .flat_map(|message| &message.content)
         .find_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }

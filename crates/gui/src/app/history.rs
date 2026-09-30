@@ -171,6 +171,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .iter()
                     .filter_map(|block| match block {
                         providers::ContentBlock::Text { text } => Some(text.as_str()),
+                        providers::ContentBlock::Compaction { .. } => {
+                            tracing::warn!("テキスト抽出では compaction block をスキップします");
+                            None
+                        }
                         _ => None,
                     })
                     .collect();

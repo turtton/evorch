@@ -83,6 +83,10 @@ fn request_texts(messages: &[Message]) -> Vec<&str> {
         .flat_map(|message| &message.content)
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -112,6 +116,10 @@ fn tool_result(messages: &[Message], call_id: &str) -> Option<(String, bool)> {
             } if tool_call_id == call_id => content.first().map(|item| match item {
                 ToolResultContent::Text { text } => (text.clone(), *is_error),
             }),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }

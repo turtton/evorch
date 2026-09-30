@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client;
 mod codex_catalog_version;
+mod compaction;
 pub(crate) mod dedup;
 pub mod error;
 pub mod http;
@@ -21,6 +22,7 @@ pub use codex_catalog_version::{
     CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
     CodexClientVersion,
 };
+pub use compaction::{CompactionResult, Compactor};
 pub use error::ProviderError;
 pub use message::{
     ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,

@@ -249,16 +249,14 @@ impl RoutedModel {
 }
 
 impl RoutedModel {
-    async fn complete_request(
+    // 通常生成と公式 compaction で override / role / category の解決を揃える。
+    fn resolve_invocation(
         &self,
         invocation: &AgentInvocationContext,
         role: Role,
-        messages: &[Message],
         tools: &[ToolSpec],
-        bus: Option<&EventBus>,
-        output_schema: Option<&providers::JsonSchema>,
-    ) -> Result<ChatResponse, RuntimeError> {
-        let (mut route, generation) = match &invocation.model_preference {
+    ) -> Result<(routing::ResolvedRoute, config::GenerationOverridesConfig), RuntimeError> {
+        Ok(match &invocation.model_preference {
             Some(preference) => {
                 // Explicit user selection is authoritative: never apply ADR 0004 fallback.
                 let provider =
@@ -303,7 +301,19 @@ impl RoutedModel {
                     .map_err(|error| route_resolution_error(error, role, invocation, &logical))?;
                 (route, binding.generation)
             }
-        };
+        })
+    }
+
+    async fn complete_request(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: Option<&EventBus>,
+        output_schema: Option<&providers::JsonSchema>,
+    ) -> Result<ChatResponse, RuntimeError> {
+        let (mut route, generation) = self.resolve_invocation(invocation, role, tools)?;
         let logical = match &invocation.model_preference {
             Some(_) => None,
             None => Some(LogicalModelId::from(
@@ -475,6 +485,58 @@ impl AgentModel for RoutedModel {
         role: Role,
     ) -> Result<(), RuntimeError> {
         self.admit_candidates(invocation, role).await
+    }
+
+    async fn compact_context(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
+        // 解決は一度だけ。provider の失敗を別 route で再試行せず Summarizer へ返す。
+        let (route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let provider = self
+            .providers
+            .get(&route.profile)
+            .ok_or_else(|| RuntimeError::Model {
+                reason: "resolved provider profile is unavailable".to_string(),
+            })?;
+        let Some(compactor) = provider.client.compactor() else {
+            return Ok(None);
+        };
+        let (base_model_id, speed) = config::types::provider::parse_model_speed(&route.model_id);
+        let model_allows_tools = !matches!(
+            self.router
+                .catalog()
+                .capability_support(base_model_id, Capability::ToolCalling),
+            CapabilitySupport::Unsupported
+        );
+        let request = ChatRequest {
+            model: base_model_id.to_owned(),
+            messages: messages.to_vec(),
+            tools: if model_allows_tools && provider.client.capabilities().tool_use {
+                tools.to_vec()
+            } else {
+                Vec::new()
+            },
+            temperature: generation.temperature,
+            max_tokens: generation.max_tokens.map(u64::from),
+            reasoning_effort: generation.reasoning_effort,
+            service_tier: match speed {
+                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
+                config::types::provider::ModelSpeed::Standard => None,
+            },
+            output_schema: None,
+            observation: Some(ObservationContext {
+                run_id: invocation.run_id.clone(),
+            }),
+        };
+        compactor
+            .compact(&request)
+            .await
+            .map(Some)
+            .map_err(model_error)
     }
 
     async fn complete(

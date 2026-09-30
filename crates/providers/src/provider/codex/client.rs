@@ -1,5 +1,7 @@
 //! Codex subscription backend の provider client を提供します。
 
+mod compaction;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +23,7 @@ use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
 use crate::observe::AttemptObserver;
 use crate::sse::SseFrame;
 use crate::stream::{DeltaStream, StreamEvent};
-use crate::wire::codex::{CodexStreamInterpreter, to_wire_request};
+use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter, to_wire_request};
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
@@ -166,12 +168,31 @@ impl CodexClient {
                 "Kimi full thinking requires an openai-compatible or kimi-subscription provider using openai-completions, not Codex reasoning summaries".into(),
             ));
         }
-        let token = self.session.current().await?;
         let wire_request = to_wire_request(request);
-        let turn_id = Uuid::new_v4().to_string();
         let mut observer = self
             .observer(request, streaming)
             .with_cache_observation(&wire_request);
+        let response = self
+            .send_response(&wire_request, streaming, &mut observer)
+            .await?;
+        Ok(adapt_sse_stream(
+            response.bytes_stream(),
+            CodexInterpreterAdapter(CodexStreamInterpreter::new()),
+            UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL),
+            request.model.clone(),
+            observer,
+        ))
+    }
+
+    /// 通常生成と公式 compaction の認証・接続設定を同一に保つ。
+    async fn send_response(
+        &self,
+        wire_request: &CodexResponsesRequest,
+        streaming: bool,
+        observer: &mut AttemptObserver,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let token = self.session.current().await?;
+        let turn_id = Uuid::new_v4().to_string();
         let client_version = self
             .resolved_client_version
             .get_or_init(|| self.client_version.resolve())
@@ -209,19 +230,17 @@ impl CodexClient {
             observer.emit_failed(&error);
             return Err(error);
         }
-        Ok(adapt_sse_stream(
-            response.bytes_stream(),
-            CodexInterpreterAdapter(CodexStreamInterpreter::new()),
-            UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL),
-            request.model.clone(),
-            observer,
-        ))
+        Ok(response)
     }
 }
 
 /// `ProviderAuth` は使用せず、セッションの token bundle から認証します。
 #[async_trait]
 impl ProviderClient for CodexClient {
+    fn compactor(&self) -> Option<&dyn crate::Compactor> {
+        Some(self)
+    }
+
     fn supports_structured_output(&self) -> bool {
         true
     }

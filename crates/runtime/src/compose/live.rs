@@ -52,6 +52,18 @@ impl AgentModel for SwitchableModel {
         self.current().admit(invocation, role).await
     }
 
+    async fn compact_context(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
+        self.current()
+            .compact_context(invocation, role, messages, tools)
+            .await
+    }
+
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,

@@ -457,6 +457,10 @@ impl SourceSnapshot {
                         providers::ContentBlock::Text { text } => ("text", text),
                         providers::ContentBlock::ToolUse { id, name, input } => ("tool_use", json!({"id":id,"name":name,"input":input}).to_string()),
                         providers::ContentBlock::ToolResult { tool_call_id, content, is_error } => ("tool_result", json!({"tool_call_id":tool_call_id,"content":content,"is_error":is_error}).to_string()),
+                        providers::ContentBlock::Compaction { .. } => {
+                            tracing::warn!("この処理では compaction block をスキップします");
+                            continue
+                        }
                         providers::ContentBlock::Reasoning { .. } | providers::ContentBlock::Image { .. } => continue,
                     };
                     visible.push(SourceRecord {

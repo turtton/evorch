@@ -63,6 +63,9 @@ pub fn assert_append_only(
 /// Input settings and system/developer instructions still must remain unchanged.
 /// The checkpoint must be new and occur exactly once as a user message, with a
 /// nonempty summary after `[COMPACTION CHECKPOINT {checkpoint_id}]\n`.
+/// Codex also permits exactly one newly inserted compaction item whose opaque
+/// encrypted_content did not occur in the previous history. The caller still
+/// must verify and consume the successful Compacted event exactly once.
 ///
 /// # Errors
 /// Returns an explanation for malformed input, a changed configuration or
@@ -88,6 +91,24 @@ pub fn assert_compaction_transition(
     };
     if instructions(&previous_history) != instructions(&current_history) {
         return Err("system/developer messages changed during compaction".to_owned());
+    }
+    if protocol == CacheProtocol::Codex {
+        let new_items: Vec<_> = current_history
+            .iter()
+            .filter(|item| item["type"] == "compaction")
+            .filter(|item| {
+                !previous_history.iter().any(|old| {
+                    old["type"] == "compaction"
+                        && old["encrypted_content"] == item["encrypted_content"]
+                })
+            })
+            .collect();
+        if new_items.len() == 1 {
+            return Ok(());
+        }
+        if !new_items.is_empty() {
+            return Err("expected exactly one new Codex compaction item".to_owned());
+        }
     }
     let marker = format!("[COMPACTION CHECKPOINT {checkpoint_id}]\n");
     if previous_history
@@ -195,6 +216,7 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
                 }
                 return Ok(());
             }
+            Some("compaction") => return required_string(item, "encrypted_content"),
             Some("message") => {}
             _ => return Err("unsupported or missing Codex input type".to_owned()),
         }
@@ -547,6 +569,59 @@ mod tests {
                     assert_compaction_transition(protocol, &previous, &current, "ckpt-1").is_err()
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod official_compaction_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(input: Value) -> Value {
+        json!({"model":"codex", "instructions":"fixed", "tools":[], "input":input})
+    }
+    fn blob(value: &str) -> Value {
+        json!({"type":"compaction", "encrypted_content":value})
+    }
+
+    #[test]
+    fn new_blob_is_a_boundary_and_then_append_only() {
+        let previous = request(json!([blob("old")]));
+        let current = request(json!([blob("new")]));
+        assert_compaction_transition(CacheProtocol::Codex, &previous, &current, "ckpt-2").unwrap();
+        let next =
+            request(json!([blob("new"), {"type":"message", "role":"user", "content":"next"}]));
+        assert_append_only(CacheProtocol::Codex, &current, &next).unwrap();
+        assert!(assert_append_only(CacheProtocol::Codex, &previous, &current).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_reused_multiple_blobs_and_changed_settings() {
+        let previous = request(json!([blob("old")]));
+        for input in [
+            json!([blob("")]),
+            json!([blob("old")]),
+            json!([blob("new"), blob("new")]),
+            json!([blob("one"), blob("two")]),
+        ] {
+            assert!(
+                assert_compaction_transition(
+                    CacheProtocol::Codex,
+                    &previous,
+                    &request(input),
+                    "ckpt-2"
+                )
+                .is_err()
+            );
+        }
+        for key in ["instructions", "model", "tools"] {
+            let mut current = request(json!([blob("new")]));
+            current[key] = json!("changed");
+            assert!(
+                assert_compaction_transition(CacheProtocol::Codex, &previous, &current, "ckpt-2")
+                    .is_err()
+            );
         }
     }
 }

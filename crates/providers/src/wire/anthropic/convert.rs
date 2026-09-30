@@ -22,6 +22,10 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::Compaction { .. } => {
+                tracing::warn!("この処理では compaction block をスキップします");
+                None
+            }
             ContentBlock::Image { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::ToolUse { .. }
@@ -56,7 +60,7 @@ pub fn to_wire_request(request: &ChatRequest, stream: bool) -> WireMessagesReque
                 content: message
                     .content
                     .iter()
-                    .map(|block| to_wire_block(block, role))
+                    .filter_map(|block| to_wire_block(block, role))
                     .collect(),
             }
         })
@@ -137,8 +141,12 @@ pub(super) fn from_wire_usage(usage: WireUsage) -> Usage {
     }
 }
 
-fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
-    match block {
+fn to_wire_block(block: &ContentBlock, role: WireRole) -> Option<WireContentBlock> {
+    Some(match block {
+        ContentBlock::Compaction { .. } => {
+            tracing::warn!("Anthropic では compaction block をスキップします");
+            return None;
+        }
         ContentBlock::Image { media_type, data } => WireContentBlock::Image {
             cache_control: None,
             source: super::types::WireImageSource::Base64 {
@@ -182,7 +190,7 @@ fn to_wire_block(block: &ContentBlock, role: WireRole) -> WireContentBlock {
                 .collect(),
             is_error: *is_error,
         },
-    }
+    })
 }
 
 fn from_wire_block(block: WireContentBlock) -> ContentBlock {
