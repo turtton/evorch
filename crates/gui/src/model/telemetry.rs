@@ -325,7 +325,10 @@ impl TelemetryOverlay {
                             .entry(run_id.clone())
                             .or_insert(now);
                     }
-                    AgentRunPhase::Waiting | AgentRunPhase::Done | AgentRunPhase::Error => {
+                    AgentRunPhase::Stopped
+                    | AgentRunPhase::Waiting
+                    | AgentRunPhase::Done
+                    | AgentRunPhase::Error => {
                         if let Some(start) = self.active_running_start.remove(run_id) {
                             *self.accumulated_running.entry(run_id.clone()).or_default() +=
                                 now.saturating_duration_since(start);

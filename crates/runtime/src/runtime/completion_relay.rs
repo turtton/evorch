@@ -40,6 +40,7 @@ impl AgentRuntime {
                 Some(reason) => format!("failed: {reason}"),
                 None => "failed".into(),
             },
+            AgentRunPhase::Stopped => "stopped".into(),
             AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return,
         };
         child.terminal_reason = reason.clone();
@@ -77,7 +78,7 @@ impl AgentRuntime {
             return;
         };
         let disposition = match *recipient.phase_rx.borrow() {
-            AgentRunPhase::Done | AgentRunPhase::Error => return,
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => return,
             AgentRunPhase::Waiting => DeliveryDisposition::Wake,
             AgentRunPhase::Pending | AgentRunPhase::Running => DeliveryDisposition::Aside,
         };

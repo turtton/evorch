@@ -188,6 +188,7 @@ pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), Snapsho
     let phase = match state.run_state.phase() {
         AgentRunPhase::Done => "Done",
         AgentRunPhase::Error => "Error",
+        AgentRunPhase::Stopped => "Stopped",
         AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => return Ok(()),
     };
     let end = safe_context_end(&state.context.messages);
@@ -417,8 +418,8 @@ fn tool_may_have_side_effects(executor: &tools::ToolExecutor, name: &str) -> boo
     )
 }
 
-// Runtime cancellation produces a protocol-complete error result, but cannot
-// establish whether a process had already modified files before it was stopped.
+// Runtime interruption produces a protocol-complete error result, but cannot
+// establish whether a process or delegate had already performed its effects.
 fn cancelled_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolCall> {
     let cancelled: std::collections::HashSet<&str> = messages
         .iter()
@@ -430,7 +431,8 @@ fn cancelled_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolC
                     is_error: true,
                 } if content.iter().any(|part| {
                     matches!(part,
-                        providers::ToolResultContent::Text { text } if text == "cancelled"
+                        providers::ToolResultContent::Text { text }
+                            if matches!(text.as_str(), "cancelled" | "stopped" | "wait cancelled")
                     )
                 }) =>
                 {

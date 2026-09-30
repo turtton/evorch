@@ -116,7 +116,10 @@ impl TranscriptRegistry {
             }) => vec![TranscriptKey::Run(run_id.clone())],
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
-                to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error,
+                to:
+                    event_bus::AgentRunPhase::Stopped
+                    | event_bus::AgentRunPhase::Done
+                    | event_bus::AgentRunPhase::Error,
                 ..
             }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
             EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. })
@@ -278,7 +281,7 @@ impl TranscriptRegistry {
             });
         let attributed = route.iter().any(|key| matches!(key, TranscriptKey::Run(_)));
         let child_terminal = matches!(&event.kind,
-            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Stopped | event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })
                 if !self.is_thread_root(run_id));
         for key in route {
             match key {

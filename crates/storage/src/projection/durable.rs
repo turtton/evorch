@@ -70,6 +70,8 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
                 let Ok(task) = serde_json::from_value::<TaskContinuation>(progress.clone()) else {
                     continue;
                 };
+                // Stopped is not closed: subsequent explicit resume progress must
+                // still update the durable task and retain its saved cursor.
                 if matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled) {
                     terminal.insert(task_id.clone());
                 }

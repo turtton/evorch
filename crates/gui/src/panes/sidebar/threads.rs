@@ -213,6 +213,7 @@ const fn thread_state_label(state: ThreadState) -> &'static str {
     match state {
         ThreadState::Active => "Active",
         ThreadState::Paused => "Paused",
+        ThreadState::Stopped => "Stopped (resumable)",
         ThreadState::Running => "Running",
         ThreadState::Waiting => "Waiting",
         ThreadState::Done => "Done",

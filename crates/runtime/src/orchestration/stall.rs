@@ -47,6 +47,11 @@ pub fn judge(
     now: Instant,
     settings: &OrchestrationSettings,
 ) -> Option<StallSignal> {
+    // An operator stop is intentional inactivity, even if the saved generation
+    // had already accumulated tool errors. Never nudge or revive it.
+    if track.phase == AgentRunPhase::Stopped {
+        return None;
+    }
     if track.consecutive_tool_errors >= settings.repeated_error_threshold {
         return Some(StallSignal::RepeatedErrors {
             count: track.consecutive_tool_errors,
@@ -64,6 +69,21 @@ pub fn judge(
             (elapsed > window).then_some(StallSignal::NoProgress)
         }
         AgentRunPhase::Waiting => (elapsed > base).then_some(StallSignal::WaitingTooLong),
-        AgentRunPhase::Done | AgentRunPhase::Error => None,
+        AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_run_is_not_stalled_even_with_old_errors_and_inflight_tool() {
+        let settings = OrchestrationSettings::default();
+        let mut track = ProgressTrack::new(AgentRunPhase::Stopped);
+        track.consecutive_tool_errors = settings.repeated_error_threshold;
+        track.tool_in_flight = Some(track.last_progress);
+        let now = track.last_progress + Duration::from_secs(settings.stall_after_secs + 1);
+        assert_eq!(judge(&track, now, &settings), None);
     }
 }

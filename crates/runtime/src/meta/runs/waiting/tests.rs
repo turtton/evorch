@@ -154,7 +154,7 @@ fn wait_schema_and_argument_validation_agree() {
 async fn any_wakes_on_one_completion_and_returns_bounded_utf8_output() {
     let (runtime, model) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first, second], WaitMode::Any, 60000);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
@@ -176,7 +176,7 @@ async fn any_wakes_on_one_completion_and_returns_bounded_utf8_output() {
 async fn all_waits_for_every_completion_including_cancelled_children() {
     let (runtime, model) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first, second], WaitMode::All, 60000);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
@@ -201,7 +201,7 @@ async fn all_waits_for_every_completion_including_cancelled_children() {
 async fn timeout_returns_snapshot_without_cancelling_work() {
     let (runtime, _) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let began = tokio::time::Instant::now();
     let result = observe(
         &runtime,
@@ -227,7 +227,7 @@ async fn timeout_returns_snapshot_without_cancelling_work() {
 async fn zero_timeout_is_immediate_and_already_completed_does_not_time_out() {
     let (runtime, model) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let began = tokio::time::Instant::now();
     assert_eq!(
         observe(
@@ -261,14 +261,14 @@ async fn zero_timeout_is_immediate_and_already_completed_does_not_time_out() {
 async fn cancellation_wins_over_simultaneous_completion() {
     let (runtime, model) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
-    let (cancel, receiver) = watch::channel(false);
+    let (cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first], WaitMode::Any, 60000);
     let wait = observe(&runtime, parent, &request, receiver.clone());
     tokio::pin!(wait);
     assert!(poll!(&mut wait).is_pending());
     model.first.notify_one();
     runtime.wait(first).await.unwrap();
-    cancel.send_replace(true);
+    cancel.send_replace(RunInterrupt::Cancel);
     assert_eq!(wait.await.unwrap_err(), "wait cancelled");
     assert_eq!(
         observe(&runtime, parent, &request, receiver)
@@ -291,7 +291,7 @@ async fn self_siblings_unrelated_and_unknown_runs_are_denied() {
         (parent, unrelated),
         (parent, RunId::new(999)),
     ] {
-        let (_cancel, receiver) = watch::channel(false);
+        let (_cancel, receiver) = watch::channel(RunInterrupt::None);
         assert!(
             observe(
                 &runtime,
@@ -303,7 +303,7 @@ async fn self_siblings_unrelated_and_unknown_runs_are_denied() {
             .is_err()
         );
     }
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     assert!(
         observe(
             &runtime,
@@ -330,7 +330,7 @@ async fn child_admission_can_be_observed_before_registration_without_weakening_a
         .unwrap();
     let unrelated =
         runtime.delegate_background(Role::Worker, "unrelated".into(), RunConfig::default());
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     assert_eq!(
         observe(
             &runtime,
@@ -375,7 +375,7 @@ async fn model_failure_is_a_terminal_result_with_bounded_reason() {
     let child = runtime
         .delegate_background_as_child(parent, Role::Worker, "failure", RunConfig::default())
         .unwrap();
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![child], WaitMode::All, 60000);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
@@ -400,7 +400,7 @@ async fn admission_failure_is_observable_without_a_registered_run() {
     let child = runtime
         .delegate_background_as_child(parent, Role::Reviewer, "failure", RunConfig::default())
         .unwrap();
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![child], WaitMode::All, 60000);
     let wait = observe(&runtime, parent, &request, receiver.clone());
     tokio::pin!(wait);
@@ -433,7 +433,7 @@ async fn optional_child_question_wakes_parent_wait_for_orchestrator_resolution()
     let (runtime, _) = fixture(None);
     let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first, second], WaitMode::All, 60000);
     let wait = observe(&runtime, parent, &request, receiver.clone());
     tokio::pin!(wait);
@@ -475,7 +475,7 @@ async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
     let (runtime, _) = fixture(None);
     let runtime = runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first, second], WaitMode::All, 60000);
     let began = tokio::time::Instant::now();
     let wait = observe(&runtime, parent, &request, receiver.clone());
@@ -524,7 +524,7 @@ async fn required_question_wakes_wait_without_consuming_or_copying_answers() {
 async fn default_wait_suspends_for_ten_minutes_without_polling_or_cancelling() {
     let (runtime, _) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = parse::<WaitArgs>(json!({"run_ids":[first.to_string()]}))
         .unwrap()
         .validate()
@@ -547,7 +547,7 @@ async fn default_wait_suspends_for_ten_minutes_without_polling_or_cancelling() {
 async fn message_interrupts_all_wait_without_consuming_or_copying_the_inbox() {
     let (runtime, _) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first, second], WaitMode::All, MAX_WAIT_MS);
     let began = tokio::time::Instant::now();
     let wait = observe(&runtime, parent, &request, receiver.clone());
@@ -599,7 +599,7 @@ async fn message_interrupts_all_wait_without_consuming_or_copying_the_inbox() {
 async fn messages_from_children_outside_wait_targets_interrupt_wait() {
     let (runtime, _) = fixture(None);
     let (parent, first, second) = spawn(&runtime);
-    let (_cancel, receiver) = watch::channel(false);
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
@@ -618,7 +618,7 @@ async fn messages_from_children_outside_wait_targets_interrupt_wait() {
 async fn cancellation_wins_over_a_simultaneous_inbox_message() {
     let (runtime, _) = fixture(None);
     let (parent, first, _) = spawn(&runtime);
-    let (cancel, receiver) = watch::channel(false);
+    let (cancel, receiver) = watch::channel(RunInterrupt::None);
     let request = request(vec![first], WaitMode::Any, MAX_WAIT_MS);
     let wait = observe(&runtime, parent, &request, receiver);
     tokio::pin!(wait);
@@ -626,7 +626,7 @@ async fn cancellation_wins_over_a_simultaneous_inbox_message() {
     runtime
         .send_agent_message(first, parent, AgentMessageKind::Send, "Finding", None)
         .unwrap();
-    cancel.send_replace(true);
+    cancel.send_replace(RunInterrupt::Cancel);
     assert_eq!(wait.await.unwrap_err(), "wait cancelled");
     assert_eq!(runtime.take_inbox(parent).unwrap().len(), 1);
     cleanup(&runtime).await;

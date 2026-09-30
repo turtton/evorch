@@ -72,6 +72,9 @@ pub enum WorkbenchCommand {
         redo: bool,
     },
     SendChat(ChatSubmission),
+    StopChat {
+        thread_id: String,
+    },
     CancelChat {
         thread_id: String,
     },
@@ -161,6 +164,17 @@ pub enum LoopEvent {
         thread_id: String,
         run_id: String,
     },
+    /// A successful operator stop; also seeds the live composer banner.
+    ChatStopped {
+        thread_id: String,
+        run_id: String,
+        running_children: usize,
+    },
+    /// Informational feedback, not a chat failure.
+    ChatNotice {
+        thread_id: String,
+        text: String,
+    },
     ChatRejected {
         thread_id: String,
         reason: String,
@@ -181,6 +195,13 @@ pub enum LoopEvent {
 }
 
 pub trait CommandSink: Send {
+    fn bind_goal_id(&mut self, _thread: &str, _goal: &str) {}
+    /// Refresh counts on lifecycle events, including descendants that just settled.
+    fn observe_lifecycle(&mut self, _event: &event_bus::Event) {}
+    /// Live count for the stopped banner; None leaves fixture/event state intact.
+    fn running_children(&mut self, _thread: &str) -> Option<usize> {
+        None
+    }
     /// Rebuild identity mappings from trusted live or persisted goal events, without spawning work.
     fn bind_goal_context(&mut self, _thread: &str, _project: &str, _run: &str) {}
     fn restore_diagnostics(
@@ -269,7 +290,7 @@ impl CommandSink for FixtureLoopAdapter {
                     diff: None,
                 }]
             }
-            WorkbenchCommand::CancelChat { .. } => Vec::new(),
+            WorkbenchCommand::CancelChat { .. } | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. } => Vec::new(),

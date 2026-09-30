@@ -240,3 +240,44 @@ fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
         && text.contains(", retrying")));
     assert_eq!(registry.run("stream").expect("run").entries(), entries);
 }
+
+#[test]
+fn stop_preserves_partial_display_and_resumed_turn_is_separate() {
+    let mut registry = root_registry();
+    registry.apply(&reasoning("partial thought"));
+    registry.apply(&message("partial answer"));
+    registry.apply(&Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "stream".into(),
+        from: AgentRunPhase::Running,
+        to: AgentRunPhase::Stopped,
+        reason: Some("stopped by operator".into()),
+    }));
+    assert!(!registry.thread().thinking_is_streaming(0));
+    assert!(
+        matches!(&registry.thread().entries()[2], TranscriptEntry::Notice { text } if text.contains("resumable"))
+    );
+    registry.apply(&Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: "stream".into(),
+        from: AgentRunPhase::Stopped,
+        to: AgentRunPhase::Running,
+        reason: None,
+    }));
+    registry.apply(&message("resumed"));
+    registry.apply(&Event::new(MessageEvent::MessageCompleted {
+        run_id: "stream".into(),
+        text: "resumed answer".into(),
+    }));
+    assert!(
+        matches!(&registry.thread().entries()[1], TranscriptEntry::Message { text, .. } if text == "partial answer")
+    );
+    assert!(
+        matches!(&registry.thread().entries()[3], TranscriptEntry::Message { text, .. } if text == "resumed answer")
+    );
+    assert!(
+        registry
+            .thread()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::Error { .. }))
+    );
+}

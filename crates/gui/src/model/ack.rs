@@ -69,9 +69,10 @@ impl AttentionAck {
 
     pub const fn is_unread(&self) -> bool {
         match self.phase {
-            ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
-                self.revision.seq > self.acknowledged_seq
-            }
+            ThreadRunPhase::Stopped
+            | ThreadRunPhase::Waiting
+            | ThreadRunPhase::Done
+            | ThreadRunPhase::Error => self.revision.seq > self.acknowledged_seq,
             ThreadRunPhase::Pending | ThreadRunPhase::Running => false,
         }
     }

@@ -379,3 +379,49 @@ fn chats_on_two_threads_use_distinct_runs() {
     assert_ne!(second, first);
     assert_ne!(fixture.run_id(&first), fixture.run_id(&second));
 }
+
+#[test]
+fn stop_retains_chat_history_and_resumes_same_run_with_current_model_preference() {
+    let mut fixture = Fixture::new();
+    let root = fixture.send("thread-stop", "first");
+    fixture.wait_for_reply(&root, "reply-1");
+    let events = fixture.sink.submit(WorkbenchCommand::StopChat {
+        thread_id: "thread-stop".into(),
+    });
+    assert!(matches!(
+        events.as_slice(),
+        [LoopEvent::ChatStopped {
+            running_children: 0,
+            ..
+        }]
+    ));
+    let run = fixture.run_id(&root);
+    let phase = fixture.rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), fixture.runtime.wait(run))
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(phase, AgentRunPhase::Stopped);
+    let preference = runtime::ModelPreference {
+        profile: "current".into(),
+        model: Some("new-model".into()),
+    };
+    assert_eq!(
+        fixture.send_preference("thread-stop", "resume", Some(preference.clone())),
+        root
+    );
+    fixture.wait_for_reply(&root, "reply-2");
+    assert_eq!(
+        fixture.preferences.lock().unwrap().last(),
+        Some(&Some(preference))
+    );
+    let requests = fixture.messages.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "reply-1"))
+    }));
+}

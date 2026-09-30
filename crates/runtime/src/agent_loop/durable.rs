@@ -20,6 +20,7 @@ impl LoopState {
             AgentRunPhase::Pending => TaskStatus::Pending,
             AgentRunPhase::Running | AgentRunPhase::Waiting => TaskStatus::Running,
             AgentRunPhase::Done => TaskStatus::Completed,
+            AgentRunPhase::Stopped => TaskStatus::Stopped,
             AgentRunPhase::Error => match reason.as_deref() {
                 Some("cancelled") => TaskStatus::Cancelled,
                 Some(_) | None => TaskStatus::Failed,
@@ -59,7 +60,9 @@ impl LoopState {
         {
             task.status = status;
         }
-        if let Some(reason) = reason {
+        if phase == AgentRunPhase::Stopped {
+            task.failure_reason = Some("stopped".into());
+        } else if let Some(reason) = reason {
             task.failure_reason = Some(reason);
         }
         // Only publish a new cursor after this generation produced an assistant message.

@@ -95,4 +95,4 @@ pub use skill::{
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,
     parse_and_validate, read_skill_resource, split_frontmatter,
 };
-pub use state::{RunState, is_valid_transition};
+pub use state::{InterruptKind, RunInterrupt, RunState, StopScope, is_valid_transition};

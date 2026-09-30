@@ -5,7 +5,7 @@
 // (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
 // テストを別ファイルへ分離すると impl+test ペアリング規約に反する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -63,6 +63,12 @@ pub struct RuntimeCommandSink {
     repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
     goal_runs: BTreeMap<String, RunId>,
+    goal_ids: BTreeMap<String, String>,
+    running_children: BTreeMap<String, usize>,
+    // A second press must escalate before the async root phase changes.
+    stop_marked: BTreeSet<String>,
+    // Retain resume eligibility even after stage two clears stop_marked.
+    stopped_by_us: BTreeSet<String>,
     goal_projects: BTreeMap<String, String>,
     chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
@@ -103,6 +109,10 @@ impl RuntimeCommandSink {
             repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
             goal_runs: BTreeMap::new(),
+            goal_ids: BTreeMap::new(),
+            running_children: BTreeMap::new(),
+            stop_marked: BTreeSet::new(),
+            stopped_by_us: BTreeSet::new(),
             goal_projects: BTreeMap::new(),
             chat_permits: BTreeMap::new(),
             ownership: None,
@@ -150,6 +160,18 @@ impl RuntimeCommandSink {
         })
     }
 
+    fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
+        (self.stop_marked.contains(thread) || self.stopped_by_us.contains(thread))
+            && matches!(
+                error,
+                runtime::RuntimeError::RunRestoreFailed {
+                    reason: runtime::RunRestoreFailure::MissingContext
+                        | runtime::RunRestoreFailure::StorageNotConfigured,
+                    ..
+                }
+            )
+    }
+
     fn route_goal_command(
         &mut self,
         route: impl FnOnce(&SupervisorHandle) -> Result<(), SupervisorError>,
@@ -164,6 +186,36 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn bind_goal_id(&mut self, thread: &str, goal: &str) {
+        self.goal_ids.insert(thread.into(), goal.into());
+    }
+
+    fn running_children(&mut self, thread: &str) -> Option<usize> {
+        let run = *self
+            .chat_runs
+            .get(thread)
+            .or_else(|| self.goal_runs.get(thread))?;
+        let count = self.runtime.live_descendants(run).len();
+        self.running_children.insert(thread.into(), count);
+        Some(count)
+    }
+
+    fn observe_lifecycle(&mut self, event: &Event) {
+        if matches!(event.kind, event_bus::EventKind::Lifecycle(_)) {
+            // Refresh all bound roots: a stopped/completed child is no longer in
+            // live_descendants, so filtering by the live set would miss it.
+            let threads: std::collections::BTreeSet<_> = self
+                .chat_runs
+                .keys()
+                .chain(self.goal_runs.keys())
+                .cloned()
+                .collect();
+            for thread in threads {
+                self.running_children(&thread);
+            }
+        }
+    }
+
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
         if let Some(id) = run.strip_prefix("run-").and_then(|s| s.parse::<u64>().ok()) {
             self.goal_runs.insert(thread.into(), RunId::new(id));
@@ -241,7 +293,8 @@ impl CommandSink for RuntimeCommandSink {
             let thread = match &command {
                 WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::CancelChat { thread_id }
+                WorkbenchCommand::StopChat { thread_id }
+                | WorkbenchCommand::CancelChat { thread_id }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
@@ -403,6 +456,84 @@ impl RuntimeCommandSink {
                 });
                 Vec::new()
             }
+            WorkbenchCommand::StopChat { thread_id } => {
+                let Some(&run_id) = self
+                    .chat_runs
+                    .get(&thread_id)
+                    .or_else(|| self.goal_runs.get(&thread_id))
+                else {
+                    return vec![LoopEvent::ChatNotice {
+                        thread_id,
+                        text: "No chat run to stop".into(),
+                    }];
+                };
+                let scope = if self.stop_marked.contains(&thread_id) {
+                    runtime::StopScope::Subtree
+                } else {
+                    match self.runtime.inspect_agent(run_id) {
+                        Ok(run) => match run.phase {
+                            event_bus::AgentRunPhase::Pending
+                            | event_bus::AgentRunPhase::Running
+                            | event_bus::AgentRunPhase::Waiting => runtime::StopScope::SelfOnly,
+                            event_bus::AgentRunPhase::Stopped
+                                if !self.runtime.live_descendants(run_id).is_empty() =>
+                            {
+                                runtime::StopScope::Subtree
+                            }
+                            _ => {
+                                return vec![LoopEvent::ChatNotice {
+                                    thread_id,
+                                    text: "Already stopped; send a message to resume".into(),
+                                }];
+                            }
+                        },
+                        // Admission-pending runs have no inspection yet. stop validates
+                        // the ID against admissions before accepting this first press.
+                        Err(runtime::RuntimeError::UnknownRun { .. }) => {
+                            runtime::StopScope::SelfOnly
+                        }
+                        Err(error) => {
+                            return vec![LoopEvent::ChatRejected {
+                                thread_id,
+                                reason: error.to_string(),
+                            }];
+                        }
+                    }
+                };
+                let mut events = Vec::new();
+                // Fence supervisor dispatch before a stopped root/child can complete.
+                if matches!(scope, runtime::StopScope::SelfOnly)
+                    && let Some(goal_id) = self.goal_ids.get(&thread_id)
+                    && let Err(error) = self.supervisor.pause(goal_id)
+                {
+                    events.push(LoopEvent::ChatNotice {
+                        thread_id: thread_id.clone(),
+                        text: format!("Run stopped; goal pause failed: {error}"),
+                    });
+                }
+                if let Err(error) = self.runtime.stop(run_id, scope) {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: error.to_string(),
+                    }];
+                }
+                match scope {
+                    runtime::StopScope::SelfOnly => {
+                        self.stop_marked.insert(thread_id.clone());
+                    }
+                    runtime::StopScope::Subtree => {
+                        self.stop_marked.remove(&thread_id);
+                    }
+                }
+                self.stopped_by_us.insert(thread_id.clone());
+                let running_children = self.running_children(&thread_id).unwrap_or(0);
+                events.push(LoopEvent::ChatStopped {
+                    thread_id,
+                    run_id: run_id.to_string(),
+                    running_children,
+                });
+                events
+            }
             WorkbenchCommand::CancelChat { thread_id } => {
                 let Some(&run_id) = self
                     .chat_runs
@@ -414,9 +545,12 @@ impl RuntimeCommandSink {
                         reason: "No chat run to cancel".into(),
                     }];
                 };
-                match self.runtime.cancel(run_id) {
+                match self.runtime.cancel_subtree(run_id) {
                     Ok(()) => {
                         self.chat_runs.remove(&thread_id);
+                        self.stop_marked.remove(&thread_id);
+                        self.stopped_by_us.remove(&thread_id);
+                        self.running_children.remove(&thread_id);
                         Vec::new()
                     }
                     Err(error) => vec![LoopEvent::ChatRejected {
@@ -468,7 +602,6 @@ impl RuntimeCommandSink {
                 let goal_id = format!("goal-{}", self.accepted_goals);
                 let prompt = render_entry_prompt(&submission);
                 let runtime = self.runtime.clone();
-                let supervisor = self.supervisor.clone();
                 let goal_for_log = submission.goal.clone();
                 let thread_id = submission.thread_id.clone();
                 let goal_id_for_run = goal_id.clone();
@@ -495,12 +628,12 @@ impl RuntimeCommandSink {
                     .map(|config| config.db_path.clone());
                 let root_run = runtime.reserve_run_id();
                 self.goal_runs.insert(thread_id.clone(), root_run);
+                // Supervisor IDs are durable unique IDs, not the local goal-N
+                // acknowledgement/run label. Bind the real ID before spawning.
+                let supervisor_goal_id = self.supervisor.create_goal(spec, root_run);
+                self.goal_ids.insert(thread_id.clone(), supervisor_goal_id);
                 self.handle.spawn(async move {
                     let decision = runtime.entry_router().classify(&goal_for_log).await;
-                    // issue #83: root run の起動より先に goal を登録する。
-                    // 先に起動すると root の delegate / finish 評価が goal 未登録の
-                    // ledger に到達しうるため、reserved id で順序を組む。
-                    supervisor.create_goal(spec, root_run);
                     runtime.spawn_reserved(
                         root_run,
                         None,
@@ -557,10 +690,12 @@ impl RuntimeCommandSink {
             WorkbenchCommand::SendChat(submission) => {
                 let thread_id = submission.thread_id;
                 if let Some(&run_id) = self.goal_runs.get(&thread_id) {
+                    // A missing-context fallback may have replaced the original goal root.
+                    let run_id = self.chat_runs.get(&thread_id).copied().unwrap_or(run_id);
                     let mut authority = RunConfig {
-                        ownership: permit,
-                        images: submission.images,
-                        model_preference: submission.model_preference,
+                        ownership: permit.clone(),
+                        images: submission.images.clone(),
+                        model_preference: submission.model_preference.clone(),
                         ..RunConfig::default()
                     };
                     if self
@@ -605,22 +740,46 @@ impl RuntimeCommandSink {
                             };
                     }
                     let _guard = self.handle.enter();
-                    return match self
+                    match self
                         .runtime
-                        .continue_goal(run_id, submission.text, authority)
+                        .continue_goal(run_id, submission.text.clone(), authority)
                     {
                         Ok(run_id) => {
                             self.chat_runs.insert(thread_id.clone(), run_id);
-                            vec![LoopEvent::ChatAccepted {
-                                thread_id,
+                            self.stop_marked.remove(&thread_id);
+                            self.stopped_by_us.remove(&thread_id);
+                            let mut events = vec![LoopEvent::ChatAccepted {
+                                thread_id: thread_id.clone(),
                                 run_id: run_id.to_string(),
-                            }]
+                            }];
+                            // continue_goal re-registers the root before the supervisor
+                            // can dispatch another continuation.
+                            if let Some(goal_id) = self.goal_ids.get(&thread_id)
+                                && self.supervisor.snapshot(goal_id).is_some_and(|goal| {
+                                    // Detached Resume would recover a second root after continue_goal.
+                                    !goal.detached && goal.state == event_bus::GoalState::Paused
+                                })
+                                && let Err(error) = self.supervisor.resume(goal_id)
+                            {
+                                events.push(LoopEvent::ChatNotice {
+                                    thread_id,
+                                    text: format!("Run resumed; goal resume failed: {error}"),
+                                });
+                            }
+                            return events;
                         }
-                        Err(error) => vec![LoopEvent::ChatRejected {
-                            thread_id,
-                            reason: error.to_string(),
-                        }],
-                    };
+                        Err(error) if self.can_restart_stopped(&thread_id, &error) => {
+                            self.stop_marked.remove(&thread_id);
+                            self.stopped_by_us.remove(&thread_id);
+                            self.chat_runs.remove(&thread_id);
+                        }
+                        Err(error) => {
+                            return vec![LoopEvent::ChatRejected {
+                                thread_id,
+                                reason: error.to_string(),
+                            }];
+                        }
+                    }
                 }
                 if let Some(permit) = &permit {
                     if self.chat_permits.get(&thread_id).is_some_and(|previous| {
@@ -634,25 +793,36 @@ impl RuntimeCommandSink {
                 }
                 if let Some(&run_id) = self.chat_runs.get(&thread_id) {
                     let _guard = self.handle.enter();
-                    return match self.runtime.continue_goal(
+                    match self.runtime.continue_goal(
                         run_id,
-                        submission.text,
+                        submission.text.clone(),
                         RunConfig {
-                            ownership: permit,
-                            images: submission.images,
-                            model_preference: submission.model_preference,
+                            ownership: permit.clone(),
+                            images: submission.images.clone(),
+                            model_preference: submission.model_preference.clone(),
                             ..RunConfig::default()
                         },
                     ) {
-                        Ok(run_id) => vec![LoopEvent::ChatAccepted {
-                            thread_id,
-                            run_id: run_id.to_string(),
-                        }],
-                        Err(error) => vec![LoopEvent::ChatRejected {
-                            thread_id,
-                            reason: error.to_string(),
-                        }],
-                    };
+                        Ok(run_id) => {
+                            self.stop_marked.remove(&thread_id);
+                            self.stopped_by_us.remove(&thread_id);
+                            return vec![LoopEvent::ChatAccepted {
+                                thread_id,
+                                run_id: run_id.to_string(),
+                            }];
+                        }
+                        Err(error) if self.can_restart_stopped(&thread_id, &error) => {
+                            self.stop_marked.remove(&thread_id);
+                            self.stopped_by_us.remove(&thread_id);
+                            self.chat_runs.remove(&thread_id);
+                        }
+                        Err(error) => {
+                            return vec![LoopEvent::ChatRejected {
+                                thread_id,
+                                reason: error.to_string(),
+                            }];
+                        }
+                    }
                 }
                 let _guard = self.handle.enter();
                 let run_id = self.runtime.delegate_chat(
@@ -681,6 +851,8 @@ impl RuntimeCommandSink {
                     }
                 };
                 self.chat_runs.insert(thread_id.clone(), run_id);
+                self.stop_marked.remove(&thread_id);
+                self.stopped_by_us.remove(&thread_id);
                 vec![LoopEvent::ChatAccepted {
                     thread_id,
                     run_id: run_id.to_string(),
@@ -885,9 +1057,21 @@ mod tests {
         SupervisorHandle,
     ) {
         let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
+        build_sink_on(rt, Arc::new(HeldModel))
+    }
+
+    fn build_sink_on(
+        rt: tokio::runtime::Runtime,
+        model: Arc<dyn AgentModel>,
+    ) -> (
+        tokio::runtime::Runtime,
+        RuntimeCommandSink,
+        AgentRuntime,
+        SupervisorHandle,
+    ) {
         let bus = Arc::new(EventBus::new(64));
         let executor = Arc::new(ToolExecutor::new(bus.clone()));
-        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(HeldModel));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model);
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -1055,6 +1239,441 @@ mod tests {
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    fn chat_command(thread: &str) -> WorkbenchCommand {
+        WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            composer_role: crate::model::composer::ComposerRole::Orchestrator,
+            images: Vec::new(),
+            thread_id: thread.into(),
+            text: "hello again".into(),
+            model_preference: None,
+        })
+    }
+
+    #[test]
+    fn rapid_stop_presses_escalate_before_root_phase_changes() {
+        // No executor progress between the two commands: phase-based staging fails here.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel));
+        sink.submit(chat_command("rapid"));
+        let root = sink.chat_runs["rapid"];
+        let child = {
+            let _guard = rt.enter();
+            runtime
+                .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+                .unwrap()
+        };
+        let stop = WorkbenchCommand::StopChat {
+            thread_id: "rapid".into(),
+        };
+        assert!(matches!(
+            sink.submit(stop.clone()).as_slice(),
+            [LoopEvent::ChatStopped {
+                running_children: 1,
+                ..
+            }]
+        ));
+        assert!(
+            sink.stop_marked.contains("rapid"),
+            "first press is SelfOnly"
+        );
+        assert_eq!(
+            runtime.inspect_agent(root).unwrap().phase,
+            event_bus::AgentRunPhase::Pending
+        );
+        assert!(matches!(
+            sink.submit(stop).as_slice(),
+            [LoopEvent::ChatStopped { .. }]
+        ));
+        assert!(
+            !sink.stop_marked.contains("rapid"),
+            "second press is Subtree"
+        );
+        assert_eq!(
+            runtime.inspect_agent(root).unwrap().phase,
+            event_bus::AgentRunPhase::Pending
+        );
+        rt.block_on(async {
+            for run in [root, child] {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    event_bus::AgentRunPhase::Stopped
+                );
+            }
+        });
+        // Stage two consumed the stage marker, but missing-storage resume still works.
+        assert!(matches!(
+            sink.submit(chat_command("rapid")).as_slice(),
+            [LoopEvent::ChatAccepted { .. }]
+        ));
+        assert_ne!(sink.chat_runs["rapid"], root);
+        assert!(!sink.stopped_by_us.contains("rapid"));
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::StopChat {
+                thread_id: "rapid".into()
+            })
+            .as_slice(),
+            [LoopEvent::ChatStopped { .. }]
+        ));
+        assert!(
+            sink.stop_marked.contains("rapid"),
+            "new run restarts at stage one"
+        );
+    }
+
+    #[test]
+    fn cancel_chat_cancels_descendants_and_fences_late_spawns() {
+        let (rt, mut sink, runtime, _) = build_sink();
+        sink.submit(chat_command("discard"));
+        let root = sink.chat_runs["discard"];
+        let (child, grandchild) = rt.block_on(async {
+            let child = runtime
+                .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+                .unwrap();
+            let grandchild = runtime
+                .delegate_background_as_child(
+                    child,
+                    Role::Worker,
+                    "grandchild",
+                    RunConfig::default(),
+                )
+                .unwrap();
+            (child, grandchild)
+        });
+        // Stage one has been requested but discard must still reach the descendants.
+        sink.stop_marked.insert("discard".into());
+        sink.stopped_by_us.insert("discard".into());
+        assert!(
+            sink.submit(WorkbenchCommand::CancelChat {
+                thread_id: "discard".into()
+            })
+            .is_empty()
+        );
+        assert!(!sink.chat_runs.contains_key("discard"));
+        assert!(!sink.stop_marked.contains("discard"));
+        assert!(!sink.stopped_by_us.contains("discard"));
+        rt.block_on(async {
+            let late = runtime.spawn_reserved(
+                runtime.reserve_run_id(),
+                Some(grandchild),
+                Role::Worker,
+                "late",
+                RunConfig::default(),
+            );
+            for run in [root, child, grandchild, late] {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    event_bus::AgentRunPhase::Error
+                );
+            }
+        });
+    }
+
+    struct AdmissionHeldModel;
+
+    #[async_trait]
+    impl AgentModel for AdmissionHeldModel {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "admission-held".into()
+        }
+        fn requires_admission(&self) -> bool {
+            true
+        }
+        async fn admit(&self, _: &AgentInvocationContext, _: Role) -> Result<(), RuntimeError> {
+            std::future::pending().await
+        }
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            _: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn stopped_missing_context_delegates_fresh_for_chat_and_goal() {
+        assert_stopped_without_context_restarts(true);
+    }
+
+    #[test]
+    fn stopped_without_storage_delegates_fresh_for_chat_and_goal() {
+        assert_stopped_without_context_restarts(false);
+    }
+
+    fn assert_stopped_without_context_restarts(with_storage: bool) {
+        for goal in [false, true] {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let (_rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(AdmissionHeldModel));
+            let dir = tempfile::tempdir().unwrap();
+            let config = StorageConfig {
+                db_path: dir.path().join("missing.db"),
+                ..Default::default()
+            };
+            let storage = Storage::open(config.clone()).unwrap();
+            let runtime = if with_storage {
+                runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap())
+            } else {
+                runtime
+            };
+            sink.submit(chat_command("no-context"));
+            let root = sink.chat_runs["no-context"];
+            if goal {
+                sink.chat_runs.remove("no-context");
+                sink.bind_goal_context("no-context", "project", &root.to_string());
+            }
+            assert!(matches!(
+                sink.submit(WorkbenchCommand::StopChat {
+                    thread_id: "no-context".into()
+                })
+                .as_slice(),
+                [LoopEvent::ChatStopped { .. }]
+            ));
+            assert!(sink.stop_marked.contains("no-context"));
+            let error = runtime
+                .continue_goal(root, "probe".into(), RunConfig::default())
+                .unwrap_err();
+            assert!(
+                matches!(error, RuntimeError::RunRestoreFailed { reason, .. }
+                if reason == if with_storage { runtime::RunRestoreFailure::MissingContext }
+                else { runtime::RunRestoreFailure::StorageNotConfigured })
+            );
+            let events = sink.submit(chat_command("no-context"));
+            assert!(
+                matches!(events.as_slice(), [LoopEvent::ChatAccepted { .. }]),
+                "{events:?}"
+            );
+            let fresh = sink.chat_runs["no-context"];
+            assert_ne!(fresh, root);
+            assert!(!sink.stop_marked.contains("no-context"));
+            assert!(!sink.stopped_by_us.contains("no-context"));
+            // Both goal and plain-chat paths use the new binding on subsequent stops.
+            sink.submit(WorkbenchCommand::StopChat {
+                thread_id: "no-context".into(),
+            });
+            assert!(sink.stop_marked.contains("no-context"));
+        }
+    }
+
+    #[test]
+    fn resume_fallback_requires_our_stop_and_only_absent_context() {
+        let (_rt, mut sink, _, _) = build_sink();
+        for goal in [false, true] {
+            let id = runtime::RunId::new(999);
+            if goal {
+                sink.goal_runs.insert("unmarked".into(), id);
+            } else {
+                sink.chat_runs.insert("unmarked".into(), id);
+            }
+            assert!(matches!(
+                sink.submit(chat_command("unmarked")).as_slice(),
+                [LoopEvent::ChatRejected { .. }]
+            ));
+        }
+        sink.stop_marked.insert("marked".into());
+        for reason in [
+            runtime::RunRestoreFailure::CorruptContext("bad".into()),
+            runtime::RunRestoreFailure::UnsupportedConfig("bad".into()),
+            runtime::RunRestoreFailure::SnapshotConsumeFailed("bad".into()),
+        ] {
+            assert!(!sink.can_restart_stopped(
+                "marked",
+                &RuntimeError::RunRestoreFailed {
+                    run_id: "run-999".into(),
+                    reason,
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn stop_chat_only_stops_parent_then_subtree_and_retains_binding() {
+        let (rt, mut sink, runtime, _) = build_sink();
+        sink.submit(WorkbenchCommand::SendChat(
+            crate::model::commands::ChatSubmission {
+                composer_role: crate::model::composer::ComposerRole::Orchestrator,
+                images: Vec::new(),
+                thread_id: "chat-thread".into(),
+                text: "hello".into(),
+                model_preference: None,
+            },
+        ));
+        let root = sink.chat_runs["chat-thread"];
+        let (child, grandchild) = rt.block_on(async {
+            let child = runtime
+                .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
+                .unwrap();
+            let grandchild = runtime
+                .delegate_background_as_child(
+                    child,
+                    Role::Worker,
+                    "grandchild",
+                    RunConfig::default(),
+                )
+                .unwrap();
+            (child, grandchild)
+        });
+        let command = WorkbenchCommand::StopChat {
+            thread_id: "chat-thread".into(),
+        };
+        let events = sink.submit(command.clone());
+        assert!(
+            matches!(
+                events.as_slice(),
+                [LoopEvent::ChatStopped {
+                    running_children: 2,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+        let phase = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
+        assert_eq!(sink.chat_runs["chat-thread"], root);
+        assert_eq!(runtime.live_descendants(root), vec![child, grandchild]);
+        assert!(matches!(
+            sink.submit(command.clone()).as_slice(),
+            [LoopEvent::ChatStopped { .. }]
+        ));
+        rt.block_on(async {
+            for run in [child, grandchild] {
+                let phase = tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
+            }
+        });
+        sink.observe_lifecycle(&event_bus::Event::new(
+            event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id: grandchild.to_string(),
+                from: event_bus::AgentRunPhase::Running,
+                to: event_bus::AgentRunPhase::Stopped,
+                reason: None,
+            },
+        ));
+        assert_eq!(sink.running_children["chat-thread"], 0);
+        assert_eq!(sink.chat_runs["chat-thread"], root);
+        assert!(
+            matches!(sink.submit(command).as_slice(), [LoopEvent::ChatNotice { text, .. }] if text == "Already stopped; send a message to resume")
+        );
+    }
+
+    #[test]
+    fn stop_goal_before_first_followup_pauses_and_send_resumes_supervisor() {
+        assert_goal_stop_resume(false);
+    }
+
+    #[test]
+    fn stopped_detached_goal_send_does_not_dispatch_recovery_root() {
+        assert_goal_stop_resume(true);
+    }
+
+    fn assert_goal_stop_resume(detached: bool) {
+        let (rt, mut sink, runtime, supervisor) = build_sink();
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("stop.sqlite3"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        sink.submit(WorkbenchCommand::SubmitGoal(submission(
+            "implement stop",
+            vec![],
+            vec![],
+        )));
+        let root = sink.goal_runs["thread-1"];
+        let goal_id = sink.goal_ids["thread-1"].clone();
+        wait_for_goal_state(&supervisor, &goal_id, GoalState::Active);
+        wait_for_agents(&runtime, |agent| agent.run_id == root);
+        let events = sink.submit(WorkbenchCommand::StopChat {
+            thread_id: "thread-1".into(),
+        });
+        assert!(
+            matches!(events.as_slice(), [LoopEvent::ChatStopped { .. }]),
+            "{events:?}"
+        );
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        wait_for_goal_state(&supervisor, &goal_id, GoalState::Paused);
+        assert_eq!(sink.goal_runs["thread-1"], root);
+        if detached {
+            supervisor
+                .adopt(vec![(supervisor.snapshot(&goal_id).unwrap(), Vec::new())])
+                .unwrap();
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !supervisor.snapshot(&goal_id).unwrap().detached {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+        }
+        let events = sink.submit(WorkbenchCommand::SendChat(
+            crate::model::commands::ChatSubmission {
+                composer_role: crate::model::composer::ComposerRole::Orchestrator,
+                images: Vec::new(),
+                thread_id: "thread-1".into(),
+                text: "resume with authority".into(),
+                model_preference: None,
+            },
+        ));
+        assert!(
+            matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string()),
+            "{events:?}"
+        );
+        wait_for_goal_state(
+            &supervisor,
+            &goal_id,
+            if detached {
+                GoalState::Paused
+            } else {
+                GoalState::Active
+            },
+        );
+        assert_eq!(sink.chat_runs["thread-1"], root);
+        assert!(!sink.stop_marked.contains("thread-1"));
+        assert!(!sink.stopped_by_us.contains("thread-1"));
+        assert_eq!(
+            runtime.list_agents().len(),
+            1,
+            "resume must not spawn a duplicate continuation"
+        );
+        runtime.cancel(root).unwrap();
+    }
+
+    #[test]
+    fn stop_chat_without_run_is_an_informational_notice() {
+        let (_rt, mut sink, _, _) = build_sink();
+        assert!(
+            matches!(sink.submit(WorkbenchCommand::StopChat { thread_id: "missing".into() }).as_slice(),
+            [LoopEvent::ChatNotice { text, .. }] if text == "No chat run to stop")
+        );
     }
 
     #[test]

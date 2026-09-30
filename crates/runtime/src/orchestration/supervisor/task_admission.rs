@@ -45,6 +45,9 @@ impl SupervisorActor {
         };
         match task.status {
             TaskStatus::Running | TaskStatus::Retrying => {}
+            // A late admission failure must not convert an operator stop into
+            // retryable failure; only explicit history restore may resume it.
+            TaskStatus::Stopped => return,
             TaskStatus::Pending
             | TaskStatus::Queued
             | TaskStatus::Blocked

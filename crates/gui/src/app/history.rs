@@ -203,6 +203,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.apply_conversation_event(&stored.event);
             self.bind_goal_event(&stored.event);
             if let event_bus::EventKind::Lifecycle(
+                event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
+            ) = &stored.event.kind
+            {
+                // In particular, Stopped survives replay as resumable, not failed/idle.
+                self.phases.insert(run_id.clone(), super::frame::phase(*to));
+            }
+            if let event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
             ) = &stored.event.kind
                 && last_waiting.get(run_id) == Some(&index)

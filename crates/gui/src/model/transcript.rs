@@ -209,6 +209,9 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: event_bus::AgentRunPhase::Stopped, ..
+            }) => self.push(TranscriptEntry::Notice { text: "Run stopped (resumable)".into() }),
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
                     to: event_bus::AgentRunPhase::Error,

@@ -64,7 +64,9 @@ pub(super) fn attention_for(
 const fn agent_run_attention(phase: AgentRunPhase) -> PaneAttention {
     match phase {
         AgentRunPhase::Pending | AgentRunPhase::Running => PaneAttention::None,
-        AgentRunPhase::Done | AgentRunPhase::Waiting => PaneAttention::Info,
+        AgentRunPhase::Done | AgentRunPhase::Waiting | AgentRunPhase::Stopped => {
+            PaneAttention::Info
+        }
         AgentRunPhase::Error => PaneAttention::Error,
     }
 }
@@ -72,7 +74,9 @@ const fn agent_run_attention(phase: AgentRunPhase) -> PaneAttention {
 const fn thread_phase_attention(phase: ThreadRunPhase) -> PaneAttention {
     match phase {
         ThreadRunPhase::Pending | ThreadRunPhase::Running => PaneAttention::None,
-        ThreadRunPhase::Done | ThreadRunPhase::Waiting => PaneAttention::Info,
+        ThreadRunPhase::Done | ThreadRunPhase::Waiting | ThreadRunPhase::Stopped => {
+            PaneAttention::Info
+        }
         ThreadRunPhase::Error => PaneAttention::Error,
     }
 }
@@ -88,7 +92,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .active_thread
                         .as_ref()
                         .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id))
-                        .and_then(|thread| thread.run_ids.last())
+                        .and_then(|thread| {
+                            // Preserve the latest run's input/attention state unless
+                            // the root was stopped: live children must not hide its
+                            // resumable banner and second-stage stop action.
+                            thread
+                                .run_ids
+                                .iter()
+                                .rev()
+                                .find(|run| self.transcripts.is_thread_root(run))
+                                .filter(|run| {
+                                    self.phases.get(*run) == Some(&ThreadRunPhase::Stopped)
+                                })
+                                .or_else(|| thread.run_ids.last())
+                        })
                         .and_then(|run| self.phases.get(run).map(|phase| (run.clone(), *phase)))
                         .into_iter()
                         .collect(),
@@ -118,6 +135,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             AgentRunPhase::Waiting => ThreadRunPhase::Waiting,
                             AgentRunPhase::Done => ThreadRunPhase::Done,
                             AgentRunPhase::Error => ThreadRunPhase::Error,
+                            AgentRunPhase::Stopped => ThreadRunPhase::Stopped,
                         };
                         (row.run_id.to_string(), phase)
                     })
@@ -195,6 +213,50 @@ mod tests {
             role: "orchestrator".to_owned(),
             status,
             model: "demo".to_owned(),
+        }
+    }
+
+    #[test]
+    fn thread_attention_only_prefers_the_root_when_stopped() {
+        use crate::fixture::{DemoSource, demo_runs, demo_sidebar, populate};
+        use ThreadRunPhase::{Done, Error, Running, Stopped, Waiting};
+
+        let root = tempfile::tempdir().unwrap();
+        let mut state = populate(
+            WorkbenchState::new(
+                DemoSource(demo_runs()),
+                &workspace_ui::UiSettings::default(),
+            )
+            .unwrap(),
+            demo_sidebar(root.path()).unwrap(),
+        );
+        let conversation = PanelId::new("agent-main");
+        // The demo has a root (run-1), then two children (run-2, run-3).
+        // Waiting/error children must not lose Send to their still-running root;
+        // a stopped root must remain visible even while its children are live.
+        for (root_phase, child_phase, expected_run) in [
+            (Running, Waiting, "run-3"),
+            (Running, Error, "run-3"),
+            (Running, Running, "run-3"),
+            (Stopped, Running, "run-1"),
+            (Stopped, Waiting, "run-1"),
+            (Stopped, Done, "run-1"),
+            (Running, Waiting, "run-3"), // Resuming restores normal selection.
+        ] {
+            state.phases.insert("run-1".into(), root_phase);
+            state.phases.insert("run-3".into(), child_phase);
+            state.observe_attention();
+            let observed: Vec<_> = state
+                .attention_acks
+                .iter()
+                .filter(|((panel, _), _)| panel == &conversation)
+                .map(|((_, run), ack)| (run.as_str(), ack.phase()))
+                .collect();
+            assert_eq!(
+                observed,
+                vec![(expected_run, state.phases[expected_run])],
+                "root={root_phase:?} child={child_phase:?}"
+            );
         }
     }
 

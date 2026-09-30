@@ -17,7 +17,7 @@ use tools::{ToolExecutionContext, ToolExecutionMode, ToolResult};
 use super::LoopState;
 use crate::escalation::detector::{EscalationDetector, ToolObservation};
 use crate::network::{NetworkAccessDecision, judge_web_network_access};
-use crate::{ExecutionPolicy, META_OPS, is_meta_op, meta, rules};
+use crate::{ExecutionPolicy, InterruptKind, META_OPS, is_meta_op, meta, rules};
 
 mod mcp_scope;
 
@@ -446,8 +446,8 @@ impl LoopState {
             }
             let mut calls = std::collections::VecDeque::new();
             for (id, name, input, permission, validation) in validated {
-                if self.cancelled() {
-                    self.finish_cancelled();
+                if let Some(kind) = self.interrupted() {
+                    self.finish_interrupted(kind);
                     return false;
                 }
                 let ready = match permission {
@@ -477,7 +477,12 @@ impl LoopState {
                                 let mut cancel = self.channels.cancel_rx.clone();
                                 let authorized = tokio::select! {
                                     biased;
-                                    _ = cancel.wait_for(|cancelled| *cancelled) => { self.finish_cancelled(); return false; }
+                                    _ = cancel.wait_for(|interrupt| interrupt.is_interrupted()) => {
+                                        if let Some(kind) = self.interrupted() {
+                                            self.finish_interrupted(kind);
+                                        }
+                                        return false;
+                                    }
                                     result = call.authorize() => result,
                                 };
                                 match authorized {
@@ -528,9 +533,11 @@ impl LoopState {
                             self.finish_error(error.to_string());
                             return false;
                         }
-                        if self.cancelled() {
-                            meta::cleanup_delegates(&runtime, spawned).await;
-                            self.finish_cancelled();
+                        if let Some(kind) = self.interrupted() {
+                            if kind == InterruptKind::Cancel {
+                                meta::cleanup_delegates(&runtime, spawned).await;
+                            }
+                            self.finish_interrupted(kind);
                             return false;
                         }
                         let child = match self
@@ -559,8 +566,8 @@ impl LoopState {
                         self.context.push_tool_result(id, dispatch.result);
                         self.publish_message_count();
                     }
-                    if self.cancelled() {
-                        self.finish_cancelled();
+                    if let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
                         return false;
                     }
                     if let Some(permit) = &self.task.config.ownership
@@ -589,8 +596,8 @@ impl LoopState {
                         self.finish_error(error.to_string());
                         return false;
                     }
-                    if self.cancelled() {
-                        self.finish_cancelled();
+                    if let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
                         return false;
                     }
                     let BatchCall {
@@ -623,7 +630,7 @@ impl LoopState {
                             } else {
                                 tokio::select! {
                                     biased;
-                                    _=cancel.wait_for(|cancelled|*cancelled)=>Err("cancelled while waiting for workspace".into()),
+                                    _=cancel.wait_for(|interrupt| interrupt.is_interrupted())=>Err(match self.interrupted() { Some(InterruptKind::Stop) => "stopped while waiting for workspace", _ => "cancelled while waiting for workspace" }.into()),
                                     result=self.snapshot_before_tool(&name,&id)=>result,
                                 }
                             };
@@ -667,12 +674,16 @@ impl LoopState {
                     let handle = tasks.spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.wait_for(|cancelled| *cancelled) => {
+                                interrupt = cancel.wait_for(|interrupt| interrupt.is_interrupted()) => {
+                                    let reason = match interrupt.ok().and_then(|value| value.kind()) {
+                                        Some(InterruptKind::Stop) => "stopped",
+                                        _ => "cancelled",
+                                    };
                                     bus.emit(Event::new(event_bus::ToolEvent::ToolCompleted {
                                         tool_name: name.clone(), call_id: id.clone(), is_error: true,
-                                        output: Some("cancelled".into()), detail: None, run_id: Some(run_id.clone()),
+                                        output: Some(reason.into()), detail: None, run_id: Some(run_id.clone()),
                                     }));
-                                    ToolResult::error("cancelled")
+                                    ToolResult::error(reason)
                                 },
                                 result = call.execute() => result.unwrap_or_else(|error| ToolResult::error(error.to_string())),
                             };
@@ -829,8 +840,8 @@ impl LoopState {
                         crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
                     }
                 }
-                if self.cancelled() {
-                    self.finish_cancelled();
+                if let Some(kind) = self.interrupted() {
+                    self.finish_interrupted(kind);
                     return false;
                 }
                 if let Some(permit) = &self.task.config.ownership
@@ -929,8 +940,8 @@ impl LoopState {
                     let verdict = tokio::select! {
                         biased;
                         changed = self.channels.cancel_rx.changed() => {
-                            if changed.is_ok() && self.cancelled() {
-                                self.finish_cancelled();
+                            if changed.is_ok() && let Some(kind) = self.interrupted() {
+                                self.finish_interrupted(kind);
                                 return NetworkGate::Cancelled;
                             }
                             return NetworkGate::Reject(ToolResult::error("review was interrupted"));
@@ -975,8 +986,8 @@ impl LoopState {
                 let outcome = tokio::select! {
                     biased;
                     changed = self.channels.cancel_rx.changed() => {
-                        if changed.is_ok() && self.cancelled() {
-                            self.finish_cancelled();
+                        if changed.is_ok() && let Some(kind) = self.interrupted() {
+                            self.finish_interrupted(kind);
                             return NetworkGate::Cancelled;
                         }
                         return NetworkGate::Reject(ToolResult::error("approval wait was interrupted"));

@@ -17,6 +17,8 @@ pub(crate) async fn complete(
 ) {
     match state.phase() {
         AgentRunPhase::Done | AgentRunPhase::Error => {}
+        // Operator stop is resumable, not a completed escalation. Retain its workspace.
+        AgentRunPhase::Stopped => return,
         AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
             tracing::warn!(
                 source_run_id = %memo.source_run_id,

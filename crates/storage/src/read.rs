@@ -45,7 +45,7 @@ impl Database {
     ) -> Result<Option<RunContextRecord>, StorageError> {
         use rusqlite::OptionalExtension;
         let id: Option<String> = self.conn.query_row(
-            "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error', 'Checkpoint') \
+            "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error', 'Checkpoint', 'Stopped') \
              ORDER BY updated_at_ns DESC, CAST(substr(run_id, 5) AS INTEGER) DESC LIMIT 1",
             [name], |row| row.get(0),
         ).optional()?;

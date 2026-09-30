@@ -103,6 +103,22 @@ mod tests {
     }
 
     #[test]
+    fn stopped_row_remains_visible_and_can_resume() {
+        let mut model = TasksModel::new(Source(vec![summary(2, AgentRunPhase::Running)]));
+        model.refresh();
+        for phase in [AgentRunPhase::Stopped, AgentRunPhase::Running] {
+            model.apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Running,
+                to: phase,
+                reason: None,
+            }));
+            assert_eq!(model.rows()[0].status, phase);
+            assert_eq!(model.rows()[0].name, "custom-name");
+        }
+    }
+
+    #[test]
     fn state_change_updates_known_row_and_unknown_refreshes() {
         // Given: a refreshed row built from a summary with distinct identity values
         let source = Source(vec![summary(2, AgentRunPhase::Running)]);

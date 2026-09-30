@@ -22,6 +22,7 @@ pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
         Some(ThreadRunPhase::Waiting) => "Waiting for input",
         Some(ThreadRunPhase::Done) => "Done",
         Some(ThreadRunPhase::Error) => "Error",
+        Some(ThreadRunPhase::Stopped) => "Stopped (resumable)",
         None => "Idle",
     };
     response.on_hover_text(label);
@@ -38,17 +39,22 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
         ThreadRunPhase::Pending => "pending",
         ThreadRunPhase::Done => "done",
         ThreadRunPhase::Error => "error",
+        ThreadRunPhase::Stopped => "stopped (resumable)",
     };
     ui.horizontal(|ui| match phase {
         ThreadRunPhase::Running => phase_circle(ui, Some(phase)),
         ThreadRunPhase::Pending => {
             badge(ui, label, phase_color(phase), palette().SURFACE_RAISED);
         }
-        ThreadRunPhase::Waiting | ThreadRunPhase::Done | ThreadRunPhase::Error => {
+        ThreadRunPhase::Stopped
+        | ThreadRunPhase::Waiting
+        | ThreadRunPhase::Done
+        | ThreadRunPhase::Error => {
             let accent = match phase {
                 ThreadRunPhase::Error | ThreadRunPhase::Pending | ThreadRunPhase::Running => {
                     phase_color(phase)
                 }
+                ThreadRunPhase::Stopped => phase_color(phase),
                 ThreadRunPhase::Waiting | ThreadRunPhase::Done => palette().INFO,
             };
             egui::Frame::new()
@@ -131,6 +137,15 @@ if rect.fill == crate::theme::tokens::palette().SURFACE_RAISED || rect.fill == p
         assert!(harness.query_by_label("waiting (input)").is_some());
         assert_eq!(spinner_count(&harness), 0);
         assert_eq!(pill_count(&harness), 1);
+    }
+
+    #[test]
+    fn stopped_badge_is_resumable_and_warning_not_error() {
+        let harness = harness(Some(ThreadRunPhase::Stopped));
+        harness.get_by_label("stopped (resumable)");
+        assert_eq!(spinner_count(&harness), 0);
+        assert_eq!(phase_color(ThreadRunPhase::Stopped), palette().WARNING_FG);
+        assert_ne!(phase_color(ThreadRunPhase::Stopped), palette().ERROR_FG);
     }
 
     #[test]

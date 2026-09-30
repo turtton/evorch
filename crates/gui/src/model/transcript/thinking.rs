@@ -18,11 +18,13 @@ impl TranscriptModel {
     pub(super) fn finish_thinking(&mut self, event: &Event) {
         if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
             run_id,
-            to: AgentRunPhase::Done | AgentRunPhase::Error,
+            to: AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error,
             ..
         }) = &event.kind
         {
             self.thinking.remove(&Some(run_id.clone()));
+            // A resumed response must not replace partial output from before stop.
+            self.streaming_messages.remove(&Some(run_id.clone()));
         }
     }
 }

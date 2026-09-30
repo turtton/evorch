@@ -10,6 +10,7 @@ pub const MAX_NOTIFICATIONS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationKind {
     RunCompleted,
+    RunStopped,
     QuestionPending { question_id: String },
     RunFailed { reason: Option<String> },
     ApprovalPending { tool_name: String, call_id: String },
@@ -52,6 +53,10 @@ impl NotificationsModel {
                 ..
             }) => {
                 let (kind, summary) = match to {
+                    AgentRunPhase::Stopped => (
+                        NotificationKind::RunStopped,
+                        format!("Run {run_id} stopped (resumable)"),
+                    ),
                     AgentRunPhase::Done => (
                         NotificationKind::RunCompleted,
                         format!("Run {run_id} completed"),
@@ -107,6 +112,7 @@ impl NotificationsModel {
         };
         let phase = match &kind {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
+            NotificationKind::RunStopped => ThreadRunPhase::Stopped,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
             NotificationKind::QuestionPending { .. }
             | NotificationKind::ApprovalPending { .. }
@@ -220,6 +226,20 @@ mod tests {
             assert!(model.is_unread(item.id));
         }
     }
+    #[test]
+    fn stopped_is_resumable_notification_not_failure() {
+        let mut model = NotificationsModel::default();
+        model.apply_event(
+            &transition(AgentRunPhase::Stopped, Some("operator stop")),
+            |_| None,
+        );
+        let item = model.items().next().unwrap();
+        assert_eq!(item.kind, NotificationKind::RunStopped);
+        assert!(item.summary.contains("resumable"));
+        assert!(!item.summary.contains("failed"));
+        assert!(model.is_unread(item.id));
+    }
+
     #[test]
     fn cancelled_reason_surfaces_as_failed_notification() {
         // Given: an empty model.

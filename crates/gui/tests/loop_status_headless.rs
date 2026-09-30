@@ -135,6 +135,7 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             WorkbenchCommand::CancelGoal { goal_id } => cancels.push(goal_id.as_str()),
             WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::StopChat { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DecideMerge(_)
             | WorkbenchCommand::DecideToolApproval { .. }
@@ -242,6 +243,7 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
+            | WorkbenchCommand::StopChat { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }

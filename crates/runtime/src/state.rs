@@ -5,26 +5,75 @@ use event_bus::{AgentRunPhase, LifecycleEvent};
 use crate::error::RuntimeError;
 use crate::run::RunId;
 
+/// run の割り込み理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptKind {
+    /// 実行をキャンセルする。
+    Cancel,
+    /// 実行を停止し、復元による再開を許可する。
+    Stop,
+}
+
+/// run へ通知する割り込み状態。初期値は `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunInterrupt {
+    /// 割り込みは要求されていない。
+    None,
+    /// 実行をキャンセルする。
+    Cancel,
+    /// 実行を停止し、復元による再開を許可する。
+    Stop,
+}
+
+impl RunInterrupt {
+    /// 割り込みが要求されているかを返す。
+    pub const fn is_interrupted(self) -> bool {
+        self.kind().is_some()
+    }
+
+    /// 要求された割り込み理由を返す。
+    pub const fn kind(self) -> Option<InterruptKind> {
+        match self {
+            Self::None => None,
+            Self::Cancel => Some(InterruptKind::Cancel),
+            Self::Stop => Some(InterruptKind::Stop),
+        }
+    }
+}
+
+/// 停止要求を適用する範囲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopScope {
+    /// 指定された run のみ停止する。
+    SelfOnly,
+    /// 指定された run と全子孫を停止する。
+    Subtree,
+}
+
 /// 位相ペアの遷移妥当性を判定する。
 ///
-/// 有効な遷移は次の 8 本のみ:
+/// 有効な遷移は次の 11 本のみ:
 ///
 /// - `Pending -> Running` (起動)
 /// - `Pending -> Error` (起動失敗)
-/// - `Running -> Waiting / Done / Error`
-/// - `Waiting -> Running / Done / Error`
+/// - `Pending -> Stopped` (起動前の停止)
+/// - `Running -> Waiting / Stopped / Done / Error`
+/// - `Waiting -> Running / Stopped / Done / Error`
 ///
-/// `Done` と `Error` は終端位相であり、そこからの遷移は存在しない。
+/// `Stopped` / `Done` / `Error` は終端位相であり、そこからの遷移は存在しない。
 pub fn is_valid_transition(from: AgentRunPhase, to: AgentRunPhase) -> bool {
-    use AgentRunPhase::{Done, Error, Pending, Running, Waiting};
+    use AgentRunPhase::{Done, Error, Pending, Running, Stopped, Waiting};
     matches!(
         (from, to),
         (Pending, Running)
             | (Pending, Error)
+            | (Pending, Stopped)
             | (Running, Waiting)
+            | (Running, Stopped)
             | (Running, Done)
             | (Running, Error)
             | (Waiting, Running)
+            | (Waiting, Stopped)
             | (Waiting, Done)
             | (Waiting, Error)
     )
@@ -116,21 +165,22 @@ impl Default for RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_bus::AgentRunPhase::{Done, Error, Pending, Running, Waiting};
+    use event_bus::AgentRunPhase::{Done, Error, Pending, Running, Stopped, Waiting};
 
-    // Given: 全 5 位相の 25 通り from/to ペアと期待される遷移行列
+    // Given: 全 6 位相の 36 通り from/to ペアと期待される遷移行列
     // When: is_valid_transition を全ペアに適用する
-    // Then: Pending→Running/Error、Running→Waiting/Done/Error、Waiting→Running/Done/Error
-    //       の 8 本のみ有効と判定し、Done/Error は終端として全遷移を拒否する
+    // Then: Pending→Running/Stopped/Error、Running→Waiting/Stopped/Done/Error、Waiting→Running/Stopped/Done/Error
+    //       の 11 本のみ有効と判定し、Stopped/Done/Error は終端として全遷移を拒否する
     #[test]
-    fn is_valid_transition_matches_matrix_for_all_25_pairs() {
-        let phases = [Pending, Running, Waiting, Done, Error];
-        let expected: [[bool; 5]; 5] = [
-            [false, true, false, false, true],   // from Pending
-            [false, false, true, true, true],    // from Running
-            [false, true, false, true, true],    // from Waiting
-            [false, false, false, false, false], // from Done (終端)
-            [false, false, false, false, false], // from Error (終端)
+    fn is_valid_transition_matches_matrix_for_all_36_pairs() {
+        let phases = [Pending, Running, Waiting, Stopped, Done, Error];
+        let expected: [[bool; 6]; 6] = [
+            [false, true, false, true, false, true],    // from Pending
+            [false, false, true, true, true, true],     // from Running
+            [false, true, false, true, true, true],     // from Waiting
+            [false, false, false, false, false, false], // from Stopped (終端)
+            [false, false, false, false, false, false], // from Done (終端)
+            [false, false, false, false, false, false], // from Error (終端)
         ];
 
         for (i, &from) in phases.iter().enumerate() {
@@ -141,6 +191,18 @@ mod tests {
                     "ペア {from:?} -> {to:?} の判定が期待と異なる"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn run_interrupt_distinguishes_idle_cancel_and_stop() {
+        for (interrupt, kind) in [
+            (RunInterrupt::None, None),
+            (RunInterrupt::Cancel, Some(InterruptKind::Cancel)),
+            (RunInterrupt::Stop, Some(InterruptKind::Stop)),
+        ] {
+            assert_eq!(interrupt.kind(), kind);
+            assert_eq!(interrupt.is_interrupted(), kind.is_some());
         }
     }
 
@@ -295,23 +357,27 @@ mod tests {
         assert_eq!(state.phase(), Done);
     }
 
-    // Given: Done (終端位相) まで進んだ RunState
+    // Given: Stopped / Done / Error (終端位相) まで進んだ RunState
     // When: Running へ transition する
-    // Then: InvalidTransition で拒否され、位相は Done のまま
+    // Then: InvalidTransition で拒否され、位相は変化しない
     #[test]
     fn transition_from_terminal_phase_is_rejected() {
-        let mut state = RunState::new();
-        let run_id = RunId::new(4);
-        state.transition(run_id, Running, None).expect("-> Running");
-        state.transition(run_id, Done, None).expect("-> Done");
+        for terminal in [Stopped, Done, Error] {
+            let mut state = RunState::new();
+            let run_id = RunId::new(4);
+            state.transition(run_id, Running, None).expect("-> Running");
+            state
+                .transition(run_id, terminal, None)
+                .expect("-> terminal");
 
-        assert_eq!(
-            state.transition(run_id, Running, None),
-            Err(RuntimeError::InvalidTransition {
-                from: Done,
-                to: Running,
-            })
-        );
-        assert_eq!(state.phase(), Done);
+            assert_eq!(
+                state.transition(run_id, Running, None),
+                Err(RuntimeError::InvalidTransition {
+                    from: terminal,
+                    to: Running,
+                })
+            );
+            assert_eq!(state.phase(), terminal);
+        }
     }
 }

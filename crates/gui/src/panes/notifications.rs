@@ -31,6 +31,7 @@ pub fn notifications_pane(
             let unread = model.is_unread(notification.id);
             let (label, accent) = match &notification.kind {
                 NotificationKind::QuestionPending { .. } => ("question", palette().INFO),
+                NotificationKind::RunStopped => ("stopped (resumable)", palette().WARNING_FG),
                 NotificationKind::RunCompleted => ("completed", palette().SUCCESS),
                 NotificationKind::RunFailed { .. } => ("failed", palette().ERROR),
                 NotificationKind::ApprovalPending { .. } => ("approval", palette().INFO),

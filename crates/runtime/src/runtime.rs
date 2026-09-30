@@ -9,7 +9,7 @@ mod questions;
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -37,6 +37,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
+use crate::state::{RunInterrupt, StopScope};
 use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
@@ -135,7 +136,7 @@ struct RunEntry {
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
     inbox_tx: mpsc::Sender<(String, Vec<crate::DelegateImage>)>,
-    cancel_tx: watch::Sender<bool>,
+    cancel_tx: watch::Sender<RunInterrupt>,
     compact_tx: watch::Sender<u64>,
     model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
     /// run の最終 assistant テキスト (loop 側 result_tx と対になる観測口)。
@@ -675,6 +676,15 @@ impl AgentRuntime {
             .spawn_intents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // An explicitly validated conversation restore starts a new generation of
+        // this root. Keep old descendants fenced, but preserve discard-then-resume
+        // in place; fresh/in-flight spawns must still inherit cancellation.
+        if parent.is_none()
+            && matches!(continuation, RunContinuation::Restored(_))
+            && let Some(intent) = intents.get_mut(&run_id)
+        {
+            intent.cancelled = false;
+        }
         let cancelled = intents.get(&run_id).is_some_and(|intent| intent.cancelled)
             || parent
                 .and_then(|parent| intents.get(&parent))
@@ -863,7 +873,7 @@ impl AgentRuntime {
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
             watch::channel(config.model_preference.clone());
@@ -1109,7 +1119,10 @@ impl AgentRuntime {
     ) -> Result<(), RuntimeError> {
         self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
-        if phase == AgentRunPhase::Done || phase == AgentRunPhase::Error {
+        if matches!(
+            phase,
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
+        ) {
             return Err(RuntimeError::RunTerminated {
                 run_id: run_id.to_string(),
             });
@@ -1133,6 +1146,146 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// run を停止する。停止後は復元により再開できる。
+    ///
+    /// admission 待機中の run は未登録のため、停止の代わりに admission をキャンセルする。
+    ///
+    /// # Errors
+    /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
+    pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
+        // Collect before taking admissions: spawning locks intents before admissions.
+        let targets = match scope {
+            StopScope::SelfOnly => HashSet::from([run_id]),
+            StopScope::Subtree => self.run_subtree_ids(run_id),
+        };
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep the same admissions -> runs fence as cancel and registration.
+        let runs = lock_runs(&self.shared.runs);
+        if !runs.contains_key(&run_id)
+            && !admissions
+                .get(&run_id)
+                .is_some_and(|admission| admission.result.borrow().is_none())
+        {
+            return Err(unknown_run(run_id));
+        }
+        for target in targets {
+            if let Some(admission) = admissions.get_mut(&target)
+                && admission.result.borrow().is_none()
+            {
+                admission.cancelled = true;
+            } else if let Some(entry) = runs.get(&target) {
+                entry.cancel_tx.send_replace(RunInterrupt::Stop);
+            }
+        }
+        Ok(())
+    }
+
+    /// Hard-cancel a root and all descendants, fencing even in-flight child spawns.
+    /// Unlike [`Self::stop`], cancellation is inherited by future descendants.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::UnknownRun`] if the root has no run or spawn intent.
+    pub fn cancel_subtree(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        // Keep intents locked from collection through cancellation. Spawning uses
+        // the same intents -> admissions -> runs order and inherits this fence.
+        let mut intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        if !intents.contains_key(&run_id)
+            && !admissions.contains_key(&run_id)
+            && !runs.contains_key(&run_id)
+        {
+            return Err(unknown_run(run_id));
+        }
+        for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
+            intents.entry(target).or_default().cancelled = true;
+            if let Some(admission) = admissions.get_mut(&target)
+                && admission.result.borrow().is_none()
+            {
+                admission.cancelled = true;
+            } else if let Some(entry) = runs.get(&target) {
+                entry.cancel_tx.send_replace(RunInterrupt::Cancel);
+            }
+        }
+        Ok(())
+    }
+
+    /// 指定された run 自身を除き、実行中または admission 待機中の全子孫を ID 順で返す。
+    pub fn live_descendants(&self, run_id: RunId) -> Vec<RunId> {
+        let descendants = self.run_subtree_ids(run_id);
+        let admissions = self
+            .shared
+            .admissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        let mut live: Vec<_> = descendants
+            .into_iter()
+            .filter(|id| {
+                *id != run_id
+                    && (admissions
+                        .get(id)
+                        .is_some_and(|admission| admission.result.borrow().is_none())
+                        || runs.get(id).is_some_and(|entry| {
+                            matches!(
+                                *entry.phase_rx.borrow(),
+                                AgentRunPhase::Pending
+                                    | AgentRunPhase::Running
+                                    | AgentRunPhase::Waiting
+                            )
+                        }))
+            })
+            .collect();
+        live.sort_by_key(|id| id.get());
+        live
+    }
+
+    /// Follow both pre-registration intents and registered parents to a fixed point.
+    fn run_subtree_ids(&self, run_id: RunId) -> HashSet<RunId> {
+        let intents = self
+            .shared
+            .spawn_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runs = lock_runs(&self.shared.runs);
+        Self::collect_subtree_ids(run_id, &intents, &runs)
+    }
+
+    fn collect_subtree_ids(
+        run_id: RunId,
+        intents: &HashMap<RunId, cancellation::SpawnIntent>,
+        runs: &HashMap<RunId, RunEntry>,
+    ) -> HashSet<RunId> {
+        let mut descendants = HashSet::from([run_id]);
+        loop {
+            let before = descendants.len();
+            for (id, parent) in intents
+                .iter()
+                .map(|(id, intent)| (id, intent.parent))
+                .chain(runs.iter().map(|(id, entry)| (id, entry.parent)))
+            {
+                if parent.is_some_and(|parent| descendants.contains(&parent)) {
+                    descendants.insert(*id);
+                }
+            }
+            if descendants.len() == before {
+                return descendants;
+            }
+        }
+    }
+
     /// run が終端位相になるまで待機し、最終位相を返す。
     pub async fn wait(&self, run_id: RunId) -> Result<AgentRunPhase, RuntimeError> {
         self.wait_admission(run_id).await?;
@@ -1140,7 +1293,7 @@ impl AgentRuntime {
         loop {
             let phase = *phase_rx.borrow_and_update();
             match phase {
-                AgentRunPhase::Done | AgentRunPhase::Error => {
+                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
                     // Terminal publication holds runs until its completion relay finishes.
                     drop(self.entry(run_id)?);
                     return Ok(phase);
@@ -1408,7 +1561,10 @@ impl AgentRuntime {
         }
 
         let phase = *recipient_entry.phase_rx.borrow();
-        if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
+        if matches!(
+            phase,
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
+        ) {
             return Err(RuntimeError::RunTerminated {
                 run_id: recipient.to_string(),
             });
@@ -1483,7 +1639,7 @@ impl AgentRuntime {
                     DeliveryDisposition::Aside
                 }
             }
-            AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
+            AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
         };
 
         Ok((message_id, message, disposition))
@@ -1569,9 +1725,10 @@ impl AgentRuntime {
             }
 
             let current_replier_phase = *replier_phase_rx.borrow();
-            if current_replier_phase == AgentRunPhase::Done
-                || current_replier_phase == AgentRunPhase::Error
-            {
+            if matches!(
+                current_replier_phase,
+                AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error
+            ) {
                 let replier_run_id = {
                     let _runs = lock_runs(&self.shared.runs);
                     self.shared
@@ -1829,5 +1986,200 @@ mod review_provenance_tests {
         let _ = runtime.cancel(root);
         let _ = runtime.cancel(child);
         let _ = runtime.cancel(grandchild);
+    }
+}
+
+#[cfg(test)]
+mod stop_cancel_tests {
+    use super::*;
+
+    struct HeldModel {
+        admission: bool,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentModel for HeldModel {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "stop-cancel-test".into()
+        }
+        fn requires_admission(&self) -> bool {
+            self.admission
+        }
+        async fn admit(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+        ) -> Result<(), RuntimeError> {
+            self.release.notified().await;
+            Ok(())
+        }
+        async fn complete(
+            &self,
+            _: &crate::AgentInvocationContext,
+            _: Role,
+            _: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, RuntimeError> {
+            std::future::pending().await
+        }
+    }
+
+    fn fixture(admission: bool) -> (AgentRuntime, Arc<HeldModel>) {
+        let bus = Arc::new(EventBus::new(64));
+        let model = Arc::new(HeldModel {
+            admission,
+            release: tokio::sync::Notify::new(),
+        });
+        let runtime =
+            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone());
+        (runtime, model)
+    }
+
+    fn spawn(runtime: &AgentRuntime, parent: Option<RunId>) -> RunId {
+        runtime.spawn_reserved(
+            runtime.reserve_run_id(),
+            parent,
+            Role::Worker,
+            "held",
+            RunConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn cancel_subtree_follows_registered_parents_and_unregistered_intents() {
+        let (runtime, _) = fixture(false);
+        let root = spawn(&runtime, None);
+        let child = spawn(&runtime, Some(root));
+        let grandchild = spawn(&runtime, Some(child));
+        let unrelated = spawn(&runtime, None);
+        let reserved = runtime.reserve_run_id();
+        runtime.track_goal_run(reserved, &grandchild.to_string());
+        // Registered parent links must also be traversed, even without an intent.
+        runtime.shared.spawn_intents.lock().unwrap().remove(&child);
+        runtime.cancel_subtree(root).unwrap();
+        for id in [root, child, grandchild, reserved] {
+            assert!(runtime.spawn_cancelled(id));
+        }
+        assert!(!runtime.spawn_cancelled(unrelated));
+        assert_eq!(
+            *runtime.entry(unrelated).unwrap().cancel_tx.borrow(),
+            RunInterrupt::None
+        );
+        // Both pre-recorded intents and children spawned after cancellation are fenced.
+        runtime.spawn_reserved_child(
+            grandchild,
+            reserved,
+            Role::Worker,
+            "reserved",
+            RunConfig::default(),
+        );
+        let late = spawn(&runtime, Some(reserved));
+        for id in [root, child, grandchild, reserved, late] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), runtime.wait(id))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                AgentRunPhase::Error
+            );
+        }
+        runtime.cancel_subtree(unrelated).unwrap();
+        let unknown = RunId::new(u64::MAX);
+        assert!(matches!(
+            runtime.cancel_subtree(unknown),
+            Err(RuntimeError::UnknownRun { .. })
+        ));
+        assert!(!runtime.spawn_cancelled(unknown));
+    }
+
+    #[tokio::test]
+    async fn explicit_root_restore_preserves_old_descendant_cancellation_fences() {
+        let (runtime, _) = fixture(false);
+        let dir = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("discard-resume.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
+        let root = spawn(&runtime, None);
+        let child = spawn(&runtime, Some(root));
+        let reserved = runtime.reserve_run_id();
+        runtime.track_goal_run(reserved, &root.to_string());
+        tokio::task::yield_now().await;
+        runtime.cancel_subtree(root).unwrap();
+        for run in [root, child] {
+            assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+        }
+        assert_eq!(
+            runtime
+                .continue_goal(root, "explicit followup".into(), RunConfig::default())
+                .unwrap(),
+            root
+        );
+        assert!(!runtime.spawn_cancelled(root));
+        assert!(runtime.spawn_cancelled(child));
+        assert!(runtime.spawn_cancelled(reserved));
+        runtime.spawn_reserved_child(
+            root,
+            reserved,
+            Role::Worker,
+            "old generation",
+            RunConfig::default(),
+        );
+        assert_eq!(runtime.wait(reserved).await.unwrap(), AgentRunPhase::Error);
+        let fresh = spawn(&runtime, Some(root));
+        assert!(!runtime.spawn_cancelled(fresh));
+        runtime.cancel_subtree(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_subtree_fences_all_pending_admissions_and_late_descendants() {
+        let (runtime, model) = fixture(true);
+        let root = spawn(&runtime, None);
+        let child = spawn(&runtime, Some(root));
+        let grandchild = spawn(&runtime, Some(child));
+        runtime.cancel_subtree(root).unwrap();
+        let late = spawn(&runtime, Some(grandchild));
+        for id in [root, child, grandchild, late] {
+            assert!(runtime.spawn_cancelled(id));
+            assert!(runtime.shared.admissions.lock().unwrap()[&id].cancelled);
+        }
+        tokio::task::yield_now().await;
+        model.release.notify_waiters();
+        for id in [root, child, grandchild, late] {
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(5), runtime.wait(id))
+                    .await
+                    .unwrap(),
+                Err(RuntimeError::RunTerminated { .. })
+            ));
+        }
+        assert!(runtime.list_agents().is_empty());
+        // Repeated discard is harmless after admission cancellation completed.
+        runtime.cancel_subtree(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_subtree_with_pending_root_covers_children_without_poisoning_spawns() {
+        let (runtime, model) = fixture(true);
+        let root = spawn(&runtime, None);
+        let child = spawn(&runtime, Some(root));
+        runtime.stop(root, StopScope::SelfOnly).unwrap();
+        assert!(!runtime.shared.admissions.lock().unwrap()[&child].cancelled);
+        runtime.stop(root, StopScope::Subtree).unwrap();
+        for id in [root, child] {
+            assert!(runtime.shared.admissions.lock().unwrap()[&id].cancelled);
+            assert!(!runtime.spawn_cancelled(id));
+        }
+        let fresh = spawn(&runtime, Some(root));
+        assert!(!runtime.shared.admissions.lock().unwrap()[&fresh].cancelled);
+        tokio::task::yield_now().await;
+        model.release.notify_waiters();
+        runtime.wait_admission(fresh).await.unwrap();
+        runtime.cancel_subtree(fresh).unwrap();
+        assert_eq!(runtime.wait(fresh).await.unwrap(), AgentRunPhase::Error);
     }
 }

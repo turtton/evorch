@@ -20,11 +20,20 @@ pub struct SandboxPickerContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {
     Send,
-    Cancel,
+    Stop,
+    Discard,
     Complete(&'static str),
     CompleteExternal(String),
     ModelPreference(Option<workspace_ui::ModelPreference>),
     OpenSandboxSettings,
+}
+
+pub fn stopped_banner(running_children: usize) -> String {
+    if running_children > 0 {
+        format!("子agent {running_children}件は実行中 — もう一度押すと全停止")
+    } else {
+        "停止中（再開可能）— メッセージを送信して再開".into()
+    }
 }
 
 pub fn composer_strip(
@@ -65,6 +74,15 @@ pub fn composer_strip(
             if let Some(selected) = selectors::row(ui, sandbox, (picker, picker_state)) {
                 action = Some(selected);
             }
+            if phase == Some(ThreadRunPhase::Stopped) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(stopped_banner(model.running_children))
+                        .color(palette().WARNING_FG));
+                    if ui.small_button("破棄").on_hover_text("キャンセルして破棄").clicked() {
+                        action = Some(ComposerAction::Discard);
+                    }
+                });
+            }
             images::render(ui, model);
             let target = match model.resolved_model.as_deref() {
                 Some(resolved) => format!("{} · {resolved}", model.role.label()),
@@ -74,10 +92,11 @@ pub fn composer_strip(
                 .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
-                let can_cancel = phase == Some(ThreadRunPhase::Running) && !model.completions_visible();
-                let send = if can_cancel {
-ui.add(egui::Button::new(egui::RichText::new("Cancel").color(palette().ERROR_FG))
-.fill(palette().ERROR_SURFACE))
+                let can_stop = (phase == Some(ThreadRunPhase::Running) && !model.completions_visible())
+                    || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
+                let send = if can_stop {
+ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::Stopped) { "全停止" } else { "Stop" }).color(if phase == Some(ThreadRunPhase::Stopped) { palette().WARNING_FG } else { palette().ERROR_FG }))
+.fill(if phase == Some(ThreadRunPhase::Stopped) { palette().SURFACE_RAISED } else { palette().ERROR_SURFACE }))
                 } else if can_send {
                     primary_button(ui, "Send")
                 } else {
@@ -136,12 +155,12 @@ ui.add(egui::Button::new(egui::RichText::new("Cancel").color(palette().ERROR_FG)
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     if model.completions_visible() {
                         model.dismiss_completions();
-                    } else if phase == Some(ThreadRunPhase::Running) {
-                        action = Some(ComposerAction::Cancel);
+                    } else if can_stop {
+                        action = Some(ComposerAction::Stop);
                     }
                     input.request_focus();
-                } else if can_cancel && send.clicked() {
-                    action = Some(ComposerAction::Cancel);
+                } else if can_stop && send.clicked() {
+                    action = Some(ComposerAction::Stop);
                     input.request_focus();
                 } else if can_send && (send.clicked() || enter) {
                     action = Some(ComposerAction::Send);
@@ -217,15 +236,63 @@ mod tests {
     }
 
     #[test]
-    fn esc_without_completions_emits_cancel_when_running() {
+    fn esc_without_completions_emits_stop_when_running() {
         let mut h = harness("draft");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.get_by_label("Message or /command").focus();
         h.run();
         h.key_press(egui::Key::Escape);
         h.run();
-        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
         assert_eq!(h.state().model.input, "draft");
+    }
+
+    #[test]
+    fn stopped_banner_keeps_subtree_stop_until_children_settle() {
+        let mut h = harness("draft");
+        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
+        h.state_mut().model.running_children = 2;
+        h.run();
+        h.get_by_label("子agent 2件は実行中 — もう一度押すと全停止");
+        h.get_by_label("全停止").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
+        assert_eq!(h.state().model.input, "draft");
+        h.state_mut().model.running_children = 0;
+        h.state_mut().action = None;
+        h.run();
+        h.get_by_label("停止中（再開可能）— メッセージを送信して再開");
+        assert!(h.query_by_label("全停止").is_none());
+        h.get_by_label("Send").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn stopped_banner_discard_is_a_separate_action() {
+        let mut h = harness("");
+        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
+        h.run();
+        h.get_by_label("破棄").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Discard));
+    }
+
+    #[test]
+    fn escape_stops_children_but_does_not_discard_stopped_thread() {
+        let mut h = harness("draft");
+        h.state_mut().phase = Some(ThreadRunPhase::Stopped);
+        h.state_mut().model.running_children = 1;
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
+        h.state_mut().model.running_children = 0;
+        h.state_mut().action = None;
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().action, None);
     }
 
     #[test]
@@ -239,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_dismisses_completions_before_cancel_even_when_running() {
+    fn esc_dismisses_completions_before_stop_even_when_running() {
         let mut h = harness("/");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.get_by_label("Message or /command").focus();
@@ -251,18 +318,18 @@ mod tests {
         assert!(h.query_by_label("/help").is_none());
         h.key_press(egui::Key::Escape);
         h.run();
-        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
     }
 
     #[test]
-    fn cancel_button_replaces_send_while_running() {
+    fn stop_button_replaces_send_while_running() {
         let mut h = harness("");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
         h.run();
         assert!(h.query_by_label("Send").is_none());
-        h.get_by_label("Cancel").click();
+        h.get_by_label("Stop").click();
         h.run();
-        assert_eq!(h.state().action, Some(ComposerAction::Cancel));
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
     }
 
     #[test]
@@ -270,7 +337,7 @@ mod tests {
         let mut h = harness("draft");
         h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Waiting);
         h.run();
-        assert!(h.query_by_label("Cancel").is_none());
+        assert!(h.query_by_label("Stop").is_none());
         h.get_by_label("Send").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Send));

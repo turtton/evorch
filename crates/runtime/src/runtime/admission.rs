@@ -4,9 +4,9 @@ pub(super) type Admissions = Mutex<HashMap<RunId, Admission>>;
 
 pub(super) struct Admission {
     parent: Option<RunId>,
-    cancelled: bool,
+    pub(super) cancelled: bool,
     ownership: Option<crate::ownership::OwnerPermit>,
-    result: watch::Receiver<Option<Result<(), RuntimeError>>>,
+    pub(super) result: watch::Receiver<Option<Result<(), RuntimeError>>>,
 }
 
 pub(super) struct AdmissionSnapshot {
@@ -126,7 +126,7 @@ impl AgentRuntime {
             return Ok(());
         }
         let sender = self.entry(run_id)?.cancel_tx.clone();
-        sender.send_replace(true);
+        sender.send_replace(RunInterrupt::Cancel);
         Ok(())
     }
 }

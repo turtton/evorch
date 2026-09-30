@@ -209,6 +209,8 @@ impl Default for ProviderStatus {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ComposerModel {
+    /// Live descendants of the active conversation root, refreshed before rendering.
+    pub running_children: usize,
     pub role: ComposerRole,
     pub resolved_model: Option<String>,
     pub registry: SlashCommandRegistry,

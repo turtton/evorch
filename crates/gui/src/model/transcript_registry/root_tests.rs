@@ -61,6 +61,7 @@ fn child_run_delta_stays_out_of_thread() {
 fn terminal_notices_are_metadata_only() {
     for (phase, reason, state) in [
         (AgentRunPhase::Done, None, "completed"),
+        (AgentRunPhase::Stopped, None, "stopped (resumable)"),
         (AgentRunPhase::Error, None, "failed"),
         (
             AgentRunPhase::Error,

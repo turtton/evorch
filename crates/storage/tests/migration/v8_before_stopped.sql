@@ -1,7 +1,7 @@
 CREATE TABLE tasks_v8 (
     id TEXT PRIMARY KEY,
     session_id TEXT REFERENCES sessions(id),
-    status TEXT NOT NULL CHECK(status IN ('pending','queued','running','blocked','retrying','stopped','completed','cancelled','failed')),
+    status TEXT NOT NULL CHECK(status IN ('pending','queued','running','blocked','retrying','completed','cancelled','failed')),
     created_at_ns INTEGER NOT NULL,
     updated_at_ns INTEGER NOT NULL,
     parent_run_id TEXT,

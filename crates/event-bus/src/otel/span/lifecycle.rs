@@ -43,7 +43,9 @@ impl SpanMapper {
             }),
             LifecycleEvent::AgentRunStarted { .. } => self.start_run(event, at),
             LifecycleEvent::AgentRunStateChanged { run_id, to, .. } => match to {
-                AgentRunPhase::Done => self.end_run(run_id, at, SpanStatus::Unset),
+                AgentRunPhase::Stopped | AgentRunPhase::Done => {
+                    self.end_run(run_id, at, SpanStatus::Unset)
+                }
                 AgentRunPhase::Error => self.end_run(run_id, at, SpanStatus::Error),
                 AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting => {
                     Vec::new()

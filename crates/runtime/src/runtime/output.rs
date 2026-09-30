@@ -18,6 +18,7 @@ enum OutputStatus {
     StillRunning,
     Completed,
     Cancelled,
+    Stopped,
     Failed,
 }
 
@@ -75,6 +76,7 @@ impl AgentRuntime {
                 entry.result_rx.borrow().clone(),
                 None,
             ),
+            AgentRunPhase::Stopped => (OutputStatus::Stopped, None, entry.terminal_reason.clone()),
             AgentRunPhase::Error => {
                 let status = match entry.terminal_reason.as_deref() {
                     Some("cancelled") => OutputStatus::Cancelled,

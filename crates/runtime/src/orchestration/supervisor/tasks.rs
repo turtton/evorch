@@ -189,6 +189,7 @@ impl SupervisorActor {
             | TaskStatus::Blocked
             | TaskStatus::Retrying
             | TaskStatus::Running
+            | TaskStatus::Stopped
             | TaskStatus::Failed => task.status = TaskStatus::Cancelled,
         }
         task.failure_reason = Some("cancelled by operator".into());
@@ -207,6 +208,7 @@ impl SupervisorActor {
     pub(super) fn task_phase(&self, run_id: &str, phase: AgentRunPhase, reason: Option<&str>) {
         let status = match phase {
             AgentRunPhase::Done => TaskStatus::Completed,
+            AgentRunPhase::Stopped => TaskStatus::Stopped,
             AgentRunPhase::Error => match reason {
                 Some("cancelled") => TaskStatus::Cancelled,
                 Some(_) | None => TaskStatus::Failed,
@@ -232,7 +234,9 @@ impl SupervisorActor {
                     continue;
                 }
                 task.status = status;
-                if let Some(reason) = reason {
+                if phase == AgentRunPhase::Stopped {
+                    task.failure_reason = Some("stopped".into());
+                } else if let Some(reason) = reason {
                     task.failure_reason = Some(reason.into());
                 }
                 self.publish_task(&goal, task_id, run_id, task);

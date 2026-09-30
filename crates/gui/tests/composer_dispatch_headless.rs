@@ -179,7 +179,7 @@ fn unsupported_image_preserves_draft_and_does_not_dispatch() {
 }
 
 #[test]
-fn cancel_chat_dispatches_active_thread_command() {
+fn stop_chat_dispatches_active_thread_command() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench(temp.path(), ProviderStatus::Configured);
     submit(&mut harness, "hello");
@@ -199,14 +199,76 @@ fn cancel_chat_dispatches_active_thread_command() {
     ]);
     harness.step();
     harness.step();
-    assert!(harness.has_label("Cancel"));
-    harness.click_label("Cancel");
+    assert!(harness.has_label("Stop"));
+    harness.click_label("Stop");
     harness.step();
     harness.step();
     assert_eq!(
         harness.state().issued().last(),
-        Some(&WorkbenchCommand::CancelChat {
+        Some(&WorkbenchCommand::StopChat {
             thread_id: "thread-1".into(),
+        })
+    );
+}
+
+#[test]
+fn stopped_parent_with_live_child_keeps_banner_and_dispatches_stop_then_discard() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    harness.state_mut().apply_events([
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "chat-1".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:thread-1".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+            run_id: "run-2".into(),
+            parent_run_id: Some("chat-1".into()),
+            agent_name: "child".into(),
+            role: "Worker".into(),
+        }),
+        Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-2".into(),
+            from: event_bus::AgentRunPhase::Pending,
+            to: event_bus::AgentRunPhase::Running,
+            reason: None,
+        }),
+    ]);
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatStopped {
+            thread_id: "thread-1".into(),
+            run_id: "chat-1".into(),
+            running_children: 1,
+        });
+    harness.run();
+    assert!(harness.has_label("子agent 1件は実行中 — もう一度押すと全停止"));
+    harness.click_label("全停止");
+    harness.run();
+    assert_eq!(
+        harness.state().issued().last(),
+        Some(&WorkbenchCommand::StopChat {
+            thread_id: "thread-1".into()
+        })
+    );
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatStopped {
+            thread_id: "thread-1".into(),
+            run_id: "chat-1".into(),
+            running_children: 0,
+        });
+    harness.run();
+    assert!(harness.has_label("停止中（再開可能）— メッセージを送信して再開"));
+    assert!(harness.has_label("Send"));
+    harness.click_label("破棄");
+    harness.run();
+    assert_eq!(
+        harness.state().issued().last(),
+        Some(&WorkbenchCommand::CancelChat {
+            thread_id: "thread-1".into()
         })
     );
 }

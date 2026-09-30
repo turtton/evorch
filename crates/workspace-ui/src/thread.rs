@@ -27,6 +27,7 @@ impl fmt::Display for ThreadId {
 pub enum ThreadState {
     Active,
     Paused,
+    Stopped,
     Running,
     Waiting,
     Done,
@@ -34,10 +35,12 @@ pub enum ThreadState {
 }
 
 /// Runtime event phases mirrored without importing runtime-owned types.
-/// `Paused` is operator-set only; `Waiting` is not paused.
+/// `Stopped` is operator-stopped and resumable; `Waiting` awaits input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadRunPhase {
+    /// Operator-stopped, with history and workspace retained for resumption.
+    Stopped,
     Pending,
     Running,
     Waiting,
@@ -145,6 +148,11 @@ impl ThreadRecord {
         let collected: Vec<&ThreadRunPhase> = phases.collect();
         if collected
             .iter()
+            .any(|phase| matches!(phase, ThreadRunPhase::Stopped))
+        {
+            ThreadState::Stopped
+        } else if collected
+            .iter()
             .any(|phase| matches!(phase, ThreadRunPhase::Error))
         {
             ThreadState::Error
@@ -168,5 +176,26 @@ impl ThreadRecord {
         } else {
             ThreadState::Active
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_is_distinct_resumable_state_even_while_children_run() {
+        let mut thread =
+            ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("project"), "Title");
+        thread.run_ids = vec!["root".into(), "child".into()];
+        let phases = BTreeMap::from([
+            ("root".into(), ThreadRunPhase::Stopped),
+            ("child".into(), ThreadRunPhase::Running),
+        ]);
+        assert_eq!(thread.state(&phases), ThreadState::Stopped);
+        assert_eq!(
+            serde_json::to_string(&ThreadRunPhase::Stopped).unwrap(),
+            "\"stopped\""
+        );
     }
 }

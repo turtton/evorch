@@ -23,11 +23,11 @@ impl AgentModel for BlockedModel {
     }
 }
 
-struct CancelOnAttach(watch::Sender<bool>);
+struct InterruptOnAttach(watch::Sender<RunInterrupt>, RunInterrupt);
 
-impl GoalGate for CancelOnAttach {
+impl GoalGate for InterruptOnAttach {
     fn attach_child(&self, _: RunId, _: RunId, _: Role) {
-        self.0.send_replace(true);
+        self.0.send_replace(self.1);
     }
 
     fn evaluate_finish<'a>(
@@ -38,7 +38,7 @@ impl GoalGate for CancelOnAttach {
     }
 }
 
-fn fixture(cancel_rx: watch::Receiver<bool>) -> (AgentRuntime, LoopState) {
+fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState) {
     let bus = Arc::new(EventBus::new(128));
     let runtime = AgentRuntime::new(
         bus.clone(),
@@ -94,9 +94,9 @@ fn fixture(cancel_rx: watch::Receiver<bool>) -> (AgentRuntime, LoopState) {
 #[tokio::test]
 async fn cancellation_between_delegate_spawns_drains_first_child() {
     // Given: the synchronous attach callback cancels after the first spawn, before the second check.
-    let (cancel, cancel_rx) = watch::channel(false);
+    let (cancel, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(cancel_rx);
-    let runtime = runtime.with_goal_gate(Arc::new(CancelOnAttach(cancel)));
+    let runtime = runtime.with_goal_gate(Arc::new(InterruptOnAttach(cancel, RunInterrupt::Cancel)));
     state
         .transition(AgentRunPhase::Running, None)
         .expect("running");
@@ -133,7 +133,7 @@ async fn cancellation_between_delegate_spawns_drains_first_child() {
 #[tokio::test]
 async fn rejected_waiting_transition_drains_all_spawned_children() {
     // Given: a Pending LoopState rejects Waiting; real children use the existing spawn path.
-    let (_cancel, cancel_rx) = watch::channel(false);
+    let (_cancel, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(cancel_rx);
     let first =
         crate::meta::spawn_delegate(&mut state, &runtime, serde_json::json!({"prompt":"first"}));
@@ -181,4 +181,72 @@ async fn rejected_waiting_transition_drains_all_spawned_children() {
         .wait(state.caller_run_id())
         .await
         .expect("parent stopped");
+}
+
+#[tokio::test]
+async fn stop_between_delegate_spawns_preserves_first_child_and_defers_terminal_publication() {
+    let (interrupt, interrupt_rx) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) = fixture(interrupt_rx);
+    let runtime =
+        runtime.with_goal_gate(Arc::new(InterruptOnAttach(interrupt, RunInterrupt::Stop)));
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    assert!(
+        !state
+            .execute_tools(vec![
+                (
+                    "first".into(),
+                    "delegate".into(),
+                    serde_json::json!({"prompt":"first"})
+                ),
+                (
+                    "second".into(),
+                    "delegate".into(),
+                    serde_json::json!({"prompt":"second"})
+                ),
+            ])
+            .await
+    );
+    let agents = runtime.list_agents();
+    assert_eq!(agents.len(), 2);
+    assert!(matches!(
+        agents[1].phase,
+        AgentRunPhase::Pending | AgentRunPhase::Running
+    ));
+    assert_eq!(state.run_state.phase(), AgentRunPhase::Stopped);
+    assert_eq!(*state.channels.phase_tx.borrow(), AgentRunPhase::Running);
+    assert_eq!(*state.channels.result_tx.borrow(), None);
+    assert!(
+        matches!(state.pending_terminal.as_ref(), Some((_, LifecycleEvent::AgentRunStateChanged {
+        to: AgentRunPhase::Stopped, reason: Some(reason), ..
+    })) if reason == "stopped")
+    );
+    // The test LoopState is independent of the fixture runtime's real parent loop.
+    for run in agents {
+        runtime.cancel(run.run_id).unwrap();
+        runtime.wait(run.run_id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stopped_wait_keeps_awaited_child_and_preserves_wait_error_contract() {
+    let (interrupt, interrupt_rx) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) = fixture(interrupt_rx);
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    let child =
+        crate::meta::spawn_delegate(&mut state, &runtime, serde_json::json!({"prompt":"child"}))
+            .ok()
+            .unwrap();
+    interrupt.send_replace(RunInterrupt::Stop);
+    let results = crate::meta::wait_delegates(&mut state, &runtime, vec![Ok(child)]).await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].result.is_error);
+    assert_eq!(results[0].result.content, "wait cancelled");
+    assert!(matches!(
+        runtime.inspect_agent(child).unwrap().phase,
+        AgentRunPhase::Pending | AgentRunPhase::Running
+    ));
+    for run in [child, state.caller_run_id()] {
+        runtime.cancel(run).unwrap();
+        runtime.wait(run).await.unwrap();
+    }
 }

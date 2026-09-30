@@ -721,7 +721,9 @@ impl SupervisorActor {
                 .iter()
                 .find(|attached| attached.run_id == run_id)
                 .map(|attached| attached.purpose);
-            if first_terminal && phase == AgentRunPhase::Done {
+            // Paused goals record child terminal facts but must not advance delivery/review/CI.
+            if first_terminal && phase == AgentRunPhase::Done && snapshot.state == GoalState::Active
+            {
                 match purpose {
                     Some(RunPurpose::Implement) | Some(RunPurpose::Repair { .. }) => {
                         self.deliver_worker(&goal_id, &run_id).await;
@@ -941,10 +943,22 @@ impl SupervisorActor {
         ) {
             return;
         }
-        let terminal = self
-            .terminal_runs
-            .contains(&snapshot.current_orchestrator_run_id)
-            || snapshot.epoch > 0;
+        // A live current orchestrator (e.g. re-registered by continue_goal after
+        // stop-resume) must not read as terminal and dispatch a duplicate via epoch > 0.
+        let orchestrator_live = self
+            .find_run(&snapshot.current_orchestrator_run_id)
+            .and_then(|run| self.runtime.inspect_agent(run).ok())
+            .is_some_and(|inspection| {
+                matches!(
+                    inspection.phase,
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            });
+        let terminal = !orchestrator_live
+            && (self
+                .terminal_runs
+                .contains(&snapshot.current_orchestrator_run_id)
+                || snapshot.epoch > 0);
         let Some(decision) = continuation::decide(
             &snapshot,
             terminal,

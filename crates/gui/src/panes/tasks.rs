@@ -75,7 +75,14 @@ pub fn tasks_pane(
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal_wrapped(|ui| {
                                     task_label(ui, &row.id, &row.title, &row.id, selected_task);
-                                    ui.label(row.status.as_str());
+                                    if row.status == storage::entity::TaskStatus::Stopped {
+                                        ui.colored_label(
+                                            palette().WARNING_FG,
+                                            "Stopped (resumable)",
+                                        );
+                                    } else {
+                                        ui.label(row.status.as_str());
+                                    }
                                     if row.attempt > 0 {
                                         badge(
                                             ui,

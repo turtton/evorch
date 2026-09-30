@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
 use crate::agent_loop::LoopState;
-use crate::{AgentRuntime, RunConfig, WorkspaceMode};
+use crate::{AgentRuntime, InterruptKind, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
 pub(super) struct DelegateArgs {
@@ -78,7 +78,7 @@ pub(super) async fn delegate(
         serde_json::json!({"run_id": child.to_string()}),
     )
     .await;
-    if result.result.is_error {
+    if result.result.is_error && state.interrupted() != Some(InterruptKind::Stop) {
         cleanup_delegates(runtime, std::iter::once(child)).await;
     }
     result
@@ -175,13 +175,15 @@ pub(crate) async fn wait_delegates(
     )
     .await;
     if waited.result.is_error {
-        cleanup_delegates(
-            runtime,
-            children
-                .iter()
-                .filter_map(|child| child.as_ref().ok().copied()),
-        )
-        .await;
+        if state.interrupted() != Some(InterruptKind::Stop) {
+            cleanup_delegates(
+                runtime,
+                children
+                    .iter()
+                    .filter_map(|child| child.as_ref().ok().copied()),
+            )
+            .await;
+        }
         let message = waited.result.content;
         return children
             .into_iter()

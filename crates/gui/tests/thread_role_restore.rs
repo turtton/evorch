@@ -242,3 +242,60 @@ fn persisted_completion_is_not_replayed_twice_from_checkpoint() {
         .collect();
     assert_eq!(answers, vec!["complete answer"]);
 }
+
+#[test]
+fn stopped_history_replays_as_resumable_with_role_and_partial_output_intact() {
+    use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent};
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("stop.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let db = Database::open(&config).unwrap();
+    storage
+        .handle()
+        .upsert_run_context(&context(
+            "run-200",
+            "Orchestrator",
+            "chat:Orchestrator:old",
+            "Stopped",
+        ))
+        .unwrap();
+    for event in [
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-200".into(),
+            parent_run_id: None,
+            agent_name: "chat:Orchestrator:old".into(),
+            role: "Orchestrator".into(),
+        }),
+        Event::new(MessageEvent::MessageDelta {
+            run_id: Some("run-200".into()),
+            delta: "kept output".into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-200".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Stopped,
+            reason: None,
+        }),
+    ] {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    let mut sidebar = sidebar(dir.path());
+    sidebar.threads[0].run_ids.push("run-200".into());
+    let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar);
+    state.restore_history(&db).unwrap();
+    assert_eq!(state.composer().role, ComposerRole::Orchestrator);
+    assert_eq!(
+        state.thread_phases()["run-200"],
+        workspace_ui::ThreadRunPhase::Stopped
+    );
+    assert!(state.transcript().entries().iter().any(|entry| matches!(entry, gui::model::transcript::TranscriptEntry::Message { text, .. } if text == "kept output")));
+    let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    assert!(harness.has_label("停止中（再開可能）— メッセージを送信して再開"));
+    assert!(harness.has_label("Send"));
+}

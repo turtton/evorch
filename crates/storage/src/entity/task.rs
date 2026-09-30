@@ -8,6 +8,8 @@ pub enum TaskStatus {
     Queued,
     Blocked,
     Retrying,
+    /// Operator-stopped; resumable with current authority, never auto-retried.
+    Stopped,
     Cancelled,
     Running,
     Completed,
@@ -33,6 +35,7 @@ string_enum!(TaskStatus {
     Queued => "queued",
     Blocked => "blocked",
     Retrying => "retrying",
+    Stopped => "stopped",
     Cancelled => "cancelled",
     Running => "running",
     Completed => "completed",

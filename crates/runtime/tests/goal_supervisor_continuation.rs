@@ -32,9 +32,10 @@ async fn cancel_task_persists_cancelled_status() {
 use std::sync::Arc;
 
 use event_bus::{
-    AgentRunPhase, Event, EventBus, EventKind, GoalState, LifecycleEvent, OrchestratorEvent,
-    RunPurpose, SuppressReason,
+    AgentRunPhase, Event, EventBus, EventKind, GoalStage, GoalState, LifecycleEvent,
+    OrchestratorEvent, RunPurpose, SuppressReason,
 };
+use providers::FinishReason;
 use runtime::orchestration::delivery::FixtureDeliveryAdapter;
 use runtime::orchestration::ledger::OrchestrationSettings;
 use runtime::orchestration::supervisor::{GoalSpec, GoalSupervisor};
@@ -47,6 +48,8 @@ use support::ScriptedModel;
 
 struct Fixture {
     model: Arc<ScriptedModel>,
+    model_gate: Arc<Notify>,
+    delivery: Arc<FixtureDeliveryAdapter>,
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     handle: runtime::orchestration::supervisor::SupervisorHandle,
@@ -62,8 +65,10 @@ impl Fixture {
             Arc::clone(&bus),
             Arc::new(DirectSandbox::new_unchecked()),
         ));
-        let model = Arc::new(ScriptedModel::gated([], Arc::new(Notify::new())));
+        let model_gate = Arc::new(Notify::new());
+        let model = Arc::new(ScriptedModel::gated([], Arc::clone(&model_gate)));
         let runtime = AgentRuntime::new(Arc::clone(&bus), executor, model.clone());
+        let delivery = Arc::new(FixtureDeliveryAdapter::default());
         let settings = OrchestrationSettings {
             max_continuations,
             stall_after_secs: 86_400,
@@ -73,7 +78,7 @@ impl Fixture {
         let handle = GoalSupervisor::spawn(
             runtime.clone(),
             Arc::clone(&bus),
-            Arc::new(FixtureDeliveryAdapter::default()),
+            delivery.clone(),
             settings,
         );
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -109,6 +114,8 @@ impl Fixture {
         );
         let fixture = Self {
             model,
+            model_gate,
+            delivery,
             runtime,
             bus,
             handle,
@@ -120,14 +127,32 @@ impl Fixture {
         fixture
     }
 
-    fn terminal(&self, run_id: runtime::RunId) {
-        self.bus
-            .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
-                run_id: run_id.to_string(),
-                from: AgentRunPhase::Running,
-                to: AgentRunPhase::Done,
-                reason: None,
-            }));
+    async fn terminal(&self, run_id: runtime::RunId) {
+        let phase = self.runtime.inspect_agent(run_id).expect("run").phase;
+        if matches!(
+            phase,
+            AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+        ) {
+            // The supervisor consults runtime liveness, so a terminal fixture
+            // must end the gated execution rather than only spoof a bus event.
+            self.runtime.cancel(run_id).expect("cancel gated run");
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), self.runtime.wait(run_id))
+                    .await
+                    .expect("terminal timeout")
+                    .expect("terminal phase"),
+                AgentRunPhase::Error
+            );
+        } else {
+            // Repeated calls exercise duplicate terminal-event handling.
+            self.bus
+                .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
+                    run_id: run_id.to_string(),
+                    from: AgentRunPhase::Running,
+                    to: phase,
+                    reason: None,
+                }));
+        }
     }
 
     async fn settle(&self) {
@@ -148,7 +173,7 @@ impl Fixture {
 async fn continuation_dispatched_exactly_once_per_terminal_epoch() {
     let fixture = Fixture::new(8).await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
 
     let dispatched = fixture
@@ -203,10 +228,10 @@ async fn agent_summaries_expose_parent_run_ids() {
 #[tokio::test]
 async fn duplicate_terminal_event_is_suppressed_as_duplicate() {
     let fixture = Fixture::new(8).await;
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
 
     assert!(fixture.orchestrator_events().iter().any(|event| matches!(
@@ -228,7 +253,7 @@ async fn paused_goal_suppresses_and_resume_dispatches_new_epoch() {
         .expect("pause command");
     fixture.settle().await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
     assert!(fixture.orchestrator_events().iter().any(|event| matches!(
         event,
@@ -247,6 +272,173 @@ async fn paused_goal_suppresses_and_resume_dispatches_new_epoch() {
         event,
         OrchestratorEvent::ContinuationDispatched { epoch: 2, .. }
     )));
+}
+
+#[tokio::test]
+async fn paused_goal_records_worker_done_without_delivery_or_continuation() {
+    let fixture = Fixture::new(8).await;
+    fixture
+        .model
+        .add_keyed(
+            "IMPL",
+            [Ok(support::text_response(
+                "implemented",
+                FinishReason::Stop,
+            ))],
+        )
+        .await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(fixture.root, Role::Worker, "IMPL", RunConfig::default())
+        .expect("implement child");
+    fixture.bus.emit(Event::new(OrchestratorEvent::RunAttached {
+        goal_id: fixture.goal_id.clone(),
+        run_id: child.to_string(),
+        parent_run_id: Some(fixture.root.to_string()),
+        role: "worker".into(),
+        purpose: RunPurpose::Implement,
+    }));
+    // Supply a branch without a worktree so delivery would not return early.
+    // Only events after setup are checked for new delivery side effects.
+    fixture
+        .bus
+        .emit(Event::new(OrchestratorEvent::DeliverableBranchBound {
+            goal_id: fixture.goal_id.clone(),
+            branch: "feature/paused-worker".into(),
+            run_id: child.to_string(),
+        }));
+    fixture.settle().await;
+
+    fixture
+        .handle
+        .pause(&fixture.goal_id)
+        .expect("operator pause");
+    fixture.settle().await;
+    fixture.terminal(fixture.root).await;
+    fixture.settle().await;
+    let paused = fixture.handle.snapshot(&fixture.goal_id).expect("snapshot");
+    assert_eq!(paused.state, GoalState::Paused);
+    assert_eq!(paused.stage, GoalStage::Implementing);
+    assert_eq!(
+        paused.deliverable_branch.as_deref(),
+        Some("feature/paused-worker")
+    );
+    assert!(
+        paused
+            .attached_runs
+            .iter()
+            .any(|run| { run.run_id == child.to_string() && run.purpose == RunPurpose::Implement })
+    );
+    assert!(matches!(
+        fixture.runtime.inspect_agent(child).expect("child").phase,
+        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+    ));
+    let orchestrators_before = paused
+        .attached_runs
+        .iter()
+        .filter(|run| run.role == Role::Orchestrator.name())
+        .count();
+    let events_before = fixture.orchestrator_events().len();
+    assert!(fixture.delivery.recorded().is_empty());
+
+    // The root has stopped, but its surviving worker completes successfully.
+    fixture.model_gate.notify_one();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture.runtime.wait(child)
+        )
+        .await
+        .expect("worker completion timeout")
+        .expect("worker phase"),
+        AgentRunPhase::Done
+    );
+    fixture.settle().await;
+
+    let events = fixture.orchestrator_events();
+    assert!(
+        !events[events_before..]
+            .iter()
+            .any(|event| matches!(event, OrchestratorEvent::DeliverableBranchBound { .. }))
+    );
+    assert!(fixture.delivery.recorded().is_empty());
+    let completed = fixture.handle.snapshot(&fixture.goal_id).expect("snapshot");
+    assert_eq!(completed.state, GoalState::Paused);
+    assert_eq!(completed.stage, paused.stage);
+    assert_eq!(
+        completed
+            .attached_runs
+            .iter()
+            .filter(|run| run.role == Role::Orchestrator.name())
+            .count(),
+        orchestrators_before
+    );
+    assert_eq!(completed.attached_runs, paused.attached_runs);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, OrchestratorEvent::ContinuationDispatched { .. }))
+    );
+}
+
+#[tokio::test]
+async fn resume_with_live_current_orchestrator_does_not_dispatch_duplicate() {
+    // Given: the current orchestrator remains live while its goal is paused.
+    let fixture = Fixture::new(8).await;
+    fixture
+        .handle
+        .pause(&fixture.goal_id)
+        .expect("pause command");
+    fixture.settle().await;
+    let paused = fixture.handle.snapshot(&fixture.goal_id).expect("snapshot");
+    assert_eq!(paused.state, GoalState::Paused);
+    assert!(matches!(
+        fixture
+            .runtime
+            .inspect_agent(fixture.root)
+            .expect("root")
+            .phase,
+        AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+    ));
+    let orchestrators_before = fixture
+        .runtime
+        .list_agents()
+        .into_iter()
+        .filter(|run| run.role_name == Role::Orchestrator.name())
+        .count();
+
+    // When: resume advances the epoch and invokes try_dispatch.
+    fixture
+        .handle
+        .resume(&fixture.goal_id)
+        .expect("resume command");
+    fixture.settle().await;
+
+    // Then: epoch > 0 must not override the current run's live registration.
+    let resumed = fixture.handle.snapshot(&fixture.goal_id).expect("snapshot");
+    assert_eq!(resumed.state, GoalState::Active);
+    assert_eq!(resumed.epoch, paused.epoch + 1);
+    assert_eq!(
+        resumed.current_orchestrator_run_id,
+        fixture.root.to_string()
+    );
+    assert_eq!(resumed.attached_runs, paused.attached_runs);
+    assert!(resumed.dispatched_epochs.is_empty());
+    assert_eq!(
+        fixture
+            .runtime
+            .list_agents()
+            .into_iter()
+            .filter(|run| run.role_name == Role::Orchestrator.name())
+            .count(),
+        orchestrators_before
+    );
+    assert!(
+        !fixture
+            .orchestrator_events()
+            .iter()
+            .any(|event| matches!(event, OrchestratorEvent::ContinuationDispatched { .. }))
+    );
 }
 
 #[tokio::test]
@@ -280,7 +472,7 @@ async fn blocked_and_complete_never_dispatch() {
             reason: "blocked by test".into(),
         }));
     blocked.settle().await;
-    blocked.terminal(blocked.root);
+    blocked.terminal(blocked.root).await;
     blocked.settle().await;
     assert!(
         !blocked
@@ -292,7 +484,7 @@ async fn blocked_and_complete_never_dispatch() {
     let cancelled = Fixture::new(8).await;
     cancelled.handle.cancel(&cancelled.goal_id).expect("cancel");
     cancelled.settle().await;
-    cancelled.terminal(cancelled.root);
+    cancelled.terminal(cancelled.root).await;
     cancelled.settle().await;
     assert!(
         !cancelled
@@ -306,7 +498,7 @@ async fn blocked_and_complete_never_dispatch() {
 async fn limit_reached_blocks_goal() {
     let fixture = Fixture::new(0).await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
 
     assert_eq!(
@@ -342,7 +534,7 @@ async fn dispatch_deferred_while_pipeline_busy_then_fires_once() {
     }));
     fixture.settle().await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
     assert!(fixture.orchestrator_events().iter().any(|event| matches!(
         event,
@@ -352,7 +544,7 @@ async fn dispatch_deferred_while_pipeline_busy_then_fires_once() {
         }
     )));
 
-    fixture.terminal(child);
+    fixture.terminal(child).await;
     fixture.settle().await;
     assert_eq!(
         fixture
@@ -383,7 +575,7 @@ async fn dispatch_stays_deferred_while_implement_worker_is_alive() {
     }));
     fixture.settle().await;
 
-    fixture.terminal(fixture.root);
+    fixture.terminal(fixture.root).await;
     fixture.settle().await;
     assert!(fixture.orchestrator_events().iter().any(|event| matches!(
         event,
@@ -413,7 +605,7 @@ async fn dispatch_stays_deferred_while_implement_worker_is_alive() {
         0
     );
 
-    fixture.terminal(child);
+    fixture.terminal(child).await;
     fixture.settle().await;
     assert_eq!(
         fixture

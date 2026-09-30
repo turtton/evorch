@@ -12,6 +12,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .map(super::external_commands::Outcome::Discovery)
         });
     }
+    pub fn stop_chat(&mut self) {
+        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
+            return;
+        };
+        self.submit_command(WorkbenchCommand::StopChat {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
+    /// Explicit discard path; never used by Stop or Escape.
     pub fn cancel_chat(&mut self) {
         let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
             return;

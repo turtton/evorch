@@ -1,7 +1,7 @@
 //! No public terminal state until the old incarnation can no longer affect its successor.
 use super::{LoopState, cleanup_worktree};
 use crate::workspace::OwnedWorktree;
-use event_bus::LifecycleEvent;
+use event_bus::{AgentRunPhase, LifecycleEvent};
 
 impl LoopState {
     pub(super) async fn finalize(&mut self, mut owned: Option<OwnedWorktree>) {
@@ -50,12 +50,24 @@ impl LoopState {
         } else {
             false
         };
+        let stopped = matches!(
+            self.pending_terminal.as_ref(),
+            Some((
+                _,
+                LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Stopped,
+                    ..
+                }
+            ))
+        );
         if released {
             match self.take_pending_escalation() {
                 Some(memo) => {
                     let shared = self.shared.runtime.clone();
                     crate::escalation::handoff::complete(&shared, self, memo, owned.take()).await;
                 }
+                // Dropping the handle retains the dirty workspace for continuation.
+                None if stopped => drop(owned.take()),
                 None => cleanup_worktree(&self.shared, self.task.run_id, owned.take()).await,
             }
         }

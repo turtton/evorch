@@ -206,6 +206,19 @@ fn wall_time_is_frozen_while_waiting() {
 }
 
 #[test]
+fn wall_time_freezes_on_stop_and_accumulates_after_resume() {
+    use AgentRunPhase::{Running, Stopped};
+    assert_eq!(
+        wall_time_after_phases(&[(Running, 10), (Stopped, 30)]),
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        wall_time_after_phases(&[(Running, 10), (Stopped, 30), (Running, 80), (Stopped, 90)]),
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
 fn wall_time_is_zero_when_run_stays_pending() {
     // Given: a registered run with no phase transitions.
     // When: reading at 120 seconds.

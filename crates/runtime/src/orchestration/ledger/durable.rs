@@ -67,6 +67,8 @@ impl GoalLedger {
                         serde_json::from_value::<TaskContinuation>(progress.clone()).ok()
                     })
                     .is_some_and(|task| {
+                        // Stopped is resumable: a new generation may publish progress
+                        // without reopening a permanently closed task.
                         matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled)
                     })
                 {
@@ -235,5 +237,62 @@ impl GoalLedger {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_task_accepts_resumed_progress_but_closed_tasks_do_not() {
+        for status in [
+            TaskStatus::Stopped,
+            TaskStatus::Completed,
+            TaskStatus::Cancelled,
+        ] {
+            let mut ledger = GoalLedger::new(&OrchestratorEvent::GoalCreated {
+                goal_id: "goal".into(),
+                session_id: "session".into(),
+                project_id: "project".into(),
+                thread_id: "thread".into(),
+                goal: "work".into(),
+                references: vec![],
+                constraints: vec![],
+                repo: "repo".into(),
+                base_ref: "main".into(),
+                root_run_id: "run-1".into(),
+            });
+            let mut task = TaskContinuation {
+                status,
+                input: Some("work".into()),
+                resume_cursor: Some("saved cursor".into()),
+                last_artifact: Some("partial artifact".into()),
+                failure_reason: Some("stopped".into()),
+                attempts: 0,
+                heartbeat_at_ns: Some(1),
+            };
+            let progress = |task: &TaskContinuation| OrchestratorEvent::TaskProgressed {
+                task_id: "task".into(),
+                run_id: "run-1".into(),
+                progress: serde_json::to_value(task).unwrap(),
+                reason: "task execution boundary".into(),
+            };
+            ledger.apply(&progress(&task)).unwrap();
+            task.status = TaskStatus::Running;
+            ledger.apply(&progress(&task)).unwrap();
+            let saved: TaskContinuation =
+                serde_json::from_value(ledger.snapshot().task_progress["task"].clone()).unwrap();
+            assert_eq!(
+                saved.status,
+                if status == TaskStatus::Stopped {
+                    TaskStatus::Running
+                } else {
+                    status
+                }
+            );
+            assert_eq!(saved.resume_cursor, task.resume_cursor);
+            assert_eq!(saved.last_artifact, task.last_artifact);
+        }
     }
 }

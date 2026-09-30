@@ -105,6 +105,7 @@ pub struct WorkbenchState<S> {
     pub(super) sink: Box<dyn CommandSink>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
+    pub(super) running_children: BTreeMap<String, usize>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -202,6 +203,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sink: Box::new(FixtureLoopAdapter::default()),
             issued: Vec::new(),
             phases: BTreeMap::new(),
+            running_children: BTreeMap::new(),
         };
         state.tasks.refresh();
         state.register_work_panels();

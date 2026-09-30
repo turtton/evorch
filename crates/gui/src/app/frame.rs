@@ -130,6 +130,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.save_sidebar();
         }
         self.bind_goal_event(event);
+        self.sink.observe_lifecycle(event);
         self.apply_runtime_event(event);
         self.pending_approvals.apply_event(
             event,
@@ -185,7 +186,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
                 self.phases.insert(run_id.clone(), phase(*to));
                 match to {
-                    AgentRunPhase::Done | AgentRunPhase::Error => {
+                    AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
                         let has_pane = self
                             .dock
                             .find_tab(&PanelId::new(format!("agent-{run_id}")))
@@ -305,13 +306,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 }
 
-fn phase(phase: AgentRunPhase) -> ThreadRunPhase {
+pub(super) fn phase(phase: AgentRunPhase) -> ThreadRunPhase {
     match phase {
         AgentRunPhase::Pending => ThreadRunPhase::Pending,
         AgentRunPhase::Running => ThreadRunPhase::Running,
         AgentRunPhase::Waiting => ThreadRunPhase::Waiting,
         AgentRunPhase::Done => ThreadRunPhase::Done,
         AgentRunPhase::Error => ThreadRunPhase::Error,
+        AgentRunPhase::Stopped => ThreadRunPhase::Stopped,
     }
 }
 

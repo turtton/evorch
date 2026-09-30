@@ -63,3 +63,31 @@ fn composer_rejects_nonrestorable_goal_with_recorded_reason() {
     );
     assert_eq!(fixture.messages.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn composer_stop_keeps_goal_resumable_without_creating_another_goal() {
+    let mut fixture = Fixture::with_success(true);
+    fixture.submit("/goal fixture");
+    let root = fixture.wait_phase(AgentRunPhase::Done);
+    fixture.submit("continue");
+    assert_eq!(fixture.wait_phase(AgentRunPhase::Waiting), root);
+    let events = fixture.sink.submit(WorkbenchCommand::StopChat {
+        thread_id: "thread-1".into(),
+    });
+    assert!(
+        matches!(events.as_slice(), [LoopEvent::ChatStopped { .. }]),
+        "{events:?}"
+    );
+    assert_eq!(
+        fixture.rt.block_on(fixture.runtime.wait(root)).unwrap(),
+        AgentRunPhase::Stopped
+    );
+    let events = fixture.submit("continue after stop");
+    assert!(
+        matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string()),
+        "{events:?}"
+    );
+    assert_eq!(fixture.wait_phase(AgentRunPhase::Waiting), root);
+    assert_eq!(fixture.created, 1);
+    assert_eq!(fixture.messages.lock().unwrap().len(), 3);
+}

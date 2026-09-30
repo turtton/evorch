@@ -1,7 +1,8 @@
 //! runtime 所有 git worktree (isolated workspace) の管理。
 //!
-//! プロセス停止時に残った worktree は自動回収しない。同じ run の次回作成は、
-//! 残存パスを [`WorkspaceError::PathExists`] として fail-closed に拒否する。
+//! 残存 worktree は自動回収しない。新規作成は残存 path を
+//! [`WorkspaceError::PathExists`] として拒否し、停止 run の復元だけが
+//! [`WorktreeManager::open_existing`] により所有権を検証して再接続する。
 //! stale worktree の自動 prune はこのモジュールの対象外である。
 
 use std::fs::{self, OpenOptions};
@@ -25,6 +26,12 @@ pub enum WorkspaceError {
     /// 作成対象の path が既に存在する。
     #[error("worktree path already exists: {path}", path = path.display())]
     PathExists { path: PathBuf },
+    /// 復元対象の worktree path が存在しない。
+    #[error("worktree path not found: {path}", path = path.display())]
+    PathMissing { path: PathBuf },
+    /// 残存 path が期待する repository / branch の登録済み worktree ではない。
+    #[error("retained worktree does not match this run: {path}", path = path.display())]
+    RetainedWorktreeMismatch { path: PathBuf },
     /// 指定 path が管理対象の git repository root ではない。
     #[error("not a git repository root: {detail}")]
     NotARepo { detail: String },
@@ -145,6 +152,71 @@ impl WorktreeManager {
             .join("worktrees")
             .join(&run_name);
         (branch.to_string(), path)
+    }
+
+    /// Reattach a retained run worktree without resetting its branch or dirty files.
+    ///
+    /// # Errors
+    /// Returns [`WorkspaceError::PathMissing`] only when the expected path is absent.
+    /// Existing paths must be registered in this repository on the run's own branch;
+    /// foreign directories, moved worktrees, symlinks and branch mismatches fail closed.
+    pub fn open_existing(&self, run_id: RunId) -> Result<OwnedWorktree, WorkspaceError> {
+        let (branch, path) = self.planned(run_id);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(WorkspaceError::PathMissing { path });
+            }
+            Err(source) => return Err(WorkspaceError::Io { path, source }),
+        }
+        let mismatch = || WorkspaceError::RetainedWorktreeMismatch { path: path.clone() };
+        if fs::canonicalize(&path).map_err(|_| mismatch())? != path {
+            return Err(mismatch());
+        }
+        let output = git_output(
+            self.project.repo_root(),
+            &["worktree", "list", "--porcelain", "-z"],
+        )?;
+        if !output.status.success() {
+            return Err(WorkspaceError::Git {
+                detail: output_detail(&output),
+            });
+        }
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let expected_path = format!("worktree {}", path.display());
+        let expected_branch = format!("branch refs/heads/{branch}");
+        if !listing.split("\0\0").any(|record| {
+            let fields: Vec<_> = record.split('\0').collect();
+            fields.contains(&expected_path.as_str()) && fields.contains(&expected_branch.as_str())
+        }) {
+            return Err(mismatch());
+        }
+        // A stale registration alone is insufficient: the directory must still be
+        // the registered checkout, not a replacement directory or foreign repository.
+        let root = git_output(&path, &["rev-parse", "--show-toplevel"])?;
+        let common = git_output(
+            &path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let head = git_output(&path, &["symbolic-ref", "--quiet", "HEAD"])?;
+        if !root.status.success() || !common.status.success() || !head.status.success() {
+            return Err(mismatch());
+        }
+        let reported_root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+        let reported_common = PathBuf::from(String::from_utf8_lossy(&common.stdout).trim());
+        if reported_root != path
+            || String::from_utf8_lossy(&head.stdout).trim() != format!("refs/heads/{branch}")
+            || fs::canonicalize(reported_common).map_err(|_| mismatch())?
+                != self.git_common_dir()?
+        {
+            return Err(mismatch());
+        }
+        Ok(OwnedWorktree {
+            path,
+            branch,
+            run_name: run_id.to_string(),
+            repo_root: self.project.repo_root.clone(),
+        })
     }
 
     /// run 専用 branch と worktree を二段階で作成する。
@@ -647,6 +719,78 @@ mod tests {
             .status
             .success()
         );
+    }
+
+    #[test]
+    fn open_existing_preserves_dirty_worktree() {
+        let (_temp, repo) = init_repo();
+        let manager = manager(&repo);
+        let owned = manager.create(RunId::new(80)).unwrap();
+        fs::write(owned.path.join("dirty.txt"), "unfinished work").unwrap();
+        let reopened = manager.open_existing(RunId::new(80)).unwrap();
+        assert_eq!(reopened.path, owned.path);
+        assert_eq!(reopened.branch, owned.branch);
+        assert_eq!(reopened.run_name, owned.run_name);
+        assert_eq!(
+            fs::read_to_string(reopened.path.join("dirty.txt")).unwrap(),
+            "unfinished work"
+        );
+        reopened.cleanup().unwrap();
+    }
+
+    #[test]
+    fn open_existing_missing_path() {
+        let (_temp, repo) = init_repo();
+        assert!(matches!(
+            manager(&repo).open_existing(RunId::new(81)),
+            Err(WorkspaceError::PathMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn open_existing_rejects_foreign_directory() {
+        let (_temp, repo) = init_repo();
+        let manager = manager(&repo);
+        let (_, path) = manager.planned(RunId::new(82));
+        fs::create_dir_all(&path).unwrap();
+        assert!(matches!(
+            manager.open_existing(RunId::new(82)),
+            Err(WorkspaceError::RetainedWorktreeMismatch { .. })
+        ));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn open_existing_rejects_moved_worktree_and_stale_registration() {
+        let (_temp, repo) = init_repo();
+        let manager = manager(&repo);
+        let owned = manager.create(RunId::new(83)).unwrap();
+        let moved = repo.join("moved-worktree");
+        fs::rename(&owned.path, &moved).unwrap();
+        // The old registration remains, but its directory is now a replacement.
+        fs::create_dir(&owned.path).unwrap();
+        assert!(matches!(
+            manager.open_existing(RunId::new(83)),
+            Err(WorkspaceError::RetainedWorktreeMismatch { .. })
+        ));
+        assert!(moved.join(".git").exists());
+    }
+
+    #[test]
+    fn open_existing_rejects_wrong_branch() {
+        let (_temp, repo) = init_repo();
+        let manager = manager(&repo);
+        let owned = manager.create(RunId::new(84)).unwrap();
+        assert!(
+            git(&owned.path, &["checkout", "-b", "foreign-branch"])
+                .status
+                .success()
+        );
+        assert!(matches!(
+            manager.open_existing(RunId::new(84)),
+            Err(WorkspaceError::RetainedWorktreeMismatch { .. })
+        ));
+        assert!(owned.path.is_dir());
     }
 
     // Given: manager 管理外 path を持つ偽の OwnedWorktree / When: cleanup / Then: path を変更せず拒否する

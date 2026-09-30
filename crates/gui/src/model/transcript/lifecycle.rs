@@ -40,6 +40,11 @@ impl TranscriptModel {
                 to: AgentRunPhase::Error,
                 ..
             }) => (run_id, "failed"),
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Stopped,
+                ..
+            }) => (run_id, "stopped (resumable)"),
             _ => return None,
         };
         let name = self

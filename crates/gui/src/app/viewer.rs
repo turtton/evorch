@@ -17,6 +17,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll_role_save();
         self.refresh_image_capability();
+        self.composer.running_children = self
+            .sidebar
+            .active_thread
+            .as_ref()
+            .map(|id| {
+                let thread = id.to_string();
+                if let Some(count) = self.sink.running_children(&thread) {
+                    self.running_children.insert(thread.clone(), count);
+                }
+                self.running_children.get(&thread).copied().unwrap_or(0)
+            })
+            .unwrap_or(0);
         self.composer.resolved_model = self
             .sidebar
             .threads
@@ -213,7 +225,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::Send => self.submit_composer(),
-                ComposerAction::Cancel => self.cancel_chat(),
+                ComposerAction::Stop => self.stop_chat(),
+                ComposerAction::Discard => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
                 ComposerAction::Complete(name) => {

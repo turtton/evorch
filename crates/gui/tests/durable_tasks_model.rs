@@ -60,6 +60,7 @@ fn typed_statuses_survive_progress_without_losing_artifact() {
         ("retrying", TaskStatus::Retrying),
         ("completed", TaskStatus::Completed),
         ("cancelled", TaskStatus::Cancelled),
+        ("stopped", TaskStatus::Stopped),
         ("failed", TaskStatus::Failed),
     ] {
         // Given: a valid artifact exists before a status-only update.

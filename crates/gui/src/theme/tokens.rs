@@ -171,6 +171,7 @@ pub fn state_color(state: ThreadState) -> Color32 {
     match state {
         ThreadState::Active => palette().ACCENT,
         ThreadState::Paused => palette().TEXT_MUTED,
+        ThreadState::Stopped => palette().WARNING_FG,
         ThreadState::Running => palette().INFO,
         ThreadState::Waiting => palette().WAITING,
         ThreadState::Done => palette().SUCCESS,
@@ -185,6 +186,7 @@ pub fn phase_color(phase: ThreadRunPhase) -> Color32 {
         ThreadRunPhase::Waiting => palette().WAITING,
         ThreadRunPhase::Done => palette().SUCCESS,
         ThreadRunPhase::Error => palette().ERROR_FG,
+        ThreadRunPhase::Stopped => palette().WARNING_FG,
     }
 }
 
@@ -195,6 +197,7 @@ pub fn agent_phase_color(phase: AgentRunPhase) -> Color32 {
         AgentRunPhase::Waiting => palette().WAITING,
         AgentRunPhase::Done => palette().SUCCESS,
         AgentRunPhase::Error => palette().ERROR_FG,
+        AgentRunPhase::Stopped => palette().WARNING_FG,
     }
 }
 
@@ -286,6 +289,11 @@ mod tests {
         assert_eq!(palette().WAITING, palette().INFO);
         assert_eq!(phase_color(ThreadRunPhase::Running), palette().RUNNING);
         assert_eq!(phase_color(ThreadRunPhase::Waiting), palette().WAITING);
+        assert_eq!(phase_color(ThreadRunPhase::Stopped), palette().WARNING_FG);
+        assert_eq!(
+            agent_phase_color(AgentRunPhase::Stopped),
+            palette().WARNING_FG
+        );
         assert_eq!(agent_phase_color(AgentRunPhase::Running), palette().RUNNING);
         assert_eq!(agent_phase_color(AgentRunPhase::Waiting), palette().WAITING);
     }
@@ -295,6 +303,7 @@ mod tests {
         let colors = [
             state_color(ThreadState::Active),
             state_color(ThreadState::Paused),
+            state_color(ThreadState::Stopped),
             state_color(ThreadState::Running),
             state_color(ThreadState::Waiting),
             state_color(ThreadState::Done),

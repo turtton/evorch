@@ -12,7 +12,7 @@ use tokio::sync::watch;
 
 use super::super::{DispatchResult, error, parse, parse_run_id, serialize, success};
 use crate::agent_loop::LoopState;
-use crate::{AgentRuntime, RunId};
+use crate::{AgentRuntime, RunId, RunInterrupt};
 
 pub(in crate::meta) const MAX_WAIT_RUNS: usize = 8;
 pub(in crate::meta) const MAX_WAIT_MS: u64 = 600_000;
@@ -92,7 +92,7 @@ pub(in crate::meta) async fn wait(
         return error("parent run could not enter Waiting");
     }
     let caller = state.caller_run_id();
-    let mut result = if *state.channels.cancel_rx.borrow() {
+    let mut result = if state.channels.cancel_rx.borrow().is_interrupted() {
         Err("wait cancelled".into())
     } else if state.has_pending_user_messages() {
         // Another wait in this same tool batch may already have received input.
@@ -162,9 +162,9 @@ async fn observe(
     runtime: &AgentRuntime,
     caller: RunId,
     request: &WaitRequest,
-    mut cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<RunInterrupt>,
 ) -> Result<Value, String> {
-    if *cancel.borrow() {
+    if cancel.borrow().is_interrupted() {
         return Err("wait cancelled".into());
     }
     let mut questions = runtime.shared.question_version.subscribe();
@@ -197,7 +197,7 @@ async fn observe(
         tokio::select! {
             biased;
             changed = cancel.changed() => {
-                if changed.is_err() || *cancel.borrow() {
+                if changed.is_err() || cancel.borrow().is_interrupted() {
                     return Err("wait cancelled".into());
                 }
             }
@@ -235,7 +235,7 @@ async fn observe(
 fn terminal(run: &Value) -> bool {
     matches!(
         run["status"].as_str(),
-        Some("completed" | "cancelled" | "failed")
+        Some("completed" | "cancelled" | "failed" | "stopped")
     )
 }
 

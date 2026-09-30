@@ -27,6 +27,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             thread_id,
             project_id,
             root_run_id,
+            goal_id,
             ..
         }) = &event.kind
         {
@@ -51,6 +52,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 &thread.project_id.to_string(),
                 root_run_id,
             );
+            self.sink.bind_goal_id(thread_id, goal_id);
         }
     }
     pub(super) fn invalidate_restore_diagnostics(&mut self, event: &Event) {

@@ -41,8 +41,8 @@ use crate::runtime::{Shared, WorkspaceContext, loop_shared};
 use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
 use crate::workspace::OwnedWorktree;
 use crate::{
-    AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, RunConfig, RunId,
-    RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
+    AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
+    RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
 };
 use tool_calls::{standard_tool_specs, visible_tool_specs};
 
@@ -71,7 +71,7 @@ pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
     pub(crate) inbox_rx: mpsc::Receiver<(String, Vec<crate::DelegateImage>)>,
-    pub(crate) cancel_rx: watch::Receiver<bool>,
+    pub(crate) cancel_rx: watch::Receiver<RunInterrupt>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
     pub(crate) compact_rx: watch::Receiver<u64>,
     pub(crate) model_preference_rx: watch::Receiver<Option<crate::ModelPreference>>,
@@ -216,6 +216,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.spawn_cancelled(state.task.run_id))
     {
         state.finish_cancelled();
+        return;
+    }
+    if state.interrupted() == Some(InterruptKind::Stop) {
+        state.finish_stopped();
         return;
     }
     if state.task.config.workspace_mode == WorkspaceMode::Shared
@@ -381,6 +385,36 @@ async fn create_worktree(
     state: &LoopState,
 ) -> Result<OwnedWorktree, String> {
     let run_id = state.task.run_id;
+    if state.resumed {
+        let manager = workspace.manager.clone();
+        match tokio::task::spawn_blocking(move || manager.open_existing(run_id)).await {
+            Ok(Ok(owned)) => {
+                runtime_shared
+                    .workspaces
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        run_id,
+                        WorkspaceInspection {
+                            mode: WorkspaceMode::Isolated,
+                            branch: Some(owned.branch.clone()),
+                            worktree_path: Some(owned.path.clone()),
+                            merge_mode: state.task.config.merge_mode,
+                        },
+                    );
+                return Ok(owned);
+            }
+            Ok(Err(crate::workspace::WorkspaceError::PathMissing { .. })) => {}
+            Ok(Err(error)) => {
+                remove_workspace_inspection(runtime_shared, run_id);
+                return Err(format!("workspace setup failed: {error}"));
+            }
+            Err(error) => {
+                remove_workspace_inspection(runtime_shared, run_id);
+                return Err(format!("workspace setup failed: {error}"));
+            }
+        }
+    }
     // inspection は sandbox build より先に登録する。factory.build の完了を観測してから
     // inspect する利用者が Shared fallback を読まないようにするため (issue #71 CI 失敗の
     // root cause: 旧実装は build 完了後に登録しており、その間の inspect が Shared を返した)。
@@ -665,8 +699,8 @@ impl LoopState {
 
     async fn execute(&mut self) {
         loop {
-            if self.cancelled() {
-                self.finish_cancelled();
+            if let Some(kind) = self.interrupted() {
+                self.finish_interrupted(kind);
                 return;
             }
             if let Some(permit) = &self.task.config.ownership
@@ -765,8 +799,8 @@ impl LoopState {
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
-                    if changed.is_ok() && self.cancelled() {
-                        self.finish_cancelled();
+                    if changed.is_ok() && let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
                         return;
                     }
                     continue;
@@ -874,8 +908,8 @@ impl LoopState {
             match finish_reason {
                 FinishReason::ToolUse => continue,
                 FinishReason::Stop => {
-                    if self.cancelled() {
-                        self.finish_cancelled();
+                    if let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
                         return;
                     }
                     match self.flush_user_answers() {
@@ -975,8 +1009,8 @@ impl LoopState {
             tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
-                    if changed.is_ok() && self.cancelled() {
-                        self.finish_cancelled();
+                    if changed.is_ok() && let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
                     }
                     return false;
                 }
@@ -1033,7 +1067,10 @@ impl LoopState {
             .run_state
             .transition(self.task.run_id, phase, reason.clone())
             .map_err(|_| ())?;
-        if matches!(phase, AgentRunPhase::Done | AgentRunPhase::Error) {
+        if matches!(
+            phase,
+            AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+        ) {
             self.activity(event_bus::RunActivity::Idle);
             self.shared
                 .executor
@@ -1108,8 +1145,19 @@ impl LoopState {
             }));
     }
 
+    pub(crate) fn interrupted(&self) -> Option<InterruptKind> {
+        self.channels.cancel_rx.borrow().kind()
+    }
+
     fn cancelled(&self) -> bool {
-        *self.channels.cancel_rx.borrow()
+        self.interrupted() == Some(InterruptKind::Cancel)
+    }
+
+    fn finish_interrupted(&mut self, kind: InterruptKind) {
+        match kind {
+            InterruptKind::Cancel => self.finish_cancelled(),
+            InterruptKind::Stop => self.finish_stopped(),
+        }
     }
 
     pub(crate) fn finish_success(&mut self) {
@@ -1169,6 +1217,10 @@ impl LoopState {
 
     fn finish_error(&mut self, reason: String) {
         let _ = self.transition(AgentRunPhase::Error, Some(reason));
+    }
+
+    fn finish_stopped(&mut self) {
+        let _ = self.transition(AgentRunPhase::Stopped, Some("stopped".into()));
     }
 
     fn finish_cancelled(&mut self) {

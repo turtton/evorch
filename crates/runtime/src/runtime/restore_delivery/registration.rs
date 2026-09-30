@@ -24,7 +24,7 @@ impl AgentRuntime {
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(restored.messages.len() + 1);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
             watch::channel(config.model_preference.clone());

@@ -232,6 +232,8 @@ pub enum AgentRunPhase {
     Running,
     /// 外部要因（ツール結果や入力）の到着を待機中です。
     Waiting,
+    /// オペレーターにより停止しました。終端位相ですが、復元により再開できます。
+    Stopped,
     /// 正常終了しました。
     Done,
     /// 異常終了しました。
@@ -386,7 +388,7 @@ pub enum LifecycleEvent {
         from: AgentRunPhase,
         /// 遷移後の位相。
         to: AgentRunPhase,
-        /// 遷移理由。`to` が [`AgentRunPhase::Error`] のときに設定されます。
+        /// 遷移理由。異常終了やオペレーターによる停止などの理由を保持します。
         reason: Option<String>,
     },
     /// セッションが完了した。
@@ -1349,7 +1351,7 @@ mod tests {
         assert_eq!(kind, restored);
     }
 
-    // Given: AgentRunPhase の全 5 位相。
+    // Given: AgentRunPhase の全 6 位相。
     // When: 各位相を JSON 文字列へシリアライズして復元する。
     // Then: いずれの位相も往復前後で等しい。
     #[test]
@@ -1358,6 +1360,7 @@ mod tests {
             AgentRunPhase::Pending,
             AgentRunPhase::Running,
             AgentRunPhase::Waiting,
+            AgentRunPhase::Stopped,
             AgentRunPhase::Done,
             AgentRunPhase::Error,
         ];

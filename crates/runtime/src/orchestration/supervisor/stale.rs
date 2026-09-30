@@ -32,6 +32,9 @@ impl SupervisorActor {
                 };
                 match task.status {
                     TaskStatus::Running | TaskStatus::Retrying => {}
+                    // Operator-stopped tasks intentionally stop advancing their
+                    // heartbeat. They remain resumable, not stale retryable failures.
+                    TaskStatus::Stopped => continue,
                     TaskStatus::Pending
                     | TaskStatus::Queued
                     | TaskStatus::Blocked

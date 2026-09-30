@@ -444,6 +444,7 @@ mod tests {
             (ThreadRunPhase::Running, "running"),
             (ThreadRunPhase::Waiting, "waiting (input)"),
             (ThreadRunPhase::Done, "done"),
+            (ThreadRunPhase::Stopped, "stopped (resumable)"),
         ] {
             let mut harness = Harness::builder()
                 .with_size(egui::vec2(400.0, 80.0))

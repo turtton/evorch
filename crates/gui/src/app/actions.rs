@@ -410,6 +410,37 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.save_sidebar();
                 }
             }
+            LoopEvent::ChatStopped {
+                thread_id,
+                run_id,
+                running_children,
+            } => {
+                self.phases
+                    .insert(run_id, workspace_ui::ThreadRunPhase::Stopped);
+                self.running_children
+                    .insert(thread_id.clone(), running_children);
+                if self
+                    .sidebar
+                    .active_thread
+                    .as_ref()
+                    .is_some_and(|id| id.to_string() == thread_id)
+                {
+                    self.push_notice(format!(
+                        "Run stopped: {}",
+                        crate::panes::composer::stopped_banner(running_children)
+                    ));
+                }
+            }
+            LoopEvent::ChatNotice { thread_id, text } => {
+                if self
+                    .sidebar
+                    .active_thread
+                    .as_ref()
+                    .is_some_and(|id| id.to_string() == thread_id)
+                {
+                    self.push_notice(text);
+                }
+            }
             LoopEvent::ChatRejected { reason, .. } => {
                 tracing::warn!(%reason, "chat command rejected");
                 self.push_notice(format!("chat failed: {reason}"));
