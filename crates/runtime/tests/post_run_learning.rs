@@ -384,3 +384,66 @@ async fn incomplete_candidate_review_batch_promotes_none() {
             .all(|entry| entry.status == MemoryStatus::Candidate)
     );
 }
+
+#[tokio::test]
+async fn self_improvement_observes_only_promoted_lessons_after_completion() {
+    use runtime::self_improvement::{ImprovementPolicy, ImprovementSettings};
+    for mode in [ReviewMode::Approve, ReviewMode::Reject] {
+        let mut fixture = Fixture::new(mode);
+        let drafts = fixture._dir.path().join("drafts");
+        fixture.runtime = fixture.runtime.with_self_improvement(ImprovementSettings {
+            writer: fixture._store.handle(),
+            project: "p".into(),
+            policy: ImprovementPolicy {
+                draft_dir: Some(drafts.clone()),
+                ..Default::default()
+            },
+        });
+        let source = fixture.start().await;
+        assert_eq!(fixture.learning(source).await, Ok(()));
+        let candidates = Database::open(&fixture.config)
+            .unwrap()
+            .improvement_candidates("p", None, 10)
+            .unwrap();
+        let promoted = fixture
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.status == MemoryStatus::Promoted)
+            .count();
+        assert_eq!(candidates.len(), promoted);
+        for candidate in candidates {
+            assert_eq!(candidate.code, "LessonPromoted");
+            assert!(drafts.join(candidate.draft_path.unwrap()).exists());
+        }
+        assert_eq!(
+            fixture.runtime.list_agents().len(),
+            3,
+            "intake must not run another model"
+        );
+    }
+}
+
+#[tokio::test]
+async fn self_improvement_draft_failure_preserves_successful_learning() {
+    use runtime::self_improvement::{ImprovementPolicy, ImprovementSettings};
+    let mut fixture = Fixture::new(ReviewMode::Approve);
+    let blocked = fixture._dir.path().join("not-a-directory");
+    std::fs::write(&blocked, "blocked").unwrap();
+    fixture.runtime = fixture.runtime.with_self_improvement(ImprovementSettings {
+        writer: fixture._store.handle(),
+        project: "p".into(),
+        policy: ImprovementPolicy {
+            draft_dir: Some(blocked),
+            ..Default::default()
+        },
+    });
+    let source = fixture.start().await;
+    assert_eq!(fixture.learning(source).await, Ok(()));
+    assert_eq!(fixture.entries()[0].status, MemoryStatus::Promoted);
+    let candidates = Database::open(&fixture.config)
+        .unwrap()
+        .improvement_candidates("p", None, 10)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].draft_path.is_none());
+}

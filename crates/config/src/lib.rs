@@ -17,6 +17,7 @@ mod save_agents;
 mod save_codex;
 mod save_routing;
 mod save_sandbox;
+mod save_self_improvement;
 mod schema;
 mod strict;
 pub mod types;
@@ -35,6 +36,7 @@ pub use save_codex::{
 };
 pub use save_routing::{save_routing, save_routing_and_agents};
 pub use save_sandbox::save_sandbox;
+pub use save_self_improvement::save_self_improvement;
 pub use schema::json_schema;
 pub use types::BudgetConfig;
 pub use types::OwnershipConfig;
@@ -44,5 +46,5 @@ pub use types::{
     MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
     PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
     RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
-    SummarizerKind, WorkerBindingConfig,
+    SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
 };

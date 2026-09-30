@@ -27,7 +27,8 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             (
                 PanelKind::AgentTranscript
                 | PanelKind::SubagentTranscript
-                | PanelKind::ParkedAgentTranscript(_),
+                | PanelKind::ParkedAgentTranscript(_)
+                | PanelKind::FileViewer,
                 None,
             ) => {
                 return Err(LayoutError::MissingTarget {
@@ -37,7 +38,8 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             (
                 PanelKind::AgentTranscript
                 | PanelKind::SubagentTranscript
-                | PanelKind::ParkedAgentTranscript(_),
+                | PanelKind::ParkedAgentTranscript(_)
+                | PanelKind::FileViewer,
                 Some(_),
             )
             | (PanelKind::Agent, None)

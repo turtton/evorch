@@ -7,7 +7,9 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const EXPECTED_TABLES: [&str; 21] = [
+const EXPECTED_TABLES: [&str; 23] = [
+    "improvement_candidates",
+    "improvement_intake",
     "user_questions",
     "user_question_links",
     "run_ledger",
@@ -31,7 +33,11 @@ const EXPECTED_TABLES: [&str; 21] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 16] = [
+const EXPECTED_INDICES: [&str; 20] = [
+    "idx_improvement_intake_dedup",
+    "idx_improvement_intake_daily",
+    "idx_improvement_candidates_dedup",
+    "idx_improvement_candidates_status",
     "user_questions_run",
     "user_questions_root",
     "user_questions_pending",
@@ -81,9 +87,9 @@ fn fresh_open_applies_latest_schema() {
     // When: データベースを初めて開く
     let database = Database::open(&config_for(&path)).expect("fresh database must open");
 
-    // Then: v10 と定義済みテーブル・インデックスが作成される
+    // Then: v11 と定義済みテーブル・インデックスが作成される
     let connection = Connection::open(path).expect("migrated database must reopen");
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 11);
     assert_eq!(
         schema_objects(&connection, "table"),
         EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -105,13 +111,13 @@ fn reopening_latest_database_is_idempotent() {
     // When: 同じファイルを再度開く
     drop(Database::open(&config_for(&path)).expect("migrated database must reopen"));
 
-    // Then: スキーマは重複せず v10 のまま維持される
+    // Then: スキーマは重複せず v11 のまま維持される
     let connection = Connection::open(path).expect("database must remain readable");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .expect("user_version must be readable"),
-        10
+        11
     );
     assert_eq!(
         schema_objects(&connection, "table").len(),
@@ -142,7 +148,7 @@ fn newer_schema_version_is_rejected() {
         error,
         StorageError::SchemaTooNew {
             found: 99,
-            supported: 10,
+            supported: 11,
         }
     );
 }
@@ -187,7 +193,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
     );
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 11);
 }
 
 #[test]
@@ -224,7 +230,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     let database = Database::open(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 11);
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "recursive_triggers", 0)
@@ -257,7 +263,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let database = Database::open(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
-    assert_eq!(database.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(database.pragma_i64("user_version").unwrap(), 11);
     let columns: BTreeSet<String> = connection
         .prepare("PRAGMA table_info(tasks)")
         .unwrap()

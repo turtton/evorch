@@ -155,9 +155,17 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     drop(conn);
 
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 11);
     assert_eq!(db.pragma_i64("foreign_keys").unwrap(), 1);
     let conn = Connection::open(&path).unwrap();
+    let tables = schema_objects(&conn, "table");
+    assert!(tables.contains("improvement_candidates"));
+    assert!(tables.contains("improvement_intake"));
+    let indices = schema_objects(&conn, "index");
+    assert!(indices.contains("idx_improvement_candidates_dedup"));
+    assert!(indices.contains("idx_improvement_candidates_status"));
+    assert!(indices.contains("idx_improvement_intake_dedup"));
+    assert!(indices.contains("idx_improvement_intake_daily"));
     assert_eq!(rows(&conn, "SELECT * FROM tasks ORDER BY id"), before_tasks);
     assert_eq!(
         rows(
@@ -221,7 +229,7 @@ fn fresh_open_accepts_stopped_and_rejects_invalid_status() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     let db = Database::open(&config_for(&path)).unwrap();
-    assert_eq!(db.pragma_i64("user_version").unwrap(), 10);
+    assert_eq!(db.pragma_i64("user_version").unwrap(), 11);
     let conn = Connection::open(&path).unwrap();
     populate(&conn, true);
     verify_constraints(&conn);

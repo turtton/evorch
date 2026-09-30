@@ -14,6 +14,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.is_saving()
             || self.role_settings.is_saving()
             || self.provider_save_rx.is_some()
+            || self.self_improvement_settings.is_saving()
     }
 
     pub(super) fn routing_load_options(&self) -> config::LoadOptions {
@@ -42,6 +43,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.provider_settings.open = false;
         self.sandbox_settings.open = false;
+        self.self_improvement_settings.open = false;
         self.close_theme_settings();
         self.role_settings.open = false;
         self.routing_settings.open = true;
@@ -61,6 +63,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.provider_settings.open = false;
         self.sandbox_settings.open = false;
+        self.self_improvement_settings.open = false;
         self.close_theme_settings();
         self.role_settings.open = false;
         self.routing_settings.open = true;

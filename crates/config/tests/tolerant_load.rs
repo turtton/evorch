@@ -61,6 +61,34 @@ obsolete = "ignored"
 }
 
 #[test]
+fn self_improvement_unknown_keys_are_pruned_like_metrics_and_compaction() {
+    // Given: ordinary sections contain both supported fields and obsolete keys.
+    let document = r#"
+[metrics]
+retention_days = 7
+obsolete = true
+[compaction]
+keep_recent_tokens = 1234
+obsolete = true
+[self_improvement]
+enabled = true
+daily_limit = 8
+obsolete = true
+"#;
+
+    // When: loading with the same tolerant policy used for existing sections.
+    let config = load(document, false).expect("unknown keys are ignored");
+
+    // Then: pruning preserves the supported values in every section.
+    assert_eq!(config.metrics.retention_days, 7);
+    assert_eq!(config.compaction.keep_recent_tokens, 1234);
+    assert!(config.self_improvement.enabled);
+    assert_eq!(config.self_improvement.daily_limit, 8);
+    let disabled = load("[self_improvement]\nenabld = true\n", false).expect("typo ignored");
+    assert!(!disabled.self_improvement.enabled);
+}
+
+#[test]
 fn known_field_with_wrong_type_still_fails() {
     let error = load("[budget]\nmax_tool_calls = 'many'\n", false).unwrap_err();
     assert!(error.to_string().contains("max_tool_calls"));

@@ -15,6 +15,7 @@ const ROOT_KEYS: &[&str] = &[
     "diagnostics",
     "permissions",
     "metrics",
+    "self_improvement",
     "agents",
     "rules",
     "compaction",
@@ -62,6 +63,16 @@ const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
+const SELF_IMPROVEMENT_KEYS: &[&str] = &[
+    "enabled",
+    "draft_dir",
+    "max_candidates",
+    "evidence_max_bytes",
+    "daily_limit",
+    "duplicate_cooldown_secs",
+    "collect_diagnostics",
+    "collect_lessons",
+];
 const AGENTS_KEYS: &[&str] = &["orchestrator", "explorer", "worker", "reviewer", "roles"];
 const ADDITIONAL_ROLE_KEYS: &[&str] = &["web_researcher", "planner", "oracle", "multimodal_looker"];
 const RULES_KEYS: &[&str] = &[
@@ -168,6 +179,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "diagnostics", DIAGNOSTICS_KEYS)?;
     validate_section(root, "permissions", PERMISSIONS_KEYS)?;
     validate_section(root, "metrics", METRICS_KEYS)?;
+    validate_section(root, "self_improvement", SELF_IMPROVEMENT_KEYS)?;
     validate_section(root, "rules", RULES_KEYS)?;
     validate_section(root, "compaction", COMPACTION_KEYS)?;
     validate_section(root, "budget", BUDGET_KEYS)?;
@@ -300,6 +312,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("diagnostics", DIAGNOSTICS_KEYS),
         ("permissions", PERMISSIONS_KEYS),
         ("metrics", METRICS_KEYS),
+        ("self_improvement", SELF_IMPROVEMENT_KEYS),
         ("rules", RULES_KEYS),
         ("compaction", COMPACTION_KEYS),
         ("budget", BUDGET_KEYS),

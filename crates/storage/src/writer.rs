@@ -15,7 +15,7 @@ mod stream_tests;
 
 use state::{log_size_state, log_temp_state, run_writer, temp_exceeded};
 
-type ReplyTx = mpsc::Sender<Result<(), StorageError>>;
+type ReplyTx<T = ()> = mpsc::Sender<Result<T, StorageError>>;
 type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 
 // AgentRunStarted 追加で Event が大型化。Box 化は append hot path に alloc を
@@ -28,6 +28,14 @@ enum Command {
     AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
     RecordCatalogUpdate(CatalogUpdateRecord, ReplyTx),
     Memory(crate::repo::memory::Mutation, ReplyTx),
+    RecordImprovementCandidate(
+        String,
+        crate::improvement::NewImprovementCandidate,
+        crate::improvement::ImprovementWritePolicy,
+        ReplyTx<crate::improvement::ImprovementRecordOutcome>,
+    ),
+    SetImprovementStatus(String, crate::improvement::ImprovementStatus, ReplyTx<bool>),
+    AttachImprovementDraft(String, String, ReplyTx<bool>),
     TaskQueue(crate::task_queue::Mutation, ReplyTx),
     AppendRunLedger(String, String, mpsc::Sender<Result<u64, StorageError>>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
@@ -221,6 +229,41 @@ impl StorageHandle {
         })
     }
 
+    /// Record a secret-guarded candidate under explicit deduplication and retention policy.
+    /// Policy checks, insertion and eviction run atomically on the single writer.
+    pub fn record_improvement_candidate(
+        &self,
+        project: &str,
+        candidate: crate::improvement::NewImprovementCandidate,
+        policy: crate::improvement::ImprovementWritePolicy,
+    ) -> Result<crate::improvement::ImprovementRecordOutcome, StorageError> {
+        self.request(|reply| {
+            Command::RecordImprovementCandidate(project.into(), candidate, policy, reply)
+        })
+    }
+
+    /// Set the review state, returning false when the candidate does not exist.
+    pub fn set_improvement_status(
+        &self,
+        id: &str,
+        status: crate::improvement::ImprovementStatus,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::SetImprovementStatus(id.into(), status, reply))
+    }
+
+    /// Attach a secret-guarded draft reference; return false for an unknown candidate.
+    ///
+    /// Callers should supply only a filename (basename) or relative path; runtime drafts
+    /// default to a managed directory. An absolute host path is the caller's explicit
+    /// choice. Storage saves the supplied reference verbatim and performs no file I/O.
+    pub fn attach_improvement_draft(
+        &self,
+        id: &str,
+        draft_path: &str,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::AttachImprovementDraft(id.into(), draft_path.into(), reply))
+    }
+
     pub fn validate_lesson(&self, id: &str, evidence: &str) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::Memory(
@@ -317,7 +360,7 @@ impl StorageHandle {
         self.request(Command::Checkpoint)
     }
 
-    fn request(&self, command: impl FnOnce(ReplyTx) -> Command) -> Result<(), StorageError> {
+    fn request<T>(&self, command: impl FnOnce(ReplyTx<T>) -> Command) -> Result<T, StorageError> {
         let (reply, result) = mpsc::channel();
         self.0
             .send(command(reply))

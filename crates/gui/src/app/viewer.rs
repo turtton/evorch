@@ -58,6 +58,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .collect();
         let mut subagent_closed = false;
         self.panels.retain(|panel_id, panel| {
+            if panel.kind == workspace_ui::PanelKind::FileViewer
+                && self.dock.find_tab(panel_id).is_none()
+            {
+                if let Some(path) = panel.target.as_deref() {
+                    crate::panes::file_viewer::forget_file(ui.ctx(), std::path::Path::new(path));
+                }
+                return false;
+            }
             let retained = !panel_id.as_str().starts_with("agent-run-")
                 || self.dock.find_tab(panel_id).is_some()
                 || panel
@@ -84,6 +92,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut request_action = None;
         let mut diagnostics_request = false;
         let mut diff_request = None;
+        let mut file_requests = Vec::new();
         let mut composer_action = None;
         let mut focus_request = None;
         let mut preference_action = None;
@@ -107,6 +116,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 notifications_action: &mut notifications_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
+                self_improvement: &mut self.self_improvement,
                 arena: &mut self.arena,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
@@ -126,6 +136,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 focus: &self.focus,
                 diff: &self.diff,
                 diff_request: &mut diff_request,
+                file_requests: &mut file_requests,
                 composer: &mut self.composer,
                 composer_action: &mut composer_action,
                 focus_request: &mut focus_request,
@@ -138,6 +149,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             DockArea::new(&mut self.dock)
                 .style(dock_style)
                 .show_inside(ui, &mut viewer);
+        }
+        for link in file_requests {
+            self.open_file_preview(&ctx, link);
         }
         if diagnostics_request {
             self.diagnostics_open = true;
@@ -235,6 +249,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Discard => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
+                ComposerAction::OpenSelfImprovementSettings => {
+                    self.open_self_improvement_settings()
+                }
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }
@@ -245,6 +262,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
+        self.render_self_improvement_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {
@@ -270,5 +288,40 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .start_models_fetch_with_store(self.credential_store.clone()),
             }
         }
+    }
+}
+
+impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Open a local file in the workspace, reusing an existing tab for that path.
+    pub fn open_file_preview(
+        &mut self,
+        ctx: &egui::Context,
+        link: crate::panes::file_viewer::FileLink,
+    ) {
+        use workspace_ui::{Panel, PanelId, PanelKind};
+        let target = link.path.to_string_lossy().into_owned();
+        let id = PanelId::new(format!("file-{target}"));
+        crate::panes::file_viewer::request_line(ctx, &link);
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::FileViewer,
+            title: link.path.file_name().map_or_else(
+                || target.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            target: Some(target),
+        });
+        if self.dock.find_tab(&id).is_none() {
+            let neighbor = self
+                .dock
+                .find_tab(&PanelId::new("subagents-home"))
+                .or_else(|| self.dock.find_tab(&PanelId::new("agent-main")));
+            if let Some(path) = neighbor {
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+            self.dock.push_to_focused_leaf(id.clone());
+        }
+        self.focus_panel(id.as_str());
+        ctx.request_repaint();
     }
 }

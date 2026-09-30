@@ -1,5 +1,7 @@
 //! Markdown presentation for transcript text.
 
+use std::path::Path;
+
 use egui::Ui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
@@ -7,6 +9,13 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use crate::theme::tokens::palette;
 
 pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
+    render_markdown_with_base(ui, source, id_salt, None);
+}
+
+pub fn render_markdown_with_base(ui: &mut Ui, source: &str, id_salt: &str, base: Option<&Path>) {
+    super::file_viewer::install_image_loader(ui.ctx());
+    let source = prepare_local_images(source, base);
+    let source = source.as_str();
     ui.push_id(id_salt, |ui| {
         let color = ui.visuals().override_text_color.unwrap_or(palette().TEXT);
         ui.visuals_mut().widgets.noninteractive.fg_stroke.color = color;
@@ -133,6 +142,43 @@ pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
             }))
             .show(ui, &mut cache, &markdown);
     });
+}
+
+fn prepare_local_images(source: &str, base: Option<&Path>) -> String {
+    if base.is_none() {
+        return source.to_owned();
+    }
+    let mut result = String::new();
+    let mut image = None;
+    let mut start = 0;
+    for (event, range) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                image = super::file_viewer::resolve_file_link(&dest_url, base)
+                    .and_then(|link| super::file_viewer::image_uri(&link.path))
+                    .map(|uri| (range.start, uri, String::new()));
+            }
+            Event::Text(text) if image.is_some() => {
+                if let Some((_, _, alt)) = &mut image {
+                    alt.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some((open, uri, alt)) = image.take() {
+                    result.push_str(&source[start..open]);
+                    let alt = alt
+                        .replace('\\', "\\\\")
+                        .replace('[', "\\[")
+                        .replace(']', "\\]");
+                    result.push_str(&format!("![{alt}]({uri})"));
+                    start = range.end;
+                }
+            }
+            _ => {}
+        }
+    }
+    result.push_str(&source[start..]);
+    result
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ pub use agents::{
 };
 pub use budget::BudgetConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
-pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig};
+pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig, SelfImprovementConfig};
 pub use model_preset::ModelPresetConfig;
 pub use orchestration::OrchestrationConfig;
 pub use ownership::OwnershipConfig;
@@ -69,6 +69,8 @@ pub struct Config {
     pub permissions: PermissionConfig,
     /// メトリクス設定。
     pub metrics: MetricsConfig,
+    /// 自己改善ドラフト設定 (既定で無効。Phase A は候補とローカル下書きのみ)。
+    pub self_improvement: SelfImprovementConfig,
     /// プロジェクトルール注入設定。
     pub rules: RulesConfig,
     /// コンテキスト圧縮設定。
@@ -94,6 +96,7 @@ impl Default for Config {
             diagnostics: DiagnosticsConfig::default(),
             permissions: PermissionConfig::default(),
             metrics: MetricsConfig::default(),
+            self_improvement: SelfImprovementConfig::default(),
             rules: RulesConfig::default(),
             compaction: CompactionConfig::default(),
             budget: BudgetConfig::default(),

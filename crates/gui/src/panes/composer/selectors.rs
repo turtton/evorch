@@ -26,6 +26,17 @@ pub(super) fn row(
         if let Some(preference) = model_picker(ui, picker.0, picker.1) {
             action = Some(ComposerAction::ModelPreference(preference));
         }
+        // Keep the composer usable at narrow widths; expose the full settings
+        // name to accessibility and in the tooltip, not as a wide inline button.
+        let response = ui
+            .button("Drafts")
+            .on_hover_text("Self-improvement settings (default off)");
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Self-improvement settings")
+        });
+        if response.clicked() {
+            action = Some(ComposerAction::OpenSelfImprovementSettings);
+        }
     });
     action
 }

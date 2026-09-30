@@ -79,6 +79,7 @@ fn generated_schema_covers_all_config_sections() {
         "diagnostics",
         "permissions",
         "metrics",
+        "self_improvement",
         "sandbox",
     ] {
         assert!(

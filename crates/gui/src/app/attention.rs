@@ -54,6 +54,7 @@ pub(super) fn attention_for(
         | PanelKind::Tasks
         | PanelKind::Notifications
         | PanelKind::Agent
+        | PanelKind::FileViewer
         | PanelKind::Diff
         | PanelKind::Terminal
         | PanelKind::Memory
@@ -144,6 +145,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 | PanelKind::SubagentRegion
                 | PanelKind::Tasks
                 | PanelKind::Notifications
+                | PanelKind::FileViewer
                 | PanelKind::Diff
                 | PanelKind::Terminal
                 | PanelKind::Memory

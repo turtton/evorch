@@ -43,6 +43,7 @@ pub mod run_store;
 pub mod runtime;
 mod sandbox_settings;
 pub mod scope;
+pub mod self_improvement;
 pub mod skill;
 pub mod snapshot;
 pub mod state;
