@@ -5,7 +5,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
     match name {
         "delegate" => ToolSpec {
             name: name.into(),
-            description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Category is worker-only; images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
+            description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. For worker tasks, choose a category using the category field's criteria; omission uses the worker base binding, with no automatic task classification. Images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -17,7 +17,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
                     "background": {"type": "boolean", "default": false, "description": "Return the child run_id immediately instead of waiting."},
                     "interactive": {"type": "boolean", "default": false, "description": "Keep the child available for messages; requires background=true."},
                     "name": {"type": "string", "description": "Human-readable child name."},
-                    "category": {"type": "string", "enum": super::CATEGORIES, "description": "Worker-only task category for model routing."},
+                    "category": {"type": "string", "enum": super::CATEGORIES, "description": "Worker-only. Choose by the task's primary difficulty, not prompt length. quick: bounded, well-specified mechanical work such as a typo, localized fix, or routine commit of reviewed changes with an exact staging scope; give explicit checks and forbidden actions. deep: multi-step implementation requiring codebase investigation, dependent edits, or broad verification. high-reasoning: subtle invariants, hard debugging, or competing designs where reasoning is the bottleneck, even with few files; use deep when breadth is the main challenge. visual: UI layout, styling, design, or screenshot-driven visual work; use multimodal_looker for image interpretation alone. writing: documentation, prose, or copy where audience and wording dominate. research: multi-source evidence synthesis with a worker deliverable; use explorer for read-only local code investigation and web_researcher for external source collection alone. Omit only when no category fits; omission uses the worker base binding, not quick."},
                     "workspace_mode": {"type": "string", "enum": ["shared", "isolated"], "default": "shared"},
                     "workspace_branch": {"type": "string", "description": "Existing branch for an isolated workspace."},
                     "load_skills": {"type": "array", "items": {"type": "string"}, "description": "Registered skills to load into the child."},
@@ -217,6 +217,28 @@ mod tests {
         assert_eq!(properties["load_skills"]["type"], "array");
         assert_eq!(properties["task"]["type"], "object");
         assert_eq!(properties["images"]["type"], "array");
+    }
+
+    #[test]
+    fn delegate_schema_explains_category_routing() {
+        let spec = tool_spec("delegate");
+        let category = &spec.input_schema["properties"]["category"];
+        let help = category["description"].as_str().expect("category help");
+        let names = category["enum"].as_array().expect("category names");
+
+        for name in names {
+            let name = name.as_str().expect("category name");
+            assert!(
+                help.contains(&format!("{name}:")),
+                "missing {name} criteria"
+            );
+        }
+        assert!(help.contains("routine commit of reviewed changes"));
+        assert!(help.contains("omission uses the worker base binding, not quick"));
+        assert!(
+            spec.description
+                .contains("no automatic task classification")
+        );
     }
 
     #[test]
