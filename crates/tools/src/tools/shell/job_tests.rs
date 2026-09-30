@@ -202,7 +202,7 @@ async fn output_is_bounded_redacted_and_archived_once() {
     let detail = end.detail.as_ref().unwrap();
     assert_eq!(detail["output_artifact"]["complete"], false);
     let path = detail["output_artifact"]["path"].as_str().unwrap();
-    assert!(path.starts_with("/var/tmp/evorch-output-"));
+    assert!(std::path::Path::new(path).starts_with(crate::output::output_root().unwrap()));
     let saved = std::fs::read_to_string(path).unwrap();
     assert!(!saved.contains(&key));
     assert!(saved.contains("[REDACTED:"));

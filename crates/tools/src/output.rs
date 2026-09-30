@@ -3,6 +3,7 @@
 //! A fixed number of independently locked slots bounds disk use across restarts
 //! and processes. Replacing a slot removes at most one bounded file. Paths carry
 //! unique IDs, so an expired reference never silently reads another command's log.
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -168,12 +169,29 @@ fn store() -> &'static OutputStore {
     })
 }
 
+fn root_from(base: Option<&OsStr>, euid: u32) -> io::Result<PathBuf> {
+    let base = Path::new(
+        base.filter(|value| !value.is_empty())
+            .unwrap_or(OsStr::new("/var/tmp")),
+    );
+    if !base.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "EVORCH_OUTPUT_DIR must be an absolute path",
+        ));
+    }
+    Ok(base.join(format!("evorch-output-{euid}")))
+}
+
 /// Host path mounted read-only into the command sandbox. Never uses TMPDIR.
+/// EVORCH_OUTPUT_DIR overrides the /var/tmp base directory when nonempty.
 pub fn output_root() -> io::Result<PathBuf> {
-    let root = PathBuf::from("/var/tmp").join(format!(
-        "evorch-output-{}",
-        rustix::process::geteuid().as_raw()
-    ));
+    let base = std::env::var_os("EVORCH_OUTPUT_DIR");
+    let root = root_from(base.as_deref(), rustix::process::geteuid().as_raw())?;
+    std::fs::create_dir_all(
+        root.parent()
+            .expect("output root has an absolute base directory"),
+    )?;
     private_dir(&root)?;
     start_cleanup(root.clone());
     Ok(root)
@@ -279,6 +297,104 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_defaults_to_var_tmp() {
+        assert_eq!(
+            root_from(None, 1000).unwrap(),
+            PathBuf::from("/var/tmp/evorch-output-1000")
+        );
+    }
+
+    #[test]
+    fn root_uses_output_directory_override() {
+        assert_eq!(
+            root_from(Some(OsStr::new("/custom/output")), 1000).unwrap(),
+            PathBuf::from("/custom/output/evorch-output-1000")
+        );
+    }
+
+    #[test]
+    fn root_requires_an_absolute_base() {
+        for base in ["relative", ".", "../output", "~/output", " "] {
+            let error = root_from(Some(OsStr::new(base)), 1000).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("EVORCH_OUTPUT_DIR"));
+        }
+    }
+
+    #[test]
+    fn root_defaults_to_var_tmp_for_empty_override() {
+        assert_eq!(
+            root_from(Some(OsStr::new("")), 1000).unwrap(),
+            root_from(None, 1000).unwrap()
+        );
+    }
+
+    #[test]
+    fn root_preserves_base_and_uid_child() {
+        for base in ["/", "/custom/output/", "/custom/with spaces"] {
+            for uid in [0, 42, u32::MAX] {
+                let root = root_from(Some(OsStr::new(base)), uid).unwrap();
+                assert_eq!(root.parent(), Some(Path::new(base)));
+                assert_eq!(
+                    root.file_name().unwrap(),
+                    format!("evorch-output-{uid}").as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_preserves_non_utf8_absolute_base() {
+        use std::os::unix::ffi::OsStrExt;
+        let base = OsStr::from_bytes(b"/custom/\xff");
+        assert_eq!(
+            root_from(Some(base), 42).unwrap(),
+            Path::new(base).join("evorch-output-42")
+        );
+    }
+
+    #[test]
+    fn custom_root_is_private_and_owned_by_current_user() {
+        use std::os::unix::fs::MetadataExt;
+        let base = tempfile::tempdir().unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        let root = root_from(Some(base.path().as_os_str()), uid).unwrap();
+        private_dir(&root).unwrap();
+        let meta = std::fs::symlink_metadata(&root).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.uid(), uid);
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        private_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn custom_root_rejects_non_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let root = root_from(
+            Some(base.path().as_os_str()),
+            rustix::process::geteuid().as_raw(),
+        )
+        .unwrap();
+        private_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_dir(&root).is_err());
+    }
+
+    #[test]
+    fn custom_root_rejects_symlink() {
+        let base = tempfile::tempdir().unwrap();
+        let root = root_from(
+            Some(base.path().as_os_str()),
+            rustix::process::geteuid().as_raw(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(base.path(), &root).unwrap();
+        assert!(private_dir(&root).is_err());
+    }
+
     #[test]
     fn bounded_capture_retains_tail_and_counts_discarded_bytes() {
         let mut capture = Capture::default();
