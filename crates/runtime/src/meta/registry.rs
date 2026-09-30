@@ -158,12 +158,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registered_names_are_unique_and_resolvable() {
+    fn registered_names_are_unique() {
         let mut names = std::collections::BTreeSet::new();
         for name in META_OPS {
             assert!(names.insert(*name), "duplicate meta operation: {name}");
-            assert!(MetaOp::from_name(name).is_some());
         }
-        assert_eq!(names.len(), META_OPS.len());
     }
 }

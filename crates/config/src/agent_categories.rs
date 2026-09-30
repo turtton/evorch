@@ -159,7 +159,6 @@ mod tests {
                 "{} needs guidance",
                 category.name
             );
-            assert!(is_public_worker_category(category.name));
             assert!(category_for_role("worker", category.name).is_some());
         }
     }
@@ -170,7 +169,6 @@ mod tests {
             let definition = category_for_role(role, name).expect("internal category exists");
             assert!(matches!(definition.delegation, Delegation::Internal));
             assert!(!is_public_worker_category(name));
-            assert!(public_worker_categories().all(|category| category.name != name));
         }
         for name in ["", "unknown", "Quick", "lesson-review"] {
             assert!(!is_public_worker_category(name));

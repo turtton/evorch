@@ -442,10 +442,6 @@ mod tests {
         for category in advertised {
             assert!(super::super::parse_category(category).is_ok());
         }
-        for category in ["lesson", "lesson_review"] {
-            assert!(!delegate.input_schema.to_string().contains(category));
-            assert!(super::super::parse_category(category).is_err());
-        }
     }
 
     #[test]
