@@ -20,6 +20,7 @@ pub mod provider_settings;
 pub mod role_settings;
 pub mod routing_settings;
 pub mod scoped_call;
+pub mod self_improvement_settings;
 pub mod tasks;
 pub mod telemetry;
 pub mod terminal;

@@ -95,6 +95,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 notifications_action: &mut notifications_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
+                self_improvement: &mut self.self_improvement,
                 arena: &mut self.arena,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
@@ -222,6 +223,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Cancel => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),
+                ComposerAction::OpenSelfImprovementSettings => {
+                    self.open_self_improvement_settings()
+                }
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }
@@ -232,6 +236,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
+        self.render_self_improvement_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {

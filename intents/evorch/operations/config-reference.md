@@ -24,6 +24,7 @@ version = 2          # スキーマバージョン（現在 2。ADR 0014。大�
 [diagnostics]
 [permissions]
 [metrics]
+[self_improvement]           # 既定で無効。候補とローカル下書きのみ
 ```
 
 通常の `Config::load` は未知キー・typo キーだけを無視し、`diagnotics`（ルート直下の typo）、`diagnostics.log_lvl`、`providers.foo.timeout` のような config path を警告ログへ出す。値はログに出さない。有効な provider・routing などの設定はそのまま読み込む。`Config::load_strict` と保存前の検証では未知キーも拒否する。いずれも deep merge と version migration の後のマージ済み値を検証する。
@@ -110,6 +111,24 @@ claude-main = [
 |---|---|---|
 | `enabled` | bool | downsampled metrics 記録の有効化（ADR 0012） |
 | `retention_days` | u32 | 保持日数 |
+
+## self_improvement（`SelfImprovementConfig`）
+
+`[self_improvement]` は **既定で無効**。`enabled = false` では候補収集・ドラフト生成を含め完全に停止する。
+Phase A は evidence に基づく改善候補とローカルの packet / issue 下書きのみを扱い、GitHub issue の自動作成・公開は行わない。公開には ADR 0011 の確認ゲートが適用される。
+
+| キー | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 自己改善ドラフト生成の有効化 |
+| `draft_dir` | string? | 未指定 (`None`) | runtime が storage dir 配下の既定位置に解決 |
+| `max_candidates` | u32 | `200` | プロジェクトあたりの候補保持上限（1..=10_000） |
+| `evidence_max_bytes` | u32 | `2048` | 候補 1 件あたりの evidence 最大バイト数（256..=65_536） |
+| `daily_limit` | u32 | `20` | 1 日あたりの新規候補作成上限、UTC 日替わり（1..=1_000） |
+| `duplicate_cooldown_secs` | u64 | `86_400` | 同一 dedup_key の再作成クールダウン秒数（60..=31_536_000） |
+| `collect_diagnostics` | bool | `true` | Diagnostic イベントからの収集（`enabled = false` なら無効） |
+| `collect_lessons` | bool | `true` | 承認済み lesson からの収集（`enabled = false` なら無効） |
+
+範囲外の値は無効時も読み込み・保存で拒否し、丸めない。スキーマ再生成コマンドは後述の [JSON Schema](#json-schema) を参照。
 
 ## Web ツールのネットワーク設定
 

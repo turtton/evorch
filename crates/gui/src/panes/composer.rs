@@ -25,6 +25,7 @@ pub enum ComposerAction {
     CompleteExternal(String),
     ModelPreference(Option<workspace_ui::ModelPreference>),
     OpenSandboxSettings,
+    OpenSelfImprovementSettings,
 }
 
 pub fn composer_strip(

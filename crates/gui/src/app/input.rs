@@ -7,6 +7,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.routing_settings.open
             || self.role_settings.open
             || self.sandbox_settings.open
+            || self.self_improvement_settings.open
             || self.theme_settings.open
     }
 

@@ -40,6 +40,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
+    pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
     pub(super) transcripts: &'a TranscriptRegistry,
     pub(super) ledger: &'a crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: &'a TelemetryOverlay,
@@ -236,7 +237,11 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .selected_project
                     .as_ref()
                     .map(ToString::to_string);
-                self.memory.render(ui, project.as_deref());
+                if tab.as_str() == "self-improvement-main" {
+                    self.self_improvement.render(ui, project.as_deref());
+                } else {
+                    self.memory.render(ui, project.as_deref());
+                }
             }
             PanelKind::Arena => {
                 let project = self

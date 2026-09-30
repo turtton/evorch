@@ -265,6 +265,15 @@ fn nested_typo_rejected_with_path() {
 }
 
 #[test]
+fn self_improvement_unknown_key_is_rejected_with_full_path() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    assert_error_contains(
+        load_project(&tmp, "[self_improvement]\nenabld = true\n"),
+        &["self_improvement.enabld", "unknown field"],
+    );
+}
+
+#[test]
 fn rejecting_unknown_sandbox_key_still_rejects_but_accepts_escalation_fields() {
     // Given: a sandbox section containing only the supported escalation fields.
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");

@@ -50,6 +50,7 @@ pub struct WorkbenchState<S> {
     pub(super) external_job: Option<super::external_commands::Job>,
     pub(super) arena: crate::panes::arena::ArenaPane,
     pub(super) memory: crate::panes::memory::MemoryPane,
+    pub(super) self_improvement: crate::panes::self_improvement::SelfImprovementPane,
     pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     pub(super) ownership_error: Option<String>,
     pub(super) shutdown_requested: bool,
@@ -92,6 +93,8 @@ pub struct WorkbenchState<S> {
     pub(super) role_settings: crate::model::role_settings::RoleSettingsModel,
     pub(super) routing_settings: crate::model::routing_settings::RoutingSettingsModel,
     pub(super) sandbox_settings: super::sandbox_settings::SandboxSettings,
+    pub(super) self_improvement_settings:
+        crate::model::self_improvement_settings::SelfImprovementSettingsModel,
     pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
@@ -140,6 +143,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             external_job: None,
             arena: crate::panes::arena::ArenaPane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
+            self_improvement: crate::panes::self_improvement::SelfImprovementPane::default(),
             ownership: None,
             ownership_error: None,
             shutdown_requested: false,
@@ -181,6 +185,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             role_settings: crate::model::role_settings::RoleSettingsModel::default(),
             routing_settings: crate::model::routing_settings::RoutingSettingsModel::default(),
             sandbox_settings: super::sandbox_settings::SandboxSettings::default(),
+            self_improvement_settings:
+                crate::model::self_improvement_settings::SelfImprovementSettingsModel::default(),
             codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
             credential_store: None,
@@ -214,9 +220,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
+        self.self_improvement.config = Some(config.clone());
         self.memory.config = Some(config);
         for (id, kind) in [
             ("memory-main", PanelKind::Memory),
+            // A GUI-local companion tab: PanelKind belongs to workspace-ui, so
+            // preserve that schema and dispatch by this distinct ID in the viewer.
+            ("self-improvement-main", PanelKind::Memory),
             ("tasks-main", PanelKind::Tasks),
             ("arena-main", PanelKind::Arena),
         ] {
@@ -227,7 +237,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     Panel {
                         id: id.clone(),
                         kind,
-                        title: kind.default_title().into(),
+                        title: if id.as_str() == "self-improvement-main" {
+                            "Self-improvement drafts".into()
+                        } else {
+                            kind.default_title().into()
+                        },
                         target: None,
                     },
                 );
@@ -240,6 +254,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        self
+    }
+
+    /// Installs startup-only visibility and the single writer used for review actions.
+    /// The resolved directory is shared with runtime policy; saving settings does not
+    /// change this session's collector or file location.
+    pub fn with_self_improvement(
+        mut self,
+        handle: storage::StorageHandle,
+        enabled: bool,
+        draft_dir: Option<PathBuf>,
+    ) -> Self {
+        self.self_improvement.handle = enabled.then_some(handle);
+        self.self_improvement.enabled = enabled;
+        self.self_improvement.draft_dir = draft_dir;
         self
     }
 

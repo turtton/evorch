@@ -299,11 +299,12 @@ pub(crate) fn write_document(path: &Path, doc: &DocumentMut) -> Result<(), Confi
     })?;
     let checked = crate::migrate::run(toml::Value::Table(table))?;
     crate::strict::validate_strict(&checked)?;
-    let _: Config = checked.try_into().map_err(|error| {
+    let config: Config = checked.try_into().map_err(|error| {
         ConfigError::Migration(format!(
             "failed to deserialize config before saving: {error}"
         ))
     })?;
+    config.self_improvement.validate()?;
 
     let mut temporary_path = path.as_os_str().to_os_string();
     temporary_path.push(".tmp");

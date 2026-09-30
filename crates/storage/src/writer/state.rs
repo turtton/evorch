@@ -152,6 +152,36 @@ pub(super) fn run_writer(
                 };
                 let _ = reply.send(result);
             }
+            Ok(Command::RecordImprovementCandidate(project, candidate, policy, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "improvement writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::improvement::record(&state.conn, &project, &candidate, policy)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::SetImprovementStatus(id, status, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "improvement writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::improvement::set_status(&state.conn, &id, status)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AttachImprovementDraft(id, draft_path, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "improvement writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::improvement::attach_draft(&state.conn, &id, &draft_path)
+                };
+                let _ = reply.send(result);
+            }
             Ok(Command::TaskQueue(mutation, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(

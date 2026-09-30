@@ -104,6 +104,7 @@ impl Config {
     /// - 環境変数のパスが衝突する場合 ([`ConfigError::InvalidEnvValue`])。
     /// - マージ済み設定に平文 credential フィールドがある場合
     ///   ([`ConfigError::InvalidField`])。未知フィールドは警告して無視する。
+    /// - 自己改善ドラフト設定の値が許容範囲外の場合 ([`ConfigError::InvalidField`])。
     /// - マージ済みの値を [`Config`] にデシリアライズできない場合 (該当する
     ///   エラーバリアントが存在しないため、経緯を文字列に載せた
     ///   [`ConfigError::Migration`] として報告する)。
@@ -149,9 +150,11 @@ impl Config {
             }
         }
         crate::strict::validate_strict(&merged)?;
-        merged.try_into().map_err(|err| {
+        let config: Config = merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
-        })
+        })?;
+        config.self_improvement.validate()?;
+        Ok(config)
     }
 }
 

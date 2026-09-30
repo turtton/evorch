@@ -118,7 +118,7 @@ impl PendingLearning {
             (self.settings.writer.clone(), self.settings.storage.clone()),
             self.settings.quick.clone(),
         );
-        queue
+        let lessons = queue
             .complete_task(
                 &QueuedTask {
                     id: &self.task_id,
@@ -130,6 +130,41 @@ impl PendingLearning {
             )
             .await
             .map_err(|error| error.to_string())?;
+        // Passive intake only after promotion succeeds. Its warn-only API cannot
+        // replace the completed learning result with a storage/draft failure.
+        if let Some(shared) = weak.upgrade()
+            && let Some(settings) = shared.self_improvement.get()
+            && settings.policy.collect_lessons
+        {
+            // complete_task returns the entire reviewed batch, including rejected
+            // candidates. Confirm promotion in storage before passive intake;
+            // a projection read failure must not fail successful learning either.
+            let promoted = (|| -> Result<Vec<_>, storage::StorageError> {
+                let database = storage::Database::open(&self.settings.storage)?;
+                let mut promoted = Vec::new();
+                for lesson in lessons {
+                    if database
+                        .memory_history(&lesson.id)?
+                        .last()
+                        .is_some_and(|entry| {
+                            entry.status == storage::memory::MemoryStatus::Promoted
+                        })
+                    {
+                        promoted.push(lesson);
+                    }
+                }
+                Ok(promoted)
+            })();
+            match promoted {
+                Ok(lessons) => {
+                    crate::self_improvement::ImprovementCollector::new(settings.clone())
+                        .ingest_lessons(&lessons);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "improvement lesson intake skipped; learning result retained")
+                }
+            }
+        }
         Ok(())
     }
 }

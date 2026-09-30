@@ -761,6 +761,52 @@ fn run() -> Result<(), GuiError> {
     };
     let (pump, handle) = spawn_event_bridge(Arc::clone(&bus), Some(repaint_hook))?;
 
+    let self_improvement = &composition_config.self_improvement;
+    // Keep the disabled path inert: no path creation, collector, or panic hook.
+    let improvement_draft_dir = self_improvement.enabled.then(|| {
+        gui::model::self_improvement_settings::resolve_draft_dir(
+            self_improvement,
+            &storage_config.db_path,
+        )
+    });
+    let runtime = if let Some(drafts_dir) = &improvement_draft_dir {
+        let policy = runtime::self_improvement::ImprovementPolicy {
+            draft_dir: Some(drafts_dir.clone()),
+            evidence_max_bytes: self_improvement.evidence_max_bytes,
+            daily_limit: self_improvement.daily_limit,
+            duplicate_cooldown_secs: self_improvement.duplicate_cooldown_secs,
+            max_candidates: self_improvement.max_candidates,
+            collect_diagnostics: self_improvement.collect_diagnostics,
+            collect_lessons: self_improvement.collect_lessons,
+        };
+        let runtime =
+            runtime.with_self_improvement(runtime::self_improvement::ImprovementSettings {
+                writer: storage.handle(),
+                project: derive_repo_slug(&repo_root),
+                policy,
+            });
+        // The GUI thread is synchronous; enter the existing event-pump runtime
+        // so the observer's tokio::spawn runs on its continuously driven executor.
+        {
+            let _guard = handle.enter();
+            runtime.start_self_improvement();
+        }
+        runtime.ingest_spooled_crashes();
+        // The spool lives inside the resolved drafts directory, matching runtime intake.
+        let spool_dir = drafts_dir.join("crash-spool");
+        let directories =
+            std::fs::create_dir_all(drafts_dir).and_then(|()| std::fs::create_dir_all(&spool_dir));
+        match directories {
+            Ok(()) => runtime::self_improvement::install_crash_spool(spool_dir),
+            Err(error) => {
+                tracing::warn!(%error, "self-improvement crash spool unavailable; skipping panic hook");
+            }
+        }
+        runtime
+    } else {
+        runtime
+    };
+
     // --demo は常に既定値を使い、非 demo のみ config 読み込みを試みる
     // (計画 Clarification C)。
     let (orchestration, mut provider_status, provider_settings) = match loaded_config.as_ref() {
@@ -910,7 +956,13 @@ fn run() -> Result<(), GuiError> {
     if let Some(path) = arguments.save_layout {
         state = state.with_save_path(path);
     }
-    state = state.with_memory_storage(storage_config.clone());
+    state = state
+        .with_memory_storage(storage_config.clone())
+        .with_self_improvement(
+            storage.handle(),
+            self_improvement.enabled,
+            improvement_draft_dir,
+        );
     state.restore_history(&storage::Database::open(&storage_config)?)?;
 
     if arguments.demo {
