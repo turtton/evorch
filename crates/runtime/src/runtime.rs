@@ -833,6 +833,7 @@ impl AgentRuntime {
                     vec![crate::escalation_review::UserRequest {
                         target_run_id: run_id.to_string(),
                         text: crate::escalation_review::bounded(&original_prompt, 1500),
+                        in_reply_to: None,
                     }]
                 } else {
                     Vec::new()
@@ -1910,6 +1911,82 @@ mod review_provenance_tests {
         ) -> Result<providers::ChatResponse, RuntimeError> {
             std::future::pending().await
         }
+    }
+
+    #[tokio::test]
+    async fn host_question_answer_reaches_delegated_review_but_agent_answer_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = storage::StorageConfig {
+            db_path: dir.path().join("questions.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).expect("storage");
+        let bus = Arc::new(EventBus::new(32));
+        let executor = Arc::new(ToolExecutor::with_standard_tools(
+            bus.clone(),
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        ));
+        let runtime = AgentRuntime::new(bus, executor, Arc::new(HangingModel))
+            .with_run_store(crate::RunStore::open(&config, storage.handle()).expect("run store"));
+        let root = runtime.reserve_run_id();
+        runtime.spawn_reserved(
+            root,
+            None,
+            Role::Orchestrator,
+            "Investigate the sandbox failure",
+            RunConfig::default(),
+        );
+        let worker = runtime.reserve_run_id();
+        runtime.spawn_reserved_child(
+            root,
+            worker,
+            Role::Worker,
+            "Run the validation command",
+            RunConfig::default(),
+        );
+
+        let question = runtime
+            .request_user_question(
+                root,
+                "May validation write temporary files outside the sandbox?".into(),
+                vec![],
+                true,
+            )
+            .expect("question");
+        runtime
+            .inherit_user_questions(root, worker, &[])
+            .expect("question link");
+        runtime
+            .answer_user_question(&question.id, "Allow temporary test files")
+            .expect("user answer");
+
+        let agent_question = runtime
+            .request_user_question(worker, "Which implementation?".into(), vec![], true)
+            .expect("worker question");
+        runtime
+            .answer_subagent_question(root, &agent_question.id, "Use option A")
+            .expect("orchestrator answer");
+
+        let runs = runtime.shared.review_runs.lock().expect("review runs");
+        let requests = runs.get(&worker).expect("worker review context").requests();
+        let answers = requests
+            .iter()
+            .filter(|request| request.in_reply_to.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 1, "linked runs share one user answer");
+        assert_eq!(answers[0].text, "Allow temporary test files");
+        assert_eq!(answers[0].target_run_id, root.to_string());
+        let context = answers[0].in_reply_to.as_ref().expect("question context");
+        assert_eq!(context.id, question.id);
+        assert_eq!(context.title, question.title);
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.text == "Use option A")
+        );
+        drop(runs);
+        let _ = runtime.cancel(root);
+        let _ = runtime.cancel(worker);
     }
 
     #[tokio::test]

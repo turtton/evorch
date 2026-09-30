@@ -94,7 +94,7 @@ impl AgentRuntime {
         let question = self.user_question(id)?.ok_or("unknown question")?;
         let child = crate::meta::parse_run_id(&question.run_id)?;
         self.validate_question_parent(caller, child)?;
-        self.answer_user_question(id, answer)
+        self.answer_question(id, answer, false)
     }
 
     fn validate_question_parent(&self, caller: RunId, child: RunId) -> Result<(), String> {
@@ -123,6 +123,15 @@ impl AgentRuntime {
     /// Host-facing answer API. A live run must still have current mutation authority.
     /// Offline answers are persisted for explicit conversation resumption, never replaying tools.
     pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<UserQuestion, String> {
+        self.answer_question(id, answer, true)
+    }
+
+    fn answer_question(
+        &self,
+        id: &str,
+        answer: &str,
+        trusted_user: bool,
+    ) -> Result<UserQuestion, String> {
         let question = self.user_question(id)?.ok_or("unknown question")?;
         if question.answer.as_deref() == Some(answer) {
             return Ok(question);
@@ -136,8 +145,8 @@ impl AgentRuntime {
             .user_question_recipients(id)
             .map_err(|e| e.to_string())?;
         let mut permits = Vec::new();
-        for recipient in recipients {
-            let run = crate::meta::parse_run_id(&recipient)?;
+        for recipient in &recipients {
+            let run = crate::meta::parse_run_id(recipient)?;
             if let Ok(entry) = self.entry(run)
                 && matches!(
                     *entry.phase_rx.borrow(),
@@ -169,6 +178,35 @@ impl AgentRuntime {
             .user_question(id)
             .map_err(|e| e.to_string())?
             .ok_or("question disappeared")?;
+        if trusted_user {
+            // The durable answer is written before it becomes review evidence. A
+            // question can be linked to a continuation run whose review context
+            // is distinct after restoration, so register once per shared lineage.
+            let reviews = self
+                .shared
+                .review_runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut targets: Vec<(String, crate::escalation_review::ReviewRunContext)> = Vec::new();
+            for recipient in std::iter::once(&question.run_id).chain(recipients.iter()) {
+                let Ok(run) = crate::meta::parse_run_id(recipient) else {
+                    continue;
+                };
+                let Some(review) = reviews.get(&run) else {
+                    continue;
+                };
+                if targets.iter().any(|(_, existing)| {
+                    std::sync::Arc::ptr_eq(&existing.user_requests, &review.user_requests)
+                }) {
+                    continue;
+                }
+                targets.push((recipient.clone(), review.clone()));
+            }
+            drop(reviews);
+            for (recipient, review) in targets {
+                review.add_user_answer(&recipient, &question, answer);
+            }
+        }
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {
