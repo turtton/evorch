@@ -96,6 +96,23 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   `GUI_QA_OUTPUT_DIR` (位置引数を省略した場合の出力先)。
 - CI ジョブ: `offscreen-gate` (`gui-evidence` artifact の `native/`)
 
+### PR の代表画面プレビュー
+
+`pull_request` の CI が成功すると、L4 の画面証跡から全体画面、Conversation、Tasks、
+Provider 設定、承認待ち、高コントラストの 6 枚を `gui-pr-preview` artifact に保存する。
+既定ブランチの `GUI PR evidence` workflow がその artifact と PR の head SHA を検証し、
+`gh pr comment --attach` で PR に画像を投稿する。全証跡は従来どおり
+`gui-evidence` artifact に残る。成功した PR の更新ごとに新しいコメントを投稿する。
+
+画像添付には、対象リポジトリへの書き込み権限があるユーザーの OAuth token または
+personal access token を Actions secret `GUI_EVIDENCE_TOKEN` に設定する必要がある。
+GitHub Actions 標準の `GITHUB_TOKEN` はこの添付 API に対応しない。トークンを
+PR コードが動く `ci` workflow には渡さず、CI 完了後の既定ブランチ workflow だけで使う。
+fine-grained PAT はこのリポジトリのみに限定し、アカウントの書き込み権限に加えて
+`Contents: Read and write` と `Pull requests: Read and write` を付ける。
+secret の設定例: `gh secret set GUI_EVIDENCE_TOKEN -R turtton/evorch`。
+secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画面証跡は残る。
+
 ### L8: 実機起動スモーク (手動)
 
 - 役割: eframe がオペレータの実ディスプレイで起動し、ウィンドウ管理・

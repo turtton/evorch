@@ -175,6 +175,27 @@ jobs:
         run: cargo build -p gui --bin native_qa_window
       - name: Exercise native GUI in a private Xvfb
         run: scripts/check-gui-native.sh target/gui-evidence/native
+      - name: Prepare representative PR screenshots
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p target/gui-pr-preview
+          cp 'target/gui-evidence/graphite/demo-1280x720@1.0.png' target/gui-pr-preview/01-workbench.png
+          cp 'target/gui-evidence/graphite/panel-agent-main-1280x720@1.0.png' target/gui-pr-preview/02-conversation.png
+          cp 'target/gui-evidence/graphite/panel-tasks-main-1280x720@1.0.png' target/gui-pr-preview/03-tasks.png
+          cp 'target/gui-evidence/graphite/modal-provider-1280x720@1.0.png' target/gui-pr-preview/04-provider-settings.png
+          cp 'target/gui-evidence/graphite/pending-approvals-1280x720@1.0.png' target/gui-pr-preview/05-approvals.png
+          cp 'target/gui-evidence/high-contrast/demo-1280x720@1.0.png' target/gui-pr-preview/06-high-contrast.png
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PR_HEAD_SHA" --argjson run "$GITHUB_RUN_ID" \
+            '{pr: $pr, head_sha: $sha, run_id: $run}' > target/gui-pr-preview/pr.json
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: gui-pr-preview
+          if-no-files-found: error
+          path: target/gui-pr-preview
       - uses: actions/upload-artifact@v4
         if: always()
         with:

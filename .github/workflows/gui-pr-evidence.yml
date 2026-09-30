@@ -1,0 +1,66 @@
+name: GUI PR evidence
+
+# This privileged workflow uses only the default-branch script and image bytes from
+# the completed CI run. It never checks out or executes pull-request code.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Require attachment token
+        env:
+          GUI_EVIDENCE_TOKEN: ${{ secrets.GUI_EVIDENCE_TOKEN }}
+        run: |
+          if [[ -z "$GUI_EVIDENCE_TOKEN" ]]; then
+            echo '::error::Set the repository secret GUI_EVIDENCE_TOKEN to a repository-scoped PAT before enabling PR image attachments.'
+            exit 1
+          fi
+      - name: Install GitHub CLI with media attachment support
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cli_dir="$RUNNER_TEMP/gh-2.100.0"
+          mkdir -p "$cli_dir"
+          gh release download v2.100.0 -R cli/cli \
+            -p gh_2.100.0_linux_amd64.tar.gz \
+            -p gh_2.100.0_checksums.txt -D "$cli_dir"
+          checksum=$(awk '$2 == "gh_2.100.0_linux_amd64.tar.gz" {print $1}' \
+            "$cli_dir/gh_2.100.0_checksums.txt")
+          test -n "$checksum"
+          (cd "$cli_dir" && printf '%s  %s\n' "$checksum" \
+            gh_2.100.0_linux_amd64.tar.gz | sha256sum -c -)
+          tar -xzf "$cli_dir/gh_2.100.0_linux_amd64.tar.gz" -C "$cli_dir"
+          echo "$cli_dir/gh_2.100.0_linux_amd64/bin" >> "$GITHUB_PATH"
+      - name: Download representative screenshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            -n gui-pr-preview -D "$RUNNER_TEMP/gui-pr-preview"
+      - name: Attach screenshots to pull request
+        env:
+          GH_TOKEN: ${{ secrets.GUI_EVIDENCE_TOKEN }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          scripts/post-gui-pr-evidence.sh "$GITHUB_REPOSITORY" "$SOURCE_RUN_ID" \
+            "$RUNNER_TEMP/gui-pr-preview" "$SOURCE_REPO" "$SOURCE_BRANCH"
