@@ -385,3 +385,39 @@ async fn saved_root_history_cannot_be_reused_while_its_incarnation_is_live() {
         .validate_history_restore(&record, &descriptor, &RunConfig::default())
         .unwrap();
 }
+
+#[tokio::test]
+async fn latest_chat_run_finds_the_newest_root_across_roles_after_restart() {
+    let fixture = Fixture::new();
+    for role in [Role::Worker, Role::Orchestrator] {
+        let run = fixture
+            .runtime
+            .delegate_chat("thread", role, "task".into(), RunConfig::default())
+            .unwrap();
+        fixture.runtime.wait(run).await.unwrap();
+        assert_eq!(
+            fixture.runtime.latest_chat_run("thread").unwrap(),
+            Some(run)
+        );
+    }
+    assert_eq!(fixture.runtime.latest_chat_run("empty").unwrap(), None);
+    let fresh = AgentRuntime::new(
+        fixture.runtime.shared.bus.clone(),
+        Arc::new(ToolExecutor::new(fixture.runtime.shared.bus.clone())),
+        Arc::new(CompletingModel),
+    )
+    .with_run_store(
+        crate::RunStore::open(
+            &storage::StorageConfig {
+                db_path: fixture._dir.path().join("goal.sqlite3"),
+                ..Default::default()
+            },
+            fixture.storage.handle(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        fresh.latest_chat_run("thread").unwrap(),
+        fixture.runtime.latest_chat_run("thread").unwrap()
+    );
+}

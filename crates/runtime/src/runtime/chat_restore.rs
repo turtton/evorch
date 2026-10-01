@@ -16,6 +16,9 @@ pub(super) enum RunContinuation {
 }
 
 impl AgentRuntime {
+    /// Current host intent supplied by `/continue`, appended without rewriting history.
+    pub const CHAT_CONTINUE_PROMPT: &str = "Continue the current task from the saved conversation. Do not start a new task or blindly repeat operations whose outcome is uncertain; inspect the current state first.";
+
     /// Continue a goal root in place, including after process restart.
     /// Persisted root identity supplies the role; the caller supplies current authority.
     /// `prompt` must be a new human submission from the host, never replayed history
@@ -96,6 +99,35 @@ impl AgentRuntime {
             config,
             RunContinuation::Restored(restored),
         ))
+    }
+
+    /// Resolve a thread's latest saved chat root without starting a new run.
+    /// The caller must still renew current authority through `continue_goal`.
+    pub fn latest_chat_run(&self, thread_id: &str) -> Result<Option<RunId>, RuntimeError> {
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(None);
+        };
+        let fail = |reason| RuntimeError::RunRestoreFailed {
+            run_id: format!("chat:{thread_id}"),
+            reason: RunRestoreFailure::CorruptContext(reason),
+        };
+        let mut latest = None;
+        for role in [Role::Worker, Role::Orchestrator] {
+            if let Some(record) = store
+                .latest_terminal_named(&format!("chat:{}:{thread_id}", role.name()))
+                .map_err(|error| fail(error.to_string()))?
+                && latest
+                    .as_ref()
+                    .is_none_or(|previous: &storage::RunContextRecord| {
+                        record.updated_at_ns > previous.updated_at_ns
+                    })
+            {
+                latest = Some(record);
+            }
+        }
+        latest
+            .map(|record| crate::meta::parse_run_id(&record.run_id).map_err(fail))
+            .transpose()
     }
 
     /// Start a chat run with the thread's latest terminal context, if one exists.
