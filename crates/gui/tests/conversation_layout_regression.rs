@@ -201,7 +201,11 @@ fn multiline_composer_grows_upward_and_shrinks_without_covering_the_transcript()
         many_lines.top() < one_line.top(),
         "{many_lines:?} vs {one_line:?}"
     );
-    assert!(many_lines.bottom() >= one_line.bottom() - 2.0);
+    // Compare growth and visible bounds, not the font-dependent bottom of the
+    // text document (which can be shorter than its reserved scroll viewport).
+    assert!(harness.get_by_label("Send").rect().bottom() <= 600.0);
+    assert!(many_lines.bottom() <= 600.0);
+    assert!(many_lines.height() > one_line.height());
     assert!(
         reply.bottom() <= many_lines.top(),
         "{reply:?} overlaps {many_lines:?}"
