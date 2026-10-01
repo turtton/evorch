@@ -257,7 +257,10 @@ fn thread_state_follows_lifecycle_events() {
             .recv_timeout(Duration::from_secs(1))
             .expect("state repaint");
         harness.run();
-        assert!(harness.has_label(badge), "missing {badge} badge");
+        assert!(
+            harness.has_label(&format!("Thread status: {badge}")),
+            "missing {badge} status"
+        );
     }
     harness.click_label("⋯");
     harness.run();
@@ -265,7 +268,7 @@ fn thread_state_follows_lifecycle_events() {
     harness.run();
 
     // Then: operator pause overrides the runtime phase badge
-    assert!(harness.has_label("Paused"));
+    assert!(harness.has_label("Thread status: Paused"));
 }
 
 #[test]
@@ -340,7 +343,7 @@ fn sidebar_with_project_but_no_threads_shows_thread_placeholder() {
 }
 
 #[test]
-fn sidebar_thread_rows_expose_state_text() {
+fn sidebar_thread_rows_expose_accessible_status_without_redundant_text() {
     // Given: a demo sidebar populated with lifecycle events
     let temp = tempfile::tempdir().expect("temp dir");
     let mut sidebar = demo_sidebar(temp.path()).expect("demo sidebar builds");
@@ -358,9 +361,11 @@ fn sidebar_thread_rows_expose_state_text() {
     harness.state_mut().apply_events(demo_events());
     harness.run();
 
-    // Then: running and paused thread states are both exposed as labels
-    assert!(harness.has_label("Running"));
-    assert!(harness.has_label("Paused"));
+    // Then: status dots expose state to assistive technology, not redundant text
+    assert!(harness.has_label("Thread status: Running"));
+    assert!(!harness.has_label("Running"));
+    assert!(!harness.has_label("Paused"));
+    assert!(harness.has_label("Thread status: Paused"));
 }
 
 #[test]
@@ -388,7 +393,7 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
     let project = harness.label_rects("evorch")[0];
     let title = harness.label_rects("Refine GUI design system")[0];
     let menus = harness.label_rects("⋯");
-    let running = harness.label_rects("Running");
+    let running = harness.label_rects("Thread status: Running");
     assert!(
         (project.height() - ROW_DENSE).abs() <= 0.5,
         "project height {} should be {ROW_DENSE} +/- 0.5; project={project:?}, title={title:?}, menus={menus:?}, running={running:?}",
@@ -406,8 +411,10 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
         "Actions menu must share the title line: title={title:?}, menus={menus:?}"
     );
     assert!(
-        running.iter().any(|rect| rect.top() >= title.bottom()),
-        "Running status must be below a narrow title row: title={title:?}, running={running:?}"
+        running
+            .iter()
+            .any(|rect| (rect.center().y - title.center().y).abs() <= 1.0),
+        "Status dot must share the title row: title={title:?}, running={running:?}"
     );
 }
 

@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
-pub const CATEGORIES: [&str; 6] = [
-    "quick",
-    "deep",
-    "high-reasoning",
-    "visual",
-    "writing",
-    "research",
-];
+/// 公開委譲カテゴリを設定側の共通定義から取得する。内部カテゴリは編集欄に出さない。
+pub fn categories_for_role(
+    role: &str,
+) -> impl Iterator<Item = config::agent_categories::PublicCategory> + '_ {
+    config::agent_categories::public_categories().filter(move |category| category.role == role)
+}
 
 /// モデルに effort_levels が未設定のときに提示する共通の推論強度一覧。
 pub const DEFAULT_EFFORT_LEVELS: [&str; 7] =
@@ -68,18 +66,17 @@ fn effort_choices_for(config: &config::Config, name: &str) -> Vec<String> {
 
 impl RoleSettingsModel {
     pub fn seed_from_config(config: &config::Config) -> Self {
-        let mut names: BTreeSet<String> = config.routing.routes.keys().cloned().collect();
-        for (_, binding) in bindings(&config.agents) {
-            names.extend(binding.logical_model.clone());
-        }
-        names.extend(
-            config
-                .agents
-                .worker
-                .categories
-                .values()
-                .filter_map(|binding| binding.logical_model.clone()),
-        );
+        let names: BTreeSet<String> = config
+            .routing
+            .routes
+            .keys()
+            .cloned()
+            .chain(
+                config::types::agents::explicit_refs(&config.agents)
+                    .into_iter()
+                    .map(|(_, name)| name),
+            )
+            .collect();
         Self {
             route_names: config.routing.routes.keys().cloned().collect(),
             routes_empty: config.routing.routes.is_empty(),
@@ -105,21 +102,22 @@ impl RoleSettingsModel {
             )?;
             validate_generation(&binding.generation, role)?;
         }
-        for (category, binding) in &self.agents.worker.categories {
-            if !CATEGORIES.contains(&category.as_str()) {
-                return Err(config::ConfigError::UnknownCategory {
-                    role: "worker".into(),
-                    category: category.clone(),
-                });
+        for (role, categories) in [
+            ("worker", &self.agents.worker.categories),
+            ("reviewer", &self.agents.reviewer.categories),
+        ] {
+            for (category, binding) in categories {
+                // 設定側で許可される内部カテゴリも保存時に検証する。
+                self.agents.binding_for(role, Some(category))?;
+                Self::validate_model(
+                    &format!("agents.{role}.categories.{category}.logical_model"),
+                    binding.logical_model.as_deref(),
+                )?;
+                validate_generation(
+                    &binding.generation,
+                    &format!("{role}.categories.{category}"),
+                )?;
             }
-            Self::validate_model(
-                &format!("agents.worker.categories.{category}.logical_model"),
-                binding.logical_model.as_deref(),
-            )?;
-            validate_generation(
-                &binding.generation,
-                &format!("worker.categories.{category}"),
-            )?;
         }
         Ok(())
     }

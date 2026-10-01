@@ -1,5 +1,8 @@
 use super::WorkbenchState;
-use crate::model::{role_settings::RoleSettingsModel, tasks::AgentRunSource};
+use crate::model::{
+    role_settings::{RoleSettingsModel, categories_for_role},
+    tasks::AgentRunSource,
+};
 use crate::panes::role_settings::{RoleSettingsAction, role_settings_modal};
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -61,11 +64,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         ];
         let rows = roles
             .into_iter()
-            .map(|(name, role)| (name, role, None))
+            .map(|(name, role)| (name.to_owned(), role, None))
             .chain(
-                crate::model::role_settings::CATEGORIES
+                [("worker", Role::Worker), ("reviewer", Role::Reviewer)]
                     .into_iter()
-                    .map(|category| (category, Role::Worker, Some(category))),
+                    .flat_map(|(role_key, role)| {
+                        categories_for_role(role_key).map(move |category| {
+                            (
+                                format!("{role_key}.categories.{}", category.name),
+                                role,
+                                Some(category.name),
+                            )
+                        })
+                    }),
             );
         self.role_settings.resolved_previews = rows
             .map(|(name, role, category)| {
@@ -76,7 +87,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         runtime::AgentModel::selected_model(model.as_ref(), role, category)
                     })
                     .filter(|selected| !selected.starts_with("unresolved:"));
-                (name.into(), resolved)
+                (name, resolved)
             })
             .collect();
     }

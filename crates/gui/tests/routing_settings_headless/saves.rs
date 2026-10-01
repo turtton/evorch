@@ -3,6 +3,54 @@ use gui::headless::HeadlessWorkbench;
 use runtime::{AgentModel, Role};
 
 #[test]
+fn route_rename_updates_reviewer_categories_and_live_runtime() {
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, runtime) = fixture(temp.path());
+    let path = config::project_main_config_path(temp.path());
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!(
+            "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
+         [agents.reviewer.categories.plan]\nlogical_model = 'old'\n\
+         [agents.reviewer.categories.tool-execution]\nlogical_model = 'old'\n\
+         [agents.reviewer.categories.lesson_review]\nlogical_model = 'old'\n"
+        ),
+    )
+    .expect("reviewer bindings");
+    state.open_routing_settings();
+    state
+        .routing_settings_mut()
+        .rename_route("old", "new")
+        .expect("rename");
+    state.submit_routing_settings();
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    finish(&mut harness);
+    assert_eq!(harness.state().routing_settings().validation_error, None);
+    harness.state_mut().open_role_settings();
+    for category in ["plan", "tool-execution", "lesson_review"] {
+        assert_eq!(
+            harness.state().role_settings().agents.reviewer.categories[category]
+                .logical_model
+                .as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            runtime.selected_model(Role::Reviewer, Some(category)),
+            "local/base"
+        );
+    }
+    assert_eq!(
+        harness.state().routing_settings().route_users["new"],
+        [
+            "reviewer.categories.lesson_review",
+            "reviewer.categories.plan",
+            "reviewer.categories.tool-execution",
+        ]
+    );
+}
+
+#[test]
 fn route_rename_saves_agents_and_reseeds_models() {
     // Given: a route referenced explicitly by explorer and implicitly by no role.
     let temp = tempfile::tempdir().expect("temp");

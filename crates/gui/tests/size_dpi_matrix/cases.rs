@@ -55,7 +55,7 @@ pub fn verify_with_theme(state: State, theme: ThemePreset) {
                     geometry.reachable("⚙");
                     match state {
                         State::ErrorThread => {
-                            geometry.reachable("Error");
+                            geometry.reachable("Thread status: Error");
                         }
                         State::Demo => {}
                         State::Empty | State::EditProfile | State::ThemeSettings => unreachable!(),

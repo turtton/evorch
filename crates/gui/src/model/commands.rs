@@ -60,6 +60,14 @@ pub struct ChatSubmission {
     pub model_preference: Option<runtime::ModelPreference>,
 }
 
+/// A host continuation request, not a new user message or a new conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatContinuation {
+    pub thread_id: String,
+    pub composer_role: super::composer::ComposerRole,
+    pub model_preference: Option<runtime::ModelPreference>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkbenchCommand {
     AnswerUserQuestion {
@@ -72,6 +80,7 @@ pub enum WorkbenchCommand {
         redo: bool,
     },
     SendChat(ChatSubmission),
+    ContinueChat(ChatContinuation),
     StopChat {
         thread_id: String,
     },
@@ -290,6 +299,9 @@ impl CommandSink for FixtureLoopAdapter {
                     diff: None,
                 }]
             }
+            WorkbenchCommand::ContinueChat(_) => vec![LoopEvent::CommandRejected {
+                reason: "No resumable conversation in demo mode".into(),
+            }],
             WorkbenchCommand::CancelChat { .. } | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }

@@ -266,3 +266,24 @@ fn renewed_generation_does_not_reuse_previous_chat_run() {
     };
     assert_ne!(first, second);
 }
+
+#[test]
+fn continue_respects_read_only_attach() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = host(&dir);
+    other.start("thread").unwrap();
+    let (mut state, observed) = state(host(&dir));
+    state.composer_mut().input = "/continue".into();
+    state.submit_composer();
+    assert!(observed.lock().unwrap().commands.is_empty());
+    assert!(state.issued().is_empty());
+    assert_eq!(state.composer().input, "/continue");
+    assert!(
+        state
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry,
+        TranscriptEntry::Notice { text } if text.contains("Read-only attach")))
+    );
+}

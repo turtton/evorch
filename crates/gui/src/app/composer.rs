@@ -1,5 +1,5 @@
 use super::WorkbenchState;
-use crate::model::commands::{ChatSubmission, WorkbenchCommand};
+use crate::model::commands::{ChatContinuation, ChatSubmission, WorkbenchCommand};
 use crate::model::composer::{ComposerInput, ProviderStatus};
 use crate::model::tasks::AgentRunSource;
 use crate::model::transcript::TranscriptEntry;
@@ -162,6 +162,39 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             ComposerInput::Command { spec, args } => match spec.name {
+                "continue" => {
+                    if !args.is_empty() {
+                        self.push_notice("usage: /continue");
+                        return;
+                    }
+                    let (Some(_), Some(thread_id)) = (
+                        self.sidebar.selected_project.as_ref(),
+                        self.sidebar.active_thread.as_ref(),
+                    ) else {
+                        self.push_notice("Select or start a thread first");
+                        return;
+                    };
+                    if let ProviderStatus::NotConfigured { guidance } = &self.provider_status {
+                        self.push_notice(guidance.clone());
+                        return;
+                    }
+                    let command = WorkbenchCommand::ContinueChat(ChatContinuation {
+                        thread_id: thread_id.to_string(),
+                        composer_role: self.composer.role,
+                        model_preference: self
+                            .sidebar
+                            .threads
+                            .iter()
+                            .find(|thread| &thread.id == thread_id)
+                            .and_then(|thread| thread.model_preference.as_ref())
+                            .map(|preference| runtime::ModelPreference {
+                                profile: preference.profile.clone(),
+                                model: preference.model.clone(),
+                            }),
+                    });
+                    self.submit_command(command);
+                    self.composer.input.clear();
+                }
                 "run" => {
                     if args.is_empty() {
                         self.push_notice("usage: /run <text>");

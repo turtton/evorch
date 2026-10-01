@@ -287,3 +287,80 @@ fn team_busy_descendant_and_claim_failures_reach_chat_rejection() {
         .unwrap();
     rejected(&send(&mut world, "continue"), "persisted task claims");
 }
+
+fn continue_chat(world: &mut World) -> Vec<LoopEvent> {
+    world.sink.submit(WorkbenchCommand::ContinueChat(
+        gui::model::commands::ChatContinuation {
+            thread_id: "thread".into(),
+            composer_role: gui::model::composer::ComposerRole::Worker,
+            model_preference: None,
+        },
+    ))
+}
+
+#[test]
+fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch() {
+    let fixture = Fixture::new();
+    let mut original = fixture.world();
+    let events = original
+        .sink
+        .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            thread_id: "thread".into(),
+            text: "original chat task".into(),
+            composer_role: gui::model::composer::ComposerRole::Orchestrator,
+            images: Vec::new(),
+            model_preference: None,
+        }));
+    let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+        panic!("{events:?}")
+    };
+    let root = parse(run_id);
+    fixture.waiting(&mut original, root);
+    original
+        .runtime
+        .stop(root, runtime::StopScope::SelfOnly)
+        .unwrap();
+    fixture.rt.block_on(original.runtime.wait(root)).unwrap();
+    drop(original);
+
+    let mut restarted = fixture.world();
+    accepted(&continue_chat(&mut restarted), root);
+    fixture.waiting(&mut restarted, root);
+    assert_eq!(
+        restarted.runtime.inspect_agent(root).unwrap().role_name,
+        Role::Orchestrator.name()
+    );
+    let messages = fixture.messages.lock().unwrap();
+    let last = serde_json::to_string(messages.last().unwrap()).unwrap();
+    assert!(last.contains("original chat task"));
+    assert!(last.contains(AgentRuntime::CHAT_CONTINUE_PROMPT));
+    drop(messages);
+    fixture.stop(&restarted, root);
+}
+
+#[test]
+fn continue_renews_team_authority_and_still_rejects_wrong_project() {
+    let fixture = Fixture::new();
+    let mut original = fixture.world();
+    let root = fixture.root(&mut original, true);
+    accepted(&continue_chat(&mut original), root);
+    fixture.waiting(&mut original, root);
+    fixture.stop(&original, root);
+    let mut wrong = fixture.world();
+    wrong
+        .sink
+        .bind_goal_context("thread", "wrong-project", &root.to_string());
+    rejected(
+        &continue_chat(&mut wrong),
+        "current_team_authority_required",
+    );
+    assert!(wrong.runtime.list_agents().is_empty());
+
+    let mut restarted = fixture.world();
+    restarted
+        .sink
+        .bind_goal_context("thread", "project", &root.to_string());
+    accepted(&continue_chat(&mut restarted), root);
+    fixture.waiting(&mut restarted, root);
+    fixture.stop(&restarted, root);
+}

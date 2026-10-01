@@ -1,4 +1,4 @@
-use crate::model::role_settings::{CATEGORIES, RoleSettingsModel, effort_options};
+use crate::model::role_settings::{RoleSettingsModel, categories_for_role, effort_options};
 mod binding_status;
 use crate::theme::{
     text::{badge, h3, muted},
@@ -30,7 +30,7 @@ pub fn role_settings_modal(
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Agent role settings"));
             ui.label(muted(
-                "Worker categories take precedence over the worker default; other roles use their role model.",
+                "Worker and reviewer categories take precedence over their role defaults; other roles use their role model.",
             ));
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
@@ -55,7 +55,7 @@ pub fn role_settings_modal(
                                 &mut agents.worker.base,
                                 Some(&mut agents.worker.categories),
                             ),
-                            ("Reviewer", "reviewer", &mut agents.reviewer.base, None),
+                            ("Reviewer", "reviewer", &mut agents.reviewer.base, Some(&mut agents.reviewer.categories)),
                             ("WebResearcher", "web_researcher", &mut agents.roles.web_researcher, None),
                             ("Planner", "planner", &mut agents.roles.planner, None),
                             ("Oracle", "oracle", &mut agents.roles.oracle, None),
@@ -85,7 +85,7 @@ pub fn role_settings_modal(
                                     });
                                     if let Some(categories) = categories {
                                         ui.label(muted("Category overrides"));
-                                        for category in CATEGORIES {
+                                        for category in categories_for_role(role_key).map(|category| category.name) {
                                             ui.collapsing(badge(category), |ui| {
                                                 let mut draft = categories
                                                     .get(category)
@@ -107,7 +107,7 @@ pub fn role_settings_modal(
                                                 if let Some(logical) = binding_status(ui, Some(effective), &model.route_names) {
                                                     action = Some(RoleSettingsAction::CreateRoute(logical));
                                                 }
-                                                if let Some(Some(resolved)) = model.resolved_previews.get(category) {
+                                                if let Some(Some(resolved)) = model.resolved_previews.get(&format!("{role_key}.categories.{category}")) {
                                                     ui.label(muted(format!("→ {resolved}")));
                                                 }
                                                 optional_text(

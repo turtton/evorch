@@ -1,3 +1,4 @@
+use egui_kittest::kittest::Queryable;
 use event_bus::{Event, LifecycleEvent, ToolEvent, UserQuestion};
 use gui::{
     app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench,
@@ -217,8 +218,8 @@ fn thread_dot_color(
 }
 
 #[test]
-fn pending_user_question_overrides_running_color_until_answered() {
-    use gui::theme::tokens::{palette, state_color};
+fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
+    use gui::theme::tokens::state_color;
     let running = state_color(workspace_ui::ThreadState::Running);
     let dir = tempfile::tempdir().unwrap();
     let state = state(dir.path());
@@ -258,14 +259,16 @@ fn pending_user_question_overrides_running_color_until_answered() {
             question: question(),
         })]);
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label("?").count(), 1);
     assert_eq!(thread_dot_color(&harness, "two"), running);
     harness
         .state_mut()
         .switch_thread(ThreadId::new("two"))
         .unwrap();
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label("?").count(), 1);
 
     let mut answered = question();
     answered.answer = Some("JSON".into());
@@ -278,6 +281,7 @@ fn pending_user_question_overrides_running_color_until_answered() {
     ]);
     harness.run_steps(3);
     assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label("?").count(), 0);
 
     // A pending row can recover its owner from durable chat identity even if
     // the matching run-start event was lost, just like the conversation card.
@@ -291,7 +295,8 @@ fn pending_user_question_overrides_running_color_until_answered() {
             question: recovered,
         })]);
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), palette().WARNING_FG);
+    assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label("?").count(), 1);
     harness
         .state_mut()
         .apply_loop_event(gui::model::commands::LoopEvent::UserAnswerSaved {
@@ -299,4 +304,5 @@ fn pending_user_question_overrides_running_color_until_answered() {
         });
     harness.run_steps(3);
     assert_eq!(thread_dot_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label("?").count(), 0);
 }
