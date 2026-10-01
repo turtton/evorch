@@ -11,8 +11,13 @@ use crate::projection;
 use crate::repo::{catalog, event, metrics};
 use crate::{HardLimits, LimitKind, StorageConfig, StorageError};
 
+#[cfg(test)]
+#[path = "accounting_tests.rs"]
+mod accounting_tests;
+
 struct WriterState {
     conn: Connection,
+    accounting: event::EventAccounting,
     config: StorageConfig,
     pending: HashMap<BucketKey, UsageBucket>,
     writes_suspended: bool,
@@ -35,6 +40,7 @@ pub(super) fn run_writer(
     let now = Instant::now();
     let mut state = WriterState {
         conn,
+        accounting: event::EventAccounting::default(),
         next_flush_at: now + config.flush_interval,
         next_checkpoint_at: now + config.checkpoint_interval,
         config,
@@ -354,14 +360,13 @@ fn append_event_to_conn(
     session_id: &Option<String>,
     event: &Event,
 ) -> Result<(), StorageError> {
-    // セッション切替と日次集計を常に DB から再シードし、キャッシュ不整合を避けます。
-    let mut accounting = event::EventAccounting::default();
+    // 同じセッション・日付の集計を保持し、ストリーム差分ごとの履歴再走査を避けます。
     event::append_event(
         &state.conn,
         session_id.as_deref(),
         event,
         &state.config.hard_limits,
-        &mut accounting,
+        &mut state.accounting,
     )
     .map(|_| ())
 }
@@ -592,6 +597,7 @@ mod tests {
         let now = Instant::now();
         WriterState {
             conn,
+            accounting: event::EventAccounting::default(),
             temp_warned: false,
             next_flush_at: now,
             next_checkpoint_at: now,

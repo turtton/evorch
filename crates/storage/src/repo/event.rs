@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use event_bus::{Event, EventKind};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row, Transaction, TransactionBehavior, params};
 
 use crate::db::{ns_to_system_time, system_time_to_ns};
 use crate::entity::SecretGuard;
@@ -24,13 +24,14 @@ pub struct StoredEvent {
     pub event: Event,
 }
 
-/// writer が保持するイベント容量のキャッシュです。
+/// 単一 writer 接続が保持するイベント容量のキャッシュです。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EventAccounting {
     pub session_bytes: u64,
     pub day_bytes: u64,
     seeded_session_id: Option<String>,
     seeded_day_start_ns: Option<i64>,
+    data_version: Option<i64>,
 }
 
 /// 容量上限を検査してイベントを一件追記します。
@@ -55,17 +56,29 @@ pub fn append_event(
         .map_err(|_| StorageError::OutOfRange("event payload length"))?;
     enforce_limit(LimitKind::EventSize, event_len, limits.max_event_bytes)?;
 
-    let mut next_accounting = accounting.clone();
+    // 他ウィンドウの writer がシードと INSERT の間に割り込まないよう、
+    // 容量検査から commit まで同じ write transaction で保護します。
+    let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let data_version: i64 =
+        transaction.pragma_query_value(None, "data_version", |row| row.get(0))?;
+    // data_version は同じ接続自身の commit では変化しません。別接続の
+    // commit を検出したときだけ再シードし、共有 DB の容量制限を維持します。
+    let mut next_accounting = if accounting.data_version == Some(data_version) {
+        accounting.clone()
+    } else {
+        EventAccounting::default()
+    };
+    next_accounting.data_version = Some(data_version);
     if next_accounting.seeded_session_id.as_deref() != session_id {
         next_accounting.session_bytes = match session_id {
-            Some(id) => accounting::session_event_bytes(conn, id)?,
+            Some(id) => accounting::session_event_bytes(&transaction, id)?,
             None => 0,
         };
         next_accounting.seeded_session_id = session_id.map(String::from);
     }
     let day_start = day_start_ns(event.meta.wall_clock)?;
     if next_accounting.seeded_day_start_ns != Some(day_start) {
-        next_accounting.day_bytes = accounting::day_event_bytes(conn, day_start)?;
+        next_accounting.day_bytes = accounting::day_event_bytes(&transaction, day_start)?;
         next_accounting.seeded_day_start_ns = Some(day_start);
     }
 
@@ -97,7 +110,6 @@ pub fn append_event(
     let kind = kind_name(&event.kind);
     let event_len_i64 =
         i64::try_from(event_len).map_err(|_| StorageError::OutOfRange("event payload length"))?;
-    let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO events \
          (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
