@@ -304,3 +304,63 @@ fn empty_skills_prompt_is_byte_identical_to_baseline() {
         assert_eq!(empty_prompt == skills_prompt, role == Role::Worker);
     }
 }
+
+#[test]
+fn reviewer_categories_compose_scoped_appendices_without_leaking_to_other_scopes() {
+    let user_dir = empty_user_dir();
+    let mut config = Config::default();
+    config.agents.reviewer.preset = Some(ROLE_APPENDIX_PRESET.into());
+    config.agents.reviewer.categories.insert(
+        "plan".into(),
+        CategoryBindingConfig {
+            preset: Some(CATEGORY_APPENDIX_PRESET.into()),
+            ..Default::default()
+        },
+    );
+    let sources = resolve_prompt_sources(&config, Some(user_dir.path())).unwrap();
+    let catalog = build_catalog(&build_input(&config, &user_dir, &[], &[])).unwrap();
+    let role_body = sources.appendices[ROLE_APPENDIX_PRESET].trim_end();
+    let scoped_body = sources.appendices[CATEGORY_APPENDIX_PRESET].trim_end();
+    for category in ["plan", "tool-execution"] {
+        let prompt = catalog
+            .system_prompt_for(Role::Reviewer, Some(category), "claude-opus-4-1")
+            .unwrap();
+        assert!(prompt.contains(sources.role_baselines["reviewer"].trim_end()));
+        assert!(prompt.contains(sources.category_overlays[category].trim_end()));
+        if category == "plan" {
+            assert!(prompt.ends_with(scoped_body));
+            assert!(!prompt.contains(role_body));
+        } else {
+            assert!(prompt.ends_with(role_body));
+            assert!(!prompt.contains(scoped_body));
+        }
+    }
+    let base = catalog
+        .system_prompt_for(Role::Reviewer, None, "claude-opus-4-1")
+        .unwrap();
+    assert!(base.ends_with(role_body));
+    assert!(!base.contains(scoped_body));
+    let worker = catalog
+        .system_prompt_for(Role::Worker, None, "claude-opus-4-1")
+        .unwrap();
+    assert!(!worker.contains(scoped_body));
+    assert!(!worker.contains(role_body));
+}
+
+#[test]
+fn reviewer_category_missing_appendix_fails_closed() {
+    let user_dir = empty_user_dir();
+    let mut config = Config::default();
+    config.agents.reviewer.categories.insert(
+        "tool-execution".into(),
+        CategoryBindingConfig {
+            preset: Some(MISSING_PRESET.into()),
+            ..Default::default()
+        },
+    );
+    let error = build_catalog(&build_input(&config, &user_dir, &[], &[])).unwrap_err();
+    assert!(
+        matches!(error, PromptCompositionError::PresetResolution(ConfigError::PresetNotFound { name })
+        if name == MISSING_PRESET)
+    );
+}

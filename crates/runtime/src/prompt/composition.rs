@@ -110,6 +110,15 @@ pub fn build_catalog(
             );
         }
     }
+    for (category, category_binding) in &input.config.agents.reviewer.categories {
+        if let Some(preset) = &category_binding.preset {
+            builder = builder.category_appendix(
+                Role::Reviewer,
+                category.as_str(),
+                appendix_body(&sources, preset),
+            );
+        }
+    }
     for (family_key, body) in &sources.family_sections {
         builder = builder.family_section(format!("family-{family_key}"), body.as_str());
     }

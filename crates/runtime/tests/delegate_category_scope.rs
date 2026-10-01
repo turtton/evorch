@@ -1,4 +1,4 @@
-//! 委譲ツールの worker 専用カテゴリ境界を検証する。
+//! 委譲ツールの worker/reviewer カテゴリとロールの一致境界を検証する。
 
 mod support;
 
@@ -16,6 +16,12 @@ use support::{ScriptedModel, text_response, tool_response};
 
 async fn delegate_case(tool: &str, args: Value, accepted: bool) {
     // Given: 親と子を識別できるスクリプトとカタログ未接続のランタイム
+    let expected_error = args["category"].as_str().map(|category| {
+        match config::agent_categories::public_category_role(category) {
+            Some(role) => format!("category `{category}` is only valid for role={role}"),
+            None => format!("unknown category: {category}"),
+        }
+    });
     let model = Arc::new(ScriptedModel::new([]));
     model
         .add_keyed(
@@ -78,7 +84,7 @@ async fn delegate_case(tool: &str, args: Value, accepted: bool) {
     if !accepted {
         assert!(content.iter().any(|item| matches!(
             item,
-            ToolResultContent::Text { text } if text.contains("worker")
+            ToolResultContent::Text { text } if text.contains(expected_error.as_deref().expect("category error"))
         )));
     }
 }
@@ -151,4 +157,80 @@ async fn async_delegate_accepts_explorer_when_category_is_absent() {
         true,
     )
     .await;
+}
+
+#[tokio::test]
+async fn delegate_accepts_reviewer_categories_in_awaited_and_background_modes() {
+    for category in ["plan", "tool-execution"] {
+        for background in [false, true] {
+            delegate_case("delegate", json!({
+                "role": "reviewer", "category": category, "background": background, "prompt": "CHILD"
+            }), true).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn delegate_rejects_mismatched_category_roles_before_spawning() {
+    for background in [false, true] {
+        for (role, category) in [
+            ("worker", "plan"),
+            ("worker", "tool-execution"),
+            ("reviewer", "quick"),
+            ("planner", "plan"),
+        ] {
+            delegate_case(
+                "delegate",
+                json!({
+                    "role": role, "category": category, "background": background, "prompt": "CHILD"
+                }),
+                false,
+            )
+            .await;
+        }
+        delegate_case(
+            "delegate",
+            json!({
+                "category": "plan", "background": background, "prompt": "CHILD"
+            }),
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn delegate_rejects_internal_categories_before_spawning() {
+    for (role, category) in [("worker", "lesson"), ("reviewer", "lesson_review")] {
+        delegate_case(
+            "delegate",
+            json!({"role": role, "category": category, "prompt": "CHILD"}),
+            false,
+        )
+        .await;
+    }
+}
+
+#[test]
+fn public_reviewer_categories_keep_standard_reviewer_capabilities() {
+    let standard = runtime::ExecutionPolicy::for_role(Role::Reviewer);
+    for category in ["plan", "tool-execution"] {
+        let policy = standard.clone().for_run_config(&RunConfig {
+            category: Some(category.into()),
+            ..Default::default()
+        });
+        assert_eq!(policy, standard);
+        for tool in [
+            "shell",
+            "edit",
+            "write",
+            "submit_lesson_review",
+            "inspect_learning_source",
+        ] {
+            assert!(
+                policy.authorize(tool).is_err(),
+                "{category} must not grant {tool}"
+            );
+        }
+    }
 }

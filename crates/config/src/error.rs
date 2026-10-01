@@ -67,9 +67,9 @@ pub enum ConfigError {
         /// 指定されたカテゴリ名。
         category: String,
     },
-    /// worker 以外のロールにカテゴリが指定された。
+    /// カテゴリをサポートしない、または所属と異なるロールにカテゴリが指定された。
     #[error(
-        "category `{category}` is not allowed for role `{role}`; only worker supports categories"
+        "category `{category}` is not allowed for role `{role}`; categories are only allowed on worker and reviewer"
     )]
     CategoryNotAllowedForRole { role: String, category: String },
     /// 指定された名前のプリセットが同梱・ユーザーのどちらにも存在しない。

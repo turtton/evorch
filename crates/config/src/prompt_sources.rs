@@ -25,7 +25,7 @@ pub struct AgentPromptSources {
     pub role_baselines: BTreeMap<String, String>,
     /// モデルファミリー別セクション (キー: ファミリー名、generic を含む全 6 種)。
     pub family_sections: BTreeMap<String, String>,
-    /// カテゴリ別オーバーレイ (公開 Worker カテゴリと内部学習カテゴリ)。
+    /// カテゴリ別オーバーレイ (worker/reviewer 公開カテゴリと内部学習カテゴリ)。
     pub category_overlays: BTreeMap<String, String>,
     /// agents 設定が参照する appendix プリセット本文 (キー: プリセット名)。
     pub appendices: BTreeMap<String, String>,
@@ -117,7 +117,12 @@ fn resolve_appendices(
             names.insert(preset.clone());
         }
     }
-    for category in agents.worker.categories.values() {
+    for category in agents
+        .worker
+        .categories
+        .values()
+        .chain(agents.reviewer.categories.values())
+    {
         if let Some(preset) = &category.preset {
             names.insert(preset.clone());
         }

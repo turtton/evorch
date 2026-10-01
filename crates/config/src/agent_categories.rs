@@ -2,11 +2,21 @@
 
 /// A worker category that may be selected through the public delegation tool.
 ///
-/// Construct tool enums and selection guidance from [`public_worker_categories`]
-/// so internal categories cannot enter the model-facing contract.
+/// This compatibility view is limited to workers; use [`public_categories`] for
+/// tool enums and selection guidance spanning all public roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicWorkerCategory {
     pub name: &'static str,
+    pub guidance: &'static str,
+}
+
+/// A public delegation category with its owning role and selection criteria.
+///
+/// Use [`public_categories`] for model-facing schemas and guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicCategory {
+    pub name: &'static str,
+    pub role: &'static str,
     pub guidance: &'static str,
 }
 
@@ -81,6 +91,24 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         overlay_body: include_str!("../assets/presets/category-research.md"),
     },
     CategoryDefinition {
+        name: "plan",
+        role: "reviewer",
+        delegation: Delegation::Public {
+            guidance: "review a planner-produced plan before execution: requirement coverage, feasibility, task decomposition, dependency ordering, risks, and missing acceptance criteria.",
+        },
+        overlay_preset: "category-plan",
+        overlay_body: include_str!("../assets/presets/category-plan.md"),
+    },
+    CategoryDefinition {
+        name: "tool-execution",
+        role: "reviewer",
+        delegation: Delegation::Public {
+            guidance: "review tool executions and approval requests, especially sandbox-external shell/bash commands: verify safety, scope confinement, and exact match to the approved intent before they run.",
+        },
+        overlay_preset: "category-tool-execution",
+        overlay_body: include_str!("../assets/presets/category-tool-execution.md"),
+    },
+    CategoryDefinition {
         name: "lesson",
         role: "worker",
         delegation: Delegation::Internal,
@@ -96,23 +124,38 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     },
 ];
 
-/// Enumerate public worker categories and their selection criteria in stable order.
-///
-/// Internal categories have no public guidance and are excluded even when their
-/// owning role is worker. Use this same projection for both tool schema and text.
-pub fn public_worker_categories() -> impl Iterator<Item = PublicWorkerCategory> {
+/// Enumerate all public categories with their owning roles in stable order.
+pub fn public_categories() -> impl Iterator<Item = PublicCategory> {
     CATEGORIES.iter().filter_map(|category| {
-        if let Delegation::Public { guidance } = category.delegation
-            && category.role == "worker"
-        {
-            Some(PublicWorkerCategory {
+        if let Delegation::Public { guidance } = category.delegation {
+            Some(PublicCategory {
                 name: category.name,
+                role: category.role,
                 guidance,
             })
         } else {
             None
         }
     })
+}
+
+/// Return the owning role only for publicly delegatable categories.
+pub fn public_category_role(name: &str) -> Option<&'static str> {
+    public_categories()
+        .find(|category| category.name == name)
+        .map(|category| category.role)
+}
+
+/// Enumerate public worker categories and their selection criteria in stable order.
+///
+/// This compatibility view excludes reviewer and internal categories.
+pub fn public_worker_categories() -> impl Iterator<Item = PublicWorkerCategory> {
+    public_categories()
+        .filter(|category| category.role == "worker")
+        .map(|category| PublicWorkerCategory {
+            name: category.name,
+            guidance: category.guidance,
+        })
 }
 
 /// Whether a category may be selected for a worker through public delegation.
@@ -169,12 +212,38 @@ mod tests {
             let definition = category_for_role(role, name).expect("internal category exists");
             assert!(matches!(definition.delegation, Delegation::Internal));
             assert!(!is_public_worker_category(name));
+            assert_eq!(public_category_role(name), None);
         }
         for name in ["", "unknown", "Quick", "lesson-review"] {
             assert!(!is_public_worker_category(name));
+            assert_eq!(public_category_role(name), None);
         }
         assert!(category_for_role("worker", "lesson_review").is_none());
         assert!(category_for_role("reviewer", "lesson").is_none());
+    }
+
+    #[test]
+    fn public_reviewer_categories_have_roles_and_do_not_enter_worker_projection() {
+        let categories: Vec<_> = public_categories().collect();
+        assert_eq!(categories.len(), 8);
+        assert_eq!(
+            categories[6..]
+                .iter()
+                .map(|category| category.name)
+                .collect::<Vec<_>>(),
+            ["plan", "tool-execution"]
+        );
+        for name in ["plan", "tool-execution"] {
+            assert_eq!(public_category_role(name), Some("reviewer"));
+        }
+        for category in categories {
+            assert_eq!(public_category_role(category.name), Some(category.role));
+            assert!(!category.guidance.is_empty());
+            assert!(category_for_role(category.role, category.name).is_some());
+            if category.role == "reviewer" {
+                assert!(!is_public_worker_category(category.name));
+            }
+        }
     }
 
     #[test]
@@ -193,7 +262,7 @@ mod tests {
             );
             assert!(!category.overlay_body.is_empty());
             if matches!(category.delegation, Delegation::Public { .. }) {
-                assert_eq!(category.role, "worker");
+                assert!(matches!(category.role, "worker" | "reviewer"));
             }
         }
     }

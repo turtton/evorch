@@ -25,21 +25,29 @@ pub(crate) fn agents_document_table(agents: &AgentsConfig) -> Table {
     for (name, binding) in [
         ("orchestrator", &agents.orchestrator),
         ("explorer", &agents.explorer),
-        ("reviewer", &agents.reviewer),
     ] {
         insert_binding(&mut agents_table, name, binding);
     }
 
-    let mut worker = binding_table(&agents.worker.base);
-    if !agents.worker.categories.is_empty() {
-        let mut categories = Table::new();
-        for (name, binding) in &agents.worker.categories {
-            categories.insert(name, Item::Table(category_table(binding)));
+    for (role, base, bindings) in [
+        ("worker", &agents.worker.base, &agents.worker.categories),
+        (
+            "reviewer",
+            &agents.reviewer.base,
+            &agents.reviewer.categories,
+        ),
+    ] {
+        let mut table = binding_table(base);
+        if !bindings.is_empty() {
+            let mut categories = Table::new();
+            for (name, binding) in bindings {
+                categories.insert(name, Item::Table(category_table(binding)));
+            }
+            table.insert("categories", Item::Table(categories));
         }
-        worker.insert("categories", Item::Table(categories));
-    }
-    if !worker.is_empty() {
-        agents_table.insert("worker", Item::Table(worker));
+        if !table.is_empty() {
+            agents_table.insert(role, Item::Table(table));
+        }
     }
 
     let mut roles = Table::new();

@@ -12,7 +12,7 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. For worker tasks, choose a category using the category field's criteria; omission uses the worker base binding, with no automatic task classification. Images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
+        description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Choose a category using the category field's criteria and pair it with its owning role: worker categories require role=worker (default); reviewer categories plan/tool-execution require role=reviewer. Omission uses the worker base binding, with no automatic task classification. Images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -318,13 +318,16 @@ pub(super) fn answer_subagent_question(name: &str) -> ToolSpec {
 }
 
 fn delegate_category_schema() -> Value {
-    let categories: Vec<_> = config::agent_categories::public_worker_categories().collect();
+    let categories: Vec<_> = config::agent_categories::public_categories().collect();
     let category_names: Vec<_> = categories.iter().map(|category| category.name).collect();
     let category_description = format!(
-        "Worker-only. Choose by the task's primary difficulty, not prompt length. {} Omit only when no category fits; omission uses the worker base binding, not quick.",
+        "Pair each category with its tagged role (worker by default; plan/tool-execution require reviewer). Choose by the task's primary difficulty, not prompt length. {} Omit only when no category fits; omission uses the worker base binding, not quick.",
         categories
             .iter()
-            .map(|category| format!("{}: {}", category.name, category.guidance))
+            .map(|category| format!(
+                "{} ({}): {}",
+                category.name, category.role, category.guidance
+            ))
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -408,7 +411,10 @@ mod tests {
         for name in names {
             let name = name.as_str().expect("category name");
             assert!(
-                help.contains(&format!("{name}:")),
+                help.contains(&format!(
+                    "{name} ({}):",
+                    config::agent_categories::public_category_role(name).expect("public role")
+                )),
                 "missing {name} criteria"
             );
         }
@@ -435,7 +441,7 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("category name"))
             .collect();
-        let public: Vec<_> = config::agent_categories::public_worker_categories()
+        let public: Vec<_> = config::agent_categories::public_categories()
             .map(|category| category.name)
             .collect();
         assert_eq!(advertised, public);

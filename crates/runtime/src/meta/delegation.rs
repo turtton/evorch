@@ -109,8 +109,13 @@ pub(crate) fn spawn_delegate(
         Ok(category) => category,
         Err(message) => return Err(error(message)),
     };
-    if category.is_some() && role != agents::Role::Worker {
-        return Err(error("category is only valid for role=worker"));
+    if let Some(category) = category.as_deref()
+        && let Some(category_role) = config::agent_categories::public_category_role(category)
+        && parse_role(category_role).ok() != Some(role)
+    {
+        return Err(error(format!(
+            "category `{category}` is only valid for role={category_role}"
+        )));
     }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,
