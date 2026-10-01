@@ -22,6 +22,7 @@ impl AgentRunSource for Source {
                 role_name: "worker".into(),
                 phase: AgentRunPhase::Done,
                 model: "model".into(),
+                category: None,
             })
             .collect()
     }

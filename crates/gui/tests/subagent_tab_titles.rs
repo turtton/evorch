@@ -201,6 +201,7 @@ fn completed_subagent_count_survives_history_restore_without_transcript_panels()
         role_name: "reviewer".into(),
         phase: AgentRunPhase::Done,
         model: "demo".into(),
+        category: None,
     }]);
     let mut live = WorkbenchState::new(source, &UiSettings::default())
         .unwrap()

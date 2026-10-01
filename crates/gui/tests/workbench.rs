@@ -227,6 +227,7 @@ fn tasks_row_updates_after_state_change_event() {
         role_name: "Worker".into(),
         phase: AgentRunPhase::Running,
         model: "demo-worker".into(),
+        category: None,
     }]);
     let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
     let pump = EventPump::spawn(

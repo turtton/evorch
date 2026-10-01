@@ -204,6 +204,7 @@ impl AgentRunSource for Source {
             role_name: "worker".into(),
             phase: AgentRunPhase::Running,
             model: "model".into(),
+            category: None,
         }]
     }
 }

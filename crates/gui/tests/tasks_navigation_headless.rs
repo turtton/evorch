@@ -11,6 +11,7 @@ fn summary(id: u64, name: &str) -> AgentSummary {
         role_name: "worker".into(),
         phase: AgentRunPhase::Running,
         model: "fixture-model".into(),
+        category: None,
     }
 }
 

@@ -95,7 +95,7 @@ fn agents_rows_show_provider_tool_and_tokens_from_events() {
     fixture.workbench.run();
 
     // Then: every event-derived value is visible without substituting task metadata.
-    for label in ["anthropic", "claude", "read", "120 / 34"] {
+    for label in ["claude · anthropic", "read", "120 / 34"] {
         assert!(
             fixture.workbench.count_labels(label) >= 1,
             "missing label: {label}"
@@ -480,6 +480,7 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
         role_name: role.into(),
         phase: AgentRunPhase::Running,
         model: format!("task-model-{id}"),
+        category: None,
     }
 }
 

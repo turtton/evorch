@@ -167,6 +167,7 @@ fn telemetry_usage_renders_in_thread_subagents_pane() {
                 role_name: "worker".into(),
                 phase: event_bus::AgentRunPhase::Running,
                 model: "model".into(),
+                category: None,
             }]
         }
     }
@@ -202,6 +203,7 @@ fn capture_telemetry_cost_png() {
         role_name: "worker".into(),
         phase: event_bus::AgentRunPhase::Running,
         model: "model".into(),
+        category: None,
     }]);
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("demo");

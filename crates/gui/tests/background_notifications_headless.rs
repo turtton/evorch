@@ -139,6 +139,7 @@ fn multiple_concurrent_runs_display_states() {
             role_name: "worker".into(),
             phase,
             model: "test-model".into(),
+            category: None,
         })
         .collect();
     let mut state = WorkbenchState::new(DemoSource(runs), &UiSettings::default()).unwrap();

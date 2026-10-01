@@ -20,6 +20,7 @@ fn run(id: u64, name: &'static str, phase: AgentRunPhase) -> AgentSummary {
         role_name: "worker".into(),
         phase,
         model: "test-model".into(),
+        category: None,
     }
 }
 

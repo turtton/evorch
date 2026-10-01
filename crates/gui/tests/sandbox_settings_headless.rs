@@ -36,6 +36,7 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
+    assert!(!harness.has_label("Save sandbox"));
     // Then: the typed setting is persisted without changing other sections.
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(dir.path().into()),

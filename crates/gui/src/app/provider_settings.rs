@@ -235,6 +235,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(crate) fn receive_provider_save(&mut self, timeout: std::time::Duration) {
+        let close_after_save = self.provider_settings.editor.is_some();
         let Some(rx) = self.provider_save_rx.take() else {
             return;
         };
@@ -254,7 +255,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.provider_settings =
                                 ProviderSettingsModel::seed_from_config(&config);
                             self.provider_settings.catalog = catalog;
-                            self.provider_settings.open = true;
+                            self.provider_settings.open = !close_after_save;
                         }
                         Err(error) => {
                             self.provider_settings.error = Some(error.to_string());

@@ -380,6 +380,7 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
         role_name: role.into(),
         phase: AgentRunPhase::Running,
         model: format!("task-model-{id}"),
+        category: None,
     }
 }
 

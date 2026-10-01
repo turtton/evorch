@@ -107,15 +107,14 @@ fn sandbox_button_label_tracks_saved_mode() {
     let dir = tempfile::tempdir().expect("temp");
     let mut harness = workbench(dir.path(), config::EscalationApproval::Auto);
     harness.run();
-    // When: saving user approval through the modal and closing it.
+    // When: saving user approval through the modal closes it automatically.
     harness.click_label("Sandbox: auto");
     harness.run();
     harness.click_label("user");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
-    harness.click_label("Cancel");
-    harness.run();
+    assert!(!harness.has_label("Save sandbox"));
     // Then: the button and a fresh workbench both reflect the saved mode.
     assert!(harness.has_label("Sandbox: user"));
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())

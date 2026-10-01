@@ -41,6 +41,7 @@ async fn list_agents_reports_name_role_and_model() {
         "W".to_string(),
         RunConfig {
             name: Some("worker-w1".to_string()),
+            category: Some("plan".to_string()),
             ..RunConfig::default()
         },
     );
@@ -58,6 +59,8 @@ async fn list_agents_reports_name_role_and_model() {
     assert_eq!(summaries[1].role_name, "Worker");
     assert_eq!(summaries[1].model, "scripted-worker");
     assert_eq!(summaries[1].phase, AgentRunPhase::Done);
+    assert_eq!(summaries[0].category, None);
+    assert_eq!(summaries[1].category.as_deref(), Some("plan"));
 }
 
 // Given: name / role_name / model がすべて異なる値の AgentSummary / When: JSON 化 /
@@ -71,6 +74,7 @@ fn agent_summary_serializes_identity_fields() {
         role_name: "Reviewer".to_string(),
         phase: AgentRunPhase::Done,
         model: "model-z".to_string(),
+        category: None,
     };
 
     let json = serde_json::to_value(&summary).expect("serialize AgentSummary");

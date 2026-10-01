@@ -215,6 +215,7 @@ mod tests {
             role: "orchestrator".to_owned(),
             status,
             model: "demo".to_owned(),
+            category: None,
         }
     }
 

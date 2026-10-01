@@ -145,6 +145,8 @@ pub struct AgentSummary {
     pub phase: AgentRunPhase,
     /// 選択済みモデル識別子。
     pub model: String,
+    /// ワーカーに指定されたカテゴリ。
+    pub category: Option<String>,
 }
 
 /// 単一 AgentRun の詳細検査 (検査用 DTO)。

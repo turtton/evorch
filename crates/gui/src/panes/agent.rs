@@ -76,9 +76,24 @@ pub fn agent_pane_with_repo_root(
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
         let composer_id = ui.id().with("composer-height");
-        let composer_height = ui
+        let previous_height = ui
             .data(|data| data.get_temp::<f32>(composer_id))
             .unwrap_or(COMPOSER_MIN_HEIGHT);
+        let lines = composer.input.split('\n').count().max(1);
+        let line_height = ui.text_style_height(&egui::TextStyle::Body);
+        let input_height = (lines as f32 * line_height + 2.0 * SP_2)
+            .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
+        let extra = input_height - (COMPOSER_MIN_HEIGHT - 2.0 * SP_2);
+        let previous_extra = ui.data(|data| {
+            data.get_temp::<f32>(composer_id.with("lines"))
+                .unwrap_or(0.0)
+        });
+        // Carry forward the measured chrome/attachments, but replace the old
+        // input height so deleting lines shrinks the composer too.
+        let composer_height = (previous_height - previous_extra + extra)
+            .max(COMPOSER_MIN_HEIGHT)
+            .min((ui.available_height() - ROW_COMPACT).max(COMPOSER_MIN_HEIGHT));
+        ui.data_mut(|data| data.insert_temp(composer_id.with("lines"), extra));
         egui::Panel::bottom(ui.id().with("composer"))
             .exact_size(composer_height)
             .resizable(false)
@@ -102,8 +117,8 @@ pub fn agent_pane_with_repo_root(
                     result
                 });
                 let height = strip.response.rect.height();
-                if height != composer_height {
-                    ui.data_mut(|data| data.insert_temp(composer_id, height));
+                ui.data_mut(|data| data.insert_temp(composer_id, height));
+                if (height - composer_height).abs() > 0.5 {
                     ui.ctx().request_repaint();
                 }
                 if let Some(composer_action) = strip.inner {

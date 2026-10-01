@@ -22,6 +22,7 @@ mod tests {
             role_name: "Reviewer".into(),
             phase,
             model: "model-y".to_string(),
+            category: None,
         }
     }
 
@@ -61,7 +62,8 @@ mod tests {
                 name: "custom-name".into(),
                 role: "Reviewer".into(),
                 status: AgentRunPhase::Running,
-                model: "model-y".into()
+                model: "model-y".into(),
+                category: None,
             }
         );
     }
@@ -171,6 +173,7 @@ pub struct TaskRow {
     pub role: String,
     pub status: AgentRunPhase,
     pub model: String,
+    pub category: Option<String>,
 }
 
 pub struct TasksModel<S> {
@@ -221,6 +224,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                 role: summary.role_name.clone(),
                 status: summary.phase,
                 model: summary.model.clone(),
+                category: summary.category.clone(),
             })
         {
             if let Some(row) = self.rows.iter_mut().find(|row| row.run_id == live.run_id) {
@@ -252,6 +256,7 @@ impl<S: AgentRunSource> TasksModel<S> {
                         role: role.clone(),
                         status: AgentRunPhase::Pending,
                         model: String::new(),
+                        category: None,
                     });
                 }
                 EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {

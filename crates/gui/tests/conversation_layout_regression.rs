@@ -124,6 +124,7 @@ fn subagents_list_only_displays_delegated_runs_in_selected_thread() {
                 role_name: "worker".into(),
                 phase: event_bus::AgentRunPhase::Running,
                 model: "gpt".into(),
+                category: None,
             })
             .collect(),
     );
@@ -142,6 +143,99 @@ fn subagents_list_only_displays_delegated_runs_in_selected_thread() {
     harness.get_by_label("Agent 2");
     assert!(harness.query_by_label("Agent 1").is_none());
     assert!(harness.query_by_label("Agent 3").is_none());
+}
+
+#[test]
+fn multiline_composer_grows_upward_and_shrinks_without_covering_the_transcript() {
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(event_bus::MessageEvent::MessageDelta {
+        delta: "AI response".into(),
+        run_id: None,
+    }));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 600.0))
+        .build_ui_state(
+            move |ui, state: &mut (ComposerModel, ModelPickerState)| {
+                gui::theme::install(ui.ctx());
+                gui::panes::agent::agent_pane(
+                    ui,
+                    &model,
+                    None,
+                    gui::panes::agent::ConversationContext {
+                        requests: None,
+                        task_rows: &[],
+                        phase_unread: false,
+                        has_project: true,
+                        active_thread_title: Some("Chat"),
+                        parent_thread: None,
+                        child_threads: Vec::new(),
+                        thread_metrics: None,
+                        phase: None,
+                        next_thread_title: String::new(),
+                        model_picker: gui::panes::model_picker::ModelPickerContext {
+                            profiles: &[],
+                            preference: None,
+                            enabled: false,
+                        },
+                        sandbox_picker: Default::default(),
+                    },
+                    &mut state.0,
+                    &mut state.1,
+                );
+            },
+            (
+                ComposerModel {
+                    input: "first".into(),
+                    ..Default::default()
+                },
+                ModelPickerState::default(),
+            ),
+        );
+    harness.run_steps(4);
+    let one_line = harness.get_by_label("Message or /command").rect();
+    harness.state_mut().0.input = "first\nsecond\nthird\nfourth\nfifth".into();
+    harness.run_steps(4);
+    let many_lines = harness.get_by_label("Message or /command").rect();
+    let reply = harness.get_by_label("AI response").rect();
+    assert!(
+        many_lines.top() < one_line.top(),
+        "{many_lines:?} vs {one_line:?}"
+    );
+    assert!(many_lines.bottom() >= one_line.bottom() - 2.0);
+    assert!(
+        reply.bottom() <= many_lines.top(),
+        "{reply:?} overlaps {many_lines:?}"
+    );
+    harness.state_mut().0.input = "short".into();
+    harness.run_steps(4);
+    assert!(harness.get_by_label("Message or /command").rect().top() > many_lines.top());
+}
+
+#[test]
+fn subagent_cards_show_category_and_model_provider_on_one_line() {
+    let mut tasks = gui::model::tasks::TasksModel::new(Source(vec![runtime::AgentSummary {
+        run_id: runtime::RunId::new(2),
+        parent_run_id: Some(runtime::RunId::new(1)),
+        name: "child".into(),
+        role_name: "Worker".into(),
+        phase: event_bus::AgentRunPhase::Done,
+        model: "local/worker-model".into(),
+        category: Some("plan".into()),
+    }]));
+    tasks.refresh();
+    let mut harness = Harness::builder().build_ui(move |ui| {
+        gui::panes::agents::subagents_pane(
+            ui,
+            &tasks,
+            &Default::default(),
+            &Default::default(),
+            &["run-2".into()],
+        );
+    });
+    harness.run_steps(2);
+    let role = harness.get_by_label("Worker(plan) · Done").rect();
+    let model = harness.get_by_label("local/worker-model · local").rect();
+    assert!((role.center().y - model.center().y).abs() < role.height());
 }
 
 #[test]

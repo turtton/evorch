@@ -13,6 +13,7 @@ impl gui::model::tasks::AgentRunSource for Source {
                 role_name: role.into(),
                 phase: event_bus::AgentRunPhase::Running,
                 model: "model".into(),
+                category: None,
             })
             .to_vec()
     }
@@ -73,6 +74,7 @@ fn role_lookup_uses_the_speakers_task_row() {
         role: role.into(),
         status: event_bus::AgentRunPhase::Running,
         model: "model".into(),
+        category: None,
     });
     // When / Then: resolving each speaker returns its role, never a fallback.
     assert_eq!(

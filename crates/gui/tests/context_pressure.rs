@@ -207,6 +207,7 @@ fn workbench(window: Option<u64>) -> HeadlessWorkbench<DemoSource> {
         role_name: "worker".into(),
         phase: AgentRunPhase::Running,
         model: "irrelevant-task-model".into(),
+        category: None,
     }]);
     let mut state = WorkbenchState::new(source, &UiSettings::default())
         .unwrap()
@@ -242,6 +243,7 @@ fn agents_cell_shows_pressure_when_window_is_known() {
             role_name: "worker".into(),
             phase: AgentRunPhase::Done,
             model: "model".into(),
+            category: None,
         }]);
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1200.0, 220.0))

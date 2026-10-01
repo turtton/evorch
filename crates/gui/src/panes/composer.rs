@@ -117,10 +117,13 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                         }
                     }
                 });
+                let rows = model.input.split('\n').count().max(1);
+                let input_height = (rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 2.0 * SP_2)
+                    .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
                 let input = egui::ScrollArea::vertical()
                     .id_salt("composer-scroll")
                     .min_scrolled_width(0.0)
-                    .min_scrolled_height(COMPOSER_MIN_HEIGHT - 2.0 * SP_2)
+                    .min_scrolled_height(input_height)
                     .max_height(COMPOSER_MAX_HEIGHT)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {

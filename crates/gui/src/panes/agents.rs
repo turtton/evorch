@@ -274,7 +274,16 @@ pub fn subagents_pane<S: AgentRunSource>(
                             ui.horizontal_wrapped(|ui| {
                                 status_dot(ui, agent_phase_color(row.status));
                                 ui.label(egui::RichText::new(&row.name).strong());
-                                ui.label(muted(format!("{} · {:?}", row.role, row.status)));
+                                ui.label(muted(format!("{} · {:?}", role_label(row), row.status)));
+                                let value = telemetry.row(&run_id);
+                                let model = value
+                                    .and_then(|value| value.model.as_deref())
+                                    .unwrap_or_else(|| if row.model.is_empty() { "unknown" } else { &row.model });
+                                let provider = value
+                                    .and_then(|value| value.provider.as_deref())
+                                    .or_else(|| row.model.split_once('/').map(|(provider, _)| provider))
+                                    .unwrap_or("unknown");
+                                ui.label(muted(format!("{model} · {provider}")));
                             });
                             ui.horizontal_wrapped(|ui| {
                                 if ui
@@ -310,9 +319,12 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 }
                             });
                             if let Some(value) = telemetry.row(&run_id) {
-                                ui.label(muted(value.model.as_deref().unwrap_or("unknown")));
-                                ui.label(muted(value.provider.as_deref().unwrap_or("unknown")));
-                                ui.label(muted(value.activity_label()));
+                                // Keep useful live activity (model/tool/compaction),
+                                // but let the lifecycle label speak for waiting/done.
+                                let activity = value.activity_label();
+                                if !matches!(activity.as_str(), "agents" | "idle" | "user input") {
+                                    ui.label(muted(activity));
+                                }
                                 ui.label(muted(value.tokens_label()))
                                     .on_hover_text(value.diagnostics_label());
                             }
@@ -326,6 +338,15 @@ pub fn subagents_pane<S: AgentRunSource>(
             });
         action
     })
+}
+
+fn role_label(row: &TaskRow) -> String {
+    match &row.category {
+        Some(category) if row.role.eq_ignore_ascii_case("worker") => {
+            format!("Worker({category})")
+        }
+        _ => row.role.clone(),
+    }
 }
 
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {

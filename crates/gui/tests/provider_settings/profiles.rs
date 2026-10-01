@@ -72,7 +72,11 @@ fn save_new_profile_appends_to_list_and_config() {
     // When
     harness.click_label("Save");
     finish_save(&mut harness);
-    // Then
+    // Then: successful save closes the editor and the settings modal.
+    assert!(!harness.state().provider_settings().open);
+    assert!(!harness.has_label("Provider settings"));
+    harness.state_mut().open_provider_settings();
+    harness.run();
     assert!(harness.has_label("new-profile"));
     assert_eq!(load_config(tmp.path()).providers.len(), 3);
     assert!(

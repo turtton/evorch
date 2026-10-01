@@ -25,6 +25,7 @@ fn agents_display_additional_role_names() {
                 role_name: (*role).into(),
                 phase: AgentRunPhase::Running,
                 model: "vision-model".into(),
+                category: None,
             })
             .collect(),
     );

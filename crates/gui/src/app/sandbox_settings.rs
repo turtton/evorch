@@ -138,6 +138,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     );
                 }
                 self.sandbox_settings.error = None;
+                self.sandbox_settings.open = false;
                 self.push_notice("Sandbox settings updated");
             }
             Err(error) => self.sandbox_settings.error = Some(error),

@@ -160,6 +160,7 @@ fn long_summary() -> AgentSummary {
         role_name: "reviewer-with-long-role".into(),
         phase: AgentRunPhase::Running,
         model: "task-model-1".into(),
+        category: None,
     }
 }
 

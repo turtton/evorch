@@ -238,9 +238,9 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
         harness.state().provider_status(),
         &ProviderStatus::Configured
     );
-    harness.click_label("Close");
-    harness.run();
     assert!(!harness.state().provider_settings().open);
+    assert!(!harness.has_label("Provider settings"));
+    harness.run();
     harness.step();
     harness.state_mut().composer_mut().input = "hello".into();
     harness.run();

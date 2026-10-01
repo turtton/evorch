@@ -66,6 +66,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
             role_name: "orchestrator".into(),
             phase: AgentRunPhase::Running,
             model: "demo-orchestrator".into(),
+            category: None,
         },
         AgentSummary {
             run_id: RunId::new(2),
@@ -74,6 +75,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
             role_name: "worker".into(),
             phase: AgentRunPhase::Done,
             model: "demo-implementer".into(),
+            category: None,
         },
         AgentSummary {
             run_id: RunId::new(3),
@@ -82,6 +84,7 @@ pub fn demo_runs() -> Vec<AgentSummary> {
             role_name: "reviewer".into(),
             phase: AgentRunPhase::Waiting,
             model: "demo-reviewer".into(),
+            category: None,
         },
     ]
 }

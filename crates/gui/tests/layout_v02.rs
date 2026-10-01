@@ -249,6 +249,7 @@ fn summary(id: u64, name: &str, role: &str) -> AgentSummary {
         role_name: role.into(),
         phase: event_bus::AgentRunPhase::Running,
         model: "fixture".into(),
+        category: None,
     }
 }
 

@@ -1389,6 +1389,7 @@ impl AgentRuntime {
                 role_name: entry.role.name().to_string(),
                 phase: *entry.phase_rx.borrow(),
                 model: entry.model.clone(),
+                category: entry.config.category.clone(),
             })
             .collect();
         summaries.sort_by_key(|summary| summary.run_id.get());
