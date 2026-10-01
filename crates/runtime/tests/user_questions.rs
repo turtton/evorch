@@ -101,7 +101,8 @@ async fn question_yields_runs_independent_work_then_wakes_once_with_free_text() 
 
 #[tokio::test]
 async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
-    // Given: 回答待ち時間より短い elapsed budget を持つ永続化付き run。
+    // Given: 永続化の初期処理を実時間で待てる elapsed budget を持つ run。
+    let max_elapsed = Duration::from_secs(30);
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("questions.db"),
@@ -123,7 +124,7 @@ async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run_config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_elapsed: Duration::from_millis(250),
+            max_elapsed,
             ..Default::default()
         },
         ..Default::default()
@@ -143,6 +144,18 @@ async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
                     to: AgentRunPhase::Waiting,
                     ..
                 }) => true,
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped,
+                    ..
+                }) => panic!(
+                    "run terminated before Waiting: {event:#?}; prior events: {observed_events:#?}"
+                ),
+                EventKind::Diagnostic(d)
+                    if d.source == "budget_tracker"
+                        && d.code == event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED =>
+                {
+                    panic!("budget exhausted before Waiting: {d:#?}");
+                }
                 _ => false,
             };
             observed_events.push(event);
@@ -152,15 +165,22 @@ async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| panic!("run did not enter Waiting; observed events: {observed_events:#?}"));
     assert_eq!(
         runtime.inspect_agent(run).unwrap().phase,
         AgentRunPhase::Waiting
     );
     let question = question.unwrap();
 
-    // When: Waiting 中に上限を大幅に超える時間を経てから回答する。
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    // When: Waiting の通知は budget.pause() 後なので、この区間だけ仮想時間を進める。
+    // 永続化などの実 I/O を仮想時計で待たず、上限を超える回答待ちは確実に作る。
+    tokio::time::pause();
+    tokio::time::advance(max_elapsed * 4).await;
+    tokio::time::resume();
+    assert_eq!(
+        runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Waiting
+    );
     runtime.answer_user_question(&question.id, "A").unwrap();
     let phase = tokio::time::timeout(Duration::from_secs(10), runtime.wait(run))
         .await
