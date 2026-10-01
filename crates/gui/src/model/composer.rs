@@ -101,6 +101,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         argument_hint: None,
     },
     SlashCommandSpec {
+        name: "continue",
+        description: "Resume the current conversation after a stop or error",
+        argument_hint: None,
+    },
+    SlashCommandSpec {
         name: "run",
         description: "Start a background run without opening a pane",
         argument_hint: Some("<text>"),
@@ -356,8 +361,15 @@ mod tests {
     fn completions_prefix_match_and_stop_after_space() {
         // Given
         let cases: &[(&str, &[&str])] = &[
-            ("/", &["team", "undo", "redo", "goal", "help", "new", "run"]),
+            (
+                "/",
+                &[
+                    "team", "undo", "redo", "goal", "help", "new", "continue", "run",
+                ],
+            ),
             ("/r", &["redo", "run"]),
+            ("/con", &["continue"]),
+            ("/continue ", &[]),
             ("/run ", &[]),
             ("/g", &["goal"]),
             ("/goal", &["goal"]),
@@ -391,6 +403,7 @@ mod tests {
             "/goal <text> — Submit a goal to the orchestrator loop",
             "/help — Show available commands",
             "/new — Start a new thread",
+            "/continue — Resume the current conversation after a stop or error",
             "/run <text> — Start a background run without opening a pane",
         ];
         // When

@@ -292,6 +292,7 @@ impl CommandSink for RuntimeCommandSink {
         let permit = if let Some(host) = &self.ownership {
             let thread = match &command {
                 WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
+                WorkbenchCommand::ContinueChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::StopChat { thread_id }
                 | WorkbenchCommand::CancelChat { thread_id }
@@ -471,22 +472,24 @@ impl RuntimeCommandSink {
                     runtime::StopScope::Subtree
                 } else {
                     match self.runtime.inspect_agent(run_id) {
-                        Ok(run) => match run.phase {
-                            event_bus::AgentRunPhase::Pending
-                            | event_bus::AgentRunPhase::Running
-                            | event_bus::AgentRunPhase::Waiting => runtime::StopScope::SelfOnly,
-                            event_bus::AgentRunPhase::Stopped
-                                if !self.runtime.live_descendants(run_id).is_empty() =>
-                            {
-                                runtime::StopScope::Subtree
-                            }
-                            _ => {
-                                return vec![LoopEvent::ChatNotice {
+                        Ok(run) => {
+                            match run.phase {
+                                event_bus::AgentRunPhase::Pending
+                                | event_bus::AgentRunPhase::Running
+                                | event_bus::AgentRunPhase::Waiting => runtime::StopScope::SelfOnly,
+                                event_bus::AgentRunPhase::Stopped
+                                    if !self.runtime.live_descendants(run_id).is_empty() =>
+                                {
+                                    runtime::StopScope::Subtree
+                                }
+                                _ => {
+                                    return vec![LoopEvent::ChatNotice {
                                     thread_id,
-                                    text: "Already stopped; send a message to resume".into(),
+                                    text: "Already stopped; use /continue or send a message to resume".into(),
                                 }];
+                                }
                             }
-                        },
+                        }
                         // Admission-pending runs have no inspection yet. stop validates
                         // the ID against admissions before accepting this first press.
                         Err(runtime::RuntimeError::UnknownRun { .. }) => {
@@ -687,162 +690,108 @@ impl RuntimeCommandSink {
             WorkbenchCommand::CancelGoal { goal_id } => {
                 self.route_goal_command(|supervisor| supervisor.cancel(&goal_id))
             }
-            WorkbenchCommand::SendChat(submission) => {
-                let thread_id = submission.thread_id;
-                if let Some(&run_id) = self.goal_runs.get(&thread_id) {
-                    // A missing-context fallback may have replaced the original goal root.
-                    let run_id = self.chat_runs.get(&thread_id).copied().unwrap_or(run_id);
-                    let mut authority = RunConfig {
-                        ownership: permit.clone(),
-                        images: submission.images.clone(),
-                        model_preference: submission.model_preference.clone(),
-                        ..RunConfig::default()
-                    };
-                    if self
-                        .runtime
-                        .restore_diagnostics(run_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|d| d.renewable_team.is_some())
-                    {
-                        let Some(project) = self.goal_projects.get(&thread_id) else {
-                            return vec![LoopEvent::ChatRejected {
-                                thread_id,
-                                reason: "Current project binding is required to continue this team"
-                                    .into(),
-                            }];
-                        };
-                        let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer)
-                        else {
-                            return vec![LoopEvent::ChatRejected {
-                                thread_id,
-                                reason: "Current team storage is unavailable".into(),
-                            }];
-                        };
-                        authority.team_store = Some(runtime::team_context::TeamStore {
-                            config: config.clone(),
-                            writer: writer.clone(),
-                            id: format!("{project}:{thread_id}"),
-                        });
-                        authority.topology =
-                            runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-                        authority.delegation_value = Some(submission.text.clone());
-                        authority.finding_store = Some(config.db_path.clone());
-                        authority.memory =
-                            match runtime::memory::MemoryBoundary::capture(config, project) {
-                                Ok(memory) => Some(memory),
-                                Err(error) => {
-                                    return vec![LoopEvent::ChatRejected {
-                                        thread_id,
-                                        reason: error.to_string(),
-                                    }];
-                                }
-                            };
+            WorkbenchCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
+            WorkbenchCommand::ContinueChat(continuation) => self.submit_chat(
+                crate::model::commands::ChatSubmission {
+                    thread_id: continuation.thread_id,
+                    composer_role: continuation.composer_role,
+                    model_preference: continuation.model_preference,
+                    images: Vec::new(),
+                    // The command is current human intent to continue, not replayed
+                    // history or permission to repeat interrupted side effects.
+                    text: AgentRuntime::CHAT_CONTINUE_PROMPT.into(),
+                },
+                permit,
+                true,
+            ),
+        }
+    }
+
+    fn submit_chat(
+        &mut self,
+        submission: crate::model::commands::ChatSubmission,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        resume_only: bool,
+    ) -> Vec<LoopEvent> {
+        let thread_id = submission.thread_id;
+        if resume_only {
+            if !self.chat_runs.contains_key(&thread_id) && !self.goal_runs.contains_key(&thread_id)
+            {
+                match self.runtime.latest_chat_run(&thread_id) {
+                    Ok(Some(run)) => {
+                        self.chat_runs.insert(thread_id.clone(), run);
                     }
-                    let _guard = self.handle.enter();
-                    match self
-                        .runtime
-                        .continue_goal(run_id, submission.text.clone(), authority)
-                    {
-                        Ok(run_id) => {
-                            self.chat_runs.insert(thread_id.clone(), run_id);
-                            self.stop_marked.remove(&thread_id);
-                            self.stopped_by_us.remove(&thread_id);
-                            let mut events = vec![LoopEvent::ChatAccepted {
-                                thread_id: thread_id.clone(),
-                                run_id: run_id.to_string(),
-                            }];
-                            // continue_goal re-registers the root before the supervisor
-                            // can dispatch another continuation.
-                            if let Some(goal_id) = self.goal_ids.get(&thread_id)
-                                && self.supervisor.snapshot(goal_id).is_some_and(|goal| {
-                                    // Detached Resume would recover a second root after continue_goal.
-                                    !goal.detached && goal.state == event_bus::GoalState::Paused
-                                })
-                                && let Err(error) = self.supervisor.resume(goal_id)
-                            {
-                                events.push(LoopEvent::ChatNotice {
-                                    thread_id,
-                                    text: format!("Run resumed; goal resume failed: {error}"),
-                                });
-                            }
-                            return events;
-                        }
-                        Err(error) if self.can_restart_stopped(&thread_id, &error) => {
-                            self.stop_marked.remove(&thread_id);
-                            self.stopped_by_us.remove(&thread_id);
-                            self.chat_runs.remove(&thread_id);
-                        }
-                        Err(error) => {
-                            return vec![LoopEvent::ChatRejected {
-                                thread_id,
-                                reason: error.to_string(),
-                            }];
-                        }
+                    Ok(None) => {
+                        return vec![LoopEvent::ChatNotice {
+                            thread_id,
+                            text: "No conversation to continue; send a message first".into(),
+                        }];
+                    }
+                    Err(error) => {
+                        return vec![LoopEvent::ChatRejected {
+                            thread_id,
+                            reason: error.to_string(),
+                        }];
                     }
                 }
-                if let Some(permit) = &permit {
-                    if self.chat_permits.get(&thread_id).is_some_and(|previous| {
-                        previous.registry_path != permit.registry_path
-                            || previous.lease.owner_id != permit.lease.owner_id
-                            || previous.lease.generation != permit.lease.generation
-                    }) {
-                        self.chat_runs.remove(&thread_id);
-                    }
-                    self.chat_permits.insert(thread_id.clone(), permit.clone());
-                }
-                if let Some(&run_id) = self.chat_runs.get(&thread_id) {
-                    let _guard = self.handle.enter();
-                    match self.runtime.continue_goal(
-                        run_id,
-                        submission.text.clone(),
-                        RunConfig {
-                            ownership: permit.clone(),
-                            images: submission.images.clone(),
-                            model_preference: submission.model_preference.clone(),
-                            ..RunConfig::default()
-                        },
-                    ) {
-                        Ok(run_id) => {
-                            self.stop_marked.remove(&thread_id);
-                            self.stopped_by_us.remove(&thread_id);
-                            return vec![LoopEvent::ChatAccepted {
-                                thread_id,
-                                run_id: run_id.to_string(),
-                            }];
-                        }
-                        Err(error) if self.can_restart_stopped(&thread_id, &error) => {
-                            self.stop_marked.remove(&thread_id);
-                            self.stopped_by_us.remove(&thread_id);
-                            self.chat_runs.remove(&thread_id);
-                        }
-                        Err(error) => {
-                            return vec![LoopEvent::ChatRejected {
-                                thread_id,
-                                reason: error.to_string(),
-                            }];
-                        }
-                    }
-                }
-                let _guard = self.handle.enter();
-                let run_id = self.runtime.delegate_chat(
-                    &thread_id,
-                    match submission.composer_role {
-                        crate::model::composer::ComposerRole::Worker => Role::Worker,
-                        crate::model::composer::ComposerRole::Orchestrator => Role::Orchestrator,
-                    },
-                    submission.text,
-                    RunConfig {
-                        images: submission.images,
-                        ownership: permit,
-                        interactive: true,
-                        keep_alive: true,
-                        model_preference: submission.model_preference,
-                        ..RunConfig::default()
-                    },
-                );
-                let run_id = match run_id {
-                    Ok(run_id) => run_id,
+            }
+            let run = self
+                .chat_runs
+                .get(&thread_id)
+                .or_else(|| self.goal_runs.get(&thread_id))
+                .copied()
+                .expect("resolved conversation root");
+            if self.runtime.inspect_agent(run).ok().is_some_and(|run| {
+                matches!(
+                    run.phase,
+                    event_bus::AgentRunPhase::Pending | event_bus::AgentRunPhase::Running
+                )
+            }) {
+                return vec![LoopEvent::ChatNotice {
+                    thread_id,
+                    text: "Run is still running or stopping; try /continue once it settles".into(),
+                }];
+            }
+        }
+
+        if let Some(&run_id) = self.goal_runs.get(&thread_id) {
+            // A missing-context fallback may have replaced the original goal root.
+            let run_id = self.chat_runs.get(&thread_id).copied().unwrap_or(run_id);
+            let mut authority = RunConfig {
+                ownership: permit.clone(),
+                images: submission.images.clone(),
+                model_preference: submission.model_preference.clone(),
+                ..RunConfig::default()
+            };
+            if self
+                .runtime
+                .restore_diagnostics(run_id)
+                .ok()
+                .flatten()
+                .is_some_and(|d| d.renewable_team.is_some())
+            {
+                let Some(project) = self.goal_projects.get(&thread_id) else {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: "Current project binding is required to continue this team".into(),
+                    }];
+                };
+                let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer) else {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: "Current team storage is unavailable".into(),
+                    }];
+                };
+                authority.team_store = Some(runtime::team_context::TeamStore {
+                    config: config.clone(),
+                    writer: writer.clone(),
+                    id: format!("{project}:{thread_id}"),
+                });
+                authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+                authority.delegation_value = Some(submission.text.clone());
+                authority.finding_store = Some(config.db_path.clone());
+                authority.memory = match runtime::memory::MemoryBoundary::capture(config, project) {
+                    Ok(memory) => Some(memory),
                     Err(error) => {
                         return vec![LoopEvent::ChatRejected {
                             thread_id,
@@ -850,15 +799,133 @@ impl RuntimeCommandSink {
                         }];
                     }
                 };
-                self.chat_runs.insert(thread_id.clone(), run_id);
-                self.stop_marked.remove(&thread_id);
-                self.stopped_by_us.remove(&thread_id);
-                vec![LoopEvent::ChatAccepted {
-                    thread_id,
-                    run_id: run_id.to_string(),
-                }]
+            }
+            let _guard = self.handle.enter();
+            match self
+                .runtime
+                .continue_goal(run_id, submission.text.clone(), authority)
+            {
+                Ok(run_id) => {
+                    self.chat_runs.insert(thread_id.clone(), run_id);
+                    self.stop_marked.remove(&thread_id);
+                    self.stopped_by_us.remove(&thread_id);
+                    let mut events = vec![LoopEvent::ChatAccepted {
+                        thread_id: thread_id.clone(),
+                        run_id: run_id.to_string(),
+                    }];
+                    // continue_goal re-registers the root before the supervisor
+                    // can dispatch another continuation.
+                    if let Some(goal_id) = self.goal_ids.get(&thread_id)
+                        && self.supervisor.snapshot(goal_id).is_some_and(|goal| {
+                            // Detached Resume would recover a second root after continue_goal.
+                            !goal.detached && goal.state == event_bus::GoalState::Paused
+                        })
+                        && let Err(error) = self.supervisor.resume(goal_id)
+                    {
+                        events.push(LoopEvent::ChatNotice {
+                            thread_id,
+                            text: format!("Run resumed; goal resume failed: {error}"),
+                        });
+                    }
+                    return events;
+                }
+                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
+                    self.stop_marked.remove(&thread_id);
+                    self.stopped_by_us.remove(&thread_id);
+                    self.chat_runs.remove(&thread_id);
+                }
+                Err(error) => {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: error.to_string(),
+                    }];
+                }
             }
         }
+        if let Some(permit) = &permit {
+            if !resume_only
+                && self.chat_permits.get(&thread_id).is_some_and(|previous| {
+                    previous.registry_path != permit.registry_path
+                        || previous.lease.owner_id != permit.lease.owner_id
+                        || previous.lease.generation != permit.lease.generation
+                })
+            {
+                self.chat_runs.remove(&thread_id);
+            }
+            self.chat_permits.insert(thread_id.clone(), permit.clone());
+        }
+        if let Some(&run_id) = self.chat_runs.get(&thread_id) {
+            let _guard = self.handle.enter();
+            match self.runtime.continue_goal(
+                run_id,
+                submission.text.clone(),
+                RunConfig {
+                    ownership: permit.clone(),
+                    images: submission.images.clone(),
+                    model_preference: submission.model_preference.clone(),
+                    ..RunConfig::default()
+                },
+            ) {
+                Ok(run_id) => {
+                    self.stop_marked.remove(&thread_id);
+                    self.stopped_by_us.remove(&thread_id);
+                    return vec![LoopEvent::ChatAccepted {
+                        thread_id,
+                        run_id: run_id.to_string(),
+                    }];
+                }
+                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
+                    self.stop_marked.remove(&thread_id);
+                    self.stopped_by_us.remove(&thread_id);
+                    self.chat_runs.remove(&thread_id);
+                }
+                Err(error) => {
+                    return vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: error.to_string(),
+                    }];
+                }
+            }
+        }
+        if resume_only {
+            return vec![LoopEvent::ChatNotice {
+                thread_id,
+                text: "No conversation to continue; send a message first".into(),
+            }];
+        }
+        let _guard = self.handle.enter();
+        let run_id = self.runtime.delegate_chat(
+            &thread_id,
+            match submission.composer_role {
+                crate::model::composer::ComposerRole::Worker => Role::Worker,
+                crate::model::composer::ComposerRole::Orchestrator => Role::Orchestrator,
+            },
+            submission.text,
+            RunConfig {
+                images: submission.images,
+                ownership: permit,
+                interactive: true,
+                keep_alive: true,
+                model_preference: submission.model_preference,
+                ..RunConfig::default()
+            },
+        );
+        let run_id = match run_id {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                return vec![LoopEvent::ChatRejected {
+                    thread_id,
+                    reason: error.to_string(),
+                }];
+            }
+        };
+        self.chat_runs.insert(thread_id.clone(), run_id);
+        self.stop_marked.remove(&thread_id);
+        self.stopped_by_us.remove(&thread_id);
+        vec![LoopEvent::ChatAccepted {
+            thread_id,
+            run_id: run_id.to_string(),
+        }]
     }
 }
 
@@ -1251,6 +1318,159 @@ mod tests {
         })
     }
 
+    fn continue_command(thread: &str) -> WorkbenchCommand {
+        WorkbenchCommand::ContinueChat(crate::model::commands::ChatContinuation {
+            thread_id: thread.into(),
+            composer_role: crate::model::composer::ComposerRole::Worker,
+            model_preference: None,
+        })
+    }
+
+    #[test]
+    fn continue_never_starts_an_empty_or_missing_context_conversation() {
+        let (rt, mut sink, runtime, _) = build_sink();
+        assert!(matches!(
+            sink.submit(continue_command("empty")).as_slice(),
+            [LoopEvent::ChatNotice { .. }]
+        ));
+        assert!(runtime.list_agents().is_empty());
+        sink.submit(chat_command("no-store"));
+        let run = sink.chat_runs["no-store"];
+        sink.submit(WorkbenchCommand::StopChat {
+            thread_id: "no-store".into(),
+        });
+        rt.block_on(async {
+            runtime.wait(run).await.unwrap();
+        });
+        assert!(matches!(
+            sink.submit(continue_command("no-store")).as_slice(),
+            [LoopEvent::ChatRejected { .. }]
+        ));
+        assert_eq!(sink.chat_runs["no-store"], run);
+        assert_eq!(runtime.list_agents().len(), 1);
+    }
+
+    #[test]
+    fn continue_does_not_queue_duplicate_turns_while_running() {
+        let (_rt, mut sink, runtime, _) = build_sink();
+        sink.submit(chat_command("active"));
+        assert!(matches!(
+            sink.submit(continue_command("active")).as_slice(),
+            [LoopEvent::ChatNotice { .. }]
+        ));
+        assert_eq!(runtime.list_agents().len(), 1);
+    }
+
+    struct ErrorOnceModel {
+        fail: std::sync::atomic::AtomicBool,
+        started: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl AgentModel for ErrorOnceModel {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "error-once".into()
+        }
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            messages: &[Message],
+            _: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            self.started.notify_one();
+            if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(RuntimeError::Model {
+                    reason: "test failure".into(),
+                });
+            }
+            if messages.len() > 1 {
+                assert!(messages.iter().any(|m| m.content.iter().any(|block|
+                    matches!(block, providers::ContentBlock::Text { text } if text == AgentRuntime::CHAT_CONTINUE_PROMPT))));
+            }
+            std::future::pending().await
+        }
+    }
+
+    #[test]
+    fn continue_restores_stopped_and_failed_chats_in_place_even_after_restart() {
+        for error in [false, true] {
+            for restart in [false, true] {
+                let model = Arc::new(ErrorOnceModel {
+                    fail: std::sync::atomic::AtomicBool::new(error),
+                    started: tokio::sync::Notify::new(),
+                });
+                let (rt, mut sink, runtime, supervisor) =
+                    build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
+                let dir = tempfile::tempdir().unwrap();
+                let config = StorageConfig {
+                    db_path: dir.path().join("continue.db"),
+                    ..Default::default()
+                };
+                let storage = Storage::open(config.clone()).unwrap();
+                let runtime = runtime
+                    .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+                sink.submit(chat_command("resume"));
+                let run = sink.chat_runs["resume"];
+                rt.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), model.started.notified())
+                        .await
+                        .unwrap();
+                });
+                if !error {
+                    sink.submit(WorkbenchCommand::StopChat {
+                        thread_id: "resume".into(),
+                    });
+                }
+                let phase = rt.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                });
+                assert_eq!(
+                    phase,
+                    if error {
+                        event_bus::AgentRunPhase::Error
+                    } else {
+                        event_bus::AgentRunPhase::Stopped
+                    }
+                );
+                let before = Database::open(&config)
+                    .unwrap()
+                    .run_context(&run.to_string())
+                    .unwrap()
+                    .unwrap();
+                if restart {
+                    sink =
+                        RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+                }
+                let events = sink.submit(continue_command("resume"));
+                assert!(
+                    matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == run.to_string()),
+                    "{events:?}"
+                );
+                assert_eq!(sink.chat_runs["resume"], run);
+                assert_eq!(runtime.list_agents().len(), 1);
+                assert!(!sink.stopped_by_us.contains("resume"));
+                let after = Database::open(&config)
+                    .unwrap()
+                    .run_context(&run.to_string())
+                    .unwrap()
+                    .unwrap();
+                let before: Vec<Message> = serde_json::from_str(&before.messages_json).unwrap();
+                let after: Vec<Message> = serde_json::from_str(&after.messages_json).unwrap();
+                assert!(
+                    after.starts_with(&before),
+                    "continuation must retain the saved prefix"
+                );
+                runtime.cancel(run).unwrap();
+                rt.block_on(async {
+                    runtime.wait(run).await.unwrap();
+                });
+            }
+        }
+    }
+
     #[test]
     fn rapid_stop_presses_escalate_before_root_phase_changes() {
         // No executor progress between the two commands: phase-based staging fails here.
@@ -1572,21 +1792,28 @@ mod tests {
         assert_eq!(sink.running_children["chat-thread"], 0);
         assert_eq!(sink.chat_runs["chat-thread"], root);
         assert!(
-            matches!(sink.submit(command).as_slice(), [LoopEvent::ChatNotice { text, .. }] if text == "Already stopped; send a message to resume")
+            matches!(sink.submit(command).as_slice(), [LoopEvent::ChatNotice { text, .. }] if text == "Already stopped; use /continue or send a message to resume")
         );
     }
 
     #[test]
     fn stop_goal_before_first_followup_pauses_and_send_resumes_supervisor() {
-        assert_goal_stop_resume(false);
+        assert_goal_stop_resume(false, false);
     }
 
     #[test]
     fn stopped_detached_goal_send_does_not_dispatch_recovery_root() {
-        assert_goal_stop_resume(true);
+        assert_goal_stop_resume(true, false);
     }
 
-    fn assert_goal_stop_resume(detached: bool) {
+    #[test]
+    fn continue_resumes_goal_without_a_duplicate_root() {
+        for detached in [false, true] {
+            assert_goal_stop_resume(detached, true);
+        }
+    }
+
+    fn assert_goal_stop_resume(detached: bool, continue_only: bool) {
         let (rt, mut sink, runtime, supervisor) = build_sink();
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
@@ -1634,15 +1861,17 @@ mod tests {
                 .unwrap();
             });
         }
-        let events = sink.submit(WorkbenchCommand::SendChat(
-            crate::model::commands::ChatSubmission {
+        let events = sink.submit(if continue_only {
+            continue_command("thread-1")
+        } else {
+            WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
                 composer_role: crate::model::composer::ComposerRole::Orchestrator,
                 images: Vec::new(),
                 thread_id: "thread-1".into(),
                 text: "resume with authority".into(),
                 model_preference: None,
-            },
-        ));
+            })
+        });
         assert!(
             matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string()),
             "{events:?}"

@@ -33,7 +33,7 @@ pub fn stopped_banner(running_children: usize) -> String {
     if running_children > 0 {
         format!("子agent {running_children}件は実行中 — もう一度押すと全停止")
     } else {
-        "停止中（再開可能）— メッセージを送信して再開".into()
+        "停止中（再開可能）— /continue またはメッセージ送信で再開".into()
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
         h.state_mut().model.running_children = 0;
         h.state_mut().action = None;
         h.run();
-        h.get_by_label("停止中（再開可能）— メッセージを送信して再開");
+        h.get_by_label("停止中（再開可能）— /continue またはメッセージ送信で再開");
         assert!(h.query_by_label("全停止").is_none());
         h.get_by_label("Send").click();
         h.run();

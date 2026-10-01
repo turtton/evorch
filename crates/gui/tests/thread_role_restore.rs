@@ -296,6 +296,6 @@ fn stopped_history_replays_as_resumable_with_role_and_partial_output_intact() {
     assert!(state.transcript().entries().iter().any(|entry| matches!(entry, gui::model::transcript::TranscriptEntry::Message { text, .. } if text == "kept output")));
     let mut harness = gui::headless::HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
-    assert!(harness.has_label("停止中（再開可能）— メッセージを送信して再開"));
+    assert!(harness.has_label("停止中（再開可能）— /continue またはメッセージ送信で再開"));
     assert!(harness.has_label("Send"));
 }

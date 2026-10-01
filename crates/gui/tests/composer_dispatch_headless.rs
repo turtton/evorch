@@ -37,6 +37,78 @@ fn submit(harness: &mut HeadlessWorkbench<DemoSource>, input: &str) {
 }
 
 #[test]
+fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().toggle_role();
+    harness
+        .state_mut()
+        .composer_mut()
+        .add_pasted_image("data:image/png;base64,aGVsbG8=");
+    harness
+        .state_mut()
+        .set_thread_model_preference(Some(workspace_ui::ModelPreference {
+            profile: "local".into(),
+            model: Some("chosen".into()),
+        }));
+    submit(&mut harness, "/continue");
+    assert!(
+        matches!(harness.state().issued(), [WorkbenchCommand::ContinueChat(request)]
+        if request.thread_id == "thread-1"
+            && request.composer_role == gui::model::composer::ComposerRole::Orchestrator
+            && request.model_preference.as_ref().unwrap().model.as_deref() == Some("chosen"))
+    );
+    assert!(
+        !harness
+            .state()
+            .transcripts()
+            .thread()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::UserMessage { .. }))
+    );
+    assert!(harness.state().composer().input.is_empty());
+    assert_eq!(harness.state().composer().attachments.len(), 1);
+}
+
+#[test]
+fn continue_checks_arguments_provider_and_active_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "/continue extra");
+    assert!(harness.state().issued().is_empty());
+    assert!(harness.has_label("usage: /continue"));
+    assert_eq!(harness.state().composer().input, "/continue extra");
+
+    let mut harness = workbench(temp.path(), ProviderStatus::default());
+    submit(&mut harness, "/continue");
+    assert!(harness.state().issued().is_empty());
+    assert_eq!(harness.state().composer().input, "/continue");
+
+    let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        .unwrap()
+        .with_provider_status(ProviderStatus::Configured);
+    state.composer_mut().input = "/continue".into();
+    state.submit_composer();
+    assert!(state.issued().is_empty());
+}
+
+#[test]
+fn continue_is_available_in_completions_and_help() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    harness.state_mut().composer_mut().input = "/con".into();
+    harness.run();
+    harness.click_label("/continue");
+    harness.run();
+    assert_eq!(harness.state().composer().input.trim(), "/continue");
+    submit(&mut harness, "/help");
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Notice { text } if text.contains("/continue —"))
+    ));
+}
+
+#[test]
 fn orchestrator_role_plain_chat_issues_send_chat_not_goal() {
     // Given: the composer is toggled to orchestrator.
     let temp = tempfile::tempdir().unwrap();
@@ -261,7 +333,7 @@ fn stopped_parent_with_live_child_keeps_banner_and_dispatches_stop_then_discard(
             running_children: 0,
         });
     harness.run();
-    assert!(harness.has_label("停止中（再開可能）— メッセージを送信して再開"));
+    assert!(harness.has_label("停止中（再開可能）— /continue またはメッセージ送信で再開"));
     assert!(harness.has_label("Send"));
     harness.click_label("破棄");
     harness.run();

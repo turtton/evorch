@@ -15,6 +15,20 @@ request produces a conversation notice containing its PR number. This version
 does not provide an approval button; the Diff-view approval surface is follow-up
 work, not an automatic approval policy.
 
+## Continuing a conversation
+
+Send `/continue` (no arguments) to resume the active conversation after an error
+or an operator Stop, without adding a user-message bubble. It retains saved
+history and uses current ownership and model settings; it also works after a
+restart when a recoverable snapshot exists. It does not submit composer image
+attachments, start an empty conversation, or blindly replay interrupted tools
+or old shell jobs. A missing/invalid snapshot is reported rather than silently
+starting over. Wait for an in-progress stop to settle before continuing; read-only
+sessions must explicitly Start or Claim write mode first.
+
+The command appears in completion suggestions and `/help`. Demo mode reports
+that no resumable conversation is available.
+
 ## Saved layouts
 
 Workspace schema v3 migrates v1/v2 JSON layouts and embedded TOML settings before

@@ -337,6 +337,17 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
 
 #[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
+    interrupted_tool_recovery("Explain the interrupted result", false).await;
+}
+
+#[tokio::test]
+async fn continue_after_stop_or_error_preserves_the_wire_prefix() {
+    for stopped in [false, true] {
+        interrupted_tool_recovery(AgentRuntime::CHAT_CONTINUE_PROMPT, stopped).await;
+    }
+}
+
+async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
     let read = Arc::new(GatedRead {
         started: Notify::new(),
         release: Notify::new(),
@@ -367,16 +378,24 @@ async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_
     tokio::time::timeout(Duration::from_secs(20), read.started.notified())
         .await
         .unwrap();
-    harness.runtime.cancel(run).unwrap();
-    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Error).await;
+    if stopped {
+        harness
+            .runtime
+            .stop(run, runtime::StopScope::SelfOnly)
+            .unwrap();
+    } else {
+        harness.runtime.cancel(run).unwrap();
+    }
+    let phase = if stopped {
+        AgentRunPhase::Stopped
+    } else {
+        AgentRunPhase::Error
+    };
+    let mut events = through_phase(&mut harness.receiver, run, phase).await;
     harness.runtime.wait(run).await.unwrap();
     harness
         .runtime
-        .continue_goal(
-            run,
-            "Explain the interrupted result".into(),
-            RunConfig::default(),
-        )
+        .continue_goal(run, prompt.into(), RunConfig::default())
         .unwrap();
     events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
     harness.runtime.cancel(run).unwrap();
@@ -391,8 +410,10 @@ async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_
         .body;
     let text = request.to_string();
     assert!(text.contains("ToolExecutionOutcomeUnknown"));
-    assert!(text.contains("Explain the interrupted result"));
-    assert!(text.contains("cancelled"));
+    assert!(text.contains(prompt));
+    if !stopped {
+        assert!(text.contains("cancelled"));
+    }
 }
 
 #[tokio::test]
