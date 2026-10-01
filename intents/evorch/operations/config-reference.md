@@ -7,11 +7,13 @@
 
 1. **組み込み既定値**（`Config::default()`。全セクション省略可）
 2. **ユーザ層**: `$XDG_CONFIG_HOME/evorch/config.toml`（未設定時は `~/.config/evorch/config.toml`）+ 同ディレクトリの `config.d/*.toml` drop-in
-3. **プロジェクト層**: `<project_dir>/evorch.toml` + `<project_dir>/config.d/*.toml` drop-in（`LoadOptions.project_dir` で有効化）
+3. **プロジェクト層**: `<project_dir>/.evorch/config.toml` + `<project_dir>/.evorch/config.d/*.toml` drop-in（`LoadOptions.project_dir` で有効化）
 4. **環境変数層**（`crates/config/src/env.rs` 経由）
 5. **CLI 上書き**（最優先。`LoadOptions.cli_overrides`）
 
-drop-in (`config.d/*.toml`) は deep merge（`merge.rs` の `deep_merge`）。同名キーは後に読んだ層が上書きし、テーブルは再帰的に統合される。
+プロジェクト層は新レイアウト `<project_dir>/.evorch/config.toml` + `<project_dir>/.evorch/config.d/*.toml` のみを読み込む。旧パス（プロジェクト直下の `evorch.toml` と `config.d/`）は読み込まれない。
+
+drop-in (`config.d/*.toml`) は辞書順に deep merge（後勝ち）（`merge.rs` の `deep_merge`）。同名キーは後に読んだ層が上書きし、テーブルは再帰的に統合される。
 
 ## ルート構造 (`Config`)
 

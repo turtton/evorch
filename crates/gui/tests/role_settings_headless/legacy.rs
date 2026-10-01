@@ -147,7 +147,7 @@ fn blank_binding_blocks_save() {
     for name in ["", "  "] {
         let temp = tempfile::tempdir().expect("temp");
         let (mut harness, _) = fixture(temp.path());
-        let before = std::fs::read(temp.path().join("evorch.toml")).expect("read");
+        let before = std::fs::read(config::project_main_config_path(temp.path())).expect("read");
         harness
             .state_mut()
             .role_settings_mut()
@@ -168,7 +168,7 @@ fn blank_binding_blocks_save() {
             .expect("error");
         assert!(harness.has_label(error));
         assert_eq!(
-            std::fs::read(temp.path().join("evorch.toml")).expect("read"),
+            std::fs::read(config::project_main_config_path(temp.path())).expect("read"),
             before
         );
     }
@@ -185,7 +185,13 @@ fn role_settings_geometry_matrix() {
             let mut state =
                 WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
                     .expect("state")
-                    .with_provider_settings_path(temp.path().join("evorch.toml"));
+                    .with_settings_load_options(config::LoadOptions {
+                        project_dir: Some(temp.path().to_path_buf()),
+                        user_config_dir: Some(temp.path().join("user")),
+                        read_env: false,
+                        ..Default::default()
+                    })
+                    .with_provider_settings_path(config::project_main_config_path(temp.path()));
             state.open_role_settings();
             let mut harness = HeadlessWorkbench::with_pixels_per_point(state, size, dpi);
             harness.run();

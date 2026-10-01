@@ -60,7 +60,8 @@ fn renamed_sections(config: &Config) -> (RoutingConfig, AgentsConfig) {
 fn roundtrip_preserves_both_sections_and_unrelated_comments() {
     // Given: コメント付き他セクションと、置換前の routing / agents。
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     write_fixture(&path);
     let mut expected = load(temp.path());
     let routing = RoutingConfig {
@@ -131,7 +132,8 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
 #[test]
 fn empty_sections_replace_old_routes_and_bindings() {
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     write_fixture(&path);
     let mut expected = load(temp.path());
     expected.routing = RoutingConfig::default();
@@ -146,7 +148,8 @@ fn empty_sections_replace_old_routes_and_bindings() {
 #[test]
 fn rename_saves_route_and_explicit_refs_together_without_materializing_implicit_refs() {
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     write_fixture(&path);
     let mut expected = load(temp.path());
     let (routing, agents) = renamed_sections(&expected);
@@ -175,7 +178,8 @@ fn rename_saves_route_and_explicit_refs_together_without_materializing_implicit_
 fn invalid_agents_leave_both_sections_and_file_bytes_unchanged() {
     // Given: リネーム対象の設定と、不正なカテゴリを含む更新後の agents。
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     write_fixture(&path);
     let before = std::fs::read(&path).expect("original bytes");
     let original = load(temp.path());
@@ -195,13 +199,14 @@ fn invalid_agents_leave_both_sections_and_file_bytes_unchanged() {
     ));
     assert_eq!(std::fs::read(&path).expect("unchanged bytes"), before);
     assert_eq!(load(temp.path()), original);
-    assert!(!temp.path().join("evorch.toml.tmp").exists());
+    assert!(!temp.path().join(".evorch/config.toml.tmp").exists());
 }
 
 #[test]
 fn combined_save_creates_new_config_file() {
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     let original: Config = toml::from_str(OLD_SECTIONS).expect("sections fixture");
     let (routing, agents) = renamed_sections(&original);
 

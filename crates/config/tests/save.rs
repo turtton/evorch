@@ -94,8 +94,9 @@ fn save_legacy_string_models_still_valid() {
 fn reload_saved_config_preserves_enabled_flags() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
     let candidate = input();
-    save_openai_compatible_provider(&tmp.path().join("evorch.toml"), &candidate).unwrap();
+    save_openai_compatible_provider(&tmp.path().join(".evorch/config.toml"), &candidate).unwrap();
     // When
     let config = Config::load(&LoadOptions {
         project_dir: Some(tmp.path().to_path_buf()),

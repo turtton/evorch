@@ -2,8 +2,9 @@ use super::*;
 
 fn seeded(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
     for name in ["personal", "work"] {
+        std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
         config::save_codex_provider(
-            &root.join("evorch.toml"),
+            &config::project_main_config_path(root),
             &config::CodexProviderInput {
                 name: name.into(),
                 account: name.into(),

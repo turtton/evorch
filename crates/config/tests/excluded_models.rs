@@ -49,8 +49,9 @@ fn unknown_field_is_rejected_when_exclusions_key_is_misspelled() {
 fn strict_load_accepts_exclusions_when_present_in_project_config() {
     // Given: 実際のプロジェクト設定ファイル
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".evorch")).unwrap();
     std::fs::write(
-        tmp.path().join("evorch.toml"),
+        tmp.path().join(".evorch/config.toml"),
         "version = 2\n[providers.local]\nexcluded_models = ['m1', 'm2']\n",
     )
     .unwrap();
@@ -87,7 +88,8 @@ fn schema_exposes_exclusions_as_string_array() {
 fn save_round_trips_exclusions_when_input_needs_normalization() {
     // Given: 手動一覧の外の ID と空白・空要素・重複
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).unwrap();
+    let path = tmp.path().join(".evorch/config.toml");
     let input = OpenAiCompatibleProviderInput {
         name: "local".into(),
         provider_type: config::ProviderTypeConfig::OpenAiCompatible,

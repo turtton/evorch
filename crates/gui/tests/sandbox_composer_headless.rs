@@ -4,7 +4,8 @@ fn workbench(
     root: &std::path::Path,
     mode: config::EscalationApproval,
 ) -> HeadlessWorkbench<DemoSource> {
-    let path = root.join("evorch.toml");
+    let path = config::project_main_config_path(root);
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     config::save_sandbox(
         &path,
         config::SandboxConfig {
@@ -15,6 +16,12 @@ fn workbench(
     .expect("fixture");
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(root.to_path_buf()),
+            user_config_dir: Some(root.join("user")),
+            read_env: false,
+            ..Default::default()
+        })
         .with_provider_settings_path(path);
     HeadlessWorkbench::new(state, [960.0, 600.0])
 }
@@ -113,7 +120,13 @@ fn sandbox_button_label_tracks_saved_mode() {
     assert!(harness.has_label("Sandbox: user"));
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
-        .with_provider_settings_path(dir.path().join("evorch.toml"));
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(dir.path().to_path_buf()),
+            user_config_dir: Some(dir.path().join("user")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(dir.path()));
     let mut reopened = HeadlessWorkbench::new(state, [960.0, 600.0]);
     reopened.run();
     assert!(reopened.has_label("Sandbox: user"));
@@ -127,7 +140,8 @@ fn composer_reports_save_failure_without_changing_mode_when_path_is_unwritable()
     harness.run();
     harness.click_label("Sandbox: auto");
     harness.run();
-    let path = dir.path().join("evorch.toml");
+    let path = config::project_main_config_path(dir.path());
+    std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::remove_file(&path).expect("remove fixture");
     std::fs::create_dir(&path).expect("block config path");
     // When: saving a mode that cannot be persisted.

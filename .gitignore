@@ -13,3 +13,4 @@
 /result-*
 # Local user config with provider credentials
 /evorch.toml
+/.evorch/

@@ -20,7 +20,8 @@ fn load(directory: &Path) -> Config {
 #[test]
 fn save_replaces_only_self_improvement_and_preserves_unrelated_bytes() {
     let directory = tempfile::tempdir().expect("temp");
-    let path = directory.path().join("evorch.toml");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    let path = directory.path().join(".evorch/config.toml");
     let before = "# user config\nversion = 2\n\n[providers.keep] # provider comment\nprovider_type = 'openai'\n\n[diagnostics]\nlog_level  = 'debug' # keep spacing\n";
     let after = "\n[metrics] # metrics comment\nenabled = false\nretention_days = 90\n";
     std::fs::write(
@@ -55,7 +56,8 @@ fn save_replaces_only_self_improvement_and_preserves_unrelated_bytes() {
 #[test]
 fn save_defaults_creates_a_file_and_removes_a_previous_draft_dir() {
     let directory = tempfile::tempdir().expect("temp");
-    let path = directory.path().join("evorch.toml");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    let path = directory.path().join(".evorch/config.toml");
     let defaults = SelfImprovementConfig::default();
     save_self_improvement(&path, &defaults).expect("create");
     assert_eq!(load(directory.path()), Config::default());

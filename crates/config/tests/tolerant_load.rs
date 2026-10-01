@@ -2,7 +2,8 @@ use config::{Config, ConfigError, LoadOptions};
 
 fn load(content: &str, strict: bool) -> Result<Config, ConfigError> {
     let directory = tempfile::tempdir().expect("temporary directory");
-    std::fs::write(directory.path().join("evorch.toml"), content).expect("write config");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    std::fs::write(directory.path().join(".evorch/config.toml"), content).expect("write config");
     let options = LoadOptions {
         project_dir: Some(directory.path().to_path_buf()),
         user_config_dir: Some(directory.path().join("empty-user")),

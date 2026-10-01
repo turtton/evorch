@@ -14,7 +14,8 @@ fn load(root: &std::path::Path) -> Config {
 fn roundtrip_preserves_routes_order_and_optional_override() {
     // Given: 特殊文字を含む論理名と順序付き候補。
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     let routing = RoutingConfig {
         routes: [
             (
@@ -53,7 +54,8 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
 fn empty_routing_replaces_old_routes_and_preserves_other_sections() {
     // Given: コメント付き他セクションと既存ルート。
     let temp = tempfile::tempdir().expect("temp");
-    let path = temp.path().join("evorch.toml");
+    std::fs::create_dir_all(temp.path().join(".evorch")).expect("config directory");
+    let path = temp.path().join(".evorch/config.toml");
     let unrelated = "# keep header\nversion = 2 # keep version\n\n[agents.worker]\n# keep binding\nlogical_model = 'worker'\n\n[providers.local]\ntype = 'openai-compatible'\nbase_url = 'https://example.invalid/v1'\napi_key_env = 'KEY'\nmodels = ['base']\ndefault_model = 'base' # keep default\n";
     std::fs::write(
         &path,

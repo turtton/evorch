@@ -53,7 +53,7 @@ skill 追加・設定変更を harness 起動後に反映する方法につい�
 - **v0.1 スコープは明示 `/reload` のみ**（pi と同水準。v01-routing-profiles の config 層に載せる）
 - **auto-watch は opt-in で v0.1 以降**。設計上の分岐点:
   - user 配下 `~/.config/evorch/config.d/` の watch は許容候補（validate-then-swap があれば中間状態でも last-good 維持されるため pi の却下理由は緩和される）
-  - **project 配下 `./evorch.toml` の自動適用はしない**（ADR 0008 threat model との整合）。checkout した repo が無確認で harness 挙動を変えられる攻撃面になるため、明示 `/reload` または GUI 確認を必須とする
+  - **project 配下 `./.evorch/config.toml` の自動適用はしない**（ADR 0008 threat model との整合）。checkout した repo が無確認で harness 挙動を変えられる攻撃面になるため、明示 `/reload` または GUI 確認を必須とする
 
 ## Consequences
 

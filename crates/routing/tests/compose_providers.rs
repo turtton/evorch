@@ -269,14 +269,15 @@ fn composed_provider_debug_never_contains_api_key() {
     assert!(!rendered.contains("ProviderAuth"));
 }
 
-// Given: typeとapi_key_env sugarを使うevorch.toml / When: Config::load後にcompose / Then: 正規化済み設定から成功する
+// Given: typeとapi_key_env sugarを使う.evorch/config.toml / When: Config::load後にcompose / Then: 正規化済み設定から成功する
 #[test]
 fn loaded_sugar_config_composes_across_crates() {
     let temporary = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = temporary.path().join("project");
-    std::fs::create_dir_all(&project).expect("project directoryを作成できる");
+    std::fs::create_dir_all(project.join(config::PROJECT_CONFIG_DIR))
+        .expect("project directoryを作成できる");
     std::fs::write(
-        project.join("evorch.toml"),
+        config::project_main_config_path(&project),
         format!(
             r#"[providers.{PROFILE}]
 type = "openai-compatible"

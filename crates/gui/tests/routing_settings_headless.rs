@@ -35,7 +35,7 @@ fn route_row_keeps_users_visible_during_rename() {
     // Given: a shared route whose name is being edited.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -64,7 +64,7 @@ fn draft_rename_warns_about_implicit_role_name_lookup_before_save() {
     // Given: worker uses its implicit role-name fallback and has a route.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -102,7 +102,7 @@ fn draft_rename_of_explicit_role_reference_does_not_warn_about_fallback() {
     // Given: worker explicitly references the route named worker.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -129,7 +129,7 @@ fn draft_rename_of_explicit_role_reference_does_not_warn_about_fallback() {
 fn empty_routes_without_providers_banner_in_routing_pane() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    std::fs::write(temp.path().join("evorch.toml"), "").expect("empty config");
+    std::fs::write(config::project_main_config_path(temp.path()), "").expect("empty config");
     state.open_routing_settings();
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
@@ -143,8 +143,10 @@ fn empty_routes_banner_in_routing_pane() {
     // Given: codex が先頭で既定モデルが一覧の先頭と異なる設定。
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        temp.path().join("evorch.toml"),
+        config::project_main_config_path(temp.path()),
         r#"
 [providers.codex]
 type = "openai-codex"
@@ -252,7 +254,7 @@ fn invalid_save_keeps_disk_and_cancel_reloads() {
         "worker".into(),
         vec![config::RouteCandidateConfig::default()],
     );
-    let before = std::fs::read(temp.path().join("evorch.toml")).expect("read");
+    let before = std::fs::read(config::project_main_config_path(temp.path())).expect("read");
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();
     // When: 保存を試みる。
@@ -267,7 +269,7 @@ fn invalid_save_keeps_disk_and_cancel_reloads() {
         .expect("error");
     assert!(harness.has_label(error));
     assert_eq!(
-        std::fs::read(temp.path().join("evorch.toml")).expect("read"),
+        std::fs::read(config::project_main_config_path(temp.path())).expect("read"),
         before
     );
     harness.click_label("Cancel");

@@ -80,9 +80,17 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
     let store = std::sync::Arc::new(
         sandbox::FileCredentialStore::open(temp.path().join("credentials")).unwrap(),
     );
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     let state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
         .unwrap()
-        .with_provider_settings_path(temp.path().join("evorch.toml"))
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(temp.path().to_path_buf()),
+            user_config_dir: Some(temp.path().join("isolated-user-config")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(temp.path()))
         .with_credential_store(store.clone());
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     let model = harness.state_mut().provider_settings_mut();
@@ -112,7 +120,7 @@ fn api_key_field_is_password_and_saves_to_credential_store() {
         "sk-test"
     );
     assert!(harness.state().provider_settings().editor.is_none());
-    let text = std::fs::read_to_string(temp.path().join("evorch.toml")).unwrap();
+    let text = std::fs::read_to_string(config::project_main_config_path(temp.path())).unwrap();
     assert!(text.contains("type = \"keyring\""));
     assert!(!text.contains("sk-test"));
 }
@@ -137,7 +145,7 @@ fn save_in_keyring_mode_without_store_shows_error_and_writes_nothing() {
         harness.state().provider_settings().error.as_deref(),
         Some("Credential store unavailable; use environment-variable mode")
     );
-    assert!(!temp.path().join("evorch.toml").exists());
+    assert!(!config::project_main_config_path(temp.path()).exists());
 }
 
 #[test]

@@ -13,8 +13,9 @@ pub(super) fn fixture_with_options(
     root: &std::path::Path,
     configure: impl FnOnce(&mut config::LoadOptions),
 ) -> (WorkbenchState<DemoSource>, Arc<SwitchableModel>) {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         r#"
 [providers.local]
 type = "openai-compatible"
@@ -52,7 +53,7 @@ default_model = "fast"
     let model = Arc::new(SwitchableModel::new(Arc::new(UnconfiguredModel)));
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
-        .with_provider_settings_path(root.join("evorch.toml"))
+        .with_provider_settings_path(config::project_main_config_path(root))
         .with_production_model(context, model.clone());
     (state, model)
 }

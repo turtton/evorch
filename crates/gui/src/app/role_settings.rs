@@ -12,15 +12,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     fn role_load_options(&self) -> config::LoadOptions {
         self.production_model.as_ref().map_or_else(
-            || config::LoadOptions {
-                project_dir: self
-                    .provider_settings_path
-                    .as_ref()
-                    .and_then(|path| path.parent())
-                    .map(std::path::Path::to_path_buf),
-                read_env: false,
-                ..Default::default()
-            },
+            || self.settings_load_options.clone(),
             |(context, _)| context.load_options.clone(),
         )
     }
@@ -108,8 +100,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.role_settings.error = None;
         self.role_settings.save_rx = Some(rx);
         std::thread::spawn(move || {
-            let result = config::save_agent_bindings(&path, &agents)
+            let result = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
                 .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    config::save_agent_bindings(&path, &agents).map_err(|error| error.to_string())
+                })
                 .and_then(|()| {
                     if let Some((context, model)) = production {
                         model.replace(context.reload()?);

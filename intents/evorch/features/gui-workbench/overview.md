@@ -110,7 +110,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 ## v0.3 Settings surface の実装確定（issue #93、PR #94、2026-09-06）
 
 - 配置=egui::Modal の中央 overlay（dock/layout 不変、PanelKind 拡張なし）。導線=composer 案内行「Open Settings」（chat は NotConfigured でブロック継続）と Goal pane「Configure provider」（goal は非ブロッキング案内のみ）
-- 編集項目=openai-compatible の base_url/api_key_env/models/default_model（sugar 形式）。保存先=project 層 evorch.toml、config::save_openai_compatible_provider が toml_edit で additive 書き戻し（他テーブル/コメント保持、schema v2 維持、version!=2 拒否、migrate/strict/Config 逆直列化の fail-closed 事前検証、atomic tmp+rename）
+- 編集項目=openai-compatible の base_url/api_key_env/models/default_model（sugar 形式）。保存先=既定はユーザ層 `$XDG_CONFIG_HOME/evorch/config.toml`（未設定時 `~/.config/evorch/config.toml`）。GUI の provider/sandbox/role/routing/self-improvement 設定に共通し、home 解決不能時のみ repo 内 `.evorch/config.toml` にフォールバックする。config::save_openai_compatible_provider が toml_edit で additive 書き戻し（他テーブル/コメント保持、schema v2 維持、version!=2 拒否、migrate/strict/Config 逆直列化の fail-closed 事前検証、atomic tmp+rename）
 - credential ガード=api_key_env に大文字環境変数名 ^[A-Z_][A-Z0-9_]*$ のみ受理（平文拒否・ADR 0008）
 - 検出=evorch-gui 非 demo 起動時 Config::load(project_dir) の providers 非空判定（真の配線、load 失敗は NotConfigured fail-closed）
 - 検証: crates/gui/tests/provider_settings_headless.rs 9 件 + headless_capture --demo --open-settings（lavapipe）
@@ -119,7 +119,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 
 - modal 幅: min(viewport×0.6, PROVIDER_MODAL_MAX_WIDTH=720px) clamp + 新 theme token。caption は combo 行から分離（同列配置だと modal が ~1180px に膨張し cap 突破）。検証: headless 幾何学テスト（input >400px・modal 右端 ≤720）+ PNG capture 800/1600px
 - /v1/models 補完: providers::list_models(base_url, &ProviderAuth) が GET {base_url}/models を Bearer で呼ぶ。GUI は std::thread + tokio current_thread + mpsc で非同期取得（UI スレッド非ブロック）、ModelsFetchState {Idle/Loading/Loaded/Failed} を表示。成功時は fetched ids を default_model combo 候補に採用（現在値は選択可能を維持）、失敗時は models_text/default_model 手動入力 fallback + Refresh models 再取得
-- 除外モデルフィルタ: ProviderProfileConfig.excluded_models を #[serde(default)] で additive 追加（旧 evorch.toml 読込可、deny_unknown_fields 維持、strict.rs PROVIDER_KEYS 追加）。正規化（trim/空除去/重複排除・初出順）後、非空のときのみ TOML 書き出し（空配列ノイズなし）。GUI multiline フィールドで編集・保存（round-trip 検証）
+- 除外モデルフィルタ: ProviderProfileConfig.excluded_models を #[serde(default)] で additive 追加（既存設定は当該フィールド省略可。プロジェクト層は新レイアウト `.evorch/config.toml` + `.evorch/config.d/*.toml` のみを読み込み、旧パス（プロジェクト直下の `evorch.toml` と `config.d/`）は読み込まれない。deny_unknown_fields 維持、strict.rs PROVIDER_KEYS 追加）。正規化（trim/空除去/重複排除・初出順）後、非空のときのみ TOML 書き出し（空配列ノイズなし）。GUI multiline フィールドで編集・保存（round-trip 検証）
 - default_model 見直し: 維持。router.rs resolve() の (1) session affinity 再解決時の concrete model (2) route candidate の model 未指定時 (3) fallback パスの anchor として必須（logical_model は論理名）。UI に用途を明示: "Used when a route doesn't override the model and when re-resolving a pinned session."
 - mock-openai: spawn_with_models で /v1/models endpoint（OpenAI 互換 list 形式、scripts キュー非消費）を追加し headless/通常テスト両方で利用
 - 検証: cargo test --workspace 1834/0（clippy -D warnings / fmt --check / git diff --check 全 PASS）。fetch headless テストは kittest step() による 1 フレーム確定進行（Loading 中 spinner の継続 repaint で run() が max_steps(4) を超過する CI flake を request-update で修正、commit 64f9c52）
@@ -156,7 +156,7 @@ t3code（pingdotgg/t3code、commit b883fc0 調査）を基準レイアウトと�
 - **W-PROFILES multi-profile 管理**: `config` に `save_codex_provider`・`delete_provider` を追加。GUI Settings modal を profile 一覧+Add/Edit/Delete に置き換え(segmented 切替は廃止)。Codex profile は profile ごとに専用エディタ、`credential account` は既定で `codex/<profile-name>`。
 - **W-ROUTE-SEAM runtime ModelPreference**: `RunConfig.model_preference`(watch 経由 mid-run 更新可)・`AgentInvocationContext.model_preference` 追加。`RoutedModel::complete` で `Some(pref)` 時は binding/Router スキップして profile を強制指定、model は pref.model or profile.default。選択中 profile/model は `SwitchableModel::available_profiles` 経由で GUI カタログに surface。
 - **W-PICKER スレッド単位モデルピッカー**: workspace-ui `ThreadRecord.model_preference` (`#[serde(default)]`)。GUI モデルピッカーを composer 直上に配置(id_salt 固定で auto-id 問題を再発させない)。ChatSubmission で経路を伝搬、new run には RunConfig、existing run には `set_model_preference(run_id, pref)` を送信。未選択時の「Select model」表示と disabled + Settings 導線。
-- **keyring v4 移行(nix 環境)**: `keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }` が nix 環境(dbus-1 pkg-config なし)で libdbus-sys ビルド不能、かつ gnome-keyring で NoEntry を返していたため、`keyring = { version = "4", features = ["v1"] }`(zbus-secret-service バックエンド、libdbus 不要)に移行。実機 debug ログで `creating entry with service evorch, user Crof`→`get password` 完走を確認。秘密値は一切ログ出力していない。ユーザー資産 `evorch.toml`(provider 接続設定)は認証情報パターンのため `.gitignore` に追加し git 管理外。
+- **keyring v4 移行(nix 環境)**: `keyring = { version = "3", default-features = false, features = ["sync-secret-service", "vendored"] }` が nix 環境(dbus-1 pkg-config なし)で libdbus-sys ビルド不能、かつ gnome-keyring で NoEntry を返していたため、`keyring = { version = "4", features = ["v1"] }`(zbus-secret-service バックエンド、libdbus 不要)に移行。実機 debug ログで `creating entry with service evorch, user Crof`→`get password` 完走を確認。秘密値は一切ログ出力していない。ユーザー資産のローカル設定（provider 接続設定など）を保護するため、`.gitignore` の `/evorch.toml` に加えて `/.evorch/` も対象とし git 管理外。
 
 検証: workspace 全テスト green / clippy(-D warnings)・fmt clean。PNG 証跡あり。`headless_run_completes_with_single_mock_response` の flake は本変更不要の pre-existing 問題(MapEnv 使用で keyring 非依存)で、単体では常に成功。known follow-up として記録するのみ。
 

@@ -24,8 +24,9 @@ fn workbench(root: &std::path::Path, configured: bool) -> HeadlessWorkbench<Demo
         .with_sidebar(sidebar)
         .with_sidebar_path(root.join("sidebar.json"));
     if configured {
+        std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
         std::fs::write(
-            root.join("evorch.toml"),
+            config::project_main_config_path(root),
             r#"
 [providers.local]
 type = "openai-compatible"

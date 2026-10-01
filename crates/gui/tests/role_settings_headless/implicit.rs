@@ -15,7 +15,7 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         // Given: providers but no routes or explicit role bindings.
         let temp = tempfile::tempdir().expect("temp");
         let (mut harness, _) = fixture(temp.path());
-        let path = temp.path().join("evorch.toml");
+        let path = config::project_main_config_path(temp.path());
         let text = std::fs::read_to_string(&path).expect("config");
         let text = text.split("[routing.routes]").next().expect("profiles");
         std::fs::write(&path, text).expect("no routes");

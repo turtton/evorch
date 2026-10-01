@@ -59,8 +59,13 @@ impl SelfImprovementSettingsModel {
         self.save_rx = Some(rx);
         self.error = None;
         std::thread::spawn(move || {
-            let result =
-                config::save_self_improvement(&path, &draft).map_err(|error| error.to_string());
+            let result = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    config::save_self_improvement(&path, &draft).map_err(|error| error.to_string())
+                });
             let _ = tx.send(result);
         });
     }
@@ -130,7 +135,9 @@ mod tests {
     #[test]
     fn async_save_round_trips_all_fields_and_preserves_other_sections() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("evorch.toml");
+        let path = config::project_main_config_path(dir.path());
+        std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR))
+            .expect("config directory");
         std::fs::write(&path, "version = 2\n[metrics]\nenabled = false\n").unwrap();
         let cfg = SelfImprovementConfig {
             enabled: true,

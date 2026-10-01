@@ -24,7 +24,7 @@ OpenAI / Anthropic / OpenAI-compatible が `ProviderClient` 実装としてコ�
 
 `crates/config/` + `crates/model/` + `crates/routing/` がコード確定（PR #17、issue #8）。要点:
 
-- **config**: TOML マルチソース読み込み（CLI/環境変数 > project `./evorch.toml` > user `~/.config/evorch/config.toml` > builtin defaults）+ `config.d/*.toml` 辞書順 deep merge（後勝ち）+ version フィールドと migration 関数 + schemars JSON Schema 生成。v0.1 設定領域の typed struct（provider profiles / model routing / panel layout・keybind / diagnostics / permission preset / 計測）。GUI（v01-gui-panes）の panel layout・keybind は workspace-ui 内の最小設定型で先行実装されており、本 config 層への統合は後続 slice
+- **config**: TOML マルチソース読み込み（CLI > 環境変数 > project `./.evorch/config.toml` > user `$XDG_CONFIG_HOME/evorch/config.toml`（未設定時 `~/.config/evorch/config.toml`）> builtin defaults）+ 各 main と同ディレクトリの `config.d/*.toml` 辞書順 deep merge（後勝ち。project は新レイアウト `./.evorch/config.toml` + `./.evorch/config.d/*.toml` のみを読み込み、旧パス（プロジェクト直下の `evorch.toml` と `config.d/`）は読み込まれない）+ version フィールドと migration 関数 + schemars JSON Schema 生成。v0.1 設定領域の typed struct（provider profiles / model routing / panel layout・keybind / diagnostics / permission preset / 計測）。GUI（v01-gui-panes）の panel layout・keybind は workspace-ui 内の最小設定型で先行実装されており、本 config 層への統合は後続 slice
 - **model**: ModelCatalog の4供給源のうち v0.1 実装分 — builtin デフォルト（オフライン返却）+ models.dev 起動時 fetch（キャッシュ + builtin フォールバック）+ `/v1/models` 検出マージ（属性未確定フラグ付き）。subscription 系の auth 状態動的フィルタは v0.3。更新履歴は SQLite `catalog_updates` テーブル（migration V2、append-only）
 - **routing**: TOML の複数 provider profile（credential は参照のみ・config 非書き込み）→ logical model → route → profile → 実モデル ID 解決。simple fallback（current profile → 同じ logical model の別 profile → 別 logical model。429 / 5xx / timeout / quota / auth で遷移）+ session affinity の基礎。health / cooldown 高度化は v0.4
 

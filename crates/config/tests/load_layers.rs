@@ -94,11 +94,11 @@ fn project_layer_overrides_user_layer() {
         "[permissions]\npreset = \"permissive\"\n",
     );
     write_file(
-        &project.join("evorch.toml"),
+        &project.join(".evorch/config.toml"),
         "[permissions]\npreset = \"strict\"\n[panel]\nlayout = \"default\"\n",
     );
     write_file(
-        &project.join("config.d/20-compact.toml"),
+        &project.join(".evorch/config.d/20-compact.toml"),
         "[panel]\nlayout = \"compact\"\n",
     );
 
@@ -128,7 +128,7 @@ fn env_overrides_project() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
     write_file(
-        &project.join("evorch.toml"),
+        &project.join(".evorch/config.toml"),
         "[diagnostics]\nlog_level = \"warn\"\nlog_dir = \"/tmp/from-file\"\n",
     );
 
@@ -178,7 +178,7 @@ fn cli_overrides_env() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
     write_file(
-        &project.join("evorch.toml"),
+        &project.join(".evorch/config.toml"),
         "[diagnostics]\nlog_dir = \"/tmp/from-file\"\n",
     );
     let cli_overrides = toml::from_str(
@@ -243,7 +243,7 @@ fn env_value_parsed_as_toml_literal_with_string_fallback() {
 fn parse_error_reports_offending_path() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
-    let broken = project.join("evorch.toml");
+    let broken = project.join(".evorch/config.toml");
     write_file(&broken, "= broken [metrics\n");
 
     let error = Config::load(&LoadOptions {
@@ -268,7 +268,7 @@ fn parse_error_reports_offending_path() {
 fn future_version_is_rejected() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
-    write_file(&project.join("evorch.toml"), "version = 999\n");
+    write_file(&project.join(".evorch/config.toml"), "version = 999\n");
 
     let error = Config::load(&LoadOptions {
         project_dir: Some(project),
@@ -293,7 +293,7 @@ fn future_version_is_rejected() {
 fn migrate_v1_file_gains_metrics_defaults() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
-    write_file(&project.join("evorch.toml"), "version = 1\n");
+    write_file(&project.join(".evorch/config.toml"), "version = 1\n");
 
     let config = Config::load(&LoadOptions {
         project_dir: Some(project),
@@ -314,7 +314,7 @@ fn v1_file_with_partial_metrics_keeps_user_values() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
     write_file(
-        &project.join("evorch.toml"),
+        &project.join(".evorch/config.toml"),
         "version = 1\n\n[metrics]\nenabled = false\n",
     );
 
@@ -345,7 +345,7 @@ fn mixed_version_layers_each_migrated_before_merge() {
         "version = 1\n\n[metrics]\nenabled = false\n",
     );
     write_file(
-        &project.join("evorch.toml"),
+        &project.join(".evorch/config.toml"),
         "version = 2\n\n[metrics]\nretention_days = 7\n",
     );
 
@@ -368,7 +368,10 @@ fn mixed_version_layers_each_migrated_before_merge() {
 fn missing_version_treated_as_current() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
-    write_file(&project.join("evorch.toml"), "[metrics]\nenabled = false\n");
+    write_file(
+        &project.join(".evorch/config.toml"),
+        "[metrics]\nenabled = false\n",
+    );
 
     let config = Config::load(&LoadOptions {
         project_dir: Some(project),

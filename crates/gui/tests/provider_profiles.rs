@@ -89,7 +89,8 @@ fn edit_existing_openai_profile_prefills_form() {
 fn delete_removes_profile_and_refreshes_list() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    let path = config::project_main_config_path(tmp.path());
+    std::fs::create_dir_all(tmp.path().join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     config::save_codex_provider(
         &path,
         &config::CodexProviderInput {

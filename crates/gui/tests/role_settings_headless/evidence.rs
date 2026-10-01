@@ -5,7 +5,7 @@ fn capture_role_routing_states() {
     for size in [[960.0, 600.0], [1200.0, 900.0]] {
         let temp = tempfile::tempdir().expect("temp");
         let (_, _) = super::fixture(temp.path());
-        let path = temp.path().join("evorch.toml");
+        let path = config::project_main_config_path(temp.path());
         let text = std::fs::read_to_string(&path).expect("config");
         std::fs::write(
             &path,

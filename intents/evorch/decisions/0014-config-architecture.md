@@ -13,13 +13,16 @@ Accepted（2026-08-29、grill による全体構想レビューから確定）
 ### 配置と優先順位（高→低）
 
 ```
-CLI 引数 / 環境変数
-  > project config（./evorch.toml）
-  > user config（~/.config/evorch/config.toml、XDG 準拠）
+CLI 引数
+  > 環境変数
+  > project config（./.evorch/config.toml + ./.evorch/config.d/*.toml）
+  > user config（$XDG_CONFIG_HOME/evorch/config.toml + 同ディレクトリの config.d/*.toml、未設定時は ~/.config/evorch/）
   > builtin defaults（コンパイル時）
 ```
 
-project config は git 管理可能でチーム共有できる。
+後続変更でプロジェクト層は新レイアウト `.evorch/config.toml` + `.evorch/config.d/*.toml` のみに移行。旧パス（プロジェクト直下の `evorch.toml` と `config.d/`）は読み込まれない。
+
+当初は project config の git 管理によるチーム共有を想定していた。後続変更ではローカル設定保護のため、このリポジトリの `.gitignore` 対象を `/evorch.toml` と `/.evorch/` とする。
 
 ### 形式と schema
 
@@ -30,7 +33,7 @@ project config は git 管理可能でチーム共有できる。
 
 ### nix / home-manager 連携
 
-- loader を **マルチソース deep merge** にする: `~/.config/evorch/config.d/*.toml` を辞書順にロードして merge + `config.toml` 本体。後勝ち
+- loader を **マルチソース deep merge** にする: ユーザ層は `$XDG_CONFIG_HOME/evorch/config.toml`（未設定時 `~/.config/evorch/config.toml`）+ 同ディレクトリの `config.d/*.toml`、プロジェクト層は `.evorch/config.toml` + `.evorch/config.d/*.toml`。drop-in は辞書順に deep merge（後勝ち）
 - home-manager は `config.d/00-nix-generated.toml` を生成（00 プレフィックスで優先度最低固定）。ユーザー手編集は `config.d/50-*.toml` 等で上書き。宣言的生成と手編集の衝突をファイル分割で可視化
 - home-manager module（programs.evorch）自体は v0.2 以降で正式提供。v0.1 で必要なのは loader の merge 機構のみ（これがあればユーザーが独自 module を書ける）
 

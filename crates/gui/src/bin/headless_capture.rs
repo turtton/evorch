@@ -79,7 +79,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         state = state.with_provider_status(ProviderStatus::Configured);
     }
     if let Some(dir) = demo_dir.as_ref() {
-        state = state.with_provider_settings_path(dir.path().join("evorch.toml"));
+        std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR))?;
+        state = state
+            .with_settings_load_options(config::LoadOptions {
+                project_dir: Some(dir.path().to_path_buf()),
+                user_config_dir: Some(dir.path().join("user")),
+                read_env: false,
+                ..Default::default()
+            })
+            .with_provider_settings_path(config::project_main_config_path(dir.path()));
     }
     if capture.open_settings {
         let config = gui::fixture::demo_provider_config();

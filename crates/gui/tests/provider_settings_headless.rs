@@ -126,6 +126,7 @@ fn settings_menu_opens_modal_when_provider_is_configured() {
 }
 
 fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("demo");
     sidebar
@@ -144,7 +145,13 @@ fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoS
         .expect("default state builds")
         .with_sidebar(sidebar)
         .with_provider_status(ProviderStatus::default())
-        .with_provider_settings_path(root.join("evorch.toml"));
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(root.to_path_buf()),
+            user_config_dir: Some(root.join("isolated-user-config")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(root));
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
@@ -190,7 +197,7 @@ fn finish_save(harness: &mut HeadlessWorkbench<DemoSource>) {
 }
 
 #[test]
-fn save_valid_settings_writes_evorch_toml_and_flips_status() {
+fn save_valid_settings_writes_project_config_and_flips_status() {
     // Given: an unconfigured conversation and valid settings with a project path.
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = workbench_with_config_path(temp.path());
@@ -207,7 +214,9 @@ fn save_valid_settings_writes_evorch_toml_and_flips_status() {
     harness.click_label("Save");
     finish_save(&mut harness);
     // Then: disk configuration and the conversation both become configured.
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     assert!(path.exists());
     let raw = std::fs::read_to_string(path).expect("saved file readable");
     assert!(raw.contains("type = \"openai-compatible\""));
@@ -266,7 +275,7 @@ fn save_with_plaintext_api_key_is_rejected_and_file_untouched() {
     harness.click_label("Save");
     harness.run();
     // Then: no file or status change occurs and the rejection is visible in the modal.
-    assert!(!temp.path().join("evorch.toml").exists());
+    assert!(!config::project_main_config_path(temp.path()).exists());
     assert_eq!(
         harness.state().provider_status(),
         &ProviderStatus::default()
@@ -284,10 +293,12 @@ fn save_with_plaintext_api_key_is_rejected_and_file_untouched() {
 }
 
 #[test]
-fn save_preserves_existing_tables_in_evorch_toml() {
+fn save_preserves_existing_tables_in_project_config() {
     // Given: a canonical provider and unrelated routing configuration already exist.
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     let existing = "version = 2\n# keep this comment\n[routing]\nroutes = {}\n\n[providers.other]\nprovider_type = \"anthropic\"\napi_protocol = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = { type = \"env\", var = \"OTHER_API_KEY\" }\nmodels = [\"claude-sonnet-4-5\"]\ndefault_model = \"claude-sonnet-4-5\"\n";
     std::fs::write(&path, existing).expect("existing config written");
     let before = load_config(temp.path());
@@ -322,7 +333,7 @@ fn cancel_closes_modal_without_writing() {
     // Then: the modal closes without configuring the provider or writing a file.
     assert!(!harness.has_label("Save"));
     assert!(harness.state().provider_settings().editor.is_none());
-    assert!(!temp.path().join("evorch.toml").exists());
+    assert!(!config::project_main_config_path(temp.path()).exists());
     assert_eq!(
         harness.state().provider_status(),
         &ProviderStatus::default()
@@ -347,6 +358,7 @@ fn workbench_with_seeded_settings(
     model: OpenAiEditorModel,
     size: [f32; 2],
 ) -> HeadlessWorkbench<DemoSource> {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     let mut sidebar = SidebarState::default();
     let project_id = ProjectId::new("demo");
     sidebar
@@ -381,7 +393,13 @@ fn workbench_with_seeded_settings(
         .expect("default state builds")
         .with_sidebar(sidebar)
         .with_provider_status(ProviderStatus::default())
-        .with_provider_settings_path(root.join("evorch.toml"))
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(root.to_path_buf()),
+            user_config_dir: Some(root.join("isolated-user-config")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(root))
         .with_provider_settings(settings);
     HeadlessWorkbench::new(state, size)
 }
@@ -502,8 +520,8 @@ fn add_kimi_subscription_saves_kimi_profile() {
     harness.click_label("Save");
     finish_save(&mut harness);
     // Then: the profile persists as kimi-subscription with the preset endpoint and models.
-    let raw =
-        std::fs::read_to_string(temp.path().join("evorch.toml")).expect("saved file readable");
+    let raw = std::fs::read_to_string(config::project_main_config_path(temp.path()))
+        .expect("saved file readable");
     assert!(raw.contains("type = \"kimi-subscription\""));
     let config = load_config(temp.path());
     let provider = config.providers.get("kimi").expect("kimi provider saved");

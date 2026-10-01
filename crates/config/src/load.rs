@@ -16,8 +16,8 @@ use crate::types::Config;
 /// ユーザ層のメイン設定ファイル名。
 const USER_MAIN_FILE: &str = "config.toml";
 
-/// プロジェクト層のメイン設定ファイル名。
-const PROJECT_MAIN_FILE: &str = "evorch.toml";
+/// プロジェクト層の設定ディレクトリ名。
+pub const PROJECT_CONFIG_DIR: &str = ".evorch";
 
 /// ドロップイン設定ディレクトリ名。
 const DROPIN_DIR: &str = "config.d";
@@ -27,7 +27,8 @@ const DROPIN_DIR: &str = "config.d";
 pub struct LoadOptions {
     /// プロジェクト層の基準ディレクトリ。
     ///
-    /// `Some` の場合 `<dir>/evorch.toml` と `<dir>/config.d/*.toml` を読み込む。
+    /// `Some` の場合 `<dir>/.evorch/config.toml` と
+    /// `<dir>/.evorch/config.d/*.toml` のみを読み込む。
     /// `None` の場合はプロジェクト層をスキップする。
     pub project_dir: Option<PathBuf>,
 
@@ -82,7 +83,7 @@ impl Config {
     /// 1. 組み込み既定値 ([`Config::default`] を TOML 経由で [`toml::Value`] にした
     ///    もの。マイグレーションは通さない — 既に現行バージョンのため)。
     /// 2. ユーザ層 (`config.toml` → `config.d/*.toml` 辞書順)。
-    /// 3. プロジェクト層 (`evorch.toml` → `config.d/*.toml` 辞書順)。
+    /// 3. プロジェクト層 (`.evorch/config.toml` → `.evorch/config.d/*.toml` 辞書順)。
     /// 4. 環境変数層 (`EVORCH_` プレフィックス、[`Option::env`] が `Some` なら
     ///    注入ソースを優先)。
     /// 5. CLI 上書き。
@@ -129,7 +130,12 @@ impl Config {
         }
 
         if let Some(dir) = &opts.project_dir {
-            merge_dir_layer(&mut merged, dir, PROJECT_MAIN_FILE, &opts.file_overrides)?;
+            merge_dir_layer(
+                &mut merged,
+                &dir.join(PROJECT_CONFIG_DIR),
+                USER_MAIN_FILE,
+                &opts.file_overrides,
+            )?;
         }
 
         if opts.read_env {
@@ -175,12 +181,27 @@ fn builtin_layer() -> Result<toml::Value, ConfigError> {
 ///
 /// `$XDG_CONFIG_HOME` (空でない) があれば `<それ>/evorch`、なければ
 /// `$HOME/.config/evorch`。どちらも解決できない場合は `None`。
-/// この関数はユーザ層の読み込みを試みる時点でのみ呼ばれる (遅延解決)。
+/// ユーザ層の読み込みや既定保存先の問い合わせ時に遅延解決する。
 pub fn user_config_dir() -> Option<PathBuf> {
     user_config_dir_from(
         std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
+}
+
+/// ユーザ層メイン設定の既定保存先を返す。
+///
+/// [`user_config_dir`] に `config.toml` を連結する。ユーザ設定ディレクトリを
+/// 解決できない場合は `None`。ディレクトリやファイルの存在は問わず、作成もしない。
+pub fn user_main_config_path() -> Option<PathBuf> {
+    user_config_dir().map(|dir| dir.join(USER_MAIN_FILE))
+}
+
+/// プロジェクト層メイン設定の既定保存先 (`<project_dir>/.evorch/config.toml`) を返す。
+///
+/// ディレクトリやファイルの存在は問わず、作成もしない。
+pub fn project_main_config_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(PROJECT_CONFIG_DIR).join(USER_MAIN_FILE)
 }
 
 pub(crate) fn user_config_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
@@ -265,10 +286,55 @@ mod tests {
     use super::{read_file_migrated, user_config_dir_from};
 
     #[test]
+    fn user_main_config_path_resolves_environment() {
+        // Test the public helper in child processes: never mutate this parallel test process's env.
+        const EXPECTED: &str = "EVORCH_CONFIG_TEST_EXPECTED_USER_MAIN_PATH";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            let expected = (!expected.is_empty()).then(|| std::path::PathBuf::from(expected));
+            assert_eq!(crate::user_main_config_path(), expected);
+            return;
+        }
+
+        for (xdg, home, expected) in [
+            (Some("/x"), Some("/h"), "/x/evorch/config.toml"),
+            (Some("/x"), None, "/x/evorch/config.toml"),
+            (Some(""), Some("/h"), "/h/.config/evorch/config.toml"),
+            (None, Some("/h"), "/h/.config/evorch/config.toml"),
+            (None, None, ""),
+            (Some(""), None, ""),
+            (None, Some(""), ""),
+            (Some(""), Some(""), ""),
+        ] {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test binary"));
+            child.args([
+                "--exact",
+                "load::tests::user_main_config_path_resolves_environment",
+                "--nocapture",
+            ]);
+            child.env(EXPECTED, expected);
+            for (key, value) in [("XDG_CONFIG_HOME", xdg), ("HOME", home)] {
+                if let Some(value) = value {
+                    child.env(key, value);
+                } else {
+                    child.env_remove(key);
+                }
+            }
+            let output = child.output().expect("run isolated helper test");
+            assert!(
+                output.status.success(),
+                "XDG_CONFIG_HOME={xdg:?}, HOME={home:?}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn file_override_skips_migration_even_for_missing_file() {
         // Given: a current-format override omits the optional version field.
         let temp = tempfile::tempdir().expect("temp");
-        let path = temp.path().join("evorch.toml");
+        let path = temp.path().join(".evorch/config.toml");
         let candidate: toml::Value =
             toml::from_str("[metrics]\nenabled = false\n").expect("current-format candidate");
         let overrides = [(path.clone(), candidate.clone())].into();
@@ -283,8 +349,8 @@ mod tests {
     fn file_override_requires_matching_path() {
         // Given: an override targets a different directory's identically named file.
         let temp = tempfile::tempdir().expect("temp");
-        let path = temp.path().join("evorch.toml");
-        let other = temp.path().join("other/evorch.toml");
+        let path = temp.path().join(".evorch/config.toml");
+        let other = temp.path().join("other/.evorch/config.toml");
         let candidate = toml::from_str("[metrics]\nenabled = false\n").expect("candidate");
         let overrides = [(other, candidate)].into();
         // When: resolving a missing file not in the map.

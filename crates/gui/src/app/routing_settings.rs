@@ -19,15 +19,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub(super) fn routing_load_options(&self) -> config::LoadOptions {
         self.production_model.as_ref().map_or_else(
-            || config::LoadOptions {
-                project_dir: self
-                    .provider_settings_path
-                    .as_ref()
-                    .and_then(|path| path.parent())
-                    .map(std::path::Path::to_path_buf),
-                read_env: false,
-                ..Default::default()
-            },
+            || self.settings_load_options.clone(),
             |(context, _)| context.load_options.clone(),
         )
     }
@@ -93,7 +85,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.save_rx = Some(rx);
         std::thread::spawn(move || {
             let saved = if renames.is_empty() {
-                config::save_routing(&path, &routing).map_err(|error| error.to_string())
+                path.parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| {
+                        config::save_routing(&path, &routing).map_err(|error| error.to_string())
+                    })
             } else {
                 config::Config::load(&options)
                     .map_err(|error| error.to_string())
@@ -113,8 +110,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             }
                             Err(error) => return Err(error.to_string()),
                         };
-                        // Project-local values are the save baseline. Copying the merged
-                        // effective agents would persist unrelated user/env/CLI overrides.
+                        // Values local to the save target are the baseline. Copying the
+                        // merged agents would persist unrelated overrides from other layers.
                         let mut project_agents: config::AgentsConfig = candidate
                             .get("agents")
                             .cloned()
@@ -168,6 +165,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 "Route rename blocked: higher-priority config (config.d drop-in, EVORCH_* env, or CLI override) still pins agents binding(s) {} to the old route name. Remove that override or edit that layer directly. No changes were saved.",
                                 blocked.join(", ")
                             ));
+                        }
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                         }
                         config::save_routing_and_agents(&path, &routing, &project_agents)
                             .map_err(|error| error.to_string())

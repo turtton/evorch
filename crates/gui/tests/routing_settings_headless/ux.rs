@@ -6,7 +6,7 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     // Given: a persisted undefined role binding.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, runtime) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let config = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -56,7 +56,7 @@ fn routing_registered_routes_start_collapsed() {
     // Given: a registered route loaded from disk.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let config = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -78,7 +78,7 @@ fn routing_expanded_route_can_edit_save_and_stays_expanded() {
     // Given: a registered route.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let config = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,

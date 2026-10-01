@@ -144,7 +144,7 @@ impl ProviderSettingsModel {
                 | config::ProviderTypeConfig::KimiSubscription
         ) {
             self.error = Some(
-                "This provider type must be edited in evorch.toml; its configuration is preserved."
+                "This provider type must be edited in config.toml; its configuration is preserved."
                     .into(),
             );
             return;

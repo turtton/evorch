@@ -147,8 +147,9 @@ fn parse_args_requires_run_subcommand() {
 }
 
 fn write_project_config(root: &std::path::Path, base_url: &str) {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         format!(
             r#"[providers.local]
 type = "openai-compatible"
@@ -165,7 +166,7 @@ profile = "local"
 "#
         ),
     )
-    .expect("evorch.toml を書ける");
+    .expect(".evorch/config.toml を書ける");
 }
 
 fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> HeadlessArgs {
@@ -249,7 +250,7 @@ async fn headless_web_tools_follow_saved_setting_and_cli_override() {
         );
         write_project_config(directory.path(), &mock.base_url());
         config::save_sandbox(
-            &directory.path().join("evorch.toml"),
+            &config::project_main_config_path(directory.path()),
             config::SandboxConfig {
                 web_tools_enabled: saved,
                 ..Default::default()

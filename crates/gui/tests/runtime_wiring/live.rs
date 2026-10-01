@@ -37,8 +37,10 @@ async fn production_non_demo_composition_uses_loaded_config_and_file_store() {
     store
         .set("live", &Secret::from("test-secret".to_owned()))
         .unwrap();
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        temp.path().join("evorch.toml"),
+        config::project_main_config_path(temp.path()),
         format!(
             r#"
 [providers.live]
@@ -103,8 +105,10 @@ worker = [{{ profile = "live" }}]
 fn provider_save_recomposes_live_model() {
     // Given: an explicit worker route; saving its provider makes it usable.
     let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        temp.path().join("evorch.toml"),
+        config::project_main_config_path(temp.path()),
         "[routing.routes]\nworker = [{ profile = 'live' }]\n",
     )
     .unwrap();
@@ -120,7 +124,7 @@ fn provider_save_recomposes_live_model() {
     );
     let mut state = WorkbenchState::new(runtime, &UiSettings::default())
         .unwrap()
-        .with_provider_settings_path(temp.path().join("evorch.toml"))
+        .with_provider_settings_path(config::project_main_config_path(temp.path()))
         .with_credential_store(store)
         .with_production_model(context, model.clone());
     let settings = state.provider_settings_mut();

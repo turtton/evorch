@@ -97,6 +97,7 @@ pub struct WorkbenchState<S> {
         crate::model::self_improvement_settings::SelfImprovementSettingsModel,
     pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
+    pub(super) settings_load_options: config::LoadOptions,
     pub(super) credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
     pub(super) provider_save_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) production_model: Option<(
@@ -190,6 +191,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 crate::model::self_improvement_settings::SelfImprovementSettingsModel::default(),
             codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
+            settings_load_options: config::LoadOptions::default(),
             credential_store: None,
             provider_save_rx: None,
             production_model: None,

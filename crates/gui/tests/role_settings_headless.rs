@@ -57,7 +57,7 @@ fn empty_routes_options_keep_only_explicit_bindings() {
     // Given: a provider config without routes and with a legacy category binding.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -168,7 +168,7 @@ fn empty_routes_banner_in_role_settings_explains_missing_routes() {
     // Given: two profiles and no routes.
     let temp = tempfile::tempdir().expect("temp");
     let (mut harness, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,

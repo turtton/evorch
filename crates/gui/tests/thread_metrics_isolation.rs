@@ -3,8 +3,9 @@ use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench}
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn state(root: &std::path::Path) -> WorkbenchState<DemoSource> {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         r#"
 [providers.local]
 type = "openai-compatible"

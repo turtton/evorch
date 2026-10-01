@@ -4,8 +4,9 @@ use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench}
 use runtime::compose::SwitchableModel;
 
 pub fn fixture(root: &std::path::Path) -> (HeadlessWorkbench<DemoSource>, Arc<SwitchableModel>) {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         r#"
 [providers.local]
 type = "openai-compatible"
@@ -58,7 +59,7 @@ pub fn sized_fixture(
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
             .expect("state")
-            .with_provider_settings_path(root.join("evorch.toml"))
+            .with_provider_settings_path(config::project_main_config_path(root))
             .with_production_model(context, model.clone());
     state.open_role_settings();
     (HeadlessWorkbench::new(state, size), model)

@@ -17,7 +17,8 @@ fn load(directory: &std::path::Path) -> Config {
 fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
     // Given: worker role と quick category に異なる binding を設定する
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("evorch.toml");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    let path = directory.path().join(".evorch/config.toml");
     let agents = AgentsConfig {
         worker: WorkerBindingConfig {
             base: RoleBindingConfig {
@@ -72,7 +73,8 @@ fn save_role_binding_roundtrips_logical_model_and_category_overrides() {
 fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
     // Given: providers を含む既存設定
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("evorch.toml");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    let path = directory.path().join(".evorch/config.toml");
     std::fs::write(
         &path,
         "version = 2\n\n[providers.other]\ntype = 'openai-compatible'\nbase_url = 'https://example.com/v1'\napi_key_env = 'OTHER_KEY'\nmodels = ['model-a']\ndefault_model = 'model-a'\n",
@@ -111,7 +113,8 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
 #[test]
 fn save_role_binding_roundtrips_freeform_reasoning_effort() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("evorch.toml");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    let path = directory.path().join(".evorch/config.toml");
     let agents = AgentsConfig {
         worker: WorkerBindingConfig {
             base: RoleBindingConfig {

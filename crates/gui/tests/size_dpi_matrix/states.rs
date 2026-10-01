@@ -36,7 +36,13 @@ impl State {
                     .expect("demo state builds"),
                 demo_sidebar(root).expect("demo sidebar builds"),
             )
-            .with_provider_settings_path(root.join("evorch.toml")),
+            .with_settings_load_options(config::LoadOptions {
+                project_dir: Some(root.to_path_buf()),
+                user_config_dir: Some(root.join("user")),
+                read_env: false,
+                ..Default::default()
+            })
+            .with_provider_settings_path(config::project_main_config_path(root)),
         };
         match self {
             Self::Empty | Self::Demo => {}

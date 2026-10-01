@@ -4,7 +4,8 @@ use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench}
 fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     // Given: an existing project configuration and the chatbox sandbox button.
     let dir = tempfile::tempdir().expect("temp");
-    let path = dir.path().join("evorch.toml");
+    let path = config::project_main_config_path(dir.path());
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
     std::fs::write(&path, "version = 2\n[metrics]\nenabled = false\n").expect("fixture");
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let runtime = runtime::AgentRuntime::new(
@@ -18,6 +19,12 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
     runtime.set_web_tools_enabled(true);
     let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
         .expect("state")
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(dir.path().to_path_buf()),
+            user_config_dir: Some(dir.path().join("user")),
+            read_env: false,
+            ..Default::default()
+        })
         .with_provider_settings_path(path.clone())
         .with_sandbox_runtime(runtime.clone());
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
@@ -46,7 +53,8 @@ fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
 fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
     // Given: an enabled persisted setting.
     let dir = tempfile::tempdir().expect("temp");
-    let path = dir.path().join("evorch.toml");
+    let path = config::project_main_config_path(dir.path());
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
     config::save_sandbox(
         &path,
         config::SandboxConfig {
@@ -58,6 +66,12 @@ fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
             .expect("state")
+            .with_settings_load_options(config::LoadOptions {
+                project_dir: Some(dir.path().to_path_buf()),
+                user_config_dir: Some(dir.path().join("user")),
+                read_env: false,
+                ..Default::default()
+            })
             .with_provider_settings_path(path.clone());
     state.open_sandbox_settings();
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
@@ -86,7 +100,8 @@ fn escalation_fixture(
     dir: &std::path::Path,
     initial: config::SandboxConfig,
 ) -> (HeadlessWorkbench<DemoSource>, runtime::AgentRuntime) {
-    let path = dir.join("evorch.toml");
+    let path = config::project_main_config_path(dir);
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
     config::save_sandbox(&path, initial).expect("save fixture");
     let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
     let runtime = runtime::AgentRuntime::new(
@@ -105,6 +120,12 @@ fn escalation_fixture(
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
             .expect("state")
+            .with_settings_load_options(config::LoadOptions {
+                project_dir: Some(dir.to_path_buf()),
+                user_config_dir: Some(dir.join("user")),
+                read_env: false,
+                ..Default::default()
+            })
             .with_provider_settings_path(path)
             .with_sandbox_runtime(runtime.clone());
     state.open_sandbox_settings();
@@ -221,7 +242,13 @@ fn capture_sandbox_settings() {
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
             .expect("state")
-            .with_provider_settings_path(dir.path().join("evorch.toml"));
+            .with_settings_load_options(config::LoadOptions {
+                project_dir: Some(dir.path().to_path_buf()),
+                user_config_dir: Some(dir.path().join("user")),
+                read_env: false,
+                ..Default::default()
+            })
+            .with_provider_settings_path(config::project_main_config_path(dir.path()));
     state.open_sandbox_settings();
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();

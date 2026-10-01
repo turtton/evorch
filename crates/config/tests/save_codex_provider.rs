@@ -38,8 +38,9 @@ fn openai(name: &str) -> config::OpenAiCompatibleProviderInput {
 fn save_codex_provider_round_trips() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
     // When
-    config::save_codex_provider(&tmp.path().join("evorch.toml"), &codex("work")).unwrap();
+    config::save_codex_provider(&tmp.path().join(".evorch/config.toml"), &codex("work")).unwrap();
     // Then
     let cfg = load(tmp.path());
     let profile = &cfg.providers["work"];
@@ -63,7 +64,8 @@ fn save_codex_provider_round_trips() {
 fn three_profiles_of_mixed_types_coexist() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     for name in ["local", "remote"] {
         config::save_openai_compatible_provider(&path, &openai(name)).unwrap();
     }
@@ -84,7 +86,8 @@ fn three_profiles_of_mixed_types_coexist() {
 fn delete_provider_removes_only_target() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     config::save_openai_compatible_provider(&path, &openai("local")).unwrap();
     config::save_codex_provider(&path, &codex("work")).unwrap();
     // When
@@ -104,7 +107,8 @@ fn delete_provider_removes_only_target() {
 fn switching_credential_modes_drops_stale_env_key_on_save() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     config::save_openai_compatible_provider(&path, &openai("work")).unwrap();
     // When
     config::save_codex_provider(&path, &codex("work")).unwrap();
@@ -124,7 +128,8 @@ fn switching_credential_modes_drops_stale_env_key_on_save() {
 #[test]
 fn codex_model_override_preserves_other_model_fields() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     let mut input = codex("work");
     let model = &mut input.models[0];
     model.context_window = Some(272_000);

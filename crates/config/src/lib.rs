@@ -24,7 +24,10 @@ mod strict;
 pub mod types;
 
 pub use error::ConfigError;
-pub use load::{LoadOptions, user_config_dir};
+pub use load::{
+    LoadOptions, PROJECT_CONFIG_DIR, project_main_config_path, user_config_dir,
+    user_main_config_path,
+};
 pub use presets::PresetStore;
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use save::{

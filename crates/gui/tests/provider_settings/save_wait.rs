@@ -36,7 +36,13 @@ fn saves_existing_keyring_profile_when_injected_store_is_slow() {
     let read_started = Arc::new(AtomicBool::new(false));
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .unwrap()
-        .with_provider_settings_path(temp.path().join("evorch.toml"))
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(temp.path().to_path_buf()),
+            user_config_dir: Some(temp.path().join("isolated-user-config")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(temp.path()))
         .with_provider_settings(ProviderSettingsModel::seed_from_config(&load_config(
             temp.path(),
         )))

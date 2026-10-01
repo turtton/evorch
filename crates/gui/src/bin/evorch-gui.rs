@@ -842,8 +842,25 @@ fn run() -> Result<(), GuiError> {
         };
     }
     let provider_settings_path = match demo_directory.as_ref() {
-        Some(directory) => directory.path().join("evorch.toml"),
-        None => repo_root.join("evorch.toml"),
+        Some(directory) => config::project_main_config_path(directory.path()),
+        None => config::user_main_config_path().unwrap_or_else(|| {
+            tracing::warn!(
+                "user config directory unavailable; saving settings in the project config"
+            );
+            config::project_main_config_path(&repo_root)
+        }),
+    };
+    // Config writers require an existing parent (notably the demo's new .evorch directory).
+    if let Some(parent) = provider_settings_path.parent() {
+        std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
+    }
+    let settings_load_options = config::LoadOptions {
+        project_dir: Some(demo_directory.as_ref().map_or_else(
+            || repo_root.clone(),
+            |directory| directory.path().to_path_buf(),
+        )),
+        read_env: false,
+        ..Default::default()
     };
 
     let delivery: Arc<dyn DeliveryPort> = match demo_directory.as_ref() {
@@ -914,6 +931,7 @@ fn run() -> Result<(), GuiError> {
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
         .with_provider_status(provider_status)
         .with_provider_settings(provider_settings)
+        .with_settings_load_options(settings_load_options)
         .with_provider_settings_path(provider_settings_path)
         .with_sandbox_runtime(sandbox_runtime)
         .with_codex_auth(codex_auth_model(

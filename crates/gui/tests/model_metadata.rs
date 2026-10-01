@@ -177,7 +177,8 @@ fn refresh_button_triggers_force_refresh() {
 #[test]
 fn config_roundtrip_with_preset_keeps_fields() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("evorch.toml");
+    let path = config::project_main_config_path(dir.path());
+    std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(&path, "[model_presets.large]\ncontext_window = 128000\n").unwrap();
     let mut editor = OpenAiEditorModel {
         name: "test-provider".into(),

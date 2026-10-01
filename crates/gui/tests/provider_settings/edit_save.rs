@@ -12,8 +12,9 @@ pub(super) fn keyring_editor(
     store
         .set("acct-A", &sandbox::Secret::from("old-token".to_owned()))
         .unwrap();
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     config::save_openai_compatible_provider(
-        &root.join("evorch.toml"),
+        &config::project_main_config_path(root),
         &config::OpenAiCompatibleProviderInput {
             name: "A".into(),
             provider_type: ProviderTypeConfig::OpenAiCompatible,
@@ -30,7 +31,13 @@ pub(super) fn keyring_editor(
     .unwrap();
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .unwrap()
-        .with_provider_settings_path(root.join("evorch.toml"))
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(root.to_path_buf()),
+            user_config_dir: Some(root.join("isolated-user-config")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(root))
         .with_provider_settings(ProviderSettingsModel::seed_from_config(&load_config(root)))
         .with_credential_store(store.clone());
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
@@ -144,8 +151,10 @@ fn replaces_profile_when_renaming_env_profile() {
 fn replaces_profile_when_renaming_codex_profile() {
     // Given
     let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     config::save_codex_provider(
-        &temp.path().join("evorch.toml"),
+        &config::project_main_config_path(temp.path()),
         &config::CodexProviderInput {
             name: "A".into(),
             account: "oauth-account".into(),
@@ -186,7 +195,9 @@ fn replaces_profile_when_renaming_codex_profile() {
 #[test]
 fn codex_editor_saves_context_override_and_retains_model_metadata() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     let mut model = config::ModelEntryConfig::enabled("gpt-6-astra");
     model.metadata_source = Some(config::MetadataSource::ModelsDev);
     model.metadata_ref = Some("openai/gpt-6-astra".into());

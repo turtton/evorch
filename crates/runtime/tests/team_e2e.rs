@@ -20,8 +20,10 @@ fn mock_provider(responses: Vec<ScriptedResponse>) -> StreamingMockOpenAi {
 }
 
 fn configured(root: &tempfile::TempDir, mock: &StreamingMockOpenAi) -> runtime::AgentRuntime {
+    std::fs::create_dir_all(root.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        root.path().join("evorch.toml"),
+        config::project_main_config_path(root.path()),
         format!(
             r#"
 [providers.local]

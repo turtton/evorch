@@ -40,8 +40,10 @@ async fn streaming_preserves_provider_deltas_when_routed_model_is_switchable() {
             .map(|_| ScriptedResponse::text_stream("reply", "gpt-4o", ["first ", "second"]))
             .collect(),
     );
+    std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        directory.path().join("evorch.toml"),
+        config::project_main_config_path(directory.path()),
         format!(
             r#"[providers.local]
 type = "openai-compatible"

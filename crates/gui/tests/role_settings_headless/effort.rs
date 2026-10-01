@@ -2,8 +2,10 @@
 fn effort_choices_follow_selected_model_levels() {
     // Given: a config where route "fast" maps to a model with restricted effort levels.
     let temp = tempfile::tempdir().expect("temp");
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        temp.path().join("evorch.toml"),
+        config::project_main_config_path(temp.path()),
         r#"
 [providers.local]
 type = "openai-compatible"

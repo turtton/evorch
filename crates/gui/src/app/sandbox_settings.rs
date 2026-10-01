@@ -16,6 +16,14 @@ pub(super) struct SandboxSettings {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Sets reload layers independently of the settings save path.
+    /// A production model's load options take precedence when one is installed.
+    pub fn with_settings_load_options(mut self, options: config::LoadOptions) -> Self {
+        self.settings_load_options = options;
+        self.load_sandbox_settings();
+        self
+    }
+
     pub fn with_provider_settings_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.provider_settings_path = Some(path.into());
         self.load_sandbox_settings();
@@ -108,6 +116,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .as_ref()
             .ok_or_else(|| "No project config path is configured".to_owned())
             .and_then(|path| {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                }
                 config::save_sandbox(path, self.sandbox_settings.draft)
                     .map_err(|error| error.to_string())
             });

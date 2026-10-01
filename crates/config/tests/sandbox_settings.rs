@@ -12,7 +12,8 @@ fn web_tools_default_to_enabled_and_round_trip_disabled() {
     }
 
     let dir = tempfile::tempdir().expect("temp");
-    let path = dir.path().join("evorch.toml");
+    std::fs::create_dir_all(dir.path().join(".evorch")).expect("config directory");
+    let path = dir.path().join(".evorch/config.toml");
     save_sandbox(
         &path,
         SandboxConfig {
@@ -39,8 +40,9 @@ fn web_tools_default_to_enabled_and_round_trip_disabled() {
 fn removed_network_settings_are_rejected_at_the_strict_boundary() {
     for setting in ["allow_network = true", "web_tool_access = \"opt-in\""] {
         let dir = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(dir.path().join(".evorch")).expect("config directory");
         std::fs::write(
-            dir.path().join("evorch.toml"),
+            dir.path().join(".evorch/config.toml"),
             format!("[sandbox]\n{setting}\n"),
         )
         .expect("write");
@@ -131,7 +133,8 @@ fn escalate_to_user_on_deny_defaults_to_false_and_round_trips() {
 fn save_sandbox_persists_escalation_fields_and_keeps_other_sections() {
     // Given: a document containing an unrelated provider section.
     let tmp = tempfile::tempdir().expect("temp");
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     std::fs::write(
         &path,
         "version = 2\n\n[providers.keep]\nprovider_type = \"openai\"\n",

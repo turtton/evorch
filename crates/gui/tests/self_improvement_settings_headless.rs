@@ -4,7 +4,13 @@ use workspace_ui::{PanelId, UiSettings};
 fn fixture(path: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .unwrap()
-        .with_provider_settings_path(path.join("evorch.toml"));
+        .with_settings_load_options(config::LoadOptions {
+            project_dir: Some(path.to_path_buf()),
+            user_config_dir: Some(path.join("user")),
+            read_env: false,
+            ..Default::default()
+        })
+        .with_provider_settings_path(config::project_main_config_path(path));
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
@@ -21,8 +27,9 @@ fn reload(path: &std::path::Path) -> config::Config {
 #[test]
 fn composer_settings_entry_shows_defaults_and_saves_for_restart_only() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).unwrap();
     std::fs::write(
-        dir.path().join("evorch.toml"),
+        config::project_main_config_path(dir.path()),
         "version = 2\n[metrics]\nenabled = false\n",
     )
     .unwrap();
@@ -70,7 +77,12 @@ fn composer_settings_entry_shows_defaults_and_saves_for_restart_only() {
 #[test]
 fn cancel_discards_toggle_and_other_settings_close_the_modal() {
     let dir = tempfile::tempdir().unwrap();
-    config::save_self_improvement(&dir.path().join("evorch.toml"), &Default::default()).unwrap();
+    std::fs::create_dir_all(dir.path().join(config::PROJECT_CONFIG_DIR)).unwrap();
+    config::save_self_improvement(
+        &config::project_main_config_path(dir.path()),
+        &Default::default(),
+    )
+    .unwrap();
     let mut harness = fixture(dir.path());
     harness.state_mut().open_self_improvement_settings();
     harness.run();

@@ -19,7 +19,7 @@ fn override_synthesizes_missing_project_main_without_writing() {
     // Given: the project directory and main file do not exist.
     let temp = tempfile::tempdir().expect("temp");
     let mut options = options(temp.path());
-    let path = temp.path().join("project/evorch.toml");
+    let path = temp.path().join("project/.evorch/config.toml");
     options.file_overrides.insert(
         path.clone(),
         toml::from_str("[agents.worker]\nlogical_model = 'virtual'\n").expect("candidate"),
@@ -39,7 +39,7 @@ fn override_replaces_disk_content_instead_of_merging_it() {
     // Given: the disk has a different binding and a field omitted by the candidate.
     let temp = tempfile::tempdir().expect("temp");
     let mut options = options(temp.path());
-    let path = temp.path().join("project/evorch.toml");
+    let path = temp.path().join("project/.evorch/config.toml");
     std::fs::create_dir_all(path.parent().expect("project")).expect("directory");
     let original = "[agents.worker]\nlogical_model = 'disk'\npreset = 'disk-only'\n";
     std::fs::write(&path, original).expect("disk config");
@@ -64,21 +64,24 @@ fn non_overridden_files_still_load_and_dropins_can_be_overridden() {
     let temp = tempfile::tempdir().expect("temp");
     let mut options = options(temp.path());
     let project = temp.path().join("project");
-    std::fs::create_dir_all(project.join("config.d")).expect("directory");
-    std::fs::write(project.join("config.d/00-replaced.toml"), "[invalid TOML")
-        .expect("replaced file");
+    std::fs::create_dir_all(project.join(".evorch/config.d")).expect("directory");
     std::fs::write(
-        project.join("config.d/10-extra.toml"),
+        project.join(".evorch/config.d/00-replaced.toml"),
+        "[invalid TOML",
+    )
+    .expect("replaced file");
+    std::fs::write(
+        project.join(".evorch/config.d/10-extra.toml"),
         "version = 1\n[agents.reviewer]\nlogical_model = 'review'\n",
     )
     .expect("ordinary drop-in");
     options.file_overrides = BTreeMap::from([
         (
-            project.join("evorch.toml"),
+            project.join(".evorch/config.toml"),
             toml::from_str("[agents.worker]\nlogical_model = 'main'\n").expect("main"),
         ),
         (
-            project.join("config.d/00-replaced.toml"),
+            project.join(".evorch/config.d/00-replaced.toml"),
             toml::from_str("[agents.worker]\nlogical_model = 'drop-in'\n").expect("drop-in"),
         ),
     ]);
@@ -121,7 +124,7 @@ fn user_old_route_survives_but_does_not_shadow_project_renamed_binding() {
     );
     options
         .file_overrides
-        .insert(temp.path().join("project/evorch.toml"), candidate);
+        .insert(temp.path().join("project/.evorch/config.toml"), candidate);
     // When: simulating a rename in the project main file.
     let effective = Config::load(&options).expect("effective");
     let before_refs: BTreeMap<_, _> = explicit_refs(&before.agents).into_iter().collect();
@@ -151,7 +154,7 @@ fn env_and_cli_still_shadow_project_file_overrides() {
         let temp = tempfile::tempdir().expect("temp");
         let mut options = options(temp.path());
         options.file_overrides.insert(
-            temp.path().join("project/evorch.toml"),
+            temp.path().join("project/.evorch/config.toml"),
             toml::from_str("[agents.worker]\nlogical_model = 'new'\n").expect("candidate"),
         );
         if cli {

@@ -73,7 +73,7 @@ OpenCode のロール割当規律にならって全トークンを preset 毎に
 - 切替 UI なし: `reload_theme(ctx, preset)` は存在する (state.rs:269-273)
   が、UI からの呼び出し導線がない。
 - 永続化なし: `theme_preset` は `WorkbenchState` 内で `Graphite` 固定
-  (state.rs:71、state.rs:142)。evorch.toml / crates/config に UI テーマの
+  (state.rs:71、state.rs:142)。ユーザ/プロジェクト設定ファイル / crates/config に UI テーマの
   schema が存在しない。
 - 独自視覚言語の欠如: 現行 palette は t3code dark palette と実質同一
   (第 1 章参照)。`DESIGN.md` も "no redesign or new visual dependencies"
@@ -452,7 +452,7 @@ DIFF_DELETE = #914c54 (git 色) [1]。
    open/close API + Modal::new + surface_frame パターンを踏襲する。
    `reload_theme` (state.rs:269-273) をここへ接続する。
 4. 永続化。`workspace-ui::UiSettings` に `theme_preset` を追加する
-   (現状は state.rs:71、state.rs:142 で Graphite 固定)。evorch.toml
+   (現状は state.rs:71、state.rs:142 で Graphite 固定)。ユーザ/プロジェクト設定ファイル
    / crates/config に UI テーマ schema は現存しない。
 5. spinner 単体表示の改善。`model_metadata.rs:17`、
    `provider_models.rs:168`、`provider_codex_editor.rs:129` の 3 箇所

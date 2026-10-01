@@ -27,7 +27,7 @@ fn env_vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn load_project(tmp: &tempfile::TempDir, content: &str) -> Result<Config, ConfigError> {
     let project = tmp.path().join("project");
-    write_file(&project.join("evorch.toml"), content);
+    write_file(&project.join(".evorch/config.toml"), content);
     Config::load_strict(&LoadOptions {
         project_dir: Some(project),
         user_config_dir: Some(empty_user_dir(tmp)),
@@ -391,7 +391,7 @@ fn dropin_source_secret_rejected() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
     write_file(
-        &project.join("config.d/50-secret.toml"),
+        &project.join(".evorch/config.d/50-secret.toml"),
         "[providers.foo]\napi_key = \"x\"\n",
     );
     assert_error_contains(

@@ -218,7 +218,8 @@ fn save_persists_fetched_selection_when_manual_models_differ() {
     // Then: the modal closes and the selected model is persisted as a member.
     assert!(harness.state().provider_settings().editor.is_none());
     assert!(!harness.has_label("Save"));
-    let raw = std::fs::read_to_string(temp.path().join("evorch.toml")).expect("saved config");
+    let raw = std::fs::read_to_string(config::project_main_config_path(temp.path()))
+        .expect("saved config");
     assert!(raw.contains("default_model = \"mock-model-a\""));
     let saved = super::load_config(temp.path());
     let provider = saved.providers.get("local").expect("saved provider");

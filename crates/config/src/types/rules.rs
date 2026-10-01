@@ -70,14 +70,15 @@ mod tests {
         let user = tmp.path().join("user");
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&user).expect("ユーザ設定ディレクトリを作成できる");
-        std::fs::create_dir_all(&project).expect("プロジェクト設定ディレクトリを作成できる");
+        std::fs::create_dir_all(project.join(".evorch"))
+            .expect("プロジェクト設定ディレクトリを作成できる");
         std::fs::write(
             user.join("config.toml"),
             "[rules]\nmax_injection_bytes = 1000\n",
         )
         .expect("ユーザ設定を書き込める");
         std::fs::write(
-            project.join("evorch.toml"),
+            project.join(".evorch/config.toml"),
             "[rules]\nmax_injection_bytes = 2000\n",
         )
         .expect("プロジェクト設定を書き込める");

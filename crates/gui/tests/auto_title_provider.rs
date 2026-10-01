@@ -70,8 +70,10 @@ fn production_title_uses_quick_route_or_explicit_thread_model() {
         } else {
             ""
         };
+        std::fs::create_dir_all(root.path().join(config::PROJECT_CONFIG_DIR))
+            .expect("config directory");
         std::fs::write(
-            root.path().join("evorch.toml"),
+            config::project_main_config_path(root.path()),
             format!(
                 r#"
 [providers.local]

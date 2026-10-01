@@ -32,6 +32,7 @@ fn input() -> OpenAiCompatibleProviderInput {
 fn save_writes_keyring_credential_inline_table_and_omits_api_key_env() {
     // Given
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
     let mut candidate = input();
     candidate.name = "openai-compat".into();
     candidate.credential = config::ProviderCredentialInput::Keyring {
@@ -39,9 +40,9 @@ fn save_writes_keyring_credential_inline_table_and_omits_api_key_env() {
         account: "openai-compat".into(),
     };
     // When
-    save_openai_compatible_provider(&tmp.path().join("evorch.toml"), &candidate).unwrap();
+    save_openai_compatible_provider(&tmp.path().join(".evorch/config.toml"), &candidate).unwrap();
     // Then
-    let text = std::fs::read_to_string(tmp.path().join("evorch.toml")).unwrap();
+    let text = std::fs::read_to_string(tmp.path().join(".evorch/config.toml")).unwrap();
     assert!(text.contains("credential = {"));
     assert!(!text.contains("api_key_env"));
     assert_eq!(
@@ -109,7 +110,8 @@ fn assert_field(result: Result<(), ConfigError>, expected: &str) {
 fn save_into_missing_file_creates_v2_sugar_entry() {
     // Given: 設定ファイルがまだない
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     // When: sugar 形式で保存する
     save_openai_compatible_provider(&path, &input()).expect("missing file save succeeds");
     // Then: 正規化した sugar が実際のロード経路で正規形になる
@@ -142,7 +144,8 @@ fn save_into_missing_file_creates_v2_sugar_entry() {
 fn save_preserves_unrelated_tables_and_comments() {
     // Given: コメント・ルーティング・エージェント・既存の二つのプロファイル
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     let original = "version = 2 # comment\n\n[routing]\nroutes = { fast = [{ profile = 'other' }] }\n\n[agents.worker]\nlogical_model = 'fast'\n\n[providers.other]\nprovider_type = 'anthropic'\ncredential = { type = 'env', var = 'OTHER_KEY' } # keep\n\n[providers.third]\nprovider_type = 'openrouter'\n";
     std::fs::write(&path, original).unwrap();
     // When: 新しいプロファイルだけを追加する
@@ -156,7 +159,8 @@ fn save_preserves_unrelated_tables_and_comments() {
 fn save_same_name_profile_replaces_entry_and_drops_stale_credential() {
     // Given: 同名プロファイルに古いキーリング参照がある
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     std::fs::write(&path, "version = 2\n[providers.local]\ncredential = { type = 'keyring', service = 'stale-service', account = 'old' }\n").unwrap();
     // When: 同名プロファイルを保存する
     save_openai_compatible_provider(&path, &input()).expect("replacement save succeeds");
@@ -261,7 +265,8 @@ fn save_refuses_non_v2_file() {
 fn save_result_round_trips_through_config_load_stably() {
     // Given: 一度保存した設定
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("evorch.toml");
+    std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+    let path = tmp.path().join(".evorch/config.toml");
     save_openai_compatible_provider(&path, &input()).expect("initial save succeeds");
     let first = load(tmp.path());
     let bytes = std::fs::read(&path).unwrap();

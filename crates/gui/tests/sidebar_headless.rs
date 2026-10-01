@@ -415,8 +415,10 @@ fn sidebar_rows_keep_dense_titles_and_responsive_controls() {
 fn thread_row_omits_cost_and_cache_metrics() {
     // Given: a thread whose run billed usage against a provider with known pricing
     let temp = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        temp.path().join("evorch.toml"),
+        config::project_main_config_path(temp.path()),
         r#"
 [providers.local]
 type = "openai-compatible"

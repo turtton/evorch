@@ -92,8 +92,10 @@ fn harness(script: Vec<ScriptedResponse>, window: u64) -> Harness {
 fn harness_with_read(script: Vec<ScriptedResponse>, window: u64, read: Arc<dyn Tool>) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
+    std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
+        .expect("config directory");
     std::fs::write(
-        directory.path().join("evorch.toml"),
+        config::project_main_config_path(directory.path()),
         format!(
             r#"
 [providers.local]

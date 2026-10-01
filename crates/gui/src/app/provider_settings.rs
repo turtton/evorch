@@ -136,6 +136,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 original_account.filter(|original| *original != account);
                         }
                     }
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                    }
                     config::save::save_openai_compatible_provider_edit(
                         &path,
                         &input,
@@ -168,6 +171,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     default_model: editor.default_model.clone(),
                 };
                 self.provider_operation(move || {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                    }
                     config::save_codex_provider_edit(&path, &input, original_name.as_deref())
                         .map_err(|e| e.to_string())
                 });
@@ -186,6 +192,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let credential = self.provider_settings.credential(&name).cloned();
         let store = self.credential_store.clone();
         self.provider_operation(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
             config::delete_provider(&path, &name).map_err(|e| e.to_string())?;
             if let Some(config::CredentialRefConfig::Keyring { account, .. }) = credential {
                 if let Some(store) = store {
@@ -235,12 +244,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.provider_settings.error = Some(error);
                     return;
                 }
-                if let Some(path) = &self.provider_settings_path {
-                    let options = config::LoadOptions {
-                        project_dir: path.parent().map(std::path::Path::to_path_buf),
-                        read_env: false,
-                        ..Default::default()
-                    };
+                if self.provider_settings_path.is_some() {
+                    let options = self.routing_load_options();
                     match config::Config::load(&options) {
                         Ok(config) => {
                             self.provider_status =

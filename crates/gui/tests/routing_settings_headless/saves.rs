@@ -7,7 +7,7 @@ fn route_rename_saves_agents_and_reseeds_models() {
     // Given: a route referenced explicitly by explorer and implicitly by no role.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, runtime) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -66,7 +66,7 @@ fn route_rename_loads_fresh_effective_agents_from_lower_layers() {
     // Given: routing is opened before a user-layer binding is added.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -122,14 +122,17 @@ fn route_rename_blocked_by_project_dropin_does_not_write_or_reload_runtime() {
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, runtime) = fixture(temp.path());
     let selected_before = runtime.selected_model(Role::Worker, None);
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     let original = format!(
         "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
          [agents.worker]\nlogical_model = 'old'\n"
     );
     std::fs::write(&path, &original).expect("main");
-    let dropins = temp.path().join("config.d");
+    let dropins = temp
+        .path()
+        .join(config::PROJECT_CONFIG_DIR)
+        .join("config.d");
     std::fs::create_dir_all(&dropins).expect("drop-in directory");
     let extra = "[agents.worker]\nlogical_model = 'old'\n";
     std::fs::write(dropins.join("extra.toml"), extra).expect("drop-in");
@@ -201,7 +204,7 @@ fn route_rename_blocked_by_env_or_cli_preserves_all_rewritten_bindings() {
             }
         });
         let selected_before = runtime.selected_model(Role::Worker, Some("quick"));
-        let path = temp.path().join("evorch.toml");
+        let path = config::project_main_config_path(temp.path());
         let text = std::fs::read_to_string(&path).expect("config");
         let original = format!("{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n");
         std::fs::write(&path, &original).expect("route");
@@ -237,7 +240,7 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
     // Given: a drop-in overrides only reviewer, not the worker binding being renamed.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, runtime) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -248,7 +251,10 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
         ),
     )
     .expect("main");
-    let dropins = temp.path().join("config.d");
+    let dropins = temp
+        .path()
+        .join(config::PROJECT_CONFIG_DIR)
+        .join("config.d");
     std::fs::create_dir_all(&dropins).expect("drop-in directory");
     let extra = "[agents.reviewer]\nlogical_model = 'review-route'\n";
     std::fs::write(dropins.join("extra.toml"), extra).expect("drop-in");
@@ -332,9 +338,10 @@ fn route_rename_allows_old_route_retained_in_user_layer() {
         std::fs::read_to_string(user.join("config.toml")).expect("user config"),
         original
     );
-    let project: config::Config =
-        toml::from_str(&std::fs::read_to_string(temp.path().join("evorch.toml")).expect("project"))
-            .expect("project config");
+    let project: config::Config = toml::from_str(
+        &std::fs::read_to_string(config::project_main_config_path(temp.path())).expect("project"),
+    )
+    .expect("project config");
     assert!(!project.routing.routes.contains_key("old"));
     assert!(project.routing.routes.contains_key("new"));
     assert_eq!(project.agents.worker.logical_model.as_deref(), Some("new"));
@@ -356,7 +363,7 @@ fn route_rename_load_error_keeps_disk_untouched_and_shows_error() {
     // Given: the effective config becomes invalid after opening the editor.
     std::fs::create_dir_all(temp.path().join("user")).expect("user directory");
     std::fs::write(temp.path().join("user/config.toml"), "[broken").expect("invalid config");
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let before = std::fs::read(&path).expect("before");
     // When: saving a rename requires loading that effective config first.
     state.submit_routing_settings();
@@ -390,7 +397,8 @@ fn identity_route_edits_do_not_materialize_agents() {
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     finish(&mut harness);
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    let text = std::fs::read_to_string(temp.path().join("evorch.toml")).expect("config");
+    let text =
+        std::fs::read_to_string(config::project_main_config_path(temp.path())).expect("config");
     assert!(!text.contains("[agents"));
 }
 
@@ -399,7 +407,7 @@ fn renaming_implicit_worker_route_leaves_an_actionable_missing_route() {
     // Given: worker inherits its role name, with a route under that name.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,
@@ -450,7 +458,7 @@ fn route_rename_does_not_persist_unrelated_cli_agent_override() {
                 .expect("CLI override"),
         );
     });
-    let path = temp.path().join("evorch.toml");
+    let path = config::project_main_config_path(temp.path());
     let text = std::fs::read_to_string(&path).expect("config");
     std::fs::write(
         &path,

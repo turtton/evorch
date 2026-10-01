@@ -102,8 +102,9 @@ async fn streaming_deltas_reach_bus_before_completion() {
 }
 
 fn load_config(root: &std::path::Path, base_url: &str) -> Config {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         format!(
             r#"[providers.local]
 type = "openai-compatible"

@@ -76,7 +76,8 @@ collect_lessons = false
     assert_eq!(parsed.self_improvement, expected);
     assert_eq!(reparsed, parsed);
     let directory = tempfile::tempdir().expect("temp");
-    std::fs::write(directory.path().join("evorch.toml"), document).expect("write");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
+    std::fs::write(directory.path().join(".evorch/config.toml"), document).expect("write");
     for load in [Config::load, Config::load_strict] {
         assert_eq!(
             load(&options(directory.path()))
@@ -90,6 +91,7 @@ collect_lessons = false
 #[test]
 fn both_load_paths_reject_out_of_range_values_even_when_disabled() {
     let directory = tempfile::tempdir().expect("temp");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
     for (field, minimum, maximum) in [
         ("max_candidates", 1, 10_000),
         ("evidence_max_bytes", 256, 65_536),
@@ -99,7 +101,7 @@ fn both_load_paths_reject_out_of_range_values_even_when_disabled() {
         for value in [minimum - 1, maximum + 1] {
             // Given: an out-of-range field, with enabled omitted (false).
             let document = format!("[self_improvement]\n{field} = {value}\n");
-            std::fs::write(directory.path().join("evorch.toml"), &document).expect("write");
+            std::fs::write(directory.path().join(".evorch/config.toml"), &document).expect("write");
             let section: Config = toml::from_str(&document).expect("typed value");
             let direct_error = section.self_improvement.validate().expect_err("invalid");
 
@@ -123,6 +125,7 @@ fn both_load_paths_reject_out_of_range_values_even_when_disabled() {
 #[test]
 fn both_load_paths_accept_inclusive_range_boundaries() {
     let directory = tempfile::tempdir().expect("temp");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
     for (field, boundaries) in [
         ("max_candidates", [1, 10_000]),
         ("evidence_max_bytes", [256, 65_536]),
@@ -131,7 +134,7 @@ fn both_load_paths_accept_inclusive_range_boundaries() {
     ] {
         for value in boundaries {
             std::fs::write(
-                directory.path().join("evorch.toml"),
+                directory.path().join(".evorch/config.toml"),
                 format!("[self_improvement]\n{field} = {value}\n"),
             )
             .expect("write");
@@ -150,8 +153,9 @@ fn both_load_paths_accept_inclusive_range_boundaries() {
 #[test]
 fn validation_uses_merged_values_in_both_load_paths() {
     let directory = tempfile::tempdir().expect("temp");
+    std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
     std::fs::write(
-        directory.path().join("evorch.toml"),
+        directory.path().join(".evorch/config.toml"),
         "[self_improvement]\ndaily_limit = 0\nmax_candidates = 300\n",
     )
     .expect("write");

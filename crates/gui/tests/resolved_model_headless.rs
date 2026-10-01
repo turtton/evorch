@@ -10,8 +10,9 @@ use runtime::compose::SwitchableModel;
 use workspace_ui::{ModelPreference, ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn workbench(root: &std::path::Path, resolved: bool) -> HeadlessWorkbench<DemoSource> {
+    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
     std::fs::write(
-        root.join("evorch.toml"),
+        config::project_main_config_path(root),
         r#"
 [providers.local]
 type = "openai-compatible"
