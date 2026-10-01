@@ -65,7 +65,7 @@ pub fn read_skill_resource(
 /// `Path::components()` は unix でカレントコンポーネント `.` を暗黙に正規化
 /// して消すため、`scripts/./x.sh` のような参照を捕えられない。そこで
 /// `/` での手動分割によって `.` を明示的に検出する。
-fn validate_reference(reference: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_reference(reference: &str) -> Result<(), &'static str> {
     if reference.is_empty() {
         return Err("empty reference");
     }

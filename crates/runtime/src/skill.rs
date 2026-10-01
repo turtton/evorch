@@ -5,17 +5,21 @@
 //! 仕様に基づく検証に加え、skill ディレクトリの発見とメタデータレジストリを
 //! 提供する。
 
+mod builtin;
 mod discovery;
 mod frontmatter;
 mod registry;
 mod resource;
 
-pub use discovery::{default_skill_dirs, discover_skills};
+pub use discovery::{
+    build_standard_registry, default_skill_dirs, discover_skills, discover_with_builtin,
+};
 pub use frontmatter::{
     SkillFrontmatter, SkillValidationError, parse_and_validate, read_frontmatter_prefix,
     split_frontmatter,
 };
 pub use registry::{
-    SkillDiagnostic, SkillEntry, SkillLoadError, SkillRegistry, SkillScope, render_skills_section,
+    SkillDiagnostic, SkillEntry, SkillLoadError, SkillRegistry, SkillScope, SkillSource,
+    render_skills_section,
 };
 pub use resource::{SkillResourceError, read_skill_resource};

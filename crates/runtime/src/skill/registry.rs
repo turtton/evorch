@@ -1,9 +1,9 @@
 //! SKILL.md メタデータレジストリ (issue #53 / AC3, AC7)。
 //!
-//! レジストリは frontmatter 由来のメタデータのみを保持し、本文は
-//! [`SkillRegistry::load_body`] で都度ディスクから読み直す (progressive
-//! disclosure)。エラー Display は識別子のみを運び、本文や frontmatter 値を
-//! 漏らさない (ADR 0010 / frontmatter モジュールと同一規約)。
+//! レジストリは frontmatter 由来のメタデータと読み込み元を保持する。fs の本文は
+//! [`SkillRegistry::load_body`] で都度ディスクから読み直し、同梱本文は静的データを
+//! 返す (progressive disclosure)。エラー Display は識別子のみを運び、本文や
+//! frontmatter 値・フルパスを漏らさない (ADR 0010 / frontmatter と同一規約)。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,15 +11,20 @@ use std::path::PathBuf;
 use event_bus::SkillDiagnosticKind;
 
 use super::frontmatter::split_frontmatter;
+use super::resource::{SkillResourceError, read_skill_resource, validate_reference};
 use crate::prompt::AvailableSkill;
 
-/// skill の由来スコープ。優先順位は repo > user (discovery 側で処理順に反映)。
+/// skill の由来スコープ。標準優先順位は repo > repo-agents > user > builtin。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillScope {
     /// リポジトリスコープ (`<repo>/.evorch/skills`)。
     Repo,
+    /// エージェント共用のリポジトリスコープ (`<repo>/.agents/skills`)。
+    RepoAgents,
     /// ユーザスコープ (`<user config>/evorch/skills`)。
     User,
+    /// バイナリ同梱スコープ。
+    Builtin,
 }
 
 impl SkillScope {
@@ -27,22 +32,64 @@ impl SkillScope {
     pub fn as_str(&self) -> &'static str {
         match self {
             SkillScope::Repo => "repo",
+            SkillScope::RepoAgents => "repo-agents",
             SkillScope::User => "user",
+            SkillScope::Builtin => "builtin",
         }
     }
 }
 
-/// 発見済み skill のメタデータ 1 件分。本文 (SKILL.md の内容) は保持しない。
+/// skill 本文・リソースの読み込み元。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    /// SKILL.md を含む skill ディレクトリ。
+    Filesystem { dir: PathBuf },
+    /// バイナリに同梱された本文と、相対リファレンス・内容の組。
+    Embedded {
+        /// frontmatter を除いた本文のみ。
+        body: &'static str,
+        /// リファレンスは `file` または `dir/file` の形状規約に従う。
+        resources: &'static [(&'static str, &'static str)],
+    },
+}
+
+/// 発見済み skill のメタデータと読み込み元 1 件分。fs 本文は保持しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillEntry {
-    /// frontmatter の `name`。ディレクトリ名との一致は発見時に検証済み。
+    /// skill 名。fs 由来なら frontmatter の `name` とディレクトリ名は一致検証済み。
     pub name: String,
-    /// frontmatter の `description`。
+    /// skill の説明。fs 由来なら frontmatter の `description`。
     pub description: String,
-    /// SKILL.md を含む skill ディレクトリ。
-    pub dir: PathBuf,
+    /// 本文・リソースの読み込み元。
+    pub source: SkillSource,
     /// この entry の由来スコープ。
     pub scope: SkillScope,
+}
+
+impl SkillEntry {
+    /// skill ルート相対のバンドルリソースを読み出す。
+    ///
+    /// fs 由来は [`read_skill_resource`] で形状検証と symlink 脱出防止を行う。
+    /// 同梱リソースは同じ形状規約を検証後、静的テーブルから検索する。
+    ///
+    /// # Errors
+    /// 形状規約違反は [`SkillResourceError::InvalidReference`]、未登録リソースは
+    /// [`SkillResourceError::NotFound`]。fs 由来では UTF-8 違反や symlink 脱出も
+    /// [`SkillResourceError`] として返す。
+    pub fn read_resource(&self, reference: &str) -> Result<String, SkillResourceError> {
+        match &self.source {
+            SkillSource::Filesystem { dir } => read_skill_resource(dir, reference),
+            SkillSource::Embedded { resources, .. } => {
+                validate_reference(reference)
+                    .map_err(|reason| SkillResourceError::InvalidReference(reason.to_owned()))?;
+                resources
+                    .iter()
+                    .find(|(name, _)| *name == reference)
+                    .map(|(_, content)| (*content).to_owned())
+                    .ok_or_else(|| SkillResourceError::NotFound(reference.to_owned()))
+            }
+        }
+    }
 }
 
 /// skill 発見時の診断 1 件分。
@@ -80,6 +127,34 @@ impl SkillRegistry {
         }
     }
 
+    /// 後続候補を first-wins でマージする。診断は既存の末尾に追加する。
+    pub(crate) fn merge_shadowing(&mut self, entries: Vec<SkillEntry>) {
+        for entry in entries {
+            if let Some(winner) = self.skills.get(&entry.name) {
+                let detail = format!(
+                    "skill '{}': {} scope shadows {} scope",
+                    entry.name,
+                    winner.scope.as_str(),
+                    entry.scope.as_str()
+                );
+                tracing::warn!(
+                    skill = %entry.name,
+                    winner_scope = winner.scope.as_str(),
+                    loser_scope = entry.scope.as_str(),
+                    "skill shadowed by higher-priority scope"
+                );
+                self.diagnostics.push(SkillDiagnostic {
+                    kind: SkillDiagnosticKind::Shadowed,
+                    skill: entry.name,
+                    scope: entry.scope,
+                    detail,
+                });
+            } else {
+                self.skills.insert(entry.name.clone(), entry);
+            }
+        }
+    }
+
     /// 指定名の entry を返す。
     pub fn get(&self, name: &str) -> Option<&SkillEntry> {
         self.skills.get(name)
@@ -106,11 +181,11 @@ impl SkillRegistry {
         self.skills.len()
     }
 
-    /// skill 本文 (frontmatter 直後から末尾まで) をディスクから読み直す。
+    /// skill 本文 (frontmatter 直後から末尾まで) を読み込み元から返す。
     ///
-    /// progressive disclosure のため本文は発見時に保持せず、この場で
+    /// progressive disclosure のため fs 本文は発見時に保持せず、この場で
     /// `<dir>/SKILL.md` を読む。発見時の検証は繰り返さない (frontmatter の
-    /// name とディレクトリ名の一致は再確認しない)。
+    /// name とディレクトリ名の一致は再確認しない)。同梱本文はそのまま返す。
     ///
     /// # Errors
     /// 未登録名なら [`SkillLoadError::UnknownSkill`]、SKILL.md が読めなければ
@@ -120,15 +195,21 @@ impl SkillRegistry {
         let Some(entry) = self.skills.get(name) else {
             return Err(SkillLoadError::UnknownSkill(name.to_owned()));
         };
-        let content = std::fs::read_to_string(entry.dir.join("SKILL.md")).map_err(|_| {
-            SkillLoadError::Unreadable {
-                name: entry.name.clone(),
+        match &entry.source {
+            SkillSource::Filesystem { dir } => {
+                let content = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|_| {
+                    SkillLoadError::Unreadable {
+                        name: entry.name.clone(),
+                    }
+                })?;
+                let (_, body) =
+                    split_frontmatter(&content).map_err(|_| SkillLoadError::Corrupt {
+                        name: entry.name.clone(),
+                    })?;
+                Ok(body.to_owned())
             }
-        })?;
-        let (_, body) = split_frontmatter(&content).map_err(|_| SkillLoadError::Corrupt {
-            name: entry.name.clone(),
-        })?;
-        Ok(body.to_owned())
+            SkillSource::Embedded { body, .. } => Ok((*body).to_owned()),
+        }
     }
 }
 
@@ -178,7 +259,9 @@ mod tests {
         SkillEntry {
             name: name.to_owned(),
             description: format!("{name} description"),
-            dir: dir.to_path_buf(),
+            source: SkillSource::Filesystem {
+                dir: dir.to_path_buf(),
+            },
             scope: SkillScope::Repo,
         }
     }

@@ -37,6 +37,7 @@ use crate::prompt::{
 use crate::rules::RulesSource;
 use crate::run::{RunConfig, WorkspaceInspection, WorkspaceMode};
 use crate::skill::{SkillRegistry, SkillScope, discover_skills};
+use crate::skill_source::SkillCatalogSource;
 use crate::state::{RunInterrupt, StopScope};
 use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
@@ -73,6 +74,7 @@ pub(crate) struct Shared {
     pub(crate) model: Arc<dyn AgentModel>,
     pub(crate) system_prompts: OnceLock<Arc<SystemPromptCatalog>>,
     pub(crate) skills: OnceLock<Arc<SkillRegistry>>,
+    pub(crate) skill_source: OnceLock<Arc<SkillCatalogSource>>,
     pub(crate) rules: OnceLock<Arc<RulesSource>>,
     pub(crate) compaction: OnceLock<CompactionSettings>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
@@ -259,6 +261,7 @@ impl AgentRuntime {
                 model,
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
+                skill_source: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
@@ -347,6 +350,15 @@ impl AgentRuntime {
     /// System メッセージなしの履歴で開始する。
     pub fn with_system_prompts(self, system_prompts: Arc<SystemPromptCatalog>) -> Self {
         let _ = self.shared.system_prompts.set(system_prompts);
+        self
+    }
+
+    /// run 境界で再読み込みする skill/catalog 供給元を接続する (先勝ち)。
+    ///
+    /// 既存の `with_skills` / `with_system_prompts` とは独立して設定でき、
+    /// 両方が接続されている場合はこの供給元が優先する。
+    pub fn with_skill_source(self, source: Arc<SkillCatalogSource>) -> Self {
+        let _ = self.shared.skill_source.set(source);
         self
     }
 
@@ -493,6 +505,7 @@ impl AgentRuntime {
                 topology: OnceLock::new(),
                 system_prompts: OnceLock::new(),
                 skills: OnceLock::new(),
+                skill_source: OnceLock::new(),
                 rules: OnceLock::new(),
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
@@ -1869,26 +1882,38 @@ fn lock_runs(runs: &Mutex<HashMap<RunId, RunEntry>>) -> MutexGuard<'_, HashMap<R
 }
 
 pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
-    shared.upgrade().map(|shared| LoopShared {
-        bus: Arc::clone(&shared.bus),
-        executor: Arc::clone(
-            &shared
-                .executor
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        ),
-        model: Arc::clone(&shared.model),
-        system_prompts: shared.system_prompts.get().cloned(),
-        skills: shared.skills.get().cloned(),
-        rules: shared.rules.get().cloned(),
-        compaction: shared.compaction.get().cloned().unwrap_or_default(),
-        compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
-        escalation: shared
-            .escalation_settings
-            .get()
-            .copied()
-            .unwrap_or_default(),
-        runtime: Arc::downgrade(&shared),
+    shared.upgrade().map(|shared| {
+        let (system_prompts, skills) = match shared.skill_source.get() {
+            Some(source) => {
+                let snapshot = source.snapshot();
+                (snapshot.catalog, Some(snapshot.registry))
+            }
+            None => (
+                shared.system_prompts.get().cloned(),
+                shared.skills.get().cloned(),
+            ),
+        };
+        LoopShared {
+            bus: Arc::clone(&shared.bus),
+            executor: Arc::clone(
+                &shared
+                    .executor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            model: Arc::clone(&shared.model),
+            system_prompts,
+            skills,
+            rules: shared.rules.get().cloned(),
+            compaction: shared.compaction.get().cloned().unwrap_or_default(),
+            compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
+            escalation: shared
+                .escalation_settings
+                .get()
+                .copied()
+                .unwrap_or_default(),
+            runtime: Arc::downgrade(&shared),
+        }
     })
 }
 
