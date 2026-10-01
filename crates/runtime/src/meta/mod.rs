@@ -152,9 +152,9 @@ pub(super) fn parse_role(name: &str) -> Result<Role, String> {
     }
 }
 
-/// Reject categories that are not exposed by the public worker delegation contract.
+/// Reject categories that are not exposed by the public worker/reviewer delegation contract.
 pub(super) fn parse_category(name: &str) -> Result<String, String> {
-    if config::agent_categories::is_public_worker_category(name) {
+    if config::agent_categories::public_category_role(name).is_some() {
         Ok(name.to_owned())
     } else {
         Err(format!("unknown category: {name}"))
@@ -194,6 +194,13 @@ pub(super) fn error(content: impl Into<String>) -> DispatchResult {
 
 #[cfg(test)]
 mod private_category_tests {
+    #[test]
+    fn normal_delegation_accepts_public_reviewer_categories() {
+        for name in ["plan", "tool-execution"] {
+            assert_eq!(super::parse_category(name).unwrap(), name);
+        }
+    }
+
     #[test]
     fn normal_delegation_rejects_internal_lesson_categories() {
         assert!(super::parse_category("lesson").is_err());

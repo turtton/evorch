@@ -15,6 +15,7 @@
           "generation": {}
         },
         "reviewer": {
+          "categories": {},
           "generation": {}
         },
         "roles": {
@@ -239,8 +240,9 @@
         },
         "reviewer": {
           "description": "reviewer ロールのバインディング。",
-          "$ref": "#/$defs/RoleBindingConfig",
+          "$ref": "#/$defs/CategorizedRoleBindingConfig",
           "default": {
+            "categories": {},
             "generation": {}
           }
         },
@@ -344,6 +346,40 @@
           "format": "uint32",
           "default": 400,
           "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CategorizedRoleBindingConfig": {
+      "description": "カテゴリを持つロールのベース設定とカテゴリ別バインディング。",
+      "type": "object",
+      "properties": {
+        "categories": {
+          "description": "ロールに属するカテゴリ別のバインディング。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CategoryBindingConfig"
+          },
+          "default": {}
+        },
+        "generation": {
+          "description": "生成パラメータの上書き。",
+          "$ref": "#/$defs/GenerationOverridesConfig",
+          "default": {}
+        },
+        "logical_model": {
+          "description": "使用する論理モデル名。省略時はロール名 (小文字) を使用する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "description": "使用するプリセット名。本文ではなく参照のみを記述する。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

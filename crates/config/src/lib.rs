@@ -45,10 +45,10 @@ pub use schema::json_schema;
 pub use types::BudgetConfig;
 pub use types::OwnershipConfig;
 pub use types::{
-    AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategoryBindingConfig, CompactionConfig,
-    Config, CredentialRefConfig, DiagnosticsConfig, EscalationApproval, GenerationOverridesConfig,
-    MetadataSource, MetricsConfig, ModelEntryConfig, ModelPresetConfig, PanelConfig,
-    PermissionConfig, ProviderProfileConfig, ProviderTypeConfig, ResolvedAgentBinding,
-    RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig, SandboxConfig,
-    SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
+    AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategorizedRoleBindingConfig,
+    CategoryBindingConfig, CompactionConfig, Config, CredentialRefConfig, DiagnosticsConfig,
+    EscalationApproval, GenerationOverridesConfig, MetadataSource, MetricsConfig, ModelEntryConfig,
+    ModelPresetConfig, PanelConfig, PermissionConfig, ProviderProfileConfig, ProviderTypeConfig,
+    ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
+    SandboxConfig, SelfImprovementConfig, SummarizerKind, WorkerBindingConfig,
 };

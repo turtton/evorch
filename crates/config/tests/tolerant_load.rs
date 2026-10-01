@@ -144,3 +144,44 @@ logical_model = "unknown-model"
     );
     assert!(!config.agents.worker.categories.contains_key("unknown"));
 }
+
+#[test]
+fn tolerant_category_pruning_preserves_reviewer_bindings_and_known_fields() {
+    let document = r#"
+[agents.reviewer]
+logical_model = "review-base"
+[agents.reviewer.categories.plan]
+logical_model = "plan-model"
+unknown = "ignored"
+[agents.reviewer.categories.plan.generation]
+max_tokens = 1024
+seed = 42
+[agents.reviewer.categories.tool-execution]
+preset = "tool-preset"
+[agents.reviewer.categories.lesson_review]
+logical_model = "lesson-model"
+[agents.reviewer.categories.quick]
+logical_model = "wrong-role"
+[agents.reviewer.categories.unknown]
+logical_model = "unknown-model"
+"#;
+    let config = load(document, false).expect("invalid category fields are ignored");
+    assert_eq!(config.agents.reviewer.categories.len(), 3);
+    let plan = config.agents.binding_for("reviewer", Some("plan")).unwrap();
+    assert_eq!(plan.logical_model, "plan-model");
+    assert_eq!(plan.generation.max_tokens, Some(1024));
+    let tool = config
+        .agents
+        .binding_for("reviewer", Some("tool-execution"))
+        .unwrap();
+    assert_eq!(tool.logical_model, "review-base");
+    assert_eq!(tool.preset.as_deref(), Some("tool-preset"));
+    assert_eq!(
+        config.agents.reviewer.categories["lesson_review"]
+            .logical_model
+            .as_deref(),
+        Some("lesson-model")
+    );
+    assert!(!config.agents.reviewer.categories.contains_key("quick"));
+    assert!(!config.agents.reviewer.categories.contains_key("unknown"));
+}

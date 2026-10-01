@@ -291,18 +291,13 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
                         strip_role_binding(
                             binding,
                             &format!("agents.roles.{name}"),
-                            false,
+                            name,
                             &mut ignored,
                         );
                     }
                 }
             } else {
-                strip_role_binding(
-                    value,
-                    &format!("agents.{role}"),
-                    role == "worker",
-                    &mut ignored,
-                );
+                strip_role_binding(value, &format!("agents.{role}"), role, &mut ignored);
             }
         }
     }
@@ -329,12 +324,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
     Ok(ignored)
 }
 
-fn strip_role_binding(
-    value: &mut toml::Value,
-    path: &str,
-    worker: bool,
-    ignored: &mut Vec<String>,
-) {
+fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: &mut Vec<String>) {
     let Some(binding) = value.as_table_mut() else {
         return;
     };
@@ -350,13 +340,13 @@ fn strip_role_binding(
             ignored,
         );
     }
-    if worker
+    if matches!(role, "worker" | "reviewer")
         && let Some(categories) = binding
             .get_mut("categories")
             .and_then(toml::Value::as_table_mut)
     {
         let categories_path = format!("{path}.categories");
-        let category_names: Vec<_> = categories_for_role("worker")
+        let category_names: Vec<_> = categories_for_role(role)
             .map(|category| category.name)
             .collect();
         retain_known(categories, &categories_path, &category_names, ignored);
@@ -574,23 +564,26 @@ fn validate_role_categories(
     binding: &toml::value::Table,
     role_path: &str,
 ) -> Result<(), ConfigError> {
-    if role_path != "agents.worker" && binding.contains_key("categories") {
+    if !matches!(role_path, "agents.worker" | "agents.reviewer")
+        && binding.contains_key("categories")
+    {
         return Err(ConfigError::InvalidField {
             path: format!("{role_path}.categories"),
-            message: "categories are only allowed on worker".into(),
+            message: "categories are only allowed on worker and reviewer".into(),
         });
     }
     let Some(categories) = binding.get("categories").and_then(toml::Value::as_table) else {
         return Ok(());
     };
+    let role = role_path.rsplit('.').next().unwrap_or(role_path);
     for (category, value) in categories {
         let category_path = format!("{role_path}.categories.{category}");
-        if category_for_role("worker", category).is_none() {
+        if category_for_role(role, category).is_none() {
             return Err(ConfigError::InvalidField {
                 path: category_path,
                 message: format!(
                     "unknown category, expected one of: {}",
-                    categories_for_role("worker")
+                    categories_for_role(role)
                         .map(|category| category.name)
                         .collect::<Vec<_>>()
                         .join(", ")

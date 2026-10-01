@@ -20,8 +20,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{
-    AgentsConfig, CategoryBindingConfig, GenerationOverridesConfig, ResolvedAgentBinding,
-    RoleBindingConfig, WorkerBindingConfig,
+    AgentsConfig, CategorizedRoleBindingConfig, CategoryBindingConfig, GenerationOverridesConfig,
+    ResolvedAgentBinding, RoleBindingConfig, WorkerBindingConfig,
 };
 pub use budget::BudgetConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};

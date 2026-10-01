@@ -98,7 +98,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         &mut agents.orchestrator,
         &mut agents.explorer,
         &mut agents.worker.base,
-        &mut agents.reviewer,
+        &mut agents.reviewer.base,
         &mut agents.roles.web_researcher,
         &mut agents.roles.planner,
         &mut agents.roles.oracle,
@@ -118,6 +118,17 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         .worker
         .categories
         .insert("deep".into(), CategoryBindingConfig::default());
+
+    for category in ["plan", "tool-execution", "lesson_review"] {
+        agents.reviewer.categories.insert(
+            category.into(),
+            CategoryBindingConfig {
+                logical_model: binding.logical_model.clone(),
+                preset: Some(format!("{category}-preset")),
+                generation: binding.generation.clone(),
+            },
+        );
+    }
 
     // When: 全ロール・カテゴリと順序付きルート候補を一括保存する。
     save_routing_and_agents(&path, &routing, &agents).expect("combined save");

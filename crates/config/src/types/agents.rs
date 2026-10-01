@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
-use crate::agent_categories::category_for_role;
+use crate::agent_categories::{CATEGORIES, category_for_role};
 
 /// ロール別のエージェントバインディング設定。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
@@ -19,14 +19,14 @@ pub struct AgentsConfig {
     /// worker ロールのバインディング。
     pub worker: WorkerBindingConfig,
     /// reviewer ロールのバインディング。
-    pub reviewer: RoleBindingConfig,
+    pub reviewer: CategorizedRoleBindingConfig,
     pub roles: AdditionalRoleBindings,
 }
 
 /// agents 内の明示的な logical_model 参照を旧名→新名で置き換える。
 ///
 /// 各 role (orchestrator/explorer/worker/reviewer/roles.web_researcher/roles.planner/
-/// roles.oracle/roles.multimodal_looker) と worker.categories の全 category が対象。
+/// roles.oracle/roles.multimodal_looker) と worker.categories / reviewer.categories の全 category が対象。
 /// logical_model が None (暗黙の role 名参照) のものは変更しない。
 /// 変換は元の値に対する1回の map lookup で行い、chain/swap での連続置換誤接続を防ぐ。
 pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<String, String>) {
@@ -38,7 +38,7 @@ pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<S
         &mut agents.orchestrator.logical_model,
         &mut agents.explorer.logical_model,
         &mut agents.worker.base.logical_model,
-        &mut agents.reviewer.logical_model,
+        &mut agents.reviewer.base.logical_model,
         &mut agents.roles.web_researcher.logical_model,
         &mut agents.roles.planner.logical_model,
         &mut agents.roles.oracle.logical_model,
@@ -52,6 +52,13 @@ pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<S
             .values_mut()
             .map(|binding| &mut binding.logical_model),
     )
+    .chain(
+        agents
+            .reviewer
+            .categories
+            .values_mut()
+            .map(|binding| &mut binding.logical_model),
+    )
     .flatten()
     {
         if let Some(new_name) = renames.get(logical) {
@@ -60,7 +67,7 @@ pub fn rename_logical_model_refs(agents: &mut AgentsConfig, renames: &BTreeMap<S
     }
 }
 
-/// 指定した論理モデルを明示的に使用するロールと worker カテゴリを返す。
+/// 指定した論理モデルを明示的に使用するロールと worker/reviewer カテゴリを返す。
 pub fn roles_using(logical: &str, agents: &AgentsConfig) -> Vec<String> {
     explicit_refs(agents)
         .into_iter()
@@ -86,6 +93,11 @@ pub fn explicit_refs(agents: &AgentsConfig) -> Vec<(String, String)> {
     for (category, binding) in &agents.worker.categories {
         if let Some(logical) = &binding.logical_model {
             refs.push((format!("worker.categories.{category}"), logical.clone()));
+        }
+    }
+    for (category, binding) in &agents.reviewer.categories {
+        if let Some(logical) = &binding.logical_model {
+            refs.push((format!("reviewer.categories.{category}"), logical.clone()));
         }
     }
     refs
@@ -137,7 +149,7 @@ impl AgentsConfig {
     /// 設定に含まれない。
     ///
     /// # Errors
-    /// worker と内部 `reviewer/lesson_review` 以外へのカテゴリ指定は
+    /// worker/reviewer 以外、またはカテゴリの所属ロールと異なる指定は
     /// [`ConfigError::CategoryNotAllowedForRole`] を返す。
     /// 未知のロール・カテゴリは型付きエラーになる。
     pub fn binding_for(
@@ -145,9 +157,10 @@ impl AgentsConfig {
         role: &str,
         category: Option<&str>,
     ) -> Result<ResolvedAgentBinding, ConfigError> {
-        if role != "worker"
-            && let Some(category) = category
+        if let Some(category) = category
             && category_for_role(role, category).is_none()
+            && (!matches!(role, "worker" | "reviewer")
+                || CATEGORIES.iter().any(|defined| defined.name == category))
         {
             return Err(ConfigError::CategoryNotAllowedForRole {
                 role: role.to_string(),
@@ -158,7 +171,7 @@ impl AgentsConfig {
             "orchestrator" => &self.orchestrator,
             "explorer" => &self.explorer,
             "worker" => &self.worker.base,
-            "reviewer" => &self.reviewer,
+            "reviewer" => &self.reviewer.base,
             "web_researcher" => &self.roles.web_researcher,
             "planner" => &self.roles.planner,
             "oracle" => &self.roles.oracle,
@@ -177,10 +190,10 @@ impl AgentsConfig {
                 category: category.to_string(),
             });
         }
-        let category_binding = if role == "worker" {
-            category.and_then(|name| self.worker.categories.get(name))
-        } else {
-            None
+        let category_binding = match role {
+            "worker" => category.and_then(|name| self.worker.categories.get(name)),
+            "reviewer" => category.and_then(|name| self.reviewer.categories.get(name)),
+            _ => None,
         };
         let logical_model = category_binding
             .and_then(|found| found.logical_model.clone())
@@ -232,6 +245,30 @@ pub struct RoleBindingConfig {
     pub preset: Option<String>,
     /// 生成パラメータの上書き。
     pub generation: GenerationOverridesConfig,
+}
+
+/// カテゴリを持つロールのベース設定とカテゴリ別バインディング。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CategorizedRoleBindingConfig {
+    #[serde(flatten)]
+    pub base: RoleBindingConfig,
+    /// ロールに属するカテゴリ別のバインディング。
+    pub categories: BTreeMap<String, CategoryBindingConfig>,
+}
+
+impl std::ops::Deref for CategorizedRoleBindingConfig {
+    type Target = RoleBindingConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl std::ops::DerefMut for CategorizedRoleBindingConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
 }
 
 /// worker 専用のロール設定とカテゴリ別バインディング。
@@ -600,7 +637,7 @@ logical_model = "B"
     }
 
     #[test]
-    fn binding_for_rejects_category_when_role_is_not_worker() {
+    fn binding_for_rejects_category_when_role_is_not_categorized() {
         // Given: worker 以外のロールと既知のカテゴリ。
         let agents = AgentsConfig::default();
         // When: explorer のカテゴリを解決する。
@@ -634,7 +671,7 @@ logical_model = "B"
         );
         assert!(matches!(
             agents.binding_for("worker", Some("lesson_review")),
-            Err(ConfigError::UnknownCategory { .. })
+            Err(ConfigError::CategoryNotAllowedForRole { .. })
         ));
         assert!(matches!(
             agents.binding_for("reviewer", Some("lesson")),
@@ -643,13 +680,13 @@ logical_model = "B"
     }
 
     #[test]
-    fn agents_binding_rejects_categories_when_role_is_not_worker() {
+    fn agents_binding_rejects_categories_when_role_is_not_categorized() {
         // Given: explorer にカテゴリを設定した TOML。
         let doc = "[agents.explorer.categories.quick]\nlogical_model = \"fast\"\n";
         // When: 設定をパースする。
         let result = toml::from_str::<Config>(doc);
         // Then: categories は未知フィールドとして拒否される。
-        let error = result.expect_err("worker 以外に categories は設定できない");
+        let error = result.expect_err("worker/reviewer 以外に categories は設定できない");
         assert!(error.to_string().contains("unknown field `categories`"));
     }
 
@@ -785,6 +822,125 @@ temperature = 0.9
         assert_eq!(resolved.generation.temperature, Some(0.9));
         assert_eq!(resolved.generation.max_tokens, Some(4096));
         assert_eq!(resolved.generation.top_p, None);
+    }
+
+    #[test]
+    fn reviewer_category_bindings_merge_per_field_and_fall_back_to_base() {
+        let config: Config = toml::from_str(
+            r#"
+[agents.reviewer]
+logical_model = "review-base"
+preset = "base-appendix"
+[agents.reviewer.generation]
+temperature = 0.2
+top_p = 0.8
+max_tokens = 4096
+reasoning_effort = "medium"
+[agents.reviewer.categories.plan]
+logical_model = "plan-model"
+[agents.reviewer.categories.plan.generation]
+temperature = 0.6
+reasoning_effort = "high"
+[agents.reviewer.categories.tool-execution]
+preset = "tool-appendix"
+[agents.reviewer.categories.tool-execution.generation]
+top_p = 0.9
+max_tokens = 2048
+"#,
+        )
+        .unwrap();
+        let agents = config.agents;
+        let plan = agents.binding_for("reviewer", Some("plan")).unwrap();
+        assert_eq!(plan.logical_model, "plan-model");
+        assert_eq!(plan.preset.as_deref(), Some("base-appendix"));
+        assert_eq!(plan.generation.temperature, Some(0.6));
+        assert_eq!(plan.generation.top_p, Some(0.8));
+        assert_eq!(plan.generation.max_tokens, Some(4096));
+        assert_eq!(plan.generation.reasoning_effort.as_deref(), Some("high"));
+        let tool = agents
+            .binding_for("reviewer", Some("tool-execution"))
+            .unwrap();
+        assert_eq!(tool.logical_model, "review-base");
+        assert_eq!(tool.preset.as_deref(), Some("tool-appendix"));
+        assert_eq!(tool.generation.temperature, Some(0.2));
+        assert_eq!(tool.generation.top_p, Some(0.9));
+        assert_eq!(tool.generation.max_tokens, Some(2048));
+        assert_eq!(tool.generation.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            agents
+                .binding_for("reviewer", Some("lesson_review"))
+                .unwrap(),
+            agents.binding_for("reviewer", None).unwrap()
+        );
+        let defaults = AgentsConfig::default();
+        for category in ["plan", "tool-execution"] {
+            assert_eq!(
+                defaults.binding_for("reviewer", Some(category)).unwrap(),
+                defaults.binding_for("reviewer", None).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn category_bindings_reject_wrong_roles_and_unknown_names() {
+        let agents = AgentsConfig::default();
+        for (role, category) in [
+            ("reviewer", "quick"),
+            ("worker", "plan"),
+            ("worker", "tool-execution"),
+            ("planner", "plan"),
+        ] {
+            assert!(matches!(
+                agents.binding_for(role, Some(category)),
+                Err(ConfigError::CategoryNotAllowedForRole { .. })
+            ));
+        }
+        for role in ["worker", "reviewer"] {
+            assert!(matches!(
+                agents.binding_for(role, Some("unknown")),
+                Err(ConfigError::UnknownCategory { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn reviewer_category_model_refs_are_explicit_and_renamed() {
+        let mut agents = AgentsConfig::default();
+        for category in ["plan", "tool-execution", "lesson_review"] {
+            agents.reviewer.categories.insert(
+                category.into(),
+                CategoryBindingConfig {
+                    logical_model: Some("old".into()),
+                    preset: Some("old".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let expected_addresses = vec![
+            "reviewer.categories.lesson_review",
+            "reviewer.categories.plan",
+            "reviewer.categories.tool-execution",
+        ];
+        assert_eq!(roles_using("old", &agents), expected_addresses);
+        assert_eq!(explicit_refs(&agents).len(), 3);
+        rename_logical_model_refs(&mut agents, &[("old".into(), "new".into())].into());
+        assert!(roles_using("old", &agents).is_empty());
+        assert_eq!(roles_using("new", &agents), expected_addresses);
+        assert!(agents.reviewer.logical_model.is_none());
+        for binding in agents.reviewer.categories.values() {
+            assert_eq!(binding.preset.as_deref(), Some("old"));
+        }
+    }
+
+    #[test]
+    fn reviewer_bindings_reject_unknown_fields() {
+        for doc in [
+            "[agents.reviewer]\nprompt = 'not allowed'",
+            "[agents.reviewer.categories.plan]\nweight = 0.5",
+            "[agents.reviewer.categories.plan.generation]\nseed = 42",
+        ] {
+            assert!(toml::from_str::<Config>(doc).is_err(), "{doc}");
+        }
     }
 
     // Given: 既知カテゴリ以外のカテゴリ名 / When: binding_for を呼ぶ

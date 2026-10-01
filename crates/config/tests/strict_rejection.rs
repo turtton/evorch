@@ -532,7 +532,7 @@ fn worker_category_config_accepts_public_categories_and_internal_lesson() {
             format!("{name}-model")
         );
     }
-    for name in ["lesson_review", "unknown"] {
+    for name in ["lesson_review", "plan", "tool-execution", "unknown"] {
         let document = format!("[agents.worker.categories.{name}]\nlogical_model = 'invalid'\n");
         let error = load_project(&tmp, &document).expect_err("not a worker category");
         assert!(matches!(error, ConfigError::InvalidField { path, .. }
@@ -540,41 +540,74 @@ fn worker_category_config_accepts_public_categories_and_internal_lesson() {
     }
 }
 
-fn assert_worker_only_categories(role_path: &str, category: &str) {
-    // Given: worker 以外のロールにカテゴリを指定した設定。
+fn assert_uncategorized_role(role_path: &str, category: &str) {
+    // Given: worker/reviewer 以外のロールにカテゴリを指定した設定。
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let document = format!("[{role_path}.categories.{category}]\npreset = 'p'\n");
     // When: 実際の設定ロード境界を通す。
-    let error = load_project(&tmp, &document).expect_err("非workerカテゴリは拒否される");
+    let error = load_project(&tmp, &document).expect_err("カテゴリ非対応ロールは拒否される");
     // Then: serde エラーではなく完全なパス付きの strict エラーになる。
     let expected_path = format!("{role_path}.categories");
     let display = error.to_string();
     assert!(display.contains(&expected_path), "{display}");
     assert!(
-        display.contains("categories are only allowed on worker"),
+        display.contains("categories are only allowed on worker and reviewer"),
         "{display}"
     );
     assert!(matches!(error, ConfigError::InvalidField { path, .. } if path == expected_path));
 }
 
 #[test]
-fn explorer_categories_are_rejected_with_worker_only_path() {
-    assert_worker_only_categories("agents.explorer", "quick");
+fn explorer_categories_are_rejected_with_uncategorized_role_path() {
+    assert_uncategorized_role("agents.explorer", "quick");
 }
 
 #[test]
-fn orchestrator_categories_are_rejected_with_worker_only_path() {
-    assert_worker_only_categories("agents.orchestrator", "deep");
+fn orchestrator_categories_are_rejected_with_uncategorized_role_path() {
+    assert_uncategorized_role("agents.orchestrator", "deep");
 }
 
 #[test]
-fn oracle_categories_are_rejected_with_worker_only_path() {
-    assert_worker_only_categories("agents.roles.oracle", "visual");
+fn oracle_categories_are_rejected_with_uncategorized_role_path() {
+    assert_uncategorized_role("agents.roles.oracle", "visual");
 }
 
 #[test]
-fn reviewer_categories_are_rejected_with_worker_only_path() {
-    assert_worker_only_categories("agents.reviewer", "writing");
+fn reviewer_categories_accept_own_names_and_reject_worker_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["plan", "tool-execution", "lesson_review"] {
+        let document =
+            format!("[agents.reviewer.categories.{name}]\nlogical_model = '{name}-model'\n");
+        let config = load_project(&tmp, &document).expect("reviewer category");
+        assert_eq!(
+            config
+                .agents
+                .binding_for("reviewer", Some(name))
+                .unwrap()
+                .logical_model,
+            format!("{name}-model")
+        );
+    }
+    for name in ["quick", "lesson", "unknown"] {
+        let document = format!("[agents.reviewer.categories.{name}]\npreset = 'p'\n");
+        assert_error_contains(
+            load_project(&tmp, &document),
+            &[
+                &format!("agents.reviewer.categories.{name}"),
+                "expected one of: plan, tool-execution, lesson_review",
+            ],
+        );
+    }
+    for (suffix, field) in [("", "typo"), (".generation", "seed")] {
+        let document = format!("[agents.reviewer.categories.plan{suffix}]\n{field} = 42\n");
+        assert_error_contains(
+            load_project(&tmp, &document),
+            &[
+                &format!("agents.reviewer.categories.plan{suffix}.{field}"),
+                "unknown field",
+            ],
+        );
+    }
 }
 
 // Given: openai-compatible の sugar 形式 (type エイリアス + api_key_env) / When: 読み込む
