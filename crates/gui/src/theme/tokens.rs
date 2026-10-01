@@ -172,7 +172,7 @@ pub fn state_color(state: ThreadState) -> Color32 {
         ThreadState::Active => palette().ACCENT,
         ThreadState::Paused => palette().TEXT_MUTED,
         ThreadState::Stopped => palette().WARNING_FG,
-        ThreadState::Running => palette().INFO,
+        ThreadState::Running => palette().RUNNING,
         ThreadState::Waiting => palette().WAITING,
         ThreadState::Done => palette().SUCCESS,
         ThreadState::Error => palette().ERROR_FG,
@@ -310,7 +310,33 @@ mod tests {
             state_color(ThreadState::Error),
         ];
         let distinct: std::collections::HashSet<_> = colors.iter().copied().collect();
-        assert_eq!(distinct.len(), colors.len() - 1);
+        assert_eq!(distinct.len(), colors.len());
+        assert_eq!(
+            state_color(ThreadState::Running),
+            phase_color(ThreadRunPhase::Running)
+        );
+        assert_eq!(
+            state_color(ThreadState::Waiting),
+            phase_color(ThreadRunPhase::Waiting)
+        );
+        for p in [Palette::graphite(), Palette::tokyo_night()] {
+            let colors = [
+                p.ACCENT,
+                p.TEXT_MUTED,
+                p.WARNING_FG,
+                p.RUNNING,
+                p.WAITING,
+                p.SUCCESS,
+                p.ERROR_FG,
+            ];
+            assert_eq!(
+                colors
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                colors.len()
+            );
+        }
     }
 
     #[test]

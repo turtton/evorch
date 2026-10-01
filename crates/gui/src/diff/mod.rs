@@ -2,6 +2,7 @@
 
 mod fixture;
 mod git_cli;
+pub(crate) mod presentation;
 
 use std::path::PathBuf;
 use std::sync::Arc;

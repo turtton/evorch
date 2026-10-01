@@ -200,3 +200,215 @@ fn branch_mode_requests_main_merge_base() {
         &[DiffMode::Branch]
     );
 }
+
+const REVIEW_DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@ fn main()\n fn main() {\n-    let message = \"old\";\n+    let message = \"new\";\n+    println!(\"{message}\");\n }\ndiff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n";
+
+fn review_harness(size: egui::Vec2) -> egui_kittest::Harness<'static, gui::diff::DiffModel> {
+    let mut model = gui::diff::DiffModel::new();
+    model.show_snapshot(REVIEW_DIFF.into());
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(size)
+        .build_ui_state(
+            |ui, model| {
+                gui::theme::style::install(ui.ctx());
+                gui::panes::diff::diff_pane(ui, model);
+            },
+            model,
+        );
+    harness.run_steps(4);
+    harness
+}
+
+fn painted_texts(
+    harness: &egui_kittest::Harness<'_, gui::diff::DiffModel>,
+) -> Vec<(String, egui::Pos2)> {
+    harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn review_diff_shows_file_stats_numbers_and_tinted_full_width_rows() {
+    use egui_kittest::kittest::Queryable;
+    let harness = review_harness(egui::vec2(1280.0, 720.0));
+    for label in [
+        "2 changed files",
+        "src/main.rs",
+        "image.png",
+        "Modified",
+        "+2",
+        "−1",
+        "    let message = \"old\";",
+        "    let message = \"new\";",
+        "Binary files a/image.png and b/image.png differ",
+    ] {
+        assert!(
+            harness.query_all_by_label(label).next().is_some(),
+            "missing {label}"
+        );
+    }
+    let text = painted_texts(&harness);
+    assert!(
+        text.iter()
+            .any(|(text, _)| text.contains("11") && text.ends_with('−'))
+    );
+    assert!(
+        text.iter()
+            .any(|(text, _)| text.contains("12") && text.ends_with('+'))
+    );
+    let row_fill = |needle: &str| {
+        let position = text.iter().find(|(text, _)| text == needle).unwrap().1;
+        harness
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.rect.contains(position + egui::vec2(1.0, 6.0))
+                        && rect.rect.width() > 800.0
+                        && (rect.rect.height() - 24.0).abs() < 0.5 =>
+                {
+                    Some(rect.fill)
+                }
+                _ => None,
+            })
+            .expect("code row has a full-width background")
+    };
+    let added = row_fill("    let message = \"new\";");
+    let deleted = row_fill("    let message = \"old\";");
+    assert_ne!(added, deleted);
+    assert!(added.g() > added.r(), "added row is green");
+    assert!(deleted.r() > deleted.g(), "deleted row is red");
+}
+
+#[test]
+fn split_toggle_aligns_old_and_new_and_file_collapse_survives_view_changes() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = review_harness(egui::vec2(1280.0, 720.0));
+    harness.get_by_label("Split").click();
+    harness.run_steps(4);
+    let text = painted_texts(&harness);
+    let old = text
+        .iter()
+        .find(|(text, _)| text == "    let message = \"old\";")
+        .unwrap()
+        .1;
+    let new = text
+        .iter()
+        .find(|(text, _)| text == "    let message = \"new\";")
+        .unwrap()
+        .1;
+    assert!((old.y - new.y).abs() < 1.0);
+    assert!(new.x - old.x > 400.0);
+    harness.get_by_label("src/main.rs").click();
+    harness.run_steps(4);
+    assert!(
+        harness
+            .query_all_by_label("    let message = \"old\";")
+            .next()
+            .is_none()
+    );
+    assert!(
+        harness
+            .query_all_by_label("Binary files a/image.png and b/image.png differ")
+            .next()
+            .is_some()
+    );
+    harness.get_by_label("Unified").click();
+    harness.run_steps(4);
+    assert!(
+        harness
+            .query_all_by_label("    let message = \"old\";")
+            .next()
+            .is_none()
+    );
+    harness.get_by_label("src/main.rs").click();
+    harness.run_steps(4);
+    assert!(
+        harness
+            .query_all_by_label("    let message = \"old\";")
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn review_diff_virtualizes_large_documents_and_keeps_toolbar_inside_narrow_pane() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = review_harness(egui::vec2(480.0, 320.0));
+    for label in [
+        "Working tree",
+        "Branch vs main",
+        "Refresh",
+        "Unified",
+        "Split",
+    ] {
+        let rect = harness.get_by_label(label).rect();
+        assert!(
+            rect.min.x >= 0.0 && rect.max.x <= 480.0,
+            "{label}: {rect:?}"
+        );
+    }
+    let text = format!(
+        "diff --git a/large.rs b/large.rs\n@@ -0,0 +1,5000 @@\n{}",
+        (0..5000)
+            .map(|i| format!("+let line_{i} = {i};\n"))
+            .collect::<String>()
+    );
+    harness.state_mut().show_snapshot(text);
+    harness.run_steps(4);
+    assert!(
+        harness
+            .query_all_by_label("let line_0 = 0;")
+            .next()
+            .is_some()
+    );
+    assert!(
+        painted_texts(&harness).len() < 100,
+        "offscreen lines must not be painted"
+    );
+}
+
+#[test]
+#[ignore = "requires a working wgpu adapter; CI requires real diff render evidence"]
+fn capture_review_diff_unified_and_split() {
+    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/gui-evidence/diff-review");
+    std::fs::create_dir_all(&directory).unwrap();
+    for size in [[1280.0, 720.0], [800.0, 600.0]] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workbench = HeadlessWorkbench::new(
+            state_with_diff(Arc::new(FixtureDiffSource::ready(REVIEW_DIFF)), temp.path()),
+            size,
+        );
+        let path = workbench
+            .state()
+            .dock()
+            .find_tab(&PanelId::new("diff-main"))
+            .unwrap();
+        workbench
+            .state_mut()
+            .dock_mut()
+            .set_active_tab(path)
+            .unwrap();
+        workbench.run();
+        workbench.click_label("Working tree");
+        step_until(&mut workbench, "src/main.rs");
+        workbench.run();
+        for view in ["Unified", "Split"] {
+            workbench.click_label(view);
+            workbench.run();
+            if let Some(frame) = gui::evidence::capture_or_skip(&mut workbench) {
+                frame
+                    .save_png(&directory.join(format!("{view}-{}x{}.png", size[0], size[1])))
+                    .unwrap();
+            }
+        }
+    }
+}

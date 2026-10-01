@@ -96,7 +96,6 @@ fn render_tree(
         let mut expansion =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
-        let mut state_below = None;
         ui.push_id(&thread.id, |ui| {
             compact_row(ui, active, |ui| {
                 ui.spacing_mut().item_spacing.x = SP_1;
@@ -130,22 +129,17 @@ fn render_tree(
                     archived_row(ui, thread, action);
                 } else {
                     let state = thread.state(phases);
-                    if active_row(
+                    active_row(
                         ui,
                         thread,
                         state,
                         question_threads.contains(&thread.id),
                         action,
-                    ) {
-                        state_below = Some(state);
-                    }
+                    );
                 }
             });
         });
         expansion.store(ui.ctx());
-        if let Some(state) = state_below {
-            ui.label(crate::theme::text::muted(thread_state_label(state)));
-        }
         if has_children && !expansion.is_open() {
             collapsed_depth = Some(depth);
         }
@@ -165,21 +159,23 @@ fn active_row(
     state: ThreadState,
     has_question: bool,
     action: &mut Option<SidebarAction>,
-) -> bool {
+) {
     let pin = if thread.pinned { "★" } else { "☆" };
     if ui.button(pin).clicked() {
         *action = Some(SidebarAction::TogglePin(thread.id.clone()));
     }
-    // Match the inline question card while a user answer is still pending,
-    // including when the runtime continues independent work in Running.
-    status_dot(
-        ui,
-        if has_question {
-            palette().WARNING_FG
-        } else {
-            state_color(state)
-        },
-    );
+    let label = format!("Thread status: {}", thread_state_label(state));
+    let dot = status_dot(ui, state_color(state)).on_hover_text(&label);
+    dot.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    // A pending question does not change the run phase. Keep both signals.
+    if has_question {
+        ui.label(
+            egui::RichText::new("?")
+                .strong()
+                .color(palette().WARNING_FG),
+        )
+        .on_hover_text("Answer needed: this thread has an unanswered question");
+    }
     if thread.parent_thread_id.is_none() {
         let archive = ui
             .add_enabled(!thread.pinned, archive_button)
@@ -193,7 +189,7 @@ fn active_row(
     } else {
         ui.add_space(ui.text_style_height(&egui::TextStyle::Small) + SP_2);
     }
-    // At the minimum window size the state and two action buttons leave no
+    // At the minimum window size the two action buttons leave little
     // room for the title, and egui's minimum Label width overlaps earlier
     // controls. Keep the title and controls in distinct hit regions.
     let narrow = ui.available_width() < 180.0;
@@ -220,11 +216,9 @@ fn active_row(
             if ui.small_button("Fork").clicked() {
                 *action = Some(SidebarAction::ForkThread(thread.id.clone()));
             }
-            ui.label(thread_state_label(state));
         }
         thread_title(ui, thread, action);
     });
-    narrow
 }
 
 fn archived_row(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarAction>) {
