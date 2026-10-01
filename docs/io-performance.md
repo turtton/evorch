@@ -53,8 +53,9 @@ GUI 保存では通常の ownership heartbeat を省略する。同じ run の�
 
 本番GUIは `OwnedStorageBridge` が停止時の有限snapshotと結合待ちの差分を保存し、
 bridgeをjoinしてからSQLiteを閉じる。起動途中の失敗でも同じ順序になる。
-所有権は先にquiesceして新規turnを止め、heartbeatによる解放を保留し、保存完了後に
-解放する。保存待ちの同一世代は有効に保ち、外部の世代変更による拒否は維持する。
+所有権は先にquiesceして新規turnを止め、heartbeatによる解放を保留する。
+flush barrierで先行保存の完了を確認してから解放し、Released通知も最終排出で保存する。
+保存待ちの同一世代は有効に保ち、外部の世代変更による拒否は維持する。
 停止要求をbridgeが観測した時点のsnapshotを区切りとし、その後のイベントは
 終了待ちを延長しない。プロセス強制終了は正常終了の保証に含まれない。
 
@@ -150,14 +151,27 @@ GUIの512差分を2行にまとめるテスト、heartbeat省略、空flushの�
 ```sh
 uv run --no-project python scripts/measure-io.py --pid 12345 --duration 60
 uv run --no-project python scripts/measure-io.py --pid 12345 --duration 300 --interval 5 --samples
+# storage-writerのTIDを選び、アプリ自身の保存I/Oを切り分ける
+uv run --no-project python scripts/measure-io.py --pid 12345 --tid 12399 --duration 60
 ```
 
 対象 PID を `/proc` から読み取り、JSON を標準出力へ出す。既定でログファイルを
-作らず、DB へメトリクスを保存しない。全 thread の CPU と I/O を含み、子プロセスは
-含まない。ツール子プロセスも調べる場合は、その PID に対して別途実行する。
-PID が再利用された場合は集計を止める。途中終了時の summary は最後に取得できた
+作らず、DB へメトリクスを保存しない。CPUは全threadを含み、子プロセスのCPUを含まない。
+プロセスI/Oは全threadに加え、終了してwaitで回収された子プロセスの累計も含む。
+まだ実行中の子プロセスは別PIDで調べる。子の終了時に過去のI/Oがまとめて加算されるため、
+その区間の毎秒値をGUI保存の瞬間速度と解釈しない。
+`--tid`は特定threadだけを測り、子プロセスや他threadのI/Oを含めない。
+PID/TID が再利用された場合は集計を止める。途中終了時の summary は最後に取得できた
 sample までであり、終了直前の未観測 I/O は含まれない。権限不足や欠損は `null` と
 `unavailable_fields` / `io_error` に出る。
+
+計測ツール自体の回帰テストは以下で実行できる。PID/TIDの取り違え、取得不能の
+ゼロ扱い、子プロセス回収前後の帰属を検証する。
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 uv run --no-project python -m unittest discover \
+  -s scripts/tests -p test_measure_io.py -v
+```
 
 | 値 | 読み方 |
 | --- | --- |
@@ -167,6 +181,9 @@ sample までであり、終了直前の未観測 I/O は含まれない。権�
 | `cpu_percent_one_core` | 1 コアを 100% とする CPU。複数 thread で 100% を超え得る |
 
 定義は [Linux procfs の公式資料](https://docs.kernel.org/filesystems/proc.html#proc-pid-io-display-the-io-accounting-fields)
-を参照。待機、長い streaming、ツール連続実行、複数ウィンドウを同じ時間ずつ測り、
+と、子プロセス回収時の集計を行う[Linux kernelの実装](https://github.com/torvalds/linux/blob/v6.18/kernel/exit.c)
+を参照。子が1MiBをfsyncして終了する実験でも、親の`wchar`と`write_bytes`にそれぞれ
+1,048,576が加算された。130GiBの内訳を判断する際も、終了済みのビルド等を考慮する。
+待機、長い streaming、ツール連続実行、複数ウィンドウを同じ時間ずつ測り、
 CPU・各 I/O の毎秒値と保存キュー件数・待ち時間を合わせて確認する。待機で継続した
 書き込みが出た場合は、保存元を特定して更新契機を修正する。

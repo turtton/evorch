@@ -170,8 +170,9 @@ fn real_owner_quiesce_preserves_a_queued_delta_until_owned_storage_shutdown() {
         runtime::ownership::OwnerState::Quiescing
     );
     permit.validate_generation().unwrap();
-    owner.shutdown();
+    owner.flush().unwrap();
     assert!(!host.release_ready().unwrap());
+    owner.shutdown();
     assert!(permit.validate_generation().is_err());
     let messages: Vec<_> = db
         .events_all_ordered()
@@ -181,5 +182,75 @@ fn real_owner_quiesce_preserves_a_queued_delta_until_owned_storage_shutdown() {
         .map(|row| row.event)
         .collect();
     assert_eq!(messages, [event]);
+    let rows = db.events_all_ordered().unwrap();
+    let delta_index = rows
+        .iter()
+        .position(|row| matches!(&row.event.kind, event_bus::EventKind::Message(_)))
+        .unwrap();
+    let released_index = rows
+        .iter()
+        .position(|row| {
+            matches!(&row.event.kind,
+        event_bus::EventKind::Ownership(owner) if owner.action == OwnershipAction::Released)
+        })
+        .expect("release is persisted before subscriber exits");
+    assert!(delta_index < released_index);
     assert_eq!(monitor.snapshot().failed_events, 0);
+}
+
+#[test]
+fn flush_acknowledges_durable_rows_without_stopping_the_subscriber() {
+    let (_dir, storage, db) = fixture();
+    let bus = Arc::new(EventBus::new(32));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        |handle| StorageBridge::new(handle, "session"),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let before = delta("before barrier");
+    bus.emit(before.clone());
+    owner.flush().unwrap();
+    assert_eq!(db.events_all_ordered().unwrap()[0].event, before);
+    assert_eq!(owner.monitor().snapshot().pending_events, 0);
+    assert_eq!(bus.receiver_count(), 1);
+    let after = delta("after barrier");
+    bus.emit(after.clone());
+    owner.shutdown();
+    let rows = db.events_all_ordered().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].event, after);
+    assert_eq!(
+        owner.flush().unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn flush_barrier_reports_a_rejected_write_instead_of_acknowledging_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(StorageConfig {
+        db_path: dir.path().join("rejected.db"),
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(32));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        |handle| StorageBridge::new(handle, "session"),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    bus.emit(delta("rejected"));
+    let error = owner.flush().unwrap_err();
+    assert!(error.to_string().contains("EventSize"), "{error}");
+    assert_eq!(owner.monitor().snapshot().failed_events, 1);
+    // Failures are reported once per barrier interval, while the bridge stays usable.
+    owner.flush().unwrap();
 }

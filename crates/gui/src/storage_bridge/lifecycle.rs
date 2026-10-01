@@ -6,7 +6,7 @@ use event_bus::EventBus;
 use storage::{Storage, StorageHandle};
 use tokio::sync::oneshot;
 
-use super::{StorageBridge, StorageBridgeMonitor, run_subscribed};
+use super::{FlushReply, StorageBridge, StorageBridgeMonitor, run_subscribed};
 
 /// Owns durable storage and its GUI event bridge. Dropping this guard signals a
 /// finite drain, joins the bridge, and only then lets the SQLite writer close.
@@ -14,6 +14,7 @@ use super::{StorageBridge, StorageBridgeMonitor, run_subscribed};
 pub struct OwnedStorageBridge {
     storage: Storage,
     shutdown: Option<oneshot::Sender<()>>,
+    flush_requests: tokio::sync::mpsc::UnboundedSender<FlushReply>,
     thread: Option<JoinHandle<()>>,
     monitor: StorageBridgeMonitor,
 }
@@ -36,6 +37,7 @@ impl OwnedStorageBridge {
         let lifetime = Arc::downgrade(&bus);
         drop(bus);
         let (shutdown, stop) = oneshot::channel();
+        let (flush_requests, flush_receiver) = tokio::sync::mpsc::unbounded_channel();
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let thread = std::thread::Builder::new()
             .name("evorch-storage-bridge".into())
@@ -49,12 +51,14 @@ impl OwnedStorageBridge {
                         async {
                             let _ = stop.await;
                         },
+                        flush_receiver,
                     ));
                 });
             })?;
         Ok(Self {
             storage,
             shutdown: Some(shutdown),
+            flush_requests,
             thread: Some(thread),
             monitor,
         })
@@ -66,6 +70,27 @@ impl OwnedStorageBridge {
 
     pub fn monitor(&self) -> StorageBridgeMonitor {
         self.monitor.clone()
+    }
+
+    /// Persist the accepted queue and a finite bus snapshot without stopping
+    /// the subscriber. Quiesce producers first, then call this before releasing
+    /// generation fences; release transitions can still reach the final shutdown
+    /// snapshot. Reports the first write failure since the preceding barrier.
+    /// This synchronous method waits for SQLite writes and usage flush to finish.
+    pub fn flush(&mut self) -> io::Result<()> {
+        let (reply, completed) = std::sync::mpsc::channel();
+        self.flush_requests
+            .send(reply)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "storage bridge is closed"))?;
+        completed
+            .recv()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "storage bridge flush was interrupted",
+                )
+            })?
+            .map_err(io::Error::other)
     }
 
     /// Drain accepted events and the snapshot pending when the stop is observed,

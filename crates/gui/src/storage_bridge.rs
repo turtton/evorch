@@ -125,21 +125,28 @@ impl StorageBridge {
     }
 
     pub fn flush_usage(&mut self) {
-        if !self.usage_dirty {
-            return;
-        }
-        self.usage_dirty = false;
-        self.usage.flush_into(&self.storage);
-        if let Err(error) = self.storage.flush_usage_now() {
+        if let Err(error) = self.flush_usage_checked() {
             self.monitor
                 .warn(&format!("failed to flush usage metrics: {error}"));
         }
     }
+
+    fn flush_usage_checked(&mut self) -> Result<(), StorageError> {
+        if !self.usage_dirty {
+            return Ok(());
+        }
+        self.usage_dirty = false;
+        self.usage.flush_into(&self.storage);
+        self.storage.flush_usage_now()
+    }
 }
+
+type FlushReply = std::sync::mpsc::Sender<Result<(), String>>;
 
 enum WriteRequest {
     Event(QueuedEvent),
     FlushUsage,
+    Barrier(FlushReply),
 }
 
 // A transient stack value from select, never retained in a collection. Boxing
@@ -151,6 +158,7 @@ enum BridgeInput {
     DeltaTick,
     Drained,
     Shutdown,
+    Flush(FlushReply),
 }
 
 /// Persists events without blocking the caller's runtime, flushing on ticks and shutdown.
@@ -177,7 +185,16 @@ pub async fn run_until_shutdown(
     let subscriber = bus.subscribe();
     let bus_lifetime = Arc::downgrade(&bus);
     drop(bus);
-    run_subscribed(subscriber, bus_lifetime, bridge, flush_every, shutdown).await;
+    let (_flush_sender, flush_requests) = tokio::sync::mpsc::unbounded_channel();
+    run_subscribed(
+        subscriber,
+        bus_lifetime,
+        bridge,
+        flush_every,
+        shutdown,
+        flush_requests,
+    )
+    .await;
 }
 
 async fn run_subscribed(
@@ -186,6 +203,7 @@ async fn run_subscribed(
     mut bridge: StorageBridge,
     flush_every: Duration,
     shutdown: impl Future<Output = ()>,
+    mut flush_requests: tokio::sync::mpsc::UnboundedReceiver<FlushReply>,
 ) {
     bridge.validator = Some(subscriber.mutation_validator());
     tokio::pin!(shutdown);
@@ -202,16 +220,27 @@ async fn run_subscribed(
     // remain held until persistence completes, including during cancellation.
     let writer = tokio::task::spawn_blocking(move || {
         tracing::dispatcher::with_default(&dispatch, || {
+            let mut failure = None;
             while let Some(request) = pending.blocking_recv() {
-                match request {
-                    WriteRequest::Event(queued) => {
-                        if let Err(error) = bridge.handle_event(&queued.event) {
-                            bridge
-                                .monitor
-                                .warn(&format!("failed to persist event: {error}"));
+                let result = match request {
+                    WriteRequest::Event(queued) => bridge.handle_event(&queued.event),
+                    WriteRequest::FlushUsage => bridge.flush_usage_checked(),
+                    WriteRequest::Barrier(reply) => {
+                        if let Err(error) = bridge.flush_usage_checked() {
+                            failure.get_or_insert_with(|| error.to_string());
                         }
+                        // This FIFO barrier runs only after preceding appends
+                        // return from SQLite. Keep the subscriber alive for the
+                        // final ownership Released event before shutdown.
+                        let _ = reply.send(failure.take().map_or(Ok(()), Err));
+                        continue;
                     }
-                    WriteRequest::FlushUsage => bridge.flush_usage(),
+                };
+                if let Err(error) = result {
+                    failure.get_or_insert_with(|| error.to_string());
+                    bridge
+                        .monitor
+                        .warn(&format!("failed to persist event or usage: {error}"));
                 }
             }
             bridge.flush_usage();
@@ -243,12 +272,21 @@ async fn run_subscribed(
             tokio::select! {
                 biased;
                 _ = &mut shutdown => BridgeInput::Shutdown,
+                Some(reply) = flush_requests.recv() => BridgeInput::Flush(reply),
                 _ = ticker.tick() => BridgeInput::UsageTick,
                 _ = delta_ticker.tick() => BridgeInput::DeltaTick,
                 result = subscriber.recv() => BridgeInput::Event(result),
             }
         };
         let result = match received {
+            BridgeInput::Flush(reply) => {
+                for event in subscriber.drain_pending_snapshot() {
+                    if queue.push(event).await.is_err() {
+                        break;
+                    }
+                }
+                queue.barrier(reply).await
+            }
             BridgeInput::Shutdown => {
                 // Capture before awaiting any writes: later emissions cannot
                 // keep an application close waiting forever on live producers.

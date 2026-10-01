@@ -244,6 +244,14 @@ impl EventQueue {
         Ok(())
     }
 
+    pub(super) async fn barrier(&mut self, reply: super::FlushReply) -> Result<(), ()> {
+        self.flush().await?;
+        self.requests
+            .send(WriteRequest::Barrier(reply))
+            .await
+            .map_err(|_| ())
+    }
+
     pub(super) async fn flush_usage(&mut self) -> Result<(), ()> {
         self.flush().await?;
         self.requests

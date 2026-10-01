@@ -1066,10 +1066,15 @@ impl Drop for GuiStorageResources {
         if let Err(error) = self.ownership.begin_quiesce() {
             tracing::warn!(%error, "failed to quiesce ownership before storage drain");
         }
-        self._storage.shutdown();
+        if let Err(error) = self._storage.flush() {
+            tracing::warn!(%error, "failed to flush queued events before ownership release");
+        }
         if let Err(error) = self.ownership.release_ready() {
             tracing::warn!(%error, "failed to release ownership after storage drain");
         }
+        // The bridge is still subscribed when release_ready emits Released.
+        // Its final snapshot durably records that transition after prior deltas.
+        self._storage.shutdown();
         // Fields then close SQLite, drop the retained host and remove temp dirs.
     }
 }
@@ -1346,6 +1351,19 @@ mod storage_shutdown_tests {
             .map(|row| row.event)
             .collect();
         assert_eq!(messages, [event]);
+        let rows = db.events_all_ordered().unwrap();
+        let delta_index = rows
+            .iter()
+            .position(|row| matches!(&row.event.kind, EventKind::Message(_)))
+            .unwrap();
+        let released_index = rows
+            .iter()
+            .position(|row| {
+                matches!(&row.event.kind,
+            EventKind::Ownership(owner) if owner.action == event_bus::OwnershipAction::Released)
+            })
+            .expect("Released must remain durable");
+        assert!(delta_index < released_index);
         assert_eq!(monitor.snapshot().failed_events, 0);
         let registry =
             runtime::ownership::Registry::open_readonly(&root.join("owners.db")).unwrap();

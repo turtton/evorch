@@ -6,4 +6,4 @@ cargo test -p storage --test io_contracts -- --nocapture
 cargo test -p runtime --lib ownership::tests
 cargo test -p gui --lib storage_bridge
 cargo test -p gui --bin evorch-gui
-cargo test -p gui --test storage_bridge --test diagnostic_ledger
+cargo test -p gui --test storage_bridge --test diagnostic_ledger --test ownership_close_headless
