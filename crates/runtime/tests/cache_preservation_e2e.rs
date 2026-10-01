@@ -90,6 +90,15 @@ fn harness(script: Vec<ScriptedResponse>, window: u64) -> Harness {
 }
 
 fn harness_with_read(script: Vec<ScriptedResponse>, window: u64, read: Arc<dyn Tool>) -> Harness {
+    harness_with_tools(script, window, read, Vec::new())
+}
+
+fn harness_with_tools(
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(script);
     std::fs::create_dir_all(directory.path().join(config::PROJECT_CONFIG_DIR))
@@ -130,6 +139,9 @@ summarizer = "structural"
     let receiver = bus.subscribe();
     let mut executor = ToolExecutor::new(bus.clone());
     executor.register(read).unwrap();
+    for tool in extra_tools {
+        executor.register(tool).unwrap();
+    }
     let mut prompts = SystemPromptCatalog::builder();
     for role in [
         Role::Orchestrator,
@@ -402,6 +414,104 @@ async fn ordinary_tool_turns_reuse_all_previous_wire_input() {
         AgentRunPhase::Done
     );
     verify_trace(&harness, run, &events, 0);
+}
+
+// Changing execution scope appends observations; it never changes tools or rewrites errors.
+#[tokio::test]
+async fn shell_scope_recovery_keeps_policy_and_failed_observations_in_the_wire_prefix() {
+    use tools::tools::shell_escalation::{EscalationDecision, ShellEscalationGate};
+
+    struct ApproveHost;
+    #[async_trait::async_trait]
+    impl ShellEscalationGate for ApproveHost {
+        async fn decide(
+            &self,
+            _ctx: &tools::ToolExecutionContext,
+            _command: &str,
+            _justification: &str,
+        ) -> EscalationDecision {
+            EscalationDecision::Approve
+        }
+    }
+
+    let shell = Arc::new(tools::Shell::new(Arc::new(
+        sandbox::DirectSandbox::new_unchecked(),
+    )));
+    let commands = [
+        json!({"command":"printf 'fixture authentication unavailable\\n'; exit 4"}),
+        json!({"command":"true", "sandbox_access":"network", "justification":"check connectivity"}),
+        json!({"command":"printf 'fixture host check complete\\n'", "sandbox_access":"unsandboxed", "justification":"check host environment for the requested task"}),
+    ];
+    let script = commands
+        .into_iter()
+        .enumerate()
+        .map(|(index, args)| {
+            ScriptedResponse::tool_call(
+                &format!("shell-response-{index}"),
+                MODEL,
+                0,
+                &format!("shell-call-{index}"),
+                "shell",
+                [args.to_string()],
+            )
+        })
+        .chain([text_response("done")])
+        .collect();
+    let mut harness =
+        harness_with_tools(script, 1_000_000, Arc::new(BulkRead), vec![shell.clone()]);
+    // Replace the model reviewer only for this offline execution/cache fixture.
+    shell.set_shell_escalation(Arc::new(ApproveHost), sandbox::composition::unsandboxed());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Diagnose the command in its execution environment".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    let requests = harness.mock.recorded_requests();
+    let first = &requests
+        .iter()
+        .find(|r| r.path == "/v1/chat/completions")
+        .unwrap()
+        .body;
+    let shell_spec = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "shell")
+        .unwrap();
+    assert!(
+        shell_spec["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("private HOME")
+    );
+    let last = &requests
+        .iter()
+        .rfind(|r| r.path == "/v1/chat/completions")
+        .unwrap()
+        .body;
+    let tool_output = |id: &str| {
+        last["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+    };
+    let isolated = tool_output("shell-call-0");
+    assert!(isolated.contains("exit_code: 4"));
+    assert!(isolated.contains("fixture authentication unavailable"));
+    assert!(tool_output("shell-call-1").contains("network-only shell access is unavailable"));
+    let host = tool_output("shell-call-2");
+    assert!(host.contains("exit_code: 0"));
+    assert!(host.contains("fixture host check complete"));
 }
 
 async fn compaction_restarts_cache(reason: CompactionReason) {

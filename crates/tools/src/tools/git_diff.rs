@@ -90,10 +90,9 @@ impl Tool for GitDiff {
             })?;
 
         let mut command = Command::new(&wrapped.program);
+        wrapped.apply_environment(command.as_std_mut());
         command
             .args(&wrapped.args)
-            .env_clear()
-            .envs(wrapped.env)
             // git diff は標準入力を読まない。フック等が読んでも即時 EOF にする。
             .stdin(Stdio::null());
         if let Some(cwd) = wrapped.cwd {

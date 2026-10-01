@@ -47,6 +47,41 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   clears an answered card even if an old run's event fence rejects its event.
   Current consumer ownership is checked; the event fence itself stays intact.
 
+## Shell execution environment
+
+The shell tool describes its execution boundaries and a general diagnosis rule:
+errors describe the selected environment, not the whole host. Connectivity,
+filesystem access, HOME/configuration, environment variables, authentication, and
+command errors require different responses. Repeating a deterministic failure in
+an unchanged environment is not a new diagnosis.
+
+| `sandbox_access` | Filesystem / HOME | Network | Environment |
+| --- | --- | --- | --- |
+| `isolated` (default) | Configured sandbox mounts / private HOME | Isolated | Filtered variables and explicit tool values |
+| `network` | Same mounts / private HOME | Host network for this command | Same filtered environment |
+| `unsandboxed` | Host filesystem / inherited HOME | Host network | evorch process environment with explicit tool overrides |
+
+Network-only access does not restore host credentials, configuration files, or
+agent sockets. Request the narrowest scope that supplies the required resources;
+a host dependency already known from the task can justify requesting unsandboxed
+execution directly. Network and unsandboxed commands need a nonempty justification
+and review. Automatic review, user review, or disabled escalation depends on current
+settings. A request does not itself establish approval. On denial, the model must
+use the actual returned reason instead of guessing a GUI prompt or user refusal.
+
+Reviewed host execution inherits native environment names and values, including
+non-UTF-8 values, without copying them into command metadata or Debug output.
+It inherits the evorch process, not an interactive login shell; shell startup
+configuration is not loaded automatically. Unchecked DirectSandbox and delivery
+paths keep their existing limited environment. Pipe, PTY, and background-job
+output is filtered for known credentials and credential-shaped spans before it
+is returned or written as an artifact.
+
+A new host-supplied human request during chat restoration is fresh review evidence
+and reaches delegated descendants. Restored messages, tool results, summaries, and
+agent-authored delegations do not grant execution authority. Successful restoration
+still reuses conversation history without rewriting the provider input prefix.
+
 ## Recovery and diagnosis
 
 ADR 0027 defines current-authority renewal, durable tool intent before

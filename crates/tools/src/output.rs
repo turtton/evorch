@@ -62,11 +62,11 @@ impl Capture {
         let text = String::from_utf8_lossy(&self.prefix);
         let truncated = self.bytes > self.prefix.len() as u64;
         let large = truncated || text.len() > PREVIEW_BYTES || text.lines().count() > PREVIEW_LINES;
-        if !large {
-            return ToolResult::success(text.into_owned());
-        }
         let redactor = SecretRedactor::from_env();
         let safe = redactor.redact(&text);
+        if !large {
+            return ToolResult::success(safe.text);
+        }
         artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count)
     }
 }

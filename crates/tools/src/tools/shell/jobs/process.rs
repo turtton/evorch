@@ -24,10 +24,9 @@ pub(super) async fn run_pipe(
         });
     }
     let mut command = tokio::process::Command::new(&wrapped.program);
+    wrapped.apply_environment(command.as_std_mut());
     command
         .args(&wrapped.args)
-        .env_clear()
-        .envs(wrapped.env.iter().cloned())
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -125,7 +124,9 @@ pub(super) async fn run_pty(
         .map_err(io_failed)?;
     let mut command = portable_pty::CommandBuilder::new(&wrapped.program);
     command.args(&wrapped.args);
-    command.env_clear();
+    if !wrapped.inherit_env {
+        command.env_clear();
+    }
     for (key, value) in &wrapped.env {
         command.env(key, value);
     }

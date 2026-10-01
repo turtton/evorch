@@ -22,6 +22,7 @@ use crate::tools::shell_escalation::{
     EscalationDecision, ShellAccess, ShellEscalation, ShellEscalationGate,
 };
 
+mod guidance;
 #[cfg(test)]
 mod job_tests;
 mod jobs;
@@ -168,7 +169,8 @@ impl Shell {
     /// 契約と子プロセスへ追加で渡す環境変数を指定して shell ツールを生成する。
     ///
     /// `extra_env` は [`CommandSpec::extra_env`] 経由で sandbox の
-    /// 環境統合（PATH/TERM/LANG/LC_ALL への追加）に渡される。
+    /// 環境統合に渡される。隔離時は最小環境へ追加し、審査済みホスト実行では
+    /// 継承したプロセス環境を上書きする。
     pub fn with_contract_and_env(
         sandbox: Arc<dyn Sandbox>,
         contract: ShellCommandContract,
@@ -237,7 +239,7 @@ impl Tool for Shell {
     }
 
     fn description(&self) -> &str {
-        "Run a POSIX shell command. Without yield_ms, wait for completion. Start with yield_ms (0..60000) to return a run-owned job ID and cursor; use action poll/stdin/stop to continue it. Poll accepts yield_ms up to 1800000 (30 minutes) and returns early on new output or completion; stdin/stop accept up to 60000. Jobs retain their sandbox/cwd, stop when the run ends, and cannot resume after restart. Live output contains complete lines; long output has a bounded temporary artifact on completion. Start defaults to sandbox_access=isolated. For dependency downloads or git pull when sandbox DNS/network access fails, request sandbox_access=network with justification to retain filesystem isolation; sandbox_access=unsandboxed removes filesystem and network isolation after review. Both non-isolated modes require a nonempty justification. Control actions retain the job's original access and cannot set sandbox_access; stdin for a reviewed job requires a fresh review."
+        guidance::DESCRIPTION
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -248,7 +250,7 @@ impl Tool for Shell {
                 "command": {"type":"string", "minLength":1, "description":"POSIX shell command. Required for start."},
                 "args": {"type":"array", "items":{"type":"string"}, "deprecated":true, "description":"Deprecated shell fragments; put all shell syntax in command."},
                 "interactive": {"type":"boolean", "default":false, "description":"Use a PTY. With yield_ms, retain stdin for later input."},
-                "sandbox_access": {"type":"string", "enum":["isolated", "network", "unsandboxed"], "default":"isolated", "description":"Start only. isolated: use the default sandbox; network: allow host networking for this command after review while retaining filesystem isolation; unsandboxed: remove filesystem and network isolation after review. network and unsandboxed require a nonempty justification."},
+                "sandbox_access": {"type":"string", "enum":["isolated", "network", "unsandboxed"], "default":"isolated", "description":guidance::ACCESS_DESCRIPTION},
                 "justification": {"type":"string", "description":"Why this command needs network or unsandboxed access. Required and nonempty for either mode."},
                 "cwd": {"type":"string", "description":"Start directory; cannot change an existing job's cwd."},
                 "timeout_ms": {"type":"integer", "minimum":1, "description":"Total command lifetime. Async jobs default to 1 hour."},
@@ -543,11 +545,8 @@ async fn run_process(
     timeout_ms: Option<u64>,
 ) -> Result<ToolResult, ToolError> {
     let mut command = tokio::process::Command::new(&wrapped.program);
-    command
-        .args(&wrapped.args)
-        .env_clear()
-        .envs(wrapped.env.iter().cloned())
-        .kill_on_drop(true);
+    wrapped.apply_environment(command.as_std_mut());
+    command.args(&wrapped.args).kill_on_drop(true);
     if let Some(cwd) = &wrapped.cwd {
         command.current_dir(cwd);
     }
@@ -677,7 +676,9 @@ async fn run_interactive(
 
     let mut command = portable_pty::CommandBuilder::new(&wrapped.program);
     command.args(&wrapped.args);
-    command.env_clear();
+    if !wrapped.inherit_env {
+        command.env_clear();
+    }
     for (key, value) in &wrapped.env {
         command.env(key, value);
     }
