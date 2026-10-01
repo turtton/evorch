@@ -238,12 +238,15 @@ fn set_project_agent_ref(
         "roles.oracle" => &mut agents.roles.oracle.logical_model,
         "roles.multimodal_looker" => &mut agents.roles.multimodal_looker.logical_model,
         address => {
-            let category = address
-                .strip_prefix("worker.categories.")
-                .ok_or_else(|| format!("Unknown agent binding address: {address}"))?;
-            &mut agents
-                .worker
-                .categories
+            let (categories, category) =
+                if let Some(category) = address.strip_prefix("worker.categories.") {
+                    (&mut agents.worker.categories, category)
+                } else if let Some(category) = address.strip_prefix("reviewer.categories.") {
+                    (&mut agents.reviewer.categories, category)
+                } else {
+                    return Err(format!("Unknown agent binding address: {address}"));
+                };
+            &mut categories
                 .entry(category.to_owned())
                 .or_default()
                 .logical_model
