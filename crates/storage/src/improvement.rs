@@ -1220,7 +1220,7 @@ mod tests {
             .unwrap();
         }
         let db = Database::open(&config).unwrap();
-        assert_eq!(db.pragma_i64("user_version").unwrap(), 11);
+        assert_eq!(db.pragma_i64("user_version").unwrap(), 12);
         assert_eq!(db.run_ledger_all().unwrap()[0].body, "preserved");
         assert!(ids(&db, "p").is_empty());
         let writer = Storage::open(config).unwrap();

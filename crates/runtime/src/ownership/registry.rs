@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use super::{OwnershipError, ThreadOwner};
 
@@ -17,6 +17,8 @@ pub enum RegistryError {
     Absent,
     #[error("thread already exists; attach or claim explicitly")]
     Exists,
+    #[error("ownership reader lock is poisoned")]
+    ReaderPoisoned,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -38,7 +40,7 @@ impl Registry {
     pub fn list(&self) -> Result<Vec<ThreadOwner>, RegistryError> {
         let mut statement = self
             .connection
-            .prepare("SELECT state FROM thread_owners ORDER BY thread_id")?;
+            .prepare_cached("SELECT state FROM thread_owners ORDER BY thread_id")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
@@ -50,14 +52,28 @@ impl Registry {
         Ok(Self { connection })
     }
 
+    /// Open an initialized registry without creating a database or running schema DDL.
+    pub fn open_existing(path: &Path) -> Result<Self, RegistryError> {
+        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    }
+
+    /// Open an existing registry for probes and generation guards only.
+    pub fn open_readonly(path: &Path) -> Result<Self, RegistryError> {
+        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    }
+
+    fn open_with_flags(path: &Path, flags: OpenFlags) -> Result<Self, RegistryError> {
+        let connection =
+            Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        Ok(Self { connection })
+    }
+
     pub fn attach(&self, thread_id: &str) -> Result<ThreadOwner, RegistryError> {
         let json: Option<String> = self
             .connection
-            .query_row(
-                "SELECT state FROM thread_owners WHERE thread_id = ?1",
-                [thread_id],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT state FROM thread_owners WHERE thread_id = ?1")?
+            .query_row([thread_id], |row| row.get(0))
             .optional()?;
         Ok(serde_json::from_str(&json.ok_or(RegistryError::Absent)?)?)
     }

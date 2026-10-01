@@ -1,6 +1,10 @@
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{
+    Arc, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::Duration;
 
 use event_bus::{Event, EventBus, OwnershipAction, OwnershipEvent};
@@ -14,6 +18,10 @@ pub struct OwnerHost {
     owner_id: String,
     settings: config::OwnershipConfig,
     bus: Arc<EventBus>,
+    // Reuse SQLite's page/statement caches for GUI probes, never ownership state.
+    reader: Mutex<Registry>,
+    // A GUI drain keeps generation guards valid until its queued writes finish.
+    release_deferred: Arc<AtomicBool>,
     stop: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -37,10 +45,13 @@ impl OwnerHost {
         listener.set_nonblocking(true)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let registry = Registry::open(&root.join("owners.db"))?;
+        let reader = Mutex::new(Registry::open_readonly(&root.join("owners.db"))?);
         let (stop, receiver) = mpsc::channel();
         let id = owner_id.clone();
         let worker_settings = settings.clone();
         let worker_bus = Arc::clone(&bus);
+        let release_deferred = Arc::new(AtomicBool::new(false));
+        let worker_deferred = Arc::clone(&release_deferred);
         let worker = std::thread::spawn(move || {
             serve(
                 registry,
@@ -49,6 +60,7 @@ impl OwnerHost {
                 &id,
                 &worker_settings,
                 &worker_bus,
+                &worker_deferred,
             )
         });
         Ok(Self {
@@ -56,13 +68,15 @@ impl OwnerHost {
             owner_id,
             settings,
             bus,
+            reader,
+            release_deferred,
             stop,
             worker: Some(worker),
         })
     }
 
     pub fn attach(&self, thread_id: &str) -> Result<ThreadOwner, RegistryError> {
-        Registry::open(&self.root.join("owners.db"))?.attach(thread_id)
+        self.reader()?.attach(thread_id)
     }
 
     pub fn start(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {
@@ -75,13 +89,13 @@ impl OwnerHost {
             },
         );
         owner.settings = self.settings.clone();
-        Registry::open(&self.root.join("owners.db"))?.start(&owner)?;
+        Registry::open_existing(&self.root.join("owners.db"))?.start(&owner)?;
         emit(&self.bus, &owner, OwnershipAction::Claimed);
         Ok(self.permit(&owner))
     }
 
     pub fn claim(&self, expected: &ThreadOwner) -> Result<OwnerPermit, RegistryError> {
-        let mut registry = Registry::open(&self.root.join("owners.db"))?;
+        let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
         let socket = self.socket(&expected.lease.owner_id)?;
         let owner = ipc::claim_configured(
             &mut registry,
@@ -115,7 +129,7 @@ impl OwnerHost {
         if permit.lease.owner_id != self.owner_id || self.root != successor.root {
             return Err(super::OwnershipError::Fenced.into());
         }
-        let mut registry = Registry::open(&self.root.join("owners.db"))?;
+        let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
         let owner = registry.update(&permit.thread_id, |owner| {
             owner.quiesce(&permit.lease)?;
             owner.release(&permit.lease)?;
@@ -126,29 +140,70 @@ impl OwnerHost {
         Ok(successor.permit(&owner))
     }
 
-    pub fn quiesce(&self) -> Result<bool, RegistryError> {
-        let mut registry = Registry::open(&self.root.join("owners.db"))?;
+    /// Stop new turns without releasing idle generations, including from the
+    /// heartbeat worker. Call `release_ready` only after durable queues drain.
+    /// Returns whether existing turns still need to checkpoint.
+    pub fn begin_quiesce(&self) -> Result<bool, RegistryError> {
+        self.release_deferred.store(true, Ordering::SeqCst);
+        let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
         let mut active = false;
         for owner in registry.list()?.into_iter().filter(|owner| {
             owner.lease.owner_id == self.owner_id && owner.state != OwnerState::Released
         }) {
-            let changed = registry.update(&owner.thread_id, |state| state.quiesce(&owner.lease))?;
+            // The GUI checks progress each frame. Already-quiescing owners need
+            // no duplicate registry write or durable transition event.
+            let changed = if owner.state == OwnerState::Quiescing {
+                owner
+            } else {
+                let changed =
+                    registry.update(&owner.thread_id, |state| state.quiesce(&owner.lease))?;
+                emit(&self.bus, &changed, OwnershipAction::Quiescing);
+                changed
+            };
             active |= changed.active_turn;
-            emit(&self.bus, &changed, OwnershipAction::Quiescing);
-            if !changed.active_turn {
+        }
+        Ok(active)
+    }
+
+    /// Release quiescing owners whose turns have checkpointed. Remaining active
+    /// owners may be released by the heartbeat worker after their checkpoint.
+    pub fn release_ready(&self) -> Result<bool, RegistryError> {
+        // Keep the worker from competing with this explicit release pass.
+        self.release_deferred.store(true, Ordering::SeqCst);
+        let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
+        let mut active = false;
+        for owner in registry.list()?.into_iter().filter(|owner| {
+            owner.lease.owner_id == self.owner_id && owner.state != OwnerState::Released
+        }) {
+            active |= owner.active_turn;
+            if owner.state == OwnerState::Quiescing && !owner.active_turn {
                 let released =
                     registry.update(&owner.thread_id, |state| state.release(&owner.lease))?;
                 emit(&self.bus, &released, OwnershipAction::Released);
             }
         }
+        self.release_deferred.store(false, Ordering::SeqCst);
         Ok(active)
     }
 
+    /// Legacy quiesce-and-release operation for callers without a durable drain.
+    pub fn quiesce(&self) -> Result<bool, RegistryError> {
+        self.begin_quiesce()?;
+        self.release_ready()
+    }
+
     pub fn has_active_turns(&self) -> Result<bool, RegistryError> {
-        Ok(Registry::open(&self.root.join("owners.db"))?
+        Ok(self
+            .reader()?
             .list()?
             .iter()
             .any(|owner| owner.lease.owner_id == self.owner_id && owner.active_turn))
+    }
+
+    fn reader(&self) -> Result<MutexGuard<'_, Registry>, RegistryError> {
+        self.reader
+            .lock()
+            .map_err(|_| RegistryError::ReaderPoisoned)
     }
 
     fn permit(&self, owner: &ThreadOwner) -> OwnerPermit {
@@ -195,6 +250,7 @@ fn serve(
     id: &str,
     settings: &config::OwnershipConfig,
     bus: &EventBus,
+    release_deferred: &AtomicBool,
 ) {
     let mut heartbeat = std::time::Instant::now();
     loop {
@@ -212,7 +268,10 @@ fn serve(
                 }) {
                     let result = registry.update(&owner.thread_id, |state| {
                         state.validate(&owner.lease)?;
-                        if state.state == OwnerState::Quiescing && !state.active_turn {
+                        if state.state == OwnerState::Quiescing
+                            && !state.active_turn
+                            && !release_deferred.load(Ordering::SeqCst)
+                        {
                             state.release(&owner.lease)?;
                         } else {
                             state.heartbeat(&owner.lease, now_ms())?;

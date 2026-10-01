@@ -141,7 +141,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.shutdown_requested && !self.shutdown_confirmed && !self.close_in_flight {
             let has_active_turns = host.has_active_turns().unwrap_or(true);
             if !has_active_turns {
-                match host.quiesce() {
+                match host.begin_quiesce() {
                     Ok(false) => {
                         self.close_in_flight = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -155,7 +155,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             egui::Window::new("Active thread ownership").collapsible(false).show(&ctx, |ui| {
                 ui.label("Closing stops this process. Drain active tools and checkpoint before releasing ownership. Other windows may claim after release.");
                 if ui.button("Drain and close").clicked() {
-                    match host.quiesce() {
+                    match host.begin_quiesce() {
                         Ok(_) => self.shutdown_confirmed = true,
                         Err(error) => self.ownership_error = Some(error.to_string()),
                     }
@@ -167,7 +167,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             });
         }
         if self.shutdown_confirmed {
-            match host.quiesce() {
+            match host.begin_quiesce() {
                 Ok(false) => {
                     self.close_in_flight = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);

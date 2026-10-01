@@ -61,6 +61,10 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/ci-shared
         run: scripts/check-cache-contracts.sh
+      - name: Storage I/O contracts (offline)
+        env:
+          CARGO_TARGET_DIR: target/ci-shared
+        run: scripts/check-io-contracts.sh
       # 以降のテスト系 step は上で揃えた target dir を読み込み専用で共有し、
       # コンパイルを走らせずテスト実行のみを background で並列化する。
       - name: Workspace tests (nextest + doctest)

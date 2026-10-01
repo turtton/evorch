@@ -5,12 +5,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
+/// 任意の診断イベントを永続化するレベル。会話や監査イベントには適用しません。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticPersistence {
+    Off,
+    #[default]
+    Warnings,
+    All,
+}
+
 /// 診断 (ログ出力) の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiagnosticsConfig {
     /// ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。
     pub log_level: String,
+    /// 診断のDB保存。既定はwarning/errorのみ。stderrのログレベルとは独立。
+    pub persistence: DiagnosticPersistence,
     /// ログ出力ディレクトリ。未指定の場合は既定の位置を使用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
@@ -20,6 +32,7 @@ impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             log_level: "info".to_string(),
+            persistence: DiagnosticPersistence::default(),
             log_dir: None,
         }
     }

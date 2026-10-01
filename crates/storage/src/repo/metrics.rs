@@ -6,6 +6,9 @@ use crate::StorageError;
 
 /// バケット群を一つのトランザクションで加算保存します。
 pub fn upsert_buckets(conn: &Connection, buckets: &[UsageBucket]) -> Result<(), StorageError> {
+    if buckets.is_empty() {
+        return Ok(());
+    }
     let transaction = conn.unchecked_transaction()?;
     for bucket in buckets {
         let values = bucket_values(bucket)?;

@@ -25,7 +25,10 @@ pub use agents::{
 };
 pub use budget::BudgetConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
-pub use misc::{DiagnosticsConfig, MetricsConfig, PermissionConfig, SelfImprovementConfig};
+pub use misc::{
+    DiagnosticPersistence, DiagnosticsConfig, MetricsConfig, PermissionConfig,
+    SelfImprovementConfig,
+};
 pub use model_preset::ModelPresetConfig;
 pub use orchestration::OrchestrationConfig;
 pub use ownership::OwnershipConfig;

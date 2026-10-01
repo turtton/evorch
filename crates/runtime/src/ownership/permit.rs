@@ -13,7 +13,7 @@ pub struct OwnerPermit {
 
 impl OwnerPermit {
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
-        let registry = Registry::open(&self.registry_path)?;
+        let registry = Registry::open_readonly(&self.registry_path)?;
         registry.guard_generation(self)?;
         Ok(registry)
     }
@@ -21,17 +21,18 @@ impl OwnerPermit {
         self.mutation_guard().map(drop)
     }
     pub fn begin_turn(&self) -> Result<(), RegistryError> {
-        Registry::open(&self.registry_path)?.update(&self.thread_id, |owner| {
-            match self.run_id.as_deref() {
+        Registry::open_existing(&self.registry_path)?.update(
+            &self.thread_id,
+            |owner| match self.run_id.as_deref() {
                 Some(run) => owner.begin_run(&self.lease, run, now_ms()),
                 None => owner.begin_turn(&self.lease, now_ms()),
-            }
-        })?;
+            },
+        )?;
         Ok(())
     }
 
     pub fn validate_mutation(&self) -> Result<(), RegistryError> {
-        let owner = Registry::open(&self.registry_path)?.attach(&self.thread_id)?;
+        let owner = Registry::open_readonly(&self.registry_path)?.attach(&self.thread_id)?;
         owner.validate(&self.lease)?;
         if !owner.active_turn || owner.lease.expires_at <= now_ms() {
             return Err(OwnershipError::NotClaimable.into());
@@ -53,7 +54,8 @@ impl OwnerPermit {
     }
 
     pub fn checkpoint(&self, messages: &[providers::Message]) -> Result<(), RegistryError> {
-        let owner = Registry::open(&self.registry_path)?.attach(&self.thread_id)?;
+        let mut registry = Registry::open_existing(&self.registry_path)?;
+        let owner = registry.attach(&self.thread_id)?;
         owner.validate(&self.lease)?;
         if self
             .run_id
@@ -62,7 +64,7 @@ impl OwnerPermit {
         {
             return Ok(());
         }
-        Registry::open(&self.registry_path)?.checkpoint_permit(self, messages)?;
+        registry.checkpoint_permit(self, messages)?;
         Ok(())
     }
 }

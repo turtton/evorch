@@ -16,7 +16,7 @@ pub(crate) fn session_event_bytes(
 ) -> Result<u64, StorageError> {
     sum_payload_bytes(
         conn,
-        "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = ?1",
+        "SELECT COALESCE((SELECT payload_bytes FROM event_session_bytes WHERE session_id = ?1), 0)",
         rusqlite::params![session_id],
     )
 }
@@ -25,8 +25,8 @@ pub(crate) fn session_event_bytes(
 pub(crate) fn day_event_bytes(conn: &Connection, day_start_ns: i64) -> Result<u64, StorageError> {
     sum_payload_bytes(
         conn,
-        "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE wall_clock_ns >= ?1",
-        rusqlite::params![day_start_ns],
+        "SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes WHERE utc_day >= ?1",
+        rusqlite::params![day_start_ns / NANOS_PER_DAY],
     )
 }
 

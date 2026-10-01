@@ -14,6 +14,7 @@ fn writer_state(conn: Connection, config: StorageConfig) -> WriterState {
     WriterState {
         conn,
         accounting: event::EventAccounting::default(),
+        statistics: StorageStatistics::default(),
         next_flush_at: now + config.flush_interval,
         next_checkpoint_at: now + config.checkpoint_interval,
         config,
@@ -85,7 +86,10 @@ fn warm_writer_appends_growing_history_without_reading_stored_payloads() {
                     table_name: "events",
                     column_name: "payload",
                 }
-            ) {
+            ) && context.accessor != Some("events_accounting_insert")
+            {
+                // INSERT bookkeeping reads NEW.payload only. A trigger read is
+                // permitted; ordinary history SELECT/SUM remains forbidden.
                 Authorization::Deny
             } else {
                 Authorization::Allow
@@ -158,6 +162,25 @@ fn utc_day_switch_and_out_of_order_events_reseed_daily_accounting() {
     append(&mut state, None, &event_at(86_402, "delta")).unwrap();
     assert_eq!(state.accounting.day_bytes, bytes * 3);
     assert_eq!(event_count(&state.conn), 5);
+}
+
+#[test]
+fn evicted_session_reseeds_without_resetting_its_limit() {
+    let mut state = fixture();
+    let event = event_at(1, "delta");
+    let bytes = payload_bytes(&event);
+    state.config.hard_limits.max_session_bytes = bytes * 2;
+    // More sessions than the bounded LRU can retain.
+    for index in 0..65 {
+        append(&mut state, Some(&format!("session-{index}")), &event).unwrap();
+    }
+    append(&mut state, Some("session-64"), &event).unwrap();
+    append(&mut state, Some("session-0"), &event).unwrap();
+    assert_eq!(
+        append(&mut state, Some("session-0"), &event),
+        Err(limit_error(LimitKind::SessionSize, bytes * 3, bytes * 2))
+    );
+    assert_eq!(event_count(&state.conn), 67);
 }
 
 #[test]

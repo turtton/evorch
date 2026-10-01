@@ -5,7 +5,7 @@ use std::time::Instant;
 use event_bus::{BucketKey, Event, UsageBucket};
 use rusqlite::Connection;
 
-use super::Command;
+use super::{Command, StorageStatistics};
 use crate::db::file_sizes;
 use crate::projection;
 use crate::repo::{catalog, event, metrics};
@@ -18,6 +18,7 @@ mod accounting_tests;
 struct WriterState {
     conn: Connection,
     accounting: event::EventAccounting,
+    statistics: StorageStatistics,
     config: StorageConfig,
     pending: HashMap<BucketKey, UsageBucket>,
     writes_suspended: bool,
@@ -41,6 +42,7 @@ pub(super) fn run_writer(
     let mut state = WriterState {
         conn,
         accounting: event::EventAccounting::default(),
+        statistics: StorageStatistics::default(),
         next_flush_at: now + config.flush_interval,
         next_checkpoint_at: now + config.checkpoint_interval,
         config,
@@ -60,6 +62,7 @@ pub(super) fn run_writer(
                 } else {
                     append_event_to_conn(&mut state, &session_id, &event)
                 };
+                record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
             Ok(Command::AppendFencedEvent(session_id, event, validator, reply)) => {
@@ -71,6 +74,7 @@ pub(super) fn run_writer(
                 } else {
                     append_event_to_conn(&mut state, &session_id, &event)
                 };
+                record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
@@ -93,6 +97,7 @@ pub(super) fn run_writer(
                     state.config.hard_limits.max_session_bytes = session_limit;
                     result
                 };
+                record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
             Ok(Command::CreateUserQuestion(question, reply)) => {
@@ -209,6 +214,9 @@ pub(super) fn run_writer(
                 let result = maintenance(&mut state);
                 let _ = reply.send(result);
             }
+            Ok(Command::Statistics(reply)) => {
+                let _ = reply.send(Ok(state.statistics.clone()));
+            }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                 if let Err(error) = flush_usage(&mut state) {
                     tracing::warn!(error = %error, "storage final usage flush failed");
@@ -272,6 +280,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     checkpoint(state)?;
     run_budgeted_vacuum(&state.conn, &state.config)?;
     check_temp(state)?;
+    state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
 }
 
@@ -348,9 +357,17 @@ pub(super) fn log_temp_state(temp_bytes: u64, threshold_bytes: u64, warned: bool
 }
 
 fn flush_usage(state: &mut WriterState) -> Result<(), StorageError> {
+    if state.pending.is_empty() {
+        return Ok(());
+    }
     let buckets = state.pending.values().cloned().collect::<Vec<_>>();
     metrics::upsert_buckets(&state.conn, &buckets)?;
     state.pending.clear();
+    state.statistics.usage_flushes = state.statistics.usage_flushes.saturating_add(1);
+    state.statistics.usage_buckets_written = state
+        .statistics
+        .usage_buckets_written
+        .saturating_add(buckets.len() as u64);
     tracing::debug!(bucket_count = buckets.len(), "usage flush");
     Ok(())
 }
@@ -361,14 +378,34 @@ fn append_event_to_conn(
     event: &Event,
 ) -> Result<(), StorageError> {
     // 同じセッション・日付の集計を保持し、ストリーム差分ごとの履歴再走査を避けます。
-    event::append_event(
+    let started = Instant::now();
+    let result = event::append_event(
         &state.conn,
         session_id.as_deref(),
         event,
         &state.config.hard_limits,
         &mut state.accounting,
     )
-    .map(|_| ())
+    .map(|_| ());
+    let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    state.statistics.append_total_micros =
+        state.statistics.append_total_micros.saturating_add(elapsed);
+    state.statistics.max_append_micros = state.statistics.max_append_micros.max(elapsed);
+    if result.is_ok() {
+        state.statistics.events_written = state.statistics.events_written.saturating_add(1);
+        state.statistics.event_payload_bytes = state
+            .statistics
+            .event_payload_bytes
+            .saturating_add(state.accounting.last_event_bytes);
+    }
+    result
+}
+
+fn record_event_failure(state: &mut WriterState, result: &Result<(), StorageError>) {
+    if result.is_err() {
+        state.statistics.event_write_failures =
+            state.statistics.event_write_failures.saturating_add(1);
+    }
 }
 
 fn handle_suspended_append(
@@ -598,6 +635,7 @@ mod tests {
         WriterState {
             conn,
             accounting: event::EventAccounting::default(),
+            statistics: StorageStatistics::default(),
             temp_warned: false,
             next_flush_at: now,
             next_checkpoint_at: now,

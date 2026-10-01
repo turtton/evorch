@@ -1,5 +1,6 @@
 //! イベントログの追記と復元を管理します。
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use event_bus::{Event, EventKind};
@@ -15,6 +16,8 @@ mod compaction_window_tests;
 use accounting::{day_start_ns, enforce_limit};
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+// 複数 run と GUI stream の交互追記を再走査なしで扱い、メモリも上限を設けます。
+const ACCOUNTING_SESSION_CAPACITY: usize = 64;
 
 /// 永続化されたイベントと採番 ID です。
 #[derive(Debug, Clone, PartialEq)]
@@ -29,9 +32,11 @@ pub struct StoredEvent {
 pub struct EventAccounting {
     pub session_bytes: u64,
     pub day_bytes: u64,
+    pub(crate) last_event_bytes: u64,
     seeded_session_id: Option<String>,
     seeded_day_start_ns: Option<i64>,
     data_version: Option<i64>,
+    sessions: VecDeque<(String, u64)>,
 }
 
 /// 容量上限を検査してイベントを一件追記します。
@@ -71,7 +76,10 @@ pub fn append_event(
     next_accounting.data_version = Some(data_version);
     if next_accounting.seeded_session_id.as_deref() != session_id {
         next_accounting.session_bytes = match session_id {
-            Some(id) => accounting::session_event_bytes(&transaction, id)?,
+            Some(id) => match next_accounting.sessions.iter().find(|(key, _)| key == id) {
+                Some((_, bytes)) => *bytes,
+                None => accounting::session_event_bytes(&transaction, id)?,
+            },
             None => 0,
         };
         next_accounting.seeded_session_id = session_id.map(String::from);
@@ -132,8 +140,23 @@ pub fn append_event(
     }
     transaction.commit()?;
 
+    if let Some(id) = session_id {
+        if let Some(index) = next_accounting
+            .sessions
+            .iter()
+            .position(|(key, _)| key == id)
+        {
+            next_accounting.sessions.remove(index);
+        } else if next_accounting.sessions.len() == ACCOUNTING_SESSION_CAPACITY {
+            next_accounting.sessions.pop_front();
+        }
+        next_accounting
+            .sessions
+            .push_back((id.to_owned(), next_session_bytes));
+    }
     next_accounting.session_bytes = next_session_bytes;
     next_accounting.day_bytes = next_day_bytes;
+    next_accounting.last_event_bytes = event_len;
     *accounting = next_accounting;
     Ok(StoredEvent {
         id,

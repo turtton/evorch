@@ -78,4 +78,4 @@ pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::StoredAgentMessage;
 pub use repo::event::StoredEvent;
 pub use run::{RunContextRecord, RunLedgerEntry};
-pub use writer::{Storage, StorageHandle};
+pub use writer::{Storage, StorageHandle, StorageStatistics};

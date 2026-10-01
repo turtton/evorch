@@ -18,7 +18,7 @@ use gui::pty::{PtySession, resolve_terminal_cwd};
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
 };
-use gui::storage_bridge::{self, StorageBridge};
+use gui::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
 use portable_pty::CommandBuilder;
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
@@ -30,7 +30,7 @@ use runtime::{
     compose_runtime, production_executor,
 };
 use sandbox::{BwrapConfig, CredentialError, CredentialStore, Sandbox, Secret, production_sandbox};
-use storage::{Database, Storage, StorageConfig, StorageHandle};
+use storage::{Database, Storage, StorageConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 const EVENT_CAPACITY: usize = 256;
@@ -349,27 +349,26 @@ fn credential_ro_binds() -> Vec<PathBuf> {
 /// 通常イベントと分単位の usage 集計を保存する bridge を専用 runtime で起動する。
 fn spawn_storage_bridge(
     bus: Arc<EventBus>,
-    storage: StorageHandle,
+    storage: Storage,
     session_id: &'static str,
-) -> Result<(), GuiError> {
-    std::thread::Builder::new()
-        .name(String::from("evorch-storage-bridge"))
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    tracing::error!(%error, "storage bridge runtime failed");
-                    return;
-                }
-            };
-            let bridge = StorageBridge::new(storage, session_id);
-            runtime.block_on(storage_bridge::run(bus, bridge, Duration::from_secs(60)));
-        })
-        .map_err(|error| GuiError::Arguments(format!("storage bridge thread failed: {error}")))?;
-    Ok(())
+    diagnostics: config::DiagnosticPersistence,
+    metrics_enabled: bool,
+) -> Result<OwnedStorageBridge, GuiError> {
+    let persistence = match diagnostics {
+        config::DiagnosticPersistence::Off => storage_bridge::DiagnosticPersistence::Off,
+        config::DiagnosticPersistence::Warnings => storage_bridge::DiagnosticPersistence::Warnings,
+        config::DiagnosticPersistence::All => storage_bridge::DiagnosticPersistence::All,
+    };
+    Ok(OwnedStorageBridge::spawn(
+        bus,
+        storage,
+        |handle| {
+            StorageBridge::new(handle, session_id)
+                .with_diagnostic_persistence(persistence)
+                .with_metrics_enabled(metrics_enabled)
+        },
+        Duration::from_secs(60),
+    )?)
 }
 
 /// 前セッションの goal 状態を永続化イベントから復元し、supervisor へ移管する。
@@ -892,7 +891,15 @@ fn run() -> Result<(), GuiError> {
         .recv()
         .map_err(|error| GuiError::Supervisor(format!("supervisor task ended: {error}")))?;
 
-    spawn_storage_bridge(Arc::clone(&bus), storage.handle(), STORAGE_SESSION_ID)?;
+    // From this point onward every early-return path joins the bridge before
+    // closing SQLite, even while runtime owners still hold the event bus.
+    let storage = spawn_storage_bridge(
+        Arc::clone(&bus),
+        storage,
+        STORAGE_SESSION_ID,
+        composition_config.diagnostics.persistence,
+        composition_config.metrics.enabled,
+    )?;
     restore_goals(&storage_config, &supervisor);
 
     let home = std::env::home_dir()
@@ -925,6 +932,14 @@ fn run() -> Result<(), GuiError> {
         ownership_settings,
         Arc::clone(&bus),
     )?);
+    // Install the retained host before any later fallible startup work. State
+    // and command-sink locals may drop first, but cannot release this generation.
+    let storage = GuiStorageResources {
+        _storage: storage,
+        ownership: Arc::clone(&ownership),
+        _demo_directory: demo_directory,
+        _storage_fallback: storage_fallback,
+    };
     // goal 投入から run 起動・supervisor 登録・merge/pause/resume/cancel までを
     // production 経路で接続する CommandSink (demo も同様)。
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
@@ -1002,6 +1017,9 @@ fn run() -> Result<(), GuiError> {
         });
     }
 
+    // One captured owner preserves shutdown ordering even if run_native fails
+    // before invoking its app constructor and only drops the closure captures.
+    let storage_resources = storage;
     let title = arguments.window_title;
     let options = gui::window::native_options(&title);
     eframe::run_native(
@@ -1014,9 +1032,7 @@ fn run() -> Result<(), GuiError> {
                 workbench: WorkbenchApp(state),
                 #[cfg(feature = "browser")]
                 browser: gui::browser::BrowserWindow::new(bus.clone(), handle.clone()),
-                _demo_directory: demo_directory,
-                _storage: storage,
-                _storage_fallback: storage_fallback,
+                _storage: storage_resources,
             }))
         }),
     )
@@ -1027,9 +1043,35 @@ struct GuiApp {
     workbench: WorkbenchApp<AgentRuntime>,
     #[cfg(feature = "browser")]
     browser: gui::browser::BrowserWindow,
+    _storage: GuiStorageResources,
+}
+
+// Retain the host across all other GUI/state drops. Its Drop releases owners,
+// which must happen only after queued generation-guarded events are durable.
+struct GuiStorageResources {
+    _storage: OwnedStorageBridge,
+    ownership: Arc<runtime::ownership::OwnerHost>,
     _demo_directory: Option<tempfile::TempDir>,
-    _storage: Storage,
     _storage_fallback: Option<tempfile::TempDir>,
+}
+
+impl GuiStorageResources {
+    fn handle(&self) -> storage::StorageHandle {
+        self._storage.handle()
+    }
+}
+
+impl Drop for GuiStorageResources {
+    fn drop(&mut self) {
+        if let Err(error) = self.ownership.begin_quiesce() {
+            tracing::warn!(%error, "failed to quiesce ownership before storage drain");
+        }
+        self._storage.shutdown();
+        if let Err(error) = self.ownership.release_ready() {
+            tracing::warn!(%error, "failed to release ownership after storage drain");
+        }
+        // Fields then close SQLite, drop the retained host and remove temp dirs.
+    }
 }
 
 impl eframe::App for GuiApp {
@@ -1228,5 +1270,89 @@ mod tests {
             orchestration_settings_or_default(&Err(ConfigError::Migration("test".to_owned()))),
             OrchestrationSettings::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod storage_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn startup_resource_guard_keeps_the_host_alive_until_fenced_writes_drain() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: directory.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let db = Database::open(&config).unwrap();
+        let bus = Arc::new(EventBus::new(64));
+        let root = directory.path().join("owners");
+        let host = Arc::new(
+            runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap(),
+        );
+        let permit = host.start("thread").unwrap();
+        let fence = permit.clone();
+        bus.register_mutation_guard(
+            "run".into(),
+            Arc::new(move || {
+                fence
+                    .mutation_guard()
+                    .ok()
+                    .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
+            }),
+        );
+        let bridge = spawn_storage_bridge(
+            bus.clone(),
+            storage,
+            "session",
+            config::DiagnosticPersistence::Warnings,
+            true,
+        )
+        .unwrap();
+        let monitor = bridge.monitor();
+        let weak_host = Arc::downgrade(&host);
+        let resources = GuiStorageResources {
+            _storage: bridge,
+            ownership: host.clone(),
+            _demo_directory: None,
+            _storage_fallback: None,
+        };
+        let event = Event::new(event_bus::MessageEvent::MessageDelta {
+            run_id: Some("run".into()),
+            delta: "tail before a later startup failure".into(),
+        });
+        bus.emit(event.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while monitor.snapshot().pending_events == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(monitor.snapshot().persisted_events, 0);
+        host.begin_quiesce().unwrap();
+        // Simulate state/command-sink locals unwinding before a retained app
+        // constructor is dropped without ever constructing a GUI window.
+        drop(host);
+        assert!(weak_host.upgrade().is_some());
+        permit.validate_generation().unwrap();
+        let constructor = move || resources;
+        drop(constructor);
+        assert!(weak_host.upgrade().is_none());
+        let messages: Vec<_> = db
+            .events_all_ordered()
+            .unwrap()
+            .into_iter()
+            .filter(|row| matches!(row.event.kind, EventKind::Message(_)))
+            .map(|row| row.event)
+            .collect();
+        assert_eq!(messages, [event]);
+        assert_eq!(monitor.snapshot().failed_events, 0);
+        let registry =
+            runtime::ownership::Registry::open_readonly(&root.join("owners.db")).unwrap();
+        assert_eq!(
+            registry.attach("thread").unwrap().state,
+            runtime::ownership::OwnerState::Released
+        );
+        assert!(permit.validate_generation().is_err());
     }
 }

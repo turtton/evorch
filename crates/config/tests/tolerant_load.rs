@@ -18,6 +18,32 @@ fn load(content: &str, strict: bool) -> Result<Config, ConfigError> {
 }
 
 #[test]
+fn diagnostic_persistence_is_strictly_validated_and_defaults_to_warnings() {
+    use config::DiagnosticPersistence;
+    assert_eq!(
+        load("", true).unwrap().diagnostics.persistence,
+        DiagnosticPersistence::Warnings
+    );
+    for (value, expected) in [
+        ("off", DiagnosticPersistence::Off),
+        ("warnings", DiagnosticPersistence::Warnings),
+        ("all", DiagnosticPersistence::All),
+    ] {
+        let document = format!("[diagnostics]\npersistence = '{value}'\n");
+        assert_eq!(
+            load(&document, true).unwrap().diagnostics.persistence,
+            expected
+        );
+        assert_eq!(
+            load(&document, false).unwrap().diagnostics.persistence,
+            expected
+        );
+    }
+    assert!(load("[diagnostics]\npersistence = 'warnngs'\n", true).is_err());
+    assert!(load("[diagnostics]\npersistence = 'warnngs'\n", false).is_err());
+}
+
+#[test]
 fn unknown_fields_do_not_discard_valid_provider_and_routing() {
     let document = r#"
 version = 2

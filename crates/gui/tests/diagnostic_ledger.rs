@@ -1,6 +1,9 @@
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
-use gui::{model::transcript_registry::TranscriptRegistry, storage_bridge::StorageBridge};
+use gui::{
+    model::transcript_registry::TranscriptRegistry,
+    storage_bridge::{DiagnosticPersistence, StorageBridge},
+};
 use storage::{Database, Storage, StorageConfig};
 
 #[test]
@@ -12,7 +15,8 @@ fn diagnostic_survives_storage_replay_and_is_visible_in_owning_thread() {
         ..StorageConfig::default()
     };
     let storage = Storage::open(config.clone()).expect("storage");
-    let mut bridge = StorageBridge::new(storage.handle(), "session");
+    let mut bridge = StorageBridge::new(storage.handle(), "session")
+        .with_diagnostic_persistence(DiagnosticPersistence::All);
     let events: Vec<_> = [
         DiagnosticSeverity::Info,
         DiagnosticSeverity::Warning,

@@ -137,6 +137,35 @@ impl EventReceiver {
         self.subscriber_id
     }
 
+    /// Drain only the raw slots pending at entry, without waiting for producers.
+    ///
+    /// Later arrivals do not extend the drain, and stale fenced events are omitted.
+    /// Overwritten slots consume the snapshot budget too. No fault events are
+    /// emitted during shutdown, avoiding an event-feedback loop while draining.
+    pub fn drain_pending_snapshot(&mut self) -> Vec<Event> {
+        let mut remaining = self.rx.len();
+        let mut events = Vec::new();
+        while remaining > 0 {
+            match self.rx.try_recv() {
+                Ok(event) => {
+                    remaining -= 1;
+                    self.lag_gate.note_ok();
+                    if self.fences.accepts(&event) {
+                        events.push(event);
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    remaining =
+                        remaining.saturating_sub(usize::try_from(skipped).unwrap_or(usize::MAX));
+                }
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => break,
+            }
+        }
+        events
+    }
+
     /// 次のイベントを受信する。
     ///
     /// # 戻り値
@@ -223,6 +252,45 @@ mod tests {
         gate.note_ok();
 
         assert_eq!(gate.note_lag(), (true, true));
+    }
+
+    #[test]
+    fn shutdown_snapshot_stops_at_original_raw_slots_even_when_stale() {
+        let bus = EventBus::new(8);
+        let mut receiver = bus.subscribe();
+        bus.emit(Event::new(LifecycleEvent::Started {
+            session_id: "stale".into(),
+        }));
+        let tx = bus.tx.clone();
+        bus.register_mutation_fence(
+            "stale".into(),
+            Arc::new(move || {
+                tx.send(Event::new(LifecycleEvent::Started {
+                    session_id: "later".into(),
+                }))
+                .unwrap();
+                false
+            }),
+        );
+        assert!(receiver.drain_pending_snapshot().is_empty());
+        assert!(matches!(receiver.rx.try_recv().unwrap().kind,
+            EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "later"));
+    }
+
+    #[test]
+    fn shutdown_snapshot_accounts_for_overwritten_slots_without_fault_feedback() {
+        let bus = EventBus::new(2);
+        let mut receiver = bus.subscribe();
+        for index in 0..4 {
+            bus.emit(Event::new(LifecycleEvent::Started {
+                session_id: index.to_string(),
+            }));
+        }
+        let events = receiver.drain_pending_snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0].kind,
+            EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "2"));
+        assert!(receiver.drain_pending_snapshot().is_empty());
     }
 
     #[tokio::test]

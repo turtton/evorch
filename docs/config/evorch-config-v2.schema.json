@@ -71,7 +71,8 @@
       "description": "診断 (ログ) 設定。",
       "$ref": "#/$defs/DiagnosticsConfig",
       "default": {
-        "log_level": "info"
+        "log_level": "info",
+        "persistence": "warnings"
       }
     },
     "metrics": {
@@ -545,6 +546,15 @@
         }
       ]
     },
+    "DiagnosticPersistence": {
+      "description": "任意の診断イベントを永続化するレベル。会話や監査イベントには適用しません。",
+      "type": "string",
+      "enum": [
+        "off",
+        "warnings",
+        "all"
+      ]
+    },
     "DiagnosticsConfig": {
       "description": "診断 (ログ出力) の設定。",
       "type": "object",
@@ -560,6 +570,11 @@
           "description": "ログレベル (`trace`/`debug`/`info`/`warn`/`error`)。",
           "type": "string",
           "default": "info"
+        },
+        "persistence": {
+          "description": "診断のDB保存。既定はwarning/errorのみ。stderrのログレベルとは独立。",
+          "$ref": "#/$defs/DiagnosticPersistence",
+          "default": "warnings"
         }
       },
       "additionalProperties": false

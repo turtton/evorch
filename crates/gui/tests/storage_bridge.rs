@@ -202,7 +202,7 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
         .unwrap()
         .unwrap();
 
-    // Then: orderly shutdown includes every original event, with no subscriber lag.
+    // Then: orderly shutdown preserves every token and its run, with fewer rows and no subscriber lag.
     let stored = db.events_all_ordered().unwrap();
     assert!(!stored.iter().any(|row| matches!(
         row.event.kind,
@@ -214,5 +214,26 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
             matches!(row.event.kind, event_bus::EventKind::Message(_)).then_some(row.event)
         })
         .collect();
-    assert_eq!(messages, expected);
+    let text = |events: &[Event]| -> String {
+        events
+            .iter()
+            .map(|event| match &event.kind {
+                event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta {
+                    run_id,
+                    delta,
+                }) => {
+                    assert_eq!(run_id.as_deref(), Some("run"));
+                    delta.as_str()
+                }
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(text(&messages), text(&expected));
+    assert!(
+        messages.len() < expected.len() / 4,
+        "{} rows for {} tokens",
+        messages.len(),
+        expected.len()
+    );
 }

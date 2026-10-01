@@ -46,7 +46,21 @@ enum Command {
     Reconcile(ReconcileReplyTx),
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
+    Statistics(ReplyTx<StorageStatistics>),
     Shutdown,
+}
+
+/// writer のメモリ内統計。取得してもDB・イベント・ログへの書き込みは発生しません。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StorageStatistics {
+    pub events_written: u64,
+    pub event_payload_bytes: u64,
+    pub event_write_failures: u64,
+    pub append_total_micros: u64,
+    pub max_append_micros: u64,
+    pub usage_flushes: u64,
+    pub usage_buckets_written: u64,
+    pub maintenance_runs: u64,
 }
 
 /// single-writer スレッドの所有権と終了処理を保持します。
@@ -66,6 +80,7 @@ impl Storage {
         let temp_warned = temp_exceeded(temp_bytes, config.temp_warn_bytes);
         log_temp_state(temp_bytes, config.temp_warn_bytes, temp_warned);
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
+        let max_event_bytes = config.hard_limits.max_event_bytes;
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
@@ -80,7 +95,7 @@ impl Storage {
                 )
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
-        Ok(Self(StorageHandle(tx), Some(writer)))
+        Ok(Self(StorageHandle(tx, max_event_bytes), Some(writer)))
     }
 
     /// 複数スレッドから共有可能な writer handle を返します。
@@ -107,9 +122,14 @@ impl Drop for Storage {
 
 /// single-writer へ同期要求または lossy usage を送る共有 handle です。
 #[derive(Debug, Clone)]
-pub struct StorageHandle(SyncSender<Command>);
+pub struct StorageHandle(SyncSender<Command>, u64);
 
 impl StorageHandle {
+    /// Serialized payload limit, retained in memory without contacting the writer.
+    pub fn max_event_bytes(&self) -> u64 {
+        self.1
+    }
+
     /// Persist a bounded clarification before publishing it to a user.
     pub fn create_user_question(
         &self,
@@ -338,6 +358,11 @@ impl StorageHandle {
             .send(Command::Reconcile(reply))
             .map_err(|_| StorageError::WriterClosed)?;
         result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    /// メモリ内の保存統計を返します。SQLiteやイベントへの永続化は行いません。
+    pub fn statistics(&self) -> Result<StorageStatistics, StorageError> {
+        self.request(Command::Statistics)
     }
 
     /// 保留中の usage バケットを直ちに永続化します。

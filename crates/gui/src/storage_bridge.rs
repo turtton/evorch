@@ -2,15 +2,74 @@
 
 use std::{future::Future, sync::Arc, task::Poll, time::Duration};
 
-use event_bus::{Event, EventBus, EventKind, RecvError, UsageAggregator};
+use event_bus::{
+    DiagnosticSeverity, Event, EventBus, EventKind, OwnershipAction, RecvError, UsageAggregator,
+};
 use storage::{StorageError, StorageHandle};
+
+mod coalescing;
+mod lifecycle;
+mod monitor;
+use coalescing::{COALESCE_INTERVAL, EventQueue, QueuedEvent, WRITE_QUEUE_CAPACITY};
+pub use lifecycle::OwnedStorageBridge;
+pub use monitor::{StorageBridgeMonitor, StorageBridgeSnapshot};
+
+/// Controls durable diagnostic rows; live diagnostics continue on the event bus.
+/// Sandbox escalation review audit records are always persisted, including `Off`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiagnosticPersistence {
+    Off,
+    #[default]
+    Warnings,
+    All,
+}
+
+#[derive(Clone, Copy)]
+struct PersistencePolicy {
+    diagnostics: DiagnosticPersistence,
+    metrics_enabled: bool,
+}
+
+impl Default for PersistencePolicy {
+    fn default() -> Self {
+        Self {
+            diagnostics: DiagnosticPersistence::default(),
+            metrics_enabled: true,
+        }
+    }
+}
+
+impl PersistencePolicy {
+    fn skip(self, event: &Event, monitor: &StorageBridgeMonitor) -> bool {
+        match &event.kind {
+            EventKind::Ownership(event) if event.action == OwnershipAction::Heartbeat => {
+                monitor.skipped_heartbeat();
+                true
+            }
+            EventKind::Diagnostic(event)
+                if !(event.source == "sandbox" && event.code == "escalation_review")
+                    && (self.diagnostics == DiagnosticPersistence::Off
+                        || (self.diagnostics == DiagnosticPersistence::Warnings
+                            && event.severity == DiagnosticSeverity::Info)) =>
+            {
+                monitor.skipped_diagnostic();
+                true
+            }
+            EventKind::Usage(_) if !self.metrics_enabled => true,
+            _ => false,
+        }
+    }
+}
 
 /// Routes GUI events to the storage writer.
 pub struct StorageBridge {
     storage: StorageHandle,
     session_id: &'static str,
     usage: UsageAggregator,
+    usage_dirty: bool,
     validator: Option<event_bus::MutationValidator>,
+    policy: PersistencePolicy,
+    monitor: StorageBridgeMonitor,
 }
 
 impl StorageBridge {
@@ -19,71 +78,137 @@ impl StorageBridge {
             storage,
             session_id,
             usage: UsageAggregator::new(),
+            usage_dirty: false,
             validator: None,
+            policy: PersistencePolicy::default(),
+            monitor: StorageBridgeMonitor::default(),
         }
+    }
+
+    pub fn with_diagnostic_persistence(mut self, policy: DiagnosticPersistence) -> Self {
+        self.policy.diagnostics = policy;
+        self
+    }
+
+    pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
+        self.policy.metrics_enabled = enabled;
+        if !enabled {
+            self.usage = UsageAggregator::new();
+            self.usage_dirty = false;
+        }
+        self
+    }
+
+    /// Retain this handle before passing the bridge to [`run`].
+    pub fn monitor(&self) -> StorageBridgeMonitor {
+        self.monitor.clone()
     }
 
     pub fn handle_event(&mut self, event: &Event) -> Result<(), StorageError> {
-        match &event.kind {
-            EventKind::Usage(usage) => {
-                self.usage.record(usage, &event.meta);
-                Ok(())
-            }
-            EventKind::Lifecycle(_)
-            | EventKind::Ledger(_)
-            | EventKind::Message(_)
-            | EventKind::Tool(_)
-            | EventKind::Provider(_)
-            | EventKind::Fault(_)
-            | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => {
-                self.storage
-                    .append_stream_event(self.session_id, event, self.validator.clone())
-            }
+        if self.policy.skip(event, &self.monitor) {
+            return Ok(());
         }
+        if let EventKind::Usage(usage) = &event.kind {
+            self.usage.record(usage, &event.meta);
+            self.usage_dirty = true;
+            return Ok(());
+        }
+        let result =
+            self.storage
+                .append_stream_event(self.session_id, event, self.validator.clone());
+        if result.is_ok() {
+            self.monitor.persisted();
+        } else {
+            self.monitor.failed();
+        }
+        result
     }
 
     pub fn flush_usage(&mut self) {
+        if !self.usage_dirty {
+            return;
+        }
+        self.usage_dirty = false;
         self.usage.flush_into(&self.storage);
         if let Err(error) = self.storage.flush_usage_now() {
-            tracing::warn!(%error, "failed to flush usage metrics");
+            self.monitor
+                .warn(&format!("failed to flush usage metrics: {error}"));
         }
     }
 }
 
-// Absorb stream bursts while the single SQLite writer is busy with a checkpoint.
-// Bound memory independently of the broadcast ring, which must be drained promptly.
-const WRITE_QUEUE_CAPACITY: usize = 16_384;
-
 enum WriteRequest {
-    Event(Box<Event>),
+    Event(QueuedEvent),
     FlushUsage,
+}
+
+// A transient stack value from select, never retained in a collection. Boxing
+// would add an allocation to every token before the bounded queue takes it.
+#[allow(clippy::large_enum_variant)]
+enum BridgeInput {
+    Event(Result<Event, RecvError>),
+    UsageTick,
+    DeltaTick,
+    Drained,
+    Shutdown,
 }
 
 /// Persists events without blocking the caller's runtime, flushing on ticks and shutdown.
 ///
-/// `flush_every` must be nonzero. Bus ownership is released after subscribing so
-/// dropping the last producer ends the bridge at the next tick, after draining.
-pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Duration) {
-    bridge.validator = Some(bus.mutation_validator());
-    let mut subscriber = bus.subscribe();
+/// Adjacent deltas from one run coalesce for at most 100 ms (256 originals or
+/// 32 KiB of payload per row, capped by the configured event-size limit).
+/// All semantic boundaries flush preceding deltas. The original
+/// event bus remains untouched; merged rows retain the first delta's timestamp.
+/// `flush_every` must be nonzero. Dropping the last producer drains the bridge.
+pub async fn run(bus: Arc<EventBus>, bridge: StorageBridge, flush_every: Duration) {
+    run_until_shutdown(bus, bridge, flush_every, std::future::pending()).await;
+}
+
+/// Stop accepting new events when `shutdown` resolves, then persist the already
+/// accepted queue and a finite snapshot of the bus backlog before returning.
+/// Events arriving after that snapshot are left to live bus subscribers and are
+/// not persisted by this bridge. Continuous producers cannot extend the drain.
+pub async fn run_until_shutdown(
+    bus: Arc<EventBus>,
+    bridge: StorageBridge,
+    flush_every: Duration,
+    shutdown: impl Future<Output = ()>,
+) {
+    let subscriber = bus.subscribe();
     let bus_lifetime = Arc::downgrade(&bus);
     drop(bus);
+    run_subscribed(subscriber, bus_lifetime, bridge, flush_every, shutdown).await;
+}
+
+async fn run_subscribed(
+    mut subscriber: event_bus::EventReceiver,
+    bus_lifetime: std::sync::Weak<EventBus>,
+    mut bridge: StorageBridge,
+    flush_every: Duration,
+    shutdown: impl Future<Output = ()>,
+) {
+    bridge.validator = Some(subscriber.mutation_validator());
+    tokio::pin!(shutdown);
     let (requests, mut pending) = tokio::sync::mpsc::channel(WRITE_QUEUE_CAPACITY);
+    let monitor = bridge.monitor();
+    let mut queue = EventQueue::new(
+        requests,
+        monitor.clone(),
+        bridge.policy,
+        bridge.storage.max_event_bytes(),
+    );
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
-    // Keep draining the event bus while SQLite writes complete. A blocking worker
-    // owns the bridge for its whole lifetime, avoiding one task hop per token.
+    // A single blocking worker keeps SQLite off the async runtime. Queue permits
+    // remain held until persistence completes, including during cancellation.
     let writer = tokio::task::spawn_blocking(move || {
         tracing::dispatcher::with_default(&dispatch, || {
             while let Some(request) = pending.blocking_recv() {
                 match request {
-                    WriteRequest::Event(event) => {
-                        if let Err(error) = bridge.handle_event(event.as_ref()) {
-                            tracing::warn!(%error, "failed to persist event");
+                    WriteRequest::Event(queued) => {
+                        if let Err(error) = bridge.handle_event(&queued.event) {
+                            bridge
+                                .monitor
+                                .warn(&format!("failed to persist event: {error}"));
                         }
                     }
                     WriteRequest::FlushUsage => bridge.flush_usage(),
@@ -95,171 +220,76 @@ pub async fn run(bus: Arc<EventBus>, mut bridge: StorageBridge, flush_every: Dur
     let mut ticker =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_every, flush_every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut delta_ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + COALESCE_INTERVAL,
+        COALESCE_INTERVAL,
+    );
+    delta_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut draining = false;
     loop {
         let received = if draining {
-            // EventReceiver owns a Sender: Closed cannot signal producer shutdown.
-            // Poll once to drain buffered events without waiting on that Sender.
+            // EventReceiver owns a Sender: poll buffered events without waiting
+            // on the receiver's own sender after the final producer is gone.
             std::future::poll_fn(|cx| {
                 let receive = subscriber.recv();
                 tokio::pin!(receive);
                 Poll::Ready(match receive.poll(cx) {
-                    Poll::Ready(result) => Some(result),
-                    Poll::Pending => None,
+                    Poll::Ready(result) => BridgeInput::Event(result),
+                    Poll::Pending => BridgeInput::Drained,
                 })
             })
             .await
         } else {
             tokio::select! {
-                result = subscriber.recv() => Some(result),
-                _ = ticker.tick() => None,
+                biased;
+                _ = &mut shutdown => BridgeInput::Shutdown,
+                _ = ticker.tick() => BridgeInput::UsageTick,
+                _ = delta_ticker.tick() => BridgeInput::DeltaTick,
+                result = subscriber.recv() => BridgeInput::Event(result),
             }
         };
-        let request = match received {
-            Some(Ok(event)) => WriteRequest::Event(Box::new(event)),
-            Some(Err(RecvError::Lagged(skipped))) => {
-                tracing::warn!(skipped, "storage bridge lagged");
-                continue;
+        let result = match received {
+            BridgeInput::Shutdown => {
+                // Capture before awaiting any writes: later emissions cannot
+                // keep an application close waiting forever on live producers.
+                for event in subscriber.drain_pending_snapshot() {
+                    if queue.push(event).await.is_err() {
+                        break;
+                    }
+                }
+                break;
             }
-            Some(Err(RecvError::Closed)) => break,
-            None if draining => break,
-            None => {
+            BridgeInput::Event(Ok(event)) => queue.push(event).await,
+            BridgeInput::Event(Err(RecvError::Lagged(skipped))) => {
+                monitor.warn(&format!("storage bridge lagged; {skipped} events skipped"));
+                queue.flush().await
+            }
+            BridgeInput::Event(Err(RecvError::Closed)) | BridgeInput::Drained => break,
+            BridgeInput::UsageTick => {
                 draining = bus_lifetime.strong_count() == 0;
-                WriteRequest::FlushUsage
+                queue.flush_usage().await
+            }
+            BridgeInput::DeltaTick => {
+                draining = bus_lifetime.strong_count() == 0;
+                monitor.warn_if_backlogged();
+                queue.flush().await
             }
         };
-        if requests.send(request).await.is_err() {
+        if result.is_err() {
             break;
         }
     }
-    // Closing the queue lets the worker finish all accepted writes and the final
-    // usage flush before shutdown is reported to the caller.
-    drop(requests);
+    let _ = queue.flush().await;
+    drop(queue);
     if let Err(error) = writer.await {
-        tracing::error!(%error, "storage bridge worker failed");
+        monitor.warn(&format!("storage bridge worker failed: {error}"));
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use event_bus::{LifecycleEvent, OwnershipAction, OwnershipEvent, UsageEvent};
-    use std::time::{Duration, UNIX_EPOCH};
-    use storage::{Database, Storage, StorageConfig};
+#[path = "storage_bridge/tests.rs"]
+mod tests;
 
-    fn fixture() -> (tempfile::TempDir, Storage, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let config = StorageConfig {
-            db_path: dir.path().join("events.db"),
-            ..StorageConfig::default()
-        };
-        let storage = Storage::open(config.clone()).unwrap();
-        let db = Database::open(&config).unwrap();
-        (dir, storage, db)
-    }
-
-    fn usage_event(tokens: u64) -> Event {
-        let mut event = Event::new(UsageEvent::Usage {
-            provider: "provider".into(),
-            model: "model".into(),
-            input_tokens: tokens,
-            output_tokens: 2,
-            cache_read_tokens: 3,
-            cache_write_tokens: 4,
-        });
-        event.meta.wall_clock = UNIX_EPOCH + Duration::from_secs(125);
-        event
-    }
-
-    #[test]
-    fn usage_event_is_not_persisted_raw() {
-        // Given: a real storage writer.
-        let (_dir, storage, db) = fixture();
-        let mut bridge = StorageBridge::new(storage.handle(), "session");
-        // When: usage reaches the bridge.
-        let result = bridge.handle_event(&usage_event(10));
-        // Then: raw usage is accepted but never persisted.
-        assert!(result.is_ok(), "{result:?}");
-        assert!(db.events_all_ordered().unwrap().is_empty());
-    }
-
-    #[test]
-    fn lifecycle_event_is_persisted() {
-        // Given: a session lifecycle event.
-        let (_dir, storage, db) = fixture();
-        let mut bridge = StorageBridge::new(storage.handle(), "session");
-        let event = Event::new(LifecycleEvent::Started {
-            session_id: "session".into(),
-        });
-        // When: it reaches the bridge.
-        bridge.handle_event(&event).unwrap();
-        // Then: the event remains available for replay.
-        let events = db.events_all_ordered().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event, event);
-    }
-
-    #[test]
-    fn ledger_event_is_persisted() {
-        // Given: a ledger event and a real storage writer.
-        let (_dir, storage, db) = fixture();
-        let mut bridge = StorageBridge::new(storage.handle(), "session");
-        let event = Event::new(event_bus::LedgerEvent::RunLedgerAppended {
-            run_id: "run-1".into(),
-            seq: 7,
-            body: "entry".into(),
-        });
-        // When: the ledger event reaches the bridge.
-        bridge.handle_event(&event).unwrap();
-        // Then: the complete event is available for replay in its session.
-        let events = db.events_all_ordered().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].session_id.as_deref(), Some("session"));
-        assert_eq!(events[0].event, event);
-    }
-
-    #[test]
-    fn ownership_event_is_persisted() {
-        let (_dir, storage, db) = fixture();
-        let mut bridge = StorageBridge::new(storage.handle(), "session");
-        let event = Event::new(OwnershipEvent {
-            thread_id: "thread-1".into(),
-            owner_id: "owner-1".into(),
-            generation: 2,
-            action: OwnershipAction::Quiescing,
-        });
-
-        bridge.handle_event(&event).unwrap();
-
-        let events = db.events_all_ordered().unwrap();
-        assert_eq!(
-            events,
-            vec![storage::StoredEvent {
-                id: events[0].id,
-                session_id: Some("session".into()),
-                event,
-            }]
-        );
-    }
-
-    #[test]
-    fn flush_usage_produces_metrics_bucket() {
-        // Given: two observations in one minute.
-        let (_dir, storage, db) = fixture();
-        let mut bridge = StorageBridge::new(storage.handle(), "session");
-        bridge.handle_event(&usage_event(10)).unwrap();
-        bridge.handle_event(&usage_event(20)).unwrap();
-        // When: usage is flushed twice (the second flush must be empty).
-        bridge.flush_usage();
-        bridge.flush_usage();
-        storage.handle().flush_usage_now().unwrap();
-        // Then: one additive bucket, without duplicate accounting.
-        let metrics = db.metrics_range(120, 180).unwrap();
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].input_tokens, 30);
-        assert_eq!(metrics[0].output_tokens, 4);
-        assert_eq!(metrics[0].cache_read_tokens, 6);
-        assert_eq!(metrics[0].cache_write_tokens, 8);
-        assert_eq!(metrics[0].request_count, 2);
-    }
-}
+#[cfg(test)]
+#[path = "storage_bridge/limit_tests.rs"]
+mod limit_tests;

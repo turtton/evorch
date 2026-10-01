@@ -18,9 +18,10 @@ fn app_close_is_not_cancelled_when_echoed_by_the_backend() {
         )
         .unwrap(),
     );
+    let permit = host.start("thread").unwrap();
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .unwrap()
-        .with_ownership(host);
+        .with_ownership(host.clone());
     let mut harness = Harness::builder().build_ui_state(
         |ui, state: &mut WorkbenchState<DemoSource>| {
             state.ui(ui, &mut eframe::Frame::_new_kittest());
@@ -40,6 +41,15 @@ fn app_close_is_not_cancelled_when_echoed_by_the_backend() {
     assert!(commands.contains(&ViewportCommand::Close));
     assert!(harness.query_by_label("Keep open").is_none());
     assert!(harness.query_by_label("Active thread ownership").is_none());
+
+    // The viewport close only requests quiescence. Durable queued mutations
+    // remain valid until the production storage owner finishes draining.
+    assert_eq!(
+        host.attach("thread").unwrap().state,
+        runtime::ownership::OwnerState::Quiescing
+    );
+    permit.validate_generation().unwrap();
+    assert!(permit.begin_turn().is_err());
 
     // When: the backend echoes the application's own close command.
     harness
