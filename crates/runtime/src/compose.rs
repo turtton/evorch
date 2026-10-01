@@ -15,6 +15,8 @@ use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
 use sandbox::credential::CredentialStore;
 use tools::ToolExecutor;
 
+use crate::skill::default_skill_dirs;
+use crate::skill_source::SkillCatalogSource;
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 
@@ -109,6 +111,11 @@ pub struct ComposedRuntime {
 /// # Errors
 /// configured source の provider 構成が失敗した場合に返す。
 pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime, CompositionError> {
+    let repo_root = input
+        .workspace
+        .as_ref()
+        .map(|seam| seam.repo_root().to_path_buf());
+    let bus = Arc::clone(&input.bus);
     let composed = match input.model_source {
         ModelSource::Fixed(model) => ComposedRuntime {
             runtime: compose_agent_runtime(input.bus, input.executor, model, input.workspace),
@@ -139,6 +146,14 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
     let runtime = composed
         .runtime
         .with_model_resolution(input.config, Some(input.credential_store));
+    let source = SkillCatalogSource::new(
+        input.config.clone(),
+        config::user_config_dir(),
+        Vec::new(),
+        default_skill_dirs(repo_root.as_deref()),
+        bus,
+    );
+    let runtime = runtime.with_skill_source(Arc::new(source));
     runtime.configure_shell_escalation(
         &runtime
             .shared

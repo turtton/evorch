@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, success};
 use crate::agent_loop::LoopState;
-use crate::skill::{SkillRegistry, read_skill_resource};
+use crate::skill::SkillRegistry;
 
 #[derive(Deserialize)]
 pub(super) struct SkillLoadArgs {
@@ -36,9 +36,9 @@ fn skill_load_with_registry(
         return error(format!("unknown skill: {}", args.name));
     };
     let loaded = match &args.resource {
-        Some(reference) => {
-            read_skill_resource(&entry.dir, reference).map_err(|load_error| load_error.to_string())
-        }
+        Some(reference) => entry
+            .read_resource(reference)
+            .map_err(|load_error| load_error.to_string()),
         None => registry
             .load_body(&args.name)
             .map_err(|load_error| load_error.to_string()),

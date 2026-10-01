@@ -45,6 +45,7 @@ mod sandbox_settings;
 pub mod scope;
 pub mod self_improvement;
 pub mod skill;
+pub mod skill_source;
 pub mod snapshot;
 pub mod state;
 pub mod team;
@@ -96,4 +97,5 @@ pub use skill::{
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,
     parse_and_validate, read_skill_resource, split_frontmatter,
 };
+pub use skill_source::{SkillCatalogSource, SourceSnapshot};
 pub use state::{InterruptKind, RunInterrupt, RunState, StopScope, is_valid_transition};

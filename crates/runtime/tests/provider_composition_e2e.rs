@@ -142,6 +142,7 @@ fn composition<'a>(
 // Given: sugar provider config、MapEnv credential、4 応答の local OpenAI mock
 // When: Orchestrator が blocking delegate で Worker を起動し Worker が edit する
 // Then: 両 run、result、provider/tool events、disk、全 wire request が同じ composition を通る
+// catalog 接続後は各 provider request の messages[0] が system role、ユーザープロンプトは messages[1]。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() {
     let directory = tempfile::tempdir().expect("project directory");
@@ -236,7 +237,10 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
     assert_eq!(requests.len(), 4);
     let initial_prompts = requests
         .iter()
-        .map(|request| request.body["messages"][0]["content"].as_str())
+        .map(|request| {
+            assert_eq!(request.body["messages"][0]["role"], "system");
+            request.body["messages"][1]["content"].as_str()
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         initial_prompts,

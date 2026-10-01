@@ -6,7 +6,7 @@
 //! config と同じ許容で空として扱う。
 //!
 //! スコープ優先順位: 呼び出し側が与える `dirs` の順で処理し、先に現れた同名
-//! 候補が勝つ (標準構成では repo が user より先)。後に現れた同名候補は
+//! 候補が勝つ (標準構成では repo → repo-agents → user → builtin)。後に現れた同名候補は
 //! `Shadowed` 診断付きで除外される。
 
 use std::collections::BTreeMap;
@@ -15,59 +15,54 @@ use std::path::{Path, PathBuf};
 
 use event_bus::SkillDiagnosticKind;
 
+use super::builtin::builtin_skill_entries;
 use super::frontmatter::{parse_and_validate, read_frontmatter_prefix, split_frontmatter};
-use super::registry::{SkillDiagnostic, SkillEntry, SkillRegistry, SkillScope};
+use super::registry::{SkillDiagnostic, SkillEntry, SkillRegistry, SkillScope, SkillSource};
 
 /// 各スコープの skill ディレクトリを走査してレジストリを構築する。
 ///
-/// `dirs` は優先度の高い順に与える (標準は repo → user)。各ディレクトリの
+/// `dirs` は優先度の高い順に与える (標準の fs は repo → repo-agents → user)。各ディレクトリの
 /// 直下サブディレクトリのうち `SKILL.md` を持つものが skill 候補で、
 /// frontmatter を検証して登録する。検証に失敗した候補は `ValidationError`
 /// 診断付きで除外され、同名の先発候補を持つ候補は `Shadowed` 診断付きで
 /// 除外される。読み取れない SKILL.md やディレクトリは `DiscoveryError` 診断
 /// として報告するが、scope ディレクトリ自体の欠損は許容して空として扱う。
 pub fn discover_skills(dirs: &[(SkillScope, PathBuf)]) -> SkillRegistry {
-    let mut skills: BTreeMap<String, SkillEntry> = BTreeMap::new();
-    let mut diagnostics = Vec::new();
+    let mut registry = SkillRegistry::new(BTreeMap::new(), Vec::new());
     for (scope, dir) in dirs {
-        let entries = scan_scope(*scope, dir, &mut diagnostics);
-        for entry in entries {
-            if skills.contains_key(&entry.name) {
-                let winner_scope = skills[&entry.name].scope;
-                let detail = format!(
-                    "skill '{}': {} scope shadows {} scope",
-                    entry.name,
-                    winner_scope.as_str(),
-                    entry.scope.as_str()
-                );
-                tracing::warn!(
-                    skill = %entry.name,
-                    winner_scope = winner_scope.as_str(),
-                    loser_scope = entry.scope.as_str(),
-                    "skill shadowed by higher-priority scope"
-                );
-                diagnostics.push(SkillDiagnostic {
-                    kind: SkillDiagnosticKind::Shadowed,
-                    skill: entry.name,
-                    scope: entry.scope,
-                    detail,
-                });
-            } else {
-                skills.insert(entry.name.clone(), entry);
-            }
-        }
+        let entries = scan_scope(*scope, dir, &mut registry.diagnostics);
+        registry.merge_shadowing(entries);
     }
-    SkillRegistry::new(skills, diagnostics)
+    registry
 }
 
-/// 標準の skill ディレクトリ一覧を優先度順 (repo → user) で返す。
+/// 明示した fs ディレクトリを探索し、最低優先度の builtin をマージする。
 ///
-/// 解決できないスコープはスキップする: `repo_root` が `None` なら repo
-/// エントリなし、`config::user_config_dir` が `None` なら user エントリなし。
+/// fs の優先順位・診断順序は [`discover_skills`] と同じ。同名の builtin は
+/// `Shadowed` 診断と warn ログを残して除外する。
+pub fn discover_with_builtin(dirs: &[(SkillScope, PathBuf)]) -> SkillRegistry {
+    let mut registry = discover_skills(dirs);
+    registry.merge_shadowing(builtin_skill_entries());
+    registry
+}
+
+/// 標準探索: fs スコープ (repo .evorch → repo .agents → user) → builtin マージ。
+pub fn build_standard_registry(repo_root: Option<&Path>) -> SkillRegistry {
+    discover_with_builtin(&default_skill_dirs(repo_root))
+}
+
+/// 標準の skill ディレクトリ一覧を優先度順 (repo → repo-agents → user) で返す。
+///
+/// 解決できないスコープはスキップする: `repo_root` が `None` なら repo と
+/// repo-agents エントリなし、`config::user_config_dir` が `None` なら user エントリなし。
 pub fn default_skill_dirs(repo_root: Option<&Path>) -> Vec<(SkillScope, PathBuf)> {
     let mut dirs = Vec::new();
     if let Some(repo_root) = repo_root {
         dirs.push((SkillScope::Repo, repo_root.join(".evorch").join("skills")));
+        dirs.push((
+            SkillScope::RepoAgents,
+            repo_root.join(".agents").join("skills"),
+        ));
     }
     if let Some(user_dir) = config::user_config_dir() {
         dirs.push((SkillScope::User, user_dir.join("skills")));
@@ -86,8 +81,8 @@ fn scan_scope(
         Ok(read_dir) => read_dir,
         Err(err) if err.kind() == ErrorKind::NotFound => return entries,
         Err(err) => {
-            let detail = format!("skills directory '{}' is unreadable: {err}", dir.display());
-            diagnostics.push(discovery_error(scope, &dir.display().to_string(), &detail));
+            let detail = format!("skills directory is unreadable: {:?}", err.kind());
+            diagnostics.push(discovery_error(scope, scope.as_str(), &detail));
             return entries;
         }
     };
@@ -96,8 +91,8 @@ fn scan_scope(
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                let detail = format!("skills directory '{}' is unreadable: {err}", dir.display());
-                diagnostics.push(discovery_error(scope, &dir.display().to_string(), &detail));
+                let detail = format!("skills directory is unreadable: {:?}", err.kind());
+                diagnostics.push(discovery_error(scope, scope.as_str(), &detail));
                 continue;
             }
         };
@@ -105,9 +100,9 @@ fn scan_scope(
             Ok(file_type) if file_type.is_dir() => subdirs.push(entry.path()),
             Ok(_) => {}
             Err(err) => {
-                let path = entry.path();
-                let detail = format!("cannot inspect '{}': {err}", path.display());
-                diagnostics.push(discovery_error(scope, &path.display().to_string(), &detail));
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let detail = format!("cannot inspect skill directory '{name}': {:?}", err.kind());
+                diagnostics.push(discovery_error(scope, &name, &detail));
             }
         }
     }
@@ -140,12 +135,15 @@ fn scan_candidate(scope: SkillScope, dir: &Path) -> CandidateOutcome {
     let dir_name = dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| dir.display().to_string());
+        .unwrap_or_else(|| scope.as_str().to_owned());
     let content = match read_frontmatter_prefix(&dir.join("SKILL.md")) {
         Ok(content) => content,
         Err(err) if err.kind() == ErrorKind::NotFound => return CandidateOutcome::Skip,
         Err(err) => {
-            let detail = format!("SKILL.md in skill directory '{dir_name}' is unreadable: {err}");
+            let detail = format!(
+                "SKILL.md in skill directory '{dir_name}' is unreadable: {:?}",
+                err.kind()
+            );
             return CandidateOutcome::Reject(discovery_error(scope, &dir_name, &detail));
         }
     };
@@ -153,7 +151,9 @@ fn scan_candidate(scope: SkillScope, dir: &Path) -> CandidateOutcome {
         Ok(frontmatter) => CandidateOutcome::Admit(SkillEntry {
             name: frontmatter.name,
             description: frontmatter.description,
-            dir: dir.to_path_buf(),
+            source: SkillSource::Filesystem {
+                dir: dir.to_path_buf(),
+            },
             scope,
         }),
         Err(err) => {
@@ -238,7 +238,12 @@ mod tests {
         assert_eq!(entry.name, "demo-skill");
         assert_eq!(entry.description, "Demo skill");
         assert_eq!(entry.scope, SkillScope::Repo);
-        assert_eq!(entry.dir, skills.join("demo-skill"));
+        assert_eq!(
+            entry.source,
+            SkillSource::Filesystem {
+                dir: skills.join("demo-skill"),
+            }
+        );
     }
 
     /// Given: user スコープに有効な skill が 1 つある
@@ -308,6 +313,134 @@ mod tests {
         assert!(diagnostic.detail.contains("demo-skill"));
     }
 
+    /// Given: .agents/skills 直下に有効な skill がある
+    /// When:  標準レジストリを構築する
+    /// Then:  RepoAgents として発見され、fs 本文・リソースを読める
+    #[test]
+    fn standard_registry_discovers_repo_agents_skill() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join(".agents").join("skills");
+        write_skill(
+            &skills,
+            "agents-discovery-fixture",
+            "Agents skill",
+            "Agents body.\n",
+        );
+        fs::write(
+            skills.join("agents-discovery-fixture/NOTES.md"),
+            "Agent note.\n",
+        )
+        .unwrap();
+
+        let registry = build_standard_registry(Some(root.path()));
+
+        let entry = registry.get("agents-discovery-fixture").unwrap();
+        assert_eq!(entry.scope, SkillScope::RepoAgents);
+        assert_eq!(entry.description, "Agents skill");
+        assert_eq!(
+            entry.source,
+            SkillSource::Filesystem {
+                dir: skills.join("agents-discovery-fixture")
+            }
+        );
+        assert_eq!(
+            registry.load_body("agents-discovery-fixture").unwrap(),
+            "Agents body.\n"
+        );
+        assert_eq!(entry.read_resource("NOTES.md").unwrap(), "Agent note.\n");
+    }
+
+    /// 標準ディレクトリ順を使い、user の実環境に依存せず repo 間の優先度を確認する。
+    #[test]
+    fn repo_scope_shadows_repo_agents_scope() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join(".evorch/skills");
+        let agents = root.path().join(".agents/skills");
+        write_skill(&repo, "demo-skill", "Repo winner", "Repo body.\n");
+        write_skill(&agents, "demo-skill", "Agents loser", "Agents body.\n");
+        let dirs = default_skill_dirs(Some(root.path()));
+
+        let registry = discover_skills(&dirs[..2]);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.get("demo-skill").unwrap().scope, SkillScope::Repo);
+        assert_eq!(registry.load_body("demo-skill").unwrap(), "Repo body.\n");
+        assert_eq!(registry.diagnostics.len(), 1);
+        let diagnostic = &registry.diagnostics[0];
+        assert_eq!(diagnostic.kind, SkillDiagnosticKind::Shadowed);
+        assert_eq!(diagnostic.skill, "demo-skill");
+        assert_eq!(diagnostic.scope, SkillScope::RepoAgents);
+        assert_eq!(
+            diagnostic.detail,
+            "skill 'demo-skill': repo scope shadows repo-agents scope"
+        );
+    }
+
+    #[test]
+    fn repo_agents_scope_shadows_user_scope() {
+        let root = tempdir().unwrap();
+        let agents = root.path().join(".agents/skills");
+        let user = root.path().join("user/skills");
+        write_skill(&agents, "demo-skill", "Agents winner", "Agents body.\n");
+        write_skill(&user, "demo-skill", "User loser", "User body.\n");
+
+        let registry =
+            discover_skills(&[(SkillScope::RepoAgents, agents), (SkillScope::User, user)]);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.get("demo-skill").unwrap().scope,
+            SkillScope::RepoAgents
+        );
+        assert_eq!(registry.load_body("demo-skill").unwrap(), "Agents body.\n");
+        assert_eq!(registry.diagnostics.len(), 1);
+        let diagnostic = &registry.diagnostics[0];
+        assert_eq!(diagnostic.kind, SkillDiagnosticKind::Shadowed);
+        assert_eq!(diagnostic.skill, "demo-skill");
+        assert_eq!(diagnostic.scope, SkillScope::User);
+        assert_eq!(
+            diagnostic.detail,
+            "skill 'demo-skill': repo-agents scope shadows user scope"
+        );
+    }
+
+    #[test]
+    fn discovery_scans_only_immediate_scope_children() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join(".agents/skills");
+        write_skill(
+            &skills.join("nested"),
+            "hidden-skill",
+            "Not discovered",
+            "Hidden body.\n",
+        );
+        write_skill(&skills, "visible-skill", "Discovered", "Visible body.\n");
+
+        let registry = discover_skills(&[(SkillScope::RepoAgents, skills)]);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("hidden-skill").is_none());
+        assert!(registry.get("visible-skill").is_some());
+        assert!(registry.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn discovery_uses_caller_order_instead_of_scope_ranking() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join(".evorch/skills");
+        let user = root.path().join("user/skills");
+        write_skill(&repo, "demo-skill", "Repo loser", "Repo body.\n");
+        write_skill(&user, "demo-skill", "User winner", "User body.\n");
+
+        let registry = discover_skills(&[(SkillScope::User, user), (SkillScope::Repo, repo)]);
+
+        assert_eq!(registry.get("demo-skill").unwrap().scope, SkillScope::User);
+        assert_eq!(registry.load_body("demo-skill").unwrap(), "User body.\n");
+        assert_eq!(registry.diagnostics.len(), 1);
+        assert_eq!(registry.diagnostics[0].scope, SkillScope::Repo);
+        assert_eq!(registry.diagnostics[0].kind, SkillDiagnosticKind::Shadowed);
+    }
+
     // -- discover_skills: 無効 skill の除外 (AC7) --------------------------------
 
     /// Given: name がディレクトリ名と一致しない SKILL.md を持つ skill
@@ -356,6 +489,25 @@ mod tests {
         assert_eq!(diagnostic.kind, SkillDiagnosticKind::DiscoveryError);
         assert_eq!(diagnostic.skill, "demo-skill");
         assert_eq!(diagnostic.scope, SkillScope::Repo);
+    }
+
+    #[test]
+    fn unreadable_scope_diagnostic_contains_identifiers_not_full_paths() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("not-a-directory");
+        fs::write(&skills, "PRIVATE CONTENT SENTINEL").unwrap();
+
+        let registry = discover_skills(&[(SkillScope::RepoAgents, skills)]);
+
+        assert!(registry.is_empty());
+        assert_eq!(registry.diagnostics.len(), 1);
+        let diagnostic = &registry.diagnostics[0];
+        assert_eq!(diagnostic.kind, SkillDiagnosticKind::DiscoveryError);
+        assert_eq!(diagnostic.scope, SkillScope::RepoAgents);
+        assert_eq!(diagnostic.skill, "repo-agents");
+        assert!(diagnostic.detail.contains("unreadable"));
+        assert!(!diagnostic.detail.contains(root.path().to_str().unwrap()));
+        assert!(!diagnostic.detail.contains("SENTINEL"));
     }
 
     // -- discover_skills: 本文の非実体化 (AC4) ------------------------------------
@@ -453,32 +605,70 @@ mod tests {
         assert!(registry.diagnostics.is_empty());
     }
 
+    #[test]
+    fn discover_with_builtin_uses_explicit_dirs_without_user_config() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join("skills");
+        write_skill(
+            &skills,
+            "explicit-skill",
+            "Explicit fixture",
+            "Explicit body.\n",
+        );
+
+        let registry = discover_with_builtin(&[(SkillScope::RepoAgents, skills)]);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.get("explicit-skill").unwrap().scope,
+            SkillScope::RepoAgents
+        );
+        assert_eq!(
+            registry.load_body("explicit-skill").unwrap(),
+            "Explicit body.\n"
+        );
+        assert!(registry.diagnostics.is_empty());
+        // 本番 builtin テーブルは空。明示 dirs が空なら user config は探索しない。
+        let empty = discover_with_builtin(&[]);
+        assert!(empty.is_empty());
+        assert!(empty.diagnostics.is_empty());
+    }
+
     // -- default_skill_dirs ------------------------------------------------------
 
     /// Given: repo root を指定する
     /// When:  default_skill_dirs を呼ぶ
-    /// Then:  先頭に repo エントリ (<root>/.evorch/skills) が来て、以降は user のみ
+    /// Then:  repo → repo-agents → user の順で、解決できたスコープだけが並ぶ
     #[test]
-    fn default_skill_dirs_lists_repo_before_user() {
+    fn default_skill_dirs_lists_repo_and_repo_agents_before_user() {
         let repo_root = Path::new("/tmp/evorch-test-repo");
 
         let dirs = default_skill_dirs(Some(repo_root));
 
-        assert_eq!(dirs[0].0, SkillScope::Repo);
-        assert_eq!(dirs[0].1, repo_root.join(".evorch").join("skills"));
-        if let Some((scope, _)) = dirs.get(1) {
-            assert_eq!(*scope, SkillScope::User);
+        let mut expected = vec![
+            (SkillScope::Repo, repo_root.join(".evorch").join("skills")),
+            (
+                SkillScope::RepoAgents,
+                repo_root.join(".agents").join("skills"),
+            ),
+        ];
+        if let Some(user_dir) = config::user_config_dir() {
+            expected.push((SkillScope::User, user_dir.join("skills")));
         }
-        assert!(dirs.len() <= 2);
+        assert_eq!(dirs, expected);
     }
 
     /// Given: repo root を指定しない
     /// When:  default_skill_dirs を呼ぶ
-    /// Then:  repo エントリは含まれない
+    /// Then:  repo・repo-agents エントリはなく、解決できれば user だけを返す
     #[test]
     fn default_skill_dirs_without_repo_root_has_no_repo_entry() {
         let dirs = default_skill_dirs(None);
 
-        assert!(dirs.iter().all(|(scope, _)| *scope != SkillScope::Repo));
+        let expected: Vec<_> = config::user_config_dir()
+            .map(|dir| (SkillScope::User, dir.join("skills")))
+            .into_iter()
+            .collect();
+        assert_eq!(dirs, expected);
     }
 }
