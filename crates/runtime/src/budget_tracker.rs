@@ -55,6 +55,8 @@ impl From<&config::BudgetConfig> for BudgetSettings {
 
 pub(crate) struct BudgetCounters {
     started_at: Instant,
+    paused_at: Option<Instant>,
+    paused_total: Duration,
     cumulative_input_tokens: u64,
     cumulative_output_tokens: u64,
     file_reads: BTreeMap<PathBuf, u32>,
@@ -88,6 +90,8 @@ impl Default for BudgetCounters {
     fn default() -> Self {
         Self {
             started_at: Instant::now(),
+            paused_at: None,
+            paused_total: Duration::ZERO,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
             file_reads: BTreeMap::new(),
@@ -101,6 +105,30 @@ impl Default for BudgetCounters {
 }
 
 impl BudgetCounters {
+    /// Waiting 位相 (ユーザ回答・reply・子 run 待ち) は max_elapsed に計上しない。
+    /// pause は冪等で、重ねても最初の pause 時点を維持する。
+    pub(crate) fn pause(&mut self) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(Instant::now());
+        }
+    }
+
+    /// 待機時間を除外対象として確定する。pause 中でなければ no-op。
+    pub(crate) fn resume(&mut self) {
+        if let Some(paused_at) = self.paused_at.take() {
+            self.paused_total = self.paused_total.saturating_add(paused_at.elapsed());
+        }
+    }
+
+    /// max_elapsed 判定に使う、待機時間を除いた実行経過時間。
+    fn active_elapsed(&self) -> Duration {
+        let paused = match self.paused_at {
+            Some(paused_at) => self.paused_total.saturating_add(paused_at.elapsed()),
+            None => self.paused_total,
+        };
+        self.started_at.elapsed().saturating_sub(paused)
+    }
+
     pub(crate) fn usage(&mut self, usage: Usage) {
         self.cumulative_input_tokens = self
             .cumulative_input_tokens
@@ -137,7 +165,7 @@ impl BudgetCounters {
         if let Some(breach) = &self.exhausted {
             return BudgetDecision::Exhausted(breach.clone());
         }
-        let elapsed = self.started_at.elapsed();
+        let elapsed = self.active_elapsed();
         if tool_calls > self.last_checkpoint_at && tool_calls.is_multiple_of(50) {
             self.last_checkpoint_at = tool_calls;
             context

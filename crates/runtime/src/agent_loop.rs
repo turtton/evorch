@@ -1075,6 +1075,13 @@ impl LoopState {
             .run_state
             .transition(self.task.run_id, phase, reason.clone())
             .map_err(|_| ())?;
+        // Waiting 位相の時間は max_elapsed に計上しない (ユーザ回答待ちなど)。
+        // 遷移失敗時は位相が変わっていないため時計も触らない。
+        if phase == AgentRunPhase::Waiting {
+            self.budget.pause();
+        } else if previous.phase() == AgentRunPhase::Waiting {
+            self.budget.resume();
+        }
         if matches!(
             phase,
             AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped

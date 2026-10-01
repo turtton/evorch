@@ -6,6 +6,114 @@ fn assert_no_event(receiver: &mut event_bus::EventReceiver) {
     assert!(std::future::Future::poll(receive.as_mut(), &mut context).is_pending());
 }
 
+#[tokio::test(start_paused = true)]
+async fn elapsed_budget_excludes_waiting_and_resumes_active_accounting() {
+    // Given: 上限より短い実行時間の後に待機する。
+    let bus = EventBus::new(16);
+    let mut receiver = bus.subscribe();
+    let settings = BudgetSettings {
+        max_elapsed: Duration::from_millis(250),
+        ..Default::default()
+    };
+    let context = BudgetContext {
+        bus: &bus,
+        run_id: "run",
+        task_id: "task",
+        settings: &settings,
+    };
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    counters.pause();
+
+    // When: 待機中に上限を超えてから再開する。
+    tokio::time::advance(Duration::from_secs(2)).await;
+    counters.resume();
+
+    // Then: 待機時間は除外され、再開後の実行時間だけが超過を引き起こす。
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(100));
+    assert_eq!(counters.publish(0, &context), BudgetDecision::Continue);
+    assert_no_event(&mut receiver);
+    tokio::time::advance(Duration::from_millis(151)).await;
+    assert!(
+        matches!(counters.publish(0, &context), BudgetDecision::Exhausted(breach)
+        if breach.code == diagnostic_codes::BUDGET_EXHAUSTED
+            && breach.detail.contains("max_elapsed_ms=250"))
+    );
+    let event = receiver.recv().await.expect("exhaustion");
+    assert!(matches!(event.kind, event_bus::EventKind::Diagnostic(d)
+        if d.source == "budget_tracker"
+            && d.code == diagnostic_codes::BUDGET_EXHAUSTED));
+    assert_no_event(&mut receiver);
+}
+
+#[tokio::test(start_paused = true)]
+async fn publishing_while_paused_excludes_current_and_previous_waits() {
+    // Given: 実行時間と確定済みの待機時間がある。
+    let bus = EventBus::new(16);
+    let mut receiver = bus.subscribe();
+    let settings = BudgetSettings {
+        max_elapsed: Duration::from_millis(250),
+        ..Default::default()
+    };
+    let context = BudgetContext {
+        bus: &bus,
+        run_id: "run",
+        task_id: "task",
+        settings: &settings,
+    };
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    counters.pause();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    counters.resume();
+    tokio::time::advance(Duration::from_millis(50)).await;
+    counters.pause();
+
+    // When: 次の待機中に publish する。
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(counters.publish(50, &context), BudgetDecision::Continue);
+
+    // Then: 進行中の待機も除外され、checkpoint も実行時間のみを報告する。
+    let event = receiver.recv().await.expect("checkpoint");
+    assert!(matches!(
+        event.kind,
+        event_bus::EventKind::Orchestrator(OrchestratorEvent::TaskCheckpoint {
+            elapsed_ms: 150,
+            ..
+        })
+    ));
+    assert_no_event(&mut receiver);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(counters.publish(50, &context), BudgetDecision::Continue);
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(150));
+    assert_no_event(&mut receiver);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_is_idempotent_and_resume_without_pause_is_a_no_op() {
+    // Given: pause していない状態の resume は実行時間を変えない。
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_millis(100)).await;
+    counters.resume();
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(100));
+    counters.pause();
+
+    // When: 待機中に重ねて pause してから再開する。
+    tokio::time::advance(Duration::from_secs(1)).await;
+    counters.pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(100));
+    counters.resume();
+
+    // Then: 最初の pause からの全時間が除外され、余分な resume は無害。
+    assert_eq!(counters.paused_total, Duration::from_secs(2));
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(100));
+    tokio::time::advance(Duration::from_millis(50)).await;
+    counters.resume();
+    assert_eq!(counters.paused_total, Duration::from_secs(2));
+    assert_eq!(counters.active_elapsed(), Duration::from_millis(150));
+}
+
 #[tokio::test]
 async fn token_warning_is_latched_without_stopping_execution() {
     // Given: token usage alone reaches the remaining-budget threshold.

@@ -2,7 +2,7 @@ mod support;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::FinishReason;
 use runtime::{AgentRuntime, Role, RunConfig, RunStore};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use storage::{Storage, StorageConfig};
 use support::{ScriptedModel, text_response, tool_response};
 use tools::ToolExecutor;
@@ -97,6 +97,108 @@ async fn question_yields_runs_independent_work_then_wakes_once_with_free_text() 
             .answer_user_question(&question.id, "different")
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
+    // Given: 回答待ち時間より短い elapsed budget を持つ永続化付き run。
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("questions.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response(
+            "ask",
+            "ask_user",
+            serde_json::json!({"title":"どの方式？","options":["A","B"]}),
+        )),
+        Ok(text_response("Waiting for the answer.", FinishReason::Stop)),
+        Ok(text_response("Applied the answer.", FinishReason::Stop)),
+    ]));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+    let run_config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_elapsed: Duration::from_millis(250),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let run = runtime.delegate_background(Role::Worker, "work".into(), run_config);
+    let mut question = None;
+    let mut observed_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            let waiting = match &event.kind {
+                EventKind::Tool(ToolEvent::UserQuestionUpdated { question: q }) => {
+                    question = Some(q.clone());
+                    false
+                }
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Waiting,
+                    ..
+                }) => true,
+                _ => false,
+            };
+            observed_events.push(event);
+            if waiting {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Waiting
+    );
+    let question = question.unwrap();
+
+    // When: Waiting 中に上限を大幅に超える時間を経てから回答する。
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    runtime.answer_user_question(&question.id, "A").unwrap();
+    let phase = tokio::time::timeout(Duration::from_secs(10), runtime.wait(run))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            let terminal = matches!(
+                &event.kind,
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    to: AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped,
+                    ..
+                })
+            );
+            observed_events.push(event);
+            if terminal {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    // Then: 回答を適用して完了し、elapsed budget 超過の診断は出ない。
+    assert_eq!(phase, AgentRunPhase::Done);
+    assert_eq!(
+        observed_events
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::Diagnostic(d)
+                if d.source == "budget_tracker"
+                    && d.code == event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED))
+            .count(),
+        0
+    );
+    let observed = model.observed().await;
+    let last = serde_json::to_string(observed.last().unwrap()).unwrap();
+    assert!(last.contains("[user-answer id="));
 }
 
 #[tokio::test]
