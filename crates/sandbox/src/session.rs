@@ -40,11 +40,10 @@ impl StdioSession {
     /// Returns the original wrapping error or the OS process-spawn error.
     pub fn spawn(sandbox: &dyn Sandbox, spec: CommandSpec) -> Result<Self, SessionError> {
         let wrapped = sandbox.wrap(spec)?;
-        let mut command = Command::new(wrapped.program);
+        let mut command = Command::new(&wrapped.program);
+        wrapped.apply_environment(&mut command);
         command
             .args(wrapped.args)
-            .env_clear()
-            .envs(wrapped.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

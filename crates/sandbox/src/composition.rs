@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     bwrap::{BwrapConfig, BwrapSandbox},
     error::SandboxError,
-    exec::{DirectSandbox, Sandbox},
+    exec::{CommandSpec, Sandbox, WrappedCommand},
 };
 
 /// ツール実行に用いる本番用サンドボックスを構築します。
@@ -25,8 +25,25 @@ pub fn production_sandbox(config: BwrapConfig) -> Result<Arc<dyn Sandbox>, Sandb
 ///
 /// 呼び出しごとの明示的な審査・承認を経た opt-out 専用です。
 /// `production_sandbox` の検出失敗時のフォールバックには使いません。
+/// evorch のプロセス環境（HOME、認証設定、agent socket 等）を継承し、
+/// `CommandSpec::extra_env` を上書きとして適用します。シェル設定は読み込みません。
 pub fn unsandboxed() -> Arc<dyn Sandbox> {
-    Arc::new(DirectSandbox::new_unchecked())
+    Arc::new(ReviewedHostSandbox)
+}
+
+/// Only the reviewed composition entry point can construct this host execution path.
+struct ReviewedHostSandbox;
+
+impl Sandbox for ReviewedHostSandbox {
+    fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        Ok(WrappedCommand {
+            program: spec.program,
+            args: spec.args,
+            cwd: spec.cwd,
+            inherit_env: true,
+            env: spec.extra_env,
+        })
+    }
 }
 
 /// bwrap 検出を注入できる、テスト用の非公開シームです。
@@ -58,6 +75,7 @@ mod tests {
             extra_env: vec![("ESCALATION_TEST".into(), "yes".into())],
         };
         let wrapped = unsandboxed().wrap(spec.clone()).expect("wrap");
+        assert!(wrapped.inherit_env);
         assert_eq!(wrapped.program, spec.program);
         assert_eq!(wrapped.args, spec.args);
         assert_eq!(wrapped.cwd, spec.cwd);

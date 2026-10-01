@@ -17,7 +17,8 @@ fn workspace() -> TempDir {
 
 fn run(wrapped: WrappedCommand) -> Output {
     let mut command = Command::new(&wrapped.program);
-    command.args(&wrapped.args).env_clear().envs(wrapped.env);
+    wrapped.apply_environment(&mut command);
+    command.args(&wrapped.args);
     if let Some(cwd) = wrapped.cwd {
         command.current_dir(cwd);
     }
@@ -65,18 +66,22 @@ fn credentials_are_isolated() {
         "cat '{}' 2>/dev/null || true; printf %s \"$FAKE_API_KEY\"",
         credential.display()
     );
-    let wrapped = sandbox
-        .wrap(CommandSpec {
-            program: "sh".to_owned(),
-            args: vec!["-c".to_owned(), script],
-            cwd: None,
-            extra_env: Vec::new(),
-        })
-        .expect("コマンドを包めるはずです");
-
-    let output = run(wrapped);
-    assert!(output.status.success(), "隔離シェルが成功するはずです");
-    assert!(output.stdout.is_empty(), "資格情報が出力されないはずです");
+    let command = CommandSpec {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script],
+        cwd: None,
+        extra_env: Vec::new(),
+    };
+    let network = sandbox.with_network_access().unwrap();
+    for sandbox in [&sandbox as &dyn Sandbox, network.as_ref()] {
+        let wrapped = sandbox
+            .wrap(command.clone())
+            .expect("コマンドを包めるはずです");
+        assert!(!wrapped.inherit_env);
+        let output = run(wrapped);
+        assert!(output.status.success(), "隔離シェルが成功するはずです");
+        assert!(output.stdout.is_empty(), "資格情報が出力されないはずです");
+    }
 }
 
 // Given: 親名前空間のローカル TCP 待受 / When: 隔離内外から接続 / Then: 外では成功し隔離内では失敗する

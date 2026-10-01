@@ -69,10 +69,10 @@ fn command_network_variant_connects_without_changing_the_default_sandbox() {
             wrapped.args.iter().any(|arg| arg == "--unshare-net"),
             !connected
         );
-        let output = Command::new(wrapped.program)
+        let mut process = Command::new(&wrapped.program);
+        wrapped.apply_environment(&mut process);
+        let output = process
             .args(wrapped.args)
-            .env_clear()
-            .envs(wrapped.env)
             .current_dir(workspace.path())
             .output()
             .expect("command");

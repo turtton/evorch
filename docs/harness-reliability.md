@@ -15,8 +15,9 @@
 Shell pipes and PTYs are drained into bounded buffers (8 MiB per stream).
 After completion or timeout, credential-shaped text is redacted before any
 artifact is written. This keeps raw credentials out of temporary files without
-requiring an unbounded streaming-redaction buffer. Smaller live results and
-source files remain unchanged; persisted event/context copies are sanitized.
+requiring an unbounded streaming-redaction buffer. Small completed shell results
+and live shell job lines are filtered as well. Source files remain unchanged;
+persisted event/context copies are sanitized.
 
 Large results return the last 300 lines / 16 KiB plus an artifact reference.
 Artifacts live in private `/var/tmp/evorch-output-<uid>/<slot>/<uuid>.txt` files,

@@ -727,7 +727,6 @@ impl AgentRuntime {
         continuation: RunContinuation,
     ) -> RunId {
         let completion_relayed = matches!(continuation, RunContinuation::Awaited);
-        let restored_run = matches!(continuation, RunContinuation::Restored(_));
         let original_prompt = prompt.clone();
         let (handoff, restored) = match continuation {
             RunContinuation::Fresh => (None, None),
@@ -825,9 +824,11 @@ impl AgentRuntime {
                 }
             }
             None => {
+                // A root prompt comes from the current host submission, including
+                // continue_goal/delegate_chat restores. Persisted messages and
+                // compaction summaries are history only, never user authority.
                 let requests = if parent.is_none()
                     && escalated_from.is_none()
-                    && !restored_run
                     && !original_prompt.trim().is_empty()
                 {
                     vec![crate::escalation_review::UserRequest {

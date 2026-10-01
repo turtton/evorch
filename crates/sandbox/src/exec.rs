@@ -1,6 +1,6 @@
 //! コマンド仕様と隔離方式の共通抽象を定義します。
 
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, ffi::OsString, path::PathBuf, process::Command, sync::Arc};
 
 use crate::error::SandboxError;
 
@@ -19,10 +19,22 @@ pub struct WrappedCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
+    /// Inherit the host process environment at launch, then apply `env` overrides.
+    /// Inherited values are never copied into this command or its Debug output.
+    pub inherit_env: bool,
     pub env: Vec<(String, String)>,
 }
 
 impl WrappedCommand {
+    /// Apply the environment policy to a fresh std command (or Tokio's `as_std_mut`).
+    /// Keeping inheritance in the process API preserves non-UTF-8 names and values.
+    pub fn apply_environment(&self, command: &mut Command) {
+        if !self.inherit_env {
+            command.env_clear();
+        }
+        command.envs(self.env.iter().cloned());
+    }
+
     /// Diagnose deterministic launch failures before entering a model/tool retry
     /// loop. This does not execute a probe or disable sandboxing.
     pub fn preflight(&self) -> Result<(), SandboxError> {
@@ -58,9 +70,11 @@ impl WrappedCommand {
             let path = self
                 .env
                 .iter()
-                .find(|(name, _)| name == "PATH")
-                .map_or("/bin:/usr/bin", |(_, value)| value.as_str());
-            std::env::split_paths(path).any(|dir| {
+                .rfind(|(name, _)| name == "PATH")
+                .map(|(_, value)| OsString::from(value))
+                .or_else(|| self.inherit_env.then(|| env::var_os("PATH")).flatten())
+                .unwrap_or_else(|| OsString::from("/bin:/usr/bin"));
+            std::env::split_paths(&path).any(|dir| {
                 executable(&if dir.is_absolute() {
                     dir.join(program)
                 } else {
@@ -97,8 +111,8 @@ pub trait Sandbox: Send + Sync {
 ///
 /// この型は公開 API 上の unit-like な value として構築できません。隔離の
 /// 無効化は [`DirectSandbox::new_unchecked`] による明示的な opt-out
-/// （非 production / テスト専用）、または審査済みの
-/// [`crate::composition::unsandboxed`] 経由でのみ行えます。これは ADR 0021 の
+/// （非 production / テスト専用）経由でのみ行えます。この型は最小限の
+/// 環境だけを渡し、ホスト環境を継承する審査済み経路は別の実装です。ADR 0021 の
 /// fail-closed 方針を construction API に適用したもので、policy 明示なしの
 /// permissive な構築経路を module visibility で構造的に塞ぐ invariant です
 /// （trybuild 等の compile-fail テストに代わり、本 doc と移行済みの
@@ -114,6 +128,7 @@ impl Sandbox for DirectSandbox {
             program: spec.program,
             args: spec.args,
             cwd: spec.cwd,
+            inherit_env: false,
             env: merge_environment(spec.extra_env),
         })
     }
@@ -220,6 +235,7 @@ mod preflight_tests {
             program: "missing-evorch-executable".into(),
             args: vec![],
             cwd: Some(dir.path().into()),
+            inherit_env: false,
             env: vec![("PATH".into(), dir.path().display().to_string())],
         };
         let error = command.preflight().unwrap_err().to_string();
@@ -245,6 +261,7 @@ mod preflight_tests {
             program: "command".into(),
             args: vec![],
             cwd: Some(dir.path().into()),
+            inherit_env: false,
             env: vec![("PATH".into(), ".".into())],
         };
         assert!(command.preflight().is_err());

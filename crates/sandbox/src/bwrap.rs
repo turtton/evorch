@@ -229,6 +229,7 @@ impl Sandbox for BwrapSandbox {
             program: self.program.to_string_lossy().into_owned(),
             args,
             cwd: None,
+            inherit_env: false,
             env,
         })
     }

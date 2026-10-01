@@ -10,12 +10,16 @@ pub(super) enum RunContinuation {
     Fresh,
     Awaited,
     Handoff(RunHandoff),
+    /// History reused by a host chat entry point alongside a new human prompt.
+    /// The restored state itself supplies no review authorization.
     Restored(RestoredState),
 }
 
 impl AgentRuntime {
     /// Continue a goal root in place, including after process restart.
     /// Persisted root identity supplies the role; the caller supplies current authority.
+    /// `prompt` must be a new human submission from the host, never replayed history
+    /// or an agent-authored continuation. It establishes fresh review evidence.
     pub fn continue_goal(
         &self,
         run_id: RunId,
@@ -96,6 +100,8 @@ impl AgentRuntime {
 
     /// Start a chat run with the thread's latest terminal context, if one exists.
     /// Current configuration supplies fresh execution authority; only history is reused.
+    /// `prompt` must be a new human submission from the host and supplies fresh review
+    /// evidence; neither persisted user-role messages nor summaries grant authority.
     ///
     /// # Errors
     /// Rejects unreadable or invalid snapshots rather than silently dropping history.

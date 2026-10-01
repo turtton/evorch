@@ -2,6 +2,7 @@ use super::*;
 
 mod invalidation;
 mod registration;
+mod review_authority;
 
 struct CompletingModel;
 
