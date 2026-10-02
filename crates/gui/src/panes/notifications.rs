@@ -1,4 +1,5 @@
 use egui::{RichText, Ui};
+use workspace_ui::ThreadId;
 
 use crate::model::notifications::{NotificationKind, NotificationsModel};
 use crate::theme::tokens::{FONT_BADGE, R_SM, STATUS_STROKE, palette};
@@ -8,6 +9,7 @@ use crate::theme::widgets::empty_state;
 pub enum NotificationsAction {
     OpenRun(String),
     OpenConversation(String),
+    OpenThread(ThreadId),
 }
 
 pub fn notifications_pane(
@@ -73,7 +75,11 @@ pub fn notifications_pane(
                                     .add(egui::Button::new(summary).frame(false).wrap())
                                     .clicked()
                                 {
-                                    action = Some(match notification.kind {
+                                    action = Some(match &notification.kind {
+                                        NotificationKind::QuestionPending {
+                                            thread_id: Some(thread_id),
+                                            ..
+                                        } => NotificationsAction::OpenThread(thread_id.clone()),
                                         NotificationKind::ApprovalPending { .. }
                                         | NotificationKind::QuestionPending { .. } => {
                                             NotificationsAction::OpenConversation(run_id.clone())
@@ -85,6 +91,20 @@ pub fn notifications_pane(
                             None => {
                                 ui.label(summary);
                             }
+                        }
+                        if let NotificationKind::QuestionPending { thread_id, .. } =
+                            &notification.kind
+                            && ui.button("Open thread").clicked()
+                        {
+                            action = thread_id
+                                .clone()
+                                .map(NotificationsAction::OpenThread)
+                                .or_else(|| {
+                                    notification
+                                        .run_id
+                                        .clone()
+                                        .map(NotificationsAction::OpenConversation)
+                                });
                         }
                     })
                     .response

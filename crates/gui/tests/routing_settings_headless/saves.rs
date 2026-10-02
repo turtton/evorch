@@ -191,8 +191,15 @@ fn route_rename_blocked_by_project_dropin_does_not_write_or_reload_runtime() {
         .expect("rename");
     // When: submitting a rename that cannot override the drop-in binding.
     state.submit_routing_settings();
+    assert!(!state.routing_settings().open);
+    assert!(state.routing_settings().is_saving());
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     finish(&mut harness);
+    assert!(harness.state().routing_settings().open);
+    assert_eq!(
+        harness.state().routing_settings().route_name_edits["old"],
+        "new"
+    );
     // Then: the error identifies the binding and expected name, with no disk or runtime change.
     let error = harness
         .state()
