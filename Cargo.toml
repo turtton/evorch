@@ -14,7 +14,8 @@ base64 = "0.22"
 bytes = "1"
 dom_smoothie = "0.18"
 # v01 GUI dependencies pinned for the workspace UI and GUI crates.
-eframe = "0.36"
+# 0.36.2 fixes the native Wayland redraw wait busy-loop (emilk/egui#8398).
+eframe = "0.36.2"
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui_kittest = { version = "0.36", features = ["wgpu"] }
