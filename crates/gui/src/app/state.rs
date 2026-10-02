@@ -292,11 +292,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .find(|thread| Some(&thread.id) == sidebar.active_thread.as_ref())
         {
-            self.composer.role = if thread.escalation_source_run_id.is_some() {
-                crate::model::composer::ComposerRole::Orchestrator
-            } else {
-                thread.chat_role.map(Into::into).unwrap_or_default()
-            };
+            self.composer.restore_thread_role(thread);
             self.composer.input = thread.draft_input.clone();
         }
         self.transcripts

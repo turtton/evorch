@@ -70,6 +70,9 @@ fn legacy_thread_recovers_its_original_chat_role_after_restart() {
     state.restore_history(&db).unwrap();
 
     assert_eq!(state.composer().role, ComposerRole::Orchestrator);
+    assert!(state.composer().role_locked);
+    state.composer_mut().toggle_role();
+    assert_eq!(state.composer().role, ComposerRole::Orchestrator);
     assert_eq!(
         state.sidebar().threads[0].chat_role,
         Some(ThreadChatRole::Orchestrator)
@@ -87,6 +90,50 @@ fn legacy_thread_recovers_its_original_chat_role_after_restart() {
         Some(gui::model::commands::WorkbenchCommand::SendChat(submission))
             if submission.composer_role == ComposerRole::Orchestrator
     ));
+}
+
+#[test]
+fn persisted_role_changed_by_old_ui_recovers_first_root_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let db = Database::open(&config).unwrap();
+    storage
+        .handle()
+        .upsert_run_context(&context(
+            "run-95",
+            "Orchestrator",
+            "chat:Orchestrator:old",
+            "Done",
+        ))
+        .unwrap();
+    storage
+        .handle()
+        .upsert_run_context(&context("run-97", "Worker", "chat:Worker:old", "Error"))
+        .unwrap();
+    let mut sidebar = sidebar(dir.path());
+    sidebar.threads[0].run_ids = vec!["run-95".into(), "run-97".into()];
+    sidebar.threads[0].chat_role = Some(ThreadChatRole::Worker);
+    let path = dir.path().join("sidebar.json");
+    let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar)
+        .with_sidebar_path(path.clone());
+    state.save_sidebar();
+
+    state.restore_history(&db).unwrap();
+
+    assert_eq!(state.composer().role, ComposerRole::Orchestrator);
+    assert!(state.composer().role_locked);
+    state.composer_mut().toggle_role();
+    assert_eq!(state.composer().role, ComposerRole::Orchestrator);
+    assert_eq!(
+        workspace_ui::load_sidebar(&path).unwrap().threads[0].chat_role,
+        Some(ThreadChatRole::Orchestrator)
+    );
 }
 
 #[test]

@@ -6,12 +6,28 @@
 
 use event_bus::{Event, EventKind, LifecycleEvent, OrchestratorEvent};
 
+use workspace_ui::ThreadChatRole;
+
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    /// Returns whether the sidebar's run index changed. Never performs I/O.
+    /// Returns whether sidebar conversation identity or its run index changed. Never performs I/O.
     pub(super) fn apply_conversation_event(&mut self, event: &Event) -> bool {
+        let role_changed = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                agent_name,
+                parent_run_id: None,
+                ..
+            }) => match (chat_thread(agent_name), chat_role(agent_name)) {
+                (Some(thread), Some(role)) => self.bind_thread_role(thread, role),
+                _ => false,
+            },
+            EventKind::Orchestrator(OrchestratorEvent::GoalCreated { thread_id, .. }) => {
+                self.bind_thread_role(thread_id, ThreadChatRole::Orchestrator)
+            }
+            _ => false,
+        };
         let changed = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 source_run_id,
@@ -50,6 +66,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => false,
         };
         self.transcripts.apply(event);
+        changed || role_changed
+    }
+
+    fn bind_thread_role(&mut self, thread_id: &str, role: ThreadChatRole) -> bool {
+        let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id.to_string() == thread_id)
+        else {
+            return false;
+        };
+        let changed = thread.chat_role.is_none();
+        thread.chat_role.get_or_insert(role);
+        if Some(&thread.id) == self.sidebar.active_thread.as_ref() {
+            self.composer.restore_thread_role(thread);
+        }
         changed
     }
 
@@ -84,6 +117,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .find(|thread| thread.run_ids.iter().any(|run| run == run_id))
             .map(|thread| thread.id.to_string())
+    }
+}
+
+fn chat_role(agent_name: &str) -> Option<ThreadChatRole> {
+    let (role, _) = agent_name.strip_prefix("chat:")?.split_once(':')?;
+    match role {
+        "Worker" => Some(ThreadChatRole::Worker),
+        "Orchestrator" => Some(ThreadChatRole::Orchestrator),
+        _ => None,
     }
 }
 
