@@ -64,6 +64,7 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
             phase_tx: watch::channel(AgentRunPhase::Pending).0,
             message_count_tx: watch::channel(0).0,
             inbox_rx: mpsc::channel(1).1,
+            user_inbox: Arc::new(crate::runtime::user_inbox::UserInbox::default()),
             cancel_rx,
             mailbox_version_rx: mailbox.subscribe_version(),
             compact_rx: watch::channel(0).1,

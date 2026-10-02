@@ -159,6 +159,7 @@ mod chat_flow_contract {
         // Then: this same run resumes, preserving both sides of its prior conversation.
         assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
         assert_eq!(runtime.list_agents().len(), 1);
+        assert_eq!(runtime.follow_up_status(run).unwrap().pending, 0);
         assert!(second.iter().any(|event| matches!(
             &event.kind,
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {

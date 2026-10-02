@@ -216,6 +216,8 @@ impl Default for ProviderStatus {
 pub struct ComposerModel {
     /// Live descendants of the active conversation root, refreshed before rendering.
     pub running_children: usize,
+    /// Refreshed from runtime receipt state for the active conversation only.
+    pub follow_ups: runtime::FollowUpStatus,
     pub role: ComposerRole,
     pub resolved_model: Option<String>,
     pub registry: SlashCommandRegistry,

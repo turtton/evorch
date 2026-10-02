@@ -91,7 +91,9 @@ pub use run::{
     WorkspaceInspection, WorkspaceMode,
 };
 pub use run_store::RunStore;
-pub use runtime::{AgentRuntime, IsolatedMounts, SandboxFactory, production_executor};
+pub use runtime::{
+    AgentRuntime, FollowUpStatus, IsolatedMounts, SandboxFactory, production_executor,
+};
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
     SkillResourceError, SkillScope, SkillValidationError, default_skill_dirs, discover_skills,
