@@ -261,7 +261,7 @@ fn verify_run(run: RunId, events: &[Event], requests: &[Value]) {
 async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs() {
     let mut h = harness();
     let load_demo = || RunConfig {
-        load_skills: vec!["demo".into()],
+        load_skills: vec!["demo".into(), "git-best-practices".into()],
         ..Default::default()
     };
     let first =
@@ -273,6 +273,14 @@ async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs(
     let initial = requests(&h.mock);
     assert_eq!(initial.len(), 1);
     assert!(system(&initial[0]).contains(V1));
+    let (_, git_body) = runtime::skill::split_frontmatter(include_str!(
+        "../skills/builtin/git-best-practices/SKILL.md"
+    ))
+    .unwrap();
+    assert!(system(&initial[0]).contains("<!-- skill:git-best-practices BEGIN -->"));
+    // wire content は JSON 文字列なので同じ表現で本文の存在を確認する。
+    let encoded_body = serde_json::to_string(git_body).unwrap();
+    assert!(system(&initial[0]).contains(&encoded_body[1..encoded_body.len() - 1]));
     assert!(!system(&initial[0]).contains(V2));
 
     // tool gate で実行を止め、既送信 System の本文と metadata の両方を陳腐化させる。
