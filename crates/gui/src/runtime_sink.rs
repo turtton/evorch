@@ -854,12 +854,15 @@ impl RuntimeCommandSink {
             }
             self.chat_permits.insert(thread_id.clone(), permit.clone());
         }
+        let conversation = submission.composer_role == crate::model::composer::ComposerRole::Worker;
         if let Some(&run_id) = self.chat_runs.get(&thread_id) {
             let _guard = self.handle.enter();
             match self.runtime.continue_goal(
                 run_id,
                 submission.text.clone(),
                 RunConfig {
+                    conversation,
+                    category: conversation.then(|| "conversation".into()),
                     ownership: permit.clone(),
                     images: submission.images.clone(),
                     model_preference: submission.model_preference.clone(),
@@ -902,6 +905,8 @@ impl RuntimeCommandSink {
             },
             submission.text,
             RunConfig {
+                conversation,
+                category: conversation.then(|| "conversation".into()),
                 images: submission.images,
                 ownership: permit,
                 interactive: true,

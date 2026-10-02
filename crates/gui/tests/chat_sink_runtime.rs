@@ -15,7 +15,15 @@ use runtime::{
 };
 use tools::ToolExecutor;
 
+#[derive(Debug)]
+struct ObservedInvocation {
+    role: Role,
+    category: Option<String>,
+    tools: Vec<String>,
+}
+
 struct ScriptedModel {
+    invocations: Arc<Mutex<Vec<ObservedInvocation>>>,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
     responses: Mutex<VecDeque<ChatResponse>>,
     preferences: Arc<Mutex<Vec<Option<runtime::ModelPreference>>>>,
@@ -26,10 +34,15 @@ impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,
-        _role: Role,
+        role: Role,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.invocations.lock().unwrap().push(ObservedInvocation {
+            role,
+            category: invocation.category.clone(),
+            tools: tools.iter().map(|tool| tool.name.clone()).collect(),
+        });
         self.messages
             .lock()
             .expect("messages")
@@ -53,6 +66,7 @@ impl AgentModel for ScriptedModel {
 }
 
 struct Fixture {
+    invocations: Arc<Mutex<Vec<ObservedInvocation>>>,
     _storage: storage::Storage,
     _directory: tempfile::TempDir,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
@@ -91,11 +105,20 @@ impl Fixture {
             })
             .collect();
         let preferences = Arc::new(Mutex::new(Vec::new()));
+        let invocations = Arc::new(Mutex::new(Vec::new()));
         let messages = Arc::new(Mutex::new(Vec::new()));
         let runtime = AgentRuntime::new(
             bus.clone(),
-            Arc::new(ToolExecutor::new(bus.clone())),
+            Arc::new(
+                ToolExecutor::with_standard_tools(
+                    bus.clone(),
+                    Arc::new(sandbox::DirectSandbox::new_unchecked()),
+                )
+                .with_web_tools()
+                .unwrap(),
+            ),
             Arc::new(ScriptedModel {
+                invocations: invocations.clone(),
                 messages: messages.clone(),
                 responses: Mutex::new(responses),
                 preferences: preferences.clone(),
@@ -113,6 +136,7 @@ impl Fixture {
         });
         let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
         Self {
+            invocations,
             _storage: storage,
             _directory: directory,
             messages,
@@ -193,6 +217,65 @@ impl Fixture {
             .find(|agent| agent.run_id.to_string() == id)
             .expect("accepted run exists")
             .run_id
+    }
+}
+
+#[test]
+fn composer_chat_grants_conversation_only_to_worker_on_start_and_restore() {
+    use gui::model::composer::ComposerRole;
+    for (composer_role, role, category) in [
+        (ComposerRole::Worker, Role::Worker, Some("conversation")),
+        (ComposerRole::Orchestrator, Role::Orchestrator, None),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut previous = None;
+        for (text, reply) in [("turn-1", "reply-1"), ("turn-2", "reply-2")] {
+            let events = fixture
+                .sink
+                .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    composer_role,
+                    images: Vec::new(),
+                    thread_id: "conversation".into(),
+                    text: text.into(),
+                    model_preference: None,
+                }));
+            let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+                panic!("expected accepted chat: {events:?}");
+            };
+            fixture.wait_for_reply(run_id, reply);
+            if let Some(previous) = &previous {
+                assert_eq!(run_id, previous, "terminal chat continues in place");
+            }
+            let id = fixture.run_id(run_id);
+            let agent = fixture
+                .runtime
+                .list_agents()
+                .into_iter()
+                .find(|agent| agent.run_id == id)
+                .unwrap();
+            assert_eq!(agent.role_name, role.name());
+            assert_eq!(agent.category.as_deref(), category);
+            fixture.runtime.cancel(id).unwrap();
+            fixture.rt.block_on(fixture.runtime.wait(id)).unwrap();
+            previous = Some(run_id.clone());
+        }
+        // Observe the actual policy at the provider boundary: Worker search requires
+        // both conversation=true and the category in each freshly constructed RunConfig.
+        let invocations = fixture.invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        for invocation in invocations.iter() {
+            assert_eq!(invocation.role, role);
+            assert_eq!(invocation.category.as_deref(), category);
+            assert_eq!(
+                invocation.tools.iter().any(|tool| tool == "web_search"),
+                role == Role::Worker
+            );
+            assert!(invocation.tools.iter().any(|tool| tool == "web_fetch"));
+            assert_eq!(
+                invocation.tools.iter().any(|tool| tool == "edit"),
+                role == Role::Worker
+            );
+        }
     }
 }
 
