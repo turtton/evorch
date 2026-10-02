@@ -58,7 +58,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) sidebar_action: &'a mut Option<SidebarAction>,
     pub(super) agents_action: &'a mut Option<AgentsAction>,
     pub(super) focus: &'a ConversationFocus,
-    pub(super) diff: &'a DiffModel,
+    pub(super) diff: &'a mut DiffModel,
+    pub(super) diff_source: &'a std::sync::Arc<dyn crate::diff::DiffSource>,
     pub(super) file_requests: &'a mut Vec<FileLink>,
     pub(super) diff_request: &'a mut Option<DiffMode>,
     pub(super) composer: &'a mut ComposerModel,
@@ -286,6 +287,20 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::Diff => {
                 if let Some(mode) = diff_pane(ui, self.diff) {
                     *self.diff_request = Some(mode);
+                } else if let Some(repo_root) = self.repo_root {
+                    let mode = crate::panes::diff::selected_mode(ui);
+                    self.diff.refresh_if_due(
+                        std::sync::Arc::clone(self.diff_source),
+                        crate::diff::DiffRequest {
+                            repo_root: repo_root.into(),
+                            mode,
+                        },
+                        std::time::Instant::now(),
+                    );
+                }
+                if !self.diff.is_snapshot() && self.repo_root.is_some() {
+                    ui.ctx()
+                        .request_repaint_after(crate::diff::AUTO_REFRESH_INTERVAL);
                 }
             }
             PanelKind::Terminal => terminal_pane(ui, self.terminal, self.terminal_input, self.pty),
