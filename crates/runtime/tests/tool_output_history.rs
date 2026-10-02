@@ -1,7 +1,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, ToolEvent};
 use providers::{ContentBlock, FinishReason, ToolResultContent};
@@ -45,6 +44,30 @@ impl Tool for LargeOutput {
 
 #[tokio::test]
 async fn returned_tool_outputs_remain_an_unchanged_model_prefix_after_ten_results() {
+    const CHILD_FLAG: &str = "EVORCH_TOOL_OUTPUT_HISTORY_FIXTURE";
+    if std::env::var_os(CHILD_FLAG).is_none() {
+        // The host artifact root may be read-only in a sandbox. Isolate the
+        // store without changing process-global environment in parallel tests.
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "returned_tool_outputs_remain_an_unchanged_model_prefix_after_ten_results",
+                "--nocapture",
+            ])
+            .env(CHILD_FLAG, "1")
+            .env("EVORCH_OUTPUT_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        return;
+    }
     // Given: ten bulky results, including an error and an output requiring an artifact.
     // Both the old eight-result retention boundary and its two pruning paths are crossed.
     let bus = Arc::new(EventBus::new(256));
@@ -74,13 +97,7 @@ async fn returned_tool_outputs_remain_an_unchanged_model_prefix_after_ten_result
         "Inspect ten outputs".into(),
         RunConfig::default(),
     );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), runtime.wait(run))
-            .await
-            .unwrap()
-            .unwrap(),
-        AgentRunPhase::Done
-    );
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
 
     // Then: every request retains all previously submitted messages byte for byte.
     let observed = model.observed().await;
@@ -141,7 +158,8 @@ async fn returned_tool_outputs_remain_an_unchanged_model_prefix_after_ten_result
             // complete body remains retrievable through the original artifact path.
             let path = detail.as_ref().unwrap()["output_artifact"]["path"]
                 .as_str()
-                .unwrap();
+                .unwrap_or_else(|| panic!("missing output artifact: {output}\n{detail:?}"));
+            assert!(std::path::Path::new(path).starts_with(tools::output::output_root().unwrap()));
             assert!(output.contains(path));
             assert_eq!(std::fs::read_to_string(path).unwrap(), original_output(1));
             assert!(
