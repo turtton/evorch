@@ -9,6 +9,8 @@ A filesystem skill with the same name overrides its builtin counterpart.
 - `git-best-practices`: consult before Git work or delegation. Prefer the target
   repository's commit-message and branch-naming rules over generic conventions;
   protect existing work, review staged changes, and verify the published commit.
+  The skill content is repository- and agent-runtime-independent; integration
+  instructions below are documentation for this runtime, not part of the skill.
 
 Discovery exposes only the name and description. A model can request the body
 with `skill_load({"name":"git-best-practices"})`; an Orchestrator can provide it

@@ -8,8 +8,8 @@ Gitの操作前にこのskillを読み、以下を作業計画と最終確認に
 
 ## 1. 規則を先に確認する
 
-- 現在のユーザー指示と、そのrepo・対象ディレクトリに適用される `AGENTS.md` 等の指示を確認する。
-- 許可された範囲で `CONTRIBUTING.md`、開発ガイド、コミットテンプレート、commitlint設定、Gitフック設定、ブランチ命名・保護設定を確認する。repoが指定する正本（CLIやガイド）があるならそれに従う。禁止された文書や複製ワークフローを代わりに読まない。
+- 作業依頼と、対象リポジトリ・ディレクトリに適用される開発規則を確認する。規則は `CONTRIBUTING.md`、開発ガイド、`AGENTS.md` などに記載されていることがある。
+- コミットテンプレート、コミットメッセージの検証設定、Gitフック、ブランチ命名・保護設定を確認する。規則に正本が指定されていれば、それを確認する。
 - **明示されたコミットメッセージ・ブランチ命名規則が一般的な慣習より優先される。** Conventional Commits、英語、日本語、issue番号、署名、ツール固有のブランチ接頭辞を勝手に必須と決めない。
 - 最近のコミットや関連ブランチは補助的な手掛かりにする。履歴にある規則違反を前例にしてよいとは解釈しない。明文化された規則と履歴が矛盾する場合は規則を優先する。
 - 意図、対象branch、命名規則、公開範囲が重要なのに判別できない場合は、状態を変更する前に一点に絞って質問する。
@@ -34,9 +34,9 @@ git log -12 --format=%s
 
 ## 3. 意味のあるbranch名とworktreeを選ぶ
 
-- repoが指定する作業形態に従う。直接main作業が指定されているならbranchやPRを勝手に増やさない。worktreeが要求されている場合や並行作業を分離する必要がある場合は専用worktreeを使う。
+- リポジトリの作業方針に従い、共有ブランチへの直接作業が許可されるか、作業ブランチやレビューが必要かを確認する。worktreeは並行作業や既存変更を分離したい場合に利用する。
 - **branch作成前に、名前の規則を確認して目的が伝わる名前を決める。** type、issue番号、接頭辞、区切り、文字種などの指定をすべて満たす。
-- 規則がなければ短く具体的な目的名を選ぶ。例: `feat/git-best-practices-skill`、`fix/commit-message-validation`。これらのprefixは例であり必須規則ではない。
+- 規則がなければ短く具体的な目的名を選ぶ。例: `feat/search-pagination`、`fix/login-redirect`。これらのprefixは例であり必須規則ではない。
 - `work`、`tmp`、`test`、ランダムな名前、今回の作業と関係のない名前を避ける。既存branchの横取り・改名や、他者のworktreeへの切替はしない。
 - 作成前にbase branchと更新状態、同名branch/worktreeの有無を確認する。作成後もbranchとcwdを確認する。
 
@@ -52,7 +52,7 @@ git log -12 --format=%s
 
 - 必須のtype、scope、issue参照、言語、件名長、本文・footer、署名がrepo規則に合っているか。
 - 件名は「何を変えたか」が具体的に伝わるか。`update`、`fix things`、`misc` のような曖昧な要約になっていないか。
-- Conventional Commitsが要求されている場合だけ、そのtype/scope規則に従う。例: `feat(runtime): add builtin Git best-practices skill`。
+- Conventional Commitsが要求されている場合だけ、そのtype/scope規則に従う。例: `fix(auth): preserve redirect after login`。
 - 本文が必要なら、変更理由、重要な制約、検証結果を簡潔に書く。未確認のCI成功や実装していない効果を記載しない。
 
 commit後は新しいcommitの差分・件名と残りのworking treeを確認する。フックに拒否されたら原因を修正し、`--no-verify` やフック無効化で迂回しない。
@@ -61,12 +61,12 @@ commit後は新しいcommitの差分・件名と残りのworking treeを確認�
 
 - `reset --hard`、`clean`、変更を捨てる `restore` / `checkout`、stash、amend、rebase、branch/worktree削除、force-pushは既存作業や履歴に影響する。必要性と影響を説明し、その操作が明示的に許可された範囲か確認する。都合のよい状態を作るために無断実行しない。
 - 共有済みcommitを勝手に書き換えない。履歴変更が明示的に許可されても、上流・他者の更新を確認する。`--force-with-lease` も許可の代わりにはならない。
-- merge、PR、main直pushの選択はユーザー指示とrepo規則に従う。conflictで他者の変更を一括で捨てず、解消の意図を確認して検証をやり直す。
+- merge、PR、共有ブランチへの直接pushの選択は作業依頼とリポジトリの規則に従う。conflictで他者の変更を一括で捨てず、解消の意図を確認して検証をやり直す。
 - push前に送信先remote/branch、送るcommit、必要な検証を確認する。未依頼の公開先や意図しないbranchへpushしない。
 - CI確認を依頼されたら、**送ったHEAD SHAに対応するrunと必要なchecks**を確認する。起動・待機中を成功と報告せず、別SHAの成功結果を使わない。失敗を調査し、修正・再push後の該当runまで追う。
 
-## 委譲と完了報告
+## 作業の引き継ぎと完了報告
 
-- Git操作をWorkerへ委譲する場合は、`load_skills: ["git-best-practices"]` でこのskillを渡し、対象repo、base branch、適用規則、既存変更、許可されたGit操作、期待する検証を伝える。
-- このskillを読んだことだけで規則遵守を保証したと判断せず、成果物のbranch名、commitメッセージ、実際の差分を確認する。
+- Git作業を他の担当者へ引き継ぐ場合は、対象リポジトリ、base branch、適用規則、既存変更、合意された作業範囲、期待する検証を伝える。
+- 指針を共有したことだけで規則遵守を保証したと判断せず、成果物のbranch名、commitメッセージ、実際の差分を確認する。
 - 完了時は実際のbranch/worktree、commit SHAと件名、実行した検証、merge/push/CIの状態、残る変更・懸念を報告する。未実行や未確認の項目は明記する。

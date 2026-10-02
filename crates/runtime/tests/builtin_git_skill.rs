@@ -127,6 +127,28 @@ async fn worker_can_receive_git_skill_in_initial_system() {
 }
 
 #[test]
+fn git_guidance_is_independent_of_repository_and_agent_runtime() {
+    for specific in [
+        "evorch",
+        "intent-cli",
+        "Worker",
+        "Orchestrator",
+        "load_skills",
+        "skill_load",
+        "feat(runtime)",
+        ".evorch/",
+    ] {
+        assert!(
+            !SKILL_MD.contains(specific),
+            "generic Git guidance must not depend on {specific}"
+        );
+    }
+    assert!(SKILL_MD.contains("明示されたコミットメッセージ・ブランチ命名規則"));
+    assert!(SKILL_MD.contains("Conventional Commitsが要求されている場合だけ"));
+    assert!(SKILL_MD.contains("git diff --cached"));
+}
+
+#[test]
 fn all_filesystem_scopes_can_override_the_actual_builtin() {
     let directory = tempfile::tempdir().unwrap();
     let skill = directory.path().join(NAME);
