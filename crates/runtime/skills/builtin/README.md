@@ -18,6 +18,13 @@ to a Worker with `delegate(..., load_skills=["git-best-practices"])`.
 This is guidance, not a commit hook, mandatory automatic loading, or permission
 to execute Git operations.
 
+## evorch development guide
+
+The repository-local skill
+[evorch-builtin-skill-authoring](../../../../.evorch/skills/evorch-builtin-skill-authoring/SKILL.md)
+documents the implementation and validation steps in detail. It is discovered
+only from this project's `.evorch/skills` and is not registered as a builtin.
+
 ## Adding a skill
 
 1. Add `<name>/SKILL.md` with valid Agent Skills frontmatter. The `name` must match
