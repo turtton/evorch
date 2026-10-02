@@ -5,7 +5,7 @@ fn legacy_v1_defaults_when_archive_fields_are_absent() {
     // Given: a sidebar written before archive metadata existed.
     let json = r#"{"version":1,"projects":[],"selected_project":null,
         "active_thread":null,"threads":[{"id":"old","project_id":"p",
-        "title":"Legacy","pinned":false,"paused":false,"run_ids":[],
+        "title":"Legacy","pinned":false,"run_ids":[],
         "branch":null,"worktree_path":null}]}"#;
     // When: reading and reserializing the legacy v1 shape.
     let sidebar: SidebarState = serde_json::from_str(json).unwrap();

@@ -70,7 +70,8 @@ pub(crate) struct RunHandoff {
 pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
-    pub(crate) inbox_rx: mpsc::Receiver<(String, Vec<crate::DelegateImage>)>,
+    pub(crate) inbox_rx: mpsc::Receiver<crate::runtime::user_inbox::UserInput>,
+    pub(crate) user_inbox: Arc<crate::runtime::user_inbox::UserInbox>,
     pub(crate) cancel_rx: watch::Receiver<RunInterrupt>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
     pub(crate) compact_rx: watch::Receiver<u64>,
@@ -108,7 +109,7 @@ pub(crate) struct LoopState {
     pub(crate) last_usage: Option<Usage>,
     answered_questions: std::collections::HashSet<String>,
     resumed: bool,
-    pending_user_messages: Vec<(String, Vec<crate::DelegateImage>)>,
+    pending_user_messages: Vec<crate::runtime::user_inbox::UserInput>,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -709,9 +710,11 @@ impl LoopState {
                 self.finish_error(error.to_string());
                 return;
             }
-            // Only wait-interrupting input is delivered before the next model
-            // request. Ordinary UI follow-ups retain their existing Stop boundary.
-            if self.has_pending_user_messages() {
+            // Ordinary follow-ups wait for Stop unless the host explicitly
+            // requests delivery at this safe (post-tools) turn boundary.
+            if self.has_pending_user_messages()
+                || self.channels.user_inbox.status().next_turn_requested
+            {
                 self.flush_user_messages();
             }
             if let Err(error) = self.flush_user_answers() {
@@ -1042,6 +1045,7 @@ impl LoopState {
                                 data: image.data,
                             }));
                         }
+                    if message.2 { self.channels.user_inbox.consumed(1); }
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();

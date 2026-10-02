@@ -91,12 +91,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Err(error) => return Err(storage::StorageError::Serialization(error.to_string())),
             }
         }
-        // Older sidebar files did not record a thread's chat role. Infer it from
-        // the first root chat run, so a restarted thread does not silently start
-        // a different role with an empty conversation.
+        // The first root chat run owns a thread's role. Repair both missing
+        // roles and values overwritten by role cycling in older sidebar files.
         let mut inferred_role = false;
         for thread in &mut self.sidebar.threads {
-            if thread.chat_role.is_some() || thread.escalation_source_run_id.is_some() {
+            if thread.escalation_source_run_id.is_some() {
                 continue;
             }
             for run_id in &thread.run_ids {
@@ -108,13 +107,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 {
                     continue;
                 }
-                thread.chat_role = match record.role.as_str() {
+                let original_role = match record.role.as_str() {
                     "Worker" => Some(workspace_ui::ThreadChatRole::Worker),
                     "Orchestrator" => Some(workspace_ui::ThreadChatRole::Orchestrator),
                     _ => None,
                 };
-                if thread.chat_role.is_some() {
-                    inferred_role = true;
+                if let Some(role) = original_role {
+                    if thread.chat_role != Some(role) {
+                        thread.chat_role = Some(role);
+                        inferred_role = true;
+                    }
                     break;
                 }
             }
@@ -125,11 +127,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
         {
-            self.composer.role = if thread.escalation_source_run_id.is_some() {
-                crate::model::composer::ComposerRole::Orchestrator
-            } else {
-                thread.chat_role.map(Into::into).unwrap_or_default()
-            };
+            self.composer.restore_thread_role(thread);
         }
         if inferred_role {
             self.save_sidebar();

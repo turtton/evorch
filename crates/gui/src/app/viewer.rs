@@ -29,6 +29,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.running_children.get(&thread).copied().unwrap_or(0)
             })
             .unwrap_or(0);
+        self.composer.follow_ups = self
+            .sidebar
+            .active_thread
+            .as_ref()
+            .and_then(|id| self.sink.follow_up_status(&id.to_string()))
+            .unwrap_or_default();
         self.composer.resolved_model = self
             .sidebar
             .threads
@@ -237,7 +243,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
-                SidebarAction::TogglePause(thread_id) => self.toggle_pause(thread_id),
                 SidebarAction::SetTrust { path, trust } => self.set_allowed_trust(path, trust),
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
@@ -246,6 +251,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match action {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Stop => self.stop_chat(),
+                ComposerAction::DeliverNextTurn => self.deliver_follow_ups_next_turn(),
                 ComposerAction::Discard => self.cancel_chat(),
                 ComposerAction::ModelPreference(_) => {}
                 ComposerAction::OpenSandboxSettings => self.open_sandbox_settings(),

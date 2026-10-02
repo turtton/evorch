@@ -21,6 +21,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
     }
 
+    pub fn deliver_follow_ups_next_turn(&mut self) {
+        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
+            return;
+        };
+        self.submit_command(WorkbenchCommand::DeliverFollowUpsNextTurn {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     /// Explicit discard path; never used by Stop or Escape.
     pub fn cancel_chat(&mut self) {
         let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
@@ -54,6 +63,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn submit_composer(&mut self) {
+        // A persisted conversation role is authoritative for chat and /continue,
+        // even if an editor caller changed the transient composer model.
+        if let Some(thread) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+            && (thread.chat_role.is_some() || thread.escalation_source_run_id.is_some())
+        {
+            self.composer.restore_thread_role(thread);
+        }
         if !self.sync_shell_cwd() {
             return;
         }
@@ -127,7 +147,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             .iter_mut()
                             .find(|thread| thread.id.to_string() == submission.thread_id)
                         {
-                            thread.chat_role = Some(self.composer.role.into());
+                            thread
+                                .chat_role
+                                .get_or_insert(submission.composer_role.into());
+                            self.composer.restore_thread_role(thread);
                         }
                         self.history.push(super::history::UserMessage {
                             thread_id: submission.thread_id.clone(),

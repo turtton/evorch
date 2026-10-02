@@ -792,3 +792,171 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
     assert_eq!(result["user_input_ready"], true);
     assert_eq!(result["runs"][0]["status"], "still_running");
 }
+
+#[tokio::test]
+async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
+    for expedite in [false, true] {
+        let read = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut script = vec![
+            read_response(0),
+            read_response(2),
+            text_response("original answer"),
+        ];
+        if !expedite {
+            script.push(text_response("follow-up answer"));
+        }
+        let mut harness = harness_with_read(script, 1_000_000, read.clone());
+        let run = harness.runtime.delegate_background(
+            Role::Worker,
+            "Original task".into(),
+            RunConfig::default(),
+        );
+        tokio::time::timeout(Duration::from_secs(20), read.started.notified())
+            .await
+            .unwrap();
+        harness
+            .runtime
+            .send_message_with_images(
+                run,
+                "first queued follow-up".into(),
+                vec![DelegateImage {
+                    media_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                }],
+            )
+            .unwrap();
+        harness
+            .runtime
+            .send_message(run, "second queued follow-up".into())
+            .unwrap();
+        assert_eq!(
+            harness.runtime.follow_up_status(run).unwrap(),
+            runtime::FollowUpStatus {
+                pending: 2,
+                next_turn_requested: false,
+                closed: false,
+            }
+        );
+        // The in-flight tool must not be aborted, nor should delivery duplicate input.
+        if expedite {
+            harness.runtime.deliver_follow_ups_next_turn(run).unwrap();
+            harness.runtime.deliver_follow_ups_next_turn(run).unwrap();
+            assert!(
+                harness
+                    .runtime
+                    .follow_up_status(run)
+                    .unwrap()
+                    .next_turn_requested
+            );
+        }
+        assert_eq!(
+            harness
+                .mock
+                .recorded_requests()
+                .iter()
+                .filter(|r| r.path == "/v1/chat/completions")
+                .count(),
+            1
+        );
+        read.release.notify_one();
+        let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+        harness.runtime.wait(run).await.unwrap();
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 0);
+        assert!(
+            !harness
+                .runtime
+                .follow_up_status(run)
+                .unwrap()
+                .next_turn_requested
+        );
+        verify_trace(&harness, run, &events, 0);
+        let requests = harness.mock.recorded_requests();
+        let bodies = requests
+            .iter()
+            .filter(|r| r.path == "/v1/chat/completions")
+            .map(|r| &r.body)
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert_eq!(
+            bodies[1].to_string().contains("first queued follow-up"),
+            expedite
+        );
+        assert_eq!(
+            bodies[2].to_string().contains("first queued follow-up"),
+            expedite
+        );
+        let messages = bodies.last().unwrap()["messages"].as_array().unwrap();
+        let first = messages
+            .iter()
+            .position(|m| m.to_string().contains("first queued follow-up"))
+            .unwrap();
+        let second = messages
+            .iter()
+            .position(|m| m.to_string().contains("second queued follow-up"))
+            .unwrap();
+        assert!(first < second);
+        assert!(
+            messages[first]
+                .to_string()
+                .contains("data:image/png;base64,aW1hZ2U=")
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.to_string().contains("first queued follow-up"))
+                .count(),
+            1
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call-0")
+        );
+    }
+}
+
+#[tokio::test]
+async fn stopped_run_keeps_undelivered_status_and_rejects_early_delivery() {
+    let read = Arc::new(GatedRead {
+        started: Notify::new(),
+        release: Notify::new(),
+        child_started: Notify::new(),
+    });
+    let harness = harness_with_read(vec![read_response(0)], 1_000_000, read.clone());
+    let run =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
+        .await
+        .unwrap();
+    harness
+        .runtime
+        .send_message(run, "undelivered".into())
+        .unwrap();
+    harness.runtime.deliver_follow_ups_next_turn(run).unwrap();
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Stopped
+    );
+    assert_eq!(
+        harness.runtime.follow_up_status(run).unwrap(),
+        runtime::FollowUpStatus {
+            pending: 1,
+            next_turn_requested: true,
+            closed: true,
+        }
+    );
+    assert!(matches!(
+        harness.runtime.deliver_follow_ups_next_turn(run),
+        Err(runtime::RuntimeError::RunTerminated { .. })
+    ));
+}

@@ -6,7 +6,7 @@ fn legacy_thread_migrates_without_fork_metadata() {
     // Given: persisted thread data from before session forks.
     let value = json!({
         "id": "root", "project_id": "project", "title": "Root",
-        "pinned": false, "paused": false, "run_ids": [],
+        "pinned": false, "run_ids": [],
         "branch": null, "worktree_path": null
     });
     // When: the legacy record is loaded.

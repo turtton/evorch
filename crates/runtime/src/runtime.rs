@@ -42,6 +42,10 @@ use crate::state::{RunInterrupt, StopScope};
 use crate::workspace::{OwnedWorktree, WorktreeManager};
 use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, RuntimeError};
 
+pub(crate) mod user_inbox;
+pub use user_inbox::FollowUpStatus;
+use user_inbox::UserInbox;
+
 const INBOX_CAPACITY: usize = 32;
 
 /// Tokio タスクとして AgentRun を実行するランタイム。
@@ -139,7 +143,8 @@ struct RunEntry {
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
-    inbox_tx: mpsc::Sender<(String, Vec<crate::DelegateImage>)>,
+    inbox_tx: mpsc::Sender<crate::runtime::user_inbox::UserInput>,
+    user_inbox: Arc<UserInbox>,
     cancel_tx: watch::Sender<RunInterrupt>,
     compact_tx: watch::Sender<u64>,
     model_preference_tx: watch::Sender<Option<crate::ModelPreference>>,
@@ -894,6 +899,7 @@ impl AgentRuntime {
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
+        let user_inbox = Arc::new(UserInbox::default());
         let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
@@ -921,6 +927,7 @@ impl AgentRuntime {
             phase_tx,
             message_count_tx,
             inbox_rx,
+            user_inbox: Arc::clone(&user_inbox),
             cancel_rx,
             mailbox_version_rx,
             compact_rx,
@@ -943,6 +950,7 @@ impl AgentRuntime {
                 phase_rx,
                 message_count_rx,
                 inbox_tx,
+                user_inbox,
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,
@@ -1148,12 +1156,22 @@ impl AgentRuntime {
                 run_id: run_id.to_string(),
             });
         }
-        let sender = self.entry(run_id)?.inbox_tx.clone();
-        sender
-            .try_send((text.clone(), images))
-            .map_err(|_| RuntimeError::RunTerminated {
-                run_id: run_id.to_string(),
-            })?;
+        let (sender, inbox) = {
+            let entry = self.entry(run_id)?;
+            (entry.inbox_tx.clone(), Arc::clone(&entry.user_inbox))
+        };
+        let send = || {
+            sender
+                .try_send((text.clone(), images, trusted_user))
+                .map_err(|_| RuntimeError::RunTerminated {
+                    run_id: run_id.to_string(),
+                })
+        };
+        if trusted_user {
+            inbox.enqueue(send)?;
+        } else {
+            send()?;
+        }
         if trusted_user
             && let Some(review) = self
                 .shared
@@ -1164,6 +1182,28 @@ impl AgentRuntime {
         {
             review.add_user_request(&run_id.to_string(), &text);
         }
+        Ok(())
+    }
+
+    /// Observe accepted follow-ups that have not entered the agent's context.
+    pub fn follow_up_status(&self, run_id: RunId) -> Result<FollowUpStatus, RuntimeError> {
+        let entry = self.entry(run_id)?;
+        let mut status = entry.user_inbox.status();
+        status.closed = entry.inbox_tx.is_closed();
+        Ok(status)
+    }
+
+    /// Deliver queued follow-ups before the next model request, without cancelling
+    /// an in-flight response or tool. This does not send a new message.
+    pub fn deliver_follow_ups_next_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
+        let entry = self.entry(run_id)?;
+        if entry.inbox_tx.is_closed() {
+            return Err(RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            });
+        }
+        entry.user_inbox.request_next_turn();
         Ok(())
     }
 

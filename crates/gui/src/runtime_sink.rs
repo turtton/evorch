@@ -186,6 +186,13 @@ impl RuntimeCommandSink {
 }
 
 impl CommandSink for RuntimeCommandSink {
+    fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
+        let run = self
+            .chat_runs
+            .get(thread)
+            .or_else(|| self.goal_runs.get(thread))?;
+        self.runtime.follow_up_status(*run).ok()
+    }
     fn bind_goal_id(&mut self, thread: &str, goal: &str) {
         self.goal_ids.insert(thread.into(), goal.into());
     }
@@ -295,6 +302,7 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::ContinueChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::StopChat { thread_id }
+                | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
                 | WorkbenchCommand::CancelChat { thread_id }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
@@ -456,6 +464,22 @@ impl RuntimeCommandSink {
                     let _ = tx.send(event);
                 });
                 Vec::new()
+            }
+            WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
+                let result = self
+                    .chat_runs
+                    .get(&thread_id)
+                    .or_else(|| self.goal_runs.get(&thread_id))
+                    .ok_or_else(|| "No conversation to deliver follow-ups to".to_owned())
+                    .and_then(|run| {
+                        self.runtime
+                            .deliver_follow_ups_next_turn(*run)
+                            .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(()) => Vec::new(),
+                    Err(reason) => vec![LoopEvent::ChatRejected { thread_id, reason }],
+                }
             }
             WorkbenchCommand::StopChat { thread_id } => {
                 let Some(&run_id) = self

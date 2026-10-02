@@ -146,11 +146,6 @@ impl SidebarState {
         Ok(())
     }
 
-    pub fn set_paused(&mut self, id: &ThreadId, paused: bool) -> Result<(), ThreadError> {
-        self.thread_mut(id)?.paused = paused;
-        Ok(())
-    }
-
     pub fn validate(&self) -> Result<(), SidebarError> {
         if self.version != SIDEBAR_SCHEMA_VERSION {
             return Err(SidebarError::Validation(format!(

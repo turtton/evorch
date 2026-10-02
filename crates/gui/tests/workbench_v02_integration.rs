@@ -570,6 +570,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
@@ -617,6 +618,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }

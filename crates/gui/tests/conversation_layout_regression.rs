@@ -1,3 +1,4 @@
+use egui::{Rect, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
 use gui::model::{
@@ -102,6 +103,154 @@ fn sandbox_review_ids_are_hidden_until_expanded_for_both_verdicts() {
         harness.run_steps(3);
         harness.get_by_label("run_id: run-93");
         harness.get_by_label("call_id: call-secret");
+    }
+}
+
+const REPORTED_REPLY: &str = "各ロールを「起用条件＋隣接ロールとの境界」で揃えます。変更対象は keyTriggers の用途案内に限定し、検証後に前回のコミットとあわせて push します。必須の pre-push チェックが失敗した場合は、迂回せず原因を確認します。";
+
+fn sandbox_review(severity: DiagnosticSeverity, verdict: &str, run: Option<&str>) -> Event {
+    Event::new(DiagnosticEvent {
+        source: "sandbox".into(),
+        severity,
+        code: "escalation_review".into(),
+        detail: verdict.into(),
+        run_id: run.map(str::to_owned),
+        call_id: Some("call-secret".into()),
+        thread_id: None,
+    })
+}
+
+fn assert_wrapped_inside<State>(harness: &Harness<'_, State>, marker: &str, bounds: Rect) {
+    let text = harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if text.galley.text().contains(marker) => Some(text),
+            _ => None,
+        })
+        .expect("rendered transcript text");
+    assert!(text.galley.rows.len() > 1, "{marker} should wrap");
+    // Check the unclipped glyph ink, not just the dock's clip rectangle.
+    let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
+    assert!(
+        ink.left() >= bounds.left() && ink.right() <= bounds.right(),
+        "{marker}: ink {ink:?} outside {bounds:?}"
+    );
+}
+
+#[test]
+fn sandbox_review_and_following_reply_wrap_inside_narrow_transcript() {
+    for width in [200.0, 320.0, 600.0] {
+        for (severity, verdict) in [
+            (DiagnosticSeverity::Info, "approved".to_owned()),
+            (
+                DiagnosticSeverity::Warning,
+                format!(
+                    "denied: {}",
+                    "長い審査理由で横幅を超えないことを確認します。".repeat(12)
+                ),
+            ),
+        ] {
+            // Given: a review precedes the reported single-line reply.
+            let mut model = TranscriptModel::new();
+            let run_id = format!("run-{}", "long-id".repeat(30));
+            model.apply(&sandbox_review(severity, &verdict, Some(&run_id)));
+            model.push_message(REPORTED_REPLY);
+            let label = format!(
+                "[{}] sandbox (escalation_review): {verdict}",
+                severity.as_str()
+            );
+            // The wider screen must not hide a layout overflow behind clipping.
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(1200.0, 1600.0))
+                .build_ui(|ui| {
+                    gui::theme::install(ui.ctx());
+                    ui.set_width(width);
+                    let right = ui.max_rect().right();
+                    gui::panes::agent::transcript_body(ui, &model);
+                    assert!(ui.min_rect().right() <= right + 1.0, "transcript overflow");
+                });
+            harness.run_steps(4);
+            let bounds = Rect::from_min_size(egui::pos2(8.0, 0.0), egui::vec2(width, 1600.0));
+            assert_wrapped_inside(&harness, "各ロール", bounds);
+            if severity == DiagnosticSeverity::Warning {
+                assert_wrapped_inside(&harness, "長い審査理由", bounds);
+            }
+            // When: expanding and collapsing IDs by clicking the verdict.
+            harness.get_by_label(&label).click();
+            harness.run_steps(4);
+            harness.get_by_label("call_id: call-secret");
+            assert_wrapped_inside(&harness, &format!("run_id: {run_id}"), bounds);
+            assert_wrapped_inside(&harness, "各ロール", bounds);
+            harness.get_by_label(&label).click();
+            harness.run_steps(4);
+            assert!(harness.query_by_label("call_id: call-secret").is_none());
+            assert_wrapped_inside(&harness, "各ロール", bounds);
+        }
+    }
+}
+
+#[test]
+fn sandbox_review_does_not_expand_reply_in_real_dock() {
+    for width in [800.0, 1200.0] {
+        for verdict in [
+            "approved".to_owned(),
+            format!("denied: {}", "review reason ".repeat(40)),
+        ] {
+            let mut state = gui::app::WorkbenchState::new(
+                Source(Vec::new()),
+                &workspace_ui::UiSettings::default(),
+            )
+            .unwrap();
+            let mut sidebar = workspace_ui::SidebarState::default();
+            let project = workspace_ui::ProjectId::new("project");
+            let thread = workspace_ui::ThreadId::new("thread-75");
+            let root = std::env::current_dir().unwrap();
+            sidebar
+                .add_project(project.clone(), "project", &root)
+                .unwrap();
+            sidebar.select_project(&project).unwrap();
+            sidebar
+                .create_thread(thread.clone(), project, "thread-75")
+                .unwrap();
+            sidebar.switch_thread(&thread).unwrap();
+            state = state.with_sidebar(sidebar);
+            state.apply_events([
+                Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+                    run_id: "run-75".into(),
+                    parent_run_id: None,
+                    agent_name: "chat:thread-75".into(),
+                    role: "worker".into(),
+                }),
+                sandbox_review(DiagnosticSeverity::Warning, &verdict, Some("run-75")),
+                Event::new(event_bus::MessageEvent::MessageDelta {
+                    delta: REPORTED_REPLY.into(),
+                    run_id: Some("run-75".into()),
+                }),
+            ]);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width, 900.0))
+                .build_ui_state(
+                    |ui, state: &mut gui::app::WorkbenchState<Source>| {
+                        state.ui(ui, &mut eframe::Frame::_new_kittest());
+                    },
+                    state,
+                );
+            harness.run_steps(16);
+            let path = harness
+                .state()
+                .dock()
+                .find_tab(&workspace_ui::PanelId::new("agent-main"))
+                .unwrap();
+            let viewport = harness
+                .state()
+                .dock()
+                .leaf(path.node_path())
+                .unwrap()
+                .viewport;
+            assert_wrapped_inside(&harness, "各ロール", viewport);
+        }
     }
 }
 
