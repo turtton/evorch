@@ -75,16 +75,30 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
 /// Role の用途・起用条件を示す。ツールの仕様と可用性は各 ToolSpec に任せる。
 fn role_purpose(role: agents::Role) -> &'static str {
     match role {
-        agents::Role::Orchestrator => "目的・優先順位・依存関係を管理する",
-        agents::Role::Explorer => "ローカルの情報を調査する",
-        agents::Role::Worker => "具体的な実装と検証を担当する",
-        agents::Role::Reviewer => "実装結果を独立に検証する",
-        agents::Role::WebResearcher => "外部情報を調査して出典を報告する",
+        agents::Role::Orchestrator => {
+            "複数ロールの委譲・調整が必要なときに使う。目的・優先順位・依存関係・受け入れを管理し、詳細調査・計画・実装は担当ロールへ委譲する"
+        }
+        agents::Role::Explorer => {
+            "ローカルのコードや資料の事実確認・影響範囲の特定が必要なときに使う。調査と根拠の報告を担当し、実装は Worker、調査結果からの詳細計画は Planner に任せる"
+        }
+        agents::Role::Worker => {
+            "具体的な変更・実装とその検証が必要なときに使う。ローカル調査だけなら Explorer、複数担当にまたがる計画なら Planner を選ぶ"
+        }
+        agents::Role::Reviewer => {
+            "実装結果や実行前の計画を、作成者から独立して仕様・受け入れ条件と照合するときに使う。問題点と合否を報告し、修正実装は Worker に任せる"
+        }
+        agents::Role::WebResearcher => {
+            "ローカル資料では足りず、外部の仕様・最新情報を Web で確認するときに使う。出典付きで報告し、ローカルのコード調査は Explorer に任せる"
+        }
         agents::Role::Planner => {
             "複数担当にまたがる実装で、依存順序・担当境界・統合時の受け入れ条件の設計が必要なときに使う。Worker からの escalate 後も、引き継ぎの計画案を検証・補完して実装可能な詳細計画にする。範囲と完了条件が明確な局所修正・定型作業や、権限・環境問題だけの昇格では省略できる"
         }
-        agents::Role::Oracle => "難しい設計判断を分析する",
-        agents::Role::MultimodalLooker => "画像や文書の内容を解釈する",
+        agents::Role::Oracle => {
+            "設計案のトレードオフ比較や、原因を絞れない難しい不具合の分析・助言が必要なときに使う。変更は行わず、実装は Worker、実行計画への具体化は Planner に任せる"
+        }
+        agents::Role::MultimodalLooker => {
+            "画像・PDF・スクリーンショットなどの視覚情報を読み解く必要があるときに使う。内容の解釈を担当し、コードの変更は Worker に任せる"
+        }
     }
 }
 
@@ -228,7 +242,10 @@ mod tests {
             assert!(!trigger.description.contains("許可ツール"));
             assert!(!trigger.description.contains("ネットワーク:"));
         }
-        assert_eq!(triggers[2].description, "具体的な実装と検証を担当する");
+        assert_eq!(
+            triggers[2].description,
+            "具体的な変更・実装とその検証が必要なときに使う。ローカル調査だけなら Explorer、複数担当にまたがる計画なら Planner を選ぶ"
+        );
     }
 
     fn agent(name: &str, description: &str) -> AvailableAgent {
