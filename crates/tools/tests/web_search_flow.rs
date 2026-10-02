@@ -38,6 +38,10 @@ impl SearchProvider for StubProvider {
         self.name
     }
 
+    fn uses_credentials(&self) -> bool {
+        self.name == "openai"
+    }
+
     async fn search(
         &self,
         _query: &str,
@@ -290,4 +294,65 @@ async fn missing_query_is_invalid_args() {
         "実際: {error:?}"
     );
     assert_eq!(primary.calls(), 0, "引数パース失敗時は provider を呼ばない");
+}
+
+// Given: keyed primary と Exa fallback / When: 成功・429・認証失敗・timeout / Then: keyed metadata と既存の 1 回 fallback 契約を維持
+#[tokio::test]
+async fn keyed_primary_reports_credentials_and_obeys_fallback_contract() {
+    for (response, fallback_calls, is_error) in [
+        (exa_ok(), 0, false),
+        (Err(SearchError::HttpStatus(429)), 1, false),
+        (Err(SearchError::HttpStatus(503)), 1, false),
+        (Err(SearchError::Timeout), 1, false),
+        (Err(SearchError::HttpStatus(401)), 0, true),
+        (Err(SearchError::HttpStatus(403)), 0, true),
+        (Err(SearchError::Transport("blocked".to_owned())), 0, true),
+    ] {
+        let primary = Arc::new(StubProvider::new("openai", response));
+        let fallback = Arc::new(StubProvider::new("exa", exa_ok()));
+        let tool = WebSearch::for_providers_with_env_lookup(
+            primary.clone(),
+            fallback.clone(),
+            Arc::new(|_| None),
+        );
+
+        let result = execute_default_query(&tool).await.expect("tool result");
+
+        assert_eq!(result.is_error, is_error);
+        let detail = result.detail.expect("metadata");
+        assert_eq!(detail["credential_status"], "keyed");
+        assert_eq!(
+            detail["provider"],
+            if fallback_calls == 0 { "openai" } else { "exa" }
+        );
+        assert_eq!(detail["fallback_attempts"], fallback_calls);
+        assert_eq!(detail["used_fallback"], fallback_calls == 1);
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(fallback.calls(), fallback_calls);
+    }
+}
+
+// Given: keyed primary と fallback がともに 429 / When: execute / Then: Exa を 1 回だけ試行し連鎖しない
+#[tokio::test]
+async fn keyed_fallback_is_still_capped_at_one() {
+    let primary = Arc::new(StubProvider::new(
+        "openai",
+        Err(SearchError::HttpStatus(429)),
+    ));
+    let fallback = Arc::new(StubProvider::new("exa", Err(SearchError::HttpStatus(429))));
+    let tool = WebSearch::for_providers_with_env_lookup(
+        primary.clone(),
+        fallback.clone(),
+        Arc::new(|_| None),
+    );
+
+    let result = execute_default_query(&tool).await.expect("tool result");
+
+    assert!(result.is_error);
+    let detail = result.detail.expect("metadata");
+    assert_eq!(detail["credential_status"], "keyed");
+    assert_eq!(detail["provider"], "exa");
+    assert_eq!(detail["fallback_attempts"], 1);
+    assert_eq!(primary.calls(), 1);
+    assert_eq!(fallback.calls(), 1);
 }

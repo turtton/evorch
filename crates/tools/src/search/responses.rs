@@ -414,6 +414,38 @@ mod tests {
         assert!(!error.to_string().contains("secret"));
     }
 
+    #[derive(Debug)]
+    struct PendingResolver;
+
+    impl reqwest::dns::Resolve for PendingResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    // Given: 応答しない DNS と paused clock / When: reqwest timeout を写像 / Then: 仮想時間で Timeout となる
+    #[tokio::test(start_paused = true)]
+    async fn maps_reqwest_timeout_without_wall_clock_waits() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(PendingResolver))
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("client");
+
+        // 全 task が pending になると Tokio が時計を進める。実 DNS/接続/sleep は使わない。
+        let error = client
+            .get("https://pending.test/")
+            .send()
+            .await
+            .expect_err("virtual timeout");
+        assert!(error.is_timeout());
+        let mapped = map_guard_error(NetworkGuardError::Http(error));
+
+        assert!(matches!(mapped, SearchError::Timeout));
+        assert!(mapped.is_fallback_trigger());
+    }
+
     // Given: guard が private IP を拒否 / When: 写像 / Then: fallback しない Transport
     #[test]
     fn maps_non_timeout_guard_errors_fail_closed() {
