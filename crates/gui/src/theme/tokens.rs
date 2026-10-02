@@ -170,7 +170,6 @@ pub fn text_style_badge() -> egui::TextStyle {
 pub fn state_color(state: ThreadState) -> Color32 {
     match state {
         ThreadState::Active => palette().ACCENT,
-        ThreadState::Paused => palette().TEXT_MUTED,
         ThreadState::Stopped => palette().WARNING_FG,
         ThreadState::Running => palette().RUNNING,
         ThreadState::Waiting => palette().WAITING,
@@ -302,7 +301,6 @@ mod tests {
     fn state_color_is_exhaustive_and_distinct() {
         let colors = [
             state_color(ThreadState::Active),
-            state_color(ThreadState::Paused),
             state_color(ThreadState::Stopped),
             state_color(ThreadState::Running),
             state_color(ThreadState::Waiting),

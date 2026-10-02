@@ -84,6 +84,9 @@ pub enum WorkbenchCommand {
     StopChat {
         thread_id: String,
     },
+    DeliverFollowUpsNextTurn {
+        thread_id: String,
+    },
     CancelChat {
         thread_id: String,
     },
@@ -204,6 +207,10 @@ pub enum LoopEvent {
 }
 
 pub trait CommandSink: Send {
+    /// Runtime receipt observation, not an acknowledgement of command acceptance.
+    fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
+        None
+    }
     fn bind_goal_id(&mut self, _thread: &str, _goal: &str) {}
     /// Refresh counts on lifecycle events, including descendants that just settled.
     fn observe_lifecycle(&mut self, _event: &event_bus::Event) {}
@@ -302,7 +309,9 @@ impl CommandSink for FixtureLoopAdapter {
             WorkbenchCommand::ContinueChat(_) => vec![LoopEvent::CommandRejected {
                 reason: "No resumable conversation in demo mode".into(),
             }],
-            WorkbenchCommand::CancelChat { .. } | WorkbenchCommand::StopChat { .. } => Vec::new(),
+            WorkbenchCommand::CancelChat { .. }
+            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. } => Vec::new(),

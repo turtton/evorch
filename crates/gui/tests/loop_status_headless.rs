@@ -137,6 +137,7 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DecideMerge(_)
             | WorkbenchCommand::DecideToolApproval { .. }
@@ -246,6 +247,7 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }

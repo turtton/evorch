@@ -21,6 +21,7 @@ pub struct SandboxPickerContext {
 pub enum ComposerAction {
     Send,
     Stop,
+    DeliverNextTurn,
     Discard,
     Complete(&'static str),
     CompleteExternal(String),
@@ -34,6 +35,25 @@ pub fn stopped_banner(running_children: usize) -> String {
         format!("子agent {running_children}件は実行中 — もう一度押すと全停止")
     } else {
         "停止中（再開可能）— /continue またはメッセージ送信で再開".into()
+    }
+}
+
+pub fn follow_up_banner(status: runtime::FollowUpStatus) -> String {
+    if status.closed {
+        format!(
+            "未配送 {}件 — agent が停止・終了しました。これらは未反映です",
+            status.pending
+        )
+    } else if status.next_turn_requested {
+        format!(
+            "配送待ち {}件 — 現在の応答・ツール完了後、次のターンで反映",
+            status.pending
+        )
+    } else {
+        format!(
+            "配送待ち {}件 — agent には未反映（通常は回答完了後に配送）",
+            status.pending
+        )
     }
 }
 
@@ -84,17 +104,41 @@ pub fn composer_strip(
                     }
                 });
             }
+            if model.follow_ups.pending > 0 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(follow_up_banner(model.follow_ups))
+                        .color(palette().WARNING_FG));
+                    if ui.add_enabled(!model.follow_ups.closed && !model.follow_ups.next_turn_requested,
+                        egui::Button::new("次のターンで届ける"))
+                        .on_hover_text("現在のモデル応答やツールは中断しません。完了後の最初の安全な境界で、配送待ちの全メッセージを反映します。")
+                        .clicked() {
+                        action = Some(ComposerAction::DeliverNextTurn);
+                    }
+                });
+            }
+            if phase == Some(ThreadRunPhase::Running) {
+                ui.label(egui::RichText::new("実行中の送信はキューに追加され、通常は回答完了後に届きます")
+                    .small().color(palette().TEXT_MUTED));
+            }
             images::render(ui, model);
             let target = match model.resolved_model.as_deref() {
                 Some(resolved) => format!("{} · {resolved}", model.role.label()),
                 None => model.role.label().to_owned(),
             };
-            ui.label(egui::RichText::new(format!("送信先: {target}  (Tab で切替)"))
+            let role_hint = if model.role_locked {
+                "このスレッドで固定"
+            } else {
+                "Tab で切替"
+            };
+            ui.label(egui::RichText::new(format!("送信先: {target}  ({role_hint})"))
                 .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
                 let can_stop = (phase == Some(ThreadRunPhase::Running) && !model.completions_visible())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
+                let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {
+                    Some(primary_button(ui, "Queue").on_hover_text("配送待ちに追加（Enter）。送信後に「次のターンで届ける」を選べます。"))
+                } else { None };
                 let send = if can_stop {
 ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::Stopped) { "全停止" } else { "Stop" }).color(if phase == Some(ThreadRunPhase::Stopped) { palette().WARNING_FG } else { palette().ERROR_FG }))
 .fill(if phase == Some(ThreadRunPhase::Stopped) { palette().SURFACE_RAISED } else { palette().ERROR_SURFACE }))
@@ -166,7 +210,7 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                 } else if can_stop && send.clicked() {
                     action = Some(ComposerAction::Stop);
                     input.request_focus();
-                } else if can_send && (send.clicked() || enter) {
+                } else if can_send && ((!can_stop && send.clicked()) || queued_send.is_some_and(|button| button.clicked()) || enter) {
                     action = Some(ComposerAction::Send);
                     input.request_focus();
                 }
@@ -268,6 +312,61 @@ mod tests {
         h.get_by_label("停止中（再開可能）— /continue またはメッセージ送信で再開");
         assert!(h.query_by_label("全停止").is_none());
         h.get_by_label("Send").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn queued_follow_ups_show_actual_delivery_boundary_and_explicit_action() {
+        let mut h = harness("draft");
+        h.state_mut().phase = Some(ThreadRunPhase::Running);
+        h.state_mut().model.follow_ups.pending = 2;
+        h.run();
+        h.get_by_label("配送待ち 2件 — agent には未反映（通常は回答完了後に配送）");
+        h.get_by_label("次のターンで届ける").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::DeliverNextTurn));
+        assert_eq!(h.state().model.input, "draft");
+        h.state_mut().model.follow_ups.next_turn_requested = true;
+        h.run();
+        h.get_by_label("配送待ち 2件 — 現在の応答・ツール完了後、次のターンで反映");
+        assert!(
+            h.query_by_label("次のターンで届ける")
+                .unwrap()
+                .accesskit_node()
+                .is_disabled()
+        );
+        h.state_mut().model.follow_ups.pending = 0;
+        h.run();
+        assert!(h.query_by_label("次のターンで届ける").is_none());
+    }
+
+    #[test]
+    fn closed_inbox_reports_undelivered_input_instead_of_promising_delivery() {
+        let mut h = harness("");
+        h.state_mut().model.follow_ups = runtime::FollowUpStatus {
+            pending: 1,
+            closed: true,
+            next_turn_requested: true,
+        };
+        h.run();
+        h.get_by_label("未配送 1件 — agent が停止・終了しました。これらは未反映です");
+        assert!(
+            h.query_by_label("次のターンで届ける")
+                .unwrap()
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn running_draft_has_queue_and_stop_without_ambiguous_send() {
+        let mut h = harness("follow-up draft");
+        h.state_mut().phase = Some(ThreadRunPhase::Running);
+        h.run();
+        h.get_by_label("Stop");
+        assert!(h.query_by_label("Send").is_none());
+        h.get_by_label("Queue").click();
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Send));
     }

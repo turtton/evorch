@@ -2,7 +2,7 @@ use workspace_ui::ThreadRecord;
 
 const LEGACY_THREAD: &str = r#"{
     "id":"thread-1","project_id":"project-1","title":"Conversation",
-    "pinned":false,"paused":false,"run_ids":[],"branch":null,"worktree_path":null
+    "pinned":false,"run_ids":[],"branch":null,"worktree_path":null
 }"#;
 
 #[test]

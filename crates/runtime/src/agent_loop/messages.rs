@@ -9,7 +9,7 @@ impl LoopState {
         !self.pending_user_messages.is_empty()
     }
 
-    pub(crate) fn queue_user_message(&mut self, message: (String, Vec<crate::DelegateImage>)) {
+    pub(crate) fn queue_user_message(&mut self, message: crate::runtime::user_inbox::UserInput) {
         self.pending_user_messages.push(message);
     }
 
@@ -19,7 +19,8 @@ impl LoopState {
             messages.push(message);
         }
         let received = !messages.is_empty();
-        for (text, images) in messages {
+        let count = messages.iter().filter(|message| message.2).count();
+        for (text, images, _) in messages {
             self.context.push_user(&text);
             if let Some(message) = self.context.messages.last_mut() {
                 message.content.extend(images.into_iter().map(|image| {
@@ -30,6 +31,7 @@ impl LoopState {
                 }));
             }
         }
+        self.channels.user_inbox.consumed(count);
         if received {
             self.publish_message_count();
             self.resumed = true;

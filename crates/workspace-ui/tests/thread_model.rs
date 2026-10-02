@@ -38,14 +38,14 @@ fn create_switch_pin_unpin_threads_under_project() {
 }
 
 #[test]
-fn thread_state_precedence_paused_error_running_waiting_done_active() {
+fn thread_state_precedence_stopped_error_running_waiting_done_active() {
     // Given: a thread with two run IDs and each possible runtime phase combination.
     let mut thread =
         workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
     assert_eq!(thread.state(&BTreeMap::new()), ThreadState::Active);
     thread.run_ids = vec!["r1".to_owned(), "r2".to_owned()];
 
-    // When: phase maps exercise precedence from done through error and operator pause.
+    // When: phase maps exercise precedence from done through error and a stopped run.
     let done = BTreeMap::from([
         ("r1".to_owned(), ThreadRunPhase::Done),
         ("r2".to_owned(), ThreadRunPhase::Done),
@@ -63,13 +63,17 @@ fn thread_state_precedence_paused_error_running_waiting_done_active() {
         ("r2".to_owned(), ThreadRunPhase::Error),
     ]);
 
-    // Then: paused is operator-owned and runtime states follow the specified precedence.
+    let stopped = BTreeMap::from([
+        ("r1".to_owned(), ThreadRunPhase::Stopped),
+        ("r2".to_owned(), ThreadRunPhase::Error),
+    ]);
+
+    // Then: the thread state follows the runtime phases, with stopped taking precedence.
     assert_eq!(thread.state(&done), ThreadState::Done);
     assert_eq!(thread.state(&waiting), ThreadState::Waiting);
     assert_eq!(thread.state(&running), ThreadState::Running);
     assert_eq!(thread.state(&error), ThreadState::Error);
-    thread.paused = true;
-    assert_eq!(thread.state(&error), ThreadState::Paused);
+    assert_eq!(thread.state(&stopped), ThreadState::Stopped);
 }
 
 #[test]

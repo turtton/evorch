@@ -189,18 +189,13 @@ fn active_row(
     } else {
         ui.add_space(ui.text_style_height(&egui::TextStyle::Small) + SP_2);
     }
-    // At the minimum window size the two action buttons leave little
+    // At the minimum window size the action button leaves little
     // room for the title, and egui's minimum Label width overlaps earlier
     // controls. Keep the title and controls in distinct hit regions.
     let narrow = ui.available_width() < 180.0;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         if narrow {
             ui.menu_button("⋯", |ui| {
-                let pause = if thread.paused { "Resume" } else { "Pause" };
-                if ui.button(pause).clicked() {
-                    *action = Some(SidebarAction::TogglePause(thread.id.clone()));
-                    ui.close();
-                }
                 if ui.button("Fork").clicked() {
                     *action = Some(SidebarAction::ForkThread(thread.id.clone()));
                     ui.close();
@@ -209,10 +204,6 @@ fn active_row(
             .response
             .on_hover_text("Thread actions");
         } else {
-            let pause = if thread.paused { "Resume" } else { "Pause" };
-            if ui.button(pause).clicked() {
-                *action = Some(SidebarAction::TogglePause(thread.id.clone()));
-            }
             if ui.small_button("Fork").clicked() {
                 *action = Some(SidebarAction::ForkThread(thread.id.clone()));
             }
@@ -332,7 +323,6 @@ fn paint_archive_box_icon(painter: &egui::Painter, rect: egui::Rect, color: egui
 const fn thread_state_label(state: ThreadState) -> &'static str {
     match state {
         ThreadState::Active => "Active",
-        ThreadState::Paused => "Paused",
         ThreadState::Stopped => "Stopped (resumable)",
         ThreadState::Running => "Running",
         ThreadState::Waiting => "Waiting",
@@ -343,8 +333,57 @@ const fn thread_state_label(state: ThreadState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::nested_threads;
-    use workspace_ui::{ProjectId, ThreadId, ThreadRecord};
+    use egui_kittest::{Harness, kittest::Queryable};
+    use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadState};
+
+    use super::{active_row, nested_threads};
+    use crate::panes::sidebar::SidebarAction;
+
+    fn assert_thread_actions_without_pause(width: f32, narrow: bool) {
+        // Given: a thread row rendered at the requested width.
+        let thread = ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("demo"), "Thread");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(width, 100.0))
+            .build_ui_state(
+                |ui, action| {
+                    crate::theme::install(ui.ctx());
+                    ui.horizontal(|ui| {
+                        active_row(ui, &thread, ThreadState::Running, false, action);
+                    });
+                },
+                None,
+            );
+        harness.run();
+
+        // When: opening the thread actions menu if the row is narrow.
+        if narrow {
+            harness.get_by_label("⋯").click();
+            harness.run();
+        } else {
+            assert!(harness.query_by_label("⋯").is_none());
+        }
+
+        // Then: Pause/Resume are absent, while runtime status and Fork still work.
+        assert!(harness.query_by_label("Pause").is_none());
+        assert!(harness.query_by_label("Resume").is_none());
+        assert!(harness.query_by_label("Thread status: Running").is_some());
+        harness.get_by_label("Fork").click();
+        harness.run();
+        assert_eq!(
+            harness.state(),
+            &Some(SidebarAction::ForkThread(thread.id.clone()))
+        );
+    }
+
+    #[test]
+    fn wide_thread_row_has_no_pause_or_resume_control() {
+        assert_thread_actions_without_pause(600.0, false);
+    }
+
+    #[test]
+    fn narrow_thread_menu_has_no_pause_or_resume_control() {
+        assert_thread_actions_without_pause(220.0, true);
+    }
 
     #[test]
     fn escalation_children_follow_parent_at_each_depth() {
