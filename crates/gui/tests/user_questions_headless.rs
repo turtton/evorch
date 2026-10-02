@@ -185,11 +185,12 @@ fn restored_question_is_visible_without_any_run_start_event() {
     ));
 }
 
-fn thread_dot_color(
+fn thread_status_icon_color(
     harness: &egui_kittest::Harness<'_, WorkbenchState<DemoSource>>,
     title: &str,
-) -> egui::Color32 {
-    use egui::epaint::Shape;
+) -> Option<egui::Color32> {
+    use egui::epaint::{ColorMode, Shape};
+    use gui::theme::tokens::{SP_1, palette};
     let label = harness
         .output()
         .shapes
@@ -204,23 +205,33 @@ fn thread_dot_color(
         .output()
         .shapes
         .iter()
-        .find_map(|shape| match &shape.shape {
-            Shape::Circle(dot)
-                if dot.radius == gui::theme::tokens::DOT_SIZE / 2.0
-                    && dot.center.x < label.pos.x
-                    && (dot.center.y - label.visual_bounding_rect().center().y).abs() < 6.0 =>
+        .filter_map(|shape| match &shape.shape {
+            Shape::Circle(dot) if dot.radius == SP_1 && dot.fill == palette().WARNING_FG => {
+                Some((dot.center, dot.fill))
+            }
+            Shape::Path(path)
+                if !path.closed && path.stroke.color == ColorMode::Solid(palette().RUNNING) =>
             {
-                Some(dot.fill)
+                Some((
+                    egui::Rect::from_points(&path.points).center(),
+                    palette().RUNNING,
+                ))
             }
             _ => None,
         })
-        .expect("thread status dot is painted beside its title")
+        .find_map(|(center, color)| {
+            (center.x > label.visual_bounding_rect().right()
+                && (center.y - label.visual_bounding_rect().center().y).abs() < 6.0)
+                .then_some(color)
+        })
 }
 
 #[test]
-fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
-    use gui::theme::tokens::state_color;
-    let running = state_color(workspace_ui::ThreadState::Running);
+fn pending_user_question_keeps_blob_alongside_running_spinner() {
+    use gui::theme::tokens::palette;
+    const QUESTION_LABEL: &str = "Answer needed: this thread has an unanswered question";
+    let running = Some(palette().RUNNING);
+    let waiting_question = Some(palette().WARNING_FG);
     let dir = tempfile::tempdir().unwrap();
     let state = state(dir.path());
     let mut sidebar = state.sidebar().clone();
@@ -250,8 +261,8 @@ fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
             state,
         );
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(thread_dot_color(&harness, "two"), running);
+    assert_eq!(thread_status_icon_color(&harness, "one"), running);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
 
     harness
         .state_mut()
@@ -259,16 +270,37 @@ fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
             question: question(),
         })]);
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(harness.query_all_by_label("?").count(), 1);
-    assert_eq!(thread_dot_color(&harness, "two"), running);
+    // A question adds a blob without replacing the owner's running spinner.
+    assert_eq!(thread_status_icon_color(&harness, "one"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
+    assert_eq!(
+        harness.query_all_by_label("Thread status: Running").count(),
+        2
+    );
+    assert_eq!(harness.query_all_by_label("?").count(), 0);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+
+    // Once the owner waits, its pending question takes the trailing slot.
+    harness
+        .state_mut()
+        .apply_events([Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-1".into(),
+            from: event_bus::AgentRunPhase::Running,
+            to: event_bus::AgentRunPhase::Waiting,
+            reason: None,
+        })]);
+    harness.run_steps(3);
+    assert_eq!(thread_status_icon_color(&harness, "one"), waiting_question);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
     harness
         .state_mut()
         .switch_thread(ThreadId::new("two"))
         .unwrap();
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(harness.query_all_by_label("?").count(), 1);
+    assert_eq!(thread_status_icon_color(&harness, "one"), waiting_question);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
 
     let mut answered = question();
     answered.answer = Some("JSON".into());
@@ -280,8 +312,9 @@ fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
         Event::new(ToolEvent::UserQuestionUpdated { question: child }),
     ]);
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(harness.query_all_by_label("?").count(), 0);
+    assert_eq!(thread_status_icon_color(&harness, "one"), None);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 0);
 
     // A pending row can recover its owner from durable chat identity even if
     // the matching run-start event was lost, just like the conversation card.
@@ -295,14 +328,16 @@ fn pending_user_question_has_separate_indicator_without_overriding_run_color() {
             question: recovered,
         })]);
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(harness.query_all_by_label("?").count(), 1);
+    assert_eq!(thread_status_icon_color(&harness, "one"), waiting_question);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 1);
     harness
         .state_mut()
         .apply_loop_event(gui::model::commands::LoopEvent::UserAnswerSaved {
             question_id: "recovered".into(),
         });
     harness.run_steps(3);
-    assert_eq!(thread_dot_color(&harness, "one"), running);
-    assert_eq!(harness.query_all_by_label("?").count(), 0);
+    assert_eq!(thread_status_icon_color(&harness, "one"), None);
+    assert_eq!(thread_status_icon_color(&harness, "two"), running);
+    assert_eq!(harness.query_all_by_label(QUESTION_LABEL).count(), 0);
 }

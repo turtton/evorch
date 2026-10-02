@@ -1,9 +1,8 @@
-use std::collections::BTreeSet;
-
 use workspace_ui::{ThreadError, ThreadId, ThreadRecord};
 
 use super::{ConversationFocus, WorkbenchError, WorkbenchState};
 use crate::model::tasks::AgentRunSource;
+use crate::panes::sidebar::threads::{family_has_running_runs, thread_family};
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn toggle_archive(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
@@ -19,19 +18,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return Ok(());
         }
         let archived = !thread.archived;
-        let mut family = BTreeSet::from([thread_id]);
-        let mut pending = family.iter().cloned().collect::<Vec<_>>();
-        while let Some(parent) = pending.pop() {
-            for child in self
-                .sidebar
-                .threads
-                .iter()
-                .filter(|thread| thread.parent_thread_id.as_ref() == Some(&parent))
-            {
-                if family.insert(child.id.clone()) {
-                    pending.push(child.id.clone());
-                }
-            }
+        let family = thread_family(&self.sidebar.threads, &thread_id);
+        // Match the pinned/child no-op contract for stale UI or direct actions.
+        // Check the whole family before mutating it: an idle root must not hide
+        // a running descendant. Restoring a family is always safe.
+        if archived && family_has_running_runs(&self.sidebar.threads, &family, &self.phases) {
+            return Ok(());
         }
         for thread in &mut self.sidebar.threads {
             if family.contains(&thread.id) {

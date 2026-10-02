@@ -1,3 +1,8 @@
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
+use event_bus::{AgentRunPhase, Event, LifecycleEvent};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::tasks::AgentRunSource;
@@ -51,6 +56,186 @@ fn fixture_state(
         .unwrap()
         .with_sidebar(serde_json::from_value(json).unwrap())
         .with_sidebar_path(root.join("sidebar.json"))
+}
+
+fn set_thread_phase(
+    state: &mut WorkbenchState<EmptySource>,
+    thread: &ThreadId,
+    phase: AgentRunPhase,
+) {
+    let run_id = format!("run-{thread}");
+    state.apply_events([
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: run_id.clone(),
+            parent_run_id: None,
+            agent_name: format!("chat:Worker:{thread}"),
+            role: "worker".into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            from: AgentRunPhase::Pending,
+            to: phase,
+            reason: None,
+        }),
+    ]);
+}
+
+#[test]
+fn running_thread_archive_button_is_disabled_and_direct_action_is_noop() {
+    for phase in [AgentRunPhase::Pending, AgentRunPhase::Running] {
+        // Given: a thread whose aggregated state is Running.
+        let temp = tempfile::tempdir().unwrap();
+        let mut harness = fixture(temp.path(), false);
+        let target = ThreadId::new("target");
+        set_thread_phase(harness.state_mut(), &target, phase);
+        harness.run();
+        let before = harness.state().sidebar().clone();
+        let saved = std::fs::read(temp.path().join("sidebar.json")).unwrap();
+        assert!(harness.has_label("Thread status: Running"));
+
+        // When: clicking the disabled control, then bypassing the UI.
+        harness.click_label("Archive");
+        harness.run();
+        assert_eq!(harness.state().sidebar(), &before);
+        harness.state_mut().toggle_archive(target).unwrap();
+
+        // Then: neither path changes selection, archive state or persistence.
+        assert_eq!(harness.state().sidebar(), &before);
+        assert_eq!(
+            std::fs::read(temp.path().join("sidebar.json")).unwrap(),
+            saved
+        );
+    }
+}
+
+fn assert_archive_blocked(state: WorkbenchState<EmptySource>, root: &std::path::Path) {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    harness.ctx.global_style_mut(|style| {
+        style.interaction.tooltip_delay = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    harness.run_steps(3);
+    let before = harness.state().sidebar().clone();
+    let saved = std::fs::read(root.join("sidebar.json")).unwrap();
+    let archive = harness.get_by_label("Archive");
+    assert!(archive.accesskit_node().is_disabled());
+    archive.hover();
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_label("Archive unavailable while a thread in this family is running")
+            .is_some()
+    );
+
+    harness.get_by_label("Archive").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().sidebar(), &before);
+    assert_eq!(std::fs::read(root.join("sidebar.json")).unwrap(), saved);
+
+    harness
+        .state_mut()
+        .toggle_archive(ThreadId::new("target"))
+        .unwrap();
+    assert_eq!(harness.state().sidebar(), &before);
+    assert_eq!(std::fs::read(root.join("sidebar.json")).unwrap(), saved);
+}
+
+#[test]
+fn mixed_phases_block_archive_despite_stopped_or_error_display_state() {
+    for terminal in [AgentRunPhase::Stopped, AgentRunPhase::Error] {
+        for active in [AgentRunPhase::Running, AgentRunPhase::Pending] {
+            // Exercise both a mixed root and a mixed descendant hidden by a
+            // non-running root. Child runs inherit the same conversation owner.
+            for descendant in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut state = fixture_state(temp.path(), false, false);
+                let target = ThreadId::new("target");
+                let owner = if descendant {
+                    let child = state.fork_thread(target.clone()).unwrap();
+                    state.fork_thread(child).unwrap()
+                } else {
+                    target
+                };
+                set_thread_phase(&mut state, &owner, terminal);
+                state.apply_events([
+                    Event::new(LifecycleEvent::AgentRunStarted {
+                        run_id: "active-child-run".into(),
+                        parent_run_id: Some(format!("run-{owner}")),
+                        agent_name: "Child worker".into(),
+                        role: "worker".into(),
+                    }),
+                    Event::new(LifecycleEvent::AgentRunStateChanged {
+                        run_id: "active-child-run".into(),
+                        from: AgentRunPhase::Pending,
+                        to: active,
+                        reason: None,
+                    }),
+                ]);
+                let thread = state
+                    .sidebar()
+                    .threads
+                    .iter()
+                    .find(|thread| thread.id == owner)
+                    .unwrap();
+                assert_eq!(
+                    thread.run_ids,
+                    [format!("run-{owner}"), "active-child-run".into()]
+                );
+                assert_archive_blocked(state, temp.path());
+            }
+        }
+    }
+}
+
+#[test]
+fn running_descendant_prevents_archiving_the_entire_family() {
+    for phase in [AgentRunPhase::Running, AgentRunPhase::Pending] {
+        // Given: an idle root with a running/pending grandchild.
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = fixture_state(temp.path(), false, false);
+        let child = state.fork_thread(ThreadId::new("target")).unwrap();
+        let grandchild = state.fork_thread(child).unwrap();
+        set_thread_phase(&mut state, &grandchild, phase);
+
+        // Both the root control and direct action must preserve the whole family.
+        assert_archive_blocked(state, temp.path());
+    }
+}
+
+#[test]
+fn stopped_or_completed_thread_can_be_archived() {
+    for phase in [
+        AgentRunPhase::Stopped,
+        AgentRunPhase::Done,
+        AgentRunPhase::Error,
+        AgentRunPhase::Waiting,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut harness = fixture(temp.path(), false);
+        let target = ThreadId::new("target");
+        set_thread_phase(harness.state_mut(), &target, phase);
+        harness.run();
+        harness.click_label("Archive");
+        harness.run();
+        assert!(harness.state().sidebar().threads[0].archived, "{phase:?}");
+    }
+}
+
+#[test]
+fn running_archived_thread_can_still_be_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = fixture(temp.path(), true);
+    let target = ThreadId::new("target");
+    set_thread_phase(harness.state_mut(), &target, AgentRunPhase::Running);
+    harness.state_mut().toggle_archive(target).unwrap();
+    assert!(!harness.state().sidebar().threads[0].archived);
+    let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    assert!(!saved.threads[0].archived);
 }
 
 #[test]
@@ -134,7 +319,8 @@ fn restore_click_returns_archived_thread_to_main_and_persists() {
     // Then: the main row and its original actions return, with no duplicate title.
     assert_eq!(harness.count_labels("Target"), 1);
     assert!(harness.has_label("Archive"));
-    assert!(harness.has_label("⋯"));
+    // Idle rows no longer reserve a status dot, leaving room for the inline action.
+    assert!(harness.has_label("Fork"));
     assert!(!harness.has_label("Restore"));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();

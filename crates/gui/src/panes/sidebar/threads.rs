@@ -1,15 +1,50 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Align, Layout, Sense, Ui};
-use workspace_ui::{ProjectRecord, SidebarState, ThreadRecord, ThreadRunPhase, ThreadState};
+use workspace_ui::{
+    ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
+};
 
 use crate::model::telemetry::TelemetryOverlay;
 use crate::theme::text::h4;
-use crate::theme::tokens::{ROW_DENSE, SP_1, SP_2};
-use crate::theme::tokens::{palette, state_color};
-use crate::theme::widgets::{compact_row, empty_state, primary_button, status_dot};
+use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
+use crate::theme::widgets::{compact_row, empty_state, primary_button};
 
 use super::SidebarAction;
+
+pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
+    let mut family = BTreeSet::from([root.clone()]);
+    let mut pending = vec![root.clone()];
+    while let Some(parent) = pending.pop() {
+        for child in threads
+            .iter()
+            .filter(|thread| thread.parent_thread_id.as_ref() == Some(&parent))
+        {
+            if family.insert(child.id.clone()) {
+                pending.push(child.id.clone());
+            }
+        }
+    }
+    family
+}
+
+pub(crate) fn family_has_running_runs(
+    threads: &[ThreadRecord],
+    family: &BTreeSet<ThreadId>,
+    phases: &BTreeMap<String, ThreadRunPhase>,
+) -> bool {
+    // Display aggregation prioritizes Stopped/Error over Running. Archive
+    // safety instead depends on every raw run phase, including descendants.
+    threads.iter().any(|thread| {
+        family.contains(&thread.id)
+            && thread.run_ids.iter().any(|run_id| {
+                matches!(
+                    phases.get(run_id),
+                    Some(ThreadRunPhase::Running | ThreadRunPhase::Pending)
+                )
+            })
+    })
+}
 
 pub fn render(
     ui: &mut Ui,
@@ -129,11 +164,18 @@ fn render_tree(
                     archived_row(ui, thread, action);
                 } else {
                     let state = thread.state(phases);
+                    let family_running = thread.parent_thread_id.is_none()
+                        && family_has_running_runs(
+                            &sidebar.threads,
+                            &thread_family(&sidebar.threads, &thread.id),
+                            phases,
+                        );
                     active_row(
                         ui,
                         thread,
                         state,
                         question_threads.contains(&thread.id),
+                        family_running,
                         action,
                     );
                 }
@@ -158,30 +200,26 @@ fn active_row(
     thread: &ThreadRecord,
     state: ThreadState,
     has_question: bool,
+    family_running: bool,
     action: &mut Option<SidebarAction>,
 ) {
     let pin = if thread.pinned { "★" } else { "☆" };
     if ui.button(pin).clicked() {
         *action = Some(SidebarAction::TogglePin(thread.id.clone()));
     }
-    let label = format!("Thread status: {}", thread_state_label(state));
-    let dot = status_dot(ui, state_color(state)).on_hover_text(&label);
-    dot.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
-    // A pending question does not change the run phase. Keep both signals.
-    if has_question {
-        ui.label(
-            egui::RichText::new("?")
-                .strong()
-                .color(palette().WARNING_FG),
-        )
-        .on_hover_text("Answer needed: this thread has an unanswered question");
-    }
     if thread.parent_thread_id.is_none() {
+        let can_archive = !thread.pinned && !family_running;
+        let disabled_reason = if family_running {
+            "Archive unavailable while a thread in this family is running"
+        } else {
+            "Unpin this thread before archiving"
+        };
         let archive = ui
-            .add_enabled(!thread.pinned, archive_button)
-            .on_hover_text("アーカイブ");
+            .add_enabled(can_archive, archive_button)
+            .on_hover_text("アーカイブ")
+            .on_disabled_hover_text(disabled_reason);
         archive.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, !thread.pinned, "Archive")
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
         });
         if archive.clicked() {
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
@@ -194,6 +232,8 @@ fn active_row(
     // controls. Keep the title and controls in distinct hit regions.
     let narrow = ui.available_width() < 180.0;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        // The first widget in this layout is the row's trailing indicator.
+        thread_status_icon(ui, state, has_question);
         if narrow {
             ui.menu_button("⋯", |ui| {
                 if ui.button("Fork").clicked() {
@@ -305,38 +345,81 @@ fn archive_button(ui: &mut Ui) -> egui::Response {
 fn paint_archive_box_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
     let stroke = egui::Stroke::new(1.2, color);
     let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+    // A balanced outline with an overhanging lid and a centered drawer pull.
+    painter.add(egui::Shape::line(
+        vec![
+            point(0.18, 0.34),
+            point(0.18, 0.87),
+            point(0.82, 0.87),
+            point(0.82, 0.34),
+        ],
+        stroke,
+    ));
     painter.rect_stroke(
-        egui::Rect::from_min_max(point(0.12, 0.36), point(0.88, 0.94)),
-        0,
+        egui::Rect::from_min_max(point(0.08, 0.12), point(0.92, 0.34)),
+        1,
         stroke,
         egui::StrokeKind::Inside,
     );
-    painter.rect_stroke(
-        egui::Rect::from_min_max(point(0.0, 0.06), point(1.0, 0.36)),
-        0,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
-    painter.line_segment([point(0.38, 0.21), point(0.62, 0.21)], stroke);
+    painter.line_segment([point(0.38, 0.53), point(0.62, 0.53)], stroke);
 }
 
-const fn thread_state_label(state: ThreadState) -> &'static str {
-    match state {
-        ThreadState::Active => "Active",
-        ThreadState::Stopped => "Stopped (resumable)",
-        ThreadState::Running => "Running",
-        ThreadState::Waiting => "Waiting",
-        ThreadState::Done => "Done",
-        ThreadState::Error => "Error",
+fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
+    // Runtime status retains the display aggregation; questions are independent
+    // and must remain visible alongside either the spinner or the error icon.
+    let status = if matches!(state, ThreadState::Running) {
+        Some((
+            ui.add(
+                egui::Spinner::new()
+                    .size(FONT_SMALL)
+                    .color(palette().RUNNING),
+            ),
+            "Thread status: Running",
+        ))
+    } else if matches!(state, ThreadState::Error) {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
+        let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+        let stroke = egui::Stroke::new(1.2, palette().ERROR_FG);
+        ui.painter().add(egui::Shape::closed_line(
+            vec![point(0.5, 0.08), point(0.94, 0.88), point(0.06, 0.88)],
+            stroke,
+        ));
+        ui.painter()
+            .line_segment([point(0.5, 0.34), point(0.5, 0.57)], stroke);
+        ui.painter()
+            .circle_filled(point(0.5, 0.72), 0.8, palette().ERROR_FG);
+        Some((response, "Thread status: Error"))
+    } else {
+        None
+    };
+    if let Some((response, label)) = status {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
+        });
+        response.on_hover_text(label);
+    }
+    if has_question {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), SP_1, palette().WARNING_FG);
+        let label = "Answer needed: this thread has an unanswered question";
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label)
+        });
+        response.on_hover_text(label);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use egui_kittest::{Harness, kittest::Queryable};
-    use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadState};
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{active_row, nested_threads};
+    use egui_kittest::{Harness, kittest::Queryable};
+    use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState};
+
+    use super::{active_row, family_has_running_runs, nested_threads, thread_family};
     use crate::panes::sidebar::SidebarAction;
 
     fn assert_thread_actions_without_pause(width: f32, narrow: bool) {
@@ -348,17 +431,18 @@ mod tests {
                 |ui, action| {
                     crate::theme::install(ui.ctx());
                     ui.horizontal(|ui| {
-                        active_row(ui, &thread, ThreadState::Running, false, action);
+                        active_row(ui, &thread, ThreadState::Running, false, true, action);
                     });
                 },
                 None,
             );
-        harness.run();
+        // A spinner continuously requests repaint; advance bounded frames.
+        harness.run_steps(2);
 
         // When: opening the thread actions menu if the row is narrow.
         if narrow {
             harness.get_by_label("⋯").click();
-            harness.run();
+            harness.run_steps(2);
         } else {
             assert!(harness.query_by_label("⋯").is_none());
         }
@@ -368,7 +452,7 @@ mod tests {
         assert!(harness.query_by_label("Resume").is_none());
         assert!(harness.query_by_label("Thread status: Running").is_some());
         harness.get_by_label("Fork").click();
-        harness.run();
+        harness.run_steps(2);
         assert_eq!(
             harness.state(),
             &Some(SidebarAction::ForkThread(thread.id.clone()))
@@ -383,6 +467,68 @@ mod tests {
     #[test]
     fn narrow_thread_menu_has_no_pause_or_resume_control() {
         assert_thread_actions_without_pause(220.0, true);
+    }
+
+    #[test]
+    fn archive_guard_uses_raw_phases_instead_of_display_state() {
+        let mut thread = ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("p"), "Thread");
+        thread.run_ids = vec!["terminal".into(), "active".into()];
+        let family = BTreeSet::from([thread.id.clone()]);
+        for (terminal, display) in [
+            (ThreadRunPhase::Stopped, ThreadState::Stopped),
+            (ThreadRunPhase::Error, ThreadState::Error),
+        ] {
+            for active in [ThreadRunPhase::Running, ThreadRunPhase::Pending] {
+                let phases =
+                    BTreeMap::from([("terminal".into(), terminal), ("active".into(), active)]);
+                assert_eq!(thread.state(&phases), display);
+                assert!(family_has_running_runs(
+                    std::slice::from_ref(&thread),
+                    &family,
+                    &phases
+                ));
+            }
+        }
+        // Missing phases and runs not owned by this family cannot block it.
+        for phase in [
+            ThreadRunPhase::Waiting,
+            ThreadRunPhase::Done,
+            ThreadRunPhase::Stopped,
+            ThreadRunPhase::Error,
+        ] {
+            let phases = BTreeMap::from([
+                ("terminal".into(), phase),
+                ("unrelated".into(), ThreadRunPhase::Running),
+            ]);
+            assert!(!family_has_running_runs(
+                std::slice::from_ref(&thread),
+                &family,
+                &phases
+            ));
+        }
+    }
+
+    #[test]
+    fn archive_family_walk_includes_descendants_and_handles_cycles() {
+        let project = ProjectId::new("p");
+        let mut root = ThreadRecord::new(ThreadId::new("root"), project.clone(), "Root");
+        let mut child = ThreadRecord::new(ThreadId::new("child"), project.clone(), "Child");
+        let mut grandchild =
+            ThreadRecord::new(ThreadId::new("grandchild"), project.clone(), "Grandchild");
+        child.parent_thread_id = Some(root.id.clone());
+        grandchild.parent_thread_id = Some(child.id.clone());
+        root.parent_thread_id = Some(grandchild.id.clone());
+        grandchild.run_ids.push("active".into());
+        let unrelated = ThreadRecord::new(ThreadId::new("other"), project, "Other");
+        let root_id = root.id.clone();
+        let expected = BTreeSet::from([root.id.clone(), child.id.clone(), grandchild.id.clone()]);
+        let threads = [unrelated, grandchild, child, root];
+        let family = thread_family(&threads, &root_id);
+        assert_eq!(family, expected);
+        let phases = BTreeMap::from([("active".into(), ThreadRunPhase::Pending)]);
+        assert!(family_has_running_runs(&threads, &family, &phases));
+        let other_family = thread_family(&threads, &threads[0].id);
+        assert!(!family_has_running_runs(&threads, &other_family, &phases));
     }
 
     #[test]
