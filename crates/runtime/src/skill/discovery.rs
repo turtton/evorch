@@ -618,7 +618,8 @@ mod tests {
 
         let registry = discover_with_builtin(&[(SkillScope::RepoAgents, skills)]);
 
-        assert_eq!(registry.len(), 1);
+        let builtins = discover_with_builtin(&[]);
+        assert_eq!(registry.len(), builtins.len() + 1);
         assert_eq!(
             registry.get("explicit-skill").unwrap().scope,
             SkillScope::RepoAgents
@@ -628,10 +629,16 @@ mod tests {
             "Explicit body.\n"
         );
         assert!(registry.diagnostics.is_empty());
-        // 本番 builtin テーブルは空。明示 dirs が空なら user config は探索しない。
-        let empty = discover_with_builtin(&[]);
-        assert!(empty.is_empty());
-        assert!(empty.diagnostics.is_empty());
+        // 明示 dirs が空なら builtin のみで user config は探索しない。
+        assert!(!builtins.is_empty());
+        assert!(
+            builtins.available_skills().iter().all(|skill| builtins
+                .get(&skill.name)
+                .unwrap()
+                .scope
+                == SkillScope::Builtin)
+        );
+        assert!(builtins.diagnostics.is_empty());
     }
 
     // -- default_skill_dirs ------------------------------------------------------

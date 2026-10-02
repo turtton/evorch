@@ -1,28 +1,31 @@
 //! バイナリ同梱 skill の静的定義とレジストリ entry への変換。
 //!
-//! 本番テーブルは空とし、fs の探索後に最低優先度でマージする。
-//! 本文・リソースは静的文字列を参照し、ディスクアクセスを必要としない。
+//! fs の探索後に最低優先度でマージする。
+//! SKILL.md・リソースは静的文字列を参照し、ディスクアクセスを必要としない。
 
+use super::frontmatter::{parse_and_validate, split_frontmatter};
 use super::registry::{SkillEntry, SkillScope, SkillSource};
 
-/// 同梱 builtin skill の静的定義。今回は基盤のみで空。
-/// 追加手順: crates/runtime/skills/builtin/<name>/ に SKILL.md と resources を配置し、
-/// 下テーブルに (name, description, body, resources) を include_str! で登録する。
-/// `body` は frontmatter を除いた本文のみとする。
+/// 同梱 skill の正本は `skills/builtin/<name>/SKILL.md`。
+/// name はディレクトリ名に対応し、メタデータは正本の frontmatter から取得する。
 struct EmbeddedSkillDef {
     name: &'static str,
-    description: &'static str,
-    body: &'static str,
+    skill_md: &'static str,
     resources: &'static [(&'static str, &'static str)],
 }
 
 impl EmbeddedSkillDef {
     fn to_entry(&self) -> SkillEntry {
+        // 静的な同梱内容の不整合はテストで検出する。本文だけを遅延公開する。
+        let metadata = parse_and_validate(self.skill_md, self.name)
+            .expect("builtin SKILL.md must have valid frontmatter");
+        let (_, body) = split_frontmatter(self.skill_md)
+            .expect("builtin SKILL.md must have frontmatter fences");
         SkillEntry {
-            name: self.name.to_owned(),
-            description: self.description.to_owned(),
+            name: metadata.name,
+            description: metadata.description,
             source: SkillSource::Embedded {
-                body: self.body,
+                body,
                 resources: self.resources,
             },
             scope: SkillScope::Builtin,
@@ -30,7 +33,11 @@ impl EmbeddedSkillDef {
     }
 }
 
-const BUILTIN_SKILLS: &[EmbeddedSkillDef] = &[];
+const BUILTIN_SKILLS: &[EmbeddedSkillDef] = &[EmbeddedSkillDef {
+    name: "git-best-practices",
+    skill_md: include_str!("../../skills/builtin/git-best-practices/SKILL.md"),
+    resources: &[],
+}];
 
 /// 同梱 skill の entry 一覧を定義順に返す。
 pub(crate) fn builtin_skill_entries() -> Vec<SkillEntry> {
@@ -58,10 +65,10 @@ mod tests {
         // 不正なキーが存在しても、検索前に形状規約で拒否する。
         ("references/deep/note.md", "UNREACHABLE RESOURCE SENTINEL"),
     ];
+    const FIXTURE_MD: &str = "---\nname: demo-builtin\ndescription: Builtin fixture\n---\nBUILTIN BODY SENTINEL\n---\n本文中の区切りは保持する。\n";
     const FIXTURE: EmbeddedSkillDef = EmbeddedSkillDef {
         name: "demo-builtin",
-        description: "Builtin fixture",
-        body: FIXTURE_BODY,
+        skill_md: FIXTURE_MD,
         resources: FIXTURE_RESOURCES,
     };
 
@@ -72,8 +79,28 @@ mod tests {
     }
 
     #[test]
-    fn production_builtin_table_is_empty() {
-        assert!(builtin_skill_entries().is_empty());
+    fn production_builtins_match_valid_single_source_frontmatter() {
+        let entries = builtin_skill_entries();
+        assert!(!entries.is_empty());
+        let mut names = std::collections::BTreeSet::new();
+        for (definition, entry) in BUILTIN_SKILLS.iter().zip(&entries) {
+            let frontmatter = parse_and_validate(definition.skill_md, definition.name).unwrap();
+            assert!(names.insert(entry.name.clone()), "duplicate builtin name");
+            assert_eq!(entry.name, frontmatter.name);
+            assert_eq!(entry.description, frontmatter.description);
+            assert_eq!(entry.scope, SkillScope::Builtin);
+            let (_, body) = split_frontmatter(definition.skill_md).unwrap();
+            assert!(
+                matches!(&entry.source, SkillSource::Embedded { body: embedded, .. } if *embedded == body)
+            );
+            assert!(!body.starts_with("---\nname:"));
+        }
+        let git = entries
+            .iter()
+            .find(|entry| entry.name == "git-best-practices")
+            .unwrap();
+        assert!(git.description.contains("Git操作"));
+        assert!(git.description.contains("前に参照"));
     }
 
     #[test]
@@ -102,8 +129,10 @@ mod tests {
     fn frontmatter_fixture_uses_only_the_split_body() {
         const SKILL_MD: &str =
             "---\nname: demo-builtin\ndescription: Builtin fixture\n---\n本文。\n";
-        let (_, body) = split_frontmatter(SKILL_MD).unwrap();
-        let fixture = EmbeddedSkillDef { body, ..FIXTURE };
+        let fixture = EmbeddedSkillDef {
+            skill_md: SKILL_MD,
+            ..FIXTURE
+        };
         let mut registry = SkillRegistry::new(BTreeMap::new(), Vec::new());
         registry.merge_shadowing(vec![fixture.to_entry()]);
 
@@ -175,16 +204,12 @@ mod tests {
                 discover_skills(&[(scope, skills.clone()), (SkillScope::User, skills.clone())]);
             let existing_diagnostics = registry.diagnostics.clone();
             assert_eq!(existing_diagnostics.len(), 1);
-            let alpha = EmbeddedSkillDef {
-                name: "alpha-builtin",
-                ..FIXTURE
-            };
-            let zulu = EmbeddedSkillDef {
-                name: "zulu-builtin",
-                ..FIXTURE
-            };
+            let mut alpha = FIXTURE.to_entry();
+            alpha.name = "alpha-builtin".into();
+            let mut zulu = FIXTURE.to_entry();
+            zulu.name = "zulu-builtin".into();
 
-            registry.merge_shadowing(vec![zulu.to_entry(), FIXTURE.to_entry(), alpha.to_entry()]);
+            registry.merge_shadowing(vec![zulu, FIXTURE.to_entry(), alpha]);
 
             let winner = registry.get("demo-builtin").unwrap();
             assert_eq!(winner.scope, scope);

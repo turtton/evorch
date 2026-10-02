@@ -249,7 +249,8 @@ async fn catalog_failure_keeps_last_good_catalog_but_updates_registry() {
         good.catalog.as_ref().unwrap(),
         failed.catalog.as_ref().unwrap()
     ));
-    assert_eq!(failed.registry.len(), 1);
+    assert!(failed.registry.get("demo").is_some());
+    assert!(failed.registry.get("git-best-practices").is_some());
     let model = model(2);
     let runtime = runtime(bus, model.clone()).with_skill_source(source);
     run(&runtime, load_demo()).await;
@@ -322,7 +323,10 @@ async fn stopped_run_continues_with_original_system_despite_new_snapshot() {
     assert_eq!(runtime.wait(id).await.unwrap(), AgentRunPhase::Error);
     write_skill(&skills, "demo", "Changed metadata", V2);
     write_skill(&skills, "second", "New skill", "SECOND-BODY");
-    assert_eq!(source.snapshot().registry.len(), 2);
+    let snapshot = source.snapshot();
+    assert!(snapshot.registry.get("demo").is_some());
+    assert!(snapshot.registry.get("second").is_some());
+    assert!(snapshot.registry.get("git-best-practices").is_some());
     runtime
         .continue_goal(id, "continue".into(), load_demo())
         .unwrap();

@@ -13,4 +13,11 @@
 /result-*
 # Local user config with provider credentials
 /evorch.toml
-/.evorch/
+!/.evorch/
+/.evorch/*
+# Only the checked-in evorch development skill is shareable; keep other local state ignored.
+!/.evorch/skills/
+/.evorch/skills/*
+!/.evorch/skills/evorch-builtin-skill-authoring/
+/.evorch/skills/evorch-builtin-skill-authoring/*
+!/.evorch/skills/evorch-builtin-skill-authoring/SKILL.md
