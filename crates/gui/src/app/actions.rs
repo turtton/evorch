@@ -129,7 +129,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub fn switch_thread(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
         let previous = self.sidebar.active_thread.clone();
-        let previous_role = self.composer.role;
         self.sidebar.switch_thread(&thread_id)?;
         if let Some(previous) = previous
             && let Some(thread) = self
@@ -138,7 +137,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .iter_mut()
                 .find(|thread| thread.id == previous)
         {
-            thread.chat_role = Some(previous_role.into());
             thread.draft_input = std::mem::take(&mut self.composer.input);
             self.composer_attachments
                 .insert(previous, std::mem::take(&mut self.composer.attachments));
@@ -150,11 +148,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .find(|thread| thread.id == thread_id)
         {
-            self.composer.role = if thread.escalation_source_run_id.is_some() {
-                crate::model::composer::ComposerRole::Orchestrator
-            } else {
-                thread.chat_role.map(Into::into).unwrap_or_default()
-            };
+            self.composer.restore_thread_role(thread);
             self.composer.input.clone_from(&thread.draft_input);
             self.composer.attachments = self
                 .composer_attachments

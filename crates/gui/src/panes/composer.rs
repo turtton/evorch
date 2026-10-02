@@ -89,7 +89,12 @@ pub fn composer_strip(
                 Some(resolved) => format!("{} · {resolved}", model.role.label()),
                 None => model.role.label().to_owned(),
             };
-            ui.label(egui::RichText::new(format!("送信先: {target}  (Tab で切替)"))
+            let role_hint = if model.role_locked {
+                "このスレッドで固定"
+            } else {
+                "Tab で切替"
+            };
+            ui.label(egui::RichText::new(format!("送信先: {target}  ({role_hint})"))
                 .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();

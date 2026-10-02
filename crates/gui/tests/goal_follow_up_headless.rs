@@ -413,8 +413,20 @@ fn orchestrator_role_chat_after_error_continues_same_run() {
     );
     drop(requests);
     fixture.state.composer_mut().toggle_role();
+    assert!(fixture.state.composer().role_locked);
+    assert_eq!(
+        fixture.state.composer().role,
+        gui::model::composer::ComposerRole::Orchestrator
+    );
     fixture.submit("keep the same role");
     assert_eq!(fixture.terminal(), original_run);
+    assert!(matches!(fixture.state.issued().last(),
+        Some(WorkbenchCommand::SendChat(chat))
+            if chat.composer_role == gui::model::composer::ComposerRole::Orchestrator));
+    let requests = fixture.messages.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].starts_with(&requests[1]));
+    drop(requests);
     assert_eq!(fixture.created, 0);
     assert!(
         matches!(fixture.submit("/goal explicit").as_slice(), [LoopEvent::GoalAccepted { goal_id, .. }] if goal_id == "goal-1")

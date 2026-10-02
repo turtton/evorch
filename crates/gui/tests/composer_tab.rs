@@ -3,9 +3,16 @@ use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ComposerRole;
-use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadChatRole, ThreadId, UiSettings};
 
 fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
+    workbench_with_role(root, None)
+}
+
+fn workbench_with_role(
+    root: &std::path::Path,
+    role: Option<ThreadChatRole>,
+) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("tab-test");
     sidebar
@@ -17,6 +24,7 @@ fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
         .create_thread(thread.clone(), project, "thread")
         .expect("thread");
     sidebar.switch_thread(&thread).expect("switch");
+    sidebar.threads[0].chat_role = role;
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("state")
         .with_sidebar(sidebar);
@@ -61,6 +69,41 @@ fn role_alternates_when_tab_is_pressed_in_consecutive_frames() {
                 assert!(harness.has_label(&format!("送信先: {}  (Tab で切替)", role.label())));
                 assert_eq!(harness.state().composer().input, draft);
                 assert_eq!(harness.focused_id(), focus);
+            }
+        }
+    }
+}
+
+#[test]
+fn started_thread_keeps_role_draft_and_focus_across_repeated_tabs() {
+    for role in [ThreadChatRole::Worker, ThreadChatRole::Orchestrator] {
+        for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+            for draft in ["draft", "/"] {
+                let root = tempfile::tempdir().expect("root");
+                let mut harness = workbench_with_role(root.path(), Some(role));
+                harness.state_mut().composer_mut().input = draft.into();
+                harness.run();
+                harness.click_label("Message or /command");
+                harness.run();
+                let focus = harness.focused_id();
+                for _ in 0..5 {
+                    harness.input_mut().events.extend([
+                        tab(modifiers, true),
+                        Event::Text("\t".into()),
+                        tab(modifiers, false),
+                    ]);
+                    harness.step();
+                    let expected = ComposerRole::from(role);
+                    assert_eq!(harness.state().composer().role, expected);
+                    assert!(harness.state().composer().role_locked);
+                    assert!(harness.has_label(&format!(
+                        "送信先: {}  (このスレッドで固定)",
+                        expected.label()
+                    )));
+                    assert!(!harness.has_label("Tab で切替"));
+                    assert_eq!(harness.state().composer().input, draft);
+                    assert_eq!(harness.focused_id(), focus);
+                }
             }
         }
     }
