@@ -32,8 +32,10 @@ pub use origin::{ContentOrigin, derive_content_origin};
 pub use result::ToolResult;
 pub use sanitize::escape_control_markers;
 pub use search::{
-    ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport, SearchError,
-    SearchOptions, SearchProvider, SearchResults, TavilyKeylessProvider, count_search_results,
+    ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport,
+    NetworkGuardResponsesTransport, OpenAiResponsesProvider, OpenAiSearchCredential,
+    ResponsesTransport, SearchError, SearchOptions, SearchProvider, SearchResults,
+    TavilyKeylessProvider, count_search_results,
 };
 pub use tool::{Permissions, Tool, ToolExecutionMode};
 pub use tools::{
