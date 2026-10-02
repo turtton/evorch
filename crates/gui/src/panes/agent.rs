@@ -13,6 +13,7 @@ use crate::theme::widgets::{card, empty_state, pane_root};
 
 mod header;
 use header::{header_strip, status_strip};
+mod sandbox_review;
 mod thinking;
 
 #[derive(Debug, Clone, Copy)]
@@ -260,16 +261,13 @@ fn run_detail_body(
                         call_id,
                     } = entry
                     {
-                        egui::CollapsingHeader::new(text)
-                            .id_salt(("sandbox-review", model.visible_entry_id(entry_idx)))
-                            .show(ui, |ui| {
-                                if let Some(run_id) = run_id {
-                                    ui.label(format!("run_id: {run_id}"));
-                                }
-                                if let Some(call_id) = call_id {
-                                    ui.label(format!("call_id: {call_id}"));
-                                }
-                            });
+                        sandbox_review::show(
+                            ui,
+                            pane_id.with(("sandbox-review", model.visible_entry_id(entry_idx))),
+                            text,
+                            run_id.as_deref(),
+                            call_id.as_deref(),
+                        );
                         return;
                     }
                     if let TranscriptEntry::Reasoning { text, run_id } = entry {
