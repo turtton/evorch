@@ -1,6 +1,45 @@
 use super::*;
 
 #[tokio::test]
+async fn conversation_without_category_binding_uses_worker_model_and_generation() {
+    let (model, requests) = routed_model(Ok(response()), "claude-sonnet-4-5", Some("gpt-5.5"));
+    assert!(!model.agents.worker.categories.contains_key("conversation"));
+    let binding = model
+        .agents
+        .binding_for("worker", Some("conversation"))
+        .unwrap();
+    assert_eq!(binding, model.agents.binding_for("worker", None).unwrap());
+    assert_eq!(
+        model.selected_model(Role::Worker, Some("conversation")),
+        "local/gpt-5.5"
+    );
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(ToolExecutor::new(bus)),
+        Arc::new(model),
+    );
+    let run = runtime
+        .delegate_chat(
+            "conversation",
+            Role::Worker,
+            "hello".into(),
+            crate::RunConfig {
+                conversation: true,
+                category: Some("conversation".into()),
+                ..Default::default()
+            },
+        )
+        .expect("direct chat");
+    assert_eq!(runtime.wait(run).await, Ok(event_bus::AgentRunPhase::Done));
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].model, "gpt-5.5");
+    assert_eq!(recorded[0].temperature, Some(0.25));
+    assert_eq!(recorded[0].max_tokens, Some(321));
+}
+
+#[tokio::test]
 async fn delegated_worker_uses_category_model_when_quick_is_bound() {
     // Given: role と quick を異なるモデルへ結び、実際の run を provider seam で観測する。
     let (mut model, requests) = routed_model(Ok(response()), "claude-sonnet-4-5", Some("gpt-5.5"));

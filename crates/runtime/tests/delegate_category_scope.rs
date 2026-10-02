@@ -211,14 +211,34 @@ async fn delegate_rejects_internal_categories_before_spawning() {
     }
 }
 
+#[tokio::test]
+async fn delegate_rejects_conversation_before_spawning_in_both_modes() {
+    for background in [false, true] {
+        for role in [Some("worker"), None] {
+            delegate_case(
+                "delegate",
+                json!({
+                    "role": role, "category": "conversation",
+                    "background": background, "prompt": "CHILD"
+                }),
+                false,
+            )
+            .await;
+        }
+    }
+}
+
 #[test]
 fn public_reviewer_categories_keep_standard_reviewer_capabilities() {
     let standard = runtime::ExecutionPolicy::for_role(Role::Reviewer);
     for category in ["plan", "tool-execution"] {
-        let policy = standard.clone().for_run_config(&RunConfig {
-            category: Some(category.into()),
-            ..Default::default()
-        });
+        let policy = standard.clone().for_run_config(
+            &RunConfig {
+                category: Some(category.into()),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(policy, standard);
         for tool in [
             "shell",

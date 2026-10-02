@@ -131,7 +131,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     };
     let policy = runtime
         .execution_policy(task.role)
-        .for_run_config(&task.config);
+        .for_run_config(&task.config, task.parent.is_none());
     drop(runtime);
     let sandbox_root = shared.upgrade().and_then(|runtime| {
         runtime

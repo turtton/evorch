@@ -82,6 +82,9 @@ pub struct RunConfig {
     pub delegation_value: Option<String>,
     pub memory: Option<crate::memory::MemoryBoundary>,
     pub learning_internal: bool,
+    /// Trusted runtime authority for direct conversation roots; never accepted by
+    /// model-facing delegation tools. Defaults to false; category alone grants nothing.
+    pub conversation: bool,
     /// Trusted runtime authority; not accepted by model-facing delegation tools.
     pub purpose: RunPurpose,
     pub ownership: Option<crate::ownership::OwnerPermit>,

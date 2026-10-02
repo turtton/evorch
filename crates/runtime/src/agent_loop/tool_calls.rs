@@ -1221,6 +1221,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn visible_tool_specs_exposes_conversation_web_tools_only_when_enabled() {
+        let policy = ExecutionPolicy::for_role(Role::Worker).for_run_config(
+            &crate::RunConfig {
+                conversation: true,
+                category: Some("conversation".into()),
+                ..Default::default()
+            },
+            true,
+        );
+        for enabled in [true, false] {
+            let specs = visible_tool_specs(standard_tool_specs(), &policy, false, false, enabled);
+            let tool_names = names(&specs);
+            assert_eq!(tool_names.contains(&"web_search"), enabled);
+            assert_eq!(tool_names.contains(&"web_fetch"), enabled);
+            for tool in ["read", "write", "edit", "shell", "grep", "git_diff"] {
+                assert!(tool_names.contains(&tool), "worker baseline keeps {tool}");
+            }
+            assert!(!tool_names.contains(&"delegate"));
+        }
+    }
+
     // Given: Worker のポリシー (skill_load は capability 内) と skills 設定あり
     // When: visible_tool_specs を呼ぶ
     // Then: skill_load はモデルに見せる定義に残る

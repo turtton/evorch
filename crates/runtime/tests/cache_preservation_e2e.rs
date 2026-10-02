@@ -142,7 +142,10 @@ summarizer = "structural"
     for tool in extra_tools {
         executor.register(tool).unwrap();
     }
-    let mut prompts = SystemPromptCatalog::builder();
+    let mut prompts = SystemPromptCatalog::builder().category_overlay(
+        "conversation",
+        include_str!("../../config/assets/presets/category-conversation.md"),
+    );
     for role in [
         Role::Orchestrator,
         Role::Explorer,
@@ -435,6 +438,78 @@ async fn ordinary_tool_turns_reuse_all_previous_wire_input() {
         AgentRunPhase::Done
     );
     verify_trace(&harness, run, &events, 0);
+}
+
+#[tokio::test]
+async fn conversation_chat_preserves_overlay_web_schemas_and_wire_prefix_on_followup() {
+    // Only expose the real Web schemas; this offline scenario never invokes the network.
+    let mut harness = harness_with_tools(
+        vec![
+            read_response(0),
+            text_response("waiting"),
+            read_response(2),
+            text_response("done"),
+        ],
+        1_000_000,
+        Arc::new(BulkRead),
+        vec![
+            Arc::new(tools::WebSearch::keyless_default().unwrap()),
+            Arc::new(tools::WebFetch::new().unwrap()),
+        ],
+    );
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "conversation-cache",
+            Role::Worker,
+            "Read and discuss the results".into(),
+            RunConfig {
+                conversation: true,
+                category: Some("conversation".into()),
+                interactive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .send_message(run, "Continue the discussion".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    for request in harness
+        .mock
+        .recorded_requests()
+        .iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+    {
+        let tools = request.body["tools"].as_array().unwrap();
+        for name in ["read", "web_search", "web_fetch"] {
+            assert!(tools.iter().any(|tool| tool["function"]["name"] == name));
+        }
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "delegate")
+        );
+        let system = request.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "system")
+            .unwrap();
+        assert!(
+            system["content"]
+                .as_str()
+                .unwrap()
+                .contains("# Conversation カテゴリオーバーレイ")
+        );
+    }
 }
 
 // Changing execution scope appends observations; it never changes tools or rewrites errors.

@@ -124,7 +124,7 @@ fn learning_tools_require_internal_purpose_and_correct_role() {
             learning_internal: true,
             ..Default::default()
         };
-        let policy = ExecutionPolicy::for_role(role).for_run_config(&config);
+        let policy = ExecutionPolicy::for_role(role).for_run_config(&config, false);
         for tool in [
             "inspect_learning_source",
             "stack_lesson_candidate",
@@ -141,7 +141,7 @@ fn learning_tools_require_internal_purpose_and_correct_role() {
         }
     }
     let config = extract_config();
-    let policy = ExecutionPolicy::for_role(Role::Worker).for_run_config(&config);
+    let policy = ExecutionPolicy::for_role(Role::Worker).for_run_config(&config, false);
     assert_eq!(
         policy
             .filter_tool_specs(specs.clone())
@@ -162,7 +162,7 @@ fn learning_tools_require_internal_purpose_and_correct_role() {
     }
     assert!(
         ExecutionPolicy::for_role(Role::Reviewer)
-            .for_run_config(&config)
+            .for_run_config(&config, false)
             .filter_tool_specs(specs.clone())
             .is_empty()
     );
@@ -170,7 +170,7 @@ fn learning_tools_require_internal_purpose_and_correct_role() {
     untrusted.learning_internal = false;
     assert!(
         ExecutionPolicy::for_role(Role::Worker)
-            .for_run_config(&untrusted)
+            .for_run_config(&untrusted, false)
             .filter_tool_specs(specs)
             .is_empty()
     );
