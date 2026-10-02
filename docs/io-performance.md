@@ -187,3 +187,57 @@ PYTHONDONTWRITEBYTECODE=1 uv run --no-project python -m unittest discover \
 待機、長い streaming、ツール連続実行、複数ウィンドウを同じ時間ずつ測り、
 CPU・各 I/O の毎秒値と保存キュー件数・待ち時間を合わせて確認する。待機で継続した
 書き込みが出た場合は、保存元を特定して更新契機を修正する。
+
+### 2026-10-02: Wayland の再描画待ちによる高 CPU
+
+修正前の実行中 GUI（eframe 0.36.1）では、メイン thread が 1 コア基準で CPU
+99.7%、毎秒約 55.2 万回の read 系 syscall を消費していた。同区間の
+`read_bytes` / `write_bytes` は増加していない。5 秒間の userspace sampling では
+`polling::Poller::wait_impl` が 75.07% を占め、Wayland のイベント待機経路に
+集中していた。フォーカス外で悪化するという観察とも整合するが、累積 195 GiB の
+書き込みをこの待機ループへ帰属させる根拠にはならない。
+
+[eframe の修正 #8398](https://github.com/emilk/egui/pull/8398) は、再描画要求時に
+`ControlFlow::Poll` へ切り替え、予定した描画がなくなると待機へ戻らない不具合を
+修正している。Wayland の compositor から描画通知が来るまでの間にもループが
+回り続けるため、非表示・非アクティブ時の描画抑制で顕在化し得る。
+[0.36.2 の changelog](https://github.com/emilk/egui/blob/0.36.2/crates/eframe/CHANGELOG.md)
+と配布ソースの `src/native/run.rs::check_redraw_requests` で、再描画時の `Poll`
+を除き、必ず `WaitUntil` または `Wait` に戻す修正を確認した。
+workspace の最低バージョンを 0.36.2 に上げ、lockfile も更新した。
+evorch 側の 200 ms ごとの再描画予約は毎秒 5 回の更新契機であり、この待機なしの
+連続ループとは分けて評価する。
+
+依存更新や描画スケジュール変更時は、同じ Wayland 環境・設定・workload で以下を
+確認する。上記は修正前の計測値であり、依存更新だけで改善後の実測値とはしない。
+
+1. 更新した lockfile から起動したバイナリを使い、起動直後の読み込みが落ち着いて
+   から前面・フォーカス外・別ウィンドウで覆った状態をそれぞれ 30〜60 秒測る。
+2. `measure-io.py --tid` でメイン thread の CPU、`syscr`、storage I/O の差分を
+   比較する。CPU が 1 コアを占有し、read 系 syscall が連続増加する再発を検出する。
+3. フォーカスを戻し、入力・再描画・streaming 中の更新が応答することも確認する。
+   CPU だけを下げて画面更新を止める変更は合格にしない。
+4. 通常の offscreen 描画テストだけでは compositor の描画通知の遅延を再現できない。
+   必要な profiler は対象 PID と数秒の採取時間を指定し、全 filesystem の探索や
+   無期限の syscall ログ出力を避ける。
+
+CI の offscreen ジョブは `scripts/check-gui-wayland-idle.sh` も実行する。
+専用の headless Weston と、実際の Workbench を使う `native_qa_window` を起動し、
+初回描画後に専用 compositor だけを停止して描画通知を保留する。5 秒間の
+メイン thread の read syscall を毎秒 5,000 回未満に制限し、compositor を再開した
+後に UI が進むことも確認する。続けて最小化要求後の 8 秒間も同じ予算で検査する。
+最小化完了の通知は検証しないため、主シナリオは最小化の実装に依存しない
+描画通知の保留である。CPU は参考値として保存し、負荷に左右される百分率の
+合否閾値は設けない。プロセスの開始時刻、欠損カウンター、途中終了も検査する。
+
+2026-10-02 に同じ QA コード・専用 Weston 16・ソフトウェア Vulkan で比較した。
+旧版をリンクした positive control は同じゲートの syscall 予算で失敗した。
+
+| eframe | 描画通知を保留した 5 秒間のメイン CPU | read syscall / 秒 | ゲート |
+| --- | ---: | ---: | --- |
+| 0.36.1 | 99.6% | 253,439 | 不合格 |
+| 0.36.2 | 計測上 0% | 0 | 合格 |
+
+0.36.2 は最小化要求後の 8 秒間も CPU・read syscall ともに計測上 0 で、
+描画通知再開後の UI の進行を確認した。CPU の 0 は OS clock tick の計測精度内の
+値であり、全 thread の実行やすべての workload の CPU がゼロという意味ではない。
