@@ -199,6 +199,102 @@ fn first_failure_shows_unavailable_without_fabricated_usage() {
     assert!(harness.query_by_label("Codex · 75% 5h · 40% wk").is_none());
 }
 
+fn codex_config() -> config::Config {
+    let mut config = config::Config::default();
+    for name in ["personal", "work"] {
+        config.providers.insert(
+            name.into(),
+            config::ProviderProfileConfig {
+                provider_type: config::ProviderTypeConfig::OpenAiCodex,
+                credential: config::CredentialRefConfig::Keyring {
+                    service: "evorch".into(),
+                    account: name.into(),
+                },
+                ..Default::default()
+            },
+        );
+    }
+    config
+}
+
+#[test]
+fn multiple_codex_subscriptions_popup_shows_all_profiles_and_windows() {
+    let settings =
+        gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&codex_config());
+    let mut state = QuotaState::default();
+    state.configure_profiles(&settings, None);
+    state
+        .subscriptions
+        .get_mut("personal")
+        .unwrap()
+        .accept(Ok(snapshot(false)));
+    let mut work = snapshot(false);
+    work.quota.plan = Some("pro".into());
+    work.quota.primary.as_mut().unwrap().remaining_percent = 10.0;
+    work.quota.primary.as_mut().unwrap().used_percent = 90.0;
+    work.quota.secondary = None;
+    work.quota.code_review = work.quota.primary.clone();
+    state
+        .subscriptions
+        .get_mut("work")
+        .unwrap()
+        .accept(Ok(work));
+    let mut harness = quota_harness(state);
+    harness.run();
+    assert!(harness.query_by_label("personal · Codex").is_none());
+    harness.get_by_label("Codex · 2 subscriptions").click();
+    harness.run();
+    harness.get_by_label("personal · Codex");
+    harness.get_by_label("work · Codex");
+    harness.get_by_label("Codex · plus · remaining quota");
+    harness.get_by_label("Codex · pro · remaining quota");
+    harness.get_by_label("5h: 75.0% remaining · 25.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label("wk: 40.0% remaining · 60.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label("5h: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label("Code review: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
+}
+
+#[test]
+fn codex_profile_changes_only_clear_affected_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn sandbox::CredentialStore> =
+        Arc::new(sandbox::credential::FileCredentialStore::open(directory.path()).unwrap());
+    let mut config = codex_config();
+    let mut state = QuotaState::default();
+    let configure = |state: &mut QuotaState, config: &config::Config| {
+        state.configure_profiles(
+            &gui::model::provider_settings::ProviderSettingsModel::seed_from_config(config),
+            Some(store.clone()),
+        );
+    };
+    configure(&mut state, &config);
+    for subscription in state.subscriptions.values_mut() {
+        subscription.accept(Ok(snapshot(false)));
+    }
+    configure(&mut state, &config);
+    assert!(
+        state
+            .subscriptions
+            .values()
+            .all(|subscription| subscription.snapshot.is_some())
+    );
+    config.providers.get_mut("personal").unwrap().credential =
+        config::CredentialRefConfig::Keyring {
+            service: "evorch".into(),
+            account: "new-account".into(),
+        };
+    configure(&mut state, &config);
+    assert!(state.subscriptions["personal"].snapshot.is_none());
+    assert!(state.subscriptions["work"].snapshot.is_some());
+    config.providers.remove("personal");
+    configure(&mut state, &config);
+    assert_eq!(state.subscriptions.len(), 1);
+    let mut harness = quota_harness(state);
+    harness.run();
+    harness.get_by_label("Codex · 75% 5h · 40% wk");
+    assert!(harness.query_by_label("Codex · 2 subscriptions").is_none());
+}
+
 #[test]
 fn reauth_required_shows_relogin_message() {
     for cached in [false, true] {

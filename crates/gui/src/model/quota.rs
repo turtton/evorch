@@ -1,4 +1,6 @@
+use crate::model::provider_settings::{ProviderKind, ProviderSettingsModel};
 use providers::provider::codex::quota::{CodexQuotaClient, QuotaConfig, QuotaError, QuotaSnapshot};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -47,6 +49,8 @@ struct Job<T> {
 }
 
 pub struct QuotaState<T: QuotaData = QuotaSnapshot> {
+    /// Per-profile subscriptions. Empty for a standalone/injected quota worker.
+    pub subscriptions: BTreeMap<String, Self>,
     pub snapshot: Option<T>,
     pub error: Option<QuotaError>,
     backend: Option<Box<dyn QuotaBackend<T>>>,
@@ -75,6 +79,7 @@ impl<T: QuotaData> Drop for QuotaState<T> {
 impl<T: QuotaData> QuotaState<T> {
     pub fn with_backend(backend: Box<dyn QuotaBackend<T>>) -> Self {
         Self {
+            subscriptions: BTreeMap::new(),
             backend: Some(backend),
             injected: true,
             snapshot: None,
@@ -102,6 +107,9 @@ impl<T: QuotaData> QuotaState<T> {
     }
 
     pub fn poll(&mut self, now: Instant) {
+        for state in self.subscriptions.values_mut() {
+            state.poll(now);
+        }
         if let Some(job) = &self.job {
             if job.stopping.load(Ordering::Acquire) {
                 if !job.thread.is_finished() {
@@ -149,6 +157,9 @@ impl<T: QuotaData> QuotaState<T> {
     }
 
     pub fn stop(&mut self) {
+        for state in self.subscriptions.values_mut() {
+            state.stop();
+        }
         self.backend = None;
         if let Some(job) = &self.job {
             job.stopping.store(true, Ordering::Release);
@@ -200,6 +211,7 @@ fn start_worker<T: QuotaData>(mut backend: Box<dyn QuotaBackend<T>>) -> Job<T> {
 impl<T: QuotaData> Default for QuotaState<T> {
     fn default() -> Self {
         Self {
+            subscriptions: BTreeMap::new(),
             snapshot: None,
             error: None,
             backend: None,
@@ -213,6 +225,34 @@ impl<T: QuotaData> Default for QuotaState<T> {
 }
 
 impl QuotaState {
+    pub fn configure_profiles(
+        &mut self,
+        settings: &ProviderSettingsModel,
+        store: Option<Arc<dyn sandbox::CredentialStore>>,
+    ) {
+        if self.injected {
+            return;
+        }
+        self.subscriptions.retain(|name, _| {
+            settings.profiles.iter().any(|profile| {
+                profile.name == *name && profile.kind == ProviderKind::CodexSubscription
+            })
+        });
+        for profile in &settings.profiles {
+            if profile.kind != ProviderKind::CodexSubscription {
+                continue;
+            }
+            let account = match settings.credential(&profile.name) {
+                Some(config::CredentialRefConfig::Keyring { account, .. }) => {
+                    Some(account.as_str())
+                }
+                _ => None,
+            };
+            let state = self.subscriptions.entry(profile.name.clone()).or_default();
+            state.configure(account, store.clone());
+        }
+    }
+
     pub fn configure(
         &mut self,
         account: Option<&str>,

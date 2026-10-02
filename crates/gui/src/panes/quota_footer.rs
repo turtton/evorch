@@ -4,8 +4,48 @@ use providers::provider::kimi_quota::KimiQuotaSnapshot;
 
 /// Compact remaining quota, with window duration and reset details on hover.
 pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
+    subscriptions_footer(ui, "Codex", state, render_codex);
+}
+
+pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>) {
+    subscriptions_footer(ui, "Kimi", state, render_kimi);
+}
+
+fn subscriptions_footer<T: QuotaData>(
+    ui: &mut egui::Ui,
+    service: &str,
+    state: &QuotaState<T>,
+    render_quota: fn(&mut egui::Ui, &QuotaState<T>, bool),
+) {
+    if state.subscriptions.len() <= 1 {
+        let state = state.subscriptions.values().next().unwrap_or(state);
+        render_quota(ui, state, false);
+        return;
+    }
+    ui.menu_button(
+        muted(format!(
+            "{service} · {} subscriptions",
+            state.subscriptions.len()
+        )),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    for (index, (profile, state)) in state.subscriptions.iter().enumerate() {
+                        if index > 0 {
+                            ui.separator();
+                        }
+                        ui.label(muted(format!("{profile} · {service}")).strong());
+                        ui.push_id(profile, |ui| render_quota(ui, state, true));
+                    }
+                });
+        },
+    );
+}
+
+fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
     let Some(snapshot) = &state.snapshot else {
-        unavailable(ui, "Codex", state);
+        unavailable(ui, "Codex", state, expanded);
         return;
     };
     let mut details = vec![format!(
@@ -36,6 +76,18 @@ pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
             (duration, window.remaining_percent)
         })
         .collect();
+    if expanded {
+        if let Some(window) = &snapshot.quota.code_review {
+            details.push(format!(
+                "Code review: {:.1}% remaining · {:.1}% used · resets {}",
+                window.remaining_percent,
+                window.used_percent,
+                window.resets_at.format("%Y-%m-%d %H:%M UTC")
+            ));
+        }
+        show_expanded(ui, details, snapshot.stale, &state.error);
+        return;
+    }
     render(
         ui,
         "Codex",
@@ -47,9 +99,9 @@ pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
     );
 }
 
-pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>) {
+fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, expanded: bool) {
     let Some(snapshot) = &state.snapshot else {
-        unavailable(ui, "Kimi", state);
+        unavailable(ui, "Kimi", state, expanded);
         return;
     };
     let mut details = vec!["Kimi · remaining quota".into()];
@@ -68,6 +120,10 @@ pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot
             (window.label.clone(), window.remaining_percent)
         })
         .collect();
+    if expanded {
+        show_expanded(ui, details, snapshot.stale, &state.error);
+        return;
+    }
     render(
         ui,
         "Kimi",
@@ -79,7 +135,7 @@ pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot
     );
 }
 
-fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>) {
+fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>, expanded: bool) {
     let status = if state.in_flight() {
         "loading…"
     } else {
@@ -87,7 +143,28 @@ fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T
     };
     let response = ui.label(muted(format!("{name} · {status}")));
     if let Some(error) = &state.error {
-        response.on_hover_text(error.to_string());
+        if expanded {
+            ui.label(muted(format!("Quota error: {error}")));
+        } else {
+            response.on_hover_text(error.to_string());
+        }
+    }
+}
+
+fn show_expanded(
+    ui: &mut egui::Ui,
+    mut details: Vec<String>,
+    stale: bool,
+    error: &Option<providers::provider::codex::quota::QuotaError>,
+) {
+    if stale {
+        details.push("Stale · quota refresh failed".into());
+    }
+    if let Some(error) = error {
+        details.push(format!("Quota error: {error}"));
+    }
+    for detail in details {
+        ui.label(muted(detail));
     }
 }
 

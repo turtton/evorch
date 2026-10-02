@@ -2,7 +2,7 @@ use super::provider_settings::{ProviderKind, ProviderSettingsModel};
 use super::telemetry::quota::{QuotaBackend, QuotaData, QuotaState};
 use providers::provider::codex::quota::QuotaError;
 use providers::provider::kimi_quota::{KimiQuotaClient, KimiQuotaSnapshot};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 impl QuotaData for KimiQuotaSnapshot {
     fn last_error(&self) -> Option<QuotaError> {
@@ -17,12 +17,12 @@ impl QuotaData for KimiQuotaSnapshot {
 #[derive(Debug, Default)]
 pub struct KimiQuotaState {
     pub state: QuotaState<KimiQuotaSnapshot>,
-    configuration: Option<(String, String, config::CredentialRefConfig)>,
+    configurations: BTreeMap<String, (String, config::CredentialRefConfig)>,
 }
 
 impl KimiQuotaState {
     pub fn configured(&self) -> bool {
-        self.configuration.is_some()
+        !self.configurations.is_empty()
     }
 
     pub fn configure(
@@ -30,41 +30,51 @@ impl KimiQuotaState {
         settings: &ProviderSettingsModel,
         store: Option<Arc<dyn sandbox::CredentialStore>>,
     ) {
-        let next = settings
+        let next: BTreeMap<_, _> = settings
             .profiles
             .iter()
-            .find(|profile| profile.kind == ProviderKind::KimiSubscription)
-            .and_then(|profile| {
+            .filter(|profile| profile.kind == ProviderKind::KimiSubscription)
+            .filter_map(|profile| {
                 Some((
                     profile.name.clone(),
-                    settings.base_url(&profile.name)?.into(),
-                    settings.credential(&profile.name)?.clone(),
+                    (
+                        settings.base_url(&profile.name)?.to_owned(),
+                        settings.credential(&profile.name)?.clone(),
+                    ),
                 ))
-            });
-        if self.configuration == next {
+            })
+            .collect();
+        if self.configurations == next {
             return;
         }
-        self.state = QuotaState::default();
-        self.configuration = next;
-        let Some((_, base_url, credential)) = &self.configuration else {
-            return;
-        };
-        let base_url = if base_url.is_empty() {
-            config::types::provider::KIMI_DEFAULT_BASE_URL
-        } else {
-            base_url
-        };
-        match KimiQuotaClient::new(base_url, Duration::from_secs(10)) {
-            Ok(client) => {
-                self.state = QuotaState::with_backend(Box::new(KimiBackend {
+        self.state
+            .subscriptions
+            .retain(|name, _| next.contains_key(name));
+        for (name, (base_url, credential)) in &next {
+            if self.configurations.get(name) == next.get(name) {
+                continue;
+            }
+            let base_url = if base_url.is_empty() {
+                config::types::provider::KIMI_DEFAULT_BASE_URL
+            } else {
+                base_url
+            };
+            let state = match KimiQuotaClient::new(base_url, Duration::from_secs(10)) {
+                Ok(client) => QuotaState::with_backend(Box::new(KimiBackend {
                     client,
                     credential: credential.clone(),
-                    store,
+                    store: store.clone(),
                     failures: 0,
-                }))
-            }
-            Err(error) => self.state.accept(Err(error)),
+                })),
+                Err(error) => {
+                    let mut state = QuotaState::default();
+                    state.accept(Err(error));
+                    state
+                }
+            };
+            self.state.subscriptions.insert(name.clone(), state);
         }
+        self.configurations = next;
     }
 }
 

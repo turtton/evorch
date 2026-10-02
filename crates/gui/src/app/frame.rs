@@ -71,21 +71,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
         self.telemetry.refresh_costs(&self.provider_settings);
-        let account = self
-            .provider_settings
-            .profiles
-            .iter()
-            .find(|profile| {
-                profile.kind == crate::model::provider_settings::ProviderKind::CodexSubscription
-            })
-            .and_then(|profile| self.provider_settings.credential(&profile.name))
-            .and_then(|credential| match credential {
-                config::CredentialRefConfig::Keyring { account, .. } => Some(account.as_str()),
-                config::CredentialRefConfig::Env { .. } => None,
-            });
         self.telemetry
             .quota
-            .configure(account, self.credential_store.clone());
+            .configure_profiles(&self.provider_settings, self.credential_store.clone());
         self.telemetry.quota.poll(std::time::Instant::now());
         self.telemetry
             .kimi_quota
