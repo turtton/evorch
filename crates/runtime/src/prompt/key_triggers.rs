@@ -72,7 +72,7 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
         .collect()
 }
 
-/// Role の担当目的だけを示す。ツールの仕様と可用性は各 ToolSpec に任せる。
+/// Role の用途・起用条件を示す。ツールの仕様と可用性は各 ToolSpec に任せる。
 fn role_purpose(role: agents::Role) -> &'static str {
     match role {
         agents::Role::Orchestrator => "目的・優先順位・依存関係を管理する",
@@ -80,7 +80,9 @@ fn role_purpose(role: agents::Role) -> &'static str {
         agents::Role::Worker => "具体的な実装と検証を担当する",
         agents::Role::Reviewer => "実装結果を独立に検証する",
         agents::Role::WebResearcher => "外部情報を調査して出典を報告する",
-        agents::Role::Planner => "依存順序と実行計画を組み立てる",
+        agents::Role::Planner => {
+            "複数担当にまたがる実装で、依存順序・担当境界・統合時の受け入れ条件の設計が必要なときに使う。Worker からの escalate 後も、引き継ぎの計画案を検証・補完して実装可能な詳細計画にする。範囲と完了条件が明確な局所修正・定型作業や、権限・環境問題だけの昇格では省略できる"
+        }
         agents::Role::Oracle => "難しい設計判断を分析する",
         agents::Role::MultimodalLooker => "画像や文書の内容を解釈する",
     }

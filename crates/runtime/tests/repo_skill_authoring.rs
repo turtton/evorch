@@ -81,3 +81,40 @@ fn source_publishes_project_metadata_without_loading_guide_body() {
     let (_, body) = split_frontmatter(GUIDE).unwrap();
     assert_eq!(snapshot.registry.load_body(NAME).unwrap(), body);
 }
+
+#[test]
+fn test_policy_loads_from_standard_repo_agents_scope() {
+    // Given: the policy installed in the repository's standard .agents scope.
+    let root = repo_root();
+    let name = "test-policy";
+    let text = std::fs::read_to_string(root.join(".agents/skills/test-policy/SKILL.md")).unwrap();
+    let metadata = parse_and_validate(&text, name).unwrap();
+    let dirs = runtime::skill::default_skill_dirs(Some(&root))
+        .into_iter()
+        .filter(|(scope, _)| matches!(scope, SkillScope::Repo | SkillScope::RepoAgents))
+        .collect();
+    // When: production catalog construction discovers the repository scopes.
+    let source = SkillCatalogSource::new(
+        config::Config::default(),
+        None,
+        Vec::new(),
+        dirs,
+        Arc::new(EventBus::new(64)),
+    );
+    let snapshot = source.snapshot();
+    // Then: metadata is advertised, while the body is loaded only on request.
+    assert_eq!(
+        snapshot.registry.get(name).unwrap().scope,
+        SkillScope::RepoAgents
+    );
+    let prompt = snapshot
+        .catalog
+        .unwrap()
+        .system_prompt_for(Role::Orchestrator, None, "mock-model")
+        .unwrap();
+    assert!(prompt.contains(&format!("- {name}: {}", metadata.description)));
+    let (_, body) = split_frontmatter(&text).unwrap();
+    assert!(!prompt.contains(body));
+    assert_eq!(snapshot.registry.load_body(name).unwrap(), body);
+    assert!(discover_with_builtin(&[]).get(name).is_none());
+}
