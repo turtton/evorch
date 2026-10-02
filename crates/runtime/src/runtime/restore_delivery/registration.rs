@@ -24,6 +24,7 @@ impl AgentRuntime {
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(restored.messages.len() + 1);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
+        let user_inbox = Arc::new(UserInbox::default());
         let (cancel_tx, cancel_rx) = watch::channel(RunInterrupt::None);
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
@@ -35,6 +36,7 @@ impl AgentRuntime {
             phase_tx: phase_tx.clone(),
             message_count_tx,
             inbox_rx,
+            user_inbox: Arc::clone(&user_inbox),
             cancel_rx,
             mailbox_version_rx: mailbox.subscribe_version(),
             compact_rx,
@@ -88,6 +90,7 @@ impl AgentRuntime {
                 phase_rx,
                 message_count_rx,
                 inbox_tx,
+                user_inbox,
                 cancel_tx,
                 compact_tx,
                 model_preference_tx,

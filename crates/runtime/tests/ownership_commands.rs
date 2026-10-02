@@ -55,6 +55,10 @@ async fn run_commands_reject_previous_generation() {
         runtime.set_model_preference(run, None),
         Err(RuntimeError::StaleOwnership { .. })
     ));
+    assert!(matches!(
+        runtime.deliver_follow_ups_next_turn(run),
+        Err(RuntimeError::StaleOwnership { .. })
+    ));
     assert!(runtime.restore_snapshot(run, false).await.is_err());
     runtime.cancel(run).expect("cancellation remains available");
 }

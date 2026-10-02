@@ -21,6 +21,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         });
     }
 
+    pub fn deliver_follow_ups_next_turn(&mut self) {
+        let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
+            return;
+        };
+        self.submit_command(WorkbenchCommand::DeliverFollowUpsNextTurn {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     /// Explicit discard path; never used by Stop or Escape.
     pub fn cancel_chat(&mut self) {
         let Some(thread_id) = self.sidebar.active_thread.as_ref() else {
