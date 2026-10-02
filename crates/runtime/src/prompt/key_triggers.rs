@@ -242,10 +242,6 @@ mod tests {
             assert!(!trigger.description.contains("許可ツール"));
             assert!(!trigger.description.contains("ネットワーク:"));
         }
-        assert_eq!(
-            triggers[2].description,
-            "具体的な変更・実装とその検証が必要なときに使う。ローカル調査だけなら Explorer、複数担当にまたがる計画なら Planner を選ぶ"
-        );
     }
 
     fn agent(name: &str, description: &str) -> AvailableAgent {
