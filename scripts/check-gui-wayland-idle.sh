@@ -2,7 +2,7 @@
 # Native Wayland redraw-wait regression, isolated from the caller's desktop.
 # Build first: cargo build -p gui --bin native_qa_window
 # Usage: scripts/check-gui-wayland-idle.sh [OUTPUT_DIR]
-# Dependencies: Weston (headless + desktop shell), jq, awk, coreutils, Linux /proc.
+# Dependencies: Weston (headless + desktop/kiosk shells), jq, awk, coreutils, Linux /proc.
 set -Eeuo pipefail
 
 fail() { printf 'Wayland idle QA: %s\n' "$*" >&2; exit 1; }
@@ -86,14 +86,18 @@ qa_env=(env -i "PATH=$PATH" "LANG=C.UTF-8" "LC_ALL=C.UTF-8"
 for variable in LD_LIBRARY_PATH LIBGL_DRIVERS_PATH VK_ICD_FILENAMES VK_DRIVER_FILES FONTCONFIG_FILE FONTCONFIG_PATH; do
     if [[ -n ${!variable:-} ]]; then qa_env+=("$variable=${!variable}"); fi
 done
-# Weston 13 (Ubuntu 24.04) and 16 both support these options. Keep the default
-# desktop shell: unlike kiosk shells, it implements xdg_toplevel.set_minimized.
 # A private headless pixman compositor neither opens a host display nor uses DRM.
+# Use a fake seat with the desktop shell when supported (Weston 16). Weston 13
+# lacks it; Ubuntu 24.04's 13.0.0 headless desktop shell crashes on the first GUI
+# frame, so use the kiosk shell for this compatibility path. Kiosk does not implement minimization;
+# the callback-withheld scenario below is independent of that shell behavior.
 timeout --kill-after=2s 5s "${qa_env[@]}" weston --help > "$out/weston-help.txt" 2>&1
 weston_args=(--backend=headless --renderer=pixman --no-config --idle-time=0
     --socket=evorch-qa --width=1280 --height=720)
 if awk '/--fake-seat/ { found=1 } END { exit !found }' "$out/weston-help.txt"; then
-    weston_args+=(--fake-seat)
+    weston_args+=(--shell=desktop-shell.so --fake-seat)
+else
+    weston_args+=(--shell=kiosk-shell.so)
 fi
 (
     cd "$qa_tmp/work"
@@ -230,7 +234,8 @@ weston_stopped=false
 
 # The timer starts at the first redraw. Reaching the 2-second minimization
 # action after CONT demonstrates that GUI redraws resumed after the withheld
-# callback, then also covers actual compositor minimization as a second case.
+# callback. The second case measures after the minimize request, without assuming
+# the compositor applied it: the kiosk shell leaves the window visible.
 for ((attempt=0; attempt<150; attempt++)); do
     kill -0 "$app_timeout_pid" 2>/dev/null || fail 'GUI exited after compositor resume.'
     if awk '$0 == "native_qa_window: minimize-requested" { minimized=1 }
@@ -245,9 +250,9 @@ awk '
 ' "$out/app.log" || fail 'GUI did not resume and request minimization exactly once within 15 seconds.'
 report_measurement callback-withheld 4
 sleep 2
-snapshot minimized-before
+snapshot minimize-requested-before
 sleep 8
-snapshot minimized-after
+snapshot minimize-requested-after
 [[ $(process_start "$weston_pid") == "$weston_start" ]] || fail 'Weston exited during measurement.'
-report_measurement minimized 7
-printf 'PASS: Wayland callback wait and minimized main-thread syscall budgets. Evidence: %s\n' "$out"
+report_measurement minimize-requested 7
+printf 'PASS: Wayland callback wait and post-minimize-request main-thread syscall budgets. Evidence: %s\n' "$out"

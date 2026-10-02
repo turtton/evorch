@@ -222,12 +222,17 @@ evorch 側の 200 ms ごとの再描画予約は毎秒 5 回の更新契機で�
    無期限の syscall ログ出力を避ける。
 
 CI の offscreen ジョブは `scripts/check-gui-wayland-idle.sh` も実行する。
-専用の headless Weston と、実際の Workbench を使う `native_qa_window` を起動し、
+専用の headless Weston と、実際の Workbench を使う `native_qa_window` を起動する。
+`--fake-seat` を提供する Weston では desktop shell と組み合わせて使う。
+このオプションがない Ubuntu 24.04 の Weston 13.0.0 では、headless desktop shell が
+初回描画時にクラッシュするため kiosk shell を使う。kiosk shell は最小化を実装せず、
+最小化要求後もウィンドウを表示する。
 初回描画後に専用 compositor だけを停止して描画通知を保留する。5 秒間の
 メイン thread の read syscall を毎秒 5,000 回未満に制限し、compositor を再開した
 後に UI が進むことも確認する。続けて最小化要求後の 8 秒間も同じ予算で検査する。
-最小化完了の通知は検証しないため、主シナリオは最小化の実装に依存しない
-描画通知の保留である。CPU は参考値として保存し、負荷に左右される百分率の
+後半のシナリオ名は `minimize-requested` とし、最小化完了の通知は検証しない。
+主シナリオは shell の最小化実装に依存しない描画通知の保留である。
+CPU は参考値として保存し、負荷に左右される百分率の
 合否閾値は設けない。プロセスの開始時刻、欠損カウンター、途中終了も検査する。
 
 2026-10-02 に同じ QA コード・専用 Weston 16・ソフトウェア Vulkan で比較した。
@@ -241,3 +246,8 @@ CI の offscreen ジョブは `scripts/check-gui-wayland-idle.sh` も実行す�
 0.36.2 は最小化要求後の 8 秒間も CPU・read syscall ともに計測上 0 で、
 描画通知再開後の UI の進行を確認した。CPU の 0 は OS clock tick の計測精度内の
 値であり、全 thread の実行やすべての workload の CPU がゼロという意味ではない。
+
+Ubuntu 24.04 の Weston 13.0.0 + kiosk shell でも同じゲートを比較した。
+描画通知保留中は 0.36.1 が CPU 97.4%・read syscall 毎秒 217,942 回で不合格、
+0.36.2 が計測上 0%・0 回で合格だった。後半の最小化要求後は表示が続くため、
+0.36.2 でも CPU 10.1%・read syscall 毎秒 198 回を計測した。
