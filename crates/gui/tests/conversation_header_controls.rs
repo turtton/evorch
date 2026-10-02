@@ -63,13 +63,18 @@ fn owner_controls_stay_above_conversation_while_settings_and_quota_stay_in_foote
     host.start("thread").unwrap();
     let owner = host.attach("thread").unwrap();
     let label = format!(
-        "Owner {} · generation {} · {:?} · write",
-        owner.lease.owner_id, owner.lease.generation, owner.state
+        "Owner {}… · generation {} · {:?} ·",
+        owner.lease.owner_id.chars().take(5).collect::<String>(),
+        owner.lease.generation,
+        owner.state
     );
     let mut workbench = HeadlessWorkbench::new(state(Some(host), dir.path()), [1280.0, 720.0]);
     workbench.run();
 
     let owner = workbench.label_rects(&label)[0];
+    let access = workbench.label_rects("write")[0];
+    assert!(owner.right() < access.left());
+    assert!((owner.center().y - access.center().y).abs() < owner.height());
     let title = workbench.label_rects("Thread: Header controls")[0];
     let attach = workbench.label_rects("Attach (read-only)")[0];
     let settings = workbench.label_rects("⚙")[0];
