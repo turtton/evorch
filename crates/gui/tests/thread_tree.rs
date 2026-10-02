@@ -68,7 +68,9 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     let mut gui = fixture(temp.path());
     gui.run();
     assert_eq!(gui.count_labels("Archive"), 1);
-    assert_eq!(gui.count_labels("Pause"), 3);
+    assert_eq!(gui.count_labels("Fork"), 3);
+    assert!(!gui.has_label("Pause"));
+    assert!(!gui.has_label("Resume"));
     assert!(gui.has_label("↳ Child"));
     assert!(gui.has_label("↳ Grandchild"));
     let parent_toggle = gui.label_rects("Collapse children of root")[0];
@@ -133,7 +135,9 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     assert!(gui.has_label("↳ Child"));
     assert!(!gui.has_label("↳ Grandchild"));
     assert_eq!(gui.count_labels("Archive"), 1);
-    assert_eq!(gui.count_labels("Pause"), 2);
+    assert_eq!(gui.count_labels("Fork"), 2);
+    assert!(!gui.has_label("Pause"));
+    assert!(!gui.has_label("Resume"));
     assert!(gui.has_label("★"));
     let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
     assert!(saved.threads.iter().all(|thread| !thread.archived));

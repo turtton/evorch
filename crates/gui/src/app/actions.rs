@@ -110,7 +110,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut fork = workspace_ui::ThreadRecord {
             archived: original.archived,
             pinned: original.pinned,
-            paused: original.paused,
             model_preference: original.model_preference,
             ..workspace_ui::ThreadRecord::new(id.clone(), original.project_id, original.title)
         };
@@ -192,18 +191,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(ThreadError::UnknownThread)?
             .pinned;
         self.sidebar.set_pinned(&thread_id, !pinned)?;
-        Ok(())
-    }
-
-    pub fn toggle_pause(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
-        let paused = self
-            .sidebar
-            .threads
-            .iter()
-            .find(|thread| thread.id == thread_id)
-            .ok_or(ThreadError::UnknownThread)?
-            .paused;
-        self.sidebar.set_paused(&thread_id, !paused)?;
         Ok(())
     }
 

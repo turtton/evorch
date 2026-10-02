@@ -66,7 +66,6 @@ pub fn demo_sidebar(root: &Path) -> Result<SidebarState, FixtureError> {
     sidebar.create_thread(thread_3.clone(), evorch_id, "Fix flaky offscreen test")?;
     sidebar.create_thread(ThreadId::new("thread-4"), intent_cli_id, "Queue seed CLI")?;
     sidebar.set_pinned(&thread_2, true)?;
-    sidebar.set_paused(&thread_3, true)?;
     sidebar.switch_thread(&thread_1)?;
     Ok(sidebar)
 }

@@ -26,7 +26,6 @@ impl fmt::Display for ThreadId {
 #[serde(rename_all = "snake_case")]
 pub enum ThreadState {
     Active,
-    Paused,
     Stopped,
     Running,
     Waiting,
@@ -71,7 +70,6 @@ pub struct ThreadRecord {
     pub archived: bool,
     #[serde(default)]
     pub created_at: i64,
-    pub paused: bool,
     pub run_ids: Vec<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
@@ -102,7 +100,6 @@ impl ThreadRecord {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
                 .unwrap_or_default(),
-            paused: false,
             run_ids: Vec::new(),
             branch: None,
             worktree_path: None,
@@ -141,9 +138,6 @@ impl ThreadRecord {
     }
 
     pub fn state(&self, phases: &BTreeMap<String, ThreadRunPhase>) -> ThreadState {
-        if self.paused {
-            return ThreadState::Paused;
-        }
         let phases = self.run_ids.iter().filter_map(|run_id| phases.get(run_id));
         let collected: Vec<&ThreadRunPhase> = phases.collect();
         if collected

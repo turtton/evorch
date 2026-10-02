@@ -262,13 +262,13 @@ fn thread_state_follows_lifecycle_events() {
             "missing {badge} status"
         );
     }
+    // Then: thread actions cannot override the runtime status with a display-only pause.
     harness.click_label("⋯");
     harness.run();
-    harness.click_label("Pause");
-    harness.run();
-
-    // Then: operator pause overrides the runtime phase badge
-    assert!(harness.has_label("Thread status: Paused"));
+    assert!(harness.has_label("Fork"));
+    assert!(!harness.has_label("Pause"));
+    assert!(!harness.has_label("Resume"));
+    assert!(harness.has_label("Thread status: Error"));
 }
 
 #[test]
@@ -364,8 +364,8 @@ fn sidebar_thread_rows_expose_accessible_status_without_redundant_text() {
     // Then: status dots expose state to assistive technology, not redundant text
     assert!(harness.has_label("Thread status: Running"));
     assert!(!harness.has_label("Running"));
-    assert!(!harness.has_label("Paused"));
-    assert!(harness.has_label("Thread status: Paused"));
+    assert!(!harness.has_label("Active"));
+    assert!(harness.has_label("Thread status: Active"));
 }
 
 #[test]
