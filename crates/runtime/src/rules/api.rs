@@ -101,8 +101,20 @@ fn user_startup_rules(source: &RulesSource, markers: &mut Vec<String>) -> Vec<Re
 
 fn user_agents_rule(source: &RulesSource, markers: &mut Vec<String>) -> Option<ResolvedRule> {
     let path = source.user_agents_md.as_deref()?;
-    if !path.is_file() {
-        return None;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(source) => {
+            disable(
+                &RulesError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                },
+                markers,
+            );
+            return None;
+        }
     }
     let directory = path.parent()?;
     match source_for_path(directory, path, RuleKind::AgentsMd, RuleScope::User, 0)

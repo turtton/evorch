@@ -264,6 +264,27 @@ mod tests {
         assert!(snapshot.contains("valid-user-rule"));
     }
 
+    // Given: AGENTS.md が自身を指す symlink / When: startup / Then: ELOOP を disabled marker にする
+    #[cfg(unix)]
+    #[test]
+    fn user_agents_symlink_loop_emits_disabled_marker() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let agents = tmp.path().join("AGENTS.md");
+        std::os::unix::fs::symlink(&agents, &agents).expect("自己参照 symlink");
+        let source = RulesSource::new(
+            ProjectTrust::Unapproved,
+            settings(),
+            None,
+            None,
+            Some(agents),
+        );
+
+        let snapshot = startup_snapshot(&source, None, None, 0).expect("disabled marker がある");
+
+        assert!(snapshot.contains("[rules disabled:"));
+        assert!(snapshot.contains("AGENTS.md"));
+    }
+
     // Given: user config 外を指す symlink / When: canonical path を検証 / Then: 本文を出さず disabled marker
     #[cfg(unix)]
     #[test]
