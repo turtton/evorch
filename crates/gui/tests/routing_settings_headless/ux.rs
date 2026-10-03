@@ -28,6 +28,7 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     harness.run();
     harness.click_label("Save routing");
     harness.step();
+    assert!(!harness.state().routing_settings().open);
     finish(&mut harness);
     // Then: return to a fresh role draft with a resolved preview and no warning.
     assert_eq!(harness.state().routing_settings().validation_error, None);
@@ -48,6 +49,41 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     assert_eq!(
         runtime::AgentModel::selected_model(runtime.as_ref(), runtime::Role::Explorer, None),
         "accelerated/fast"
+    );
+}
+
+#[test]
+fn routing_invalid_save_keeps_modal_and_draft_open() {
+    // Given: an invalid candidate in a role-originated draft.
+    let temp = tempfile::tempdir().expect("temp");
+    let (mut state, _) = fixture(temp.path());
+    state.open_routing_settings_prefill("draft-route");
+    state
+        .routing_settings_mut()
+        .routes
+        .get_mut("draft-route")
+        .unwrap()[0]
+        .profile = "missing-profile".into();
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    // When: validation prevents the save from starting.
+    harness.click_label("Save routing");
+    harness.run();
+    // Then: the draft and its error stay visible, without returning to roles.
+    assert!(harness.state().routing_settings().open);
+    assert!(harness.state().routing_settings().origin_role_settings);
+    assert!(!harness.state().routing_settings().is_saving());
+    assert!(!harness.state().role_settings().open);
+    assert!(
+        harness
+            .state()
+            .routing_settings()
+            .validation_error
+            .is_some()
+    );
+    assert_eq!(
+        harness.state().routing_settings().routes["draft-route"][0].profile,
+        "missing-profile"
     );
 }
 
@@ -74,7 +110,7 @@ fn routing_registered_routes_start_collapsed() {
 }
 
 #[test]
-fn routing_expanded_route_can_edit_save_and_stays_expanded() {
+fn routing_expanded_route_can_edit_save_and_close() {
     // Given: a registered route.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
@@ -97,9 +133,10 @@ fn routing_expanded_route_can_edit_save_and_stays_expanded() {
     harness.run();
     harness.click_label("Save routing");
     harness.step();
+    assert!(!harness.state().routing_settings().open);
     finish(&mut harness);
-    // Then: the normal save remains in routing and preserves the expanded editor.
-    assert!(harness.state().routing_settings().open);
+    // Then: saving closes routing and does not reopen either settings modal on success.
+    assert!(!harness.state().routing_settings().open);
     assert!(!harness.state().role_settings().open);
     assert_eq!(
         harness.state().routing_settings().routes["registered"][0]
@@ -107,7 +144,28 @@ fn routing_expanded_route_can_edit_save_and_stays_expanded() {
             .as_deref(),
         Some("fast")
     );
-    assert!(harness.has_label("registered candidate 1 model override"));
+    assert!(!harness.has_label("registered candidate 1 model override"));
+    assert!(
+        harness
+            .state()
+            .routing_settings()
+            .expanded
+            .contains("registered")
+    );
+    assert_eq!(
+        config::Config::load(&config::LoadOptions {
+            project_dir: Some(temp.path().into()),
+            user_config_dir: Some(temp.path().join("user")),
+            read_env: false,
+            ..Default::default()
+        })
+        .expect("saved config")
+        .routing
+        .routes["registered"][0]
+            .model
+            .as_deref(),
+        Some("fast")
+    );
 }
 
 fn model_fixture() -> HeadlessWorkbench<DemoSource> {

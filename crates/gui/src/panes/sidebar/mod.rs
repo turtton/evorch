@@ -7,7 +7,7 @@ use crate::theme::tokens::palette;
 use crate::theme::widgets::{pane_root, surface_frame};
 
 mod projects;
-mod threads;
+pub(crate) mod threads;
 
 const UI_STATE_ID: &str = "sidebar-ui-state";
 

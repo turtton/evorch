@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, OrchestratorEvent, ToolEvent};
-use workspace_ui::ThreadRunPhase;
+use workspace_ui::{ThreadId, ThreadRunPhase};
 
 use crate::app::{AttentionAck, DisplayRevision};
 
@@ -11,10 +11,20 @@ pub const MAX_NOTIFICATIONS: usize = 64;
 pub enum NotificationKind {
     RunCompleted,
     RunStopped,
-    QuestionPending { question_id: String },
-    RunFailed { reason: Option<String> },
-    ApprovalPending { tool_name: String, call_id: String },
-    MergeApprovalPending { goal_id: String },
+    QuestionPending {
+        question_id: String,
+        thread_id: Option<ThreadId>,
+    },
+    RunFailed {
+        reason: Option<String>,
+    },
+    ApprovalPending {
+        tool_name: String,
+        call_id: String,
+    },
+    MergeApprovalPending {
+        goal_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,11 +46,20 @@ impl NotificationsModel {
     pub fn apply_event(&mut self, event: &Event, resolve_run: impl Fn(&str) -> Option<String>) {
         let (kind, run_id, summary) = match &event.kind {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
-                if question.answer.is_none() =>
+                if question.answer.is_none() && question.run_id == question.root_run_id =>
             {
+                // Durable chat identity survives a missing run-start event. Other roots
+                // can still be resolved through their run id when the button is clicked.
+                let thread_id = question
+                    .root_name
+                    .strip_prefix("chat:Worker:")
+                    .or_else(|| question.root_name.strip_prefix("chat:Orchestrator:"))
+                    .filter(|thread| !thread.is_empty())
+                    .map(ThreadId::new);
                 (
                     NotificationKind::QuestionPending {
                         question_id: question.id.clone(),
+                        thread_id,
                     },
                     Some(question.root_run_id.clone()),
                     format!("Question: {}", question.title),
@@ -192,6 +211,70 @@ mod tests {
         let mut model = NotificationsModel::default();
         model.apply_event(&transition(AgentRunPhase::Done, None), |_| None);
         model
+    }
+
+    #[test]
+    fn question_notification_retains_durable_thread_and_root_run() {
+        for (root_name, thread_id) in [
+            ("chat:Worker:thread-one", Some("thread-one")),
+            ("chat:Orchestrator:thread:two", Some("thread:two")),
+            ("chat:Worker:", None),
+            ("chat:Explorer:thread-one", None),
+            ("goal-one", None),
+        ] {
+            // Given: a root question without a run-start event or a call resolver.
+            let question = event_bus::UserQuestion {
+                id: "question-one".into(),
+                run_id: "root-run".into(),
+                root_run_id: "root-run".into(),
+                root_name: root_name.into(),
+                title: "Which format?".into(),
+                options: vec![],
+                blocking: true,
+                answer: None,
+            };
+            let mut model = NotificationsModel::default();
+            // When: the pending question arrives.
+            model.apply_event(
+                &Event::new(ToolEvent::UserQuestionUpdated { question }),
+                |_| None,
+            );
+            // Then: only exact chat identities produce a thread target, not run ids.
+            let item = model.items().next().unwrap();
+            assert_eq!(
+                item.kind,
+                NotificationKind::QuestionPending {
+                    question_id: "question-one".into(),
+                    thread_id: thread_id.map(ThreadId::new),
+                }
+            );
+            assert_eq!(item.run_id.as_deref(), Some("root-run"));
+            assert_eq!(item.summary, "Question: Which format?");
+            assert!(model.is_unread(item.id));
+        }
+    }
+
+    #[test]
+    fn answered_and_orchestrator_addressed_questions_push_nothing() {
+        for (run_id, answer) in [("root-run", Some("JSON".into())), ("child-run", None)] {
+            let question = event_bus::UserQuestion {
+                id: "question-one".into(),
+                run_id: run_id.into(),
+                root_run_id: "root-run".into(),
+                root_name: "chat:Worker:thread-one".into(),
+                title: "Which format?".into(),
+                options: vec![],
+                blocking: true,
+                answer,
+            };
+            let mut model = NotificationsModel::default();
+            model.apply_event(
+                &Event::new(ToolEvent::UserQuestionUpdated { question }),
+                |_| None,
+            );
+            assert_eq!(model.items().count(), 0);
+            assert_eq!(model.unread_count(), 0);
+        }
     }
 
     #[test]

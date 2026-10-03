@@ -14,6 +14,15 @@ use crate::panes::{
 };
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    fn open_notification_thread(&mut self, ctx: &egui::Context, thread_id: workspace_ui::ThreadId) {
+        let result = self.switch_thread(thread_id);
+        if result.is_ok() {
+            self.return_to_thread();
+            self.focus_panel("agent-main");
+        }
+        set_sidebar_error(ctx, result.err().map(|error| error.to_string()));
+    }
+
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll_role_save();
         self.refresh_image_capability();
@@ -196,14 +205,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match action {
                 NotificationsAction::OpenRun(run_id) => self.open_agent_pane(&run_id),
                 NotificationsAction::OpenConversation(run_id) => {
-                    if let Some(thread_id) = self.thread_for_run(&run_id)
-                        && self
-                            .switch_thread(workspace_ui::ThreadId::new(thread_id))
-                            .is_ok()
-                    {
-                        self.return_to_thread();
-                        self.focus_panel("agent-main");
+                    if let Some(thread_id) = self.thread_for_run(&run_id) {
+                        self.open_notification_thread(&ctx, workspace_ui::ThreadId::new(thread_id));
                     }
+                }
+                NotificationsAction::OpenThread(thread_id) => {
+                    self.open_notification_thread(&ctx, thread_id);
                 }
             }
         }

@@ -257,9 +257,10 @@ fn thread_state_follows_lifecycle_events() {
             .recv_timeout(Duration::from_secs(1))
             .expect("state repaint");
         harness.run();
-        assert!(
+        assert_eq!(
             harness.has_label(&format!("Thread status: {badge}")),
-            "missing {badge} status"
+            matches!(to, AgentRunPhase::Running | AgentRunPhase::Error),
+            "unexpected {badge} indicator visibility"
         );
     }
     // Then: thread actions cannot override the runtime status with a display-only pause.
@@ -361,11 +362,11 @@ fn sidebar_thread_rows_expose_accessible_status_without_redundant_text() {
     harness.state_mut().apply_events(demo_events());
     harness.run();
 
-    // Then: status dots expose state to assistive technology, not redundant text
+    // Then: active icons are accessible without redundant text; idle rows stay quiet.
     assert!(harness.has_label("Thread status: Running"));
     assert!(!harness.has_label("Running"));
     assert!(!harness.has_label("Active"));
-    assert!(harness.has_label("Thread status: Active"));
+    assert!(!harness.has_label("Thread status: Active"));
 }
 
 #[test]

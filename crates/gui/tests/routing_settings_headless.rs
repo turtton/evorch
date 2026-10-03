@@ -241,7 +241,9 @@ fn menu_add_reorder_save_rebuilds_runtime() {
     assert_eq!(saved.routing.routes["worker"][0].profile, "local");
     assert_eq!(saved.routing.routes["worker"][1].profile, "accelerated");
     assert_eq!(model.selected_model(Role::Worker, None), "local/base");
-    assert!(harness.state().routing_settings().open);
+    // A successful save closes the routing settings rather than reopening them.
+    assert!(!harness.state().routing_settings().open);
+    assert!(!harness.has_label("Save routing"));
 }
 
 #[test]

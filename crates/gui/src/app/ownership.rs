@@ -69,12 +69,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_provider_settings();
                     ui.close();
                 }
-                if ui.button("Agent roles").clicked() {
-                    self.open_role_settings();
-                    ui.close();
-                }
                 if ui.button("Routing").clicked() {
                     self.open_routing_settings();
+                    ui.close();
+                }
+                if ui.button("Agent roles").clicked() {
+                    self.open_role_settings();
                     ui.close();
                 }
             })

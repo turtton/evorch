@@ -83,6 +83,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.routing_settings.validation_error = None;
         self.routing_settings.save_rx = Some(rx);
+        self.routing_settings.open = false;
         std::thread::spawn(move || {
             let saved = if renames.is_empty() {
                 path.parent()
@@ -207,17 +208,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .collect();
                 self.routing_settings = RoutingSettingsModel::seed_from_config(&config);
                 self.routing_settings.expanded = expanded;
-                self.routing_settings.open = true;
                 if return_to_roles {
                     self.open_role_settings();
                 }
                 self.push_notice("Routing settings updated");
             }
-            Ok(Err(error)) => self.routing_settings.validation_error = Some(error),
+            Ok(Err(error)) => {
+                self.routing_settings.validation_error = Some(error);
+                self.routing_settings.open = true;
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => self.routing_settings.save_rx = Some(rx),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.routing_settings.validation_error =
                     Some("Routing settings worker stopped without a result".into());
+                self.routing_settings.open = true;
             }
         }
     }

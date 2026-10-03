@@ -1,6 +1,6 @@
 use egui::{Color32, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
-use event_bus::{AgentRunPhase, Event, LifecycleEvent};
+use event_bus::{AgentRunPhase, Event, LifecycleEvent, ToolEvent, UserQuestion};
 use gui::{app::WorkbenchState, model::notifications::NotificationsModel, theme::tokens::palette};
 use workspace_ui::PanelId;
 
@@ -28,6 +28,126 @@ fn panel_harness(active: &str) -> Harness<'static, WorkbenchState<gui::fixture::
             |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
             state,
         )
+}
+
+#[test]
+fn pending_question_button_emits_thread_action_with_run_fallback() {
+    use gui::panes::notifications::{NotificationsAction, notifications_pane};
+    for (root_name, expected) in [
+        (
+            "chat:Worker:question-thread",
+            NotificationsAction::OpenThread(workspace_ui::ThreadId::new("question-thread")),
+        ),
+        (
+            "legacy-root",
+            NotificationsAction::OpenConversation("question-run".into()),
+        ),
+    ] {
+        // Given: a pending user question with a distinct thread and run identity.
+        let mut model = NotificationsModel::default();
+        model.apply_event(
+            &Event::new(ToolEvent::UserQuestionUpdated {
+                question: UserQuestion {
+                    id: "question-one".into(),
+                    run_id: "question-run".into(),
+                    root_run_id: "question-run".into(),
+                    root_name: root_name.into(),
+                    title: "Which format?".into(),
+                    options: vec![],
+                    blocking: true,
+                    answer: None,
+                },
+            }),
+            |_| None,
+        );
+        let mut harness = Harness::builder().build_ui_state(
+            |ui, (model, action)| {
+                if let Some(next) = notifications_pane(ui, model, None) {
+                    *action = Some(next);
+                }
+            },
+            (model, None),
+        );
+        harness.run();
+        // When: clicking the explicit navigation button.
+        harness.get_by_label("Open thread").click();
+        harness.run();
+        // Then: the durable thread target wins, with the original run fallback retained.
+        assert_eq!(harness.state().1, Some(expected));
+    }
+}
+
+#[test]
+fn question_notification_opens_owning_thread_and_conversation() {
+    use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
+    for (root_name, with_run_start) in [
+        ("chat:Worker:one", false),
+        ("chat:Orchestrator:one", false),
+        ("legacy-root", true),
+    ] {
+        // Given: another active thread and a hidden conversation pane.
+        let temp = tempfile::tempdir().unwrap();
+        let mut sidebar = SidebarState::default();
+        let project = ProjectId::new("project");
+        sidebar
+            .add_project(project.clone(), "Project", temp.path())
+            .unwrap();
+        for id in ["one", "two"] {
+            sidebar
+                .create_thread(ThreadId::new(id), project.clone(), id)
+                .unwrap();
+        }
+        sidebar.switch_thread(&ThreadId::new("two")).unwrap();
+        let mut state =
+            WorkbenchState::new(gui::fixture::DemoSource(vec![]), &UiSettings::default())
+                .unwrap()
+                .with_sidebar(sidebar);
+        if with_run_start {
+            state.apply_events([Event::new(LifecycleEvent::AgentRunStarted {
+                run_id: "question-run".into(),
+                parent_run_id: None,
+                agent_name: "chat:Worker:one".into(),
+                role: "worker".into(),
+            })]);
+        }
+        state.apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: UserQuestion {
+                id: "question-one".into(),
+                run_id: "question-run".into(),
+                root_run_id: "question-run".into(),
+                root_name: root_name.into(),
+                title: "Which format?".into(),
+                options: vec!["JSON".into()],
+                blocking: true,
+                answer: None,
+            },
+        })]);
+        state.open_agent_pane("other-run");
+        let tab = state
+            .dock()
+            .find_tab(&PanelId::new("notifications-main"))
+            .unwrap();
+        state.dock_mut().set_active_tab(tab).unwrap();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1280.0, 900.0))
+            .build_ui_state(
+                |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+                state,
+            );
+        // The live workbench requests periodic repaints; it need not become idle.
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Which format?").is_none());
+        // When: opening the question's thread from its notification.
+        harness.get_by_label("Open thread").click();
+        harness.run_steps(3);
+        // Then: both sidebar selection and the visible conversation follow the target.
+        assert_eq!(
+            harness.state().sidebar().active_thread,
+            Some(ThreadId::new("one"))
+        );
+        assert!(harness.query_by_label("Which format?").is_some());
+        assert!(harness.query_by_label("回答を送信").is_some());
+    }
 }
 
 #[test]
