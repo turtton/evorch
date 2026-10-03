@@ -25,7 +25,7 @@ pub struct AgentPromptSources {
     pub role_baselines: BTreeMap<String, String>,
     /// モデルファミリー別セクション (キー: ファミリー名、generic を含む全 6 種)。
     pub family_sections: BTreeMap<String, String>,
-    /// カテゴリ別オーバーレイ (worker/reviewer 公開カテゴリと内部学習カテゴリ)。
+    /// カテゴリ別オーバーレイ (worker/reviewer 公開カテゴリと内部カテゴリ)。
     pub category_overlays: BTreeMap<String, String>,
     /// agents 設定が参照する appendix プリセット本文 (キー: プリセット名)。
     pub appendices: BTreeMap<String, String>,

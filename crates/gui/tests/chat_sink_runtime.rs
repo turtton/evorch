@@ -15,7 +15,15 @@ use runtime::{
 };
 use tools::ToolExecutor;
 
+#[derive(Debug)]
+struct ObservedInvocation {
+    role: Role,
+    category: Option<String>,
+    tools: Vec<String>,
+}
+
 struct ScriptedModel {
+    invocations: Arc<Mutex<Vec<ObservedInvocation>>>,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
     responses: Mutex<VecDeque<ChatResponse>>,
     preferences: Arc<Mutex<Vec<Option<runtime::ModelPreference>>>>,
@@ -26,10 +34,15 @@ impl AgentModel for ScriptedModel {
     async fn complete(
         &self,
         invocation: &AgentInvocationContext,
-        _role: Role,
+        role: Role,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.invocations.lock().unwrap().push(ObservedInvocation {
+            role,
+            category: invocation.category.clone(),
+            tools: tools.iter().map(|tool| tool.name.clone()).collect(),
+        });
         self.messages
             .lock()
             .expect("messages")
@@ -53,6 +66,8 @@ impl AgentModel for ScriptedModel {
 }
 
 struct Fixture {
+    invocations: Arc<Mutex<Vec<ObservedInvocation>>>,
+    model: Arc<ScriptedModel>,
     _storage: storage::Storage,
     _directory: tempfile::TempDir,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
@@ -91,15 +106,25 @@ impl Fixture {
             })
             .collect();
         let preferences = Arc::new(Mutex::new(Vec::new()));
+        let invocations = Arc::new(Mutex::new(Vec::new()));
         let messages = Arc::new(Mutex::new(Vec::new()));
+        let model = Arc::new(ScriptedModel {
+            invocations: invocations.clone(),
+            messages: messages.clone(),
+            responses: Mutex::new(responses),
+            preferences: preferences.clone(),
+        });
         let runtime = AgentRuntime::new(
             bus.clone(),
-            Arc::new(ToolExecutor::new(bus.clone())),
-            Arc::new(ScriptedModel {
-                messages: messages.clone(),
-                responses: Mutex::new(responses),
-                preferences: preferences.clone(),
-            }),
+            Arc::new(
+                ToolExecutor::with_standard_tools(
+                    bus.clone(),
+                    Arc::new(sandbox::DirectSandbox::new_unchecked()),
+                )
+                .with_web_tools()
+                .unwrap(),
+            ),
+            model.clone(),
         );
         let runtime = runtime
             .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
@@ -113,6 +138,8 @@ impl Fixture {
         });
         let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
         Self {
+            invocations,
+            model,
             _storage: storage,
             _directory: directory,
             messages,
@@ -122,6 +149,38 @@ impl Fixture {
             events,
             preferences,
         }
+    }
+
+    fn restart_runtime(&mut self) {
+        let storage_config = storage::StorageConfig {
+            db_path: self._directory.path().join("chat.sqlite3"),
+            ..storage::StorageConfig::default()
+        };
+        let bus = Arc::new(EventBus::new(64));
+        self.events = bus.subscribe();
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(
+                ToolExecutor::with_standard_tools(
+                    bus.clone(),
+                    Arc::new(sandbox::DirectSandbox::new_unchecked()),
+                )
+                .with_web_tools()
+                .unwrap(),
+            ),
+            self.model.clone(),
+        )
+        .with_run_store(runtime::RunStore::open(&storage_config, self._storage.handle()).unwrap());
+        let supervisor = self.rt.block_on(async {
+            GoalSupervisor::spawn(
+                runtime.clone(),
+                bus,
+                Arc::new(FixtureDeliveryAdapter::default()),
+                OrchestrationSettings::default(),
+            )
+        });
+        self.sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone(), supervisor);
+        self.runtime = runtime;
     }
 
     fn send(&mut self, thread: &str, text: &str) -> String {
@@ -193,6 +252,203 @@ impl Fixture {
             .find(|agent| agent.run_id.to_string() == id)
             .expect("accepted run exists")
             .run_id
+    }
+}
+
+#[test]
+fn composer_chat_grants_conversation_only_to_worker_on_start_and_restore() {
+    use gui::model::composer::ComposerRole;
+    for (composer_role, role, category) in [
+        (ComposerRole::Worker, Role::Worker, Some("conversation")),
+        (ComposerRole::Orchestrator, Role::Orchestrator, None),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut previous = None;
+        for (text, reply) in [("turn-1", "reply-1"), ("turn-2", "reply-2")] {
+            let events = fixture
+                .sink
+                .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    composer_role,
+                    images: Vec::new(),
+                    thread_id: "conversation".into(),
+                    text: text.into(),
+                    model_preference: None,
+                }));
+            let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+                panic!("expected accepted chat: {events:?}");
+            };
+            fixture.wait_for_reply(run_id, reply);
+            if let Some(previous) = &previous {
+                assert_eq!(run_id, previous, "terminal chat continues in place");
+            }
+            let id = fixture.run_id(run_id);
+            let agent = fixture
+                .runtime
+                .list_agents()
+                .into_iter()
+                .find(|agent| agent.run_id == id)
+                .unwrap();
+            assert_eq!(agent.role_name, role.name());
+            assert_eq!(agent.category.as_deref(), category);
+            fixture.runtime.cancel(id).unwrap();
+            fixture.rt.block_on(fixture.runtime.wait(id)).unwrap();
+            previous = Some(run_id.clone());
+        }
+        // Observe the actual policy at the provider boundary: Worker search requires
+        // both conversation=true and the category in each freshly constructed RunConfig.
+        let invocations = fixture.invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        for invocation in invocations.iter() {
+            assert_eq!(invocation.role, role);
+            assert_eq!(invocation.category.as_deref(), category);
+            assert_eq!(
+                invocation.tools.iter().any(|tool| tool == "web_search"),
+                role == Role::Worker
+            );
+            assert!(invocation.tools.iter().any(|tool| tool == "web_fetch"));
+            assert_eq!(
+                invocation.tools.iter().any(|tool| tool == "edit"),
+                role == Role::Worker
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
+    use gui::model::commands::ChatContinuation;
+    use gui::model::composer::ComposerRole;
+
+    let config = config::Config::default();
+    let catalog = Arc::new(
+        runtime::build_catalog(&runtime::CatalogBuildInput {
+            config: &config,
+            user_presets_dir: None,
+            available_agents: &[],
+            available_skills: &[],
+        })
+        .unwrap(),
+    );
+    for (saved_composer, next_composer, role, category) in [
+        (
+            ComposerRole::Worker,
+            ComposerRole::Orchestrator,
+            Role::Worker,
+            Some("conversation"),
+        ),
+        (
+            ComposerRole::Orchestrator,
+            ComposerRole::Worker,
+            Role::Orchestrator,
+            None,
+        ),
+    ] {
+        // A normal followup reuses the sink's run binding; /continue also resolves
+        // the saved root when a fresh runtime has no registered runs or binding.
+        for (resume_only, restart) in [(false, false), (true, false), (true, true)] {
+            let mut fixture = Fixture::new();
+            fixture.runtime = fixture.runtime.clone().with_system_prompts(catalog.clone());
+            let events = fixture
+                .sink
+                .submit(WorkbenchCommand::SendChat(ChatSubmission {
+                    composer_role: saved_composer,
+                    images: Vec::new(),
+                    thread_id: "conversation".into(),
+                    text: "turn-1".into(),
+                    model_preference: None,
+                }));
+            let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
+                panic!("expected accepted chat: {events:?}");
+            };
+            fixture.wait_for_reply(run_id, "reply-1");
+            let id = fixture.run_id(run_id);
+            let events = fixture.sink.submit(WorkbenchCommand::StopChat {
+                thread_id: "conversation".into(),
+            });
+            assert!(matches!(events.as_slice(), [LoopEvent::ChatStopped { .. }]));
+            assert_eq!(
+                fixture.rt.block_on(fixture.runtime.wait(id)).unwrap(),
+                AgentRunPhase::Stopped
+            );
+            if restart {
+                fixture.restart_runtime();
+                fixture.runtime = fixture.runtime.clone().with_system_prompts(catalog.clone());
+                assert!(fixture.runtime.list_agents().is_empty());
+            }
+            assert_eq!(
+                fixture
+                    .runtime
+                    .restore_diagnostics(id)
+                    .unwrap()
+                    .unwrap()
+                    .role_name,
+                role.name(),
+                "saved role is available even without a registered run"
+            );
+            let command = if resume_only {
+                WorkbenchCommand::ContinueChat(ChatContinuation {
+                    thread_id: "conversation".into(),
+                    composer_role: next_composer,
+                    model_preference: None,
+                })
+            } else {
+                WorkbenchCommand::SendChat(ChatSubmission {
+                    composer_role: next_composer,
+                    images: Vec::new(),
+                    thread_id: "conversation".into(),
+                    text: "turn-2".into(),
+                    model_preference: None,
+                })
+            };
+            let events = fixture.sink.submit(command);
+            let [
+                LoopEvent::ChatAccepted {
+                    run_id: continued, ..
+                },
+            ] = events.as_slice()
+            else {
+                panic!("expected accepted continuation: {events:?}");
+            };
+            assert_eq!(continued, run_id, "saved root continues in place");
+            fixture.wait_for_reply(continued, "reply-2");
+            let agents = fixture.runtime.list_agents();
+            assert_eq!(agents.len(), 1);
+            assert_eq!(agents[0].role_name, role.name());
+            assert_eq!(agents[0].category.as_deref(), category);
+            fixture.runtime.cancel(id).unwrap();
+            fixture.rt.block_on(fixture.runtime.wait(id)).unwrap();
+
+            let invocations = fixture.invocations.lock().unwrap();
+            assert_eq!(invocations.len(), 2);
+            for invocation in invocations.iter() {
+                assert_eq!(invocation.role, role);
+                assert_eq!(invocation.category.as_deref(), category);
+                // Search requires conversation=true as well as the category and root.
+                assert_eq!(
+                    invocation.tools.iter().any(|tool| tool == "web_search"),
+                    role == Role::Worker
+                );
+                assert!(invocation.tools.iter().any(|tool| tool == "web_fetch"));
+                assert_eq!(
+                    invocation.tools.iter().any(|tool| tool == "edit"),
+                    role == Role::Worker
+                );
+            }
+            let messages = fixture.messages.lock().unwrap();
+            assert_eq!(messages[0][0].role, MessageRole::System);
+            assert!(messages[1].starts_with(&messages[0]));
+            let continued_prompt = if resume_only {
+                AgentRuntime::CHAT_CONTINUE_PROMPT
+            } else {
+                "turn-2"
+            };
+            assert_eq!(
+                messages[1].last().unwrap().content,
+                vec![ContentBlock::Text {
+                    text: continued_prompt.into()
+                }]
+            );
+        }
     }
 }
 

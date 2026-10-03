@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRestoreDiagnostics {
     pub run_id: RunId,
+    /// Persisted role identity used by `continue_goal`, not renewed execution authority.
+    pub role_name: String,
     pub last_successful_checkpoint_at_ns: i64,
     pub checkpoint_phase: String,
     pub message_count: usize,
@@ -59,6 +61,7 @@ impl AgentRuntime {
             || renewable.renewable_team_root();
         Ok(Some(RunRestoreDiagnostics {
             run_id,
+            role_name: descriptor.role,
             last_successful_checkpoint_at_ns: record.updated_at_ns,
             checkpoint_phase: record.terminal_phase,
             message_count: history.messages.len(),

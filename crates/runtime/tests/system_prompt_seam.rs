@@ -133,6 +133,60 @@ async fn run_starts_with_single_assembled_system_message() {
     assert_eq!(system_count, 1);
 }
 
+#[tokio::test]
+async fn conversation_chat_gets_bundled_overlay_in_stable_system_prompt() {
+    // Given: the real config preset resolver, not a test-only conversation overlay.
+    let model = Arc::new(ScriptedModel::new([
+        Ok(text_response("waiting", FinishReason::Stop)),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let (runtime, _bus) = runtime_with(model.clone(), None);
+    let runtime = runtime
+        .with_config_prompts(&runtime::CatalogBuildInput {
+            config: &config::Config::default(),
+            user_presets_dir: None,
+            available_agents: &[],
+            available_skills: &[],
+        })
+        .expect("bundled prompt catalog");
+    let run = runtime
+        .delegate_chat(
+            "conversation",
+            Role::Worker,
+            "hello".into(),
+            RunConfig {
+                conversation: true,
+                ..cfg(true, Some("conversation"))
+            },
+        )
+        .expect("direct conversation root");
+    runtime
+        .send_message(run, "continue".into())
+        .expect("followup");
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+
+    // Then: both turns preserve the bundled overlay and Worker role, with no Intent Gate.
+    let observed = model.observed().await;
+    assert_eq!(observed.len(), 2);
+    let system = text_of_role(&observed[0], MessageRole::System).expect("system prompt");
+    assert!(
+        system
+            .contains(include_str!("../../config/assets/presets/category-conversation.md").trim())
+    );
+    assert!(!system.contains(GATE_MARK));
+    assert_eq!(
+        text_of_role(&observed[1], MessageRole::System),
+        Some(system)
+    );
+    let agent = runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.run_id == run)
+        .expect("chat run");
+    assert_eq!(agent.role_name, Role::Worker.name());
+    assert_eq!(agent.category.as_deref(), Some("conversation"));
+}
+
 // Given: compaction 設定を明示したランタイム
 // When: Worker run の初回モデル呼び出しを観測する
 // Then: compaction 方針が閾値・compact tool・cache prefix・cooldown を含む

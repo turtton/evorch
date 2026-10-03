@@ -109,6 +109,13 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         overlay_body: include_str!("../assets/presets/category-tool-execution.md"),
     },
     CategoryDefinition {
+        name: "conversation",
+        role: "worker",
+        delegation: Delegation::Internal,
+        overlay_preset: "category-conversation",
+        overlay_body: include_str!("../assets/presets/category-conversation.md"),
+    },
+    CategoryDefinition {
         name: "lesson",
         role: "worker",
         delegation: Delegation::Internal,
@@ -208,7 +215,11 @@ mod tests {
 
     #[test]
     fn internal_categories_are_resolvable_but_never_publicly_delegatable() {
-        for (name, role) in [("lesson", "worker"), ("lesson_review", "reviewer")] {
+        for (name, role) in [
+            ("conversation", "worker"),
+            ("lesson", "worker"),
+            ("lesson_review", "reviewer"),
+        ] {
             let definition = category_for_role(role, name).expect("internal category exists");
             assert!(matches!(definition.delegation, Delegation::Internal));
             assert!(!is_public_worker_category(name));

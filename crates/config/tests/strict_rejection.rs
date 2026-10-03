@@ -508,11 +508,11 @@ fn agents_category_unknown_name_is_rejected_with_path() {
 }
 
 #[test]
-fn worker_category_config_accepts_public_categories_and_internal_lesson() {
+fn worker_category_config_accepts_public_and_internal_categories() {
     let tmp = tempfile::tempdir().expect("temporary directory");
     let names: Vec<_> = config::agent_categories::public_worker_categories()
         .map(|category| category.name)
-        .chain(["lesson"])
+        .chain(["lesson", "conversation"])
         .collect();
     let document = names
         .iter()
@@ -521,7 +521,7 @@ fn worker_category_config_accepts_public_categories_and_internal_lesson() {
 
     let config = load_project(&tmp, &document).expect("all worker category bindings are valid");
 
-    assert_eq!(config.agents.worker.categories.len(), 7);
+    assert_eq!(config.agents.worker.categories.len(), 8);
     for name in names {
         assert_eq!(
             config

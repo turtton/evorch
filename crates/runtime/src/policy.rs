@@ -29,10 +29,22 @@ pub struct ExecutionPolicy {
 
 impl ExecutionPolicy {
     /// A category or name alone never grants the tools of an internal stage.
-    pub fn for_run_config(mut self, config: &crate::RunConfig) -> Self {
+    /// `is_root` must come from the runtime's task parent, not model-supplied data.
+    pub fn for_run_config(mut self, config: &crate::RunConfig, is_root: bool) -> Self {
         use crate::RunPurpose;
         let tools: &[&str] = match config.purpose {
-            RunPurpose::General => return self,
+            RunPurpose::General => {
+                if config.conversation
+                    && config.category.as_deref() == Some("conversation")
+                    && is_root
+                    && self.role_name == Role::Worker.name()
+                {
+                    self.capabilities
+                        .allowed_tools
+                        .extend(["web_search", "web_fetch"].into_iter().map(str::to_owned));
+                }
+                return self;
+            }
             RunPurpose::LessonExtract { .. }
                 if config.learning_internal && self.role_name == Role::Worker.name() =>
             {
@@ -113,6 +125,155 @@ mod tests {
             name: name.to_string(),
             description: format!("{name} ツール"),
             input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    fn conversation_config() -> crate::RunConfig {
+        crate::RunConfig {
+            conversation: true,
+            category: Some("conversation".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn conversation_root_adds_web_tools_without_changing_worker_baseline() {
+        let baseline = ExecutionPolicy::for_role(Role::Worker)
+            .with_escalation_approval(config::EscalationApproval::User)
+            .with_escalate_to_user_on_deny(true);
+        let policy = baseline
+            .clone()
+            .for_run_config(&conversation_config(), true);
+        let mut expected = baseline.clone();
+        expected
+            .capabilities
+            .allowed_tools
+            .extend(["web_search", "web_fetch"].into_iter().map(str::to_owned));
+        assert_eq!(policy, expected);
+        for tool in &expected.capabilities.allowed_tools {
+            assert_eq!(policy.authorize(tool), Ok(()), "{tool}");
+        }
+        let specs: Vec<_> = expected
+            .capabilities
+            .allowed_tools
+            .iter()
+            .map(|name| spec(name))
+            .collect();
+        assert_eq!(policy.filter_tool_specs(specs.clone()), specs);
+        for tool in [
+            "delegate",
+            "submit_lesson_review",
+            "inspect_learning_source",
+        ] {
+            assert!(policy.authorize(tool).is_err(), "{tool}");
+            assert!(policy.filter_tool_specs(vec![spec(tool)]).is_empty());
+        }
+    }
+
+    #[test]
+    fn conversation_web_tools_require_authority_category_and_root() {
+        let baseline = ExecutionPolicy::for_role(Role::Worker);
+        assert!(!crate::RunConfig::default().conversation);
+        for (config, is_root) in [
+            (conversation_config(), false),
+            (
+                crate::RunConfig {
+                    conversation: false,
+                    ..conversation_config()
+                },
+                true,
+            ),
+            (
+                crate::RunConfig {
+                    category: None,
+                    ..conversation_config()
+                },
+                true,
+            ),
+            (
+                crate::RunConfig {
+                    category: Some("quick".into()),
+                    ..conversation_config()
+                },
+                true,
+            ),
+        ] {
+            let policy = baseline.clone().for_run_config(&config, is_root);
+            assert_eq!(policy, baseline);
+            for tool in ["web_search", "web_fetch"] {
+                assert!(matches!(
+                    policy.authorize(tool),
+                    Err(RuntimeError::CapabilityDenied { .. })
+                ));
+                assert!(policy.filter_tool_specs(vec![spec(tool)]).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_does_not_add_authority_to_other_roles() {
+        for role in [
+            Role::Orchestrator,
+            Role::Explorer,
+            Role::Reviewer,
+            Role::WebResearcher,
+            Role::Planner,
+            Role::Oracle,
+            Role::MultimodalLooker,
+        ] {
+            let baseline = ExecutionPolicy::for_role(role);
+            let policy = baseline
+                .clone()
+                .for_run_config(&conversation_config(), true);
+            assert_eq!(policy, baseline);
+            // Orchestrator already allows fetch and WebResearcher already allows both.
+            for tool in ["web_search", "web_fetch"] {
+                assert_eq!(policy.authorize(tool), baseline.authorize(tool));
+                assert_eq!(
+                    policy.filter_tool_specs(vec![spec(tool)]),
+                    baseline.filter_tool_specs(vec![spec(tool)])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_never_expands_learning_stage_tools() {
+        for (role, purpose) in [
+            (
+                Role::Worker,
+                crate::RunPurpose::LessonExtract {
+                    source_run_id: crate::RunId::new(1),
+                },
+            ),
+            (
+                Role::Reviewer,
+                crate::RunPurpose::LessonReview {
+                    source_run_id: crate::RunId::new(1),
+                    extraction_run_id: crate::RunId::new(2),
+                },
+            ),
+        ] {
+            for learning_internal in [false, true] {
+                let config = crate::RunConfig {
+                    purpose,
+                    learning_internal,
+                    ..conversation_config()
+                };
+                let policy = ExecutionPolicy::for_role(role).for_run_config(&config, true);
+                let ordinary = crate::RunConfig {
+                    conversation: false,
+                    category: None,
+                    ..config
+                };
+                assert_eq!(
+                    policy,
+                    ExecutionPolicy::for_role(role).for_run_config(&ordinary, true)
+                );
+                for tool in ["web_search", "web_fetch"] {
+                    assert!(policy.authorize(tool).is_err());
+                }
+            }
         }
     }
 

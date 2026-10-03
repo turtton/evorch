@@ -879,11 +879,20 @@ impl RuntimeCommandSink {
             self.chat_permits.insert(thread_id.clone(), permit.clone());
         }
         if let Some(&run_id) = self.chat_runs.get(&thread_id) {
+            // continue_goal preserves the saved role, regardless of the current composer.
+            let conversation = self
+                .runtime
+                .restore_diagnostics(run_id)
+                .ok()
+                .flatten()
+                .is_some_and(|saved| saved.role_name == Role::Worker.name());
             let _guard = self.handle.enter();
             match self.runtime.continue_goal(
                 run_id,
                 submission.text.clone(),
                 RunConfig {
+                    conversation,
+                    category: conversation.then(|| "conversation".into()),
                     ownership: permit.clone(),
                     images: submission.images.clone(),
                     model_preference: submission.model_preference.clone(),
@@ -917,6 +926,7 @@ impl RuntimeCommandSink {
                 text: "No conversation to continue; send a message first".into(),
             }];
         }
+        let conversation = submission.composer_role == crate::model::composer::ComposerRole::Worker;
         let _guard = self.handle.enter();
         let run_id = self.runtime.delegate_chat(
             &thread_id,
@@ -926,6 +936,8 @@ impl RuntimeCommandSink {
             },
             submission.text,
             RunConfig {
+                conversation,
+                category: conversation.then(|| "conversation".into()),
                 images: submission.images,
                 ownership: permit,
                 interactive: true,
