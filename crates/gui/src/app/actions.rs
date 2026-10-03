@@ -381,6 +381,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 {
                     match diff {
                         Some(diff) => {
+                            self.diff.set_repo_root(self.active_repo_root());
                             self.diff.show_snapshot(diff);
                             self.focus_panel("diff-main");
                         }

@@ -3,11 +3,11 @@
 mod fixture;
 mod git_cli;
 pub(crate) mod presentation;
+mod refresh;
+
+pub use refresh::{AUTO_REFRESH_INTERVAL, DiffModel};
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
-use std::thread::{self, JoinHandle};
 
 pub use fixture::FixtureDiffSource;
 pub use git_cli::GitCliDiffSource;
@@ -78,78 +78,6 @@ pub trait DiffSource: Send + Sync {
     /// # Errors
     /// Git の実行、出力変換、または process 起動に失敗した場合は [`DiffError`] を返す。
     fn fetch(&self, req: &DiffRequest) -> Result<String, DiffError>;
-}
-
-/// UI frame から非同期 worker の完了を監視する差分モデル。
-#[derive(Debug)]
-pub struct DiffModel {
-    working_tree: DiffState,
-    branch: DiffState,
-    rx: Receiver<(DiffMode, Result<String, DiffError>)>,
-    tx: mpsc::Sender<(DiffMode, Result<String, DiffError>)>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl DiffModel {
-    pub fn show_snapshot(&mut self, text: String) {
-        self.working_tree = state_from_result(Ok(text));
-    }
-    /// 全 mode が未取得のモデルを生成する。
-    pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self {
-            working_tree: DiffState::Idle,
-            branch: DiffState::Idle,
-            rx,
-            tx,
-            worker: None,
-        }
-    }
-
-    /// 指定 mode の現在状態を返す。
-    pub const fn state(&self, mode: &DiffMode) -> &DiffState {
-        match mode {
-            DiffMode::WorkingTree => &self.working_tree,
-            DiffMode::Branch => &self.branch,
-        }
-    }
-
-    /// 差分取得を worker thread へ移し、即座に `Loading` へ遷移する。
-    pub fn request(&mut self, source: Arc<dyn DiffSource>, req: DiffRequest) {
-        *self.state_mut(&req.mode) = DiffState::Loading;
-        let tx = self.tx.clone();
-        self.worker = Some(thread::spawn(move || {
-            let mode = req.mode.clone();
-            let result = source.fetch(&req);
-            let _send_result = tx.send((mode, result));
-        }));
-    }
-
-    /// 完了済みの worker result を drain し、表示状態へ変換する。
-    pub fn poll(&mut self) {
-        while let Ok((mode, result)) = self.rx.try_recv() {
-            *self.state_mut(&mode) = state_from_result(result);
-        }
-
-        if self.worker.as_ref().is_some_and(JoinHandle::is_finished)
-            && let Some(worker) = self.worker.take()
-        {
-            let _join_result = worker.join();
-        }
-    }
-
-    const fn state_mut(&mut self, mode: &DiffMode) -> &mut DiffState {
-        match mode {
-            DiffMode::WorkingTree => &mut self.working_tree,
-            DiffMode::Branch => &mut self.branch,
-        }
-    }
-}
-
-impl Default for DiffModel {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 fn state_from_result(result: Result<String, DiffError>) -> DiffState {
