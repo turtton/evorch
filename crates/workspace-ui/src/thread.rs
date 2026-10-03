@@ -73,6 +73,9 @@ pub struct ThreadRecord {
     pub run_ids: Vec<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
+    /// Inspected active root; without a worktree path this is populated only for Shared runs.
+    #[serde(default)]
+    pub active_root: Option<PathBuf>,
     #[serde(default)]
     pub model_preference: Option<ModelPreference>,
     #[serde(default)]
@@ -103,6 +106,7 @@ impl ThreadRecord {
             run_ids: Vec::new(),
             branch: None,
             worktree_path: None,
+            active_root: None,
             model_preference: None,
             chat_role: None,
             draft_input: String::new(),

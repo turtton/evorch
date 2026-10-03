@@ -149,6 +149,20 @@ fn render_tree(
                 "{branch} @ {}",
                 worktree.display()
             )));
+        } else if !archived
+            && thread.worktree_path.is_none()
+            && let Some(root) = &thread.active_root
+            && sidebar
+                .projects
+                .iter()
+                .find(|project| project.id == thread.project_id)
+                .is_some_and(|project| project.repo_root != *root)
+        {
+            // Reconciliation populates this no-worktree root only for Shared mode.
+            ui.label(crate::theme::text::muted(format!(
+                "Shared workspace: {}",
+                root.display()
+            )));
         }
     }
 }

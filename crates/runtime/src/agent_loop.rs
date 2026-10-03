@@ -293,13 +293,26 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     };
     let active_root = match owned_worktree.as_ref() {
         Some(owned) => Some(owned.path.clone()),
-        None => state
-            .shared
-            .rules
-            .as_ref()
-            .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
-            .or(sandbox_root),
+        None => shared_active_root(state.shared.rules.as_deref(), sandbox_root),
     };
+    if state.task.config.workspace_mode == WorkspaceMode::Shared
+        && let Some(runtime_shared) = shared.upgrade()
+    {
+        runtime_shared
+            .workspaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                state.task.run_id,
+                WorkspaceInspection {
+                    mode: WorkspaceMode::Shared,
+                    branch: None,
+                    worktree_path: None,
+                    active_root: active_root.clone(),
+                    merge_mode: state.task.config.merge_mode,
+                },
+            );
+    }
     if let Some(source) = state.shared.rules.as_ref() {
         state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
     }
@@ -365,6 +378,56 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     state.finalize(owned_worktree).await;
 }
 
+fn shared_active_root(
+    rules: Option<&RulesSource>,
+    sandbox_root: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    rules
+        .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
+        .or(sandbox_root)
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::shared_active_root;
+    use crate::{ProjectTrust, RulesSettings, RulesSource};
+    use std::path::PathBuf;
+
+    #[test]
+    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
+        let rules_root = PathBuf::from("/rules-project");
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(rules_root.clone()),
+        );
+        assert_eq!(
+            shared_active_root(Some(&rules), Some(sandbox_root)),
+            Some(rules_root),
+        );
+    }
+
+    #[test]
+    fn shared_active_root_falls_back_to_sandbox_or_none() {
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            None,
+        );
+        for source in [None, Some(&rules)] {
+            assert_eq!(
+                shared_active_root(source, Some(sandbox_root.clone())),
+                Some(sandbox_root.clone()),
+            );
+            assert_eq!(shared_active_root(source, None), None);
+        }
+    }
+}
+
 async fn setup_isolated_workspace(
     workspace: &WorkspaceContext,
     runtime_shared: &Arc<Shared>,
@@ -400,6 +463,7 @@ async fn create_worktree(
                             mode: WorkspaceMode::Isolated,
                             branch: Some(owned.branch.clone()),
                             worktree_path: Some(owned.path.clone()),
+                            active_root: Some(owned.path.clone()),
                             merge_mode: state.task.config.merge_mode,
                         },
                     );
@@ -434,7 +498,8 @@ async fn create_worktree(
             WorkspaceInspection {
                 mode: WorkspaceMode::Isolated,
                 branch: Some(planned_branch),
-                worktree_path: Some(planned_path),
+                worktree_path: Some(planned_path.clone()),
+                active_root: Some(planned_path),
                 merge_mode: state.task.config.merge_mode,
             },
         );
@@ -482,6 +547,7 @@ async fn attach_adopted_workspace(
                 mode: WorkspaceMode::Isolated,
                 branch: Some(owned.branch.clone()),
                 worktree_path: Some(owned.path.clone()),
+                active_root: Some(owned.path.clone()),
                 merge_mode: state.task.config.merge_mode,
             },
         );
@@ -537,6 +603,7 @@ fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {
 }
 
 async fn cleanup_failed_setup(runtime_shared: &Arc<Shared>, run_id: RunId, owned: OwnedWorktree) {
+    // Setup failure is the exception: discard the inspection rather than retain/clear its roots.
     remove_workspace_inspection(runtime_shared, run_id);
     let _ = tokio::task::spawn_blocking(move || owned.cleanup()).await;
 }
@@ -560,6 +627,7 @@ pub(crate) async fn cleanup_worktree(
             .get_mut(&run_id)
     {
         inspection.worktree_path = None;
+        inspection.active_root = None;
     }
 }
 

@@ -304,6 +304,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.sidebar = sidebar;
         self.sync_subagent_thread_panes();
+        self.refresh_active_thread_workspace();
         self
     }
 

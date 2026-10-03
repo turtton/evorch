@@ -223,30 +223,52 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    fn refresh_active_thread_workspace(&mut self) {
-        let Some(active_id) = self.sidebar.active_thread.clone() else {
-            return;
-        };
-        let Some(index) = self
-            .sidebar
-            .threads
-            .iter()
-            .position(|thread| thread.id == active_id)
-        else {
-            return;
-        };
-        for raw_id in self.sidebar.threads[index].run_ids.clone() {
-            let Some(run_id) = parse_run_id(&raw_id) else {
-                continue;
-            };
-            let Some(workspace) = self.tasks.inspect(run_id).and_then(|run| run.workspace) else {
-                continue;
-            };
-            if workspace.worktree_path.is_some() {
-                self.sidebar.threads[index].branch = workspace.branch;
-                self.sidebar.threads[index].worktree_path = workspace.worktree_path;
-                break;
+    pub(super) fn refresh_active_thread_workspace(&mut self) {
+        let mut changed = false;
+        // Reconcile every thread, including inactive ones. Do not cache run IDs/phases:
+        // the same RunId may reattach a retained workspace after Stopped.
+        for thread in &mut self.sidebar.threads {
+            let mut isolated = None;
+            let mut shared = None;
+            for raw_id in &thread.run_ids {
+                let Some(run_id) = parse_run_id(raw_id) else {
+                    continue;
+                };
+                let Some(workspace) = self.tasks.inspect(run_id).and_then(|run| run.workspace)
+                else {
+                    continue;
+                };
+                match workspace.mode {
+                    runtime::WorkspaceMode::Isolated if workspace.worktree_path.is_some() => {
+                        isolated.get_or_insert(workspace);
+                    }
+                    runtime::WorkspaceMode::Shared if workspace.active_root.is_some() => {
+                        shared.get_or_insert(workspace);
+                    }
+                    _ => {}
+                }
             }
+            let (branch, worktree_path, active_root) =
+                isolated.or(shared).map_or((None, None, None), |workspace| {
+                    (
+                        workspace.branch,
+                        workspace.worktree_path,
+                        workspace.active_root,
+                    )
+                });
+            if thread.branch != branch
+                || thread.worktree_path != worktree_path
+                || thread.active_root != active_root
+            {
+                thread.branch = branch;
+                thread.worktree_path = worktree_path;
+                thread.active_root = active_root;
+                changed = true;
+            }
+        }
+        // fold_event persists before this inspection pass; persist the refreshed roots too.
+        if changed {
+            self.save_sidebar();
         }
     }
 

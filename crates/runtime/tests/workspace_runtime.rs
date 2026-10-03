@@ -8,7 +8,8 @@ use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use providers::FinishReason;
 use runtime::workspace::{Project, WorktreeManager};
 use runtime::{
-    AgentRuntime, IsolatedMounts, MergeMode, RunConfig, WorkspaceInspection, WorkspaceMode,
+    AgentRuntime, IsolatedMounts, MergeMode, ProjectTrust, RulesSettings, RulesSource, RunConfig,
+    WorkspaceInspection, WorkspaceMode,
 };
 use sandbox::DirectSandbox;
 use serde_json::json;
@@ -187,6 +188,7 @@ async fn inspect_agent_reports_isolated_workspace() {
             mode: WorkspaceMode::Isolated,
             branch: Some(branch.clone()),
             worktree_path: Some(worktree_path.clone()),
+            active_root: Some(worktree_path.clone()),
             merge_mode: MergeMode::Branch,
         })
     );
@@ -204,6 +206,7 @@ async fn inspect_agent_reports_isolated_workspace() {
             mode: WorkspaceMode::Isolated,
             branch: Some(branch),
             worktree_path: None,
+            active_root: None,
             merge_mode: MergeMode::Branch,
         })
     );
@@ -252,7 +255,8 @@ async fn inspect_agent_reports_isolated_workspace_during_sandbox_build() {
         Some(WorkspaceInspection {
             mode: WorkspaceMode::Isolated,
             branch: Some(branch),
-            worktree_path: Some(worktree_path),
+            worktree_path: Some(worktree_path.clone()),
+            active_root: Some(worktree_path),
             merge_mode: MergeMode::Branch,
         })
     );
@@ -349,9 +353,174 @@ async fn inspect_agent_reports_shared_workspace_default() {
             mode: WorkspaceMode::Shared,
             branch: None,
             worktree_path: None,
+            active_root: None,
             merge_mode: MergeMode::Branch,
         })
     );
+}
+
+#[tokio::test]
+async fn shared_inspection_keeps_startup_root_after_default_cwd_changes() {
+    // Given: rules root を持つ shared run。最初の model 呼出しを gate する。
+    let root = tempfile::tempdir().expect("rules root");
+    let next_root = tempfile::tempdir().expect("next cwd");
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(text_response("done", FinishReason::Stop))],
+        Arc::clone(&gate),
+    ));
+    let bus = Arc::new(EventBus::new(64));
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(bus, executor, model.clone()).with_project_rules(Arc::new(
+        RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(root.path().to_path_buf()),
+        ),
+    ));
+    let run_id = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
+
+    // When: current-thread runtime が run を実行する前は、設定から root を合成しない。
+    assert_eq!(
+        runtime
+            .inspect_agent(run_id)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .active_root,
+        None,
+    );
+    wait_for_model_calls(&model, 1).await;
+    let expected = Some(WorkspaceInspection {
+        mode: WorkspaceMode::Shared,
+        branch: None,
+        worktree_path: None,
+        active_root: Some(root.path().to_path_buf()),
+        merge_mode: MergeMode::Branch,
+    });
+    let started = runtime.inspect_agent(run_id).expect("started inspection");
+    assert_eq!(started.phase, AgentRunPhase::Running);
+    assert_eq!(started.workspace, expected);
+
+    // Then: 設定を変更しても Running/Done の既存 run は開始時の root を保持する。
+    runtime
+        .set_default_cwd(next_root.path().to_path_buf())
+        .expect("update cwd");
+    assert_eq!(runtime.inspect_agent(run_id).unwrap().workspace, expected);
+    gate.notify_one();
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    assert_eq!(runtime.inspect_agent(run_id).unwrap().workspace, expected);
+}
+
+#[tokio::test]
+async fn inspecting_workspace_preserves_already_sent_model_prefix() {
+    let root = tempfile::tempdir().expect("rules root");
+    let next_root = tempfile::tempdir().expect("next cwd");
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [
+            Ok(tool_response(
+                "inspect-1",
+                "inspect_agent",
+                json!({"run_id": "run-1"}),
+            )),
+            Ok(tool_response(
+                "inspect-2",
+                "inspect_agent",
+                json!({"run_id": "run-1"}),
+            )),
+            Ok(text_response("done", FinishReason::Stop)),
+        ],
+        Arc::clone(&gate),
+    ));
+    let bus = Arc::new(EventBus::new(64));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_project_rules(Arc::new(RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(root.path().to_path_buf()),
+        )));
+    let run = runtime.delegate_background(
+        Role::Orchestrator,
+        "inspect workspace".into(),
+        RunConfig::default(),
+    );
+    wait_for_model_calls(&model, 1).await;
+    gate.notify_one();
+    wait_for_model_calls(&model, 2).await;
+    runtime
+        .set_default_cwd(next_root.path().to_path_buf())
+        .unwrap();
+    gate.notify_one();
+    wait_for_model_calls(&model, 3).await;
+    gate.notify_one();
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+
+    let requests = model.observed().await;
+    for pair in requests.windows(2) {
+        assert!(
+            pair[1].starts_with(&pair[0]),
+            "inspection rewrote the sent prefix"
+        );
+    }
+    let inspections: Vec<serde_json::Value> = requests
+        .last()
+        .unwrap()
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            providers::ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!is_error);
+                let providers::ToolResultContent::Text { text } = &content[0];
+                Some(serde_json::from_str(text).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inspections.len(), 2);
+    for inspection in inspections {
+        assert_eq!(inspection["workspace"]["active_root"], json!(root.path()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_failure_retains_isolated_workspace_roots() {
+    // Given: model 呼出し中の isolated run。
+    let (_temp, repo) = init_git_repo();
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(text_response("done", FinishReason::Stop))],
+        Arc::clone(&gate),
+    ));
+    let (runtime, _mounts, _bus) = runtime_with_workspace(&repo, Arc::clone(&model));
+    let run_id = runtime.delegate_background(Role::Worker, "work".into(), isolated_config());
+    wait_for_model_calls(&model, 1).await;
+    let before = runtime.inspect_agent(run_id).unwrap().workspace.unwrap();
+    let worktree = before.worktree_path.as_ref().expect("isolated path");
+    assert_eq!(before.active_root.as_ref(), Some(worktree));
+
+    // When: temporary fixture の worktree path を通常ファイルに置換し、
+    // git remove と fallback remove_dir_all の両方を決定的に失敗させる。
+    let retained = repo.join("retained-worktree");
+    std::fs::rename(worktree, &retained).expect("retain worktree fixture");
+    std::fs::write(worktree, "cleanup blocker").expect("block directory removal");
+    gate.notify_one();
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    let after = runtime.inspect_agent(run_id).unwrap().workspace;
+    let blocked = worktree.is_file();
+    std::fs::remove_file(worktree).expect("remove fixture blocker");
+    std::fs::rename(&retained, worktree).expect("restore worktree fixture");
+
+    // Then: cleanup 失敗時は両 root と branch を保持する。
+    assert!(blocked);
+    assert_eq!(after, Some(before));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

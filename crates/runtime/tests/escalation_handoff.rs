@@ -317,6 +317,7 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
             mode: WorkspaceMode::Isolated,
             branch: Some(source_branch.clone()),
             worktree_path: Some(source_path.clone()),
+            active_root: Some(source_path.clone()),
             merge_mode: MergeMode::Branch,
         })
     );
@@ -329,6 +330,7 @@ async fn isolated_escalation_adopts_workspace_exclusively_until_new_run_finishes
             mode: WorkspaceMode::Isolated,
             branch: Some(source_branch.clone()),
             worktree_path: None,
+            active_root: None,
             merge_mode: MergeMode::Branch,
         })
     );

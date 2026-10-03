@@ -177,6 +177,14 @@ async fn stage1_persists_stopped_snapshot_and_retains_worktree() {
         .unwrap();
     assert_eq!(record.terminal_phase, "Stopped");
     assert!(record.restorable);
+    let workspace = fixture
+        .runtime
+        .inspect_agent(parent)
+        .unwrap()
+        .workspace
+        .unwrap();
+    assert_eq!(workspace.worktree_path.as_ref(), Some(&path));
+    assert_eq!(workspace.active_root.as_ref(), Some(&path));
     assert_eq!(
         std::fs::read_to_string(path.join("dirty.txt")).unwrap(),
         "retained unfinished work"
@@ -305,6 +313,7 @@ async fn resume_after_stage1_reattaches_and_reports_unknown() {
         .workspace
         .unwrap();
     assert_eq!(workspace.worktree_path.as_ref(), Some(&path));
+    assert_eq!(workspace.active_root.as_ref(), Some(&path));
     assert_eq!(
         workspace.branch.as_deref(),
         Some(format!("evorch/task/{parent}").as_str())
