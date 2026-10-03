@@ -9,7 +9,7 @@
 //! so Latin glyphs keep Inter/Hack metrics while Japanese thread names,
 //! project names, goal text, and error messages still render natively.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use egui::{FontData, FontDefinitions, FontFamily};
 
@@ -24,15 +24,26 @@ pub const ICON_FILL_FONT_NAME: &str = "phosphor-fill";
 const INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
 
 pub fn install(ctx: &egui::Context) {
-    let cjk = resolve_cjk_font();
-    if cjk.is_some() {
-        tracing::info!("installed system CJK font (fontconfig query: {FONT_QUERY})");
-    } else {
-        tracing::warn!(
-            "no system font matched fontconfig query {FONT_QUERY:?}; CJK text may show as tofu. Install Noto Sans CJK or Takao."
-        );
+    // All presets share a font stack. Reloading a preset (or a harness frame)
+    // must not rerun fontconfig, reread CJK data, or compare entire TTF buffers.
+    let installed = egui::Id::new("evorch.theme.fonts.installed");
+    if ctx.data(|data| data.get_temp::<bool>(installed).unwrap_or(false)) {
+        return;
     }
-    ctx.set_fonts(definitions(cjk));
+    static FONTS: OnceLock<FontDefinitions> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let cjk = resolve_cjk_font();
+        if cjk.is_some() {
+            tracing::info!("installed system CJK font (fontconfig query: {FONT_QUERY})");
+        } else {
+            tracing::warn!(
+                "no system font matched fontconfig query {FONT_QUERY:?}; CJK text may show as tofu. Install Noto Sans CJK or Takao."
+            );
+        }
+        definitions(cjk)
+    });
+    ctx.set_fonts(fonts.clone());
+    ctx.data_mut(|data| data.insert_temp(installed, true));
 }
 
 fn definitions(cjk: Option<Vec<u8>>) -> FontDefinitions {

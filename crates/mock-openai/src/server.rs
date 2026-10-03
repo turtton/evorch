@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -24,6 +24,48 @@ pub struct RecordedRequest {
     pub authorization: Option<String>,
     pub body: Value,
     pub stream: bool,
+}
+
+/// Holds a scripted response until the test explicitly releases it.
+/// Arrival notifications are sent after the HTTP request has been recorded,
+/// before any response bytes are written. Release the gate before dropping the
+/// mock server, including on assertion failure, so its worker threads can join.
+#[derive(Clone, Debug)]
+pub struct ResponseGate {
+    arrived: mpsc::Sender<()>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ResponseGate {
+    /// Creates a gate and a receiver reporting each response waiting at it.
+    pub fn new() -> (Self, mpsc::Receiver<()>) {
+        let (arrived, arrivals) = mpsc::channel();
+        (
+            Self {
+                arrived,
+                released: Arc::new((Mutex::new(false), Condvar::new())),
+            },
+            arrivals,
+        )
+    }
+
+    /// Releases all current and future responses sharing this gate.
+    pub fn release(&self) {
+        let (released, changed) = &*self.released;
+        *released.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        changed.notify_all();
+    }
+
+    pub(crate) fn wait(&self) {
+        let _ = self.arrived.send(());
+        let (released, changed) = &*self.released;
+        let released = released.lock().unwrap_or_else(|error| error.into_inner());
+        drop(
+            changed
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+    }
 }
 
 /// Controls SSE writes, not TCP packet or client read boundaries.
@@ -172,7 +214,10 @@ impl StreamingMockOpenAi {
                             response
                         }
                     });
-                    if let Some(response) = &response { thread::sleep(response.delay); }
+                    if let Some(response) = &response {
+                        if let Some(gate) = &response.gate { gate.wait(); }
+                        thread::sleep(response.delay);
+                    }
                     match response {
                         Some(response) if streaming => write_sse(&mut stream, &response, mode),
                         Some(response) => {

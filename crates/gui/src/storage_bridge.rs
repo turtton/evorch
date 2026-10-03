@@ -70,6 +70,8 @@ pub struct StorageBridge {
     validator: Option<event_bus::MutationValidator>,
     policy: PersistencePolicy,
     monitor: StorageBridgeMonitor,
+    #[cfg(test)]
+    automatic_flush_enabled: bool,
 }
 
 impl StorageBridge {
@@ -82,6 +84,8 @@ impl StorageBridge {
             validator: None,
             policy: PersistencePolicy::default(),
             monitor: StorageBridgeMonitor::default(),
+            #[cfg(test)]
+            automatic_flush_enabled: true,
         }
     }
 
@@ -205,6 +209,10 @@ async fn run_subscribed(
     shutdown: impl Future<Output = ()>,
     mut flush_requests: tokio::sync::mpsc::UnboundedReceiver<FlushReply>,
 ) {
+    #[cfg(test)]
+    let automatic_flush_enabled = bridge.automatic_flush_enabled;
+    #[cfg(not(test))]
+    let automatic_flush_enabled = true;
     bridge.validator = Some(subscriber.mutation_validator());
     tokio::pin!(shutdown);
     let (requests, mut pending) = tokio::sync::mpsc::channel(WRITE_QUEUE_CAPACITY);
@@ -273,8 +281,8 @@ async fn run_subscribed(
                 biased;
                 _ = &mut shutdown => BridgeInput::Shutdown,
                 Some(reply) = flush_requests.recv() => BridgeInput::Flush(reply),
-                _ = ticker.tick() => BridgeInput::UsageTick,
-                _ = delta_ticker.tick() => BridgeInput::DeltaTick,
+                _ = ticker.tick(), if automatic_flush_enabled => BridgeInput::UsageTick,
+                _ = delta_ticker.tick(), if automatic_flush_enabled => BridgeInput::DeltaTick,
                 result = subscriber.recv() => BridgeInput::Event(result),
             }
         };
@@ -322,6 +330,41 @@ async fn run_subscribed(
     if let Err(error) = writer.await {
         monitor.warn(&format!("storage bridge worker failed: {error}"));
     }
+}
+
+/// Subscribe synchronously so events emitted immediately after starting a test
+/// cannot be lost while the spawned task is waiting to be scheduled.
+#[cfg(test)]
+fn spawn_test_bridge(
+    bus: &Arc<EventBus>,
+    bridge: StorageBridge,
+    flush_every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    spawn_test_bridge_until_shutdown(bus, bridge, flush_every, std::future::pending())
+}
+
+#[cfg(test)]
+fn spawn_test_bridge_until_shutdown(
+    bus: &Arc<EventBus>,
+    bridge: StorageBridge,
+    flush_every: Duration,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let subscriber = bus.subscribe();
+    let lifetime = Arc::downgrade(bus);
+    let (flush_sender, flush_requests) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let _flush_sender = flush_sender;
+        run_subscribed(
+            subscriber,
+            lifetime,
+            bridge,
+            flush_every,
+            shutdown,
+            flush_requests,
+        )
+        .await;
+    })
 }
 
 #[cfg(test)]

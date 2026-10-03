@@ -18,6 +18,7 @@ enum ResponseKind {
 #[derive(Debug, Clone)]
 pub struct ScriptedResponse {
     pub(crate) delay: std::time::Duration,
+    pub(crate) gate: Option<crate::server::ResponseGate>,
     id: String,
     model: String,
     fragments: Vec<String>,
@@ -28,6 +29,13 @@ pub struct ScriptedResponse {
 }
 
 impl ScriptedResponse {
+    /// Waits for an explicit test signal before writing this response.
+    #[must_use]
+    pub fn with_gate(mut self, gate: crate::server::ResponseGate) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
     pub const fn with_delay(mut self, delay: std::time::Duration) -> Self {
         self.delay = delay;
         self
@@ -41,6 +49,7 @@ impl ScriptedResponse {
         Self {
             id: id.to_owned(),
             delay: std::time::Duration::ZERO,
+            gate: None,
             model: model.to_owned(),
             fragments: fragments
                 .into_iter()

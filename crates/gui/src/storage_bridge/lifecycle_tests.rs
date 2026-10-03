@@ -3,6 +3,14 @@ use event_bus::{Event, MessageEvent, OwnershipAction, OwnershipEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage::{Database, StorageConfig};
 
+// These tests exercise explicit flush/shutdown, so keep deltas queued until
+// those boundaries rather than allowing the unrelated deadline to race them.
+fn shutdown_only_bridge(handle: StorageHandle) -> StorageBridge {
+    let mut bridge = StorageBridge::new(handle, "session");
+    bridge.automatic_flush_enabled = false;
+    bridge
+}
+
 fn fixture() -> (tempfile::TempDir, Storage, Database) {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -28,21 +36,14 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
     let owner = OwnedStorageBridge::spawn(
         bus.clone(),
         storage,
-        |handle| StorageBridge::new(handle, "session"),
+        shutdown_only_bridge,
         Duration::from_secs(60),
     )
     .unwrap();
     let monitor = owner.monitor();
     let event = delta("pending at application close");
     assert_eq!(bus.emit(event.clone()), 1);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while monitor.snapshot().pending_events == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "delta must enter the partial batch"
-        );
-        std::thread::yield_now();
-    }
+    monitor.wait_for_blocking(|state| state.pending_events >= 1);
     assert_eq!(monitor.snapshot().persisted_events, 0);
     let running = Arc::new(AtomicBool::new(true));
     let emit = running.clone();
@@ -55,7 +56,11 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
                 generation: 1,
                 action: OwnershipAction::Heartbeat,
             }));
-            std::thread::sleep(Duration::from_millis(1));
+            // Keep a producer alive until the subscriber explicitly closes.
+            if producer_bus.receiver_count() == 0 {
+                break;
+            }
+            std::thread::yield_now();
         }
     });
     let (closed, completion) = std::sync::mpsc::channel();
@@ -63,7 +68,7 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
         drop(owner);
         let _ = closed.send(());
     });
-    let result = completion.recv_timeout(Duration::from_secs(2));
+    let result = completion.recv();
     running.store(false, Ordering::Relaxed);
     producer.join().unwrap();
     result.expect("live producer must not prevent bounded shutdown");
@@ -88,7 +93,7 @@ fn startup_error_drops_guard_and_persists_its_snapshot_before_storage_closes() {
         let _owner = OwnedStorageBridge::spawn(
             bus.clone(),
             storage,
-            |handle| StorageBridge::new(handle, "session"),
+            shutdown_only_bridge,
             Duration::from_secs(60),
         )
         .unwrap();
@@ -115,7 +120,7 @@ fn explicit_shutdown_is_idempotent_and_leaves_the_writer_available_until_drop() 
     let mut owner = OwnedStorageBridge::spawn(
         bus.clone(),
         storage,
-        |handle| StorageBridge::new(handle, "session"),
+        shutdown_only_bridge,
         Duration::from_secs(60),
     )
     .unwrap();
@@ -151,18 +156,14 @@ fn real_owner_quiesce_preserves_a_queued_delta_until_owned_storage_shutdown() {
     let mut owner = OwnedStorageBridge::spawn(
         bus.clone(),
         storage,
-        |handle| StorageBridge::new(handle, "session"),
+        shutdown_only_bridge,
         Duration::from_secs(60),
     )
     .unwrap();
     let event = delta("last generation-fenced delta");
     bus.emit(event.clone());
     let monitor = owner.monitor();
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while monitor.snapshot().pending_events == 0 {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::yield_now();
-    }
+    monitor.wait_for_blocking(|state| state.pending_events >= 1);
     assert_eq!(monitor.snapshot().persisted_events, 0);
     assert!(!host.begin_quiesce().unwrap());
     assert_eq!(
@@ -205,7 +206,7 @@ fn flush_acknowledges_durable_rows_without_stopping_the_subscriber() {
     let mut owner = OwnedStorageBridge::spawn(
         bus.clone(),
         storage,
-        |handle| StorageBridge::new(handle, "session"),
+        shutdown_only_bridge,
         Duration::from_secs(60),
     )
     .unwrap();
@@ -243,7 +244,7 @@ fn flush_barrier_reports_a_rejected_write_instead_of_acknowledging_success() {
     let mut owner = OwnedStorageBridge::spawn(
         bus.clone(),
         storage,
-        |handle| StorageBridge::new(handle, "session"),
+        shutdown_only_bridge,
         Duration::from_secs(60),
     )
     .unwrap();

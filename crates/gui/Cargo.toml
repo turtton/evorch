@@ -56,4 +56,4 @@ workspace-ui = { path = "../workspace-ui" }
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }
 tools = { path = "../tools" }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

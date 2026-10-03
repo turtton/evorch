@@ -130,17 +130,11 @@ async fn capacity_flushes_partial_delta_before_waiting_and_drop_clears_monitor()
         queue.push(delta(Some("run"), "y", false)).await.unwrap();
         queue
     });
-    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let first = rx.recv().await.unwrap();
     assert_eq!(monitor.snapshot().pending_events, 3);
     assert!(matches!(&first, WriteRequest::Event(event) if text(&event.event) == "xxx"));
     drop(first);
-    let queue = tokio::time::timeout(Duration::from_secs(2), producer)
-        .await
-        .unwrap()
-        .unwrap();
+    let queue = producer.await.unwrap();
     assert_eq!(monitor.snapshot().pending_events, 1);
     assert_eq!(monitor.snapshot().peak_pending_events, 3);
     drop(queue);
@@ -160,16 +154,10 @@ async fn byte_capacity_does_not_hold_partial_permits_while_waiting() {
         queue.push(event).await.unwrap();
         queue
     });
-    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let first = rx.recv().await.unwrap();
     assert_eq!(monitor.snapshot().pending_bytes, bytes * 2);
     drop(first);
-    let queue = tokio::time::timeout(Duration::from_secs(2), producer)
-        .await
-        .unwrap()
-        .unwrap();
+    let queue = producer.await.unwrap();
     assert_eq!(monitor.snapshot().peak_pending_bytes, bytes * 2);
     drop(queue);
     assert_eq!(monitor.snapshot().pending_bytes, 0);

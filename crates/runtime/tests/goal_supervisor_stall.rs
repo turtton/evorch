@@ -3,8 +3,8 @@ mod support;
 use std::sync::Arc;
 
 use event_bus::{
-    AgentRunPhase, Event, EventBus, EventKind, GoalState, LifecycleEvent, OrchestratorEvent,
-    RunPurpose, StallSignal, ToolEvent,
+    AgentRunPhase, Event, EventBus, EventKind, EventReceiver, GoalState, LifecycleEvent,
+    OrchestratorEvent, RunPurpose, StallSignal, ToolEvent,
 };
 use runtime::orchestration::delivery::FixtureDeliveryAdapter;
 use runtime::orchestration::ledger::OrchestrationSettings;
@@ -21,7 +21,7 @@ struct Fixture {
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     handle: runtime::orchestration::supervisor::SupervisorHandle,
-    events: Arc<std::sync::Mutex<Vec<OrchestratorEvent>>>,
+    events: EventReceiver,
     parent: runtime::RunId,
     child: runtime::RunId,
     goal_id: String,
@@ -53,19 +53,7 @@ impl Fixture {
             Arc::new(FixtureDeliveryAdapter::default()),
             settings,
         );
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured = Arc::clone(&events);
-        let mut subscriber = handle.subscribe();
-        tokio::spawn(async move {
-            while let Ok(event) = subscriber.recv().await {
-                if let EventKind::Orchestrator(event) = event.kind {
-                    captured
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(event);
-                }
-            }
-        });
+        let mut events = handle.subscribe();
         let parent =
             runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
         let child = runtime
@@ -91,7 +79,18 @@ impl Fixture {
             role: "worker".into(),
             purpose: RunPurpose::Implement,
         }));
-        let fixture = Self {
+        // Both runs must finish initialization before advancing the stall clock:
+        // a late Running event would reset the progress timestamp and counter.
+        while [parent, child].iter().any(|run| {
+            runtime.inspect_agent(*run).expect("registered run").phase != AgentRunPhase::Running
+        }) {
+            events.recv().await.expect("run initialization event");
+        }
+        handle
+            .synchronize()
+            .await
+            .expect("initial progress applied");
+        Self {
             runtime,
             bus,
             handle,
@@ -99,22 +98,36 @@ impl Fixture {
             parent,
             child,
             goal_id,
-        };
-        fixture.settle().await;
-        fixture
-    }
-
-    async fn settle(&self) {
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
         }
     }
-    fn events(&self) -> Vec<OrchestratorEvent> {
-        self.events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+
+    async fn tick(&self) {
+        self.handle.synchronize().await.expect("progress applied");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
     }
+
+    async fn wait_for(&mut self, expected: impl Fn(&OrchestratorEvent) -> bool) {
+        loop {
+            if let EventKind::Orchestrator(event) =
+                self.events.recv().await.expect("supervisor event").kind
+                && expected(&event)
+            {
+                return;
+            }
+        }
+    }
+
+    async fn wait_for_nudge(&mut self, index: u32) {
+        let child = self.child.to_string();
+        self.wait_for(|event| {
+            matches!(event,
+                OrchestratorEvent::NudgeSent { run_id, nudge_index, .. }
+                    if run_id == &child && *nudge_index == index
+            )
+        })
+        .await;
+    }
+
     fn progress(&self) {
         self.bus
             .emit(Event::new(LifecycleEvent::AgentRunStateChanged {
@@ -126,15 +139,11 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn no_progress_after_stall_window_sends_steering_nudge_from_parent() {
-    let fixture = Fixture::new(2).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
-
-    assert!(fixture.events().iter().any(|event| matches!(event,
-        OrchestratorEvent::NudgeSent { run_id, nudge_index: 1, .. } if run_id == &fixture.child.to_string()
-    )));
+    let mut fixture = Fixture::new(2).await;
+    fixture.tick().await;
+    fixture.wait_for_nudge(1).await;
     let message = fixture
         .runtime
         .take_inbox(fixture.child)
@@ -166,36 +175,31 @@ fn in_flight_tool_gets_multiplied_window() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn progress_resets_nudge_counter() {
-    let fixture = Fixture::new(2).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
+    let mut fixture = Fixture::new(2).await;
+    fixture.tick().await;
+    fixture.wait_for_nudge(1).await;
     fixture.progress();
-    fixture.settle().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
-
-    assert_eq!(
-        fixture
-            .events()
-            .iter()
-            .filter(|event| matches!(event,
-                OrchestratorEvent::NudgeSent { run_id, nudge_index: 1, .. }
-                    if run_id == &fixture.child.to_string()
-            ))
-            .count(),
-        2
-    );
+    fixture.tick().await;
+    fixture.wait_for_nudge(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn max_nudges_then_cancel_and_blocked() {
-    let fixture = Fixture::new(1).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
+    let mut fixture = Fixture::new(1).await;
+    fixture.tick().await;
+    fixture.wait_for_nudge(1).await;
+    fixture.tick().await;
+    let goal_id = fixture.goal_id.clone();
+    fixture
+        .wait_for(|event| {
+            matches!(event,
+                OrchestratorEvent::GoalStateChanged { goal_id: changed, to: GoalState::Blocked, .. }
+                    if changed == &goal_id
+            )
+        })
+        .await;
 
     assert_eq!(
         fixture
@@ -211,9 +215,9 @@ async fn max_nudges_then_cancel_and_blocked() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_tool_errors_trigger_stall() {
-    let fixture = Fixture::new(2).await;
+    let mut fixture = Fixture::new(2).await;
     for index in 0..3 {
         fixture.bus.emit(Event::new(ToolEvent::ToolCompleted {
             tool_name: "shell".into(),
@@ -224,17 +228,20 @@ async fn repeated_tool_errors_trigger_stall() {
             run_id: Some(fixture.child.to_string()),
         }));
     }
-    fixture.settle().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    fixture.settle().await;
-
-    assert!(fixture.events().iter().any(|event| matches!(
-        event,
-        OrchestratorEvent::StallDetected {
-            signal: StallSignal::RepeatedErrors { count: 3 },
-            ..
-        }
-    )));
+    fixture.tick().await;
+    let child = fixture.child.to_string();
+    fixture
+        .wait_for(|event| {
+            matches!(
+                event,
+                OrchestratorEvent::StallDetected {
+                    run_id,
+                    signal: StallSignal::RepeatedErrors { count: 3 },
+                    ..
+                } if run_id == &child
+            )
+        })
+        .await;
 }
 
 #[test]

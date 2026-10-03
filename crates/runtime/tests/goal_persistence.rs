@@ -3,7 +3,8 @@ mod support;
 use std::sync::Arc;
 
 use event_bus::{
-    EventBus, EventKind, GoalReference, GoalState, OrchestratorEvent, RecvError, RunPurpose,
+    EventBus, EventKind, EventReceiver, GoalReference, GoalState, OrchestratorEvent, RecvError,
+    RunPurpose,
 };
 use runtime::orchestration::delivery::FixtureDeliveryAdapter;
 use runtime::orchestration::ledger::{GoalLedger, OrchestrationSettings};
@@ -12,7 +13,7 @@ use runtime::{AgentRuntime, Role, RunConfig};
 use sandbox::DirectSandbox;
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use tempfile::TempDir;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tools::ToolExecutor;
 
 use support::ScriptedModel;
@@ -29,24 +30,41 @@ fn runtime_with(bus: Arc<EventBus>) -> AgentRuntime {
     )
 }
 
-fn spawn_storage_bridge(bus: &EventBus, handle: StorageHandle) -> tokio::task::JoinHandle<()> {
+fn spawn_storage_bridge(
+    bus: &EventBus,
+    handle: StorageHandle,
+) -> (
+    tokio::task::JoinHandle<()>,
+    mpsc::UnboundedReceiver<OrchestratorEvent>,
+) {
     let mut subscriber = bus.subscribe();
-    tokio::spawn(async move {
+    let (persisted, events) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
         loop {
             match subscriber.recv().await {
-                Ok(event) => handle
-                    .append_event(Some("goal-persistence"), &event)
-                    .expect("persist event"),
+                Ok(event) => {
+                    handle
+                        .append_event(Some("goal-persistence"), &event)
+                        .expect("persist event");
+                    if let EventKind::Orchestrator(event) = event.kind {
+                        let _ = persisted.send(event);
+                    }
+                }
                 Err(RecvError::Lagged(skipped)) => panic!("storage bridge lagged by {skipped}"),
                 Err(RecvError::Closed) => return,
             }
         }
-    })
+    });
+    (task, events)
 }
 
-async fn settle() {
-    for _ in 0..24 {
-        tokio::task::yield_now().await;
+async fn wait_for_event(events: &mut EventReceiver, expected: impl Fn(&OrchestratorEvent) -> bool) {
+    loop {
+        if let EventKind::Orchestrator(event) = events.recv().await.expect("supervisor event").kind
+            && expected(&event)
+        {
+            return;
+        }
     }
 }
 
@@ -78,7 +96,7 @@ async fn adopt_marks_active_goal_paused_with_recovery_reason() {
     );
     let root = runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
     let goal_id = first.create_goal(spec(), root);
-    settle().await;
+    first.synchronize().await.expect("goal created");
     let snapshot = first.snapshot(&goal_id).expect("snapshot");
     let mut events = bus.subscribe();
     let fresh_runtime = runtime_with(Arc::clone(&bus));
@@ -90,22 +108,18 @@ async fn adopt_marks_active_goal_paused_with_recovery_reason() {
     );
 
     adopted.adopt(vec![(snapshot, vec![])]).expect("adopt");
-    settle().await;
+    adopted.synchronize().await.expect("goal adopted");
 
     let current = adopted.snapshot(&goal_id).expect("adopted snapshot");
     assert_eq!(current.state, GoalState::Paused);
     assert!(current.detached);
-    let mut found = false;
-    while let Ok(Ok(event)) =
-        tokio::time::timeout(std::time::Duration::from_millis(10), events.recv()).await
-    {
-        if matches!(event.kind, EventKind::Orchestrator(OrchestratorEvent::GoalStateChanged { ref reason, .. }) if reason == "recovered-after-restart")
-        {
-            found = true;
-            break;
-        }
-    }
-    assert!(found);
+    wait_for_event(&mut events, |event| {
+        matches!(event,
+            OrchestratorEvent::GoalStateChanged { goal_id: changed, reason, .. }
+                if changed == &goal_id && reason == "recovered-after-restart"
+        )
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -121,7 +135,7 @@ async fn resume_of_adopted_goal_dispatches_recovery_run_not_child_continuation()
     let old_root =
         source_runtime.delegate_background(Role::Orchestrator, "OLD".into(), RunConfig::default());
     let goal_id = source.create_goal(spec(), old_root);
-    settle().await;
+    source.synchronize().await.expect("goal created");
     let snapshot = source.snapshot(&goal_id).expect("snapshot");
 
     let bus = Arc::new(EventBus::new(256));
@@ -134,27 +148,21 @@ async fn resume_of_adopted_goal_dispatches_recovery_run_not_child_continuation()
     );
     let mut events = bus.subscribe();
     handle.adopt(vec![(snapshot, vec![])]).expect("adopt");
-    settle().await;
+    handle.synchronize().await.expect("goal adopted");
     handle.resume(&goal_id).expect("resume");
-    settle().await;
-
-    let mut recovery = false;
-    while let Ok(Ok(event)) =
-        tokio::time::timeout(std::time::Duration::from_millis(10), events.recv()).await
-    {
-        if matches!(
-            event.kind,
-            EventKind::Orchestrator(OrchestratorEvent::RunAttached {
+    handle.synchronize().await.expect("goal resumed");
+    wait_for_event(&mut events, |event| {
+        matches!(
+            event,
+            OrchestratorEvent::RunAttached {
+                goal_id: attached,
                 parent_run_id: None,
                 purpose: RunPurpose::Recovery { .. },
                 ..
-            })
-        ) {
-            recovery = true;
-            break;
-        }
-    }
-    assert!(recovery);
+            } if attached == &goal_id
+        )
+    })
+    .await;
     assert!(!handle.snapshot(&goal_id).expect("snapshot").detached);
 }
 
@@ -168,7 +176,7 @@ async fn goal_events_round_trip_and_resume_dispatches_continuation() {
     let storage = Storage::open(config.clone()).expect("storage");
     let bus = Arc::new(EventBus::new(512));
     let runtime = runtime_with(Arc::clone(&bus));
-    let bridge = spawn_storage_bridge(&bus, storage.handle());
+    let (bridge, mut persisted) = spawn_storage_bridge(&bus, storage.handle());
     let handle = GoalSupervisor::spawn(
         runtime.clone(),
         Arc::clone(&bus),
@@ -177,9 +185,18 @@ async fn goal_events_round_trip_and_resume_dispatches_continuation() {
     );
     let root = runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
     let goal_id = handle.create_goal(spec(), root);
-    settle().await;
+    handle.synchronize().await.expect("goal created");
     handle.pause(&goal_id).expect("pause");
-    settle().await;
+    // append_event acknowledges the committed transaction. Waiting for this
+    // exact transition also covers all earlier events on the bridge receiver.
+    loop {
+        if matches!(persisted.recv().await.expect("persisted goal event"),
+            OrchestratorEvent::GoalStateChanged { goal_id: changed, to: GoalState::Paused, .. }
+                if changed == goal_id
+        ) {
+            break;
+        }
+    }
     let expected = handle.snapshot(&goal_id).expect("snapshot");
     bridge.abort();
     let _ = bridge.await;
@@ -211,20 +228,13 @@ async fn goal_events_round_trip_and_resume_dispatches_continuation() {
     );
     let mut events = fresh_bus.subscribe();
     fresh.adopt(vec![(restored, vec![])]).expect("adopt");
-    settle().await;
+    fresh.synchronize().await.expect("goal adopted");
     fresh.resume(&goal_id).expect("resume");
-    settle().await;
-    let mut dispatched = false;
-    while let Ok(Ok(event)) =
-        tokio::time::timeout(std::time::Duration::from_millis(10), events.recv()).await
-    {
-        if matches!(
-            event.kind,
-            EventKind::Orchestrator(OrchestratorEvent::ContinuationDispatched { .. })
-        ) {
-            dispatched = true;
-            break;
-        }
-    }
-    assert!(dispatched);
+    wait_for_event(&mut events, |event| {
+        matches!(event,
+            OrchestratorEvent::ContinuationDispatched { goal_id: dispatched, .. }
+                if dispatched == &goal_id
+        )
+    })
+    .await;
 }
