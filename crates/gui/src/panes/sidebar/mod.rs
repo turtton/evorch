@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase, TrustState};
 
-use crate::theme::tokens::palette;
-use crate::theme::widgets::{pane_root, surface_frame};
+use crate::theme::widgets::pane_root;
 
 mod projects;
 pub(crate) mod threads;
@@ -51,21 +50,20 @@ pub fn sidebar_pane(
             .id_salt("sidebar-scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                surface_frame(palette().SIDEBAR).show(ui, |ui| {
-                    let selected = selected_project(sidebar);
-                    projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
-                    if let Some(project) = selected {
-                        threads::render(
-                            ui,
-                            sidebar,
-                            project,
-                            phases,
-                            telemetry,
-                            question_threads,
-                            &mut action,
-                        );
-                    }
-                });
+                // The pane itself is the surface; nesting another frame only adds borders.
+                let selected = selected_project(sidebar);
+                projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
+                if let Some(project) = selected {
+                    threads::render(
+                        ui,
+                        sidebar,
+                        project,
+                        phases,
+                        telemetry,
+                        question_threads,
+                        &mut action,
+                    );
+                }
             });
     });
 

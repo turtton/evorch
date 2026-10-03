@@ -1,10 +1,17 @@
-use egui::{Align, Layout, Sense, Ui};
+use egui::{Align, Layout, RichText, Sense, Ui};
 use workspace_ui::{SidebarState, TrustState};
 
-use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_2, palette};
-use crate::theme::widgets::{badge, compact_row, empty_state, primary_button, status_dot};
+use crate::theme::icons;
+use crate::theme::text::{medium, muted};
+use crate::theme::tokens::{FONT_ICON, SP_1, SP_2, palette};
+use crate::theme::widgets::{
+    badge, compact_row, empty_state, ghost, icon_button_rich, icon_text, primary_button, row_title,
+};
 
 use super::{SidebarAction, SidebarUiState};
+
+/// Horizontal offset of row titles: row padding + icon + item spacing.
+pub(super) const ROW_TEXT_INDENT: f32 = SP_2 + FONT_ICON + SP_2;
 
 pub fn render(
     ui: &mut Ui,
@@ -25,65 +32,57 @@ pub fn render(
     for project in &sidebar.projects {
         let selected_project = selected.map(|p| &p.id) == Some(&project.id);
         compact_row(ui, selected_project, |ui| {
-            let dot_color = if selected_project {
-                palette().ACCENT
+            ui.spacing_mut().item_spacing.x = SP_2;
+            let (icon, color) = if selected_project {
+                (icons::FOLDER_OPEN, palette().ACCENT)
             } else {
-                palette().TEXT_MUTED
+                (icons::FOLDER_SIMPLE, palette().TEXT_MUTED)
             };
-            status_dot(ui, dot_color);
+            ui.label(icon_text(icon).color(color));
             let count = sidebar
                 .threads
                 .iter()
                 .filter(|thread| thread.project_id == project.id)
                 .count();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SP_1;
                 let primary = sidebar.primary_project.as_ref() == Some(&project.id);
                 let star_label = if primary {
                     "Clear primary project"
                 } else {
                     "Set as primary project"
                 };
-                let star_response = ui
-                    .small_button(if primary { "★" } else { "☆" })
-                    .on_hover_text(star_label);
-                star_response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, star_label)
-                });
-                if star_response.clicked() {
+                let star = if primary {
+                    icons::filled(ui, icons::STAR)
+                        .size(FONT_ICON)
+                        .color(palette().WARNING_FG)
+                } else {
+                    icon_text(icons::STAR).color(palette().TEXT_MUTED)
+                };
+                if icon_button_rich(ui, star, star_label).clicked() {
                     *action = Some(SidebarAction::SetPrimaryProject(
                         (!primary).then(|| project.id.clone()),
                     ));
                 }
                 if count > 0 {
-                    badge(
-                        ui,
-                        count.to_string(),
-                        palette().TEXT_MUTED,
-                        palette().SURFACE_RAISED,
-                    );
+                    ui.label(muted(count.to_string()));
                 }
-                let title_response = ui.add_sized(
-                    egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
-                    egui::Label::new(&project.name)
-                        .truncate()
-                        .halign(Align::LEFT)
-                        .sense(Sense::click()),
-                );
-                if title_response.clicked() {
+                let title = if selected_project {
+                    medium(&project.name).color(palette().TEXT)
+                } else {
+                    RichText::new(&project.name).color(palette().TEXT)
+                };
+                if row_title(ui, title).clicked() {
                     *action = Some(SidebarAction::SelectProject(project.id.clone()));
                 }
             });
         });
         let path = project.repo_root.display().to_string();
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&path)
-                    .size(FONT_SMALL)
-                    .color(palette().TEXT_MUTED),
-            )
-            .truncate(),
-        )
-        .on_hover_text(&path);
+        ui.horizontal(|ui| {
+            ui.add_space(ROW_TEXT_INDENT);
+            ui.add(egui::Label::new(muted(&path)).truncate())
+                .on_hover_text(&path);
+        });
     }
 
     ui.add_space(SP_2);
@@ -96,10 +95,14 @@ pub fn render(
         egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Project path (~ allowed)")
     });
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!pane_state.picker_busy, egui::Button::new("Browse…"))
-            .clicked()
-        {
+        let browse = ui.add_enabled(
+            !pane_state.picker_busy,
+            ghost(icons::with_icon(icons::FOLDER_OPEN, "Browse…")),
+        );
+        browse.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, !pane_state.picker_busy, "Browse…")
+        });
+        if browse.clicked() {
             *action = Some(SidebarAction::BrowseForProject);
         }
         if primary_button(ui, "Add project").clicked() && !pane_state.project_path.trim().is_empty()

@@ -7,11 +7,20 @@ use workspace_ui::{
 };
 
 use crate::model::telemetry::{TelemetryOverlay, WorkspaceWaitEntry};
-use crate::theme::text::h4;
-use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{compact_row, empty_state, primary_button};
+use crate::theme::icons;
+use crate::theme::text::section;
+use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, SP_3, palette};
+use crate::theme::widgets::{
+    compact_row, empty_state, ghost, ghost_icon_button, icon_button, icon_text, labeled,
+    primary_button, row_title,
+};
 
 use super::SidebarAction;
+
+/// Side of the square pin/archive/fork action buttons.
+const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
+/// Below this row width Fork moves into the overflow menu.
+const NARROW_ROW_WIDTH: f32 = 240.0;
 
 pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
     let mut family = BTreeSet::from([root.clone()]);
@@ -64,15 +73,21 @@ pub fn render(
     let (project_threads, archived) =
         ThreadRecord::partition_for_project(&sidebar.threads, &project.id);
 
-    ui.separator();
+    ui.add_space(SP_3);
     ui.horizontal(|ui| {
-        ui.label(h4("Threads"));
+        ui.set_min_height(ROW_DENSE);
+        ui.add_space(SP_2);
+        ui.label(section("Threads"));
         let has_threads = !project_threads.is_empty();
-        let new_thread_clicked = if has_threads {
-            ui.button("New thread").clicked()
-        } else {
-            primary_button(ui, "New thread").clicked()
-        };
+        let new_thread_clicked = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if has_threads {
+                    icon_button(ui, icons::PLUS, "New thread").clicked()
+                } else {
+                    primary_button(ui, "New thread").clicked()
+                }
+            })
+            .inner;
         if new_thread_clicked {
             let title = format!("thread-{}", sidebar.threads.len() + 1);
             *action = Some(SidebarAction::CreateThread(title));
@@ -131,9 +146,15 @@ fn render_tree(
                 ui.spacing_mut().item_spacing.x = SP_1;
                 ui.spacing_mut().button_padding.x = SP_1;
                 ui.add_space(depth as f32 * 16.0);
+                let (rect, toggle) = ui.allocate_exact_size(
+                    egui::vec2(16.0, ROW_DENSE),
+                    if has_children {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    },
+                );
                 if has_children {
-                    let (rect, toggle) =
-                        ui.allocate_exact_size(egui::vec2(16.0, ROW_DENSE), Sense::click());
                     if toggle.clicked() {
                         expansion.toggle(ui);
                     }
@@ -149,10 +170,22 @@ fn render_tree(
                             format!("{label} children of {}", thread.id),
                         )
                     });
-                    egui::collapsing_header::paint_default_icon(
-                        ui,
-                        if expansion.is_open() { 1.0 } else { 0.0 },
-                        &toggle.with_new_rect(rect.shrink(2.0)),
+                    let caret = if expansion.is_open() {
+                        icons::CARET_DOWN
+                    } else {
+                        icons::CARET_RIGHT
+                    };
+                    let color = if toggle.hovered() {
+                        palette().TEXT
+                    } else {
+                        palette().TEXT_MUTED
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        caret,
+                        egui::FontId::proportional(FONT_SMALL),
+                        color,
                     );
                 }
                 if archived {
@@ -214,53 +247,78 @@ fn active_row(
     wait_context: (&SidebarState, &TelemetryOverlay),
     action: &mut Option<SidebarAction>,
 ) {
-    let pin = if thread.pinned { "★" } else { "☆" };
-    if ui.button(pin).clicked() {
-        *action = Some(SidebarAction::TogglePin(thread.id.clone()));
-    }
-    if thread.parent_thread_id.is_none() {
-        let can_archive = !thread.pinned && !family_running;
-        let disabled_reason = if family_running {
-            "Archive unavailable while a thread in this family is running"
-        } else {
-            "Unpin this thread before archiving"
-        };
-        let archive = ui
-            .add_enabled(can_archive, archive_button)
-            .on_hover_text("アーカイブ")
-            .on_disabled_hover_text(disabled_reason);
-        archive.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
-        });
-        if archive.clicked() {
-            *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
-        }
-    } else {
-        ui.add_space(ui.text_style_height(&egui::TextStyle::Small) + SP_2);
-    }
-    // At the minimum window size the action button leaves little
-    // room for the title, and egui's minimum Label width overlaps earlier
-    // controls. Keep the title and controls in distinct hit regions.
-    let narrow = ui.available_width() < 180.0;
+    // At the minimum window size the action buttons leave little room for the
+    // title, so Fork moves into an overflow menu and the title keeps its own
+    // hit region.
+    let narrow = ui.available_width() < NARROW_ROW_WIDTH;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // Existing runtime/question indicators remain at the trailing edge;
-        // workspace contention is an additional independent signal beside them.
+        // Runtime/question indicators stay at the trailing edge; workspace
+        // contention is an additional independent signal beside them.
+        ui.spacing_mut().item_spacing.x = SP_1;
         thread_status_icon(ui, state, has_question);
         workspace_wait_icon(ui, thread, wait_context.0, wait_context.1);
+        ui.add_space(SP_1);
+        ui.spacing_mut().item_spacing.x = 0.0;
         if narrow {
-            ui.menu_button("⋯", |ui| {
-                if ui.button("Fork").clicked() {
+            let menu = egui::containers::menu::MenuButton::from_button(
+                ghost(icon_text(icons::DOTS_THREE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
+            )
+            .ui(ui, |ui| {
+                if ghost_icon_button(ui, icons::GIT_FORK, "Fork").clicked() {
                     *action = Some(SidebarAction::ForkThread(thread.id.clone()));
                     ui.close();
                 }
             })
-            .response
-            .on_hover_text("Thread actions");
-        } else {
-            if ui.small_button("Fork").clicked() {
-                *action = Some(SidebarAction::ForkThread(thread.id.clone()));
-            }
+            .0;
+            labeled(menu, "⋯").on_hover_text("Thread actions");
+        } else if icon_button(ui, icons::GIT_FORK, "Fork").clicked() {
+            *action = Some(SidebarAction::ForkThread(thread.id.clone()));
         }
+        if thread.parent_thread_id.is_none() {
+            let can_archive = !thread.pinned && !family_running;
+            let disabled_reason = if family_running {
+                "Archive unavailable while a thread in this family is running"
+            } else {
+                "Unpin this thread before archiving"
+            };
+            let archive = ui
+                .add_enabled(
+                    can_archive,
+                    ghost(icon_text(icons::ARCHIVE)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
+                )
+                .on_hover_text("アーカイブ")
+                .on_disabled_hover_text(disabled_reason);
+            archive.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, can_archive, "Archive")
+            });
+            if archive.clicked() {
+                *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
+            }
+        } else {
+            // Keep pins of child rows aligned with their root's pin.
+            ui.add_space(ACTION_SIZE);
+        }
+        let (pin_icon, pin_label, pin_hint) = if thread.pinned {
+            (
+                icons::filled(ui, icons::PUSH_PIN)
+                    .size(FONT_ICON)
+                    .color(palette().TEXT),
+                "★",
+                "Unpin",
+            )
+        } else {
+            (
+                icon_text(icons::PUSH_PIN).color(palette().TEXT_MUTED),
+                "☆",
+                "Pin",
+            )
+        };
+        let pin = ui.add(ghost(pin_icon).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)));
+        pin.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pin_label));
+        if pin.on_hover_text(pin_hint).clicked() {
+            *action = Some(SidebarAction::TogglePin(thread.id.clone()));
+        }
+        ui.add_space(SP_1);
         thread_title(ui, thread, action);
     });
 }
@@ -274,15 +332,14 @@ fn workspace_wait_icon(
     if telemetry.workspace_waits(&thread.run_ids).next().is_none() {
         return;
     }
-    // Draw the hourglass so its appearance does not depend on emoji/font support.
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), Sense::hover());
-    let rect = rect.shrink(2.0);
-    let stroke = egui::Stroke::new(1.3, palette().WARNING_FG);
-    let painter = ui.painter();
-    painter.line_segment([rect.left_top(), rect.right_top()], stroke);
-    painter.line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
-    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
-    painter.line_segment([rect.right_top(), rect.left_bottom()], stroke);
+    let response = ui.add(
+        egui::Label::new(
+            egui::RichText::new(icons::HOURGLASS_MEDIUM)
+                .size(FONT_SMALL + 2.0)
+                .color(palette().WARNING_FG),
+        )
+        .sense(Sense::hover()),
+    );
     let label = format!("作業領域の使用待ち: {}", thread.id);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     response.on_hover_ui(|ui| {
@@ -360,36 +417,32 @@ fn archived_row(
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = SP_1;
         workspace_wait_icon(ui, thread, sidebar, telemetry);
-        if thread.parent_thread_id.is_none()
-            && ui
-                .small_button("Restore")
-                .on_hover_text("アーカイブを解除")
-                .clicked()
-        {
+        if thread.parent_thread_id.is_none() && restore_button(ui).clicked() {
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
         thread_title(ui, thread, action);
     });
 }
 
+fn restore_button(ui: &mut Ui) -> egui::Response {
+    let response = ui.add(
+        ghost(icon_text(icons::ARROW_U_UP_LEFT)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Restore"));
+    response.on_hover_text("アーカイブを解除")
+}
+
 fn thread_title(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarAction>) {
-    if ui
-        .add_sized(
-            egui::vec2(ui.available_width().max(0.0), ROW_DENSE),
-            egui::Label::new(format!(
-                "{}{}",
-                if thread.parent_thread_id.is_some() {
-                    "↳ "
-                } else {
-                    ""
-                },
-                thread.title
-            ))
-            .truncate()
-            .halign(Align::LEFT)
-            .sense(Sense::click()),
-        )
+    // Indentation and the caret already show nesting; "↳" stays in the
+    // accessible name only.
+    let title = row_title(ui, thread.title.as_str());
+    if thread.parent_thread_id.is_some() {
+        let label = format!("↳ {}", thread.title);
+        title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    }
+    if title
         .on_hover_text(format!("thread ID: {}", thread.id))
         .clicked()
     {
@@ -436,41 +489,6 @@ fn nested_threads<'a>(threads: &[&'a ThreadRecord]) -> Vec<(&'a ThreadRecord, us
     output
 }
 
-fn archive_button(ui: &mut Ui) -> egui::Response {
-    let size = ui.text_style_height(&egui::TextStyle::Small);
-    let response = ui.add(
-        egui::Button::new("")
-            .small()
-            .min_size(egui::vec2(size + SP_2, size + SP_2)),
-    );
-    let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(size, size));
-    let color = ui.style().interact(&response).text_color();
-    paint_archive_box_icon(ui.painter(), rect, color);
-    response
-}
-
-fn paint_archive_box_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.2, color);
-    let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
-    // A balanced outline with an overhanging lid and a centered drawer pull.
-    painter.add(egui::Shape::line(
-        vec![
-            point(0.18, 0.34),
-            point(0.18, 0.87),
-            point(0.82, 0.87),
-            point(0.82, 0.34),
-        ],
-        stroke,
-    ));
-    painter.rect_stroke(
-        egui::Rect::from_min_max(point(0.08, 0.12), point(0.92, 0.34)),
-        1,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
-    painter.line_segment([point(0.38, 0.53), point(0.62, 0.53)], stroke);
-}
-
 fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
     // Runtime status retains the display aggregation; questions are independent
     // and must remain visible alongside either the spinner or the error icon.
@@ -484,18 +502,14 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
             "Thread status: Running",
         ))
     } else if matches!(state, ThreadState::Error) {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(FONT_SMALL, FONT_SMALL), Sense::hover());
-        let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
-        let stroke = egui::Stroke::new(1.2, palette().ERROR_FG);
-        ui.painter().add(egui::Shape::closed_line(
-            vec![point(0.5, 0.08), point(0.94, 0.88), point(0.06, 0.88)],
-            stroke,
-        ));
-        ui.painter()
-            .line_segment([point(0.5, 0.34), point(0.5, 0.57)], stroke);
-        ui.painter()
-            .circle_filled(point(0.5, 0.72), 0.8, palette().ERROR_FG);
+        let response = ui.add(
+            egui::Label::new(
+                egui::RichText::new(icons::WARNING)
+                    .size(FONT_SMALL + 2.0)
+                    .color(palette().ERROR_FG),
+            )
+            .sense(Sense::hover()),
+        );
         Some((response, "Thread status: Error"))
     } else {
         None

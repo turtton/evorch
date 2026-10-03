@@ -13,7 +13,7 @@ pub fn dock_style(style: &egui::Style) -> Style {
     dock.separator.color_hovered = palette().TEXT_MUTED;
     dock.separator.color_dragged = palette().ACCENT;
 
-    dock.tab_bar.bg_fill = palette().SURFACE_RAISED;
+    dock.tab_bar.bg_fill = palette().CANVAS;
     dock.tab_bar.height = TAB_HEIGHT + 2.0 * TAB_GAP;
     dock.tab_bar.inner_margin = Margin::symmetric(SP_1 as i8, TAB_GAP as i8);
     dock.tab_bar.corner_radius = CornerRadius::ZERO;
@@ -25,40 +25,39 @@ pub fn dock_style(style: &egui::Style) -> Style {
     dock.tab.minimum_width = None;
     dock.tab.hline_below_active_tab_name = true;
 
-    let top_radius = CornerRadius {
-        nw: R_SM,
-        ne: R_SM,
-        sw: 0,
-        se: 0,
-    };
+    // Pill tabs: the active tab is a filled chip (stronger in the focused leaf),
+    // the rest are bare text.
+    let tab_radius = CornerRadius::same(R_SM);
     dock.tab.active = TabInteractionStyle {
-        bg_fill: palette().ACTIVE_ROW,
+        bg_fill: palette().SURFACE_RAISED,
         text_color: palette().TEXT,
-        outline_color: palette().ACCENT,
-        corner_radius: top_radius,
+        outline_color: Color32::TRANSPARENT,
+        corner_radius: tab_radius,
     };
     dock.tab.focused = TabInteractionStyle {
         bg_fill: palette().ACTIVE_ROW,
         text_color: palette().TEXT,
-        outline_color: palette().ACCENT,
-        corner_radius: top_radius,
+        outline_color: Color32::TRANSPARENT,
+        corner_radius: tab_radius,
     };
     dock.tab.inactive = TabInteractionStyle {
-        bg_fill: palette().SURFACE_RAISED,
+        bg_fill: palette().CANVAS,
         text_color: palette().TEXT_MUTED,
         outline_color: Color32::TRANSPARENT,
-        corner_radius: top_radius,
+        corner_radius: tab_radius,
     };
     dock.tab.hovered = TabInteractionStyle {
         bg_fill: palette().HOVER_ROW,
         text_color: palette().TEXT,
-        outline_color: palette().BORDER,
-        corner_radius: top_radius,
+        outline_color: Color32::TRANSPARENT,
+        corner_radius: tab_radius,
     };
     dock.tab.inactive_with_kb_focus = dock.tab.inactive.clone();
     dock.tab.inactive_with_kb_focus.outline_color = palette().ACCENT;
     dock.tab.active_with_kb_focus = dock.tab.active.clone();
+    dock.tab.active_with_kb_focus.outline_color = palette().ACCENT;
     dock.tab.focused_with_kb_focus = dock.tab.focused.clone();
+    dock.tab.focused_with_kb_focus.outline_color = palette().ACCENT;
 
     dock.tab.tab_body = TabBodyStyle {
         inner_margin: Margin::same(SP_2 as i8),

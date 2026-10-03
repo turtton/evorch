@@ -123,15 +123,16 @@ fn selected_row_paints_stronger_fill_when_selected() {
 }
 
 #[test]
-fn dock_chrome_uses_raised_elevation_when_built() {
+fn dock_chrome_uses_canvas_bar_and_pill_tabs_when_built() {
     // Given: the installed palette and workbench style.
     let p = palette();
     // When: dock chrome is derived.
     let dock = dock_style(&style_for(ThemePreset::Graphite));
-    // Then: permanent chrome stays below overlays and selection is explicit.
-    assert_eq!(dock.tab_bar.bg_fill, p.SURFACE_RAISED);
-    assert_eq!(dock.tab.inactive.bg_fill, p.SURFACE_RAISED);
-    assert_eq!(dock.tab.active.bg_fill, p.ACTIVE_ROW);
+    // Then: the tab bar blends into the canvas, inactive tabs are bare text,
+    // and the active chip is strongest in the focused leaf.
+    assert_eq!(dock.tab_bar.bg_fill, p.CANVAS);
+    assert_eq!(dock.tab.inactive.bg_fill, p.CANVAS);
+    assert_eq!(dock.tab.active.bg_fill, p.SURFACE_RAISED);
     assert_eq!(dock.tab.focused.bg_fill, p.ACTIVE_ROW);
     assert_eq!(dock.separator.width, 1.0);
     assert_eq!(dock.tab.tab_body.stroke, Stroke::NONE);

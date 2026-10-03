@@ -164,6 +164,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             };
             DockArea::new(&mut self.dock)
                 .style(dock_style)
+                // Leaf "close all" never closes anything: most panes are not closeable.
+                .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
         }
         for link in file_requests {

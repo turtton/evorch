@@ -1,10 +1,13 @@
 //! Composer strip rendering and action reporting without dispatch.
 
 use crate::model::composer::{ComposerModel, completions};
+use crate::theme::icons;
 use crate::theme::tokens::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
 };
-use crate::theme::widgets::{primary_button, surface_frame};
+use crate::theme::widgets::{
+    accessible, ghost, primary_button, primary_icon_button, surface_frame,
+};
 use workspace_ui::ThreadRunPhase;
 
 #[path = "composer_images.rs"]
@@ -143,9 +146,11 @@ pub fn composer_strip(
 ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::Stopped) { "全停止" } else { "Stop" }).color(if phase == Some(ThreadRunPhase::Stopped) { palette().WARNING_FG } else { palette().ERROR_FG }))
 .fill(if phase == Some(ThreadRunPhase::Stopped) { palette().SURFACE_RAISED } else { palette().ERROR_SURFACE }))
                 } else if can_send {
-                    primary_button(ui, "Send")
+                    primary_icon_button(ui, icons::PAPER_PLANE_RIGHT, "Send")
                 } else {
-                    ui.add_enabled(false, egui::Button::new("Send"))
+                    let send = ui.add_enabled(false, ghost(icons::with_icon(icons::PAPER_PLANE_RIGHT, "Send")));
+                    accessible(&send, "Send");
+                    send
                 };
                 let ime_id = ui.id().with("ime-composing");
                 let mut ime_composing = ui.data(|data| data.get_temp::<bool>(ime_id).unwrap_or_default());

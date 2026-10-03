@@ -117,6 +117,25 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
     }
 }
 
+fn panel_icon(kind: PanelKind) -> &'static str {
+    use crate::theme::icons;
+    match kind {
+        PanelKind::Agent => icons::CHAT_CIRCLE_TEXT,
+        PanelKind::Sidebar => icons::FOLDER_SIMPLE,
+        PanelKind::Agents | PanelKind::SubagentRegion => icons::ROBOT,
+        PanelKind::AgentTranscript
+        | PanelKind::SubagentTranscript
+        | PanelKind::ParkedAgentTranscript(_) => icons::SCROLL,
+        PanelKind::Diff => icons::GIT_DIFF,
+        PanelKind::FileViewer => icons::FILE_TEXT,
+        PanelKind::Terminal => icons::TERMINAL_WINDOW,
+        PanelKind::Tasks => icons::LIST_CHECKS,
+        PanelKind::Notifications => icons::BELL,
+        PanelKind::Memory => icons::BRAIN,
+        PanelKind::Arena => icons::SCALES,
+    }
+}
+
 impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
     type Tab = PanelId;
 
@@ -160,6 +179,10 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                 }
             })
             .unwrap_or_else(|| tab.to_string());
+        let title = match self.panels.get(tab) {
+            Some(panel) => crate::theme::icons::with_icon(panel_icon(panel.kind), title),
+            None => title,
+        };
         // egui_dock paints tab titles without accesskit nodes, so the "• " prefix
         // never reaches label-based test queries; the tab title text is unchanged.
         // U+2022 is used because egui's bundled fonts lack U+25CF (renders as tofu).

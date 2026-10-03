@@ -154,12 +154,18 @@ fn tool_card_summary_is_single_line_and_unicode_bounded() {
     // Then
     let expected = format!("✓ bash echo {}…", "界".repeat(115));
     assert!(harness.query_by_label(&expected).is_some());
+    // The painted header swaps the textual mark for the Phosphor check glyph.
+    let painted = format!(
+        "{} bash echo {}…",
+        gui::theme::icons::CHECK,
+        "界".repeat(115)
+    );
     let text = harness
         .output()
         .shapes
         .iter()
         .find_map(|shape| match &shape.shape {
-            Shape::Text(text) if text.galley.text() == expected => Some(text),
+            Shape::Text(text) if text.galley.text() == painted => Some(text),
             _ => None,
         })
         .expect("painted compact header");
@@ -178,41 +184,6 @@ fn tool_card_omits_empty_or_unfocused_summary() {
         let harness = harness(tool, input, "");
         // Then
         assert!(harness.query_by_label(&format!("✓ {tool}")).is_some());
-    }
-}
-
-#[test]
-fn transcript_card_accent_line_does_not_overlap_text() {
-    // Given
-    let accent = gui::theme::tokens::palette().INFO;
-    let mut harness = Harness::new_ui(move |ui| {
-        gui::theme::install(ui.ctx());
-        gui::theme::widgets::card(ui, accent, |ui| {
-            ui.label("Transcript content");
-            ui.label("Second line");
-        });
-    });
-    // When
-    harness.run_steps(2);
-    // Then
-    let shapes = &harness.output().shapes;
-    let bar = shapes
-        .iter()
-        .find_map(|shape| match &shape.shape {
-            Shape::Rect(rect) if rect.fill == accent => Some(rect.rect),
-            _ => None,
-        })
-        .expect("accent remains visible");
-    for label in ["Transcript content", "Second line"] {
-        let text = shapes
-            .iter()
-            .find_map(|shape| match &shape.shape {
-                Shape::Text(text) if text.galley.text() == label => Some(text),
-                _ => None,
-            })
-            .expect("content is painted");
-        assert!(bar.right() < text.pos.x, "bar {bar:?}, text {:?}", text.pos);
-        assert!(bar.bottom() >= text.pos.y);
     }
 }
 

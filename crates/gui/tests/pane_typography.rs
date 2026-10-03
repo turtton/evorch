@@ -1,6 +1,6 @@
 use egui::{FontFamily, FontId, epaint::Shape};
 use egui_kittest::{Harness, kittest::Queryable};
-use gui::theme::tokens::{FONT_H3, FONT_H4};
+use gui::theme::tokens::{FONT_H3, FONT_SMALL};
 
 fn assert_header(harness: &Harness<'_, ()>, label: &str, size: f32) {
     harness.get_by_label(label);
@@ -23,7 +23,7 @@ fn assert_header(harness: &Harness<'_, ()>, label: &str, size: f32) {
 }
 
 #[test]
-fn sidebar_header_uses_h4_when_project_is_selected() {
+fn sidebar_header_uses_section_label_when_project_is_selected() {
     // Given: a real sidebar with its selected demo project.
     let dir = tempfile::tempdir().unwrap();
     let sidebar = gui::fixture::demo_sidebar(dir.path()).unwrap();
@@ -41,8 +41,8 @@ fn sidebar_header_uses_h4_when_project_is_selected() {
         });
     // When: the sidebar renders.
     harness.run_steps(2);
-    // Then: its compact title retains the h4 proportional role.
-    assert_header(&harness, "Threads", FONT_H4);
+    // Then: its section heading uses the small proportional section role.
+    assert_header(&harness, "Threads", FONT_SMALL);
 }
 
 #[test]

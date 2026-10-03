@@ -7,8 +7,10 @@ use egui::{
 };
 
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
-use crate::theme::tokens::{FONT_SMALL, R_SM, SP_2, palette};
-use crate::theme::widgets::surface_frame;
+use crate::theme::icons;
+use crate::theme::text::WEIGHT_MEDIUM;
+use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, SP_2, palette};
+use crate::theme::widgets::soft_frame;
 
 pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
     tool_card_with_repo_root(ui, entry, pane_id, None);
@@ -58,23 +60,26 @@ pub fn tool_card_with_repo_root(
     if summary_chars.next().is_some() {
         compact_summary.push('…');
     }
-    let icon = match status {
-        ToolStatus::Running => "",
-        ToolStatus::Succeeded | ToolStatus::Approved => "✓ ",
-        ToolStatus::Failed | ToolStatus::Denied { .. } => "✗ ",
-        ToolStatus::AwaitingApproval => "? ",
+    // The accessible name keeps the textual status mark; the painted header
+    // uses an icon glyph instead.
+    let (glyph, mark) = match status {
+        ToolStatus::Running => ("", ""),
+        ToolStatus::Succeeded | ToolStatus::Approved => (icons::CHECK, "✓ "),
+        ToolStatus::Failed | ToolStatus::Denied { .. } => (icons::X, "✗ "),
+        ToolStatus::AwaitingApproval => (icons::QUESTION, "? "),
     };
-    let mut header = format!("{icon}{tool_name}");
+    let mut label = format!("{mark}{tool_name}");
     if !compact_summary.is_empty() {
-        header.push(' ');
-        header.push_str(&compact_summary);
+        label.push(' ');
+        label.push_str(&compact_summary);
     }
+    let header = header_job(glyph, color, tool_name, &compact_summary);
     let tooltip = if summary.is_empty() {
         call_id.clone()
     } else {
         format!("{call_id}\n{summary}")
     };
-    surface_frame(palette().SURFACE).show(ui, |ui| {
+    soft_frame(palette().SURFACE).show(ui, |ui| {
         let response = ui.horizontal(|ui| {
             if running {
                 ui.add(
@@ -83,14 +88,14 @@ pub fn tool_card_with_repo_root(
                         .color(palette().RUNNING),
                 );
             }
-            ui.add_enabled(
-                !running,
-                egui::Button::new(RichText::new(header).color(color))
-                    .frame(false)
-                    .truncate(),
-            )
-            .on_hover_text(&tooltip)
-            .on_disabled_hover_text(&tooltip)
+            let button =
+                ui.add_enabled(!running, egui::Button::new(header).frame(false).truncate());
+            button.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
+            });
+            button
+                .on_hover_text(&tooltip)
+                .on_disabled_hover_text(&tooltip)
         });
         if running {
             return;
@@ -206,6 +211,31 @@ fn display_output<'a>(tool_name: &str, output: &'a str) -> Cow<'a, str> {
         return Cow::Owned(combined);
     }
     Cow::Borrowed(output)
+}
+
+/// `<status icon> <tool name> <summary>` with the name emphasized and the
+/// summary muted.
+fn header_job(glyph: &str, color: Color32, tool_name: &str, summary: &str) -> LayoutJob {
+    let font = FontId::proportional(FONT_BODY);
+    let mut job = LayoutJob::default();
+    if !glyph.is_empty() {
+        job.append(
+            &format!("{glyph} "),
+            0.0,
+            TextFormat::simple(FontId::proportional(FONT_BODY + 1.0), color),
+        );
+    }
+    let mut name = TextFormat::simple(font.clone(), palette().TEXT);
+    name.coords.push("wght", WEIGHT_MEDIUM);
+    job.append(tool_name, 0.0, name);
+    if !summary.is_empty() {
+        job.append(
+            &format!(" {summary}"),
+            0.0,
+            TextFormat::simple(font, palette().TEXT_MUTED),
+        );
+    }
+    job
 }
 
 fn pretty_json(value: &serde_json::Value) -> String {
