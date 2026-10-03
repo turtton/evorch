@@ -50,7 +50,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
             | (PanelKind::Diff, None)
             | (PanelKind::Terminal, None)
             | (PanelKind::Tasks, None) => {}
-            (PanelKind::Memory | PanelKind::Arena, None) => {}
+            (PanelKind::Memory | PanelKind::Arena | PanelKind::Usage, None) => {}
             (PanelKind::Agent, Some(_))
             | (PanelKind::Sidebar, Some(_))
             | (PanelKind::Agents, Some(_))
@@ -63,7 +63,7 @@ pub fn validate(workspace: &Workspace) -> Result<(), LayoutError> {
                     panel_id: panel.id.to_string(),
                 });
             }
-            (PanelKind::Memory | PanelKind::Arena, Some(_)) => {
+            (PanelKind::Memory | PanelKind::Arena | PanelKind::Usage, Some(_)) => {
                 return Err(LayoutError::UnexpectedTarget {
                     panel_id: panel.id.to_string(),
                 });

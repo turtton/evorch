@@ -77,6 +77,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.telemetry.refresh_costs(&self.provider_settings);
         self.sync_usage_ledger(Instant::now());
+        self.usage
+            .update(&ctx, Instant::now(), self.memory.config.as_ref(), || {
+                self.provider_settings.usage_pricing()
+            });
         self.telemetry
             .quota
             .configure_profiles(&self.provider_settings, self.credential_store.clone());

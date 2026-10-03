@@ -52,6 +52,7 @@ pub struct WorkbenchState<S> {
     /// Whether the composer had an `@` query last frame; a new one refreshes the index.
     pub(super) mention_active: bool,
     pub(super) arena: crate::panes::arena::ArenaPane,
+    pub(super) usage: crate::panes::usage::UsagePane,
     pub(super) memory: crate::panes::memory::MemoryPane,
     pub(super) self_improvement: crate::panes::self_improvement::SelfImprovementPane,
     pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
@@ -154,6 +155,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             mention_job: None,
             mention_active: false,
             arena: crate::panes::arena::ArenaPane::default(),
+            usage: crate::panes::usage::UsagePane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
             self_improvement: crate::panes::self_improvement::SelfImprovementPane::default(),
             ownership: None,

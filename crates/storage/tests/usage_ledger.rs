@@ -262,3 +262,30 @@ fn maintenance_rolls_expired_requests_into_daily_totals() {
     );
     assert_eq!((day.ttft_sum_ms, day.ttft_count), (600, 2));
 }
+
+#[test]
+fn local_day_reads_bound_requests_by_the_ledger_clock() {
+    // Given: a request now and one three days earlier.
+    let temp_dir = TempDir::new().unwrap();
+    let config = config(&temp_dir);
+    let storage = Storage::open(config.clone()).unwrap();
+    let now = SystemTime::now();
+    storage
+        .handle()
+        .record_usage_requests(vec![
+            record("today", now, Some(0.1)),
+            record("earlier", now - Duration::from_secs(3 * 86_400), Some(0.1)),
+        ])
+        .unwrap();
+    storage.close();
+    let database = Database::open(&config).unwrap();
+
+    // When: only today's local day is read.
+    let today = database.usage_local_today().unwrap();
+    let rows = database.usage_requests_in_days(&today, &today).unwrap();
+
+    // Then: the row is labelled with that day and older rows are excluded.
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].record.request_id, "today");
+    assert_eq!(rows[0].day, today);
+}

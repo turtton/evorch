@@ -143,6 +143,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
                 arena: &mut self.arena,
+                usage: &mut self.usage,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -336,6 +337,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Open the usage statistics tab beside the conversation, or focus it.
+    /// The conversation leaf is the widest, which the tables need.
+    pub fn open_usage_tab(&mut self) {
+        use workspace_ui::{Panel, PanelId, PanelKind};
+        let id = PanelId::new("usage-main");
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::Usage,
+            title: PanelKind::Usage.default_title().into(),
+            target: None,
+        });
+        if self.dock.find_tab(&id).is_none() {
+            let neighbor = self
+                .dock
+                .find_tab(&PanelId::new("agent-main"))
+                .or_else(|| self.dock.find_tab(&PanelId::new("subagents-home")));
+            if let Some(path) = neighbor {
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+            self.dock.push_to_focused_leaf(id.clone());
+            self.usage.invalidate();
+        }
+        self.focus_panel(id.as_str());
+    }
+
     /// Open a local file in the workspace, reusing an existing tab for that path.
     pub fn open_file_preview(
         &mut self,

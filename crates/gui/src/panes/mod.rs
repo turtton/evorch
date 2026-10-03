@@ -29,3 +29,4 @@ pub mod tasks;
 pub mod team;
 pub mod terminal;
 pub mod transcript_tool;
+pub mod usage;

@@ -72,6 +72,8 @@ pub struct RunAttribution {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageRequestRow {
     pub record: UsageRequestRecord,
+    /// Local calendar day of `record.at_ns`, `YYYY-MM-DD`, matching [`UsageDailyRow::day`].
+    pub day: String,
     pub thread_id: Option<String>,
     pub project_id: Option<String>,
 }
