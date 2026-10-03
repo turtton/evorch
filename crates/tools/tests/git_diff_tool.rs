@@ -17,9 +17,16 @@ fn git_diff() -> GitDiff {
 /// 一時ディレクトリをカレントにして git サブコマンドを実行する。
 ///
 /// テストフィクスチャ用のため、ユーザーの git 設定を読まないよう
-/// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` を無効化する。
+/// `GIT_*` を取り除き、`GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` を無効化する。
 fn run_git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    // Hooks export repository-local Git variables; fixtures must never use that repository.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -38,6 +45,42 @@ fn init_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     run_git(dir.path(), &["init"]);
     dir
+}
+
+#[test]
+fn git_fixture_ignores_inherited_repository_env() {
+    const CHILD_MARKER: &str = "EVORCH_GIT_FIXTURE_ISOLATION_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let fixture = init_repo();
+        assert!(fixture.path().join(".git").is_dir());
+        run_git(fixture.path(), &["config", "user.name", "Fixture Identity"]);
+        return;
+    }
+
+    let host = init_repo();
+    run_git(host.path(), &["config", "user.name", "Host Identity"]);
+    let config = host.path().join(".git/config");
+    let original = std::fs::read(&config).unwrap();
+    // A child process keeps the hook-like environment out of parallel tests.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "git_fixture_ignores_inherited_repository_env"])
+        .env(CHILD_MARKER, "1")
+        .env("GIT_DIR", host.path().join(".git"))
+        .env("GIT_COMMON_DIR", host.path().join(".git"))
+        .env("GIT_WORK_TREE", host.path())
+        .env("GIT_INDEX_FILE", host.path().join(".git/index"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "user.name")
+        .env("GIT_CONFIG_VALUE_0", "Inherited Identity")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture isolation failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(config).unwrap(), original);
 }
 
 // Given: original をステージ済みで作業ツリーを modified に変更したリポジトリ / When: 引数 cwd のみで git_diff を実行 / Then: 削除行と追加行を含む差分が正常終了で返る

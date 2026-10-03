@@ -13,6 +13,15 @@ Child implementation repos do NOT own this state.
 - Work directly on `main`. Do NOT open a PR for routine host-state updates
   (queue-state, runs.jsonl, packets, intents/) unless the operator explicitly
   asks for one.
+- Before creating a real commit, check the effective author and committer with
+  `git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`. Test fixture
+  identities (such as `example.invalid`) must never be used for real commits.
+  Use an email verified on the committer's GitHub account and the configured
+  signing method. Do not bypass a signing failure with `--no-gpg-sign`; fix the
+  configuration instead. Before pushing, inspect the new commit's identities
+  and signature with `git show -s --format=fuller HEAD` and
+  `git log -1 --format='%G? %GK'` (expect `G` and the configured key). Check
+  GitHub's verification status after pushing.
 - `git pull --ff-only` before edits. Commit and push to `main` after each
   coherent change.
 - All workflow label transitions go through installed `intent-cli automation`

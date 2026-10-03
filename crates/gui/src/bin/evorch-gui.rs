@@ -256,6 +256,17 @@ fn demo_diff_source() -> FixtureDiffSource {
 fn init_demo_repo(base: &Path) -> Result<PathBuf, GuiError> {
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo)?;
+    // Git hooks export repository routing variables; a demo must discover its own repo.
+    let local_env = std::process::Command::new("git")
+        .args(["rev-parse", "--local-env-vars"])
+        .output()?;
+    if !local_env.status.success() {
+        return Err(GuiError::DemoRepo(format!(
+            "git rev-parse --local-env-vars failed: {}",
+            String::from_utf8_lossy(&local_env.stderr).trim()
+        )));
+    }
+    let local_env = String::from_utf8_lossy(&local_env.stdout);
     let commands: Vec<(&str, Vec<&str>)> = vec![
         ("git init", vec!["init", "--quiet"]),
         (
@@ -270,6 +281,7 @@ fn init_demo_repo(base: &Path) -> Result<PathBuf, GuiError> {
             "git commit",
             vec![
                 "commit",
+                "--no-gpg-sign",
                 "--allow-empty",
                 "--quiet",
                 "-m",
@@ -278,10 +290,11 @@ fn init_demo_repo(base: &Path) -> Result<PathBuf, GuiError> {
         ),
     ];
     for (label, args) in commands {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&repo)
-            .output()?;
+        let mut command = std::process::Command::new("git");
+        for variable in local_env.lines() {
+            command.env_remove(variable);
+        }
+        let output = command.args(args).current_dir(&repo).output()?;
         if !output.status.success() {
             return Err(GuiError::DemoRepo(format!(
                 "{label} failed: {}",
@@ -1111,6 +1124,62 @@ mod tests {
     use super::orchestration_settings_or_default;
     use config::ConfigError;
     use runtime::OrchestrationSettings;
+
+    #[test]
+    fn demo_repo_isolates_inherited_git_repository() {
+        const CHILD_BASE: &str = "EVORCH_DEMO_REPO_ISOLATION_TEST";
+        if let Some(base) = std::env::var_os(CHILD_BASE) {
+            let repo = super::init_demo_repo(std::path::Path::new(&base)).unwrap();
+            assert!(repo.join(".git").is_dir(), "demo owns its Git repository");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .args(["init", "--quiet"])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_dir = source.join(".git");
+        let config_path = git_dir.join("config");
+        let config = format!(
+            "{}\n[user]\n\tname = Existing User\n\temail = existing@example.com\n",
+            std::fs::read_to_string(&config_path).unwrap()
+        );
+        std::fs::write(&config_path, &config).unwrap();
+
+        // A subprocess models hook inheritance without mutating this test runner's env.
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::demo_repo_isolates_inherited_git_repository",
+                    "--nocapture",
+                ])
+                .env(CHILD_BASE, temp.path().join("demo"))
+                .env("GIT_DIR", &git_dir)
+                .env("GIT_COMMON_DIR", &git_dir)
+                .env("GIT_WORK_TREE", &source)
+                .env("GIT_INDEX_FILE", git_dir.join("index"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), config);
+        assert_eq!(
+            std::fs::read_dir(git_dir.join("refs/heads"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn startup_restores_theme_from_explicit_settings() {

@@ -48,10 +48,17 @@ fn tool_event(event: &Event) -> &ToolEvent {
 
 /// 一時ディレクトリをカレントにして git サブコマンドを実行する（フィクスチャ用）。
 ///
-/// ユーザーの git 設定を読まないよう `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM`
-/// を無効化する。
+/// 継承した `GIT_*` を取り除き、ユーザーの git 設定を読まないよう
+/// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` を無効化する。
 fn run_git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    // Hooks export repository-local Git variables; fixtures must never use that repository.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
