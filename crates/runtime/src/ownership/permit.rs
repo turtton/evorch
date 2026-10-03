@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Lease, OwnerState, OwnershipError, Registry, RegistryError};
+use super::{Lease, OwnerState, OwnershipError, Registry, RegistryError, ThreadOwner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerPermit {
@@ -32,24 +32,61 @@ impl OwnerPermit {
     }
 
     pub fn validate_mutation(&self) -> Result<(), RegistryError> {
+        self.validate_mutation_with_clock(now_ms)
+    }
+
+    pub(super) fn validate_mutation_with_clock(
+        &self,
+        clock: impl Fn() -> u64,
+    ) -> Result<(), RegistryError> {
         let owner = Registry::open_readonly(&self.registry_path)?.attach(&self.thread_id)?;
+        self.validate_active(&owner)?;
+        if owner.lease.expires_at > clock() {
+            return Ok(());
+        }
+
+        // Keep the usual probe read-only. A delayed heartbeat needs a write,
+        // with authority rechecked under the same lock as the renewal so a
+        // claim or handoff committed since the read always fences this permit.
+        Registry::open_existing(&self.registry_path)?
+            .update(&self.thread_id, |owner| {
+                self.validate_active(owner)?;
+                let now = clock();
+                if owner.lease.expires_at <= now {
+                    owner.heartbeat(&self.lease, now)?;
+                }
+                Ok(())
+            })
+            .inspect_err(|error| {
+                tracing::warn!(
+                    thread_id = %self.thread_id,
+                    owner_id = %self.lease.owner_id,
+                    generation = self.lease.generation,
+                    %error,
+                    "owner permit lease renewal failed"
+                );
+            })?;
+        Ok(())
+    }
+
+    fn validate_active(&self, owner: &ThreadOwner) -> Result<(), OwnershipError> {
         owner.validate(&self.lease)?;
-        if !owner.active_turn || owner.lease.expires_at <= now_ms() {
-            return Err(OwnershipError::NotClaimable.into());
+        if !owner.active_turn {
+            return Err(OwnershipError::NotClaimable);
         }
         if self
             .run_id
             .as_ref()
             .is_some_and(|run| !owner.active_runs.contains(run))
         {
-            return Err(OwnershipError::Active.into());
+            return Err(OwnershipError::Active);
         }
         match owner.state {
             OwnerState::Running | OwnerState::Quiescing => Ok(()),
             OwnerState::Suspect
             | OwnerState::Stale
             | OwnerState::Claimable
-            | OwnerState::Released => Err(OwnershipError::NotClaimable.into()),
+            | OwnerState::Released => Err(OwnershipError::NotClaimable),
         }
     }
 
