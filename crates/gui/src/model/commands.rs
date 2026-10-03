@@ -84,6 +84,10 @@ pub enum WorkbenchCommand {
     StopChat {
         thread_id: String,
     },
+    StopRun {
+        thread_id: String,
+        run_id: String,
+    },
     DeliverFollowUpsNextTurn {
         thread_id: String,
     },
@@ -311,6 +315,7 @@ impl CommandSink for FixtureLoopAdapter {
             }],
             WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }
