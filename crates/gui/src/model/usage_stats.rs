@@ -30,6 +30,9 @@ pub enum UsageRange {
     ThisMonth,
     Last90Days,
     AllTime,
+    /// Month-to-date plus at least the last week, for burn rates and quota
+    /// windows. Not offered as a period choice.
+    Live,
 }
 
 impl UsageRange {
@@ -50,6 +53,7 @@ impl UsageRange {
             Self::ThisMonth => "This month",
             Self::Last90Days => "Last 90 days",
             Self::AllTime => "All time",
+            Self::Live => "Live",
         }
     }
 
@@ -62,6 +66,7 @@ impl UsageRange {
             Self::ThisMonth => Some(today.month_start()),
             Self::Last90Days => Some(today.add_days(-89)),
             Self::AllTime => None,
+            Self::Live => Some(today.month_start().min(today.add_days(-6))),
         }
     }
 }
@@ -172,6 +177,23 @@ pub struct UsageFact {
     pub ttft_sum_ms: u64,
     pub ttft_count: u64,
     pub duration_sum_ms: u64,
+    /// Per-request details; `None` for rolled-up daily totals.
+    pub request: Option<RequestDetail>,
+}
+
+/// Fields shown for a single request in the Requests view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestDetail {
+    pub request_id: String,
+    /// Local `HH:MM:SS`.
+    pub time: String,
+    pub run_id: Option<String>,
+    pub failure: Option<String>,
+    pub finish_reason: Option<String>,
+    /// `None` when the provider reported no reasoning breakdown.
+    pub reasoning: Option<u64>,
+    pub ttft_ms: Option<u64>,
+    pub duration_ms: u64,
 }
 
 impl UsageFact {
@@ -206,6 +228,16 @@ impl UsageFact {
             ttft_sum_ms: record.ttft_ms.unwrap_or_default(),
             ttft_count: u64::from(record.ttft_ms.is_some()),
             duration_sum_ms: record.duration_ms,
+            request: Some(RequestDetail {
+                request_id: record.request_id.clone(),
+                time: row.time.clone(),
+                run_id: record.run_id.clone(),
+                failure: record.failure.clone(),
+                finish_reason: record.finish_reason.clone(),
+                reasoning: record.reasoning_tokens,
+                ttft_ms: record.ttft_ms,
+                duration_ms: record.duration_ms,
+            }),
         })
     }
 
@@ -239,6 +271,7 @@ impl UsageFact {
             ttft_sum_ms: row.ttft_sum_ms,
             ttft_count: row.ttft_count,
             duration_sum_ms: row.duration_sum_ms,
+            request: None,
         })
     }
 
@@ -254,6 +287,8 @@ impl UsageFact {
 #[derive(Debug, Clone, Default)]
 pub struct UsageDataset {
     pub today: Option<LocalDay>,
+    /// Local midnight bounds of today, in Unix nanoseconds.
+    pub today_bounds_ns: Option<(i64, i64)>,
     pub facts: Vec<UsageFact>,
 }
 
@@ -271,6 +306,7 @@ impl UsageDataset {
         facts.sort_by_key(|fact| (fact.day, fact.at_ns));
         Self {
             today: Some(today),
+            today_bounds_ns: None,
             facts,
         }
     }
@@ -282,9 +318,10 @@ impl UsageDataset {
             return Ok(Self::default());
         }
         let database = storage::Database::open(config).map_err(|error| error.to_string())?;
-        let today = database
-            .usage_local_today()
+        let clock = database
+            .usage_local_clock()
             .map_err(|error| error.to_string())?;
+        let today = clock.today;
         let today_day =
             LocalDay::parse(&today).ok_or_else(|| format!("invalid local day {today}"))?;
         let from = range
@@ -296,7 +333,9 @@ impl UsageDataset {
         let daily = database
             .usage_daily_between(&from, &today)
             .map_err(|error| error.to_string())?;
-        Ok(Self::from_rows(today_day, &requests, &daily))
+        let mut dataset = Self::from_rows(today_day, &requests, &daily);
+        dataset.today_bounds_ns = Some((clock.day_start_ns, clock.day_end_ns));
+        Ok(dataset)
     }
 }
 
@@ -434,6 +473,12 @@ impl<'a> CostCalculator<'a> {
             mode,
             cache: HashMap::new(),
         }
+    }
+
+    /// Cost of one fact, and whether part of it had no known price.
+    pub fn price(&mut self, fact: &UsageFact) -> (f64, bool) {
+        let cost = self.cost(fact);
+        (cost.usd, cost.unpriced)
     }
 
     fn cost(&mut self, fact: &UsageFact) -> FactCost {

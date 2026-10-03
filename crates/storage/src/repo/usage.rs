@@ -149,7 +149,8 @@ const REQUEST_COLUMNS: &str = "SELECT r.request_id, r.at_ns, r.provider, r.profi
      r.run_id, r.parent_run_id, r.role, r.purpose, r.status, r.failure, r.finish_reason, \
      r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, \
      r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, t.thread_id, t.project_id, \
-     date(r.at_ns / 1000000000, 'unixepoch', 'localtime') \
+     date(r.at_ns / 1000000000, 'unixepoch', 'localtime'), \
+     time(r.at_ns / 1000000000, 'unixepoch', 'localtime') \
      FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id";
 
 /// Requests in `[from_ns, to_ns)` ordered by time, joined with their owner.
@@ -185,6 +186,23 @@ pub fn list_requests_in_days(
     )
 }
 
+/// Today's local day and its midnight bounds, on the same clock as the ledger days.
+pub fn local_clock(conn: &Connection) -> Result<crate::usage::LocalClock, StorageError> {
+    Ok(conn.query_row(
+        "SELECT date('now', 'localtime'), \
+         unixepoch(date('now', 'localtime'), 'utc') * 1000000000, \
+         unixepoch(date('now', 'localtime'), '+1 day', 'utc') * 1000000000",
+        [],
+        |row| {
+            Ok(crate::usage::LocalClock {
+                today: row.get(0)?,
+                day_start_ns: row.get(1)?,
+                day_end_ns: row.get(2)?,
+            })
+        },
+    )?)
+}
+
 /// Today's local calendar day, `YYYY-MM-DD`, on the same clock as the ledger days.
 pub fn local_today(conn: &Connection) -> Result<String, StorageError> {
     Ok(conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?)
@@ -202,6 +220,7 @@ fn query_requests(
         result.push(UsageRequestRow {
             record: request_record(row)?,
             day: row.get(22)?,
+            time: row.get(23)?,
             thread_id: row.get(20)?,
             project_id: row.get(21)?,
         });

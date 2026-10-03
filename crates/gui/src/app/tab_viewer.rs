@@ -375,8 +375,16 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .render(ui, self.memory.config.as_ref().zip(project.as_deref()));
             }
             PanelKind::Usage => {
-                self.usage
-                    .render(ui, self.memory.config.as_ref(), self.sidebar);
+                if let Some(thread) = self.usage.render(
+                    ui,
+                    self.memory.config.as_ref(),
+                    self.sidebar,
+                    &self.telemetry.quota,
+                ) {
+                    *self.sidebar_action = Some(SidebarAction::SwitchThread(
+                        workspace_ui::ThreadId::new(thread),
+                    ));
+                }
             }
         }
         let link_base = if panel.kind == PanelKind::FileViewer {

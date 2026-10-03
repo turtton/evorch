@@ -12,7 +12,7 @@ use crate::model::usage_stats::{
     CostCalculator, CostMode, LocalDay, UsageDataset, UsageDimension, UsageFilter, UsageRange,
     UsageTotals,
 };
-use crate::theme::text::{h2, muted};
+use crate::theme::text::muted;
 
 /// Dimensions offered by the distribution view.
 pub(super) const DISTRIBUTION: [UsageDimension; 6] = [
@@ -161,31 +161,19 @@ impl OverviewData {
                 daily(|totals| totals.average_ttft_ms().unwrap_or_default() as f64),
             ),
         ];
-        // Frames report their size only after drawing, so wrap by a computed column count.
-        let spacing = ui.spacing().item_spacing.x;
-        let outer = TILE_WIDTH + 20.0 + spacing;
-        let columns = ((ui.available_width() + spacing) / outer).floor().max(1.0) as usize;
-        let mut tiles = tiles.into_iter().peekable();
-        while tiles.peek().is_some() {
-            ui.horizontal(|ui| {
-                for (title, value, detail, values) in tiles.by_ref().take(columns) {
-                    egui::Frame::new()
-                        .fill(crate::theme::tokens::palette().SURFACE_RAISED)
-                        .corner_radius(8)
-                        .inner_margin(10)
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(TILE_WIDTH);
-                                ui.label(muted(title));
-                                ui.add(egui::Label::new(h2(value.clone())).truncate())
-                                    .on_hover_text(&value);
-                                ui.add(egui::Label::new(muted(detail)).truncate());
-                                charts::sparkline(ui, &values, SERIES[0], vec2(TILE_WIDTH, 26.0));
-                            });
-                        });
-                }
-            });
-        }
+        charts::tiles(
+            ui,
+            TILE_WIDTH,
+            tiles
+                .into_iter()
+                .map(|(title, value, detail, values)| charts::Tile {
+                    title: title.to_owned(),
+                    value,
+                    detail,
+                    sparkline: Some(values),
+                })
+                .collect(),
+        );
     }
 
     fn token_bars(&self, ui: &mut Ui) {

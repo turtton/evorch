@@ -179,6 +179,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
         }
+        if self.usage.take_conversation_request() {
+            self.focus_panel("agent-main");
+        }
         for link in file_requests {
             self.open_file_preview(&ctx, link);
         }

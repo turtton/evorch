@@ -329,6 +329,14 @@ impl Database {
         crate::repo::usage::list_requests_in_days(&self.conn, from_day, to_day)
     }
 
+    /// usage ledger と同じ時計での今日のローカル日付と、その開始・終了時刻を返します。
+    ///
+    /// # Errors
+    /// SQLite 操作に失敗した場合にエラーを返します。
+    pub fn usage_local_clock(&self) -> Result<crate::usage::LocalClock, StorageError> {
+        crate::repo::usage::local_clock(&self.conn)
+    }
+
     /// usage ledger と同じ時計での今日のローカル日付 (`YYYY-MM-DD`) を返します。
     ///
     /// # Errors

@@ -74,8 +74,21 @@ pub struct UsageRequestRow {
     pub record: UsageRequestRecord,
     /// Local calendar day of `record.at_ns`, `YYYY-MM-DD`, matching [`UsageDailyRow::day`].
     pub day: String,
+    /// Local wall-clock time of `record.at_ns`, `HH:MM:SS`.
+    pub time: String,
     pub thread_id: Option<String>,
     pub project_id: Option<String>,
+}
+
+/// Today's local day and its bounds, on the ledger's clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalClock {
+    /// `YYYY-MM-DD`.
+    pub today: String,
+    /// Local midnight starting today, in Unix nanoseconds.
+    pub day_start_ns: i64,
+    /// Local midnight ending today, in Unix nanoseconds.
+    pub day_end_ns: i64,
 }
 
 /// Totals for requests rolled up after the retention window. Unknown

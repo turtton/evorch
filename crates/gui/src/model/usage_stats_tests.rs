@@ -38,6 +38,7 @@ fn request(day: &str, model: &str, project: &str, cost: Option<f64>) -> UsageReq
             cost_usd: cost,
         },
         day: day.into(),
+        time: "12:00:00".into(),
         thread_id: None,
         project_id: Some(project.into()),
     }
