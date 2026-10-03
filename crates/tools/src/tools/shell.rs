@@ -100,15 +100,16 @@ mod tests {
     // Given: PTY stdout and stderr / When: execute / Then: output has no section headers.
     #[tokio::test]
     async fn interactive_output_is_combined() {
-        let result = execute(
-            json!({"command": "echo out; echo err >&2", "interactive": true, "timeout_ms": 1000}),
-        )
-        .await;
+        let result =
+            execute(json!({"command": "echo out; echo err >&2", "interactive": true})).await;
         let normalized = result.content.replace("\r\n", "\n");
         let output = normalized
             .strip_prefix("exit_code: 0\n")
             .expect("exit code");
-        assert_eq!(output.trim(), "out\nerr");
+        // Dropping portable-pty's UnixMasterWriter sends a newline and VEOF;
+        // terminal input echo can therefore insert an empty line between streams.
+        let lines: Vec<_> = output.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines, ["out", "err"]);
     }
 
     // Given: denied command split over command and args / When: execute / Then: contract rejects it.
