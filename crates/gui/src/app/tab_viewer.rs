@@ -322,7 +322,18 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .as_ref()
                     .map(ToString::to_string);
                 if tab.as_str() == "self-improvement-main" {
-                    self.self_improvement.render(ui, project.as_deref());
+                    let root = self
+                        .sidebar
+                        .selected_project
+                        .as_ref()
+                        .and_then(|id| {
+                            self.sidebar
+                                .projects
+                                .iter()
+                                .find(|project| &project.id == id)
+                        })
+                        .map(|project| project.repo_root.as_path());
+                    self.self_improvement.render_for_repo_root(ui, root);
                 } else {
                     self.memory.render(ui, project.as_deref());
                 }
