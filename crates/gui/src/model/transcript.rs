@@ -1,5 +1,6 @@
 use event_bus::{AgentMessageKind, CompactionReason, Event};
 
+mod branch;
 mod compaction;
 mod diagnostics;
 mod lifecycle;
@@ -75,6 +76,16 @@ pub enum TranscriptEntry {
         peer_run_id: String,
         kind: AgentMessageKind,
         content: String,
+    },
+    /// A completed turn of `run_id`; a fork or rewind boundary, not visible text.
+    TurnEnd {
+        run_id: String,
+        context_len: u64,
+    },
+    /// Where a forked or rewound conversation leaves its inherited history.
+    Branch {
+        kind: workspace_ui::LineageKind,
+        source_thread_id: String,
     },
 }
 
@@ -209,6 +220,12 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
+                run_id, context_len,
+            }) => self.push(TranscriptEntry::TurnEnd {
+                run_id: run_id.clone(),
+                context_len: *context_len,
+            }),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 to: event_bus::AgentRunPhase::Stopped, ..
             }) => self.push(TranscriptEntry::Notice { text: "Run stopped (resumable)".into() }),
@@ -388,7 +405,9 @@ impl TranscriptModel {
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
-                    | TranscriptEntry::AgentMessage { .. } => {}
+                    | TranscriptEntry::AgentMessage { .. }
+                    | TranscriptEntry::TurnEnd { .. }
+                    | TranscriptEntry::Branch { .. } => {}
                 }
             }
         } else {

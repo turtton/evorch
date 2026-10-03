@@ -3,6 +3,7 @@
 mod actions;
 mod attention;
 pub mod auto_title;
+mod branching;
 mod composer;
 mod conversation;
 mod escalation;
@@ -49,6 +50,8 @@ pub enum WorkbenchError {
     Project(#[from] workspace_ui::ProjectError),
     #[error("thread state failed: {0}")]
     Thread(#[from] workspace_ui::ThreadError),
+    #[error("{0}")]
+    Branch(&'static str),
 }
 
 /// eframe::App 実装。WorkbenchState をラップします。

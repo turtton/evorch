@@ -120,7 +120,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             enabled: !self.settings_save_in_progress(),
         };
         {
+            let rewind_block = self
+                .sidebar
+                .active_thread
+                .as_ref()
+                .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id))
+                .and_then(|thread| self.rewind_block(thread));
             let mut viewer = WorkbenchTabViewer {
+                rewind_block,
                 sandbox_picker,
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
@@ -250,6 +257,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
+                SidebarAction::ForkAtTurn { thread, entry_id } => {
+                    self.fork_at_turn(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::RewindToTurn { thread, entry_id } => {
+                    self.rewind_to_turn(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::EditFromMessage { thread, entry_id } => {
+                    self.edit_from_message(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::SwitchVersion(thread_id) => self.switch_version(thread_id),
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),

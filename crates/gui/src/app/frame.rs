@@ -150,7 +150,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }
-                        | TranscriptEntry::AgentMessage { .. } => None,
+                        | TranscriptEntry::AgentMessage { .. }
+                        | TranscriptEntry::TurnEnd { .. }
+                        | TranscriptEntry::Branch { .. } => None,
                     })
                     .flatten()
             },

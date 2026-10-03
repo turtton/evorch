@@ -54,6 +54,7 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     phase,
                     next_thread_title: String::new(),
                     sandbox_picker: Default::default(),
+                    branch: None,
                     model_picker: gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,

@@ -71,18 +71,32 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .any(|((id, _), ack)| id == tab && ack.is_unread()),
             has_project: self.sidebar.selected_project.is_some(),
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
+            // Rewound versions are not parents or children: they share one row.
             parent_thread: active_thread
-                .and_then(|thread| thread.parent_thread_id.as_ref())
-                .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id)),
+                .and_then(|thread| workspace_ui::display_parent(&self.sidebar.threads, &thread.id))
+                .and_then(|id| self.sidebar.threads.iter().find(|thread| thread.id == id)),
             child_threads: self
                 .sidebar
                 .threads
                 .iter()
                 .filter(|thread| {
-                    active_thread
-                        .is_some_and(|parent| thread.parent_thread_id.as_ref() == Some(&parent.id))
+                    !thread.superseded
+                        && active_thread.is_some_and(|parent| {
+                            workspace_ui::display_parent(&self.sidebar.threads, &thread.id).as_ref()
+                                == Some(&parent.id)
+                        })
                 })
                 .collect(),
+            branch: match (self.focus, active_thread) {
+                (ConversationFocus::Thread, Some(thread)) => {
+                    Some(crate::panes::agent::BranchContext {
+                        thread,
+                        threads: &self.sidebar.threads,
+                        rewind_block: self.rewind_block,
+                    })
+                }
+                _ => None,
+            },
             thread_metrics: active_thread.map(|thread| match self.focus {
                 ConversationFocus::Thread => self.telemetry.thread_metrics(&thread.run_ids),
                 ConversationFocus::Agent(run_id) => {

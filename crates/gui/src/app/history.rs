@@ -181,6 +181,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        self.seed_branches(None);
         let mut messages = self.history.clone();
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
@@ -203,6 +204,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.telemetry.apply_event_at(&stored.event, at);
             self.transcripts.select_thread(None);
             self.apply_conversation_event(&stored.event);
+            if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
+                run_id,
+                context_len,
+            }) = &stored.event.kind
+            {
+                self.seed_branches(Some(&workspace_ui::ForkPoint {
+                    run_id: run_id.clone(),
+                    context_len: *context_len,
+                }));
+            }
             self.bind_goal_event(&stored.event);
             if let event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
