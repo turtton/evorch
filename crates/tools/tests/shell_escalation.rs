@@ -17,7 +17,7 @@ impl Sandbox for ProbeSandbox {
         if let Some(bin) = &self.1 {
             // Only the fixture directory is searched, so these tests can never
             // fall back to an installed gh or its authentication/network access.
-            spec.program = "/bin/sh".into();
+            spec.program = bin.join("sh").to_string_lossy().into_owned();
             spec.extra_env
                 .push(("PATH".into(), bin.to_string_lossy().into_owned()));
         }
@@ -30,16 +30,30 @@ struct FakeGh(tempfile::TempDir);
 
 impl FakeGh {
     fn new() -> Self {
+        // Nix sandboxes do not provide /bin/sh; resolve the actual executable
+        // before restricting PATH to this fixture's gh and sh.
+        let search_path = std::env::var_os("PATH").expect("shell search path");
+        let shell = std::env::split_paths(&search_path)
+            .filter_map(|dir| std::fs::canonicalize(dir.join("sh")).ok())
+            .find(|path| {
+                path.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .expect("executable sh in PATH");
         let dir = tempfile::tempdir().expect("fake gh directory");
         let gh = dir.path().join("gh");
         std::fs::write(
             &gh,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.called\"\nprintf 'merge executed\\n'\n",
+            format!(
+                "#!{}\nprintf '%s\\n' \"$@\" > \"$0.called\"\nprintf 'merge executed\\n'\n",
+                shell.display()
+            ),
         )
         .expect("fake gh script");
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))
             .expect("executable fake gh");
-        std::os::unix::fs::symlink("/bin/sh", dir.path().join("sh"))
+        std::os::unix::fs::symlink(shell, dir.path().join("sh"))
             .expect("fixture shell interpreter");
         Self(dir)
     }

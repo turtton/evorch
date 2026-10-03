@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -25,7 +25,7 @@ impl Sandbox for MergeProbeSandbox {
     fn wrap(&self, mut spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
         self.commands.lock().expect("commands").push(spec.clone());
         // No real gh can be reached, even if the wrong sandbox path is selected.
-        spec.program = "/bin/sh".into();
+        spec.program = self.bin.join("sh").display().to_string();
         spec.extra_env
             .push(("PATH".into(), self.bin.display().to_string()));
         spec.extra_env.push((
@@ -42,13 +42,21 @@ impl Sandbox for MergeProbeSandbox {
 async fn delegated_merge_uses_real_user_context_and_executes_only_on_review_approval() {
     const REQUEST: &str = "Implement the fix, open a PR, and merge it after CI passes.";
     const DELEGATION: &str = "Merge PR 42 after confirming its CI and head SHA.";
-    const COMMAND: &str =
-        "gh pr merge 42 --repo example/project --squash --match-head-commit abc123";
+    const COMMAND: &str = "gh pr merge 42 --repo example/project --squash --match-head-commit 0123456789abcdef0123456789abcdef01234567";
+    let shell = std::env::split_paths(&std::env::var_os("PATH").expect("host PATH"))
+        .filter_map(|dir| std::fs::canonicalize(dir.join("sh")).ok())
+        .find(|path| {
+            path.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .expect("executable sh on host PATH");
 
     for approve in [true, false] {
         let dir = tempfile::tempdir().expect("fake gh directory");
+        symlink(&shell, dir.path().join("sh")).expect("fixture shell");
         let gh = dir.path().join("gh");
-        std::fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$EVORCH_MERGE_PROBE_MARKER\"\nprintf 'fake merge completed'\n").expect("fake gh");
+        std::fs::write(&gh, format!("#!{}\nprintf '%s\\n' \"$*\" > \"$EVORCH_MERGE_PROBE_MARKER\"\nprintf 'fake merge completed'\n", shell.display())).expect("fake gh");
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).expect("executable");
         let sandbox = Arc::new(MergeProbeSandbox {
             commands: Mutex::new(Vec::new()),
@@ -136,7 +144,7 @@ async fn delegated_merge_uses_real_user_context_and_executes_only_on_review_appr
                 assert_eq!(commands[0].args, vec!["-c", COMMAND]);
                 assert_eq!(
                     std::fs::read_to_string(dir.path().join("merged")).expect("fake gh ran"),
-                    "pr merge 42 --repo example/project --squash --match-head-commit abc123\n"
+                    format!("{}\n", COMMAND.strip_prefix("gh ").expect("gh command"))
                 );
             } else {
                 assert!(
