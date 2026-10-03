@@ -12,11 +12,12 @@ use providers::{ContentBlock, Message, Role as MessageRole, ToolSpec};
 use runtime::escalation_review::{QuickModelReviewer, ReviewError, ReviewVerdict};
 use runtime::{AgentInvocationContext, Role};
 use serde_json::{Value, json};
-use support::{harness, harness_fallback};
+use support::{harness, harness_fallback, harness_with_reviewer_model};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MODEL: &str = "gpt-4o";
+const REVIEW_MODEL: &str = "gpt-4o-review";
 const APPROVE: &str = r#"{"approve":true,"reason":"safe inspection"}"#;
 const DENY: &str = r#"{"approve":false,"reason":"unsafe effects"}"#;
 
@@ -25,9 +26,9 @@ async fn server(codex: bool) -> MockServer {
     Mock::given(method("GET"))
         .and(path("/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(if codex {
-            json!({"models":[{"slug":MODEL}]})
+            json!({"models":[{"slug":MODEL},{"slug":REVIEW_MODEL}]})
         } else {
-            json!({"data":[{"id":MODEL}]})
+            json!({"data":[{"id":MODEL},{"id":REVIEW_MODEL}]})
         }))
         .mount(&server)
         .await;
@@ -128,6 +129,29 @@ async fn compatible_schema_and_reasoning_reach_the_real_review_path() {
         );
         assert_eq!(requests[0]["model"], MODEL);
     }
+}
+
+#[tokio::test]
+async fn shell_review_uses_reviewer_tool_execution_model_and_generation() {
+    let server = server(false).await;
+    Mock::given(method("POST"))
+        .respond_with(completion(APPROVE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let harness = harness_with_reviewer_model(&server.uri(), Duration::from_secs(2));
+    assert_eq!(
+        QuickModelReviewer::new(harness.model)
+            .review("run-review", "pwd", "inspect directory")
+            .await,
+        Ok(ReviewVerdict::Approve)
+    );
+    let captured = requests(&server).await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0]["model"], REVIEW_MODEL);
+    assert_eq!(captured[0]["temperature"], 0.25);
+    assert_eq!(captured[0]["max_tokens"], 321);
+    assert_schema(&captured[0]["response_format"]);
 }
 
 #[tokio::test]

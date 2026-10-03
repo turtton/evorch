@@ -1,12 +1,12 @@
 use gui::model::role_settings::{RoleSettingsModel, categories_for_role};
 
 #[test]
-fn public_editor_categories_follow_config_registry() {
+fn editor_categories_follow_settings_registry_including_shell_audits() {
     for role in ["worker", "reviewer", "explorer"] {
         let actual: Vec<_> = categories_for_role(role)
             .map(|category| category.name)
             .collect();
-        let expected: Vec<_> = config::agent_categories::public_categories()
+        let expected: Vec<_> = config::agent_categories::settings_categories()
             .filter(|category| category.role == role)
             .map(|category| category.name)
             .collect();
