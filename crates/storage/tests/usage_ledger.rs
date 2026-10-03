@@ -288,4 +288,8 @@ fn local_day_reads_bound_requests_by_the_ledger_clock() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].record.request_id, "today");
     assert_eq!(rows[0].day, today);
+    assert_eq!(rows[0].time.len(), "HH:MM:SS".len());
+    let clock = database.usage_local_clock().unwrap();
+    assert_eq!(clock.today, today);
+    assert!(clock.day_start_ns <= rows[0].record.at_ns && rows[0].record.at_ns < clock.day_end_ns);
 }

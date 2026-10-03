@@ -191,6 +191,132 @@ pub fn percentile(values: impl IntoIterator<Item = f64>, quantile: f64) -> Optio
     Some(values[rank.clamp(1, values.len()) - 1])
 }
 
+const MINUTE_NS: i64 = 60_000_000_000;
+
+/// Per-minute totals for the `minutes` minutes ending at `now_ns`, oldest first.
+pub fn minute_totals(
+    facts: &[UsageFact],
+    filter: &UsageFilter,
+    costs: &mut CostCalculator<'_>,
+    now_ns: i64,
+    minutes: usize,
+) -> Vec<UsageTotals> {
+    let mut buckets = vec![UsageTotals::default(); minutes];
+    let start = now_ns - MINUTE_NS * minutes as i64;
+    for fact in facts.iter().filter(|fact| filter.matches(fact)) {
+        let Some(at) = fact.at_ns.filter(|at| (start..now_ns).contains(at)) else {
+            continue;
+        };
+        let index = ((at - start) / MINUTE_NS) as usize;
+        let cost = costs.cost(fact);
+        buckets[index.min(minutes - 1)].add(fact, cost);
+    }
+    buckets
+}
+
+/// Totals of individual requests in `[from_ns, until_ns)`.
+pub fn totals_between(
+    facts: &[UsageFact],
+    filter: &UsageFilter,
+    costs: &mut CostCalculator<'_>,
+    from_ns: i64,
+    until_ns: i64,
+) -> UsageTotals {
+    let mut totals = UsageTotals::default();
+    for fact in facts.iter().filter(|fact| filter.matches(fact)) {
+        if fact
+            .at_ns
+            .is_some_and(|at| (from_ns..until_ns).contains(&at))
+        {
+            let cost = costs.cost(fact);
+            totals.add(fact, cost);
+        }
+    }
+    totals
+}
+
+/// Cost so far and where the current pace leads.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Projection {
+    pub today: f64,
+    /// Cost per hour over the recent window.
+    pub burn_per_hour: f64,
+    /// Today's cost if the recent pace continues until local midnight.
+    pub end_of_day: f64,
+    pub month: f64,
+    /// Month-to-date cost per elapsed day, carried through the month.
+    pub end_of_month: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn projection(
+    facts: &[UsageFact],
+    filter: &UsageFilter,
+    costs: &mut CostCalculator<'_>,
+    today: LocalDay,
+    (day_start_ns, day_end_ns): (i64, i64),
+    now_ns: i64,
+    window_minutes: i64,
+) -> Projection {
+    let today_cost = totals_between(facts, filter, costs, day_start_ns, day_end_ns).cost;
+    let recent = totals_between(
+        facts,
+        filter,
+        costs,
+        now_ns - MINUTE_NS * window_minutes,
+        now_ns + 1,
+    );
+    let burn_per_hour = recent.cost * 60.0 / window_minutes as f64;
+    let hours_left = (day_end_ns - now_ns).max(0) as f64 / (MINUTE_NS * 60) as f64;
+    let month_start = today.month_start();
+    let mut month = 0.0;
+    for fact in facts.iter().filter(|fact| filter.matches(fact)) {
+        if fact.day >= month_start && fact.day <= today {
+            month += costs.cost(fact).usd;
+        }
+    }
+    let day_length = (day_end_ns - day_start_ns).max(1) as f64;
+    let elapsed_days = today.days_since(month_start) as f64
+        + ((now_ns - day_start_ns).max(0) as f64 / day_length).min(1.0);
+    let month_days = month_start
+        .add_days(32)
+        .month_start()
+        .days_since(month_start) as f64;
+    Projection {
+        today: today_cost,
+        burn_per_hour,
+        end_of_day: today_cost + burn_per_hour * hours_left,
+        month,
+        end_of_month: if elapsed_days > 0.0 {
+            month / elapsed_days * month_days
+        } else {
+            month
+        },
+    }
+}
+
+/// Usage a subscription window has consumed, scaled to its quota percentage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuotaEfficiency {
+    pub used_percent: f64,
+    pub totals: UsageTotals,
+}
+
+impl QuotaEfficiency {
+    /// Too little of the quota is used to scale it meaningfully.
+    pub fn is_reliable(&self) -> bool {
+        self.used_percent >= 1.0 && self.totals.total_tokens() > 0
+    }
+
+    pub fn tokens_per_percent(&self) -> f64 {
+        self.totals.total_tokens() as f64 / self.used_percent
+    }
+
+    pub fn cost_per_percent(&self) -> f64 {
+        self.totals.cost / self.used_percent
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +349,7 @@ mod tests {
             ttft_sum_ms: ttft.unwrap_or_default(),
             ttft_count: u64::from(ttft.is_some()),
             duration_sum_ms: 2_000,
+            request: None,
         }
     }
 
@@ -332,5 +459,47 @@ mod tests {
         assert_eq!(percentile([5.0, 1.0, 3.0, 2.0, 4.0], 0.95), Some(5.0));
         assert_eq!(percentile([5.0, 1.0, 3.0, 2.0, 4.0], 0.5), Some(3.0));
         assert_eq!(percentile([], 0.5), None);
+    }
+
+    #[test]
+    fn minute_buckets_and_projection_follow_the_recent_pace() {
+        let pricing = UsagePricing::default();
+        let mut costs = CostCalculator::new(&pricing, CostMode::Recorded);
+        let minute = 60_000_000_000_i64;
+        let day_start = 0;
+        let now = 12 * 60 * minute;
+        let at = |minutes_ago: i64, cost: f64| {
+            let mut fact = fact("2026-10-14", "a", "p", cost, None);
+            fact.at_ns = Some(now - minutes_ago * minute);
+            fact
+        };
+        let mut earlier = fact("2026-10-01", "a", "p", 4.0, None);
+        earlier.at_ns = None;
+        let facts = [earlier, at(600, 2.0), at(30, 0.5), at(1, 0.5)];
+
+        let minutes = minute_totals(&facts, &UsageFilter::default(), &mut costs, now, 60);
+        let busy: Vec<_> = minutes
+            .iter()
+            .enumerate()
+            .filter(|(_, totals)| totals.requests > 0)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(busy, [30, 59]);
+
+        let projection = projection(
+            &facts,
+            &UsageFilter::default(),
+            &mut costs,
+            LocalDay::parse("2026-10-14").unwrap(),
+            (day_start, 24 * 60 * minute),
+            now,
+            60,
+        );
+        assert_eq!(projection.today, 3.0);
+        assert_eq!(projection.burn_per_hour, 1.0);
+        assert_eq!(projection.end_of_day, 15.0);
+        assert_eq!(projection.month, 7.0);
+        // 13.5 elapsed days of a 31-day month.
+        assert!((projection.end_of_month - 7.0 / 13.5 * 31.0).abs() < 1e-9);
     }
 }

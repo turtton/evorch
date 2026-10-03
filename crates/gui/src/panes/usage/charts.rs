@@ -212,20 +212,33 @@ pub fn stacked_day_bars(
     first: LocalDay,
     layers: &[TokenLayer],
 ) -> Vec<BarChart> {
+    let totals: Vec<_> = days.iter().map(|(_, totals)| *totals).collect();
+    stacked_bars(&totals, layers, move |index| {
+        first.add_days(index).to_string()
+    })
+}
+
+/// One stacked bar per bucket; `bucket_label` names a bucket in tooltips.
+pub fn stacked_bars(
+    buckets: &[UsageTotals],
+    layers: &[TokenLayer],
+    bucket_label: impl Fn(i64) -> String + Clone + 'static,
+) -> Vec<BarChart> {
     let mut charts: Vec<BarChart> = Vec::new();
     for (index, (name, value)) in layers.iter().enumerate() {
-        let bars = days
+        let bars = buckets
             .iter()
             .enumerate()
-            .map(|(day, (_, totals))| Bar::new(day as f64, value(totals) as f64).width(0.7))
+            .map(|(bucket, totals)| Bar::new(bucket as f64, value(totals) as f64).width(0.7))
             .collect();
         let name = (*name).to_owned();
+        let label = bucket_label.clone();
         let mut chart = BarChart::new(name.clone(), bars)
             .color(SERIES[index])
             .element_formatter(Box::new(move |bar, _| {
                 format!(
                     "{} · {name}: {}",
-                    first.add_days(bar.argument as i64),
+                    label(bar.argument as i64),
                     compact_tokens(bar.value as u64)
                 )
             }));
@@ -249,4 +262,50 @@ pub fn day_plot(id: &str, first: LocalDay, height: f32) -> Plot<'static> {
         .allow_double_click_reset(false)
         .show_grid([false, true])
         .x_axis_formatter(move |mark, _| day_axis_label(first, mark.value))
+}
+
+/// A stat tile: muted title, headline value, muted detail and an optional sparkline.
+pub struct Tile {
+    pub title: String,
+    pub value: String,
+    pub detail: String,
+    pub sparkline: Option<Vec<f64>>,
+}
+
+/// Lays tiles out in rows that fit the available width. Frames report their
+/// size only after drawing, so the column count is computed up front.
+pub fn tiles(ui: &mut Ui, width: f32, tiles: Vec<Tile>) {
+    let spacing = ui.spacing().item_spacing.x;
+    let outer = width + 20.0 + spacing;
+    let columns = ((ui.available_width() + spacing) / outer).floor().max(1.0) as usize;
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        ui.horizontal(|ui| {
+            for tile in tiles.by_ref().take(columns) {
+                egui::Frame::new()
+                    .fill(palette().SURFACE_RAISED)
+                    .corner_radius(8)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            ui.label(crate::theme::text::muted(tile.title));
+                            ui.add(
+                                egui::Label::new(crate::theme::text::h2(tile.value.clone()))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&tile.value);
+                            ui.add(
+                                egui::Label::new(crate::theme::text::muted(tile.detail.clone()))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&tile.detail);
+                            if let Some(values) = &tile.sparkline {
+                                sparkline(ui, values, SERIES[0], vec2(width, 26.0));
+                            }
+                        });
+                    });
+            }
+        });
+    }
 }

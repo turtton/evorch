@@ -20,8 +20,12 @@ use crate::theme::text::{h3, muted};
 mod analysis;
 #[path = "usage/charts.rs"]
 mod charts;
+#[path = "usage/live.rs"]
+mod live;
 #[path = "usage/overview.rs"]
 mod overview;
+#[path = "usage/requests.rs"]
+mod requests;
 
 /// The views offered below the shared toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,22 +34,34 @@ enum UsageView {
     Overview,
     Breakdown,
     Analysis,
+    Live,
+    Requests,
 }
 
 impl UsageView {
-    const ALL: [Self; 3] = [Self::Overview, Self::Breakdown, Self::Analysis];
+    const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Breakdown,
+        Self::Analysis,
+        Self::Live,
+        Self::Requests,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Breakdown => "Breakdown",
             Self::Analysis => "Analysis",
+            Self::Live => "Live",
+            Self::Requests => "Request log",
         }
     }
 }
 
 /// Reload the open tab this often so new requests appear without a click.
 const AUTO_REFRESH: Duration = Duration::from_secs(30);
+/// The Live view reloads its own month-to-date data this often.
+const LIVE_REFRESH: Duration = Duration::from_secs(15);
 /// Refresh today's footer total this often.
 const FOOTER_REFRESH: Duration = Duration::from_secs(60);
 const PRICING_REFRESH: Duration = Duration::from_secs(1);
@@ -166,6 +182,33 @@ pub struct UsagePane {
     distribution: UsageDimension,
     overview: Option<(ViewKey, Option<overview::OverviewData>)>,
     analysis: Option<(ViewKey, Option<analysis::AnalysisData>)>,
+    live: LiveState,
+    request_controls: requests::RequestControls,
+    requests: Option<(ViewKey, requests::RequestControls, requests::RequestsData)>,
+    open_conversation: bool,
+}
+
+/// Month-to-date data for the Live view, loaded separately from the period.
+struct LiveState {
+    loader: UsageLoader,
+    dataset: Option<UsageDataset>,
+    generation: u64,
+    loaded_at: Option<Instant>,
+    window_minutes: i64,
+    view: Option<((u64, ViewKey, i64), live::LiveData)>,
+}
+
+impl Default for LiveState {
+    fn default() -> Self {
+        Self {
+            loader: UsageLoader::default(),
+            dataset: None,
+            generation: 0,
+            loaded_at: None,
+            window_minutes: 60,
+            view: None,
+        }
+    }
 }
 
 impl UsagePane {
@@ -197,6 +240,15 @@ impl UsagePane {
                     self.dataset = Some((range, dataset));
                     self.error = None;
                     self.generation += 1;
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        if let Some((_, result)) = self.live.loader.poll() {
+            match result {
+                Ok(dataset) => {
+                    self.live.dataset = Some(dataset);
+                    self.live.generation += 1;
                 }
                 Err(error) => self.error = Some(error),
             }
@@ -239,18 +291,26 @@ impl UsagePane {
     /// Force the next frame to reload both the tab and the footer total.
     pub fn invalidate(&mut self) {
         self.loaded_at = None;
+        self.live.loaded_at = None;
         self.today.next_refresh = None;
     }
 
+    /// Whether a request row asked to show its conversation; clears the request.
+    pub fn take_conversation_request(&mut self) -> bool {
+        std::mem::take(&mut self.open_conversation)
+    }
+
+    /// Renders the tab. Returns a thread a request row asked to open.
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
         config: Option<&storage::StorageConfig>,
         sidebar: &SidebarState,
-    ) {
+        quota: &crate::model::telemetry::quota::QuotaState,
+    ) -> Option<String> {
         let Some(config) = config else {
             ui.label("Usage statistics need the events database.");
-            return;
+            return None;
         };
         let refresh = self.toolbar(ui);
         let stale = self
@@ -268,14 +328,6 @@ impl UsagePane {
         if let Some(error) = &self.error {
             ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
-        let Some((_, dataset)) = &self.dataset else {
-            ui.label(muted("Loading usage…"));
-            return;
-        };
-        if dataset.facts.is_empty() {
-            ui.label(muted("No usage recorded for this period."));
-            return;
-        }
         ui.horizontal(|ui| {
             for view in UsageView::ALL {
                 if charts::segment(ui, self.active == view, view.label()) {
@@ -283,8 +335,23 @@ impl UsagePane {
                 }
             }
         });
+        if self.active == UsageView::Live {
+            self.filters(ui, sidebar);
+            ui.separator();
+            self.live_view(ui, config, quota);
+            return None;
+        }
+        let Some((_, dataset)) = &self.dataset else {
+            ui.label(muted("Loading usage…"));
+            return None;
+        };
+        if dataset.facts.is_empty() {
+            ui.label(muted("No usage recorded for this period."));
+            return None;
+        }
         self.filters(ui, sidebar);
         ui.separator();
+        let mut open = None;
         match self.active {
             UsageView::Overview => {
                 self.refresh_overview();
@@ -308,7 +375,88 @@ impl UsagePane {
                         .show(ui, |ui| data.render(ui, sidebar));
                 }
             }
+            UsageView::Requests => {
+                self.refresh_requests();
+                if let Some((_, _, data)) = &self.requests {
+                    open = data.render(ui, sidebar, &mut self.request_controls);
+                }
+            }
+            UsageView::Live => {}
         }
+        self.open_conversation |= open.is_some();
+        open
+    }
+
+    fn refresh_requests(&mut self) {
+        let key = self.view_key(UsageDimension::Day);
+        if self.requests.as_ref().is_some_and(|(cached, controls, _)| {
+            *cached == key && *controls == self.request_controls
+        }) {
+            return;
+        }
+        let Some((_, dataset)) = &self.dataset else {
+            return;
+        };
+        let data = requests::RequestsData::compute(
+            dataset,
+            &self.filter,
+            &self.pricing,
+            self.cost_mode,
+            &self.request_controls,
+        );
+        self.requests = Some((key, self.request_controls.clone(), data));
+    }
+
+    fn live_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &storage::StorageConfig,
+        quota: &crate::model::telemetry::quota::QuotaState,
+    ) {
+        let live = &mut self.live;
+        if live
+            .loaded_at
+            .is_none_or(|loaded| loaded.elapsed() >= LIVE_REFRESH)
+            && !live.loader.is_loading()
+        {
+            live.loaded_at = Some(Instant::now());
+            live.loader
+                .start(config.clone(), UsageRange::Live, Some(ui.ctx().clone()));
+        }
+        // Repaint after the next refresh even without input, so the pace stays current.
+        ui.ctx().request_repaint_after(LIVE_REFRESH);
+        let Some(dataset) = &self.live.dataset else {
+            ui.label(muted("Loading usage…"));
+            return;
+        };
+        let key = (
+            self.live.generation,
+            self.view_key(UsageDimension::Day),
+            self.live.window_minutes,
+        );
+        if self
+            .live
+            .view
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != key)
+        {
+            let data = live::LiveData::compute(
+                dataset,
+                &self.filter,
+                &self.pricing,
+                self.cost_mode,
+                self.live.window_minutes,
+                quota,
+            );
+            self.live.view = Some((key, data));
+        }
+        let mut window = self.live.window_minutes;
+        if let Some((_, data)) = &self.live.view {
+            egui::ScrollArea::vertical()
+                .id_salt("usage-live-scroll")
+                .show(ui, |ui| data.render(ui, &mut window));
+        }
+        self.live.window_minutes = window;
     }
 
     fn view_key(&self, dimension: UsageDimension) -> ViewKey {
