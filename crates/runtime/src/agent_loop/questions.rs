@@ -102,6 +102,7 @@ mod tests {
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),
             root_name: "chat:Worker:thread".into(),
+            recipient_run_ids: Vec::new(),
             title: "scope?".into(),
             options: vec![],
             blocking: true,

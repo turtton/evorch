@@ -480,7 +480,10 @@ async fn new_chat_run_inherits_pending_question_and_receives_answer_once() {
     question_waiting(&mut events, resumed).await;
     assert_eq!(
         runtime.user_answers(resumed).unwrap(),
-        vec![question.clone()]
+        vec![event_bus::UserQuestion {
+            recipient_run_ids: vec![resumed.to_string()],
+            ..question.clone()
+        }]
     );
     assert!(runtime.has_active_question_recipient(&question.id).unwrap());
     runtime.answer_user_question(&question.id, "A").unwrap();
@@ -678,6 +681,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),
             root_name: "chat:Worker:thread".into(),
+            recipient_run_ids: Vec::new(),
             title: "scope".into(),
             options: vec![],
             blocking: true,

@@ -511,13 +511,40 @@ pub enum MessageEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserQuestion {
     pub id: String,
+    /// Immutable original requester provenance, including after continuation.
     pub run_id: String,
     pub root_run_id: String,
     pub root_name: String,
+    /// Consumer routing projected from durable continuation links, in link order.
+    /// Requester provenance above is immutable; these IDs are not UI ownership permits.
+    #[serde(default)]
+    pub recipient_run_ids: Vec<String>,
     pub title: String,
     pub options: Vec<String>,
     pub blocking: bool,
     pub answer: Option<String>,
+}
+
+impl UserQuestion {
+    /// Child-to-parent questions must never become user-facing prompts.
+    pub fn is_user_visible(&self) -> bool {
+        self.run_id == self.root_run_id
+    }
+
+    /// Shared GUI projection/answer scope, not an execution ownership permit.
+    /// Callers supply registered thread runs and separately validate ownership.
+    /// Exact chat identity also supports recovery without a run-start event.
+    pub fn belongs_to_thread(&self, thread_id: &str, bound_runs: &[String]) -> bool {
+        self.is_user_visible()
+            && (bound_runs.contains(&self.root_run_id)
+                || ["Worker", "Orchestrator"]
+                    .into_iter()
+                    .any(|role| self.root_name == format!("chat:{role}:{thread_id}"))
+                || self
+                    .recipient_run_ids
+                    .iter()
+                    .any(|run| bound_runs.contains(run)))
+    }
 }
 
 /// ツール実行に関するイベント。

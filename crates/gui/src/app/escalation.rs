@@ -29,6 +29,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 format!("Orchestrator · {}", parent.title),
             );
             child.archived = parent.archived;
+            child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
             child.parent_thread_id = Some(parent.id.clone());
             child.escalation_source_run_id = Some(source_run_id.into());
             self.sidebar.threads.push(child);
@@ -43,6 +44,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.transcripts.adopt_thread_root(&thread_id, new_run_id);
         let bound = self.bind_thread_run(&thread_id, new_run_id);
         if adopted {
+            let inherited = self
+                .user_questions
+                .values()
+                .filter(|question| {
+                    question.answer.is_none()
+                        && question.is_user_visible()
+                        && question
+                            .recipient_run_ids
+                            .iter()
+                            .any(|run| run == new_run_id)
+                })
+                .map(|question| question.id.as_str())
+                .collect::<Vec<_>>();
+            if !inherited.is_empty() {
+                self.transcripts.push_to_thread(
+                    &parent.id.to_string(),
+                    TranscriptEntry::Notice {
+                        text: format!(
+                            "未回答の質問 ({}) は継承先 Orchestrator · {} ({thread_id}, {new_run_id}) に引き継ぎ済みです。元の質問 ID のまま、ここからも回答できます。新 ID で再質問しないでください。",
+                            inherited.join(", "), parent.title
+                        ),
+                    },
+                );
+            }
             // Do not insert a notice between chunks of an already-started stream.
             if !has_output {
                 self.transcripts.push_to_thread(

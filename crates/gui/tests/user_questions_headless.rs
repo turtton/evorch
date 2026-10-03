@@ -35,6 +35,7 @@ fn question() -> UserQuestion {
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
         root_name: "chat:Worker:one".into(),
+        recipient_run_ids: Vec::new(),
         title: "Which output format?".into(),
         options: vec!["Markdown".into(), "JSON".into()],
         blocking: true,
@@ -152,6 +153,7 @@ fn orchestrator_addressed_child_question_does_not_become_a_user_prompt() {
     let mut state = state(dir.path());
     let mut child = question();
     child.run_id = "run-child".into();
+    child.recipient_run_ids = vec!["run-1".into()];
     state.apply_events([
         started(),
         Event::new(ToolEvent::UserQuestionUpdated { question: child }),

@@ -65,6 +65,8 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
 - `continue_goal` はプロセス再起動後も保存済みrootを検証し、同じgoal run IDで継続できる。
   `delegate_chat` は新しいrun IDを使う。必要な質問・回答は明示的なconsumer linkを
   永続化してから引き継ぎ、新しいrootの開始より先に配送先を確定する。
+  継承質問のIDと元requester provenanceは保持する。既存IDへの回答は現在の
+  recipient / ownershipを検証し、正当な継承先threadだけを許可する。
 
 ### 4. 入口ごとの権限源
 
@@ -102,6 +104,9 @@ run-29ではGUIが現在のownership permitを再発行するにもかかわら�
   snapshot書込、workspace inspection更新が触れない順序を守る。
 - エスカレーションは質問継承とworkspace引継ぎ準備の後、元run終了通知→新root開始
   の既存順序を維持する。準備に失敗した場合は新rootを開始しない。
+  継承未回答質問は新Orchestrator threadに表示し、開始時に既存質問への回答を
+  案内する。元threadには引き継ぎ済みの旨と移動先を表示し、新IDで再質問しない。
+  storage再起動復元と複数continuationでも質問と現在の担当の追跡を維持する。
 - 未確認shell結果のhandleは、回収と副作用マーカーの保存を確認してから解放する。
   回収や必要な保存を確認できなければhandle/workspaceを保持して失敗を報告する。
   未確認shell副作用がないrunのsnapshot保存失敗は診断に残し、既存の非致命扱いを保つ。

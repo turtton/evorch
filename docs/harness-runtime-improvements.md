@@ -47,6 +47,35 @@ contract is [ADR 0027](../intents/evorch/decisions/0027-restore-contract.md).
   clears an answered card even if an old run's event fence rejects its event.
   Current consumer ownership is checked; the event fence itself stays intact.
 
+### Escalation question inheritance acceptance
+
+The escalation question UI and answer contract supplements
+[orchestration intent](../intents/evorch/features/orchestration/overview.md) and
+[GUI workbench intent](../intents/evorch/features/gui-workbench/overview.md).
+The completed PR #76
+[packet](../.intent-cli/issues/v02-direct-escalation-handoff/packet.yaml) remains
+historical evidence; these additional requirements do not rewrite that packet.
+
+1. An inherited unanswered question appears in the destination Orchestrator
+   thread with its original question ID and requester provenance unchanged.
+2. An answer to that existing ID from the legitimate destination thread is
+   accepted after checking current recipient / ownership. After the model
+   observes the answer, the inherited blocking question no longer prevents finish.
+3. The source thread shows that the question has been handed off and identifies
+   the destination. It does not create a replacement question ID.
+4. An answer submitted from an unrelated thread is rejected, even when it names
+   a valid inherited question ID.
+5. Orchestrator startup explicitly lists inherited unanswered questions and
+   directs the user to answer the existing questions, not ask again with new IDs.
+6. Storage restart recovery and multiple continuations preserve question identity,
+   original provenance, and tracking of the current recipient / ownership.
+
+The handoff memo must include constraints and completion criteria agreed with the
+user, adopted and rejected approaches with reasons, and unverified items. These
+items must not turn an unanswered question into an assumed agreement. Question
+inheritance and workspace preparation still precede source termination and new
+root startup; failed preparation prevents startup (ADR 0027).
+
 ## Shell execution environment
 
 The shell tool describes its execution boundaries and a general diagnosis rule:

@@ -22,7 +22,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 // Child questions are addressed to their orchestrator. Only root questions,
 // including explicit ask_user requests, are addressed to the person at the UI.
 pub(super) fn user_visible(question: &UserQuestion) -> bool {
-    question.run_id == question.root_run_id
+    question.is_user_visible()
 }
 
 // The durable question remains discoverable even if its run-start event was
@@ -33,10 +33,7 @@ pub(super) fn belongs_to_thread(
     thread_id: &str,
     roots: &[String],
 ) -> bool {
-    roots.contains(&question.root_run_id)
-        || [runtime::Role::Worker, runtime::Role::Orchestrator]
-            .into_iter()
-            .any(|role| question.root_name == format!("chat:{}:{thread_id}", role.name()))
+    question.belongs_to_thread(thread_id, roots)
 }
 
 #[cfg(test)]
@@ -50,6 +47,7 @@ mod tests {
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),
             root_name: "chat:Worker:one".into(),
+            recipient_run_ids: Vec::new(),
             title: "scope".into(),
             options: vec![],
             blocking: true,
@@ -62,5 +60,24 @@ mod tests {
         goal.root_name = "goal-1".into();
         assert!(!belongs_to_thread(&goal, "one", &[]));
         assert!(belongs_to_thread(&goal, "one", &["run-1".into()]));
+        goal.recipient_run_ids = vec!["run-2".into(), "run-3".into()];
+        assert!(belongs_to_thread(&goal, "recipient", &["run-3".into()]));
+        assert!(!belongs_to_thread(&goal, "unrelated", &["run-4".into()]));
+        goal.run_id = "child".into();
+        assert!(!user_visible(&goal));
+        assert!(!belongs_to_thread(&goal, "one", &["run-1".into()]));
+        assert!(!belongs_to_thread(&goal, "recipient", &["run-3".into()]));
+    }
+
+    #[test]
+    fn legacy_question_events_default_to_no_inherited_recipients() {
+        let question: UserQuestion = serde_json::from_value(serde_json::json!({
+            "id":"q", "run_id":"run-1", "root_run_id":"run-1",
+            "root_name":"chat:Worker:one", "title":"scope", "options":[],
+            "blocking":true, "answer":null
+        }))
+        .unwrap();
+        assert!(question.recipient_run_ids.is_empty());
+        assert!(belongs_to_thread(&question, "one", &[]));
     }
 }

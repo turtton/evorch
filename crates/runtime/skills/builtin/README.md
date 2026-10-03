@@ -1,7 +1,11 @@
 # Builtin skills
 
 Builtin skills are compiled into the runtime binary. They are the lowest-priority
-fallback: repo `.evorch/skills` → repo `.agents/skills` → user skills → builtin.
+fallback: repo `.evorch/skills` → repo `.agents/skills` → user config
+`evorch/skills` → `$HOME/.agents/skills` → builtin.
+User config honors `$XDG_CONFIG_HOME` (falling back to `$HOME/.config`).
+The shared user agents directory requires a non-empty `$HOME`; XDG alone does
+not resolve it. Missing skill directories are allowed.
 A filesystem skill with the same name overrides its builtin counterpart.
 
 ## Available skills
