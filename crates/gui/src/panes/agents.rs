@@ -2,9 +2,14 @@ use crate::model::durable_tasks::DurableTasksModel;
 use crate::model::tasks::{AgentRunSource, TaskRow, TasksModel};
 use crate::model::telemetry::{TelemetryOverlay, TelemetryRow, ThreadMetrics};
 use crate::panes::agents_columns::fit_columns;
-use crate::theme::text::muted;
-use crate::theme::tokens::{CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, agent_phase_color, palette};
-use crate::theme::widgets::{empty_state, pane_root, status_dot};
+use crate::theme::icons;
+use crate::theme::text::{muted, semibold};
+use crate::theme::tokens::{
+    CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color, palette,
+};
+use crate::theme::widgets::{
+    empty_state, ghost, halo_dot, metric, pane_root, soft_frame, status_dot,
+};
 use egui::{Align, Button, Label, Layout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,10 +275,15 @@ pub fn subagents_pane<S: AgentRunSource>(
                 for row in rows {
                     let run_id = row.run_id.to_string();
                     ui.push_id(&run_id, |ui| {
-                        crate::theme::widgets::surface_frame(palette().SURFACE).show(ui, |ui| {
+                        soft_frame(palette().SURFACE).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.horizontal_wrapped(|ui| {
-                                status_dot(ui, agent_phase_color(row.status));
-                                ui.label(egui::RichText::new(&row.name).strong());
+                                halo_dot(
+                                    ui,
+                                    agent_phase_color(row.status),
+                                    row.status == event_bus::AgentRunPhase::Running,
+                                );
+                                ui.label(semibold(&row.name).color(palette().TEXT));
                                 ui.label(muted(format!("{} · {:?}", role_label(row), row.status)));
                                 let value = telemetry.row(&run_id);
                                 let model = value
@@ -293,7 +303,14 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 {
                                     action = Some(AgentsAction::DrillDown(run_id.clone()));
                                 }
-                                if ui.small_button("Open pane").clicked() {
+                                let open = ui.add(ghost(muted(icons::with_icon(
+                                    icons::ARROW_SQUARE_OUT,
+                                    "Open pane",
+                                ))));
+                                open.widget_info(|| {
+                                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Open pane")
+                                });
+                                if open.clicked() {
                                     action = Some(AgentsAction::OpenPane(run_id.clone()));
                                 }
                                 for task in durable_tasks.tasks_for_run(&run_id) {
@@ -325,8 +342,12 @@ pub fn subagents_pane<S: AgentRunSource>(
                                 if !matches!(activity.as_str(), "agents" | "idle" | "user input") {
                                     ui.label(muted(activity));
                                 }
-                                ui.label(muted(value.tokens_label()))
-                                    .on_hover_text(value.diagnostics_label());
+                                let tokens = value.tokens_label();
+                                let response = ui.label(muted(icons::with_icon(icons::COINS, &tokens)));
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &tokens)
+                                });
+                                response.on_hover_text(value.diagnostics_label());
                             }
                             render_run_metrics(
                                 ui,
@@ -351,7 +372,8 @@ fn role_label(row: &TaskRow) -> String {
 
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
     ui.horizontal_wrapped(|ui| {
-        for (index, label) in [
+        ui.spacing_mut().item_spacing.x = SP_3;
+        for label in [
             metrics
                 .cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
@@ -368,12 +390,8 @@ fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
             ),
         ]
         .iter()
-        .enumerate()
         {
-            if index > 0 {
-                ui.label(muted("·"));
-            }
-            ui.label(muted(label));
+            metric(ui, label);
         }
     });
 }

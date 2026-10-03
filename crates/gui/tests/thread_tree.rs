@@ -157,11 +157,13 @@ fn thread_status_icons_follow_state_and_question_priority() {
                     if circle.fill == palette().WARNING_FG)
                 })
                 .count();
+            // The error status is the Phosphor warning glyph painted in ERROR_FG.
             let warnings = shapes
                 .iter()
                 .filter(|shape| {
-                    matches!(&shape.shape, Shape::Path(path)
-                    if path.closed && path.stroke.color == ColorMode::Solid(palette().ERROR_FG))
+                    matches!(&shape.shape, Shape::Text(text)
+                    if text.galley.text() == gui::theme::icons::WARNING
+                        && text.galley.job.sections.iter().all(|section| section.format.color == palette().ERROR_FG))
                 })
                 .count();
             assert_eq!(spinners, usize::from(running));
@@ -191,7 +193,7 @@ fn thread_status_icons_are_trailing_without_overlapping_title_or_actions() {
             );
             assert!((title.center().y - icon.center().y).abs() <= 0.5);
             assert!(icon.right() <= width);
-            assert!(harness.get_by_label("Archive").rect().right() <= title.left());
+            assert!(title.right() <= harness.get_by_label("Archive").rect().left());
             // Moving the icon must not steal the title's or Fork's click target.
             harness.get_by_label("Status thread").click();
             harness.run_steps(3);
@@ -244,7 +246,7 @@ fn question_blob_and_runtime_icon_share_the_trailing_edge() {
                 without_question.get_by_label(status).rect().right()
             );
             assert!(icon.right() <= width);
-            assert!(harness.get_by_label("Archive").rect().right() <= title.left());
+            assert!(title.right() <= harness.get_by_label("Archive").rect().left());
 
             harness.get_by_label("Status thread").click();
             harness.run_steps(3);
@@ -275,12 +277,13 @@ fn family_rows_keep_title_and_actions_separate_at_minimum_width() {
     let root_pin = gui.label_rects("☆")[0];
     let archive = gui.label_rects("Archive")[0];
     let root_toggle = gui.label_rects("Collapse children of root")[0];
-    assert!(root_toggle.right() <= root_pin.left());
+    // caret → title → pin → archive: the title leads, actions trail it.
+    assert!(root_toggle.right() <= root_title.left());
+    assert!(root_title.right() <= root_pin.left());
     assert!(root_pin.right() <= archive.left());
-    assert!(archive.right() <= root_title.left());
     let child_title = gui.label_rects("↳ Child")[0];
     let child_pin = gui.label_rects("★")[0];
-    assert!(child_pin.right() <= child_title.left());
+    assert!(child_title.right() <= child_pin.left());
 }
 
 #[test]

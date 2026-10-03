@@ -76,7 +76,7 @@ fn narrow_code_preserves_indentation_and_line_structure() {
 }
 
 #[test]
-fn transcript_prose_after_wide_table_wraps_inside_card() {
+fn transcript_prose_after_wide_table_wraps_inside_entry() {
     // Given: a wide table followed by ordinary prose in the real transcript.
     let mut model = crate::model::transcript::TranscriptModel::new();
     model.push_message(format!(
@@ -94,10 +94,13 @@ fn transcript_prose_after_wide_table_wraps_inside_card() {
             crate::panes::agent::transcript_body(ui, &model);
         });
     harness.run_steps(2);
-    // Then: prose wraps inside the card, not merely the viewport clip rectangle.
+    // Then: prose wraps inside the entry inset (harness margin 8 + 200 - SP_1),
+    // not merely the viewport clip rectangle.
     let prose = text_shape(&harness, "abcdefghijklmno");
     assert!(prose.galley.rows.len() > 1);
-    assert!(prose.pos.x + prose.galley.mesh_bounds.right() <= 196.0);
+    assert!(
+        prose.pos.x + prose.galley.mesh_bounds.right() <= 8.0 + 200.0 - crate::theme::tokens::SP_1
+    );
 }
 
 #[test]

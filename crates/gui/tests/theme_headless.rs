@@ -48,7 +48,7 @@ fn tokyo_night_renders_demo_with_dark_style() {
     assert_eq!(palette(), p);
     assert_eq!(
         gui::theme::dock::dock_style(&style).tab_bar.bg_fill,
-        p.SURFACE_RAISED
+        p.CANVAS
     );
 }
 
@@ -211,10 +211,9 @@ fn dock_style_distinguishes_tab_states() {
     // Then: tab states are visually distinct and sized as specified.
     assert_ne!(dock.tab.active.bg_fill, dock.tab.inactive.bg_fill);
     assert_ne!(dock.tab.hovered.text_color, dock.tab.inactive.text_color);
-    assert_eq!(
-        dock.tab.active.outline_color,
-        gui::theme::tokens::palette().ACCENT
-    );
+    // Pill tabs carry no outline; the focused leaf's tab is the strongest chip.
+    assert_eq!(dock.tab.active.outline_color, egui::Color32::TRANSPARENT);
+    assert_ne!(dock.tab.focused.bg_fill, dock.tab.active.bg_fill);
     assert_eq!(dock.tab_bar.height, 28.0);
     assert_eq!(dock.tab.tab_body.inner_margin, egui::Margin::same(8));
 }

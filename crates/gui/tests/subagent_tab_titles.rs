@@ -71,6 +71,14 @@ fn painted_text<'a>(harness: &'a Harness<'_, WorkbenchState<DemoSource>>) -> Vec
         .collect()
 }
 
+/// Tab titles are painted as `<icon> <title>`.
+fn has_tab_title(painted: &[&str], title: &str) -> bool {
+    painted.iter().any(|text| {
+        text.strip_suffix(title)
+            .is_some_and(|icon| icon.ends_with(' '))
+    })
+}
+
 #[test]
 fn started_tab_uses_owner_id_only_when_owner_thread_is_selected() {
     let mut state = state();
@@ -127,7 +135,7 @@ fn parked_tab_keeps_owner_and_subagent_count_after_workspace_reload() {
             .any(|title| title.contains("worker-1") && title.contains("owner")),
         "{text:?}"
     );
-    assert!(text.contains(&"Subagents(1)"));
+    assert!(has_tab_title(&text, "Subagents(1)"));
     assert!(
         !text
             .iter()
@@ -138,17 +146,17 @@ fn parked_tab_keeps_owner_and_subagent_count_after_workspace_reload() {
 #[test]
 fn subagent_count_is_live_thread_local_and_retains_completed_nested_runs() {
     let mut harness = render(state());
-    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+    assert!(has_tab_title(&painted_text(&harness), "Subagents(0)"));
     harness.state_mut().apply_events([started(), started()]);
     harness.run_steps(3);
-    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+    assert!(has_tab_title(&painted_text(&harness), "Subagents(0)"));
 
     harness
         .state_mut()
         .switch_thread(ThreadId::new("owner"))
         .unwrap();
     harness.run_steps(3);
-    assert!(painted_text(&harness).contains(&"Subagents(1)"));
+    assert!(has_tab_title(&painted_text(&harness), "Subagents(1)"));
 
     harness.state_mut().apply_events([
         Event::new(LifecycleEvent::AgentRunStarted {
@@ -160,14 +168,14 @@ fn subagent_count_is_live_thread_local_and_retains_completed_nested_runs() {
         completed(),
     ]);
     harness.run_steps(3);
-    assert!(painted_text(&harness).contains(&"Subagents(2)"));
+    assert!(has_tab_title(&painted_text(&harness), "Subagents(2)"));
 
     harness
         .state_mut()
         .switch_thread(ThreadId::new("other"))
         .unwrap();
     harness.run_steps(3);
-    assert!(painted_text(&harness).contains(&"Subagents(0)"));
+    assert!(has_tab_title(&painted_text(&harness), "Subagents(0)"));
 }
 
 #[test]
@@ -209,7 +217,7 @@ fn completed_subagent_count_survives_history_restore_without_transcript_panels()
     live.apply_events(events.clone());
     let sidebar = live.sidebar().clone();
     // A live task row and its parked pane represent the same launched agent.
-    assert!(painted_text(&render(live)).contains(&"Subagents(1)"));
+    assert!(has_tab_title(&painted_text(&render(live)), "Subagents(1)"));
 
     let dir = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
@@ -226,5 +234,8 @@ fn completed_subagent_count_survives_history_restore_without_transcript_panels()
     restored
         .restore_history(&storage::Database::open(&config).unwrap())
         .unwrap();
-    assert!(painted_text(&render(restored)).contains(&"Subagents(1)"));
+    assert!(has_tab_title(
+        &painted_text(&render(restored)),
+        "Subagents(1)"
+    ));
 }

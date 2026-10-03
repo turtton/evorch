@@ -1,5 +1,6 @@
 pub mod dock;
 pub mod fonts;
+pub mod icons;
 pub mod style;
 pub mod text;
 pub mod tokens;

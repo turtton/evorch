@@ -187,8 +187,9 @@ fn create_switch_pin_thread_via_ui_clicks() {
     let pin = harness.label_rects("☆")[0];
     let archive = harness.label_rects("Archive")[0];
     let title = harness.label_rects("thread-1")[0];
-    assert!(pin.right() <= title.left());
-    assert!(archive.right() <= title.left());
+    // The title leads the row; row actions trail it without overlapping.
+    assert!(title.right() <= pin.left());
+    assert!(pin.right() <= archive.left());
     harness.click_label("thread-1");
     harness.run();
     harness.click_label("☆");

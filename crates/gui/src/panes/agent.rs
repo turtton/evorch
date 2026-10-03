@@ -8,8 +8,10 @@ use crate::model::transcript::{MessageDirection, TranscriptEntry, TranscriptMode
 use crate::panes::agents::AgentsAction;
 use crate::panes::composer::{ComposerAction, composer_strip};
 use crate::panes::sidebar::SidebarAction;
+use crate::theme::icons::{self, with_icon};
+use crate::theme::text::medium;
 use crate::theme::tokens::*;
-use crate::theme::widgets::{card, empty_state, pane_root};
+use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
 mod header;
 use header::{header_strip, status_strip};
@@ -223,19 +225,24 @@ fn run_detail_body(
                     );
                     continue;
                 }
-                let accent = entry_accent(entry);
-                card(ui, accent, |ui| {
+                ui.add_space(SP_1);
+                if let TranscriptEntry::UserMessage { text } = entry {
+                    user_bubble(ui, text);
+                    continue;
+                }
+                if let Some((icon, color)) = event_icon(entry) {
+                    event_line(ui, icon, &entry_label(entry), color);
+                    continue;
+                }
+                entry_frame(entry).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     match entry {
                         TranscriptEntry::Message { run_id, .. }
                         | TranscriptEntry::Reasoning { run_id, .. } => {
                             if let Some(role) = run_id.as_deref().and_then(|run_id| {
                                 crate::model::tasks::role_for_run(task_rows, run_id)
                             }) {
-                                ui.label(
-                                    egui::RichText::new(format!("[{role}]"))
-                                        .small()
-                                        .color(palette().TEXT_MUTED),
-                                );
+                                role_label(ui, role);
                             }
                         }
                         TranscriptEntry::Error { .. }
@@ -295,21 +302,88 @@ fn run_detail_body(
         .inner
 }
 
-fn entry_accent(entry: &TranscriptEntry) -> Color32 {
+/// Single-line lifecycle entries render as a muted icon line, not a card.
+fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
     match entry {
-        TranscriptEntry::Error { .. } => palette().ERROR_FG,
-        TranscriptEntry::UserMessage { .. } => palette().TEXT,
-        TranscriptEntry::Notice { .. }
+        TranscriptEntry::Notice { .. } => Some((icons::INFO, palette().TEXT_MUTED)),
+        TranscriptEntry::AgentMessage { direction, .. } => Some(match direction {
+            MessageDirection::Incoming => (icons::ARROW_BEND_DOWN_RIGHT, palette().SUCCESS),
+            MessageDirection::Outgoing => (icons::PAPER_PLANE_RIGHT, palette().WARNING_FG),
+        }),
+        TranscriptEntry::Error { .. }
+        | TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::SandboxReview { .. }
-        | TranscriptEntry::Compaction { .. } => palette().TEXT_MUTED,
-        TranscriptEntry::Message { .. } => palette().ACCENT,
-        TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
-        TranscriptEntry::Tool { .. } => palette().INFO,
-        TranscriptEntry::AgentMessage { direction, .. } => match direction {
-            MessageDirection::Incoming => palette().SUCCESS,
-            MessageDirection::Outgoing => palette().WARNING_FG,
-        },
+        | TranscriptEntry::Compaction { .. }
+        | TranscriptEntry::Message { .. }
+        | TranscriptEntry::Reasoning { .. }
+        | TranscriptEntry::Tool { .. } => None,
     }
+}
+
+/// Assistant text sits directly on the canvas; only entries that need to
+/// stand out (errors, reviews, compaction) get a borderless tinted surface.
+fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
+    let fill = match entry {
+        TranscriptEntry::Error { .. } => palette().ERROR_SURFACE,
+        TranscriptEntry::SandboxReview { .. } => palette().WARNING_SURFACE,
+        TranscriptEntry::Compaction { .. } => palette().SURFACE,
+        _ => {
+            return egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(SP_1 as i8, SP_1 as i8));
+        }
+    };
+    soft_frame(fill)
+}
+
+fn user_bubble(ui: &mut egui::Ui, text: &str) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+        let max_width = (ui.available_width() * 0.8).max(120.0);
+        soft_frame(palette().SURFACE_RAISED)
+            .corner_radius(egui::CornerRadius::same(R_XL))
+            .show(ui, |ui| {
+                ui.set_max_width(max_width);
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    let response = ui.add(
+                        egui::Label::new(egui::RichText::new(text).color(palette().TEXT)).wrap(),
+                    );
+                    let label = format!("You: {text}");
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
+                    });
+                });
+            });
+    });
+}
+
+fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32) {
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(SP_1);
+        ui.spacing_mut().item_spacing.x = SP_2;
+        ui.label(
+            egui::RichText::new(icon)
+                .size(FONT_SMALL + 1.0)
+                .color(color),
+        );
+        let response = ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .size(FONT_SMALL)
+                    .color(palette().TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    });
+}
+
+fn role_label(ui: &mut egui::Ui, role: &str) {
+    let response = ui.label(
+        medium(with_icon(icons::ROBOT, role))
+            .size(FONT_SMALL)
+            .color(palette().TEXT_MUTED),
+    );
+    let label = format!("[{role}]");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
 }
 
 fn entry_label(entry: &TranscriptEntry) -> String {

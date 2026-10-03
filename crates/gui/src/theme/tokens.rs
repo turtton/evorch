@@ -150,6 +150,11 @@ pub const FONT_H2: f32 = 18.0;
 pub const FONT_H3: f32 = 16.0;
 pub const FONT_H4: f32 = 14.0;
 pub const FONT_BADGE: f32 = 11.0;
+/// Icon glyph size for icon-only buttons and row actions.
+pub const FONT_ICON: f32 = 16.0;
+
+/// Seconds for hover highlights to fade in and out.
+pub const HOVER_FADE: f32 = 0.12;
 
 pub fn text_style_h2() -> egui::TextStyle {
     egui::TextStyle::Name("h2".into())
