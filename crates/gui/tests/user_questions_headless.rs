@@ -1,5 +1,5 @@
-use egui_kittest::kittest::Queryable;
-use event_bus::{Event, LifecycleEvent, ToolEvent, UserQuestion};
+use egui_kittest::kittest::{NodeT, Queryable};
+use event_bus::{Event, LifecycleEvent, MessageEvent, ToolEvent, UserQuestion};
 use gui::{
     app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench,
     model::commands::WorkbenchCommand,
@@ -75,6 +75,158 @@ fn question_card_is_thread_scoped_and_selection_requires_explicit_send() {
         })]);
     assert_eq!(ui.state().pending_user_questions().count(), 0);
 }
+fn answer_input<'a>(
+    harness: &'a egui_kittest::Harness<'_, WorkbenchState<DemoSource>>,
+    draft: &str,
+) -> egui_kittest::Node<'a> {
+    harness
+        .query_all_by_role(egui::accesskit::Role::MultilineTextInput)
+        .find(|node| {
+            node.accesskit_node().label().as_deref() != Some("Message or /command")
+                && node.value().as_deref() == Some(draft)
+        })
+        .expect("question answer input")
+}
+
+#[test]
+fn answer_input_keeps_focus_and_cursor_across_conversation_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state(dir.path());
+    state.apply_events([
+        started(),
+        Event::new(ToolEvent::UserQuestionUpdated {
+            question: question(),
+        }),
+    ]);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1600.0, 1800.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    harness.run_steps(4);
+    answer_input(&harness, "").click();
+    harness.run_steps(4);
+    answer_input(&harness, "").type_text("custom answer");
+    harness.run_steps(4);
+    harness.key_press(egui::Key::Home);
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run_steps(4);
+    let focused = harness.ctx.memory(|memory| memory.focused()).unwrap();
+    let mut updated_question = question();
+    updated_question.options.insert(0, "Plain text".into());
+    let updates = [
+        Event::new(MessageEvent::MessageDelta {
+            delta: "Working while you answer".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(MessageEvent::MessageDelta {
+            delta: "\n\n- Another streamed paragraph".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(MessageEvent::ReasoningDelta {
+            delta: "Considering the next step".into(),
+            run_id: Some("run-1".into()),
+        }),
+        Event::new(ToolEvent::ApprovalRequested {
+            call_id: "run-1:call:1".into(),
+            tool_name: "shell".into(),
+            input: Some(serde_json::json!({"command": "pwd"})),
+        }),
+        Event::new(ToolEvent::ApprovalResolved {
+            call_id: "run-1:call:1".into(),
+            approved: true,
+        }),
+        Event::new(ToolEvent::UserQuestionUpdated {
+            question: updated_question,
+        }),
+    ];
+    let mut expected = String::from("custom answer");
+    for (index, update) in updates.into_iter().enumerate() {
+        harness.state_mut().apply_events([update]);
+        harness.run_steps(4);
+        assert_eq!(harness.ctx.memory(|memory| memory.focused()), Some(focused));
+        assert!(answer_input(&harness, &expected).is_focused());
+        // Text must still land at the existing cursor without clicking again.
+        answer_input(&harness, &expected).type_text("+");
+        harness.run_steps(4);
+        expected.insert(index + 1, '+');
+        assert!(answer_input(&harness, &expected).is_focused());
+        assert!(harness.state().composer().input.is_empty());
+        assert!(harness.state().issued().is_empty());
+    }
+    harness.get_by_label("回答を送信").click();
+    harness.run_steps(4);
+    assert!(harness.state().issued().iter().any(|command| matches!(
+        command,
+        WorkbenchCommand::AnswerUserQuestion { question_id, answer, .. }
+            if question_id == "q-one" && answer == &expected
+    )));
+}
+
+#[test]
+fn answer_input_isolated_from_other_question_cards_and_user_focus_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state(dir.path());
+    state.apply_events([
+        started(),
+        Event::new(ToolEvent::UserQuestionUpdated {
+            question: question(),
+        }),
+    ]);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1600.0, 1800.0))
+        .build_ui_state(
+            |ui, state| state.ui(ui, &mut eframe::Frame::_new_kittest()),
+            state,
+        );
+    harness.run_steps(4);
+    answer_input(&harness, "").click();
+    harness.run_steps(4);
+    answer_input(&harness, "").type_text("first draft");
+    harness.run_steps(4);
+    let focused = harness.ctx.memory(|memory| memory.focused()).unwrap();
+    let mut preceding = question();
+    preceding.id = "q-before".into();
+    preceding.title = "Another question".into();
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: preceding.clone(),
+        })]);
+    harness.run_steps(4);
+    assert_eq!(harness.ctx.memory(|memory| memory.focused()), Some(focused));
+    assert!(answer_input(&harness, "first draft").is_focused());
+    answer_input(&harness, "").click();
+    harness.run_steps(4);
+    answer_input(&harness, "").type_text("second draft");
+    harness.run_steps(4);
+    assert!(answer_input(&harness, "second draft").is_focused());
+    assert!(!answer_input(&harness, "first draft").is_focused());
+    preceding.answer = Some("answered elsewhere".into());
+    harness
+        .state_mut()
+        .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
+            question: preceding,
+        })]);
+    harness.run_steps(4);
+    assert!(!answer_input(&harness, "first draft").is_focused());
+    answer_input(&harness, "first draft").click();
+    harness.run_steps(4);
+    assert_eq!(harness.ctx.memory(|memory| memory.focused()), Some(focused));
+    harness.get_by_label("Message or /command").click();
+    harness.run_steps(4);
+    harness
+        .state_mut()
+        .apply_events([Event::new(MessageEvent::MessageDelta {
+            delta: "Conversation continues".into(),
+            run_id: Some("run-1".into()),
+        })]);
+    harness.run_steps(4);
+    assert!(harness.get_by_label("Message or /command").is_focused());
+    assert!(!answer_input(&harness, "first draft").is_focused());
+}
+
 #[test]
 fn question_row_survives_restart_even_when_event_delivery_was_lost() {
     let dir = tempfile::tempdir().unwrap();
