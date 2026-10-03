@@ -96,6 +96,7 @@ pub struct WorkbenchState<S> {
     pub(super) sandbox_settings: super::sandbox_settings::SandboxSettings,
     pub(super) self_improvement_settings:
         crate::model::self_improvement_settings::SelfImprovementSettingsModel,
+    pub(super) storage_settings: super::storage_settings::StorageSettings,
     pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) settings_load_options: config::LoadOptions,
@@ -191,6 +192,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sandbox_settings: super::sandbox_settings::SandboxSettings::default(),
             self_improvement_settings:
                 crate::model::self_improvement_settings::SelfImprovementSettingsModel::default(),
+            storage_settings: super::storage_settings::StorageSettings::default(),
             codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
             settings_load_options: config::LoadOptions::default(),
@@ -275,6 +277,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.self_improvement.handle = enabled.then_some(handle);
         self.self_improvement.enabled = enabled;
         self.self_improvement.draft_dir = draft_dir;
+        self
+    }
+
+    pub fn with_diagnostic_storage(
+        mut self,
+        handle: storage::StorageHandle,
+        config: &storage::StorageConfig,
+    ) -> Self {
+        self.storage_settings.configure(handle, config);
         self
     }
 

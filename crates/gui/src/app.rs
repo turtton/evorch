@@ -20,6 +20,7 @@ mod routing_settings;
 mod sandbox_settings;
 mod self_improvement_settings;
 mod state;
+mod storage_settings;
 mod subagent_dock;
 mod tab_viewer;
 mod theme_settings;

@@ -197,3 +197,14 @@ fn tab_cycles_before_focused_composer_and_enter_still_sends() {
             [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature" && chat.composer_role == ComposerRole::Orchestrator));
     }
 }
+
+#[test]
+fn storage_settings_keeps_tab_for_modal_navigation() {
+    let temp = tempfile::tempdir().expect("root");
+    let mut harness = workbench(temp.path());
+    harness.state_mut().open_storage_settings();
+    harness.run();
+    harness.key_press(Modifiers::NONE, Key::Tab);
+    harness.run();
+    assert_eq!(harness.state().composer().role, ComposerRole::Worker);
+}

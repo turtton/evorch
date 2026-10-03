@@ -8,6 +8,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.role_settings.open
             || self.sandbox_settings.open
             || self.self_improvement_settings.open
+            || self.storage_settings.open
             || self.theme_settings.open
     }
 
