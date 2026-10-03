@@ -1,6 +1,6 @@
 //! 設定済み provider と runtime kernel を接続する edge composition root。
-// allow: SIZE_OK — T2 restricts runtime production edits to model.rs/compose.rs;
-// retain the existing composition root and shared route/error path in this file.
+// allow: SIZE_OK — keep the shared provider/runtime composition and route/error path
+// together here; source-specific loading lives in its dedicated modules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use routing::{ComposeDeps, ComposedProviders, RoutingError, SessionAffinity};
 use sandbox::credential::CredentialStore;
 use tools::ToolExecutor;
 
+use crate::rules::{ProjectTrust, RulesSettings, RulesSource};
 use crate::skill::default_skill_dirs;
 use crate::skill_source::SkillCatalogSource;
 use crate::workspace::{Project, WorktreeManager};
@@ -67,6 +68,8 @@ impl WorkspaceSeam {
 /// runtime の全外部依存を一度に渡す composition 入力。
 pub struct RuntimeComposition<'a> {
     pub config: &'a config::Config,
+    /// 明示指定がなければ標準のユーザ config ディレクトリを遅延解決する。
+    pub user_config_dir: Option<PathBuf>,
     pub bus: Arc<EventBus>,
     pub executor: Arc<ToolExecutor>,
     pub credential_store: Arc<dyn CredentialStore>,
@@ -115,6 +118,10 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
         .workspace
         .as_ref()
         .map(|seam| seam.repo_root().to_path_buf());
+    let user_dir = input
+        .user_config_dir
+        .clone()
+        .or_else(config::user_config_dir);
     let bus = Arc::clone(&input.bus);
     let composed = match input.model_source {
         ModelSource::Fixed(model) => ComposedRuntime {
@@ -146,6 +153,13 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
     let runtime = composed
         .runtime
         .with_model_resolution(input.config, Some(input.credential_store));
+    let runtime = runtime.with_project_rules(Arc::new(RulesSource::new(
+        ProjectTrust::Unapproved,
+        RulesSettings::from(&input.config.rules),
+        None,
+        repo_root.clone(),
+        user_dir.map(|directory| directory.join("AGENTS.md")),
+    )));
     let source = SkillCatalogSource::new(
         input.config.clone(),
         config::user_config_dir(),

@@ -14,6 +14,7 @@ fn composed_runtime_uses_web_tool_config_and_live_updates() {
         ..Default::default()
     };
     let runtime = runtime::compose_runtime(runtime::RuntimeComposition {
+        user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         bus: bus.clone(),
         executor: std::sync::Arc::new(tools::ToolExecutor::with_standard_tools(

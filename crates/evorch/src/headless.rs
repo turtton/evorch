@@ -179,6 +179,7 @@ pub async fn run_headless(
         tokio::task::spawn_blocking(move || open_credential_store(&credential_args)).await??;
 
     let composed = compose_runtime(RuntimeComposition {
+        user_config_dir: None,
         config: &config,
         bus: Arc::clone(&bus),
         executor,

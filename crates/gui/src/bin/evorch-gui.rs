@@ -640,6 +640,7 @@ fn run() -> Result<(), GuiError> {
                 runtime,
                 model_identity,
             } = compose_runtime(RuntimeComposition {
+                user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
                 executor,
@@ -671,6 +672,7 @@ fn run() -> Result<(), GuiError> {
                 runtime,
                 model_identity,
             } = compose_runtime(RuntimeComposition {
+                user_config_dir: None,
                 config: &composition_config,
                 bus: Arc::clone(&bus),
                 executor,

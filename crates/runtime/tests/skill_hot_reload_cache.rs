@@ -136,6 +136,7 @@ summarizer = "structural"
     executor.register(read.clone()).unwrap();
     let (factory, _) = support::recording_factory();
     let runtime = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,
         executor: Arc::new(executor),

@@ -92,6 +92,12 @@ fn composition<'a>(
     workspace: Option<WorkspaceSeam>,
 ) -> RuntimeComposition<'a> {
     RuntimeComposition {
+        user_config_dir: Some(
+            tempfile::tempdir()
+                .expect("user config directory")
+                .path()
+                .join("empty-user-config"),
+        ),
         config,
         executor: executor(&bus),
         bus,

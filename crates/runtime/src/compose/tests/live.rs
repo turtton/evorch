@@ -107,6 +107,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
     // When
     let model = compose_routed_model(&config, deps).unwrap();
     let runtime = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(ToolExecutor::new(bus.clone())),
         bus,
