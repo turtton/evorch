@@ -268,6 +268,7 @@ impl ToolExecutor {
     }
 
     /// 標準ツールに web_search / web_fetch（production 既定構成）を追加登録する。
+    /// web_search は OpenAI 資格情報があれば keyed、なければ従来の keyless 構成を使う。
     ///
     /// # Errors
     ///
@@ -282,7 +283,7 @@ impl ToolExecutor {
     ///
     /// [`NetworkGuard`]: crate::network_guard::NetworkGuard
     pub fn with_web_tools(mut self) -> Result<Self, NetworkGuardError> {
-        self.register(Arc::new(WebSearch::keyless_default()?))
+        self.register(Arc::new(WebSearch::from_env_default()?))
             // SAFE-EXPECT: web スキーマは web_tool_schemas_compile でコンパイル検証済み。
             .expect("web_search のスキーマは web_tool_schemas_compile でコンパイル可能を検証済み");
         self.register(Arc::new(WebFetch::new()?))

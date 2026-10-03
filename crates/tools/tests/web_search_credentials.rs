@@ -40,6 +40,10 @@ impl SearchProvider for StubSearchProvider {
         self.name
     }
 
+    fn uses_credentials(&self) -> bool {
+        self.name == "openai"
+    }
+
     async fn search(
         &self,
         _query: &str,
@@ -67,6 +71,45 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
         std::env::set_var("EXA_API_KEY", "k");
         std::env::set_var("TAVILY_API_KEY", "k");
     }
+
+    // Given: OpenAI 資格情報なし / When: 自動選択 / Then: 現行 keyless を維持。
+    // SAFETY: 単一 current-thread test の最初の await 前で、環境を読む別スレッドは開始していない。
+    unsafe {
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_OAUTH_TOKEN");
+    }
+    assert_eq!(
+        WebSearch::from_env_default()
+            .expect("zero config")
+            .provider_names(),
+        ("exa", "tavily")
+    );
+    // SAFETY: 上と同じ。構築は DNS resolver の実行や通信を開始しない。
+    unsafe {
+        std::env::set_var("OPENAI_OAUTH_TOKEN", "fixture-oauth-token-unique");
+    }
+    assert_eq!(
+        WebSearch::from_env_default()
+            .expect("oauth config")
+            .provider_names(),
+        ("openai", "exa")
+    );
+    // SAFETY: 上と同じ。これ以降は環境を変更せず、sandbox child env からの隔離を検証する。
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "fixture-api-key-unique");
+    }
+    assert_eq!(
+        WebSearch::from_env_default()
+            .expect("keyed config")
+            .provider_names(),
+        ("openai", "exa")
+    );
+    assert_eq!(
+        WebSearch::keyless_default()
+            .expect("explicit keyless")
+            .provider_names(),
+        ("exa", "tavily")
+    );
 
     // Assert A: main process 側の消費。実環境 lookup で key の存在を検出し、
     // 現行 transport では未使用であることを credential_status で報告する。
@@ -96,6 +139,24 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
         "metadata に key 値が漏れていない: {detail}"
     );
 
+    // Given: keyed primary / When: 同じ実環境下で検索 / Then: keyed と報告し token を出さない。
+    let keyed = Arc::new(StubSearchProvider::new("openai", exa_ok()));
+    let keyed_fallback = Arc::new(StubSearchProvider::new("exa", exa_ok()));
+    let keyed_tool = WebSearch::for_providers(keyed.clone(), keyed_fallback.clone());
+    let keyed_result = Tool::execute(&keyed_tool, json!({"query": "evorch"}))
+        .await
+        .expect("keyed result");
+    assert!(!keyed_result.is_error);
+    let keyed_detail = keyed_result.detail.expect("keyed metadata");
+    assert_eq!(keyed_detail["credential_status"], "keyed");
+    assert_eq!(keyed_detail["provider"], "openai");
+    for token in ["fixture-api-key-unique", "fixture-oauth-token-unique"] {
+        assert!(!keyed_detail.to_string().contains(token));
+        assert!(!detail.to_string().contains(token));
+    }
+    assert_eq!(keyed.calls(), 1);
+    assert_eq!(keyed_fallback.calls(), 0);
+
     // Assert B: sandbox child env への非露出。merge_environment の許可リスト
     // (PATH / TERM / LANG / LC_ALL) は DirectSandbox::wrap と BwrapSandbox::wrap
     // で共有されるため、Direct 経路の証明で許可リストの首根っこを検証する。
@@ -109,10 +170,13 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
         .expect("コマンドを包めるはずです");
 
     assert!(
-        !wrapped
-            .env
-            .iter()
-            .any(|(key, _)| key == "EXA_API_KEY" || key == "TAVILY_API_KEY"),
+        !wrapped.env.iter().any(|(key, _)| [
+            "EXA_API_KEY",
+            "TAVILY_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_OAUTH_TOKEN"
+        ]
+        .contains(&key.as_str())),
         "子コマンド env に provider API key が含まれる: {:?}",
         wrapped.env
     );
@@ -144,10 +208,13 @@ async fn provider_api_keys_stay_in_main_process_and_out_of_sandbox_child_env() {
         .expect("コマンドを包めるはずです");
 
     assert!(
-        !bwrap_wrapped
-            .env
-            .iter()
-            .any(|(key, _)| key == "EXA_API_KEY" || key == "TAVILY_API_KEY"),
+        !bwrap_wrapped.env.iter().any(|(key, _)| [
+            "EXA_API_KEY",
+            "TAVILY_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_OAUTH_TOKEN"
+        ]
+        .contains(&key.as_str())),
         "bwrap 経路の子コマンド env に provider API key が含まれる: {:?}",
         bwrap_wrapped.env
     );

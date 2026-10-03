@@ -1,11 +1,9 @@
 //! web_search ツールの実装。
 //!
-//! Exa keyless endpoint を primary、Tavily keyless endpoint を 1 回限りの
-//! fallback とする keyless 検索ツールである。API key による keyed transport は
-//! 将来拡張 (interview Q2) であり、本実装は環境変数の存在確認のみを行う。
-//! キーが環境に存在しても現行 transport はそれを使用しないため、資格情報の
-//! 状態は "key_present_unused" として報告する。メタデータに API key の値が
-//! 含まれることはなく、credential_status はリテラル値のみである。
+//! OpenAI 資格情報があれば OpenAI primary・Exa keyless fallback、なければ
+//! Exa keyless primary・Tavily keyless fallback を使う。chain は常に 2 slot で、
+//! Tavily は keyless 構成専用。fallback は 429・5xx・timeout の場合に 1 回のみ。
+//! 資格情報の値を metadata に含めず、credential_status はリテラル値のみとする。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,11 +14,13 @@ use crate::error::ToolError;
 use crate::network_guard::{NetworkGuard, NetworkGuardError};
 use crate::result::ToolResult;
 use crate::search::{
-    ExaKeylessProvider, SearchError, SearchOptions, SearchProvider, SearchResults,
-    TavilyKeylessProvider,
+    ExaKeylessProvider, OpenAiResponsesProvider, OpenAiSearchCredential, SearchError,
+    SearchOptions, SearchProvider, SearchResults, TavilyKeylessProvider,
 };
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
+/// primary が資格情報を使うことを表す credential_status。
+const CREDENTIAL_STATUS_KEYED: &str = "keyed";
 /// 環境に API key が存在しないことを表す credential_status。
 const CREDENTIAL_STATUS_KEYLESS: &str = "keyless";
 /// API key が存在するが現行 transport では未使用であることを表す credential_status。
@@ -67,7 +67,7 @@ enum Flight {
 /// credential_status 判定に使う環境変数 lookup。
 type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// Exa primary・Tavily fallback の keyless web 検索ツール。
+/// keyed または keyless の primary・fallback を持つ web 検索ツール。
 ///
 /// fallback は fallback 対象の error（429・5xx・timeout、
 /// [`SearchError::is_fallback_trigger`]）に対してのみ 1 回試行され、fallback の
@@ -79,6 +79,22 @@ pub struct WebSearch {
 }
 
 impl WebSearch {
+    /// 環境の OpenAI 資格情報があれば OpenAI primary・Exa fallback で構築する。
+    ///
+    /// 未設定または不正な header 値なら Exa primary・Tavily fallback に戻る。
+    /// 1 つの guard を共有する。OAuth token の取得・更新はここでは行わない。
+    ///
+    /// # Errors
+    /// guard の初期化に失敗した場合、NetworkGuardError を返す。
+    pub fn from_env_default() -> Result<Self, NetworkGuardError> {
+        let guard = Arc::new(NetworkGuard::new()?);
+        let env_lookup: EnvLookup = Arc::new(|key: &str| std::env::var(key).ok());
+        let (primary, fallback) = default_providers(guard, &*env_lookup);
+        Ok(Self::for_providers_with_env_lookup(
+            primary, fallback, env_lookup,
+        ))
+    }
+
     /// production 用の既定構成（Exa keyless primary・Tavily keyless fallback）で
     /// 構築する。
     ///
@@ -110,7 +126,8 @@ impl WebSearch {
     /// 既定配線の診断・検証用に、primary と fallback の provider 識別名を返す。
     ///
     /// 戻り値は metadata の `provider` field と同一の情報源であり、production
-    /// 既定構成 (`keyless_default`) では `("exa", "tavily")` となる。
+    /// 既定構成は keyed なら `("openai", "exa")`、keyless なら `("exa", "tavily")`。
+    /// `keyless_default` は資格情報にかかわらず後者を返す。
     pub fn provider_names(&self) -> (&str, &str) {
         (self.primary.name(), self.fallback.name())
     }
@@ -130,9 +147,12 @@ impl WebSearch {
 
     /// 環境変数の存在から credential_status を判定する。
     ///
-    /// keyed transport は将来拡張のため、キーが存在しても現行経路では未使用である。
+    /// primary が資格情報を使う構成なら keyed（fallback 後も同じ構成状態）。
     /// 空文字列のキーは存在しないものと扱う。
     fn credential_status(&self) -> &'static str {
+        if self.primary.uses_credentials() {
+            return CREDENTIAL_STATUS_KEYED;
+        }
         let has_key = CREDENTIAL_ENV_KEYS
             .iter()
             .any(|key| (self.env_lookup)(key).is_some_and(|value| !value.is_empty()));
@@ -274,4 +294,65 @@ impl Tool for WebSearch {
 // SAFE-EXPECT: WebSearchMetadata は文字列・数値・null のみで構成され serde_json::to_value は失敗しない。
 fn metadata_detail(metadata: WebSearchMetadata) -> serde_json::Value {
     serde_json::to_value(metadata).expect("WebSearchMetadata の serialize は失敗しない")
+}
+
+/// private な選択境界。失敗時の警告は source 名のみで token/error を含めない。
+fn default_providers(
+    guard: Arc<NetworkGuard>,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> (Arc<dyn SearchProvider>, Arc<dyn SearchProvider>) {
+    if let Some(credential) = OpenAiSearchCredential::resolve(env_lookup) {
+        let source = credential.source;
+        match OpenAiResponsesProvider::with_guard(Arc::clone(&guard), credential) {
+            Ok(provider) => {
+                return (
+                    Arc::new(provider),
+                    Arc::new(ExaKeylessProvider::with_guard(guard)),
+                );
+            }
+            Err(_) => tracing::warn!(
+                source,
+                "Invalid OpenAI search credential header; using keyless providers"
+            ),
+        }
+    }
+    (
+        Arc::new(ExaKeylessProvider::with_guard(Arc::clone(&guard))),
+        Arc::new(TavilyKeylessProvider::with_guard(guard)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Given: 資格情報の有無と不正 header / When: 既定 provider 選択 / Then: 2 slot を非破壊に選ぶ
+    #[test]
+    fn selects_keyed_or_keyless_providers_without_chaining() {
+        for (api_key, oauth, names) in [
+            (None, None, ("exa", "tavily")),
+            (Some(""), Some(""), ("exa", "tavily")),
+            (Some("test-api"), None, ("openai", "exa")),
+            (None, Some("test-oauth"), ("openai", "exa")),
+            (Some(""), Some("test-oauth"), ("openai", "exa")),
+            // API key は OAuth より優先。不正 API key を OAuth で隠さない。
+            (
+                Some("invalid\nsecret"),
+                Some("test-oauth"),
+                ("exa", "tavily"),
+            ),
+        ] {
+            let (primary, fallback) = default_providers(
+                Arc::new(NetworkGuard::new().expect("guard")),
+                |key| match key {
+                    "OPENAI_API_KEY" => api_key.map(str::to_owned),
+                    "OPENAI_OAUTH_TOKEN" => oauth.map(str::to_owned),
+                    _ => None,
+                },
+            );
+            assert_eq!((primary.name(), fallback.name()), names);
+            assert_eq!(primary.uses_credentials(), names.0 == "openai");
+            assert!(!fallback.uses_credentials());
+        }
+    }
 }

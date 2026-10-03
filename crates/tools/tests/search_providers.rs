@@ -271,3 +271,199 @@ async fn tavily_provider_headers_reach_the_wire() -> TestResult {
     );
     Ok(())
 }
+
+struct StubResponsesTransport {
+    response: Value,
+    bodies: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl tools::ResponsesTransport for StubResponsesTransport {
+    async fn create_response(&self, body: &Value) -> Result<Value, SearchError> {
+        self.bodies.lock().expect("bodies mutex").push(body.clone());
+        Ok(self.response.clone())
+    }
+}
+
+fn openai_response() -> Value {
+    json!({
+        "id": "resp_fixture", "status": "completed", "usage": {"input_tokens": 7, "output_tokens": 9},
+        "output": [
+            {"type": "web_search_call", "status": "completed"},
+            {"type": "message", "content": [{"type": "output_text", "text": "An answer.", "annotations": [
+                {"type": "url_citation", "title": "First", "url": "https://example.com/first"},
+                {"type": "url_citation", "title": "Repeated", "url": "https://example.com/first"},
+                {"type": "url_citation", "title": "Second", "url": "https://example.com/second"}
+            ]}]}
+        ]
+    })
+}
+
+fn responses_transport(
+    server: &FixtureServer,
+) -> Result<tools::NetworkGuardResponsesTransport, reqwest::header::InvalidHeaderValue> {
+    let guard = Arc::new(NetworkGuard::with_resolver_and_root_certificate(
+        Arc::new(CountingResolver {
+            addr: server.resolver_addr(),
+            calls: AtomicUsize::new(0),
+        }),
+        server.certificate(),
+    ));
+    let credential = tools::OpenAiSearchCredential::resolve(|key| {
+        (key == "OPENAI_API_KEY").then(|| "fixture-token-not-a-real-secret".to_owned())
+    })
+    .expect("fixture credential");
+    tools::NetworkGuardResponsesTransport::new(guard, server.url("/v1/responses"), credential)
+}
+
+// Given: Responses stub / When: bounded search / Then: hosted web_search body、dedup と bound、usage が契約どおり
+#[tokio::test]
+async fn openai_shapes_public_request_and_bounds_unique_citations() -> TestResult {
+    let stub = Arc::new(StubResponsesTransport {
+        response: openai_response(),
+        bodies: Mutex::new(Vec::new()),
+    });
+    let provider = tools::OpenAiResponsesProvider::new(stub.clone(), "chosen-model");
+
+    let result = provider
+        .search(
+            "evorch",
+            &SearchOptions {
+                max_results: Some(1),
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        *stub.bodies.lock().expect("bodies mutex"),
+        vec![json!({
+            "model": "chosen-model", "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "input": "evorch", "store": false
+        })]
+    );
+    assert_eq!(
+        result.content,
+        "An answer.\n\nTitle: First\nURL: https://example.com/first"
+    );
+    assert_eq!(result.result_count, 1);
+    assert_eq!(result.request_id.as_deref(), Some("resp_fixture"));
+    assert_eq!(
+        result.usage,
+        Some(json!({"input_tokens": 7, "output_tokens": 9}))
+    );
+    assert_eq!(
+        tools::OpenAiResponsesProvider::ENDPOINT,
+        "https://api.openai.com/v1/responses"
+    );
+    Ok(())
+}
+
+// Given: HTTPS fixture と guarded Responses transport / When: search / Then: bearer header と JSON が wire に乗り結果が組み上がる
+#[tokio::test]
+async fn openai_authorization_and_request_reach_the_wire() -> TestResult {
+    let server = FixtureServer::start(|_| {
+        response_with_status(
+            "200 OK",
+            &["Content-Type: application/json".to_owned()],
+            openai_response().to_string().as_bytes(),
+        )
+    })
+    .await?;
+    let provider =
+        tools::OpenAiResponsesProvider::new(Arc::new(responses_transport(&server)?), "wire-model");
+
+    let result = provider
+        .search("wire query", &SearchOptions::default())
+        .await?;
+
+    assert_eq!(result.result_count, 2);
+    assert_eq!(result.request_id.as_deref(), Some("resp_fixture"));
+    let requests = server.captured_requests();
+    assert_eq!(requests.len(), 1);
+    let request = String::from_utf8(requests[0].clone())?;
+    let (headers, body) = request.split_once("\r\n\r\n").expect("HTTP request");
+    assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer fixture-token-not-a-real-secret\r\n")
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(body)?,
+        json!({
+            "model": "wire-model", "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "input": "wire query", "store": false
+        })
+    );
+    Ok(())
+}
+
+// Given: 非 2xx と不正 JSON / When: guarded search / Then: HTTP status/Protocol を写像し error body の秘密は破棄する
+#[tokio::test]
+async fn openai_wire_errors_preserve_fallback_contract_without_echoing_credentials() -> TestResult {
+    for (status, code, trigger) in [
+        ("401 Unauthorized", 401, false),
+        ("403 Forbidden", 403, false),
+        ("429 Too Many Requests", 429, true),
+        ("500 Internal Server Error", 500, true),
+        ("503 Service Unavailable", 503, true),
+        ("200 OK", 200, false),
+    ] {
+        let server = FixtureServer::start(move |_| {
+            response_with_status(status, &[], b"fixture-token-not-a-real-secret")
+        })
+        .await?;
+        let provider = tools::OpenAiResponsesProvider::new(
+            Arc::new(responses_transport(&server)?),
+            "wire-model",
+        );
+
+        let error = provider
+            .search("wire", &SearchOptions::default())
+            .await
+            .expect_err("invalid response");
+
+        if code == 200 {
+            assert!(matches!(error, SearchError::Protocol(_)));
+        } else {
+            assert!(matches!(error, SearchError::HttpStatus(actual) if actual == code));
+        }
+        assert_eq!(error.is_fallback_trigger(), trigger);
+        assert!(
+            !error
+                .to_string()
+                .contains("fixture-token-not-a-real-secret")
+        );
+    }
+    Ok(())
+}
+
+// Given: POST redirect / When: guarded Responses search / Then: fail-closed Transport で header を転送せず fallback もしない
+#[tokio::test]
+async fn openai_post_redirect_is_fail_closed() -> TestResult {
+    let server = FixtureServer::start(|_| {
+        response_with_status(
+            "302 Found",
+            &["Location: https://example.com/other".to_owned()],
+            b"",
+        )
+    })
+    .await?;
+    let provider =
+        tools::OpenAiResponsesProvider::new(Arc::new(responses_transport(&server)?), "wire-model");
+
+    let error = provider
+        .search("wire", &SearchOptions::default())
+        .await
+        .expect_err("redirect rejected");
+
+    assert!(matches!(error, SearchError::Transport(_)));
+    assert!(!error.is_fallback_trigger());
+    assert_eq!(server.captured_requests().len(), 1);
+    Ok(())
+}

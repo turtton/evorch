@@ -1,11 +1,12 @@
-//! web_search ツールが利用する keyless 検索プロバイダ層。
+//! web_search ツールが利用する検索プロバイダ層。
 //!
-//! MCP JSON-RPC による単発 tools/call transport、envelope 解析、そして
-//! transport の上に成る keyless 検索 provider（[`SearchProvider`]）を提供する。
+//! MCP JSON-RPC の keyless transport と OpenAI Responses API の keyed transport、
+//! 応答解析、共通の検索 provider 抽象（[`SearchProvider`]）を提供する。
 
 pub(crate) mod envelope;
 pub mod error;
 pub mod mcp;
+pub mod responses;
 
 use std::sync::Arc;
 
@@ -16,6 +17,10 @@ use crate::network_guard::NetworkGuard;
 
 pub use error::SearchError;
 pub use mcp::{McpToolSuccess, McpTransport, NetworkGuardMcpTransport};
+pub use responses::{
+    NetworkGuardResponsesTransport, OpenAiResponsesProvider, OpenAiSearchCredential,
+    ResponsesTransport,
+};
 
 /// 検索 1 回あたりの要求 option。
 #[derive(Debug, Clone, Copy, Default)]
@@ -24,20 +29,20 @@ pub struct SearchOptions {
     pub max_results: Option<u32>,
 }
 
-/// keyless provider が組み立てた検索結果。
+/// provider が組み立てた検索結果。
 #[derive(Debug, Clone)]
 pub struct SearchResults {
     /// provider 応答の本文（formatter 由来の text）。
     pub content: String,
     /// content から best-effort で数えた result 数。
     pub result_count: usize,
-    /// keyless envelope には request id が無いため常に None（Q10 schema 用の field）。
+    /// provider の request id（keyless envelope では None）。
     pub request_id: Option<String>,
     /// provider 固有の usage metadata（Exa の `_meta.searchTime` など）。
     pub usage: Option<serde_json::Value>,
 }
 
-/// keyless 検索 provider の抽象。
+/// 検索 provider の抽象。
 ///
 /// ## 第三の provider を非破壊で追加する方法
 ///
@@ -52,6 +57,11 @@ pub struct SearchResults {
 pub trait SearchProvider: Send + Sync {
     /// provider の識別名。
     fn name(&self) -> &str;
+
+    /// この provider が資格情報を使うか（既存 keyless provider は false）。
+    fn uses_credentials(&self) -> bool {
+        false
+    }
 
     /// query を検索し、正規化した結果を返す。
     ///

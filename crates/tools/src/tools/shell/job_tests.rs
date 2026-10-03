@@ -26,7 +26,7 @@ fn id(result: &ToolResult) -> String {
 }
 async fn finish(shell: &Shell, owner: &str, id: &str, mut cursor: u64) -> ToolResult {
     // Each wait is watch-driven; no sleeps or status-only busy loop.
-    for _ in 0..20 {
+    loop {
         let result = invoke(
             shell,
             owner,
@@ -38,7 +38,6 @@ async fn finish(shell: &Shell, owner: &str, id: &str, mut cursor: u64) -> ToolRe
             return result;
         }
     }
-    panic!("job did not finish")
 }
 
 #[tokio::test]
@@ -190,6 +189,30 @@ async fn pty_job_accepts_input_and_finishes() {
 
 #[tokio::test]
 async fn output_is_bounded_redacted_and_archived_once() {
+    const CHILD_FLAG: &str = "EVORCH_SHELL_JOB_OUTPUT_FIXTURE";
+    if std::env::var_os(CHILD_FLAG).is_none() {
+        // The host artifact root may be read-only in a sandbox. Isolate the
+        // store without changing process-global environment in parallel tests.
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::shell::job_tests::output_is_bounded_redacted_and_archived_once",
+                "--nocapture",
+            ])
+            .env(CHILD_FLAG, "1")
+            .env("EVORCH_OUTPUT_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        return;
+    }
     let shell = shell();
     let key = format!("sk-{}", "A".repeat(30));
     let command = format!(
@@ -197,11 +220,15 @@ async fn output_is_bounded_redacted_and_archived_once() {
     );
     let start = invoke(&shell, "owner", json!({"command":command, "yield_ms":0})).await;
     let end = finish(&shell, "owner", &id(&start), 0).await;
+    assert_eq!(job(&end)["status"], "completed", "{end:?}");
+    assert_eq!(job(&end)["exit_code"], 0, "{end:?}");
     assert!(!end.content.contains(&key));
     assert!(end.content.len() < 16 * 1024);
     let detail = end.detail.as_ref().unwrap();
     assert_eq!(detail["output_artifact"]["complete"], false);
-    let path = detail["output_artifact"]["path"].as_str().unwrap();
+    let path = detail["output_artifact"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing output artifact: {end:?}"));
     assert!(std::path::Path::new(path).starts_with(crate::output::output_root().unwrap()));
     let saved = std::fs::read_to_string(path).unwrap();
     assert!(!saved.contains(&key));
