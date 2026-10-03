@@ -118,10 +118,12 @@ impl QuotaConfig {
 }
 
 /// One client per account. Recreate on account switches to discard cached data.
-/// The app-server uses its own Codex login; supply the matching token store.
+/// The default client uses the app-server's own Codex login. Registered profiles
+/// must use `new_for_account` to acquire quota with their own token store.
 pub struct CodexQuotaClient {
     config: QuotaConfig,
     store: Arc<dyn CodexTokenStore>,
+    use_app_server: bool,
     http: reqwest::Client,
     snapshot: Option<QuotaSnapshot>,
     last_error: Option<QuotaError>,
@@ -141,6 +143,7 @@ impl CodexQuotaClient {
         Ok(Self {
             config,
             store,
+            use_app_server: true,
             http,
             snapshot: None,
             last_error: None,
@@ -149,17 +152,31 @@ impl CodexQuotaClient {
         })
     }
 
+    /// Fetch quota only through WHAM using the supplied account's credentials.
+    /// The app-server's ambient login can belong to a different account.
+    /// # Errors
+    /// Returns `HttpTransport` if TLS/client setup fails.
+    pub fn new_for_account(
+        config: QuotaConfig,
+        store: Arc<dyn CodexTokenStore>,
+    ) -> Result<Self, QuotaError> {
+        let mut client = Self::new(config, store)?;
+        client.use_app_server = false;
+        Ok(client)
+    }
+
     pub fn poll_interval(&self) -> Duration {
         self.config.retry_delay(self.failures)
     }
 
-    /// Fetch from app-server, then WHAM on any primary error. Within the polling
-    /// interval return cache; after failures retain the last good data as stale.
+    /// Fetch from app-server, then WHAM on any primary error, or directly from
+    /// WHAM for an account-scoped client. Within the polling interval return cache;
+    /// after failures retain the last good data as stale.
     /// An RPC supervisor kills and reaps its child before returning. Dropping this
     /// future signals the supervisor to do the same asynchronously; keep the Tokio
     /// runtime alive until cleanup completes. Runtime shutdown uses kill-on-drop.
     /// # Errors
-    /// Returns both source errors when no good snapshot has ever been acquired.
+    /// Returns source errors when no good snapshot has ever been acquired.
     pub async fn fetch_quota(&mut self) -> Result<QuotaSnapshot, QuotaError> {
         if self
             .attempted_at
@@ -172,15 +189,21 @@ impl CodexQuotaClient {
                 return Err(error.clone());
             }
         }
-        let result = match rpc::fetch(&self.config).await {
-            Ok(quota) => Ok((quota, QuotaSource::AppServer)),
-            Err(app_server) => wire::fetch_wham(&self.http, &self.config, self.store.as_ref())
+        let result = if self.use_app_server {
+            match rpc::fetch(&self.config).await {
+                Ok(quota) => Ok((quota, QuotaSource::AppServer)),
+                Err(app_server) => wire::fetch_wham(&self.http, &self.config, self.store.as_ref())
+                    .await
+                    .map(|quota| (quota, QuotaSource::Wham))
+                    .map_err(|wham| QuotaError::Sources {
+                        app_server: Box::new(app_server),
+                        wham: Box::new(wham),
+                    }),
+            }
+        } else {
+            wire::fetch_wham(&self.http, &self.config, self.store.as_ref())
                 .await
                 .map(|quota| (quota, QuotaSource::Wham))
-                .map_err(|wham| QuotaError::Sources {
-                    app_server: Box::new(app_server),
-                    wham: Box::new(wham),
-                }),
         };
         self.attempted_at = Some(Instant::now());
         match result {

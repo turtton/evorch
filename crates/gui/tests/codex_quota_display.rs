@@ -218,7 +218,7 @@ fn codex_config() -> config::Config {
 }
 
 #[test]
-fn multiple_codex_subscriptions_popup_shows_all_profiles_and_windows() {
+fn multiple_codex_subscriptions_show_first_usage_and_switch_from_details() {
     let settings =
         gui::model::provider_settings::ProviderSettingsModel::seed_from_config(&codex_config());
     let mut state = QuotaState::default();
@@ -242,7 +242,9 @@ fn multiple_codex_subscriptions_popup_shows_all_profiles_and_windows() {
     let mut harness = quota_harness(state);
     harness.run();
     assert!(harness.query_by_label("personal · Codex").is_none());
-    harness.get_by_label("Codex · 2 subscriptions").click();
+    harness
+        .get_by_label("Codex · personal · 75% 5h · 40% wk")
+        .click();
     harness.run();
     harness.get_by_label("personal · Codex");
     harness.get_by_label("work · Codex");
@@ -252,6 +254,17 @@ fn multiple_codex_subscriptions_popup_shows_all_profiles_and_windows() {
     harness.get_by_label("wk: 40.0% remaining · 60.0% used · resets 2026-09-13 12:00 UTC");
     harness.get_by_label("5h: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
     harness.get_by_label("Code review: 10.0% remaining · 90.0% used · resets 2026-09-13 12:00 UTC");
+    harness.get_by_label("work · Codex").click();
+    harness.run();
+    harness.get_by_label("Codex · work · 10% 5h");
+    assert!(
+        harness
+            .query_by_label("Codex · personal · 75% 5h · 40% wk")
+            .is_none()
+    );
+    harness.get_by_label("Codex · work · 10% 5h").click();
+    harness.run();
+    harness.get_by_label("work · Codex");
 }
 
 #[test]
@@ -292,7 +305,11 @@ fn codex_profile_changes_only_clear_affected_quota() {
     let mut harness = quota_harness(state);
     harness.run();
     harness.get_by_label("Codex · 75% 5h · 40% wk");
-    assert!(harness.query_by_label("Codex · 2 subscriptions").is_none());
+    assert!(
+        harness
+            .query_by_label("Codex · personal · 75% 5h · 40% wk")
+            .is_none()
+    );
 }
 
 #[test]
