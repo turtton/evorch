@@ -521,3 +521,53 @@ async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
         Some("effects observed")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop() {
+    let (_temp, root) = init_git_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let executor = executor(&bus, &root);
+    let (model, mut calls) = model();
+    let runtime = AgentRuntime::new(bus, executor.clone(), model);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "notify before next turn".into(),
+        RunConfig::default(),
+    );
+    next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"while [ ! -f release ]; do sleep 0.01; done; printf finished", "yield_ms":0})));
+    let active = next(&mut calls).await;
+    let job = active.job("start");
+    let previous_input = serde_json::to_value(&active.messages).unwrap();
+    std::fs::write(root.join("release"), "go").unwrap();
+    timeout(DEADLINE, async {
+        while executor.has_running_shell_jobs(&run.to_string()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Continue with ToolUse, not Stop: the completion must reach the next request.
+    active.respond(tool_response("read", "read", json!({"path":"release"})));
+    let notified = next(&mut calls).await;
+    let next_input = serde_json::to_value(&notified.messages).unwrap();
+    let prefix_len = previous_input.as_array().unwrap().len();
+    assert_eq!(
+        &next_input.as_array().unwrap()[..prefix_len],
+        previous_input.as_array().unwrap().as_slice()
+    );
+    let text = serde_json::to_string(&notified.messages).unwrap();
+    assert!(text.contains(&format!("Shell job completed: {job}")));
+    assert!(text.contains("exit_code: 0"));
+    assert!(executor.has_unobserved_shell_jobs(&run.to_string()));
+    notified.respond(tool_response(
+        "poll",
+        "shell",
+        json!({"action":"poll", "job_id":job}),
+    ));
+    let observed = next(&mut calls).await;
+    assert_eq!(field(&observed.result("poll").0, "status: "), "completed");
+    let text = serde_json::to_string(&observed.messages).unwrap();
+    assert_eq!(text.matches("Shell job completed:").count(), 1);
+    observed.respond(text_response("done", FinishReason::Stop));
+    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+}

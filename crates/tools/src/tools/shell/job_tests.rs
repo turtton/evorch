@@ -513,3 +513,38 @@ async fn terminal_release_rejects_live_jobs_and_preserves_other_owners() {
     shell.drain_shell_jobs("second").await.unwrap();
     shell.release_shell_jobs("second").unwrap();
 }
+
+#[tokio::test]
+async fn completion_notices_are_owner_scoped_once_and_do_not_observe_results() {
+    let shell = shell();
+    let start = invoke(
+        &shell,
+        "owner",
+        json!({"command":"read value", "yield_ms":0}),
+    )
+    .await;
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+    shell.drain_shell_jobs("owner").await.unwrap();
+    assert!(shell.take_shell_job_notifications("other").is_empty());
+    let notices = shell.take_shell_job_notifications("owner");
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains(&id(&start)));
+    assert!(notices[0].contains("status: cancelled"));
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    invoke(
+        &shell,
+        "owner",
+        json!({"action":"poll", "job_id":id(&start)}),
+    )
+    .await;
+    assert!(!shell.has_unobserved_shell_jobs("owner"));
+}
+
+#[tokio::test]
+async fn observed_completion_does_not_generate_a_notice() {
+    let shell = shell();
+    let start = invoke(&shell, "owner", json!({"command":"true", "yield_ms":1000})).await;
+    assert_eq!(job(&start)["status"], "completed");
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+}
