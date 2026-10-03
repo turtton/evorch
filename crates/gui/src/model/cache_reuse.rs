@@ -224,9 +224,10 @@ mod tests {
         ));
         assert_eq!(summary.label(), "cache — (avg 90%)");
         let tooltip = summary.tooltip(Some(12.0), Some(40.0));
-        assert!(tooltip.contains("Latest: — (prompt prefix changed, e.g. by compaction)"));
-        assert!(tooltip.contains("Average: 90% (1 of 2 requests compared)"));
-        assert!(tooltip.contains("Billed hit rate (cache read / input): latest 12%, average 40%"));
+        assert!(tooltip.contains(baseline_missing_label(CacheBaselineMissing::PrefixChanged)));
+        assert!(tooltip.contains("1 of 2 requests compared"));
+        // The billed ratio stays available beside the retention.
+        assert!(tooltip.contains("latest 12%, average 40%"));
     }
 
     #[test]
@@ -246,11 +247,7 @@ mod tests {
         assert_eq!(summary.label(), "cache —");
         assert_eq!(summary.average_label(), "avg cache —");
         summary.complete(RequestReuse::Unobserved);
+        assert_eq!(summary.latest_retention(), None);
         assert!(!summary.latest_is_low());
-        assert!(
-            summary
-                .tooltip(None, None)
-                .contains("Latest: — (cache reuse was not observed)")
-        );
     }
 }

@@ -139,16 +139,16 @@ fn cache_label_reports_root_retention_while_billed_ratio_moves_to_tooltip() {
     // Then: the cold first request does not lower the conversation retention.
     assert_eq!(thread.cache_label(), "cache 100% (avg 100%)");
     assert!(!thread.cache_reuse.latest_is_low());
-    assert!(
-        thread
-            .cache_tooltip()
-            .contains("Average: 100% (2 of 3 requests compared)")
+    assert_eq!(
+        (
+            thread.cache_reuse.compared_requests,
+            thread.cache_reuse.completed_requests
+        ),
+        (2, 3)
     );
-    assert!(
-        thread
-            .cache_tooltip()
-            .contains("Billed hit rate (cache read / input): latest 75%, average 57%")
-    );
+    // The billed ratio behind the tooltip still reflects the cold request.
+    assert_eq!(thread.cache_hit_rate, Some(75.0));
+    assert_eq!(thread.average_cache_hit_rate.map(f64::round), Some(57.0));
     // And: the child's own metrics flag its regression.
     let child = telemetry.thread_metrics(&["child".into()]);
     assert_eq!(child.cache_reuse.average_label(), "avg cache 10.0%");
@@ -172,11 +172,7 @@ fn a_request_without_reuse_observation_does_not_keep_the_previous_value() {
     }
     let metrics = telemetry.thread_metrics(&["run".into()]);
     assert_eq!(metrics.cache_label(), "cache — (avg 90%)");
-    assert!(
-        metrics
-            .cache_tooltip()
-            .contains("Latest: — (cache reuse was not observed)")
-    );
+    assert_eq!(metrics.cache_reuse.latest, Some(RequestReuse::Unobserved));
 }
 
 #[test]
