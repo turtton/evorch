@@ -71,6 +71,8 @@ impl ConversationRequests<'_> {
                     }
                     ui.add(
                         egui::TextEdit::multiline(draft)
+                            // Use the question's stable scope, not the changing transcript's auto ID.
+                            .id_salt("answer-input")
                             .hint_text("回答を入力（選択肢以外でも可）")
                             .desired_width(f32::INFINITY)
                             .desired_rows(2),
