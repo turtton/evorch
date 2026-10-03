@@ -61,15 +61,17 @@ fn heartbeat_and_claim_use_persisted_lease_settings() {
     let token = owner.lease.clone();
     owner.heartbeat(&token, 120).expect("suspect heartbeat");
     assert_eq!(owner.lease.expires_at, 820);
-    assert!(owner.heartbeat(&token, 870).is_err());
-    assert!(owner.claim(&token, "next", 869, 50).is_err());
-    owner.claim(&token, "next", 870, 50).expect("claim");
-    assert_eq!(owner.lease.expires_at, 1_570);
+    owner.heartbeat(&token, 10_000).expect("delayed heartbeat");
+    assert_eq!(owner.lease.expires_at, 10_700);
+    assert!(owner.claim(&token, "next", 10_749, 50).is_err());
+    owner.claim(&token, "next", 10_750, 50).expect("claim");
+    assert_eq!(owner.lease.expires_at, 11_450);
+    assert!(owner.heartbeat(&token, 20_000).is_err());
 }
 
 #[cfg(unix)]
 #[test]
-fn ipc_heartbeat_uses_owner_settings() {
+fn ipc_delayed_heartbeat_uses_owner_settings() {
     use runtime::ownership::ipc::{Request, Response, request, serve_connection};
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("owners.db");
@@ -88,7 +90,7 @@ fn ipc_heartbeat_uses_owner_settings() {
     registry.start(&owner).expect("start");
     let worker = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
-        serve_connection(&mut stream, &mut registry, 20).expect("serve");
+        serve_connection(&mut stream, &mut registry, 20_000).expect("serve");
     });
     let response = request(
         &socket,
@@ -98,7 +100,7 @@ fn ipc_heartbeat_uses_owner_settings() {
         },
     )
     .expect("heartbeat");
-    assert!(matches!(response, Response::Status(owner) if owner.lease.expires_at == 720));
+    assert!(matches!(response, Response::Status(owner) if owner.lease.expires_at == 20_700));
     worker.join().expect("worker");
 }
 
