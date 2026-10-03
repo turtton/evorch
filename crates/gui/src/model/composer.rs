@@ -1,7 +1,13 @@
 #[path = "external_slash.rs"]
 mod external_slash;
+#[path = "composer_mention.rs"]
+mod mention;
 #[path = "composer_role.rs"]
 mod role;
+pub use mention::{
+    CompletionItem, CompletionKind, MentionIndex, MentionQuery, expand_skill_mentions, mention_at,
+    split_skill_attachments,
+};
 pub use role::ComposerRole;
 
 pub struct SlashCommandSpec {
@@ -225,15 +231,90 @@ pub struct ComposerModel {
     pub registry: SlashCommandRegistry,
     pub input: String,
     pub completions_dismissed_for: Option<String>,
+    /// Highlighted completion row, clamped to the visible candidates.
+    pub completion_selected: usize,
+    /// Text cursor as a char index, mirrored from the editor each frame.
+    pub cursor: Option<usize>,
+    /// Char index the editor moves its cursor to on the next frame.
+    pub pending_cursor: Option<usize>,
+    pub focus_requested: bool,
+    /// Whether the editor held keyboard focus at the end of the last frame.
+    pub focused: bool,
+    /// Tab presses (`true` with Shift) captured before egui focus navigation.
+    pub tab_presses: Vec<bool>,
+    pub mentions: MentionIndex,
     pub attachments: Vec<ImageAttachment>,
     pub image_input_supported: bool,
 }
 
 impl ComposerModel {
     pub fn completions_visible(&self) -> bool {
-        self.completions_dismissed_for.as_ref() != Some(&self.input)
-            && (!completions(&self.input).is_empty()
-                || !self.registry.completions(&self.input).is_empty())
+        !self.completion_items().is_empty()
+    }
+
+    /// Slash commands for a leading `/word`, otherwise `@` mentions at the cursor.
+    pub fn completion_items(&self) -> Vec<CompletionItem> {
+        if self.completions_dismissed_for.as_ref() == Some(&self.input) {
+            return Vec::new();
+        }
+        let whole = 0..self.input.len();
+        let commands: Vec<_> = completions(&self.input)
+            .into_iter()
+            .map(|spec| CompletionItem {
+                kind: CompletionKind::Command,
+                label: match spec.argument_hint {
+                    Some(hint) => format!("/{} {hint}", spec.name),
+                    None => format!("/{}", spec.name),
+                },
+                detail: spec.description.into(),
+                range: whole.clone(),
+                replacement: format!("/{} ", spec.name),
+            })
+            .chain(
+                self.registry
+                    .completions(&self.input)
+                    .into_iter()
+                    .map(|command| CompletionItem {
+                        kind: CompletionKind::Command,
+                        label: format!("/{}", command.name),
+                        detail: command.description.clone(),
+                        range: whole.clone(),
+                        replacement: format!("/{} ", command.name),
+                    }),
+            )
+            .collect();
+        if !commands.is_empty() {
+            return commands;
+        }
+        self.mention_query()
+            .map(|mention| self.mentions.complete(&mention))
+            .unwrap_or_default()
+    }
+
+    pub fn mention_query(&self) -> Option<MentionQuery<'_>> {
+        let cursor = self
+            .cursor
+            .and_then(|chars| self.input.char_indices().nth(chars).map(|(byte, _)| byte))
+            .unwrap_or(self.input.len());
+        mention_at(&self.input, cursor)
+    }
+
+    pub fn apply_completion(&mut self, item: &CompletionItem) {
+        let Some(range) = self
+            .input
+            .get(item.range.clone())
+            .map(|_| item.range.clone())
+        else {
+            return;
+        };
+        self.input.replace_range(range.clone(), &item.replacement);
+        let cursor = self.input[..range.start + item.replacement.len()]
+            .chars()
+            .count();
+        self.cursor = Some(cursor);
+        self.pending_cursor = Some(cursor);
+        self.completion_selected = 0;
+        self.focus_requested = true;
     }
 
     pub fn dismiss_completions(&mut self) {

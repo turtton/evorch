@@ -61,6 +61,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .collect(),
             drafts: self.question_drafts,
         });
+        let default_model = self.composer.resolved_model.clone();
         let ctx = ConversationContext {
             requests,
             sandbox_picker: self.sandbox_picker,
@@ -114,6 +115,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             model_picker: crate::panes::model_picker::ModelPickerContext {
                 profiles: self.profiles,
                 preference: active_thread.and_then(|thread| thread.model_preference.as_ref()),
+                default_model: default_model.as_deref(),
                 enabled: active_thread.is_some(),
             },
         };

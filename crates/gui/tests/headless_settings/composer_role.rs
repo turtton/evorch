@@ -8,22 +8,34 @@ use gui::model::composer::{ComposerModel, ComposerRole, ProviderStatus};
 use workspace_ui::{KeyAction, KeybindSettings, ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[test]
-fn tab_resolves_role_but_ctrl_tab_does_not() {
-    // Given: the default bindings and forward/reverse/unrelated shortcuts.
-    let keymap = Keymap::from_settings(&KeybindSettings::default());
-    for (modifiers, expected) in [
-        (Modifiers::NONE, Some(KeyAction::CycleAgentRole)),
-        (Modifiers::SHIFT, Some(KeyAction::CycleAgentRole)),
-        (Modifiers::CTRL, None),
-        (Modifiers::COMMAND, None),
-        (Modifiers::ALT, None),
+fn role_shortcut_never_claims_plain_tab() {
+    // Given: defaults, a pre-completion config that saved Tab, and a custom chord.
+    let mut saved_tab = KeybindSettings::default();
+    saved_tab
+        .bindings
+        .insert(KeyAction::CycleAgentRole, "Tab".parse().expect("Tab"));
+    let mut custom = KeybindSettings::default();
+    custom
+        .bindings
+        .insert(KeyAction::CycleAgentRole, "Alt+R".parse().expect("Alt+R"));
+    for (settings, modifiers, key, expected) in [
+        (KeybindSettings::default(), Modifiers::NONE, Key::Tab, None),
+        (saved_tab.clone(), Modifiers::NONE, Key::Tab, None),
+        (saved_tab, Modifiers::SHIFT, Key::Tab, None),
+        (
+            custom,
+            Modifiers::ALT,
+            Key::R,
+            Some(KeyAction::CycleAgentRole),
+        ),
     ] {
+        let keymap = Keymap::from_settings(&settings);
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             events: vec![
                 egui::Event::ModifiersChanged(modifiers),
                 egui::Event::Key {
-                    key: Key::Tab,
+                    key,
                     physical_key: None,
                     pressed: true,
                     repeat: false,
@@ -38,8 +50,8 @@ fn tab_resolves_role_but_ctrl_tab_does_not() {
             actual = ui.input(|input| keymap.action_for_input(input))
         });
         output.textures_delta.clear();
-        // Then: only plain Tab and Shift+Tab cycle the two roles.
-        assert_eq!(actual, expected, "{modifiers:?}");
+        // Then: Tab stays with composer completion; only a custom chord cycles.
+        assert_eq!(actual, expected, "{modifiers:?} {key:?}");
     }
 }
 
@@ -158,53 +170,20 @@ fn plain_submission_routes_by_target_role() {
 }
 
 #[test]
-fn tab_cycles_before_focused_composer_and_enter_still_sends() {
-    for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
-        // Given: text editing focus in the worker composer.
-        let temp = tempfile::tempdir().expect("root");
-        let mut harness = workbench(temp.path());
-        harness.state_mut().composer_mut().input = "ship feature".into();
-        harness.run();
-        harness.click_label("Message or /command");
-        harness.run();
-        // When: cycle then send using the retained keyboard focus.
-        let focused_before = harness.focused_id();
-        // Some native backends emit a Text event alongside the Key event in the
-        // same frame. Reproduce that input shape so the draft stays clean.
-        harness.input_mut().events.extend([
-            egui::Event::Key {
-                key: Key::Tab,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers,
-            },
-            egui::Event::Text("\t".into()),
-        ]);
-        harness.run();
-        assert_eq!(harness.state().composer().role, ComposerRole::Orchestrator);
-        assert_eq!(harness.state().composer().input, "ship feature");
-        let focused_after = harness.focused_id();
-        assert_eq!(
-            focused_before, focused_after,
-            "Tab must not hand focus to another widget ({modifiers:?})"
-        );
-        harness.key_press(Modifiers::NONE, Key::Enter);
-        harness.run();
-        // Then: Tab neither inserts whitespace nor moves focus away from input,
-        // and Enter sends a chat request for the toggled orchestrator role.
-        assert!(matches!(harness.state().issued(),
-            [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature" && chat.composer_role == ComposerRole::Orchestrator));
-    }
-}
-
-#[test]
-fn storage_settings_keeps_tab_for_modal_navigation() {
+fn role_button_switches_target_and_enter_still_sends() {
+    // Given: text editing focus in the worker composer.
     let temp = tempfile::tempdir().expect("root");
     let mut harness = workbench(temp.path());
-    harness.state_mut().open_storage_settings();
+    harness.state_mut().composer_mut().input = "ship feature".into();
     harness.run();
-    harness.key_press(Modifiers::NONE, Key::Tab);
+    // When: switch with the selector-row button, then send from the editor.
+    harness.click_label("Role: worker");
     harness.run();
-    assert_eq!(harness.state().composer().role, ComposerRole::Worker);
+    harness.click_label("Message or /command");
+    harness.run();
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+    // Then: the draft survives and the chat targets the orchestrator.
+    assert!(matches!(harness.state().issued(),
+        [WorkbenchCommand::SendChat(chat)] if chat.text == "ship feature" && chat.composer_role == ComposerRole::Orchestrator));
 }

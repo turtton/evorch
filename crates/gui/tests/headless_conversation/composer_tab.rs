@@ -3,16 +3,9 @@ use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::model::composer::ComposerRole;
-use workspace_ui::{ProjectId, SidebarState, ThreadChatRole, ThreadId, UiSettings};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 fn workbench(root: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
-    workbench_with_role(root, None)
-}
-
-fn workbench_with_role(
-    root: &std::path::Path,
-    role: Option<ThreadChatRole>,
-) -> HeadlessWorkbench<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("tab-test");
     sidebar
@@ -24,7 +17,6 @@ fn workbench_with_role(
         .create_thread(thread.clone(), project, "thread")
         .expect("thread");
     sidebar.switch_thread(&thread).expect("switch");
-    sidebar.threads[0].chat_role = role;
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
         .expect("state")
         .with_sidebar(sidebar);
@@ -41,115 +33,54 @@ fn tab(modifiers: Modifiers, pressed: bool) -> Event {
     }
 }
 
-#[test]
-fn role_alternates_when_tab_is_pressed_in_consecutive_frames() {
-    for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
-        for draft in ["draft", "/"] {
-            let root = tempfile::tempdir().expect("root");
-            let mut harness = workbench(root.path());
-            harness.state_mut().composer_mut().input = draft.into();
-            harness.run();
-            harness.click_label("Message or /command");
-            harness.run();
-            let focus = harness.focused_id();
-            for role in [
-                ComposerRole::Orchestrator,
-                ComposerRole::Worker,
-                ComposerRole::Orchestrator,
-                ComposerRole::Worker,
-                ComposerRole::Orchestrator,
-            ] {
-                harness.input_mut().events.extend([
-                    tab(modifiers, true),
-                    Event::Text("\t".into()),
-                    tab(modifiers, false),
-                ]);
-                harness.step();
-                assert_eq!(harness.state().composer().role, role);
-                assert!(harness.has_label(&format!("送信先: {}  (Tab で切替)", role.label())));
-                assert_eq!(harness.state().composer().input, draft);
-                assert_eq!(harness.focused_id(), focus);
-            }
-        }
-    }
-}
-
-#[test]
-fn started_thread_keeps_role_draft_and_focus_across_repeated_tabs() {
-    for role in [ThreadChatRole::Worker, ThreadChatRole::Orchestrator] {
-        for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
-            for draft in ["draft", "/"] {
-                let root = tempfile::tempdir().expect("root");
-                let mut harness = workbench_with_role(root.path(), Some(role));
-                harness.state_mut().composer_mut().input = draft.into();
-                harness.run();
-                harness.click_label("Message or /command");
-                harness.run();
-                let focus = harness.focused_id();
-                for _ in 0..5 {
-                    harness.input_mut().events.extend([
-                        tab(modifiers, true),
-                        Event::Text("\t".into()),
-                        tab(modifiers, false),
-                    ]);
-                    harness.step();
-                    let expected = ComposerRole::from(role);
-                    assert_eq!(harness.state().composer().role, expected);
-                    assert!(harness.state().composer().role_locked);
-                    assert!(harness.has_label(&format!(
-                        "送信先: {}  (このスレッドで固定)",
-                        expected.label()
-                    )));
-                    assert!(!harness.has_label("Tab で切替"));
-                    assert_eq!(harness.state().composer().input, draft);
-                    assert_eq!(harness.focused_id(), focus);
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn both_presses_count_when_two_tabs_arrive_in_one_frame() {
+fn focused(draft: &str) -> (tempfile::TempDir, HeadlessWorkbench<DemoSource>) {
     let root = tempfile::tempdir().expect("root");
     let mut harness = workbench(root.path());
-    harness.run();
-    for _ in 0..2 {
-        harness.input_mut().events.extend([
-            tab(Modifiers::NONE, true),
-            Event::Text("\t".into()),
-            tab(Modifiers::NONE, false),
-        ]);
-    }
-    harness.step();
-    assert_eq!(harness.state().composer().role, ComposerRole::Worker);
-    assert!(harness.has_label("送信先: worker  (Tab で切替)"));
-}
-
-#[test]
-fn role_is_unchanged_when_provider_settings_owns_tab() {
-    let root = tempfile::tempdir().expect("root");
-    let mut harness = workbench(root.path());
-    harness.state_mut().open_provider_settings();
-    harness.run();
-    for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
-        harness
-            .input_mut()
-            .events
-            .extend([tab(modifiers, true), tab(modifiers, false)]);
-        harness.step();
-        assert_eq!(harness.state().composer().role, ComposerRole::Worker);
-    }
-}
-
-#[test]
-fn release_repeat_and_text_do_not_count_as_presses() {
-    let root = tempfile::tempdir().expect("root");
-    let mut harness = workbench(root.path());
-    harness.state_mut().composer_mut().input = "draft".into();
+    harness.state_mut().composer_mut().input = draft.into();
     harness.run();
     harness.click_label("Message or /command");
     harness.run();
+    (root, harness)
+}
+
+#[test]
+fn tab_completes_without_toggling_role_or_moving_focus() {
+    // Given: a focused draft with exactly one slash candidate.
+    let (_root, mut harness) = focused("/con");
+    let focus = harness.focused_id();
+    // When: a backend delivers Tab together with a literal tab character.
+    harness.input_mut().events.extend([
+        tab(Modifiers::NONE, true),
+        Event::Text("\t".into()),
+        tab(Modifiers::NONE, false),
+    ]);
+    harness.run();
+    // Then: the candidate is accepted, focus stays, and the role is untouched.
+    assert_eq!(harness.state().composer().input, "/continue ");
+    assert_eq!(harness.state().composer().role, ComposerRole::Worker);
+    assert_eq!(harness.focused_id(), focus);
+}
+
+#[test]
+fn tab_without_candidates_keeps_draft_role_and_focus() {
+    for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+        let (_root, mut harness) = focused("draft");
+        let focus = harness.focused_id();
+        harness.input_mut().events.extend([
+            tab(modifiers, true),
+            Event::Text("\t".into()),
+            tab(modifiers, false),
+        ]);
+        harness.run();
+        assert_eq!(harness.state().composer().input, "draft");
+        assert_eq!(harness.state().composer().role, ComposerRole::Worker);
+        assert_eq!(harness.focused_id(), focus, "{modifiers:?}");
+    }
+}
+
+#[test]
+fn release_repeat_and_text_do_not_accept_completions() {
+    let (_root, mut harness) = focused("/con");
     harness.input_mut().events.extend([
         tab(Modifiers::NONE, false),
         Event::Key {
@@ -162,45 +93,16 @@ fn release_repeat_and_text_do_not_count_as_presses() {
         Event::Text("\t".into()),
         Event::Ime(egui::ImeEvent::Commit("\t".into())),
     ]);
-    harness.step();
-    assert_eq!(harness.state().composer().role, ComposerRole::Worker);
-    assert_eq!(harness.state().composer().input, "draft");
+    harness.run();
+    assert_eq!(harness.state().composer().input, "/con");
 }
 
 #[test]
-fn raw_hook_passes_events_through_when_any_settings_is_open() {
-    for open in [
-        WorkbenchState::open_provider_settings,
-        WorkbenchState::open_role_settings,
-        WorkbenchState::open_routing_settings,
-        WorkbenchState::open_sandbox_settings,
-        WorkbenchState::open_theme_settings,
-    ] {
-        let mut app = gui::app::WorkbenchApp(
-            WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state"),
-        );
-        open(&mut app.0);
-        let mut raw = egui::RawInput {
-            events: vec![
-                tab(Modifiers::NONE, true),
-                Event::Text("\t".into()),
-                tab(Modifiers::NONE, false),
-                tab(Modifiers::SHIFT, true),
-                Event::Ime(egui::ImeEvent::Commit("\t".into())),
-            ],
-            ..Default::default()
-        };
-        let expected = raw.events.clone();
-        eframe::App::raw_input_hook(&mut app, &egui::Context::default(), &mut raw);
-        assert_eq!(raw.events, expected);
-    }
-}
-
-#[test]
-fn raw_hook_filters_only_role_shortcut_events() {
+fn raw_hook_captures_only_plain_tabs_for_a_focused_composer() {
     let mut app = gui::app::WorkbenchApp(
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state"),
     );
+    app.0.composer_mut().focused = true;
     let expected = vec![
         tab(Modifiers::CTRL, true),
         tab(Modifiers::ALT, true),
@@ -218,4 +120,40 @@ fn raw_hook_filters_only_role_shortcut_events() {
     raw.events.extend(expected.clone());
     eframe::App::raw_input_hook(&mut app, &egui::Context::default(), &mut raw);
     assert_eq!(raw.events, expected);
+    assert_eq!(app.0.composer().tab_presses, [false, true]);
+}
+
+#[test]
+fn raw_hook_leaves_tab_to_other_panes_and_open_settings() {
+    type Setup = fn(&mut WorkbenchState<DemoSource>);
+    let cases: [Setup; 7] = [
+        |_| {},
+        |state| WorkbenchState::open_provider_settings(state),
+        |state| WorkbenchState::open_role_settings(state),
+        |state| WorkbenchState::open_routing_settings(state),
+        |state| WorkbenchState::open_sandbox_settings(state),
+        |state| WorkbenchState::open_theme_settings(state),
+        |state| WorkbenchState::open_storage_settings(state),
+    ];
+    for (index, setup) in cases.into_iter().enumerate() {
+        let mut app = gui::app::WorkbenchApp(
+            WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state"),
+        );
+        // The first case is an unfocused composer; the rest have settings open over it.
+        app.0.composer_mut().focused = index > 0;
+        setup(&mut app.0);
+        let mut raw = egui::RawInput {
+            events: vec![
+                tab(Modifiers::NONE, true),
+                Event::Text("\t".into()),
+                tab(Modifiers::NONE, false),
+                tab(Modifiers::SHIFT, true),
+            ],
+            ..Default::default()
+        };
+        let expected = raw.events.clone();
+        eframe::App::raw_input_hook(&mut app, &egui::Context::default(), &mut raw);
+        assert_eq!(raw.events, expected, "case {index}");
+        assert!(app.0.composer().tab_presses.is_empty());
+    }
 }

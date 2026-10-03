@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use egui::{Key, Modifiers};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
@@ -77,15 +76,17 @@ planning = [{ profile = "planner", model = "planner-model" }]
 }
 
 #[test]
-fn automatic_mode_shows_resolved_profile_model_next_to_role() {
+fn automatic_mode_shows_resolved_profile_model_in_the_picker() {
     // Given: the worker binding selects its concrete profile/model.
     let temp = tempfile::tempdir().expect("root");
     let mut harness = workbench(temp.path(), true);
     // When: render the automatic-mode composer.
     harness.run();
-    // Then: the concrete routed model shares the role label.
+    // Then: the picker names the routed default instead of a generic prompt.
+    assert!(harness.has_label("Role: worker"));
+    assert!(!harness.has_label("Select model"));
     assert!(
-        harness.has_label("送信先: worker · local/worker-model  (Tab で切替)"),
+        harness.has_label("local/worker-model"),
         "composer: {:?}",
         harness.state().composer()
     );
@@ -100,18 +101,17 @@ fn automatic_mode_shows_resolved_profile_model_next_to_role() {
 
 #[test]
 fn switching_role_updates_resolved_label() {
-    // Given: a focused worker composer with distinct role bindings.
+    // Given: a worker composer with distinct role bindings.
     let temp = tempfile::tempdir().expect("root");
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    harness.click_label("Message or /command");
-    harness.run();
-    // When: Tab switches the active composer role.
-    harness.key_press(Modifiers::NONE, Key::Tab);
+    // When: the role button switches the active composer role.
+    harness.click_label("Role: worker");
     harness.run();
     // Then: the orchestrator model replaces the worker model.
+    assert!(harness.has_label("Role: orchestrator"));
     assert!(
-        harness.has_label("送信先: orchestrator · planner/planner-model  (Tab で切替)"),
+        harness.has_label("planner/planner-model"),
         "composer: {:?}",
         harness.state().composer()
     );
@@ -133,7 +133,6 @@ fn explicit_model_preference_hides_resolved_label() {
         }));
     harness.run();
     // Then: only the picker shows a model, without a stale resolved label.
-    assert!(harness.has_label("送信先: worker  (Tab で切替)"));
     assert!(!harness.has_label("local/worker-model"));
     assert!(harness.has_label("local / explicit-model"));
 }
@@ -146,5 +145,5 @@ fn failed_resolution_shows_verbatim_logical_model() {
     // When: render the automatic-mode composer.
     harness.run();
     // Then: the runtime diagnostic is visible without substitution.
-    assert!(harness.has_label("送信先: worker · unresolved:missing-route  (Tab で切替)"));
+    assert!(harness.has_label("unresolved:missing-route"));
 }

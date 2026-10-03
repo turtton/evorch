@@ -67,14 +67,25 @@ default_model = "model-c"
     HeadlessWorkbench::new(state, [1200.0, 900.0])
 }
 
+fn default_model(harness: &HeadlessWorkbench<DemoSource>) -> String {
+    let model = harness
+        .state()
+        .composer()
+        .resolved_model
+        .clone()
+        .expect("automatic routing resolves a default model");
+    assert!(!harness.has_label("Select model"));
+    model
+}
+
 #[test]
 fn picker_lists_profiles_and_models_from_catalog() {
     // Given
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    // When
-    harness.click_label("Select model");
+    // When: the closed picker names the routed default model.
+    harness.click_label(&default_model(&harness));
     harness.run();
     // Then
     for label in ["local / model-a", "local / model-b", "remote / model-c"] {
@@ -88,7 +99,7 @@ fn selecting_model_persists_on_thread() {
     let temp = tempfile::tempdir().unwrap();
     let mut harness = workbench(temp.path(), true);
     harness.run();
-    harness.click_label("Select model");
+    harness.click_label(&default_model(&harness));
     harness.run();
     // When
     harness.click_label("local / model-b");

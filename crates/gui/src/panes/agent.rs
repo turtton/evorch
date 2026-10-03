@@ -380,6 +380,7 @@ fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
 }
 
 fn user_bubble(ui: &mut egui::Ui, text: &str) {
+    let (text, skills) = crate::model::composer::split_skill_attachments(text);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
         let max_width = (ui.available_width() * 0.8).max(120.0);
         soft_frame(palette().SURFACE_RAISED)
@@ -394,6 +395,21 @@ fn user_bubble(ui: &mut egui::Ui, text: &str) {
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
                     });
+                    if !skills.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            for skill in skills {
+                                ui.label(
+                                    egui::RichText::new(icons::with_icon(
+                                        icons::SPARKLE,
+                                        format!("skill: {skill}"),
+                                    ))
+                                    .small()
+                                    .color(palette().TEXT_MUTED),
+                                )
+                                .on_hover_text("送信時に skill 本文を添付済み");
+                            }
+                        });
+                    }
                 });
             });
     });
@@ -432,7 +448,10 @@ fn role_label(ui: &mut egui::Ui, role: &str) {
 
 fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
-        TranscriptEntry::UserMessage { text } => format!("You: {text}"),
+        TranscriptEntry::UserMessage { text } => format!(
+            "You: {}",
+            crate::model::composer::split_skill_attachments(text).0
+        ),
         TranscriptEntry::Notice { text }
         | TranscriptEntry::SandboxReview { text, .. }
         | TranscriptEntry::Error { text } => text.clone(),
@@ -611,6 +630,7 @@ mod tests {
                         model_picker: crate::panes::model_picker::ModelPickerContext {
                             profiles: &[],
                             preference: None,
+                            default_model: None,
                             enabled: false,
                         },
                         branch: None,
