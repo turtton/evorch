@@ -17,6 +17,29 @@ impl OwnerPermit {
         registry.guard_generation(self)?;
         Ok(registry)
     }
+
+    /// Attempt a generation guard without waiting for a SQLite writer. None
+    /// means contention, which callers must retry after releasing other guards;
+    /// an error means authority could not be established and fails closed.
+    pub fn try_mutation_guard(&self) -> Result<Option<Registry>, RegistryError> {
+        let attempt = || {
+            let registry = Registry::open_readonly_nonblocking(&self.registry_path)?;
+            registry.guard_generation(self)?;
+            Ok(registry)
+        };
+        match attempt() {
+            Ok(registry) => Ok(Some(registry)),
+            Err(RegistryError::Sql(error))
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
     pub fn validate_generation(&self) -> Result<(), RegistryError> {
         self.mutation_guard().map(drop)
     }

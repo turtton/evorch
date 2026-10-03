@@ -90,10 +90,10 @@ fn contention_stays_in_header_and_recovers_without_a_raw_error_label() {
         );
         harness.state_mut().1 = now + Duration::from_secs(1);
         harness.run();
-        harness.get_by_label("write ⚠");
+        harness.get_by_label("write (stale) ⚠");
         assert!(harness.output().shapes.iter().any(|shape| {
             matches!(&shape.shape, egui::epaint::Shape::Text(text)
-                if text.galley.text() == "write ⚠"
+                if text.galley.text() == "write (stale) ⚠"
                     && text.galley.job.sections.iter().all(|section| section.format.color == palette().WARNING_FG))
         }));
         assert!(harness.query_by_label("read-only").is_none());

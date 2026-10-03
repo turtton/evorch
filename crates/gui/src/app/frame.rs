@@ -1,6 +1,7 @@
 // allow: SIZE_OK - #110 の相関 join は既存 fold 順序に依存するため、フレーム全体の分割は別変更とする。
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::RunId;
+use std::time::{Duration, Instant};
 use workspace_ui::{KeyAction, PanelId, ThreadRunPhase, Workspace};
 
 use super::WorkbenchState;
@@ -19,22 +20,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
         let ctx = ui.ctx().clone();
         self.handle_input(&ctx);
         if !self.theme_installed {
             crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
         }
-        self.drain_pump();
+        let (event_count, drain_time, fold_time) = self.drain_pump();
         self.poll_external();
         self.poll_auto_titles();
         if self.external_command_running() && ui.button("Cancel external command").clicked() {
             self.cancel_external_command();
         }
         self.diff.set_repo_root(self.active_repo_root());
+        let sink_started = Instant::now();
         for event in self.sink.poll() {
             self.apply_loop_event(event);
         }
+        let sink_time = sink_started.elapsed();
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.diff.poll();
         self.drain_pty(&ctx);
@@ -83,9 +87,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .kimi_quota
             .state
             .poll(std::time::Instant::now());
+        let ownership_started = Instant::now();
         self.ownership_ui(ui);
+        let ownership_time = ownership_started.elapsed();
+        let render_started = Instant::now();
         self.render(ui);
+        let render_time = render_started.elapsed();
+        let draft_started = Instant::now();
         self.persist_composer_draft();
+        let draft_time = draft_started.elapsed();
         self.render_restore_diagnostics(&ctx);
         if self.provider_settings.openai_mut().is_some_and(|editor| {
             matches!(
@@ -99,14 +109,44 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
+        let frame_time = frame_started.elapsed();
+        // A slow frame can be diagnosed after it returns without recording user content or
+        // emitting an event back into the queue being measured. Bound repeated warnings.
+        if frame_time >= Duration::from_millis(200)
+            && self.last_slow_frame_log.is_none_or(|last| {
+                frame_started.saturating_duration_since(last) >= Duration::from_secs(30)
+            })
+        {
+            self.last_slow_frame_log = Some(frame_started);
+            let measured =
+                drain_time + fold_time + sink_time + ownership_time + render_time + draft_time;
+            tracing::warn!(
+                target: "gui::frame",
+                frame_ms = frame_time.as_secs_f64() * 1000.0,
+                events = event_count,
+                drain_ms = drain_time.as_secs_f64() * 1000.0,
+                fold_ms = fold_time.as_secs_f64() * 1000.0,
+                sink_ms = sink_time.as_secs_f64() * 1000.0,
+                ownership_ms = ownership_time.as_secs_f64() * 1000.0,
+                render_ms = render_time.as_secs_f64() * 1000.0,
+                draft_ms = draft_time.as_secs_f64() * 1000.0,
+                other_ms = frame_time.saturating_sub(measured).as_secs_f64() * 1000.0,
+                "slow GUI frame"
+            );
+        }
     }
 
-    fn drain_pump(&mut self) {
+    fn drain_pump(&mut self) -> (usize, Duration, Duration) {
+        let drain_started = Instant::now();
         let events = self
             .pump
             .as_mut()
             .map_or_else(Vec::new, crate::events::EventPump::drain);
+        let drain_time = drain_started.elapsed();
+        let event_count = events.len();
+        let fold_started = Instant::now();
         self.apply_events(events);
+        (event_count, drain_time, fold_started.elapsed())
     }
 
     /// Synchronous fold for fixtures/tests/headless capture; production uses
