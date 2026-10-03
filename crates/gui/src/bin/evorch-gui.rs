@@ -640,7 +640,7 @@ fn run() -> Result<(), GuiError> {
                 runtime,
                 model_identity,
             } = compose_runtime(RuntimeComposition {
-                user_config_dir: None,
+                user_config_dir: Some(directory.path().to_path_buf()),
                 config: &composition_config,
                 bus: Arc::clone(&bus),
                 executor,
