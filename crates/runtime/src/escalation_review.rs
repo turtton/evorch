@@ -765,12 +765,14 @@ mod tests {
             settings,
             None,
             Some(project.path().to_path_buf()),
+            None,
         );
         let unapproved = crate::rules::RulesSource::new(
             crate::rules::ProjectTrust::Unapproved,
             settings,
             None,
             Some(project.path().to_path_buf()),
+            None,
         );
         let run = ReviewRunContext {
             root_run_id: "run-81".into(),

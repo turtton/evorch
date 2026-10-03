@@ -48,6 +48,7 @@ mod tests {
             },
             None,
             None,
+            None,
         ));
         let mut session = RulesSession::new(source, None);
         let usage = Usage {

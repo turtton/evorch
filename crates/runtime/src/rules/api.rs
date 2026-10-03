@@ -31,6 +31,9 @@ pub fn startup_snapshot(
     {
         rules.push(rule);
     }
+    if let Some(rule) = user_agents_rule(source, &mut markers) {
+        rules.push(rule);
+    }
     render_snapshot(
         rules,
         markers,
@@ -94,6 +97,23 @@ fn user_startup_rules(source: &RulesSource, markers: &mut Vec<String>) -> Vec<Re
             }
         })
         .collect()
+}
+
+fn user_agents_rule(source: &RulesSource, markers: &mut Vec<String>) -> Option<ResolvedRule> {
+    let path = source.user_agents_md.as_deref()?;
+    if !path.is_file() {
+        return None;
+    }
+    let directory = path.parent()?;
+    match source_for_path(directory, path, RuleKind::AgentsMd, RuleScope::User, 0)
+        .and_then(resolve_agents)
+    {
+        Ok(rule) => Some(rule),
+        Err(error) => {
+            disable(&error, markers);
+            None
+        }
+    }
 }
 
 fn project_root_rule(root: &Path, markers: &mut Vec<String>) -> Option<ResolvedRule> {

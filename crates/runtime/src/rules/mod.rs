@@ -54,6 +54,7 @@ mod tests {
             settings(),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         );
 
         let snapshot =
@@ -80,6 +81,7 @@ mod tests {
             settings(),
             Some(user),
             Some(project.clone()),
+            None,
         ));
 
         let startup = startup_snapshot(&source, Some(&project), None, 0).expect("user 規則がある");
@@ -103,6 +105,7 @@ mod tests {
             settings(),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         ));
         let mut session = RulesSession::new(Arc::clone(&source), Some(tmp.path().to_path_buf()));
 
@@ -128,6 +131,7 @@ mod tests {
             settings(),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         ));
         let mut session = RulesSession::new(source, Some(tmp.path().to_path_buf()));
         let targets = [tmp.path().join("src/new.rs")];
@@ -158,6 +162,7 @@ mod tests {
             settings(),
             Some(tmp.path().to_path_buf()),
             None,
+            None,
         );
 
         let output = startup_snapshot(&source, None, None, 0).expect("always 規則がある");
@@ -180,6 +185,7 @@ mod tests {
             settings(),
             None,
             Some(project.clone()),
+            None,
         ));
         let mut session = RulesSession::new(source, Some(project.clone()));
 

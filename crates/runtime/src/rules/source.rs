@@ -11,21 +11,24 @@ pub struct RulesSource {
     pub(crate) settings: RulesSettings,
     pub(crate) user_rules_dir: Option<PathBuf>,
     pub(crate) project_root: Option<PathBuf>,
+    pub(crate) user_agents_md: Option<PathBuf>,
 }
 
 impl RulesSource {
-    /// 信頼状態・予算・ユーザ規則・プロジェクトルートから読み込み元を生成する。
+    /// 信頼状態・予算・ユーザ規則・プロジェクトルート・ユーザ AGENTS.md から読み込み元を生成する。
     pub const fn new(
         trust: ProjectTrust,
         settings: RulesSettings,
         user_rules_dir: Option<PathBuf>,
         project_root: Option<PathBuf>,
+        user_agents_md: Option<PathBuf>,
     ) -> Self {
         Self {
             trust,
             settings,
             user_rules_dir,
             project_root,
+            user_agents_md,
         }
     }
 
@@ -57,7 +60,7 @@ mod tests {
             response_headroom_tokens: 2,
             max_injection_bytes: 8,
         };
-        let source = RulesSource::new(ProjectTrust::Approved, settings, None, None);
+        let source = RulesSource::new(ProjectTrust::Approved, settings, None, None, None);
 
         assert_eq!(source.trust(), ProjectTrust::Approved);
         assert_eq!(source.settings(), &settings);

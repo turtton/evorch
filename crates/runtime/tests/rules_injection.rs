@@ -43,6 +43,7 @@ fn runtime_with_rules(
             settings(65_536),
             None,
             Some(project_root.to_path_buf()),
+            None,
         )),
     );
     (runtime, bus)
@@ -107,6 +108,7 @@ async fn read_success_injects_single_user_rules_message() {
             settings,
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         )),
     );
 
@@ -329,6 +331,7 @@ async fn run_read_fixture(
                 settings(65_536),
                 None,
                 Some(project_root.to_path_buf()),
+                None,
             ),
         ))
     } else {
