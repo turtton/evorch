@@ -165,6 +165,39 @@ fn new_conversation_root_supersedes_old_error_and_stopped_runs() {
 }
 
 #[test]
+fn follow_up_acceptance_does_not_replace_the_lifecycle_bound_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = HeadlessWorkbench::new(state(dir.path()), [1200.0, 900.0]);
+    harness.state_mut().apply_events([
+        started("root", None),
+        phase("root", AgentRunPhase::Pending, AgentRunPhase::Running),
+    ]);
+    // A receipt may arrive independently from the lifecycle stream. It indexes
+    // the accepted run but cannot reassign the transcript or sidebar root.
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatAccepted {
+            thread_id: "thread".into(),
+            run_id: "receipt-run".into(),
+        });
+    harness
+        .state_mut()
+        .apply_events([Event::new(event_bus::MessageEvent::MessageCompleted {
+            run_id: "root".into(),
+            text: "follow-up answer".into(),
+        })]);
+    assert_status(&mut harness, AgentRunPhase::Running);
+    assert_eq!(
+        harness.state().sidebar().threads[0].root_run_id.as_deref(),
+        Some("root")
+    );
+    assert!(harness.state().transcripts().thread().entries().iter().any(
+        |entry| matches!(entry, gui::model::transcript::TranscriptEntry::Message { text, .. }
+            if text == "follow-up answer")
+    ));
+}
+
+#[test]
 fn resumed_thread_status_is_reconstructed_from_persisted_events() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
