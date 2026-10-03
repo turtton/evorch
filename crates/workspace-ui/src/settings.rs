@@ -13,20 +13,21 @@ mod role_tests {
     use super::*;
 
     #[test]
-    fn cycle_role_defaults_to_tab_and_parses_from_config() {
-        // Given: the default settings and an explicit role binding.
-        let source = "[keybinds.bindings]\ncycle_agent_role = 'Tab'";
-        // When: deserialize the new action.
+    fn cycle_role_is_unbound_by_default_but_parses_from_config() {
+        // Given: an explicit role binding in a saved config.
+        let source = "[keybinds.bindings]\ncycle_agent_role = 'Alt+R'";
+        // When: deserialize the action.
         let settings: UiSettings = toml::from_str(source).expect("role config");
-        // Then: both use the unmodified Tab chord.
-        let expected: KeyChord = "Tab".parse().expect("Tab chord");
+        // Then: the saved chord survives while defaults leave Tab to completion.
+        let expected: KeyChord = "Alt+R".parse().expect("Alt+R chord");
         assert_eq!(
             settings.keybinds.bindings[&KeyAction::CycleAgentRole],
             expected
         );
-        assert_eq!(
-            KeybindSettings::default().bindings[&KeyAction::CycleAgentRole],
-            expected
+        assert!(
+            !KeybindSettings::default()
+                .bindings
+                .contains_key(&KeyAction::CycleAgentRole)
         );
     }
 
@@ -183,15 +184,6 @@ pub struct KeybindSettings {
 impl Default for KeybindSettings {
     fn default() -> Self {
         let bindings = [
-            (
-                KeyAction::CycleAgentRole,
-                KeyChord {
-                    ctrl: false,
-                    shift: false,
-                    alt: false,
-                    key: "Tab".to_owned(),
-                },
-            ),
             (
                 KeyAction::FocusAgentPane,
                 KeyChord {

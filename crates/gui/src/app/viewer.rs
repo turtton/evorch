@@ -24,6 +24,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        // The composer re-asserts focus when it renders; a hidden one must not keep claiming Tab.
+        self.composer.focused = false;
+        self.refresh_mention_index(ui.ctx());
         self.poll_role_save();
         self.refresh_image_capability();
         self.composer.running_children = self
@@ -282,6 +285,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
         }
+        // Tab presses only apply to the composer frame they were captured for.
+        self.composer.tab_presses.clear();
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::Send => self.submit_composer(),
@@ -294,12 +299,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_self_improvement_settings()
                 }
                 ComposerAction::OpenStorageSettings => self.open_storage_settings(),
-                ComposerAction::Complete(name) => {
-                    self.composer_mut().input = format!("/{name} ");
-                }
-                ComposerAction::CompleteExternal(name) => {
-                    self.composer_mut().input = format!("/{name} ");
-                }
+                ComposerAction::Complete(item) => self.composer.apply_completion(&item),
+                ComposerAction::ToggleRole => self.composer.toggle_role(),
             }
         }
         self.render_theme_settings(ui.ctx());

@@ -3,6 +3,8 @@
 
 #[path = "headless_conversation/compaction_ledger.rs"]
 mod compaction_ledger;
+#[path = "headless_conversation/composer_mention.rs"]
+mod composer_mention;
 #[path = "headless_conversation/composer_tab.rs"]
 mod composer_tab;
 #[path = "headless_conversation/continuation_transcript_headless.rs"]

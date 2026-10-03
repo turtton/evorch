@@ -93,9 +93,12 @@ impl TranscriptModel {
     }
 
     /// Text of a user message by absolute id.
+    /// The typed text, without skill bodies inlined at send time.
     pub fn user_text(&self, entry_id: usize) -> Option<&str> {
         match self.entry_by_id(entry_id)? {
-            TranscriptEntry::UserMessage { text } => Some(text),
+            TranscriptEntry::UserMessage { text } => {
+                Some(crate::model::composer::split_skill_attachments(text).0)
+            }
             _ => None,
         }
     }

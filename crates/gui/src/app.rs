@@ -11,6 +11,7 @@ mod external_commands;
 mod frame;
 mod history;
 mod input;
+mod mentions;
 mod ownership;
 mod ownership_status;
 mod provider_settings;
