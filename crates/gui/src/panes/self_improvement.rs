@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
 use storage::{Database, StorageConfig, StorageHandle};
+
+const POLL_INTERVAL_SECS: f64 = 1.0;
 
 #[derive(Default)]
 pub struct SelfImprovementPane {
@@ -19,23 +22,60 @@ pub struct SelfImprovementPane {
     error: Option<String>,
     draft_errors: BTreeMap<String, String>,
     refresh: bool,
+    resolved_project: Option<(PathBuf, String)>,
+    database: Option<Database>,
+    database_path: Option<PathBuf>,
+    data_version: Option<i64>,
+    next_poll_at: f64,
+    loaded_status: Option<ImprovementStatus>,
 }
 
 impl SelfImprovementPane {
+    /// Uses the same repository identity as the runtime collector, independently
+    /// of sidebar display IDs. Resolve Git metadata only when selection changes.
+    pub fn render_for_repo_root(&mut self, ui: &mut egui::Ui, root: Option<&Path>) {
+        if !self.enabled || self.config.is_none() || root.is_none() {
+            self.render(ui, None);
+            return;
+        }
+        let root = root.expect("checked above");
+        if self
+            .resolved_project
+            .as_ref()
+            .map(|(path, _)| path.as_path())
+            != Some(root)
+        {
+            self.resolved_project =
+                Some((root.to_owned(), crate::runtime_sink::derive_repo_slug(root)));
+        }
+        let project = self.resolved_project.as_ref().unwrap().1.clone();
+        self.render(ui, Some(&project));
+    }
+
     pub fn render(&mut self, ui: &mut egui::Ui, project: Option<&str>) {
         if !self.enabled {
             ui.label("Self-improvement drafts are disabled ([self_improvement] enabled=false). Candidates are not collected.");
+            return;
+        }
+        if self.config.is_none() {
+            ui.label("Self-improvement storage is not connected.");
             return;
         }
         let Some(project) = project else {
             ui.label("Select a project to browse improvement candidates.");
             return;
         };
-        if self.config.is_none() {
-            ui.label("Self-improvement storage is not connected.");
-            return;
+        let path = &self.config.as_ref().unwrap().db_path;
+        let storage_changed = self.database_path.as_ref() != Some(path);
+        if storage_changed {
+            self.database_path = Some(path.clone());
+            self.database = None;
+            self.data_version = None;
         }
-        let mut refresh = self.project.as_deref() != Some(project) || self.refresh;
+        let mut refresh = storage_changed
+            || self.project.as_deref() != Some(project)
+            || self.loaded_status != self.status
+            || self.refresh;
         self.project = Some(project.into());
         ui.horizontal_wrapped(|ui| {
             ui.label("Status");
@@ -56,27 +96,38 @@ impl SelfImprovementPane {
             status_response.response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Candidate status")
             });
-            refresh |= ui.button("Refresh").clicked();
         });
-        if refresh {
+        let now = ui.input(|input| input.time);
+        if refresh || now >= self.next_poll_at {
             self.refresh = false;
-            self.draft_errors.clear();
-            let result = self.config.as_ref().map(|config| {
-                Database::open(config)
-                    .and_then(|db| db.improvement_candidates(project, self.status, 200))
-            });
-            match result {
-                Some(Ok(entries)) => {
+            self.next_poll_at = now + POLL_INTERVAL_SECS;
+            self.loaded_status = self.status;
+            let result = (|| {
+                if self.database.is_none() {
+                    self.database = Some(Database::open(self.config.as_ref().unwrap())?);
+                }
+                let db = self.database.as_ref().unwrap();
+                // data_version is comparable only across reads on one connection.
+                // Sample before SELECT so a concurrent write forces the next reload.
+                let version = db.pragma_i64("data_version")?;
+                if refresh || self.data_version != Some(version) {
+                    let entries = db.improvement_candidates(project, self.status, 200)?;
+                    self.draft_errors
+                        .retain(|id, _| entries.iter().any(|entry| &entry.id == id));
                     self.entries = entries;
                     self.error = None;
+                    self.data_version = Some(version);
                 }
-                Some(Err(error)) => {
-                    self.entries.clear();
-                    self.error = Some(error.to_string());
-                }
-                None => {}
+                Ok::<_, storage::StorageError>(())
+            })();
+            if let Err(error) = result {
+                self.entries.clear();
+                self.error = Some(error.to_string());
+                self.data_version = None;
             }
         }
+        ui.ctx()
+            .request_repaint_after(Duration::from_secs_f64((self.next_poll_at - now).max(0.0)));
         if let Some(error) = &self.error {
             ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
         }
@@ -168,7 +219,9 @@ impl SelfImprovementPane {
             match handle.set_improvement_status(&id, status) {
                 Ok(true) => self.refresh = true,
                 Ok(false) => {
-                    self.error = Some("Candidate no longer exists. Refresh to reload.".into())
+                    self.refresh = true;
+                    self.error =
+                        Some("Candidate no longer exists. Reloading automatically.".into());
                 }
                 Err(error) => self.error = Some(error.to_string()),
             }
