@@ -14,7 +14,7 @@ use super::frontmatter::split_frontmatter;
 use super::resource::{SkillResourceError, read_skill_resource, validate_reference};
 use crate::prompt::AvailableSkill;
 
-/// skill の由来スコープ。標準優先順位は repo > repo-agents > user > builtin。
+/// skill の由来スコープ。標準優先順位は repo > repo-agents > user > user-agents > builtin。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillScope {
     /// リポジトリスコープ (`<repo>/.evorch/skills`)。
@@ -23,6 +23,8 @@ pub enum SkillScope {
     RepoAgents,
     /// ユーザスコープ (`<user config>/evorch/skills`)。
     User,
+    /// エージェント共用のユーザスコープ (`$HOME/.agents/skills`)。
+    UserAgents,
     /// バイナリ同梱スコープ。
     Builtin,
 }
@@ -34,6 +36,7 @@ impl SkillScope {
             SkillScope::Repo => "repo",
             SkillScope::RepoAgents => "repo-agents",
             SkillScope::User => "user",
+            SkillScope::UserAgents => "user-agents",
             SkillScope::Builtin => "builtin",
         }
     }

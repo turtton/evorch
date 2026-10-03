@@ -199,7 +199,12 @@ mod tests {
         )
         .unwrap();
 
-        for scope in [SkillScope::Repo, SkillScope::RepoAgents, SkillScope::User] {
+        for scope in [
+            SkillScope::Repo,
+            SkillScope::RepoAgents,
+            SkillScope::User,
+            SkillScope::UserAgents,
+        ] {
             let mut registry =
                 discover_skills(&[(scope, skills.clone()), (SkillScope::User, skills.clone())]);
             let existing_diagnostics = registry.diagnostics.clone();

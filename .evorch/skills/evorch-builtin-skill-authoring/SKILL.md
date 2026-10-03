@@ -91,7 +91,7 @@ EmbeddedSkillDef {
 
 ## 5. 実行時の契約を維持する
 
-- 標準の優先順位は **repo `.evorch/skills` → repo `.agents/skills` → user skills → builtin**。同名の有効なfilesystem skillがbuiltinを上書きし、Shadowed診断が出る。
+- 標準の優先順位は **repo `.evorch/skills` → repo `.agents/skills` → user config `evorch/skills` → `$HOME/.agents/skills` → builtin**。同名の有効なfilesystem skillがbuiltinを上書きし、Shadowed診断が出る。user configは `$XDG_CONFIG_HOME`（未設定・空なら `$HOME/.config`）を使う。user-agentsは空でない `$HOME` がある場合だけ探索し、XDGからHOMEを推測しない。存在しない探索先は許容する。
 - 通常のGUI等が使う `compose_runtime()` はスキル供給元を接続する。repoスコープの探索にはrepo rootが必要。
 - 発見・カタログ構築では名前と説明を公開する。builtin本文を全runのSystemへ無条件に追加しない。
 - 本文は `skill_load({"name":"example-skill"})`、リソースは `skill_load({"name":"example-skill","resource":"references/guide.md"})` で取得できる。
@@ -107,7 +107,7 @@ EmbeddedSkillDef {
 1. 正本のfrontmatterが有効で、テーブルの名前・説明・本文と一致する。本文からfrontmatterが除かれる。
 2. builtinが外部のskillファイルなしで発見・読み込みでき、必要なリソースが正しいキーで取得できる。
 3. カタログには名前・説明だけが現れ、必要時の `skill_load` と `load_skills` が実ループで本文を取得できる。
-4. repo、repo-agents、userの同名skillがbuiltinより優先される。
+4. repo、repo-agents、user、user-agentsの同名skillがbuiltinより優先される。
 5. 不正なリソース参照・未知名が拒否される。汎用skillなら、プロジェクト固有文言が紛れ込んでいない。
 6. キャッシュへ影響する変更では、入力由来のmock cacheと独立したwire-prefix検証を使う。固定のcached-token値や「本文がある」という確認だけで代替しない。
 
