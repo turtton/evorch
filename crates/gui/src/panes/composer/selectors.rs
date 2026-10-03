@@ -37,6 +37,15 @@ pub(super) fn row(
         if response.clicked() {
             action = Some(ComposerAction::OpenSelfImprovementSettings);
         }
+        let response = ui
+            .button("Storage")
+            .on_hover_text("Diagnostic history and database usage");
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Storage settings")
+        });
+        if response.clicked() {
+            action = Some(ComposerAction::OpenStorageSettings);
+        }
     });
     action
 }

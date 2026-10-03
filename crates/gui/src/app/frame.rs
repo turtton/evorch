@@ -41,6 +41,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.poll_provider_save();
         self.poll_routing_save();
         self.poll_self_improvement_save();
+        self.poll_storage_settings();
         if self.provider_settings.catalog.poll() {
             ctx.request_repaint();
         }

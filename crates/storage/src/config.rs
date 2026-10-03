@@ -42,7 +42,7 @@ impl Default for HardLimits {
             max_session_bytes: 67_108_864,
             max_daily_event_bytes: 268_435_456,
             max_wal_bytes: 67_108_864,
-            max_db_bytes: 1_073_741_824,
+            max_db_bytes: 10 * 1024 * 1024 * 1024,
             soft_warn_ratio: 0.8,
         }
     }
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(limits.max_session_bytes, 67_108_864);
         assert_eq!(limits.max_daily_event_bytes, 268_435_456);
         assert_eq!(limits.max_wal_bytes, 67_108_864);
-        assert_eq!(limits.max_db_bytes, 1_073_741_824);
+        assert_eq!(limits.max_db_bytes, 10 * 1024 * 1024 * 1024);
         assert_eq!(limits.soft_warn_ratio, 0.8);
     }
 

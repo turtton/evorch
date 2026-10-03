@@ -55,6 +55,7 @@
 
 pub mod config;
 mod db;
+mod diagnostic;
 pub mod entity;
 pub mod error;
 pub mod eval;
@@ -72,6 +73,7 @@ mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
+pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary};
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
 pub use projection::{ReconcileSummary, SessionSnapshot};

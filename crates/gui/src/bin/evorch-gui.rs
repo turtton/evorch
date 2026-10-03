@@ -1006,6 +1006,7 @@ fn run() -> Result<(), GuiError> {
     }
     state = state
         .with_memory_storage(storage_config.clone())
+        .with_diagnostic_storage(storage.handle(), &storage_config)
         .with_self_improvement(
             storage.handle(),
             self_improvement.enabled,

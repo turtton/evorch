@@ -268,6 +268,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::OpenSelfImprovementSettings => {
                     self.open_self_improvement_settings()
                 }
+                ComposerAction::OpenStorageSettings => self.open_storage_settings(),
                 ComposerAction::Complete(name) => {
                     self.composer_mut().input = format!("/{name} ");
                 }
@@ -279,6 +280,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());
+        self.render_storage_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {
