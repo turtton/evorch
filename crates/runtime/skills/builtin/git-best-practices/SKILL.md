@@ -48,6 +48,13 @@ git log -12 --format=%s
 4. **最終的な `git diff --cached` 全体、`git diff --cached --check`、`git status --short` を確認する。** stage後に修正した内容や、フックが書き換えた内容も再確認する。
 5. staged差分の実際の内容からメッセージ案を作り、既存規則のチェックを通してからcommitする。
 
+実コミット前のidentity・署名の確認:
+
+- 対象repoで `git var GIT_AUTHOR_IDENT` と `git var GIT_COMMITTER_IDENT` を実行し、実効author/committerが意図したidentityか確認する。`git config user.email` だけでは環境変数による上書きを検出できない。明示的なauthor指定などがあれば、その影響も確認する。
+- `example.invalid` などのテストfixture用identityを実コミットに流用しない。identityが不明ならダミー値を設定せず、適切な設定を確認する。
+- repoが署名を要求する場合は、設定された署名方式と鍵を使う。署名失敗を `--no-gpg-sign` や署名設定の無効化で迂回しない。署名を全repoで一律必須にはしない。
+- 隔離環境でidentity・署名鍵・設定が見えない場合は、ホストにも存在しないと決めつけない。必要なアクセスを承認された経路で確認し、解決できなければコミットを中断して報告する。無断で設定を書き換えない。
+
 コミットメッセージの確認項目:
 
 - 必須のtype、scope、issue参照、言語、件名長、本文・footer、署名がrepo規則に合っているか。
@@ -63,6 +70,9 @@ commit後は新しいcommitの差分・件名と残りのworking treeを確認�
 - 共有済みcommitを勝手に書き換えない。履歴変更が明示的に許可されても、上流・他者の更新を確認する。`--force-with-lease` も許可の代わりにはならない。
 - merge、PR、共有ブランチへの直接pushの選択は作業依頼とリポジトリの規則に従う。conflictで他者の変更を一括で捨てず、解消の意図を確認して検証をやり直す。
 - push前に送信先remote/branch、送るcommit、必要な検証を確認する。未依頼の公開先や意図しないbranchへpushしない。
+- 作成したcommitのidentityを `git show -s --format=fuller HEAD` で確認する。署名が要求される場合は `git log -1 --format='%G? %GK'` などで署名の検証結果と鍵を確認する。これらはHEADのみの例なので、複数commitを送る場合は対象の各commitを確認する。
+- `%G?` はローカルの署名検証結果であり、信頼設定や署名方式にも依存する。`G` だけを全環境共通の合格条件にせず、repoの要件と期待する鍵に照らして判断する。検証不能を成功扱いしない。
+- 公開先が署名検証に対応し、repoがその確認を要求する場合は、push後に送信したcommit SHAの検証状態を確認する。ローカルの検証成功と公開先のVerified判定は別であり、同一視しない。確認できなければ未確認として報告する。
 - CI確認を依頼されたら、**送ったHEAD SHAに対応するrunと必要なchecks**を確認する。起動・待機中を成功と報告せず、別SHAの成功結果を使わない。失敗を調査し、修正・再push後の該当runまで追う。
 
 ## 作業の引き継ぎと完了報告
