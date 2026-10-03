@@ -45,6 +45,33 @@ fn status_harness(
 }
 
 #[test]
+fn ownership_without_host_allocates_the_empty_header_row() {
+    let state =
+        WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default()).unwrap();
+    assert!(state.ownership.is_none());
+    let mut harness = Harness::builder().build_ui_state(
+        |ui, (state, header_height): &mut (WorkbenchState<DemoSource>, f32)| {
+            let top = ui.cursor().top();
+            state.ownership_ui(ui);
+            *header_height = ui.cursor().top() - top;
+        },
+        (state, 0.0),
+    );
+    let mut baseline = Harness::builder().build_ui_state(
+        |ui, header_height| {
+            let top = ui.cursor().top();
+            ui.horizontal_wrapped(|_| {});
+            *header_height = ui.cursor().top() - top;
+        },
+        0.0,
+    );
+    harness.run();
+    baseline.run();
+    assert!(*baseline.state() > 0.0);
+    assert_eq!(harness.state().1, *baseline.state());
+}
+
+#[test]
 fn contention_stays_in_header_and_recovers_without_a_raw_error_label() {
     for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
         let now = Instant::now();

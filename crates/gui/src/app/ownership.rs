@@ -89,24 +89,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
+        // Keep the header row allocated even without a host; native QA and embedders depend on the stable layout.
+        ui.horizontal_wrapped(|ui| {
+            let Some(host) = self.ownership.clone() else {
+                return;
+            };
+            let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
+            if self.ownership_status.select_thread(thread.as_deref())
+                && self
+                    .ownership_action_error
+                    .as_ref()
+                    .is_some_and(|error| error.operation != SHUTDOWN)
+            {
+                self.ownership_action_error = None;
+            }
+            if let Some(thread) = thread {
+                let result =
+                    probe_ownership(&host, &thread, self.readonly_threads.contains(&thread));
+                let now = Instant::now();
+                self.ownership_status.observe(&thread, result, now);
+                self.ownership_controls_ui(ui, &host, &thread, now);
+            }
+        });
         let Some(host) = self.ownership.clone() else {
             return;
         };
-        let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);
-        if self.ownership_status.select_thread(thread.as_deref())
-            && self
-                .ownership_action_error
-                .as_ref()
-                .is_some_and(|error| error.operation != SHUTDOWN)
-        {
-            self.ownership_action_error = None;
-        }
-        if let Some(thread) = thread {
-            let result = probe_ownership(&host, &thread, self.readonly_threads.contains(&thread));
-            let now = Instant::now();
-            self.ownership_status.observe(&thread, result, now);
-            self.ownership_controls_ui(ui, &host, &thread, now);
-        }
         self.ownership_shutdown_ui(ui, &host);
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(250));
