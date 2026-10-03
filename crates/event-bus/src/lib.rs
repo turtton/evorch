@@ -13,7 +13,8 @@ pub mod usage;
 
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase,
+    CACHE_RETENTION_WARNING_THRESHOLD, CacheBaselineMissing, CacheComparison, CompactionEvent,
     CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,

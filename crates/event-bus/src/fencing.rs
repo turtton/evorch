@@ -115,6 +115,7 @@ impl MutationFences {
                 ProviderEvent::RequestStarted { run_id, .. }
                 | ProviderEvent::FirstTokenObserved { run_id, .. }
                 | ProviderEvent::RequestCompleted { run_id, .. }
+                | ProviderEvent::CacheReuseObserved { run_id, .. }
                 | ProviderEvent::RequestFailed { run_id, .. },
             ) => run_id.as_deref().is_none_or(accepts),
             EventKind::Message(

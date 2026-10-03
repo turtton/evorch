@@ -8,7 +8,7 @@ use crate::theme::tokens::{
     CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color, palette,
 };
 use crate::theme::widgets::{
-    empty_state, ghost, halo_dot, metric, pane_root, soft_frame, status_dot,
+    empty_state, ghost, halo_dot, metric, metric_detailed, pane_root, soft_frame, status_dot,
 };
 use egui::{Align, Button, Label, Layout};
 
@@ -103,6 +103,14 @@ pub fn agents_pane<S: AgentRunSource>(
                                 ui.label(muted("·"));
                             }
                             ui.label(muted(segment));
+                        }
+                        if let Some(rate) = value.cache_reuse.average_retention() {
+                            ui.label(muted("·"));
+                            let mut text = muted(format!("cache {rate:.1}%"));
+                            if value.cache_reuse.average_is_low() {
+                                text = text.color(palette().WARNING_FG);
+                            }
+                            ui.label(text).on_hover_text(value.cache_tooltip());
                         }
                         if let Some(ttft) = value.average_ttft_ms() {
                             ui.label(muted(format!(
@@ -373,13 +381,19 @@ fn role_label(row: &TaskRow) -> String {
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
-        for label in [
-            metrics
+        metric(
+            ui,
+            &metrics
                 .cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-            metrics
-                .average_cache_hit_rate
-                .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.1}%")),
+        );
+        metric_detailed(
+            ui,
+            &metrics.cache_reuse.average_label(),
+            &metrics.cache_tooltip(),
+            metrics.cache_reuse.average_is_low(),
+        );
+        for label in [
             metrics.average_tok_s.map_or_else(
                 || "avg — tok/s".into(),
                 |rate| format!("avg {rate:.1} tok/s"),

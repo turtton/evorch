@@ -83,7 +83,100 @@ fn cache_average_weights_all_conversation_inputs_including_cold_requests() {
     let metrics = telemetry.thread_metrics(&["one".into(), "two".into()]);
     assert_eq!(metrics.cache_hit_rate, Some(100.0));
     assert_eq!(metrics.average_cache_hit_rate, Some(90.0));
-    assert_eq!(metrics.cache_hit_rate_label(), "cache 100% (Δ90%)");
+    // No reuse observation was emitted, so retention stays unknown.
+    assert_eq!(metrics.cache_label(), "cache —");
+}
+
+fn reuse(run: &str, read: u64, previous: Option<u64>) -> Event {
+    Event::new(ProviderEvent::CacheReuseObserved {
+        request_id: format!("request-{run}"),
+        cache_read_tokens: read,
+        comparison: match previous {
+            Some(previous_cache_tokens) => event_bus::CacheComparison::Compared {
+                previous_request_id: "previous".into(),
+                previous_cache_tokens,
+            },
+            None => event_bus::CacheComparison::NoBaseline {
+                reason: event_bus::CacheBaselineMissing::NoPreviousRequest,
+            },
+        },
+        run_id: Some(run.into()),
+    })
+}
+
+fn request_started(run: &str) -> Event {
+    Event::new(ProviderEvent::RequestStarted {
+        request_id: format!("request-{run}"),
+        provider: "provider".into(),
+        profile: None,
+        protocol: "fixture".into(),
+        model: "model".into(),
+        streaming: true,
+        run_id: Some(run.into()),
+    })
+}
+
+#[test]
+fn cache_label_reports_root_retention_while_billed_ratio_moves_to_tooltip() {
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.apply_event(&started("root", None));
+    telemetry.apply_event(&started("child", Some("root")));
+    // Given: the root warms up 0% -> 50% -> 75% billed, and a child breaks its cache.
+    for (run, input, cached, previous) in [
+        ("root", 1_000, 0, None),
+        ("root", 2_000, 1_000, Some(1_000)),
+        ("root", 4_000, 3_000, Some(2_000)),
+        ("child", 5_000, 0, None),
+        ("child", 5_000, 500, Some(5_000)),
+    ] {
+        telemetry.apply_event(&request_started(run));
+        telemetry.apply_event(&reuse(run, cached, previous));
+        for event in observed(run, input, cached, 20, 100) {
+            telemetry.apply_event(&event);
+        }
+    }
+    let thread = telemetry.thread_metrics(&["root".into(), "child".into()]);
+    // Then: the cold first request does not lower the conversation retention.
+    assert_eq!(thread.cache_label(), "cache 100% (avg 100%)");
+    assert!(!thread.cache_reuse.latest_is_low());
+    assert!(
+        thread
+            .cache_tooltip()
+            .contains("Average: 100% (2 of 3 requests compared)")
+    );
+    assert!(
+        thread
+            .cache_tooltip()
+            .contains("Billed hit rate (cache read / input): latest 75%, average 57%")
+    );
+    // And: the child's own metrics flag its regression.
+    let child = telemetry.thread_metrics(&["child".into()]);
+    assert_eq!(child.cache_reuse.average_label(), "avg cache 10.0%");
+    assert!(child.cache_reuse.average_is_low());
+}
+
+#[test]
+fn a_request_without_reuse_observation_does_not_keep_the_previous_value() {
+    let mut telemetry = TelemetryOverlay::new();
+    telemetry.apply_event(&request_started("run"));
+    telemetry.apply_event(&reuse("run", 900, Some(1_000)));
+    for event in observed("run", 1_000, 900, 20, 100) {
+        telemetry.apply_event(&event);
+    }
+    // A failed attempt's observation must not leak into the next request.
+    telemetry.apply_event(&request_started("run"));
+    telemetry.apply_event(&reuse("run", 0, Some(1_000)));
+    telemetry.apply_event(&request_started("run"));
+    for event in observed("run", 1_000, 900, 20, 100) {
+        telemetry.apply_event(&event);
+    }
+    let metrics = telemetry.thread_metrics(&["run".into()]);
+    assert_eq!(metrics.cache_label(), "cache — (avg 90%)");
+    assert!(
+        metrics
+            .cache_tooltip()
+            .contains("Latest: — (cache reuse was not observed)")
+    );
 }
 
 #[test]
@@ -145,8 +238,8 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
     assert_eq!(pending.tok_s, None);
     assert_eq!(pending.average_ttft, Some(Duration::from_millis(200)));
     assert_eq!(pending.average_tok_s, Some(20.0));
-    assert_eq!(pending.ttft_label(), "TTFT — (Δ200ms)");
-    assert_eq!(pending.tok_s_label(), "— tok/s (Δ20.0 tok/s)");
+    assert_eq!(pending.ttft_label(), "TTFT — (avg 200ms)");
+    assert_eq!(pending.tok_s_label(), "— tok/s (avg 20.0 tok/s)");
     for event in observed("run", 1_000, 500, 100, 600) {
         telemetry.apply_event_at(&event, start + Duration::from_secs(203));
     }
@@ -156,8 +249,8 @@ fn tool_execution_does_not_change_provider_duration_or_current_ttft() {
     assert_eq!(telemetry.row("run").unwrap().average_ttft_ms(), Some(400));
     assert_eq!(next.average_ttft, Some(Duration::from_millis(400)));
     assert_eq!(next.average_tok_s, Some(35.0));
-    assert_eq!(next.ttft_label(), "TTFT 600ms (Δ400ms)");
-    assert_eq!(next.tok_s_label(), "50.0 tok/s (Δ35.0 tok/s)");
+    assert_eq!(next.ttft_label(), "TTFT 600ms (avg 400ms)");
+    assert_eq!(next.tok_s_label(), "50.0 tok/s (avg 35.0 tok/s)");
 }
 
 #[test]

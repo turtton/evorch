@@ -53,6 +53,7 @@ impl SpanMapper {
                 terminal: terminal_error(Some(failure_name(failure))),
             }),
             ProviderEvent::FirstTokenObserved { .. }
+            | ProviderEvent::CacheReuseObserved { .. }
             | ProviderEvent::ProviderFallback { .. }
             | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
         }

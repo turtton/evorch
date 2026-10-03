@@ -354,6 +354,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 operation_attrs(provider, model, profile.as_deref(), None),
             )],
             ProviderEvent::RequestStarted { .. }
+            | ProviderEvent::CacheReuseObserved { .. }
             | ProviderEvent::ProviderFallback { .. }
             | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
         },

@@ -17,6 +17,10 @@ pub mod pricing;
 #[path = "quota.rs"]
 pub mod quota;
 
+#[path = "cache_reuse.rs"]
+mod cache_reuse;
+pub use cache_reuse::{CacheReuseSummary, RequestReuse};
+
 #[path = "context_pressure.rs"]
 mod context_pressure;
 
@@ -45,6 +49,8 @@ pub struct TelemetryRow {
     pub last_checkpoint: Option<std::time::SystemTime>,
     pub checkpoint_failure: Option<String>,
     pub usage: TokenUsage,
+    pub cache_reuse: CacheReuseSummary,
+    pending_reuse: Option<RequestReuse>,
     latest_context: Option<context_pressure::RequestContext>,
     in_flight: bool,
     context_order: u64,
@@ -113,8 +119,12 @@ pub struct ThreadMetrics {
     pub cost: Option<f64>,
     /// Only the conversation roots, excluding launched subagents.
     pub conversation_cost: Option<f64>,
+    /// Billed `cache_read / input` of the latest request, kept for tooltips.
     pub cache_hit_rate: Option<f64>,
+    /// Billed `cache_read / input` across the conversation, kept for tooltips.
     pub average_cache_hit_rate: Option<f64>,
+    /// Retention of the conversation roots, the displayed cache health metric.
+    pub cache_reuse: CacheReuseSummary,
     pub wall_time: Duration,
     pub context_pressure: Option<u128>,
     pub context_used_tokens: Option<u128>,
@@ -196,6 +206,16 @@ impl TelemetryOverlay {
                 row.ttft_ms = None;
                 row.output_tokens = 0;
                 row.streamed_chars = 0;
+                row.pending_reuse = None;
+            }
+            EventKind::Provider(ProviderEvent::CacheReuseObserved {
+                cache_read_tokens,
+                comparison,
+                run_id: Some(run_id),
+                ..
+            }) => {
+                self.rows.entry(run_id.clone()).or_default().pending_reuse =
+                    Some(RequestReuse::observed(*cache_read_tokens, comparison));
             }
             EventKind::Provider(ProviderEvent::FirstTokenObserved {
                 ttft_ms,
@@ -262,6 +282,8 @@ impl TelemetryOverlay {
                 row.usage.output = row.usage.output.saturating_add(*output_tokens);
                 row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
                 row.usage.cache_write = row.usage.cache_write.saturating_add(*cache_write_tokens);
+                let reuse = row.pending_reuse.take().unwrap_or(RequestReuse::Unobserved);
+                row.cache_reuse.complete(reuse);
                 self.context_order = self.context_order.saturating_add(1);
                 row.context_order = self.context_order;
                 row.latest_context = Some(context_pressure::RequestContext {

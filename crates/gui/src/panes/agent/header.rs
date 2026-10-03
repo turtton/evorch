@@ -4,7 +4,7 @@ use crate::theme::{
     icons,
     text::{h3, muted},
     tokens::*,
-    widgets::{fill_label, ghost, icon_text, metric},
+    widgets::{fill_label, ghost, icon_text, metric, metric_detailed},
 };
 
 pub(super) fn header_strip(
@@ -114,11 +114,19 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
-        for segment in [
-            metrics
+        metric(
+            ui,
+            &metrics
                 .conversation_cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-            metrics.cache_hit_rate_label(),
+        );
+        metric_detailed(
+            ui,
+            &metrics.cache_label(),
+            &metrics.cache_tooltip(),
+            metrics.cache_reuse.latest_is_low(),
+        );
+        for segment in [
             metrics.ttft_label(),
             metrics.tok_s_label(),
             metrics.context_label(),

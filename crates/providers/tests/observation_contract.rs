@@ -118,6 +118,7 @@ fn attempt_run_id(event: &Event) -> Option<&str> {
         EventKind::Provider(ProviderEvent::RequestStarted { run_id, .. })
         | EventKind::Provider(ProviderEvent::FirstTokenObserved { run_id, .. })
         | EventKind::Provider(ProviderEvent::RequestCompleted { run_id, .. })
+        | EventKind::Provider(ProviderEvent::CacheReuseObserved { run_id, .. })
         | EventKind::Provider(ProviderEvent::RequestFailed { run_id, .. }) => run_id.as_deref(),
         other => panic!("attempt 観測イベントを期待しました: {other:?}"),
     }
@@ -740,7 +741,7 @@ fn anthropic_wire_request_omits_observation_context() {
     );
 }
 
-// Given: observation context 付きリクエスト / When: OpenAI send が成功 / Then: RequestStarted と RequestCompleted の両方に context の run_id が載る
+// Given: observation context 付きリクエスト / When: OpenAI send が成功 / Then: RequestStarted・CacheReuseObserved・RequestCompleted に context の run_id が載る
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_send_stamps_context_run_id_on_observation_events() {
     let server = MockServer::start().await;
@@ -761,16 +762,17 @@ async fn openai_send_stamps_context_run_id_on_observation_events() {
         .await
         .expect("send は成功する");
 
-    let events = collect_events(&mut rx, 3).await;
+    let events = collect_events(&mut rx, 4).await;
     assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-1"));
     assert!(matches!(
         &events[1].kind,
         EventKind::Usage(UsageEvent::Usage { .. })
     ));
     assert_eq!(attempt_run_id(&events[2]), Some("run-ctx-1"));
+    assert_eq!(attempt_run_id(&events[3]), Some("run-ctx-1"));
 }
 
-// Given: observation context 付きリクエスト / When: OpenAI stream が完了まで流れる / Then: Started・FirstToken・Completed の全観測イベントに context の run_id が載る
+// Given: observation context 付きリクエスト / When: OpenAI stream が完了まで流れる / Then: Started・FirstToken・CacheReuse・Completed の全観測イベントに context の run_id が載る
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_stream_stamps_context_run_id_on_observation_events() {
     let server = MockServer::start().await;
@@ -793,7 +795,7 @@ async fn openai_stream_stamps_context_run_id_on_observation_events() {
         .collect()
         .await;
 
-    let events = collect_events(&mut rx, 4).await;
+    let events = collect_events(&mut rx, 5).await;
     assert_eq!(attempt_run_id(&events[0]), Some("run-ctx-2"));
     assert!(matches!(
         &events[1].kind,
@@ -805,6 +807,7 @@ async fn openai_stream_stamps_context_run_id_on_observation_events() {
         EventKind::Usage(UsageEvent::Usage { .. })
     ));
     assert_eq!(attempt_run_id(&events[3]), Some("run-ctx-2"));
+    assert_eq!(attempt_run_id(&events[4]), Some("run-ctx-2"));
 }
 
 // Given: observation context 付きリクエスト / When: OpenAI send が HTTP 500 で失敗 / Then: RequestFailed にも context の run_id が載る
