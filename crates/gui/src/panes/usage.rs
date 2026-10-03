@@ -16,6 +16,34 @@ use crate::model::usage_stats::{
 };
 use crate::theme::text::{h3, muted};
 
+#[path = "usage/analysis.rs"]
+mod analysis;
+#[path = "usage/charts.rs"]
+mod charts;
+#[path = "usage/overview.rs"]
+mod overview;
+
+/// The views offered below the shared toolbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UsageView {
+    #[default]
+    Overview,
+    Breakdown,
+    Analysis,
+}
+
+impl UsageView {
+    const ALL: [Self; 3] = [Self::Overview, Self::Breakdown, Self::Analysis];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Breakdown => "Breakdown",
+            Self::Analysis => "Analysis",
+        }
+    }
+}
+
 /// Reload the open tab this often so new requests appear without a click.
 const AUTO_REFRESH: Duration = Duration::from_secs(30);
 /// Refresh today's footer total this often.
@@ -134,6 +162,10 @@ pub struct UsagePane {
     next_pricing_refresh: Option<Instant>,
     view: Option<(ViewKey, Vec<BreakdownRow>, UsageTotals)>,
     today: TodaySummary,
+    active: UsageView,
+    distribution: UsageDimension,
+    overview: Option<(ViewKey, Option<overview::OverviewData>)>,
+    analysis: Option<(ViewKey, Option<analysis::AnalysisData>)>,
 }
 
 impl UsagePane {
@@ -244,11 +276,91 @@ impl UsagePane {
             ui.label(muted("No usage recorded for this period."));
             return;
         }
+        ui.horizontal(|ui| {
+            for view in UsageView::ALL {
+                if charts::segment(ui, self.active == view, view.label()) {
+                    self.active = view;
+                }
+            }
+        });
         self.filters(ui, sidebar);
         ui.separator();
-        egui::ScrollArea::horizontal()
-            .id_salt("usage-breakdown-scroll")
-            .show(ui, |ui| self.breakdown_view(ui, sidebar));
+        match self.active {
+            UsageView::Overview => {
+                self.refresh_overview();
+                let distribution = &mut self.distribution;
+                if let Some((_, Some(data))) = &self.overview {
+                    egui::ScrollArea::vertical()
+                        .id_salt("usage-overview-scroll")
+                        .show(ui, |ui| data.render(ui, sidebar, distribution));
+                }
+            }
+            UsageView::Breakdown => {
+                egui::ScrollArea::horizontal()
+                    .id_salt("usage-breakdown-scroll")
+                    .show(ui, |ui| self.breakdown_view(ui, sidebar));
+            }
+            UsageView::Analysis => {
+                self.refresh_analysis();
+                if let Some((_, Some(data))) = &self.analysis {
+                    egui::ScrollArea::vertical()
+                        .id_salt("usage-analysis-scroll")
+                        .show(ui, |ui| data.render(ui, sidebar));
+                }
+            }
+        }
+    }
+
+    fn view_key(&self, dimension: UsageDimension) -> ViewKey {
+        ViewKey {
+            generation: self.generation,
+            filter: self.filter.clone(),
+            dimension,
+            cost_mode: self.cost_mode,
+        }
+    }
+
+    fn refresh_overview(&mut self) {
+        let key = self.view_key(self.distribution);
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == key)
+        {
+            return;
+        }
+        let data = self.dataset.as_ref().and_then(|(range, dataset)| {
+            overview::OverviewData::compute(
+                dataset,
+                *range,
+                &self.filter,
+                &self.pricing,
+                self.cost_mode,
+                self.distribution,
+            )
+        });
+        self.overview = Some((key, data));
+    }
+
+    fn refresh_analysis(&mut self) {
+        let key = self.view_key(UsageDimension::Day);
+        if self
+            .analysis
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == key)
+        {
+            return;
+        }
+        let data = self.dataset.as_ref().and_then(|(range, dataset)| {
+            analysis::AnalysisData::compute(
+                dataset,
+                *range,
+                &self.filter,
+                &self.pricing,
+                self.cost_mode,
+            )
+        });
+        self.analysis = Some((key, data));
     }
 
     /// Returns whether a manual refresh was requested.
@@ -290,15 +402,18 @@ impl UsagePane {
             return;
         };
         let facts = &dataset.facts;
+        let breakdown = self.active == UsageView::Breakdown;
         ui.horizontal_wrapped(|ui| {
-            ui.label(muted("Group by"));
-            egui::ComboBox::from_id_salt("usage-dimension")
-                .selected_text(self.dimension.label())
-                .show_ui(ui, |ui| {
-                    for dimension in UsageDimension::ALL {
-                        ui.selectable_value(&mut self.dimension, dimension, dimension.label());
-                    }
-                });
+            if breakdown {
+                ui.label(muted("Group by"));
+                egui::ComboBox::from_id_salt("usage-dimension")
+                    .selected_text(self.dimension.label())
+                    .show_ui(ui, |ui| {
+                        for dimension in UsageDimension::ALL {
+                            ui.selectable_value(&mut self.dimension, dimension, dimension.label());
+                        }
+                    });
+            }
             for (label, dimension, selected) in [
                 (
                     "Provider",
@@ -330,7 +445,9 @@ impl UsagePane {
             if !self.filter.is_empty() && ui.button("Clear filters").clicked() {
                 self.filter = UsageFilter::default();
             }
-            ui.checkbox(&mut self.show_models, "Model breakdown");
+            if breakdown {
+                ui.checkbox(&mut self.show_models, "Model breakdown");
+            }
         });
     }
 
