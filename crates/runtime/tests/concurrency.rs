@@ -1,6 +1,6 @@
 mod support;
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use agents::Role;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
@@ -10,7 +10,7 @@ use sandbox::DirectSandbox;
 use serde_json::json;
 use tools::ToolExecutor;
 
-use support::{ScriptedModel, collect_events, text_response, tool_response};
+use support::{ScriptedModel, text_response, tool_response};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_runs_keep_independent_histories_and_run_ids() {
@@ -64,30 +64,24 @@ async fn concurrent_runs_keep_independent_histories_and_run_ids() {
             .message_count,
         4
     );
-    let events = collect_events(&mut events, 12).await;
-    let changed_ids: Vec<&str> = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, .. }) => {
-                Some(run_id.as_str())
-            }
-            EventKind::Lifecycle(_)
-            | EventKind::Ledger(_)
-            | EventKind::Message(_)
-            | EventKind::Tool(_)
-            | EventKind::Usage(_)
-            | EventKind::Provider(_)
-            | EventKind::Fault(_)
-            | EventKind::AgentMessage(_)
-            | EventKind::Compaction(_)
-            | EventKind::Orchestrator(_)
-            | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
-            | EventKind::Snapshot(_) => None,
-        })
-        .collect();
     let short_text = short_id.to_string();
     let tool_text = tool_id.to_string();
-    assert!(changed_ids.contains(&short_text.as_str()));
-    assert!(changed_ids.contains(&tool_text.as_str()));
+    let mut pending_runs = HashSet::from([short_text.clone(), tool_text.clone()]);
+    let mut changed_ids = HashSet::new();
+    // A fixed event prefix can contain only one run: scheduling and the number
+    // of diagnostic/provider events are independent of the second run's start.
+    // Consume through both terminal events instead of assuming an interleaving.
+    while !pending_runs.is_empty() {
+        let event = events.recv().await.expect("event receiver remains open");
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+            event.kind
+        {
+            if to == AgentRunPhase::Done {
+                pending_runs.remove(&run_id);
+            }
+            changed_ids.insert(run_id);
+        }
+    }
+    assert!(changed_ids.contains(&short_text));
+    assert!(changed_ids.contains(&tool_text));
 }
