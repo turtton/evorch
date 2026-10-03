@@ -80,10 +80,10 @@ async fn named_windows_preserve_monthly_limits_and_use_configured_endpoint() {
             .map(|window| (window.label.as_str(), window.remaining_percent))
             .collect::<Vec<_>>(),
         [
-            ("5h", 70.0),
-            ("wk", 80.0),
-            ("month", 60.0),
-            ("code month", 75.0)
+            ("5h", 99.7),
+            ("wk", 99.8),
+            ("month", 99.6),
+            ("code month", 99.75)
         ]
     );
     assert!(snapshot.windows[0].resets_at.is_some());
@@ -91,13 +91,16 @@ async fn named_windows_preserve_monthly_limits_and_use_configured_endpoint() {
 }
 
 #[tokio::test]
-async fn named_windows_normalize_percentage_and_fractional_ratios() {
+async fn named_windows_use_percentage_values_without_ratio_conversion() {
     for (used_ratio, used_percent, remaining_percent) in [
+        (json!(0), 0.0, 100.0),
         (json!(100), 100.0, 0.0),
         (json!(42), 42.0, 58.0),
-        (json!(0.5), 50.0, 50.0),
-        (json!("0.3"), 30.0, 70.0),
-        (json!(1.0), 100.0, 0.0),
+        (json!(0.5), 0.5, 99.5),
+        (json!("0.3"), 0.3, 99.7),
+        (json!(1.0), 1.0, 99.0),
+        (json!(1), 1.0, 99.0),
+        (json!("1.0"), 1.0, 99.0),
         (json!("42"), 42.0, 58.0),
     ] {
         let server = MockServer::start().await;
@@ -282,7 +285,7 @@ async fn correcting_five_hour_zero_preserves_named_monthly_usage() {
         &[
             ("5h", 59.0, 41.0),
             ("month", 42.0, 58.0),
-            ("code month", 25.0, 75.0),
+            ("code month", 0.25, 99.75),
         ],
     );
 }
@@ -303,7 +306,7 @@ async fn nonzero_named_usage_wins_over_larger_legacy_usage_with_matching_resets(
     }))
     .await
     .unwrap();
-    assert_windows(&snapshot, &[("5h", 20.0, 80.0), ("wk", 10.0, 90.0)]);
+    assert_windows(&snapshot, &[("5h", 0.2, 99.8), ("wk", 0.1, 99.9)]);
 }
 
 #[tokio::test]
@@ -576,7 +579,7 @@ async fn nonzero_named_usage_wins_over_conflicting_legacy_candidates() {
         }))
         .await
         .unwrap();
-        assert_windows(&snapshot, &[("5h", 20.0, 80.0)]);
+        assert_windows(&snapshot, &[("5h", 0.2, 99.8)]);
         assert_eq!(snapshot.windows[0].resets_at, Some(reset.parse().unwrap()));
     }
 }
