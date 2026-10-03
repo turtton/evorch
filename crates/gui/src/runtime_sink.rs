@@ -242,6 +242,42 @@ impl CommandSink for RuntimeCommandSink {
             .map_err(|e| e.to_string())
     }
 
+    fn preview_base_context(
+        &self,
+        mut request: runtime::base_context::BaseContextRequest,
+        project: Option<&str>,
+    ) -> Option<crate::model::commands::ContextPreviewReceiver> {
+        if let (Some(config), Some(project)) = (&self.memory_config, project) {
+            // Chat runs capture lessons the same way; a read failure only hides the section.
+            request.memory = runtime::memory::MemoryBoundary::capture(config, project)
+                .inspect_err(|error| tracing::debug!(%error, "context preview memory read failed"))
+                .ok();
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runtime = self.runtime.clone();
+        self.handle.spawn(async move {
+            let report = runtime
+                .preview_base_context(request)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(report);
+        });
+        Some(receiver)
+    }
+
+    fn run_context_view(
+        &self,
+        run: &str,
+    ) -> Result<Option<runtime::base_context::RunContextView>, String> {
+        let id = run
+            .strip_prefix("run-")
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("invalid run ID")?;
+        self.runtime
+            .run_context_view(RunId::new(id))
+            .map_err(|e| e.to_string())
+    }
+
     fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
         // cwd 未指定時は起動済み executor を維持し、不要な sandbox 構築を避ける。
         let Some(root) = cwd else {

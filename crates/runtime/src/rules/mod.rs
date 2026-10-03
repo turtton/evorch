@@ -11,7 +11,10 @@ mod session;
 mod source;
 mod types;
 
-pub use api::{after_successful_tools, startup_snapshot};
+pub use api::{
+    StartupRuleExclusion, StartupRuleFile, after_successful_tools, startup_rule_files,
+    startup_snapshot,
+};
 pub use session::RulesSession;
 pub use source::RulesSource;
 pub use types::{ProjectTrust, RulesError, RulesSettings};

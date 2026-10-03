@@ -81,6 +81,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .update(&ctx, Instant::now(), self.memory.config.as_ref(), || {
                 self.provider_settings.usage_pricing()
             });
+        let project = self
+            .sidebar
+            .selected_project
+            .as_ref()
+            .map(ToString::to_string);
+        self.context_inspector
+            .update(&ctx, self.sink.as_ref(), project.as_deref());
         self.telemetry
             .quota
             .configure_profiles(&self.provider_settings, self.credential_store.clone());

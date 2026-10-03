@@ -98,23 +98,25 @@ pub fn build_catalog(
             builder = builder.role_baseline(role, body.as_str());
         }
         if let Some(preset) = &binding.preset {
-            builder = builder.appendix(role, appendix_body(&sources, preset));
+            builder = builder.appendix_preset(role, preset, appendix_body(&sources, preset));
         }
     }
     for (category, category_binding) in &input.config.agents.worker.categories {
         if let Some(preset) = &category_binding.preset {
-            builder = builder.category_appendix(
+            builder = builder.category_appendix_preset(
                 Role::Worker,
                 category.as_str(),
+                preset,
                 appendix_body(&sources, preset),
             );
         }
     }
     for (category, category_binding) in &input.config.agents.reviewer.categories {
         if let Some(preset) = &category_binding.preset {
-            builder = builder.category_appendix(
+            builder = builder.category_appendix_preset(
                 Role::Reviewer,
                 category.as_str(),
+                preset,
                 appendix_body(&sources, preset),
             );
         }

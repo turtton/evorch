@@ -119,6 +119,12 @@ pub struct RunRestoreDescriptor {
     pub interrupted_tool_calls: Vec<InterruptedToolCall>,
     #[serde(default)]
     pub durable_task_id: Option<String>,
+    /// Model identity at the last snapshot, for inspection only; restore never routes by it.
+    #[serde(default)]
+    pub selected_model: Option<String>,
+    /// Tool definitions visible to the model at the last snapshot, for inspection only.
+    #[serde(default)]
+    pub tool_names: Vec<String>,
 }
 
 impl RunRestoreDescriptor {
@@ -369,6 +375,12 @@ fn write_snapshot(
         renewable_team,
         interrupted_tool_calls,
         durable_task_id: config.task_id.clone(),
+        selected_model: Some(crate::compaction::selected_model(state)),
+        tool_names: state
+            .tool_specs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),
