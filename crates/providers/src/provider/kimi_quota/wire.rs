@@ -136,12 +136,9 @@ fn number(value: &Value) -> Option<f64> {
 }
 
 fn named_usage(entry: &Value) -> Result<f64, QuotaError> {
-    let ratio =
-        number(&entry["used_ratio"]).ok_or(QuotaError::Protocol("invalid Kimi quota ratio"))?;
-    // The official client uses current percentage values unchanged; accept 0..=1
-    // fractions for compatibility. Exactly 1.0 means 100%, indistinguishable from
-    // a percentage value of 1 (1%).
-    Ok(if ratio > 1.0 { ratio } else { ratio * 100.0 })
+    // The current API uses 0–100 percentages, unchanged by the official client.
+    // Fractional-ratio compatibility is intentionally no longer supported.
+    number(&entry["used_ratio"]).ok_or(QuotaError::Protocol("invalid Kimi quota ratio"))
 }
 
 fn legacy_count(entry: &Value, key: &str) -> Result<Option<f64>, QuotaError> {
