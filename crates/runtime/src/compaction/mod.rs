@@ -220,13 +220,13 @@ pub(crate) async fn compact_now(
             },
         }],
     };
-    let estimated_after = estimate_checkpoint(
-        &state.context.messages,
-        plan.start,
-        plan.end,
-        &summary_message,
-    )
-    .saturating_add(state.estimated_tool_tokens());
+    let checkpoint = CompactionCheckpoint {
+        id: checkpoint_id.clone(),
+        summary: summary_message,
+        range: (plan.start, plan.end),
+    };
+    let estimated_after = estimate_tokens(&checkpoint.project(&state.context.messages))
+        .saturating_add(state.estimated_tool_tokens());
     let still_above_threshold = estimated_after as f64 / window as f64 >= settings.threshold;
     let outcome = CompactionOutcome {
         estimated_tokens_before: estimated_before,
@@ -237,11 +237,7 @@ pub(crate) async fn compact_now(
         still_above_threshold,
     };
 
-    state.context.apply_checkpoint(CompactionCheckpoint {
-        id: checkpoint_id.clone(),
-        summary: summary_message,
-        range: (plan.start, plan.end),
-    });
+    state.context.apply_checkpoint(checkpoint);
     // Provider usage describes the pre-compaction input and cannot be reused.
     state.last_usage = None;
     state.compaction.last_usage_estimated_tokens = None;
@@ -299,12 +295,4 @@ fn first_user_text(messages: &[Message]) -> Option<&str> {
             | ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. } => None,
         })
-}
-
-fn estimate_checkpoint(messages: &[Message], start: usize, end: usize, summary: &Message) -> u64 {
-    let mut projected = Vec::with_capacity(messages.len().saturating_sub(end - start) + 1);
-    projected.extend_from_slice(&messages[..start]);
-    projected.push(summary.clone());
-    projected.extend_from_slice(&messages[end..]);
-    estimate_tokens(&projected)
 }
