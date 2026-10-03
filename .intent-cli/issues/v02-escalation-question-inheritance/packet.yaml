@@ -1,0 +1,69 @@
+# Post-hoc follow-up: implemented in PR #133 (squash eb79a7f).
+# v02-direct-escalation-handoff is historical evidence; do not rewrite it.
+implementation_issue_packet:
+  issue_title: "escalation 継承質問の同一 ID 表示と継承先回答認可"
+  issue_kind: feature
+  source_execution_unit: v02-escalation-question-inheritance
+  domain: evorch
+  target_repo: turtton/evorch
+  target_path: "crates/event-bus/ crates/storage/ crates/runtime/ crates/gui/ intents/ docs/"
+  target_part: "escalation で継承された未回答ユーザー質問を同一 question ID・元 provenance のまま継承先 Orchestrator thread に表示・回答可能にする追加契約。実装は PR #133（squash eb79a7f）で完了済み。本 packet は post-hoc の歴史的追跡であり、新規実装依頼ではない"
+  dependencies: [v02-direct-escalation-handoff]
+  technical_baseline:
+    - "PR #133 (https://github.com/turtton/evorch/pull/133), squash eb79a7f: runtime/GUI 実装、回帰テスト、intent/ADR/docs 更新は実施済み。本 packet 作成時の再実装・既存文書変更は行わない"
+    - "durable user_question_links が canonical consumer routing。UserQuestion の id/run_id/root_run_id/root_name は元の question identity/requester provenance として保持し、consumer routing と実行 ownership を混同しない"
+    - "UserQuestion.recipient_run_ids は #[serde(default)] を備える additive projection。storage の hydrate が SELECT run_id FROM user_question_links WHERE question_id=?1 ORDER BY rowid で継承順を復元し、get/list の読み取り経路に適用する。古い payload/event 内の routing は正本にしない"
+    - "event-bus の共有 helper is_user_visible/belongs_to_thread を GUI 表示と runtime_sink の回答認可で共有する。root の user-visible 質問のみを元 thread または登録済み recipient run に結び付く thread に表示し、child-to-Orchestrator 質問をユーザーへ漏らさない"
+    - "runtime は継承成功後に hydrate 済み UserQuestionUpdated を再発行し、同一 ID/provenance の routing を GUI へ伝える。質問継承と workspace 準備は source terminal と新 root startup に先行し、準備失敗時は起動しない（ADR 0027）。event fence は維持する"
+    - "runtime_sink は belongs_to_thread による consumer routing 判定と caller permit の thread/generation・mutation_guard および live recipient ownership 検証を分離する。保存成功の UserAnswerSaved acknowledgement は古い run の event が fence されてもカードを消せるが、認可を省略しない"
+    - "継承先 Orchestrator の起動 prompt に既存未回答 ID/requester/root/blocking/title/options と再質問禁止・回答観測前 finish 禁止を記載する。元 thread の notice は質問 ID と移動先 thread/run を示し、新 ID を作らない"
+    - "crates/runtime/src/meta/specs.rs の escalate ToolSpec は escalation/prompt.rs の静的 TOOL_DESCRIPTION に接続済み。original_request に合意済み制約・完了条件、findings に採用/却下案と理由、blockers に未確認事項を記す説明を提供し、schema/order や run ごとの provider prefix を変えない"
+  intent_references:
+    - intents/evorch/features/orchestration/overview.md
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0027-restore-contract.md
+    - docs/harness-runtime-improvements.md
+    - .intent-cli/issues/v02-direct-escalation-handoff/packet.yaml
+  # First six entries are transcribed from docs/harness-runtime-improvements.md:59-71.
+  acceptance_criteria:
+    - "An inherited unanswered question appears in the destination Orchestrator thread with its original question ID and requester provenance unchanged."
+    - "An answer to that existing ID from the legitimate destination thread is accepted after checking current recipient / ownership. After the model observes the answer, the inherited blocking question no longer prevents finish."
+    - "The source thread shows that the question has been handed off and identifies the destination. It does not create a replacement question ID."
+    - "An answer submitted from an unrelated thread is rejected, even when it names a valid inherited question ID."
+    - "Orchestrator startup explicitly lists inherited unanswered questions and directs the user to answer the existing questions, not ask again with new IDs."
+    - "Storage restart recovery and multiple continuations preserve question identity, original provenance, and tracking of the current recipient / ownership."
+    - "handoff メモにはユーザーと合意済みの制約・完了条件、採用/却下案と理由、未確認事項を記載する。未回答質問やメモにない事項を合意済みと推測しない"
+
+intent_placement:
+  primary_intent: intents/evorch/features/orchestration/overview.md
+  supporting_intents:
+    - intents/evorch/features/gui-workbench/overview.md
+    - intents/evorch/decisions/0027-restore-contract.md
+  new_intent_needed: false
+  placement_rationale: "PR #133 で追加契約を既存 orchestration/GUI intent と ADR 0027 へ反映済み。完了済み PR #76 の v02-direct-escalation-handoff packet は歴史的証跡として参照し、上書きしない"
+knowledge_updates:
+  intent_tree:
+    required: false
+    target_paths: []
+    summary: "追加契約の intent 更新は PR #133（eb79a7f）に含まれる。本 post-hoc packet では新たな intent 更新を要求しない"
+  adr:
+    required: false
+    target_paths: []
+    decision_title: ""
+  diagram:
+    required: false
+    target_paths: []
+    diagram_type: none
+  docs:
+    required: false
+    target_paths: []
+    summary: "docs/harness-runtime-improvements.md の6件の受け入れ条件と handoff メモ契約は PR #133 で記載済み。本 packet では既存文書を変更しない"
+closeout_learning:
+  expected: "同一質問 ID/provenance、durable consumer routing、current ownership/permit、event fence の分離を PR #133 の実装・テスト・更新済み intent/ADR/docs に紐付けて歴史的に追跡する"
+  write_back_required: false
+  write_back_targets: []
+guide_reachability:
+  no_role_facing_surface: true
+  routes: []
+# This packet adds no new role-facing surface. PR #133 already connected
+# specs.rs -> escalation/prompt.rs::TOOL_DESCRIPTION and the startup prompt.
