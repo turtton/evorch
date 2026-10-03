@@ -108,6 +108,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                     ProviderStatus::Configured => {
                         let submission = ChatSubmission {
+                            fork_seed: self.fork_seed(thread_id),
                             composer_role: self.composer.role,
                             images: self
                                 .composer

@@ -89,6 +89,7 @@ impl MutationFences {
                 | LifecycleEvent::TaskPromptPublished { run_id, .. }
                 | LifecycleEvent::AgentRunRestored { run_id, .. }
                 | LifecycleEvent::AgentRunStateChanged { run_id, .. }
+                | LifecycleEvent::TurnCompleted { run_id, .. }
                 | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),
                 LifecycleEvent::BackgroundTaskStarted { task_id }
                 | LifecycleEvent::BackgroundTaskCompleted { task_id }

@@ -122,7 +122,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
                 let _ = state.session(stored);
             }
             // エージェント実行はセッションではないため、セッション射影を変更しません。
-            LifecycleEvent::AgentRunStateChanged { .. } => {}
+            LifecycleEvent::AgentRunStateChanged { .. } | LifecycleEvent::TurnCompleted { .. } => {}
             LifecycleEvent::WorkspaceWaitChanged { .. }
             | LifecycleEvent::RunProgress { .. }
             | LifecycleEvent::AgentRunStarted { .. }

@@ -22,9 +22,11 @@ const ACTION_SIZE: f32 = ROW_DENSE - SP_1;
 /// Below this row width Fork moves into the overflow menu.
 const NARROW_ROW_WIDTH: f32 = 240.0;
 
+/// A root's family, including every rewound version and their forks.
 pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
+    let root = workspace_ui::version_root(threads, root);
     let mut family = BTreeSet::from([root.clone()]);
-    let mut pending = vec![root.clone()];
+    let mut pending = vec![root];
     while let Some(parent) = pending.pop() {
         for child in threads
             .iter()
@@ -127,7 +129,7 @@ fn render_tree(
     archived: bool,
     action: &mut Option<SidebarAction>,
 ) {
-    let rows = nested_threads(threads);
+    let rows = nested_threads(threads, &sidebar.threads);
     let mut collapsed_depth = None;
     for (index, (thread, depth)) in rows.iter().copied().enumerate() {
         if collapsed_depth.is_some_and(|hidden_depth| depth > hidden_depth) {
@@ -188,11 +190,20 @@ fn render_tree(
                         color,
                     );
                 }
+                let display_root =
+                    workspace_ui::display_parent(&sidebar.threads, &thread.id).is_none();
                 if archived {
-                    archived_row(ui, thread, sidebar, indicators.telemetry, action);
+                    archived_row(
+                        ui,
+                        thread,
+                        display_root,
+                        sidebar,
+                        indicators.telemetry,
+                        action,
+                    );
                 } else {
                     let state = thread.state(indicators.phases);
-                    let family_running = thread.parent_thread_id.is_none()
+                    let family_running = display_root
                         && family_has_running_runs(
                             &sidebar.threads,
                             &thread_family(&sidebar.threads, &thread.id),
@@ -200,7 +211,7 @@ fn render_tree(
                         );
                     active_row(
                         ui,
-                        thread,
+                        (thread, display_root),
                         state,
                         indicators.question_threads.contains(&thread.id),
                         family_running,
@@ -240,7 +251,7 @@ fn render_tree(
 
 fn active_row(
     ui: &mut Ui,
-    thread: &ThreadRecord,
+    (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
     has_question: bool,
     family_running: bool,
@@ -274,7 +285,7 @@ fn active_row(
         } else if icon_button(ui, icons::GIT_FORK, "Fork").clicked() {
             *action = Some(SidebarAction::ForkThread(thread.id.clone()));
         }
-        if thread.parent_thread_id.is_none() {
+        if display_root {
             let can_archive = !thread.pinned && !family_running;
             let disabled_reason = if family_running {
                 "Archive unavailable while a thread in this family is running"
@@ -319,7 +330,7 @@ fn active_row(
             *action = Some(SidebarAction::TogglePin(thread.id.clone()));
         }
         ui.add_space(SP_1);
-        thread_title(ui, thread, action);
+        thread_title(ui, thread, !display_root, action);
     });
 }
 
@@ -412,6 +423,7 @@ fn workspace_wait_tooltip(
 fn archived_row(
     ui: &mut Ui,
     thread: &ThreadRecord,
+    display_root: bool,
     sidebar: &SidebarState,
     telemetry: &TelemetryOverlay,
     action: &mut Option<SidebarAction>,
@@ -419,10 +431,10 @@ fn archived_row(
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
         workspace_wait_icon(ui, thread, sidebar, telemetry);
-        if thread.parent_thread_id.is_none() && restore_button(ui).clicked() {
+        if display_root && restore_button(ui).clicked() {
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
-        thread_title(ui, thread, action);
+        thread_title(ui, thread, !display_root, action);
     });
 }
 
@@ -434,11 +446,16 @@ fn restore_button(ui: &mut Ui) -> egui::Response {
     response.on_hover_text("アーカイブを解除")
 }
 
-fn thread_title(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarAction>) {
+fn thread_title(
+    ui: &mut Ui,
+    thread: &ThreadRecord,
+    child: bool,
+    action: &mut Option<SidebarAction>,
+) {
     // Indentation and the caret already show nesting; "↳" stays in the
     // accessible name only.
     let title = row_title(ui, thread.title.as_str());
-    if thread.parent_thread_id.is_some() {
+    if child {
         let label = format!("↳ {}", thread.title);
         title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     }
@@ -450,11 +467,14 @@ fn thread_title(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarA
     }
 }
 
-fn nested_threads<'a>(threads: &[&'a ThreadRecord]) -> Vec<(&'a ThreadRecord, usize)> {
+fn nested_threads<'a>(
+    threads: &[&'a ThreadRecord],
+    all: &[ThreadRecord],
+) -> Vec<(&'a ThreadRecord, usize)> {
     fn append<'a>(
         thread: &'a ThreadRecord,
         depth: usize,
-        threads: &[&'a ThreadRecord],
+        rows: &[(&'a ThreadRecord, Option<ThreadId>)],
         seen: &mut BTreeSet<workspace_ui::ThreadId>,
         output: &mut Vec<(&'a ThreadRecord, usize)>,
     ) {
@@ -462,29 +482,32 @@ fn nested_threads<'a>(threads: &[&'a ThreadRecord]) -> Vec<(&'a ThreadRecord, us
             return;
         }
         output.push((thread, depth));
-        for child in threads
+        for (child, _) in rows
             .iter()
-            .copied()
-            .filter(|candidate| candidate.parent_thread_id.as_ref() == Some(&thread.id))
+            .filter(|(_, parent)| parent.as_ref() == Some(&thread.id))
         {
-            append(child, depth + 1, threads, seen, output);
+            append(child, depth + 1, rows, seen, output);
         }
     }
 
+    // Rewound versions are hidden; children hang under their parent's visible version.
+    let rows: Vec<_> = threads
+        .iter()
+        .map(|thread| (*thread, workspace_ui::display_parent(all, &thread.id)))
+        .collect();
     let mut seen = BTreeSet::new();
     let mut output = Vec::with_capacity(threads.len());
-    for thread in threads.iter().copied() {
-        if thread
-            .parent_thread_id
+    for (thread, parent) in &rows {
+        if parent
             .as_ref()
             .is_none_or(|parent| !threads.iter().any(|candidate| &candidate.id == parent))
         {
-            append(thread, 0, threads, &mut seen, &mut output);
+            append(thread, 0, &rows, &mut seen, &mut output);
         }
     }
     // Corrupt or cyclic parent links still leave every thread reachable.
     for thread in threads.iter().copied() {
-        append(thread, 0, threads, &mut seen, &mut output);
+        append(thread, 0, &rows, &mut seen, &mut output);
     }
     output
 }
@@ -560,7 +583,7 @@ mod tests {
                     ui.horizontal(|ui| {
                         active_row(
                             ui,
-                            &thread,
+                            (&thread, true),
                             ThreadState::Running,
                             false,
                             true,
@@ -675,7 +698,8 @@ mod tests {
         child.escalation_source_run_id = Some("run-worker".into());
         let mut grandchild = ThreadRecord::new(ThreadId::new("grandchild"), project, "Grandchild");
         grandchild.parent_thread_id = Some(child.id.clone());
-        let rows = nested_threads(&[&grandchild, &child, &parent]);
+        let all = [grandchild.clone(), child.clone(), parent.clone()];
+        let rows = nested_threads(&[&grandchild, &child, &parent], &all);
         assert_eq!(
             rows.iter()
                 .map(|(thread, depth)| (thread.id.to_string(), *depth))

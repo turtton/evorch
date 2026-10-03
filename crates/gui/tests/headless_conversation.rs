@@ -31,3 +31,5 @@ mod thread_role_lock;
 mod thread_role_restore;
 #[path = "headless_conversation/thread_tree.rs"]
 mod thread_tree;
+#[path = "headless_conversation/turn_branching.rs"]
+mod turn_branching;

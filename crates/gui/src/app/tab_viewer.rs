@@ -71,6 +71,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) preference_action: &'a mut Option<Option<workspace_ui::ModelPreference>>,
     pub(super) repo_root: Option<&'a Path>,
     pub(super) sandbox_picker: crate::panes::composer::SandboxPickerContext,
+    pub(super) rewind_block: Option<&'static str>,
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {

@@ -426,6 +426,7 @@ impl RuntimeCommandSink {
                 );
                 let mut events = self.submit_authorized(
                     WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                        fork_seed: None,
                         thread_id,
                         text,
                         images: Vec::new(),
@@ -774,6 +775,7 @@ impl RuntimeCommandSink {
             WorkbenchCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
             WorkbenchCommand::ContinueChat(continuation) => self.submit_chat(
                 crate::model::commands::ChatSubmission {
+                    fork_seed: None,
                     thread_id: continuation.thread_id,
                     composer_role: continuation.composer_role,
                     model_preference: continuation.model_preference,
@@ -985,7 +987,7 @@ impl RuntimeCommandSink {
         }
         let conversation = submission.composer_role == crate::model::composer::ComposerRole::Worker;
         let _guard = self.handle.enter();
-        let run_id = self.runtime.delegate_chat(
+        let run_id = self.runtime.delegate_chat_seeded(
             &thread_id,
             match submission.composer_role {
                 crate::model::composer::ComposerRole::Worker => Role::Worker,
@@ -1002,6 +1004,7 @@ impl RuntimeCommandSink {
                 model_preference: submission.model_preference,
                 ..RunConfig::default()
             },
+            submission.fork_seed,
         );
         let run_id = match run_id {
             Ok(run_id) => run_id,
@@ -1523,6 +1526,7 @@ mod tests {
 
     fn chat_command(thread: &str) -> WorkbenchCommand {
         WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            fork_seed: None,
             composer_role: crate::model::composer::ComposerRole::Orchestrator,
             images: Vec::new(),
             thread_id: thread.into(),
@@ -1923,6 +1927,7 @@ mod tests {
         let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(WorkbenchCommand::SendChat(
             crate::model::commands::ChatSubmission {
+                fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Orchestrator,
                 images: Vec::new(),
                 thread_id: "chat-thread".into(),
@@ -2278,6 +2283,7 @@ mod tests {
             continue_command("thread-1")
         } else {
             WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+                fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Orchestrator,
                 images: Vec::new(),
                 thread_id: "thread-1".into(),
@@ -2374,6 +2380,7 @@ mod tests {
         // Given: a model that holds the run until cancellation.
         let (rt, mut sink, runtime, _) = build_sink();
         let chat = WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
+            fork_seed: None,
             composer_role: crate::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "chat-thread".into(),

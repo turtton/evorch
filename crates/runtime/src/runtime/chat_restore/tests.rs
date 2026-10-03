@@ -1,5 +1,6 @@
 use super::*;
 
+mod fork_seed;
 mod invalidation;
 mod registration;
 mod review_authority;

@@ -13,6 +13,8 @@ use crate::theme::text::medium;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
+mod branch;
+pub use branch::BranchContext;
 mod header;
 use header::{header_strip, status_strip};
 mod sandbox_review;
@@ -40,6 +42,8 @@ pub struct ConversationContext<'a> {
     pub next_thread_title: String,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
     pub sandbox_picker: crate::panes::composer::SandboxPickerContext,
+    /// Present only while showing a thread conversation.
+    pub branch: Option<BranchContext<'a>>,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -144,14 +148,21 @@ pub fn agent_pane_with_repo_root(
                     && identity.is_none_or(|identity| identity.ledger.is_empty())
                 {
                     empty_state_body(ui, &ctx, &mut action);
-                } else if let Some(request) = run_detail_body(
-                    ui,
-                    model,
-                    (identity, ctx.task_rows),
-                    repo_root,
-                    ctx.requests.as_mut(),
-                ) {
-                    action = Some(AgentPaneAction::Request(request));
+                } else {
+                    let mut branch_action = None;
+                    if let Some(request) = run_detail_body(
+                        ui,
+                        model,
+                        (identity, ctx.task_rows),
+                        repo_root,
+                        ctx.requests.as_mut(),
+                        (ctx.branch.as_ref(), &mut branch_action),
+                    ) {
+                        action = Some(AgentPaneAction::Request(request));
+                    }
+                    if let Some(branch_action) = branch_action {
+                        action = Some(AgentPaneAction::Sidebar(branch_action));
+                    }
                 }
             });
         action
@@ -202,7 +213,7 @@ pub fn transcript_body_with_repo_root(
     model: &TranscriptModel,
     repo_root: Option<&std::path::Path>,
 ) {
-    run_detail_body(ui, model, (None, &[]), repo_root, None);
+    run_detail_body(ui, model, (None, &[]), repo_root, None, (None, &mut None));
 }
 
 fn run_detail_body(
@@ -211,14 +222,40 @@ fn run_detail_body(
     context: (Option<AgentIdentity<'_>>, &[crate::model::tasks::TaskRow]),
     repo_root: Option<&std::path::Path>,
     requests: Option<&mut super::requests::ConversationRequests<'_>>,
+    (branch, branch_action): (Option<&BranchContext<'_>>, &mut Option<SidebarAction>),
 ) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
+    let own_branch = model.last_branch_entry_id();
+    if branch.is_some() {
+        branch::confirm_modal(ui, branch_action);
+    }
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            if let Some(branch) = branch {
+                branch::start_versions(ui, branch, branch_action);
+            }
             for (entry_idx, entry) in model.visible_entries().iter().enumerate() {
+                let entry_id = model.visible_entry_id(entry_idx);
+                if let TranscriptEntry::TurnEnd { .. } = entry {
+                    // Run detail panes show history only; turn actions belong to threads.
+                    if let Some(branch) = branch {
+                        branch::turn_footer(ui, model, entry_id, branch, branch_action);
+                    }
+                    continue;
+                }
+                if let TranscriptEntry::Branch { kind, .. } = entry {
+                    branch::branch_divider(
+                        ui,
+                        *kind,
+                        own_branch == Some(entry_id),
+                        branch,
+                        branch_action,
+                    );
+                    continue;
+                }
                 if matches!(entry, TranscriptEntry::Tool { .. }) {
                     crate::panes::transcript_tool::tool_card_with_repo_root(
                         ui, entry, pane_id, repo_root,
@@ -228,6 +265,9 @@ fn run_detail_body(
                 ui.add_space(SP_1);
                 if let TranscriptEntry::UserMessage { text } = entry {
                     user_bubble(ui, text);
+                    if let Some(branch) = branch {
+                        branch::edit_button(ui, model, entry_id, branch);
+                    }
                     continue;
                 }
                 if let Some((icon, color)) = event_icon(entry) {
@@ -251,7 +291,9 @@ fn run_detail_body(
                         | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Tool { .. }
-                        | TranscriptEntry::AgentMessage { .. } => {}
+                        | TranscriptEntry::AgentMessage { .. }
+                        | TranscriptEntry::TurnEnd { .. }
+                        | TranscriptEntry::Branch { .. } => {}
                     }
                     if let TranscriptEntry::Message { text, .. } = entry {
                         crate::panes::markdown_render::render_markdown_with_base(
@@ -316,7 +358,9 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::Compaction { .. }
         | TranscriptEntry::Message { .. }
         | TranscriptEntry::Reasoning { .. }
-        | TranscriptEntry::Tool { .. } => None,
+        | TranscriptEntry::Tool { .. }
+        | TranscriptEntry::TurnEnd { .. }
+        | TranscriptEntry::Branch { .. } => None,
     }
 }
 
@@ -432,6 +476,17 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             };
             format!("{prefix} {peer_run_id}: {content}")
         }
+        TranscriptEntry::TurnEnd {
+            run_id,
+            context_len,
+        } => {
+            format!("Turn completed ({run_id} @ {context_len})")
+        }
+        TranscriptEntry::Branch {
+            source_thread_id, ..
+        } => {
+            format!("Branched from {source_thread_id}")
+        }
     }
 }
 
@@ -480,6 +535,7 @@ mod tests {
                     ),
                     None,
                     None,
+                    (None, &mut None),
                 );
             });
         harness.run_steps(2);
@@ -521,6 +577,7 @@ mod tests {
                 ),
                 None,
                 None,
+                (None, &mut None),
             );
         });
         // Then: no ledger header is exposed.
@@ -556,6 +613,7 @@ mod tests {
                             preference: None,
                             enabled: false,
                         },
+                        branch: None,
                     };
                     header_strip(ui, &None, &ctx, &mut None);
                 });

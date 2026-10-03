@@ -114,6 +114,9 @@ impl TranscriptRegistry {
             EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
                 run_id, ..
             }) => vec![TranscriptKey::Run(run_id.clone())],
+            EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted { run_id, .. }) => {
+                self.route_run(run_id)
+            }
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id,
                 to:
@@ -331,6 +334,15 @@ impl TranscriptRegistry {
             self.threads.entry(id.clone()).or_default();
         }
         self.active_thread = id;
+    }
+
+    pub(crate) fn thread_model(&self, thread: &str) -> Option<&TranscriptModel> {
+        self.threads.get(thread)
+    }
+
+    /// Install a branched conversation's inherited history.
+    pub(crate) fn insert_thread(&mut self, thread: &str, model: TranscriptModel) {
+        self.threads.insert(thread.into(), model);
     }
 
     pub(crate) fn push_to_thread(&mut self, thread: &str, entry: TranscriptEntry) {

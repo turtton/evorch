@@ -87,8 +87,37 @@ pub struct ThreadRecord {
     /// Worker run that requested this independent orchestrator conversation.
     #[serde(default)]
     pub escalation_source_run_id: Option<String>,
+    /// How this conversation branched from `parent_thread_id`, if it did.
     #[serde(default)]
-    pub fork_event_id: Option<i64>,
+    pub lineage: Option<ThreadLineage>,
+    /// A rewound version kept for restoration but hidden behind its visible version.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageKind {
+    /// A separate conversation shown as a child thread.
+    Fork,
+    /// A replacement version of the parent conversation.
+    Rewind,
+}
+
+/// A completed-turn boundary in the run that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ForkPoint {
+    pub run_id: String,
+    /// Non-system message count published with the turn completion.
+    pub context_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadLineage {
+    pub kind: LineageKind,
+    /// `None` branches before the first turn.
+    #[serde(default)]
+    pub point: Option<ForkPoint>,
 }
 
 impl ThreadRecord {
@@ -112,7 +141,8 @@ impl ThreadRecord {
             draft_input: String::new(),
             parent_thread_id: None,
             escalation_source_run_id: None,
-            fork_event_id: None,
+            lineage: None,
+            superseded: false,
         }
     }
 
@@ -122,7 +152,7 @@ impl ThreadRecord {
     ) -> (Vec<&'a Self>, Vec<&'a Self>) {
         let (mut archived, mut main): (Vec<_>, Vec<_>) = threads
             .iter()
-            .filter(|thread| &thread.project_id == project)
+            .filter(|thread| &thread.project_id == project && !thread.superseded)
             .partition(|thread| thread.archived);
         let newest_first = |left: &&Self, right: &&Self| {
             right
@@ -139,6 +169,12 @@ impl ThreadRecord {
         });
         archived.sort_by(newest_first);
         (main, archived)
+    }
+
+    pub fn is_rewind(&self) -> bool {
+        self.lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.kind == LineageKind::Rewind)
     }
 
     pub fn state(&self, phases: &BTreeMap<String, ThreadRunPhase>) -> ThreadState {

@@ -58,6 +58,9 @@ pub struct ChatSubmission {
     pub text: String,
     #[serde(default)]
     pub model_preference: Option<runtime::ModelPreference>,
+    /// Completed-turn boundary a forked thread starts from until it saves its own history.
+    #[serde(default)]
+    pub fork_seed: Option<runtime::ChatForkSeed>,
 }
 
 /// A host continuation request, not a new user message or a new conversation.
@@ -581,6 +584,7 @@ mod tests {
         // When: both chats are submitted in order.
         let events = ["t1", "t2"].map(|thread_id| {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
                 images: Vec::new(),
                 thread_id: thread_id.into(),

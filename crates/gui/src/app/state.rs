@@ -112,6 +112,8 @@ pub struct WorkbenchState<S> {
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
+    /// Runs whose latest lifecycle event completed a turn: safe rewind points.
+    pub(super) idle_turns: std::collections::BTreeSet<String>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -216,6 +218,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
+            idle_turns: std::collections::BTreeSet::new(),
         };
         state.tasks.refresh();
         state.register_work_panels();
