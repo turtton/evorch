@@ -1,6 +1,6 @@
-# Tool execution review
+# Shell execution audit
 
-Review the exact requested tool execution or approval request before it runs, especially sandbox-external shell/bash commands. Do not execute commands yourself.
+Review the exact shell sandbox escalation request before the command runs. Do not execute commands yourself.
 
 - Inspect the full command, arguments, working directory, environment, and intended effects. Do not approve an unspecified or substituted command.
 - Check for destructive or irreversible operations, secret exposure or exfiltration, and unintended network or filesystem effects.

@@ -195,15 +195,10 @@ pub(super) fn error(content: impl Into<String>) -> DispatchResult {
 #[cfg(test)]
 mod private_category_tests {
     #[test]
-    fn normal_delegation_accepts_public_reviewer_categories() {
-        for name in ["plan", "tool-execution"] {
-            assert_eq!(super::parse_category(name).unwrap(), name);
+    fn normal_delegation_reserves_internal_categories() {
+        assert_eq!(super::parse_category("plan").unwrap(), "plan");
+        for name in ["lesson", "lesson_review", "tool-execution"] {
+            assert!(super::parse_category(name).is_err());
         }
-    }
-
-    #[test]
-    fn normal_delegation_rejects_internal_lesson_categories() {
-        assert!(super::parse_category("lesson").is_err());
-        assert!(super::parse_category("lesson_review").is_err());
     }
 }
