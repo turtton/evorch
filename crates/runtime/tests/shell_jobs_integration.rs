@@ -525,8 +525,27 @@ async fn finish_checks_unobserved_job_effects_before_accepting_completion() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop() {
     let (_temp, root) = init_git_repo();
+    // A FIFO releases the real child without polling the filesystem or relying
+    // on elapsed time. Job completion itself is awaited through its watch.
+    let release = root.join("release");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
     let bus = Arc::new(EventBus::new(256));
-    let executor = executor(&bus, &root);
+    let shell = Arc::new(tools::tools::shell::Shell::new(Arc::new(
+        sandbox::DirectSandbox::new_unchecked(),
+    )));
+    let mut executor = ToolExecutor::with_standard_tools_in(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+        Some(root.clone()),
+    );
+    executor.register(shell.clone()).unwrap();
+    let executor = Arc::new(executor);
     let (model, mut calls) = model();
     let runtime = AgentRuntime::new(bus, executor.clone(), model);
     let run = runtime.delegate_background(
@@ -534,21 +553,32 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
         "notify before next turn".into(),
         RunConfig::default(),
     );
-    next(&mut calls).await.respond(tool_response("start", "shell", json!({"command":"while [ ! -f release ]; do sleep 0.01; done; printf finished", "yield_ms":0})));
-    let active = next(&mut calls).await;
+    calls.recv().await.unwrap().respond(tool_response(
+        "start",
+        "shell",
+        json!({"command":"read value < release; printf finished", "yield_ms":0}),
+    ));
+    let active = calls.recv().await.unwrap();
     let job = active.job("start");
     let previous_input = serde_json::to_value(&active.messages).unwrap();
-    std::fs::write(root.join("release"), "go").unwrap();
-    timeout(DEADLINE, async {
-        while executor.has_running_shell_jobs(&run.to_string()) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::task::spawn_blocking(move || std::fs::write(release, "go\n"))
+        .await
+        .unwrap()
+        .unwrap();
+    shell
+        .wait_for_job(
+            &tools::ToolExecutionContext {
+                run_id: run.to_string(),
+                thread_id: None,
+                call_id: None,
+            },
+            &job,
+        )
+        .await
+        .unwrap();
     // Continue with ToolUse, not Stop: the completion must reach the next request.
-    active.respond(tool_response("read", "read", json!({"path":"release"})));
-    let notified = next(&mut calls).await;
+    active.respond(tool_response("read", "read", json!({"path":"README.md"})));
+    let notified = calls.recv().await.unwrap();
     let next_input = serde_json::to_value(&notified.messages).unwrap();
     let prefix_len = previous_input.as_array().unwrap().len();
     assert_eq!(
@@ -564,10 +594,12 @@ async fn completed_shell_is_notified_before_next_turn_without_waiting_for_stop()
         "shell",
         json!({"action":"poll", "job_id":job}),
     ));
-    let observed = next(&mut calls).await;
+    let observed = calls.recv().await.unwrap();
     assert_eq!(field(&observed.result("poll").0, "status: "), "completed");
+    assert!(observed.result("poll").0.contains("finished"));
+    assert!(!executor.has_unobserved_shell_jobs(&run.to_string()));
     let text = serde_json::to_string(&observed.messages).unwrap();
     assert_eq!(text.matches("Shell job completed:").count(), 1);
     observed.respond(text_response("done", FinishReason::Stop));
-    assert_eq!(wait(&runtime, run).await, AgentRunPhase::Done);
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
 }

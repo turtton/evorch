@@ -290,6 +290,25 @@ impl JobRegistry {
         Ok(job.snapshot(args.cursor))
     }
 
+    pub(super) async fn wait(
+        &self,
+        ctx: &ToolExecutionContext,
+        job_id: &str,
+    ) -> Result<(), ToolError> {
+        let job = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(job_id)
+            .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
+            .ok_or_else(|| invalid("shell job is unavailable for this run (expired, restarted, or a different owner); commands are never automatically replayed"))?;
+        // Subscribe before checking completion so finishing during registration
+        // cannot be missed. An already completed job returns immediately.
+        let mut changed = job.changed.subscribe();
+        while job.running() {
+            changed.changed().await.map_err(|_| {
+                io_failed("shell job completion signal closed before process teardown")
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn cancel(&self, run_id: &str) {
         for job in self
             .jobs
