@@ -1,6 +1,6 @@
 //! shell コマンド契約（S9）の統合テスト。
 //!
-//! standard 契約はモデル起因の shell 実行から `gh pr merge` と intent-cli の
+//! standard 契約はモデル起因の shell 実行から `gh issue create|edit|close` と intent-cli の
 //! queue/automation/issue/packet/publish/run 系を拒否し、delivery / merge_only
 //! 契約は supervisor 配信アダプタ専用の allowlist を提供する。拒否は ToolError
 //! ではなく `is_error: true` の ToolResult として返ることも検証する。
@@ -33,15 +33,21 @@ fn assert_denied(verdict: CommandVerdict) {
     }
 }
 
-// Given: standard 契約 / When: gh pr merge を直接と /usr/bin/gh と sh -c 経由で評価 / Then: すべて拒否される
+// Given: standard 契約 / When: gh pr merge を直接とインタプリタ経由で評価 / Then: 通常の sandbox 経路へ進める
 #[test]
-fn standard_denies_gh_pr_merge_direct_and_via_sh_dash_c() {
+fn standard_allows_gh_pr_merge_direct_and_via_interpreters() {
     let contract = ShellCommandContract::standard();
 
-    assert_denied(contract.evaluate("gh", &argv(&["pr", "merge", "123", "--repo", "o/r"])));
-    assert_denied(contract.evaluate("/usr/bin/gh", &argv(&["pr", "merge", "123"])));
-    assert_denied(contract.evaluate("sh", &argv(&["-c", "gh pr merge 123 --repo o/r"])));
-    assert_denied(contract.evaluate("bash", &argv(&["-c", "cd repo && gh pr merge 123"])));
+    assert_allowed(contract.evaluate("gh", &argv(&["pr", "merge", "123", "--repo", "o/r"])));
+    assert_allowed(contract.evaluate("/usr/bin/gh", &argv(&["pr", "merge", "123"])));
+    for interpreter in ["sh", "bash", "zsh", "dash"] {
+        assert_allowed(
+            contract.evaluate(interpreter, &argv(&["-c", "gh pr merge 123 --repo o/r"])),
+        );
+        assert_allowed(
+            contract.evaluate(interpreter, &argv(&["-c", "cd repo && gh pr merge 123"])),
+        );
+    }
 }
 
 // Given: standard 契約 / When: intent-cli の queue 系サブコマンドを直接と sh -c 経由で評価 / Then: すべて拒否される
@@ -242,7 +248,7 @@ fn merge_only_allows_only_match_head_commit_shape() {
     assert_denied(contract.evaluate("sh", &argv(&["-c", "gh pr merge 123"])));
 }
 
-// Given: standard 契約を Shell へ注入 / When: gh pr merge を実行 / Then: ToolError ではなく is_error 付き ToolResult が返る
+// Given: standard 契約を Shell へ注入 / When: issue mutation を実行 / Then: ToolError ではなく is_error 付き ToolResult が返る
 #[tokio::test]
 async fn shell_tool_returns_tool_error_not_err_when_denied() {
     let shell = Shell::with_contract(
@@ -253,7 +259,7 @@ async fn shell_tool_returns_tool_error_not_err_when_denied() {
     let result = shell
         .execute(json!({
             "command": "gh",
-            "args": ["pr", "merge", "123", "--repo", "o/r", "--squash"]
+            "args": ["issue", "close", "123", "--repo", "o/r"]
         }))
         .await
         .expect("拒否は ToolError ではなく ToolResult として返るはずです");
@@ -262,7 +268,7 @@ async fn shell_tool_returns_tool_error_not_err_when_denied() {
     assert!(result.content.contains("shell command denied by contract"));
 }
 
-// Given: Shell::new / When: gh pr merge を実行 / Then: 既定で standard 契約が適用され拒否される
+// Given: Shell::new / When: intent-cli queue を実行 / Then: 既定で standard 契約が適用され拒否される
 #[tokio::test]
 async fn shell_new_applies_standard_contract_by_default() {
     let shell = Shell::new(Arc::new(DirectSandbox::new_unchecked()));
@@ -270,7 +276,7 @@ async fn shell_new_applies_standard_contract_by_default() {
     let result = shell
         .execute(json!({
             "command": "sh",
-            "args": ["-c", "gh pr merge 123 --repo o/r"]
+            "args": ["-c", "intent-cli queue list"]
         }))
         .await
         .expect("拒否は ToolError ではなく ToolResult として返るはずです");
