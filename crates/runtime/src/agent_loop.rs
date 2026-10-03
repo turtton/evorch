@@ -402,6 +402,7 @@ mod workspace_tests {
             RulesSettings::from(&config::RulesConfig::default()),
             None,
             Some(rules_root.clone()),
+            None,
         );
         assert_eq!(
             shared_active_root(Some(&rules), Some(sandbox_root)),
@@ -415,6 +416,7 @@ mod workspace_tests {
         let rules = RulesSource::new(
             ProjectTrust::Approved,
             RulesSettings::from(&config::RulesConfig::default()),
+            None,
             None,
             None,
         );
