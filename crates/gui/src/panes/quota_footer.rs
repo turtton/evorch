@@ -4,11 +4,11 @@ use providers::provider::kimi_quota::KimiQuotaSnapshot;
 
 /// Compact remaining quota, with window duration and reset details on hover.
 pub fn quota_footer(ui: &mut egui::Ui, state: &QuotaState) {
-    subscriptions_footer(ui, "Codex", state, render_codex);
+    subscriptions_footer(ui, "Codex", state, render_codex, codex_summary);
 }
 
 pub fn kimi_quota_footer(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>) {
-    subscriptions_footer(ui, "Kimi", state, render_kimi);
+    subscriptions_footer(ui, "Kimi", state, render_kimi, kimi_summary);
 }
 
 fn subscriptions_footer<T: QuotaData>(
@@ -16,16 +16,30 @@ fn subscriptions_footer<T: QuotaData>(
     service: &str,
     state: &QuotaState<T>,
     render_quota: fn(&mut egui::Ui, &QuotaState<T>, bool),
+    summary: fn(&QuotaState<T>) -> String,
 ) {
+    let selection_id = ui.id().with(("selected_quota_profile", service));
     if state.subscriptions.len() <= 1 {
-        let state = state.subscriptions.values().next().unwrap_or(state);
-        render_quota(ui, state, false);
+        let (profile, subscription) = state
+            .subscriptions
+            .iter()
+            .next()
+            .map(|(name, subscription)| (name.as_str(), subscription))
+            .unwrap_or(("", state));
+        ui.data_mut(|data| data.insert_temp(selection_id, profile.to_owned()));
+        render_quota(ui, subscription, false);
         return;
     }
+    let selected = ui
+        .data(|data| data.get_temp::<String>(selection_id))
+        .filter(|name| state.subscriptions.contains_key(name))
+        .unwrap_or_else(|| state.subscriptions.keys().next().unwrap().clone());
+    ui.data_mut(|data| data.insert_temp(selection_id, selected.clone()));
+    let selected_state = &state.subscriptions[&selected];
     ui.menu_button(
         muted(format!(
-            "{service} · {} subscriptions",
-            state.subscriptions.len()
+            "{service} · {selected} · {}",
+            summary(selected_state)
         )),
         |ui| {
             egui::ScrollArea::vertical()
@@ -35,12 +49,82 @@ fn subscriptions_footer<T: QuotaData>(
                         if index > 0 {
                             ui.separator();
                         }
-                        ui.label(muted(format!("{profile} · {service}")).strong());
+                        if ui
+                            .selectable_label(
+                                selected == *profile,
+                                format!("{profile} · {service}"),
+                            )
+                            .clicked()
+                        {
+                            ui.data_mut(|data| data.insert_temp(selection_id, profile.clone()));
+                            ui.close();
+                        }
                         ui.push_id(profile, |ui| render_quota(ui, state, true));
                     }
                 });
         },
     );
+}
+
+fn codex_summary(state: &QuotaState) -> String {
+    let Some(snapshot) = &state.snapshot else {
+        return status(state);
+    };
+    let parts: Vec<_> = [&snapshot.quota.primary, &snapshot.quota.secondary]
+        .into_iter()
+        .flatten()
+        .map(|window| {
+            let duration = if window.window_duration.as_secs() == 7 * 24 * 60 * 60 {
+                "wk".to_owned()
+            } else {
+                window.duration_label()
+            };
+            format!(
+                "{:.0}% {duration}",
+                window.remaining_percent.clamp(0.0, 100.0)
+            )
+        })
+        .collect();
+    summary_with_stale(parts.join(" · "), snapshot.stale)
+}
+
+fn kimi_summary(state: &QuotaState<KimiQuotaSnapshot>) -> String {
+    let Some(snapshot) = &state.snapshot else {
+        return status(state);
+    };
+    let parts: Vec<_> = snapshot
+        .windows
+        .iter()
+        .map(|window| {
+            format!(
+                "{:.0}% {}",
+                window.remaining_percent.clamp(0.0, 100.0),
+                window.label
+            )
+        })
+        .collect();
+    summary_with_stale(parts.join(" · "), snapshot.stale)
+}
+
+fn summary_with_stale(usage: String, stale: bool) -> String {
+    let usage = if usage.is_empty() {
+        "unavailable".to_owned()
+    } else {
+        usage
+    };
+    if stale {
+        format!("{usage} · stale")
+    } else {
+        usage
+    }
+}
+
+fn status<T: QuotaData>(state: &QuotaState<T>) -> String {
+    if state.in_flight() {
+        "loading…".to_owned()
+    } else {
+        "unavailable".to_owned()
+    }
 }
 
 fn render_codex(ui: &mut egui::Ui, state: &QuotaState, expanded: bool) {
@@ -136,12 +220,7 @@ fn render_kimi(ui: &mut egui::Ui, state: &QuotaState<KimiQuotaSnapshot>, expande
 }
 
 fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>, expanded: bool) {
-    let status = if state.in_flight() {
-        "loading…"
-    } else {
-        "unavailable"
-    };
-    let response = ui.label(muted(format!("{name} · {status}")));
+    let response = ui.label(muted(format!("{name} · {}", status(state))));
     if let Some(error) = &state.error {
         if expanded {
             ui.label(muted(format!("Quota error: {error}")));
