@@ -123,7 +123,8 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
             }
             // エージェント実行はセッションではないため、セッション射影を変更しません。
             LifecycleEvent::AgentRunStateChanged { .. } => {}
-            LifecycleEvent::RunProgress { .. }
+            LifecycleEvent::WorkspaceWaitChanged { .. }
+            | LifecycleEvent::RunProgress { .. }
             | LifecycleEvent::AgentRunStarted { .. }
             | LifecycleEvent::TaskPromptPublished { .. } => {}
             LifecycleEvent::AgentRunRestored { .. } => {}

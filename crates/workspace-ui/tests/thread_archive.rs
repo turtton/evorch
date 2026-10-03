@@ -14,11 +14,26 @@ fn legacy_v1_defaults_when_archive_fields_are_absent() {
     assert_eq!(sidebar.version, 1);
     assert!(!sidebar.threads[0].archived);
     assert_eq!(sidebar.threads[0].created_at, 0);
+    assert_eq!(sidebar.threads[0].active_root, None);
+    assert_eq!(saved["threads"][0]["active_root"], serde_json::Value::Null);
     assert_eq!(saved["threads"][0]["archived"], false);
     assert_eq!(saved["threads"][0]["created_at"], 0);
     assert_eq!(
         serde_json::from_value::<SidebarState>(saved).unwrap(),
         sidebar
+    );
+}
+
+#[test]
+fn active_root_survives_thread_json_round_trip() {
+    let mut thread = ThreadRecord::new(ThreadId::new("shared"), ProjectId::new("p"), "Shared");
+    assert_eq!(thread.active_root, None);
+    thread.active_root = Some("/workspace/active".into());
+    let saved = serde_json::to_value(&thread).unwrap();
+    assert_eq!(saved["active_root"], "/workspace/active");
+    assert_eq!(
+        serde_json::from_value::<ThreadRecord>(saved).unwrap(),
+        thread
     );
 }
 

@@ -80,6 +80,12 @@ production layer-1 gate（`crates/runtime/src/policy.rs` の role フィルタ�
 
 **v0.2 web tools の role 別公開（issue #67、PR #68、2026-09-05）**: v0.2 確定節の「Librarian の調査相棒」を production に配線。`Role::Librarian` を新設（allowed_tools: read / grep / web_search / web_fetch、NetworkAccess=Allowed、can_delegate=false）、Orchestrator は web_fetch のみ許可で NetworkAccess=OptIn（web_search は Librarian 専用）。model-visible surface は `standard_tool_specs()` に web 2 tool を登録し layer-1 role filter で非対称を適用、production registry は `ToolExecutor::with_web_tools()` を AgentRuntime::production / isolated 構築に配線（NetworkGuard 初期化失敗は fail-closed 伝播）。Orchestrator の web_fetch は session OptIn 時に EventBus ApprovalRequested/ApprovalResolved 承認（ApprovalGate、相関キー `{run_id}:{call_id}`、300 秒 timeout）を経てのみ executor 到達、session Denied（既定）は fail-closed 拒否。tripwire 2 件（web_search/web_fetch_network_gate）を非対称公開へ更新。ADR 0002 に確定節追記済み。未配線（後続 slice）: GUI の approval 発行 UI と network_access 設定 surface、delegate meta-op への network_access 引数・親 run 継承、Librarian の config フィールド/prompt baseline/parse_role/GUI 露出。
 
+## 通常会話の PR マージと権限昇格（2026-10-03）
+
+[ユーザー決定](../../interviews/merge-execution-policy-2026-10-03.json) と [orchestration の現行方針](../orchestration/overview.md) に従い、モデル shell の standard 契約は `gh pr merge` を一律拒否しない。直接 argv、絶対パス、shell wrapper のいずれも既存の sandbox 実行経路へ進む。
+
+権限昇格を要求する場合は、実ユーザーの依頼を参照する既存 reviewer が `Auto` / `User` / `Off` 設定に従って審査する。理由不足、審査拒否、審査機構未接続時はプロセスを起動しない。隔離内実行の権限は従来どおりであり、マージだけに自動昇格を付与しない。この standard shell は通常会話と `/goal` 配下の Worker に共通である。supervisor 自身の delivery / merge-only allowlist と承認 token は専用経路の契約として維持し、モデル shell の追加条件にはしない。issue / intent-cli の host-state 操作に関する standard 制約は維持する。
+
 ## 受け入れ基準
 
 - Role ごとに tool capability が runtime レベルで制限され、拒否が観測可能であること

@@ -120,6 +120,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         fork.run_ids.clear();
         fork.branch = None;
         fork.worktree_path = None;
+        fork.active_root = None;
         self.sidebar.threads.push(fork);
         self.switch_thread(id.clone())?;
         self.save_sidebar();

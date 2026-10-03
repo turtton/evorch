@@ -24,6 +24,11 @@ Thread archive uses a Painter-drawn box at Small text height, a 1.2pt stroke,
 a wider lid with a centered handle slit, and native interaction text color.
 Its native small Button reserves Small text height + SP_2 on each axis;
 pinned threads use egui's disabled painting and cannot activate Archive.
+Workspace contention adds a Painter-drawn hourglass in WARNING_FG alongside the
+thread's existing status and question indicators, including waits from subagents.
+Its tooltip lists elapsed wait, waiting tool, authoritative current holder and
+workspace; shell commands use bounded, redacted previews. Unknown holders remain
+explicitly unknown. Only visible tooltips request elapsed-time repainting.
 Sandbox settings reuse the settings modal and native labeled Checkbox with
 unchecked/checked/focused states, Save/Cancel, inline errors and explicit scope text.
 Conversation message/reasoning cards show a small TEXT_MUTED `[role]` label

@@ -57,10 +57,20 @@ omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲�
 - **goal 固定**: run に goal を紐付け、durable な goal state（active / paused / complete）を保持する
 - **finish gate**: orchestrator / worker の `finish`（完了宣言）は composite gate（PR 実在 + CI green + diff の成功基準照合）と Reviewer 承認を満たさなければ拒否し、run を継続させる。omo の「idle イベント駆動 continuation dispatch」（todo / goal / boulder 未完了時に continuation prompt を自動注入）に相当する機構を runtime が持つ
 - **review 往復**: Reviewer run の指摘は request-update として worker へ差し戻し、rereview まで orchestrator が回す（現行運用の lead 手作業の内製化）
-- **人間承認点は merge のみ**: 実装・PR 作成・CI 確認・review 往復・closeout 記録 (intent-cli は shell 経由) は自律。`gh pr merge` だけ GUI approval で人間に求める（現行ループと同じ安全水準）
+- **当時の人間承認点は merge のみ**: 実装・PR 作成・CI 確認・review 往復・closeout 記録 (intent-cli は shell 経由) は自律。`gh pr merge` だけ GUI approval で人間に求める。通常会話の shell にもこの制約を課す方針は、下記の 2026-10-03 決定で変更した。`/goal` supervisor の承認経路は引き続き別の契約として維持する。
 - **起点は GUI の goal 投入のみ**: CLI（crates/evorch main.rs）は新設しない。検証は gui crate の headless モードで行う（ADR 0005 の分離と一致）
 - **停滞検知**: worker の無応答・エラー停滞を検知して追加指示（促し）を送る。lead が直接修正しない規律（herdr-opencode-loop 運用）は維持
 - **Intent Gate との統合**: 既存構想の Intent Gate（Direct / Coordinated 分類）に、omo 式の分類表（explain / implement / look into / broken / refactor 等）と利用可能 agent / skill から動的生成される keyTriggers を実装する（詳細は v02-prompt-assembly / v02-orchestrator-loop packet）
+
+### 通常会話からの PR マージ方針の変更（2026-10-03）
+
+[ユーザー決定](../../interviews/merge-execution-policy-2026-10-03.json) に基づき、通常会話のモデル shell に対する `gh pr merge` の一律拒否を廃止する。マージまで依頼された agent は、既存の sandbox と権限昇格審査を使ってマージを実行できる。GUI 専用承認を追加の必須条件にしない。
+
+- `network` / `unsandboxed` の呼び出しは既存の権限昇格設定に従う。`Auto` は自動レビュー、`User` は利用者承認、`Off` は昇格拒否。`isolated` の呼び出しは従来どおり隔離内で実行し、昇格審査を要求しない。
+- 認可の根拠は実ユーザーの依頼・追加指示・回答である。agent が書いた委譲指示や実行理由、project rules だけでマージ権限を増やしてはならない。
+- agent は依頼された PR の head に対する CI 成功を確認し、その SHA を `--match-head-commit` に指定してマージする。通常 shell の昇格 reviewer 自体が GitHub の CI や PR head を取得・保証する仕様ではない。
+- standard shell の方針は `/goal` 配下の Worker にも共通であり、shell から直接マージする場合も同じ権限昇格審査に従う。supervisor の承認 token を shell の追加条件にはしない。supervisor 自身が実行するマージは別経路であり、PR / head SHA / gate snapshot に束縛した承認と専用 delivery adapter を維持する。今回の変更は、supervisor の承認待ちからの自動遷移や未接続 GUI 承認画面の実装を含まない。
+- `gh issue create|edit|close` と intent-cli の host-state 操作に対する既存の shell 制約、delivery / merge-only adapter の allowlist は維持する。
 
 ## v0.2 prompt assembly / routing の実装確定（issue #49、PR #50、2026-09-02）
 
@@ -122,7 +132,7 @@ GUI の goal 投入時に Orchestrator 起動へ進む前に Execution Shape を
 ## 検証・ゲート実績
 6 commits 17 files +1802/-7 / CI 系全 PASS（146 suites 0 failed、otel-exporter feature 両面）/ Reviewer Gate APPROVED_WITH_NOTES（blocker 0、note 2）。canonical: claim/result-summary/complete 全 applied、issue #71 intent-pr-created。**queue-state linked_pr 同期は sandbox RO で失敗 → lead 側で closeout-plan --write-recovered-linkage が必要**。
 
-## v0.2 確定（PR #74）: orchestrator loop 内製
+## v0.2 確定（PR #74）: `/goal` orchestrator loop 内製
 
 goal 投入から PR・review・merge 承認まで継続する durable orchestration loop を `crates/runtime/src/orchestration/`（supervisor/gate/approval/continuation/stall/review/closeout/ledger/delivery/shell_delivery/types/registry/prompts）に実装。GoalState（active/paused/complete）は SQLite event sourcing で durable、restart 後に session/goal を再構成。finish は PR 実在・CI green・packet 照合・最新 Reviewer approval の composite gate でのみ受理（欠落は理由付き拒否+goal active 維持）。gate 未充足 idle で continuation prompt を自動 dispatch（同一 idle epoch で二重発火しない）。review 修復往復は config bounded、stalled は event 時刻+progress signal で判定して nudge→blocked。実装・commit/push・PR・CI・review・closeout は approved shell tool 経由（専用 bridge/新 CLI なし）。merge のみ人間 approval 必須で、approval は PR/head SHA/gate snapshot に bind され変化で失効、reject は goal active continuation へ戻す。crash 復旧は transcript+durable state から新規 run 再構成（厳密 revive なし）。gui headless fixture で goal→worker→PR/CI→review→repair→approval→merge→closeout を完走検証、--demo は決定的 adapter で再現。実バイナリ検証で continuation cascade バグを発見・修正済（1015b23）。
 

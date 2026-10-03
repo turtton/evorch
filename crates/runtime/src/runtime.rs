@@ -1092,6 +1092,7 @@ impl AgentRuntime {
             && source.worktree_path.as_ref() == Some(&owned.path)
         {
             source.worktree_path = None;
+            source.active_root = None;
         }
         before_spawn();
         let summary = memo.summary();
@@ -1465,6 +1466,7 @@ impl AgentRuntime {
                 mode: WorkspaceMode::Shared,
                 branch: None,
                 worktree_path: None,
+                active_root: None,
                 merge_mode: entry.config.merge_mode,
             });
         Ok(AgentInspection {

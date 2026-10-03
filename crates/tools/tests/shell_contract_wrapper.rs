@@ -31,7 +31,6 @@ fn sh_c_wrapped_merge_pr_with_wrong_sha_denied() {
 #[test]
 fn sh_c_wrapped_denylist_still_denies() {
     for command in [
-        MERGE,
         "gh issue create",
         "gh issue edit 1",
         "gh issue close 1",

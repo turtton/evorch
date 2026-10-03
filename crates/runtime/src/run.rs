@@ -129,6 +129,9 @@ pub struct WorkspaceInspection {
     pub branch: Option<String>,
     /// isolated worktree の path。cleanup 成功後は `None`。
     pub worktree_path: Option<PathBuf>,
+    /// run 開始時に決定した作業 root。cleanup 成功・handoff 切離し後は `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_root: Option<PathBuf>,
     /// isolated workspace の変更を統合する方法。
     pub merge_mode: MergeMode,
 }
@@ -170,6 +173,49 @@ pub struct AgentInspection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_inspection_serializes_active_root_without_changing_existing_keys() {
+        let workspace = WorkspaceInspection {
+            mode: WorkspaceMode::Isolated,
+            branch: Some("evorch/task/run-7".into()),
+            worktree_path: Some(PathBuf::from("/project/.evorch/worktrees/run-7")),
+            active_root: Some(PathBuf::from("/project/.evorch/worktrees/run-7")),
+            merge_mode: MergeMode::Branch,
+        };
+
+        assert_eq!(
+            serde_json::to_value(workspace).expect("serialize WorkspaceInspection"),
+            serde_json::json!({
+                "mode": "isolated",
+                "branch": "evorch/task/run-7",
+                "worktree_path": "/project/.evorch/worktrees/run-7",
+                "active_root": "/project/.evorch/worktrees/run-7",
+                "merge_mode": "branch",
+            }),
+        );
+    }
+
+    #[test]
+    fn workspace_inspection_omits_only_absent_active_root() {
+        let workspace = WorkspaceInspection {
+            mode: WorkspaceMode::Shared,
+            branch: None,
+            worktree_path: None,
+            active_root: None,
+            merge_mode: MergeMode::Branch,
+        };
+
+        assert_eq!(
+            serde_json::to_value(workspace).expect("serialize WorkspaceInspection"),
+            serde_json::json!({
+                "mode": "shared",
+                "branch": null,
+                "worktree_path": null,
+                "merge_mode": "branch",
+            }),
+        );
+    }
 
     // Given: 数値 7 と 0 の RunId / When: Display / Then: "run-{n}" 形式 (イベント run_id と同一形式)
     #[test]

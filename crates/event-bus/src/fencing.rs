@@ -83,7 +83,8 @@ impl MutationFences {
         };
         let accepted = match &event.kind {
             EventKind::Lifecycle(event) => match event {
-                LifecycleEvent::RunProgress { run_id, .. }
+                LifecycleEvent::WorkspaceWaitChanged { run_id, .. }
+                | LifecycleEvent::RunProgress { run_id, .. }
                 | LifecycleEvent::AgentRunStarted { run_id, .. }
                 | LifecycleEvent::TaskPromptPublished { run_id, .. }
                 | LifecycleEvent::AgentRunRestored { run_id, .. }

@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, Sense, Ui};
 use workspace_ui::{
     ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
 };
 
-use crate::model::telemetry::TelemetryOverlay;
+use crate::model::telemetry::{TelemetryOverlay, WorkspaceWaitEntry};
 use crate::theme::text::h4;
 use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{compact_row, empty_state, primary_button};
@@ -51,10 +52,15 @@ pub fn render(
     sidebar: &SidebarState,
     project: &ProjectRecord,
     phases: &BTreeMap<String, ThreadRunPhase>,
-    _telemetry: &TelemetryOverlay,
+    telemetry: &TelemetryOverlay,
     question_threads: &BTreeSet<workspace_ui::ThreadId>,
     action: &mut Option<SidebarAction>,
 ) {
+    let indicators = ThreadIndicators {
+        phases,
+        telemetry,
+        question_threads,
+    };
     let (project_threads, archived) =
         ThreadRecord::partition_for_project(&sidebar.threads, &project.id);
 
@@ -82,38 +88,27 @@ pub fn render(
         );
     }
 
-    render_tree(
-        ui,
-        sidebar,
-        &project_threads,
-        phases,
-        question_threads,
-        false,
-        action,
-    );
+    render_tree(ui, sidebar, &project_threads, &indicators, false, action);
 
     egui::CollapsingHeader::new(format!("アーカイブ済み ({})", archived.len()))
         .id_salt(("archived-threads", &project.id))
         .show(ui, |ui| {
-            render_tree(
-                ui,
-                sidebar,
-                &archived,
-                phases,
-                question_threads,
-                true,
-                action,
-            );
+            render_tree(ui, sidebar, &archived, &indicators, true, action);
         });
     ui.add_space(SP_2);
+}
+
+struct ThreadIndicators<'a> {
+    phases: &'a BTreeMap<String, ThreadRunPhase>,
+    telemetry: &'a TelemetryOverlay,
+    question_threads: &'a BTreeSet<workspace_ui::ThreadId>,
 }
 
 fn render_tree(
     ui: &mut Ui,
     sidebar: &SidebarState,
     threads: &[&ThreadRecord],
-    phases: &BTreeMap<String, ThreadRunPhase>,
-    question_threads: &BTreeSet<workspace_ui::ThreadId>,
+    indicators: &ThreadIndicators<'_>,
     archived: bool,
     action: &mut Option<SidebarAction>,
 ) {
@@ -161,21 +156,22 @@ fn render_tree(
                     );
                 }
                 if archived {
-                    archived_row(ui, thread, action);
+                    archived_row(ui, thread, sidebar, indicators.telemetry, action);
                 } else {
-                    let state = thread.state(phases);
+                    let state = thread.state(indicators.phases);
                     let family_running = thread.parent_thread_id.is_none()
                         && family_has_running_runs(
                             &sidebar.threads,
                             &thread_family(&sidebar.threads, &thread.id),
-                            phases,
+                            indicators.phases,
                         );
                     active_row(
                         ui,
                         thread,
                         state,
-                        question_threads.contains(&thread.id),
+                        indicators.question_threads.contains(&thread.id),
                         family_running,
+                        (sidebar, indicators.telemetry),
                         action,
                     );
                 }
@@ -191,6 +187,20 @@ fn render_tree(
                 "{branch} @ {}",
                 worktree.display()
             )));
+        } else if !archived
+            && thread.worktree_path.is_none()
+            && let Some(root) = &thread.active_root
+            && sidebar
+                .projects
+                .iter()
+                .find(|project| project.id == thread.project_id)
+                .is_some_and(|project| project.repo_root != *root)
+        {
+            // Reconciliation populates this no-worktree root only for Shared mode.
+            ui.label(crate::theme::text::muted(format!(
+                "Shared workspace: {}",
+                root.display()
+            )));
         }
     }
 }
@@ -201,6 +211,7 @@ fn active_row(
     state: ThreadState,
     has_question: bool,
     family_running: bool,
+    wait_context: (&SidebarState, &TelemetryOverlay),
     action: &mut Option<SidebarAction>,
 ) {
     let pin = if thread.pinned { "★" } else { "☆" };
@@ -232,8 +243,10 @@ fn active_row(
     // controls. Keep the title and controls in distinct hit regions.
     let narrow = ui.available_width() < 180.0;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // The first widget in this layout is the row's trailing indicator.
+        // Existing runtime/question indicators remain at the trailing edge;
+        // workspace contention is an additional independent signal beside them.
         thread_status_icon(ui, state, has_question);
+        workspace_wait_icon(ui, thread, wait_context.0, wait_context.1);
         if narrow {
             ui.menu_button("⋯", |ui| {
                 if ui.button("Fork").clicked() {
@@ -252,8 +265,102 @@ fn active_row(
     });
 }
 
-fn archived_row(ui: &mut Ui, thread: &ThreadRecord, action: &mut Option<SidebarAction>) {
+fn workspace_wait_icon(
+    ui: &mut Ui,
+    thread: &ThreadRecord,
+    sidebar: &SidebarState,
+    telemetry: &TelemetryOverlay,
+) {
+    if telemetry.workspace_waits(&thread.run_ids).next().is_none() {
+        return;
+    }
+    // Draw the hourglass so its appearance does not depend on emoji/font support.
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), Sense::hover());
+    let rect = rect.shrink(2.0);
+    let stroke = egui::Stroke::new(1.3, palette().WARNING_FG);
+    let painter = ui.painter();
+    painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+    painter.line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.right_top(), rect.left_bottom()], stroke);
+    let label = format!("作業領域の使用待ち: {}", thread.id);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    response.on_hover_ui(|ui| {
+        ui.set_max_width(420.0);
+        let now = Instant::now();
+        for (index, (run_id, call_id, entry)) in
+            telemetry.workspace_waits(&thread.run_ids).enumerate()
+        {
+            if index > 0 {
+                ui.separator();
+            }
+            ui.label(workspace_wait_tooltip(sidebar, run_id, call_id, entry, now));
+        }
+        // Only a visible tooltip needs the elapsed-time timer.
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+    });
+}
+
+fn workspace_wait_tooltip(
+    sidebar: &SidebarState,
+    run_id: &str,
+    call_id: &str,
+    entry: &WorkspaceWaitEntry,
+    now: Instant,
+) -> String {
+    let seconds = entry.elapsed_at(now).as_secs();
+    let elapsed = if seconds >= 3600 {
+        format!(
+            "{}時間{}分{}秒",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60
+        )
+    } else if seconds >= 60 {
+        format!("{}分{}秒", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}秒")
+    };
+    let wait = &entry.waiting;
+    let mut text = format!(
+        "作業領域の使用待ち · {elapsed}\n待機中: {} ({run_id} / {call_id})",
+        wait.tool_name,
+    );
+    if let Some(command) = &wait.command {
+        text.push_str(&format!("\nコマンド: {command}"));
+    }
+    if let Some(holder) = &wait.holder {
+        // Lookup includes other projects and archived threads. Only the runtime's
+        // holder identity is authoritative; activity cannot identify a blocker.
+        let title = sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.run_ids.contains(&holder.run_id))
+            .map(|thread| format!("「{}」 ({})", thread.title, holder.run_id))
+            .unwrap_or_else(|| holder.run_id.clone());
+        text.push_str(&format!(
+            "\n使用中: {title}\n処理: {} ({})",
+            holder.tool_name, holder.call_id
+        ));
+        if let Some(command) = &holder.command {
+            text.push_str(&format!("\nコマンド: {command}"));
+        }
+    } else {
+        text.push_str("\n使用中: 不明");
+    }
+    text.push_str(&format!("\n対象: {}", wait.workspace_root.display()));
+    text
+}
+
+fn archived_row(
+    ui: &mut Ui,
+    thread: &ThreadRecord,
+    sidebar: &SidebarState,
+    telemetry: &TelemetryOverlay,
+    action: &mut Option<SidebarAction>,
+) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        workspace_wait_icon(ui, thread, sidebar, telemetry);
         if thread.parent_thread_id.is_none()
             && ui
                 .small_button("Restore")
@@ -413,6 +520,10 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, has_question: bool) {
 }
 
 #[cfg(test)]
+#[path = "threads_wait_tests.rs"]
+mod wait_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -425,13 +536,23 @@ mod tests {
     fn assert_thread_actions_without_pause(width: f32, narrow: bool) {
         // Given: a thread row rendered at the requested width.
         let thread = ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("demo"), "Thread");
+        let sidebar = workspace_ui::SidebarState::default();
+        let telemetry = crate::model::telemetry::TelemetryOverlay::new();
         let mut harness = Harness::builder()
             .with_size(egui::vec2(width, 100.0))
             .build_ui_state(
                 |ui, action| {
                     crate::theme::install(ui.ctx());
                     ui.horizontal(|ui| {
-                        active_row(ui, &thread, ThreadState::Running, false, true, action);
+                        active_row(
+                            ui,
+                            &thread,
+                            ThreadState::Running,
+                            false,
+                            true,
+                            (&sidebar, &telemetry),
+                            action,
+                        );
                     });
                 },
                 None,
