@@ -2,6 +2,8 @@ name: ci
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 # 同一 ref への連続 push / PR 更新で古い実行を中断し、runner を無駄遣いしないようにする。
