@@ -106,8 +106,7 @@ fn diff_pane_shows_loading_then_ready_from_fixture() {
     });
     let mut harness = diff_harness(source, temp.path());
 
-    // When: the working tree diff is requested from the pane
-    harness.click_label("Working tree");
+    // When: the tab opens, it requests the working tree without any click
     harness.step();
 
     // Then: the model is loading before the worker completes
@@ -135,8 +134,7 @@ fn empty_diff_shows_explicit_empty_state() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = diff_harness(Arc::new(FixtureDiffSource::empty()), temp.path());
 
-    // When: the working tree diff is requested
-    harness.click_label("Working tree");
+    // When: the visible tab requests the working tree automatically
 
     // Then: the empty state is explicit
     step_until(&mut harness, "no changes");
@@ -154,8 +152,7 @@ fn truncated_diff_shows_cap_notice() {
     let text = "x".repeat(total_bytes);
     let mut harness = diff_harness(Arc::new(FixtureDiffSource::ready(&text)), temp.path());
 
-    // When: the working tree diff is requested
-    harness.click_label("Working tree");
+    // When: the visible tab requests the working tree automatically
 
     // Then: the truncation notice reports cap and total
     step_until(
@@ -174,8 +171,7 @@ fn git_error_is_shown_and_ui_keeps_rendering() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut harness = diff_harness(Arc::new(FixtureDiffSource::error("boom")), temp.path());
 
-    // When: the working tree diff is requested
-    harness.click_label("Working tree");
+    // When: the visible tab requests the working tree automatically
 
     // Then: the error is shown without blocking the rest of the workbench
     step_until(&mut harness, "error: diff output I/O error: boom");
@@ -195,9 +191,20 @@ fn branch_mode_requests_main_merge_base() {
 
     // Then: the model fetches a branch diff against main
     step_until(&mut harness, "branch body");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !source
+        .modes
+        .lock()
+        .expect("modes lock")
+        .contains(&DiffMode::Branch)
+        && Instant::now() < deadline
+    {
+        harness.step();
+        std::thread::yield_now();
+    }
     assert_eq!(
         source.modes.lock().expect("modes lock").as_slice(),
-        &[DiffMode::Branch]
+        &[DiffMode::WorkingTree, DiffMode::Branch]
     );
 }
 
@@ -411,4 +418,96 @@ fn capture_review_diff_unified_and_split() {
             }
         }
     }
+}
+
+#[test]
+fn hidden_diff_tab_does_not_fetch_until_opened() {
+    // Given: a selected project with another dock tab active.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let source = Arc::new(RecordingDiffSource::default());
+    let mut harness =
+        HeadlessWorkbench::new(state_with_diff(source.clone(), temp.path()), [800.0, 600.0]);
+    let path = harness
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("subagents-home"))
+        .expect("conversation tab");
+    harness
+        .state_mut()
+        .dock_mut()
+        .set_active_tab(path)
+        .expect("activate conversation");
+    harness.run();
+    // Then: no initial/periodic Git fetch is launched for the hidden diff tab.
+    assert!(source.modes.lock().expect("modes lock").is_empty());
+    // When: opening Diff, without touching Working tree or Refresh.
+    let path = harness
+        .state()
+        .dock()
+        .find_tab(&PanelId::new("diff-main"))
+        .expect("diff tab");
+    harness
+        .state_mut()
+        .dock_mut()
+        .set_active_tab(path)
+        .expect("activate diff");
+    step_until(&mut harness, "branch body");
+    assert_eq!(
+        source.modes.lock().expect("modes lock").as_slice(),
+        &[DiffMode::WorkingTree]
+    );
+}
+
+#[test]
+fn visible_diff_picks_up_real_git_edits_without_refresh_clicks() {
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // Given: a clean repository and an open Diff tab.
+    let temp = tempfile::tempdir().expect("temp dir");
+    git(temp.path(), &["init", "-b", "main"]);
+    std::fs::write(temp.path().join("tracked.txt"), "before\n").expect("fixture");
+    git(temp.path(), &["add", "."]);
+    git(
+        temp.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+    );
+    let mut harness = diff_harness(Arc::new(gui::diff::GitCliDiffSource), temp.path());
+    step_until(&mut harness, "no changes");
+    // When: a tracked file changes on disk, and frames continue (no UI clicks).
+    std::fs::write(temp.path().join("tracked.txt"), "after\n").expect("edit fixture");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        harness.step();
+        if matches!(harness.state().diff().state(&DiffMode::WorkingTree), DiffState::Ready { text } if text.contains("+after"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "periodic diff never picked up the edit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Then: the changed file is rendered automatically.
+    assert!(harness.has_label("tracked.txt"));
+    assert!(harness.has_label("Auto-updating"));
 }

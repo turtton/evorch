@@ -4,8 +4,16 @@
 
 The Diff tab is a read-only review surface inspired by [Crit's code mode](https://crit.md/modes/code):
 
-- Select **Working tree** (index versus working tree) or **Branch vs main**
-  (the merge base with `main` versus `HEAD`); **Refresh** reloads the selected scope.
+- Opening the tab automatically loads **Working tree** (index versus working tree).
+  The selected scope updates every 2 seconds while visible; no scope/Refresh click
+  is needed after edits. **Branch vs main** (merge base with `main` versus `HEAD`)
+  auto-loads when selected. **Refresh** remains an optional immediate reload.
+- Git runs on a worker, with at most one fetch in flight. Hidden tabs do not launch
+  refreshes. The last successful diff stays visible during refreshes, preserving
+  scroll, file collapse, and Unified/Split selection. Failed refreshes keep it and
+  report an error, retrying after 5 seconds. Project changes invalidate both scopes
+  and discard stale worker results; restored snapshots remain pinned until a manual
+  scope/Refresh action returns to live changes.
 - **Unified** shows old/new line-number gutters together. **Split** aligns removed
   lines on the left and added lines on the right, with shared context on both sides.
 - Each file has a collapsible path heading, change status, and addition/deletion counts.
@@ -45,11 +53,14 @@ tooltip, even if the runtime continues working; it never overrides the state dot
 
 ## Regression coverage
 
-`diff_headless` covers colored full-width rows, both line numbers, split alignment,
+`diff_headless` covers automatic initial loading, periodic real-Git updates, hidden-tab
+inactivity, colored full-width rows, both line numbers, split alignment,
 file collapse, narrow toolbar layout, large-document virtualization, and legacy
 loading/empty/error/truncated/plain-text states. Parser unit tests cover multiple
 hunks, additions/deletions, renames, binary/mode changes, quoted UTF-8 paths, and
-incomplete output. Sidebar and question tests cover lifecycle updates, accessible
+incomplete output. Refresh scheduler tests use a controlled clock and gated workers
+to cover intervals, single-flight execution, repository changes, error recovery, and
+snapshot preservation. Sidebar and question tests cover lifecycle updates, accessible
 status dots, dense row geometry, and independent question indicators.
 
 The ignored `capture_review_diff_unified_and_split` test renders both views at

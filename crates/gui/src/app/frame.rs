@@ -31,6 +31,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.external_command_running() && ui.button("Cancel external command").clicked() {
             self.cancel_external_command();
         }
+        self.diff.set_repo_root(self.active_repo_root());
         for event in self.sink.poll() {
             self.apply_loop_event(event);
         }

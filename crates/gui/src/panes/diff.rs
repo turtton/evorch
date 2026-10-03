@@ -40,7 +40,13 @@ impl Row {
     }
 }
 
-/// Render the diff tab and return a clicked fetch request.
+pub(crate) fn selected_mode(ui: &egui::Ui) -> DiffMode {
+    ui.ctx()
+        .data_mut(|data| data.get_temp::<DiffMode>(ui.id().with("selected_mode")))
+        .unwrap_or(DiffMode::WorkingTree)
+}
+
+/// Render the diff tab and return an optional manual fetch request.
 pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
     let mode_id = ui.id().with("selected_mode");
     let view_id = ui.id().with("diff_view");
@@ -66,6 +72,20 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
         if ui.button("Refresh").clicked() {
             requested = Some(mode.clone());
         }
+        ui.label(
+            RichText::new(if diff.is_snapshot() {
+                "Snapshot"
+            } else {
+                "Auto-updating"
+            })
+            .small()
+            .color(palette().TEXT_MUTED),
+        )
+        .on_hover_text(if diff.is_snapshot() {
+            "Restored snapshot. Choose a scope or Refresh to return to live changes."
+        } else {
+            "Changes update automatically every 2 seconds while this tab is visible."
+        });
         ui.separator();
         ui.selectable_value(&mut view, View::Unified, "Unified");
         ui.selectable_value(&mut view, View::Split, "Split");
@@ -75,12 +95,18 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
         data.insert_temp(view_id, view);
     });
     ui.separator();
+    if let Some(error) = diff.refresh_error(&mode) {
+        ui.label(
+            RichText::new(format!("Refresh failed: {error}. Retrying automatically…"))
+                .color(palette().WARNING_FG),
+        );
+    }
     match diff.state(&mode) {
         DiffState::Idle => {
             empty_state(
                 ui,
                 "No diff loaded",
-                "Choose Working tree or Branch vs main.",
+                "Select a project to see its changes automatically.",
                 None,
             );
         }
@@ -88,7 +114,7 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             empty_state(
                 ui,
                 "no changes",
-                "Edit files, then choose Working tree or Branch vs main to refresh.",
+                "Changes appear automatically while this tab is open.",
                 None,
             );
         }

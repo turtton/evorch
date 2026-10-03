@@ -227,7 +227,7 @@ fn empty_monitoring_panes_explain_what_will_appear() {
         (
             "diff-main",
             "No diff loaded",
-            "Choose Working tree or Branch vs main.",
+            "Select a project to see its changes automatically.",
             Some("Working tree"),
         ),
     ] {
@@ -282,7 +282,7 @@ fn empty_diff_keeps_refresh_action_with_guidance() {
     assert!(harness.query_by_label("no changes").is_some());
     assert!(
         harness
-            .query_by_label("Edit files, then choose Working tree or Branch vs main to refresh.")
+            .query_by_label("Changes appear automatically while this tab is open.")
             .is_some()
     );
     assert!(harness.query_by_label("Working tree").is_some());
