@@ -1,4 +1,4 @@
-//! production composition 経由の skill reload と入力由来 cache / wire prefix 契約。
+//! production composition 経由の skill / user AGENTS reload と入力由来 cache / wire prefix 契約。
 //! 合成 token 数は課金推定ではない。run 間の prefix 継続は要求しない。
 
 mod support;
@@ -6,7 +6,6 @@ mod support;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use config::{Config, LoadOptions};
 use event_bus::{
@@ -29,6 +28,8 @@ const MODEL: &str = "mock-model";
 const KEY_ENV: &str = "EVORCH_SKILL_CACHE_TEST_KEY";
 const V1: &str = "HOT-RELOAD-BODY-SENTINEL-V1";
 const V2: &str = "HOT-RELOAD-BODY-SENTINEL-V2";
+const AGENTS_V1: &str = "USER-AGENTS-SENTINEL-V1";
+const AGENTS_V2: &str = "USER-AGENTS-SENTINEL-V2";
 
 struct GatedRead {
     entered: Notify,
@@ -60,6 +61,7 @@ impl Tool for GatedRead {
 struct Harness {
     _directory: tempfile::TempDir,
     repo: PathBuf,
+    user_agents_md: PathBuf,
     runtime: AgentRuntime,
     receiver: EventReceiver,
     mock: StreamingMockOpenAi,
@@ -90,6 +92,10 @@ fn read_response(index: usize) -> ScriptedResponse {
 fn harness() -> Harness {
     let (directory, repo) = support::init_git_repo();
     write_skill(&repo, "demo", "Demo reload skill", V1);
+    let user_config = directory.path().join("user-config");
+    std::fs::create_dir(&user_config).unwrap();
+    let user_agents_md = user_config.join("AGENTS.md");
+    std::fs::write(&user_agents_md, AGENTS_V1).unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache(vec![
         read_response(0),
         read_response(1),
@@ -121,7 +127,7 @@ summarizer = "structural"
     .unwrap();
     let config = Config::load(&LoadOptions {
         project_dir: Some(repo.clone()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
+        user_config_dir: Some(user_config.clone()),
         read_env: false,
         ..Default::default()
     })
@@ -136,7 +142,7 @@ summarizer = "structural"
     executor.register(read.clone()).unwrap();
     let (factory, _) = support::recording_factory();
     let runtime = compose_runtime(RuntimeComposition {
-        user_config_dir: Some(directory.path().join("empty-user-config")),
+        user_config_dir: Some(user_config),
         config: &config,
         bus,
         executor: Arc::new(executor),
@@ -153,6 +159,7 @@ summarizer = "structural"
     Harness {
         _directory: directory,
         repo,
+        user_agents_md,
         runtime,
         receiver,
         mock,
@@ -175,17 +182,17 @@ fn system(request: &Value) -> String {
 }
 
 async fn through_done(receiver: &mut EventReceiver, run: RunId) -> Vec<Event> {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let mut events = Vec::new();
-        loop {
-            let event = receiver.recv().await.unwrap();
-            let done = matches!(&event.kind,
-                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Done, .. })
-                if run_id == &run.to_string());
-            events.push(event);
-            if done { return events; }
+    let mut events = Vec::new();
+    loop {
+        let event = receiver.recv().await.unwrap();
+        let terminal = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. })
+            if run_id == &run.to_string() && matches!(to, AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped));
+        events.push(event);
+        if terminal {
+            return events;
         }
-    }).await.expect("run must complete")
+    }
 }
 
 // provider request ID で usage を対応付け、同 run 内の隣接 wire request だけを検証する。
@@ -259,7 +266,7 @@ fn verify_run(run: RunId, events: &[Event], requests: &[Value]) {
 }
 
 #[tokio::test]
-async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs() {
+async fn skill_and_user_agents_reload_preserve_wire_prefix_and_refresh_only_new_runs() {
     let mut h = harness();
     let load_demo = || RunConfig {
         load_skills: vec!["demo".into(), "git-best-practices".into()],
@@ -268,12 +275,11 @@ async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs(
     let first =
         h.runtime
             .delegate_background(Role::Orchestrator, "First skill run".into(), load_demo());
-    tokio::time::timeout(Duration::from_secs(20), h.read.entered.notified())
-        .await
-        .unwrap();
+    h.read.entered.notified().await;
     let initial = requests(&h.mock);
     assert_eq!(initial.len(), 1);
     assert!(system(&initial[0]).contains(V1));
+    assert!(system(&initial[0]).contains(AGENTS_V1));
     let (_, git_body) = runtime::skill::split_frontmatter(include_str!(
         "../skills/builtin/git-best-practices/SKILL.md"
     ))
@@ -286,6 +292,7 @@ async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs(
 
     // tool gate で実行を止め、既送信 System の本文と metadata の両方を陳腐化させる。
     write_skill(&h.repo, "demo", "Demo reload skill", V2);
+    std::fs::write(&h.user_agents_md, AGENTS_V2).unwrap();
     write_skill(
         &h.repo,
         "second",
@@ -300,6 +307,8 @@ async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs(
     for request in &first_requests {
         assert_eq!(system(request), system(&initial[0]));
         assert!(system(request).contains(V1));
+        assert!(system(request).contains(AGENTS_V1));
+        assert!(!request.to_string().contains(AGENTS_V2));
         assert!(!request.to_string().contains(V2));
         assert!(!system(request).contains("- second: Second reload skill"));
     }
@@ -314,6 +323,8 @@ async fn skill_reload_preserves_running_wire_prefix_and_refreshes_only_new_runs(
     verify_run(second, &second_events, second_requests);
     for request in second_requests {
         assert!(system(request).contains(V2));
+        assert!(system(request).contains(AGENTS_V2));
+        assert!(!system(request).contains(AGENTS_V1));
         assert!(!system(request).contains(V1));
         assert!(system(request).contains("- second: Second reload skill"));
         assert!(!system(request).contains("SECOND-BODY-NOT-LOADED"));

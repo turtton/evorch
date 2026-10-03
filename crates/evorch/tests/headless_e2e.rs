@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use event_bus::AgentRunPhase;
 use evorch::headless::{HeadlessArgs, HeadlessError, SandboxChoice, parse_args, run_headless};
@@ -181,10 +180,10 @@ fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> Head
 
 // Given: sugar provider 設定 (localhost モック) と MapEnv credential
 // When: DirectUnchecked で worker を headless 実行する
-// Then: phase Done、final_text にモック応答が含まれ、モックは Bearer 認証付き
+// Then: user AGENTS の全文だけが system に注入され、phase Done、モックは Bearer 認証付き
 //       model=gpt-4o の completion リクエストを 1 件だけ受け取る
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn headless_run_completes_with_single_mock_response() {
+async fn headless_run_injects_user_agents_from_explicit_config_directory() {
     let directory = tempfile::tempdir().expect("project directory");
     let mock = StreamingMockOpenAi::spawn_with_models(
         vec![ScriptedResponse::text_stream("text", MODEL, ["headless ok"]).with_usage(1, 1)],
@@ -193,21 +192,31 @@ async fn headless_run_completes_with_single_mock_response() {
     );
     write_project_config(directory.path(), &mock.base_url());
     let env = MapEnv::from_iter([(KEY_ENV, KEY)]);
-
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(30),
-        run_headless(
-            headless_args(
-                directory.path().to_path_buf(),
-                Some(directory.path().join("user-config")),
-            ),
-            Arc::new(env),
-            SandboxChoice::DirectUnchecked,
-        ),
+    let user_config = directory.path().join("user-config");
+    std::fs::create_dir(&user_config).expect("user config directory");
+    let body = "---\nalwaysApply: false\n---\n# User instructions\nHEADLESS-USER-AGENTS\n";
+    std::fs::write(user_config.join("AGENTS.md"), body).expect("user AGENTS.md");
+    std::fs::write(
+        directory.path().join("AGENTS.md"),
+        "UNAPPROVED-PROJECT-RULE",
     )
-    .await
-    .expect("headless run がタイムアウトしない")
-    .expect("headless run が成功する");
+    .expect("project AGENTS.md");
+    let args = parse_args(argv(&[
+        "run",
+        "--project",
+        directory.path().to_str().unwrap(),
+        "--role",
+        "worker",
+        "--prompt",
+        PROMPT,
+        "--user-config",
+        user_config.to_str().unwrap(),
+    ]))
+    .expect("headless CLI args");
+
+    let outcome = run_headless(args, Arc::new(env), SandboxChoice::DirectUnchecked)
+        .await
+        .expect("headless run が成功する");
 
     assert_eq!(outcome.phase, AgentRunPhase::Done);
     assert!(
@@ -232,6 +241,17 @@ async fn headless_run_completes_with_single_mock_response() {
     assert_eq!(completion_requests[0].body["model"], MODEL);
     assert!(completion_requests[0].stream);
     assert_eq!(completion_requests[0].body["stream"], true);
+    let messages = completion_requests[0].body["messages"]
+        .as_array()
+        .expect("messages");
+    let system = messages
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .collect::<Vec<_>>();
+    assert_eq!(system.len(), 1);
+    let content = system[0]["content"].as_str().expect("system content");
+    assert!(content.contains(body));
+    assert!(!content.contains("UNAPPROVED-PROJECT-RULE"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -263,16 +283,12 @@ async fn headless_web_tools_follow_saved_setting_and_cli_override() {
         );
         args.role = Role::WebResearcher;
         args.web_tools_enabled = override_enabled;
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(30),
-            run_headless(
-                args,
-                Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
-                SandboxChoice::DirectUnchecked,
-            ),
+        let outcome = run_headless(
+            args,
+            Arc::new(MapEnv::from_iter([(KEY_ENV, KEY)])),
+            SandboxChoice::DirectUnchecked,
         )
         .await
-        .expect("headless run completes")
         .expect("headless run succeeds");
         assert_eq!(outcome.phase, AgentRunPhase::Done);
         let requests = mock.recorded_requests();

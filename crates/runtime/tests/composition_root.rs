@@ -110,21 +110,21 @@ fn composition<'a>(
 
 // Given: provider を持たない既定 Config と固定 ScriptedModel
 // When: compose_runtime で runtime を一度だけ構築する
-// Then: provider 構成を要求せず Fixed identity の空 runtime が得られる
+// Then: provider 構成を要求せず Fixed identity の runtime が得られ、user AGENTS を注入する
 #[tokio::test]
 async fn fixed_source_ignores_missing_providers() {
     let config = Config::default();
     let bus = Arc::new(EventBus::new(32));
-    let composed = compose_runtime(composition(
-        &config,
-        bus,
-        ModelSource::Fixed(Arc::new(ScriptedModel::new([Ok(text_response(
-            "fixed done",
-            providers::FinishReason::Stop,
-        ))]))),
-        None,
-    ))
-    .expect("fixed model composes without providers");
+    let directory = tempfile::tempdir().expect("user config directory");
+    let body = "FIXED-MODEL-USER-AGENTS";
+    std::fs::write(directory.path().join("AGENTS.md"), body).expect("user AGENTS.md");
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        "fixed done",
+        providers::FinishReason::Stop,
+    ))]));
+    let mut input = composition(&config, bus, ModelSource::Fixed(model.clone()), None);
+    input.user_config_dir = Some(directory.path().to_path_buf());
+    let composed = compose_runtime(input).expect("fixed model composes without providers");
 
     assert!(matches!(composed.model_identity, ModelIdentity::Fixed));
     assert!(composed.runtime.list_agents().is_empty());
@@ -138,6 +138,14 @@ async fn fixed_source_ignores_missing_providers() {
         composed.runtime.run_result(run),
         Ok(Some("fixed done".to_string()))
     );
+    let observed = model.observed().await;
+    let system = observed[0]
+        .iter()
+        .filter(|message| message.role == providers::Role::System)
+        .collect::<Vec<_>>();
+    assert_eq!(system.len(), 1);
+    assert!(system[0].content.iter().any(|block| matches!(block,
+        providers::ContentBlock::Text { text } if text.contains(body))));
 }
 
 // Given: provider を持たない既定 Config と Configured source

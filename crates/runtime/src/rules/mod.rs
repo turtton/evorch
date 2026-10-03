@@ -196,4 +196,140 @@ mod tests {
         assert!(!output.contains("<system-reminder>"));
         assert!(output.contains("<\\system-reminder>"));
     }
+
+    // Given: frontmatter 風の user AGENTS と未承認 project / When: startup / Then: user の全文だけを含む
+    #[test]
+    fn user_agents_is_plain_markdown_even_for_unapproved_projects() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let agents = tmp.path().join("user/AGENTS.md");
+        let project = tmp.path().join("project");
+        let body =
+            "---\nalwaysApply: false\nglobs: '['\n---\n# 共通ルール\nKeep this whole document.\n";
+        write(&agents, body);
+        write(&project.join("AGENTS.md"), "project-secret");
+        let source = RulesSource::new(
+            ProjectTrust::Unapproved,
+            settings(),
+            None,
+            Some(project.clone()),
+            Some(agents),
+        );
+
+        let snapshot =
+            startup_snapshot(&source, Some(&project), None, 0).expect("user AGENTS がある");
+
+        assert!(snapshot.contains(body));
+        assert!(!snapshot.contains("project-secret"));
+        assert!(!snapshot.contains("rules disabled:"));
+    }
+
+    // Given: None・欠損・ディレクトリ / When: startup / Then: marker なしで静黙スキップ
+    #[test]
+    fn absent_or_non_file_user_agents_is_silently_skipped() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        for path in [
+            None,
+            Some(tmp.path().join("AGENTS.md")),
+            Some(tmp.path().to_path_buf()),
+        ] {
+            let source = RulesSource::new(ProjectTrust::Unapproved, settings(), None, None, path);
+
+            assert_eq!(startup_snapshot(&source, None, None, 0), None);
+        }
+    }
+
+    // Given: UTF-8 として読めない user AGENTS / When: startup / Then: disabled marker を返し継続
+    #[test]
+    fn unreadable_user_agents_keeps_other_rules_and_emits_disabled_marker() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let agents = tmp.path().join("AGENTS.md");
+        std::fs::write(&agents, [0xff]).expect("不正 UTF-8 を書ける");
+        let user_rules = tmp.path().join("rules");
+        write(
+            &user_rules.join("always.md"),
+            "---\nalwaysApply: true\n---\nvalid-user-rule",
+        );
+        let source = RulesSource::new(
+            ProjectTrust::Unapproved,
+            settings(),
+            Some(user_rules),
+            None,
+            Some(agents),
+        );
+
+        let snapshot = startup_snapshot(&source, None, None, 0).expect("disabled marker がある");
+
+        assert!(snapshot.contains("[rules disabled:"));
+        assert!(snapshot.contains("AGENTS.md"));
+        assert!(snapshot.contains("valid-user-rule"));
+    }
+
+    // Given: user config 外を指す symlink / When: canonical path を検証 / Then: 本文を出さず disabled marker
+    #[cfg(unix)]
+    #[test]
+    fn user_agents_canonical_path_must_stay_inside_config_directory() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let config = tmp.path().join("config");
+        std::fs::create_dir(&config).expect("config directory");
+        let outside = tmp.path().join("outside.md");
+        write(&outside, "outside-secret");
+        let agents = config.join("AGENTS.md");
+        std::os::unix::fs::symlink(&outside, &agents).expect("symlink");
+        let source = RulesSource::new(
+            ProjectTrust::Unapproved,
+            settings(),
+            None,
+            None,
+            Some(agents),
+        );
+
+        let snapshot = startup_snapshot(&source, None, None, 0).expect("disabled marker がある");
+
+        assert!(snapshot.contains("[rules disabled:"));
+        assert!(!snapshot.contains("outside-secret"));
+    }
+
+    // Given: user rule・project・user AGENTS / When: startup / Then: user AGENTS は最後、狭い予算でも優先
+    #[test]
+    fn user_agents_is_last_and_survives_project_budget_omission() {
+        let tmp = tempfile::tempdir().expect("一時ディレクトリを作れる");
+        let user_rules = tmp.path().join("user/rules");
+        let project = tmp.path().join("project");
+        let agents = tmp.path().join("user/AGENTS.md");
+        write(
+            &user_rules.join("always.md"),
+            "---\nalwaysApply: true\n---\nuser-first",
+        );
+        write(&project.join("AGENTS.md"), &"project-middle ".repeat(100));
+        write(&agents, "user-agents-last");
+        for budget in [65_536, 250] {
+            let source = RulesSource::new(
+                ProjectTrust::Approved,
+                RulesSettings {
+                    max_injection_bytes: budget,
+                    ..settings()
+                },
+                Some(user_rules.clone()),
+                Some(project.clone()),
+                Some(agents.clone()),
+            );
+
+            let snapshot = startup_snapshot(&source, Some(&project), None, 0).expect("規則がある");
+
+            assert!(snapshot.contains("user-agents-last"));
+            if budget == 65_536 {
+                assert!(
+                    snapshot.find("user-first").unwrap() < snapshot.find("project-middle").unwrap()
+                );
+                assert!(
+                    snapshot.find("project-middle").unwrap()
+                        < snapshot.find("user-agents-last").unwrap()
+                );
+            } else {
+                assert!(!snapshot.contains("project-middle"));
+                assert!(snapshot.contains("[rules omitted: AGENTS.md;"));
+                assert!(!snapshot.contains("[rules truncated:"));
+            }
+        }
+    }
 }
