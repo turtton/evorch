@@ -2,7 +2,10 @@
 
 pub mod bus;
 mod fencing;
-pub use fencing::{MutationCheck, MutationGuard, MutationGuardCheck, MutationValidator};
+pub use fencing::{
+    MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
+    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
+};
 pub mod event;
 pub mod orchestrator;
 pub mod ownership;

@@ -104,10 +104,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.ownership_action_error = None;
             }
             if let Some(thread) = thread {
-                let result =
-                    probe_ownership(&host, &thread, self.readonly_threads.contains(&thread));
                 let now = Instant::now();
-                self.ownership_status.observe(&thread, result, now);
+                self.ownership_status.refresh(
+                    host.clone(),
+                    &thread,
+                    self.readonly_threads.contains(&thread),
+                    ui.ctx(),
+                    now,
+                );
                 self.ownership_controls_ui(ui, &host, &thread, now);
             }
         });
@@ -164,6 +168,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         operation: &'static str,
         result: Result<T, RegistryError>,
     ) {
+        self.ownership_status.invalidate();
         self.ownership_action_error = result.err().map(|error| OwnershipActionError {
             operation,
             detail: error.to_string(),
@@ -226,7 +231,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 }
 
-fn probe_ownership(
+pub(super) fn probe_ownership(
     host: &OwnerHost,
     thread: &str,
     readonly: bool,
@@ -268,6 +273,12 @@ fn ownership_status_ui(ui: &mut egui::Ui, status: &OwnershipStatus, now: Instant
         tooltip.push_str("\n操作権限の確認を再試行中...\n");
         tooltip.push_str(&failure.detail);
     }
+    let access = if status.stale(now) {
+        tooltip.push_str("\n表示は前回の確認結果です。操作時に権限を再確認します。");
+        format!("{} (stale)", display.access)
+    } else {
+        display.access.to_owned()
+    };
     match &status.snapshot {
         Some(OwnershipSnapshot::Owned { owner, .. }) => {
             ui.label(format!(
@@ -284,9 +295,9 @@ fn ownership_status_ui(ui: &mut egui::Ui, status: &OwnershipStatus, now: Instant
         None => {}
     }
     let access = if display.warning {
-        egui::RichText::new(format!("{} ⚠", display.access)).color(palette().WARNING_FG)
+        egui::RichText::new(format!("{access} ⚠")).color(palette().WARNING_FG)
     } else {
-        egui::RichText::new(display.access)
+        egui::RichText::new(access)
     };
     ui.label(access).on_hover_text(tooltip);
 }

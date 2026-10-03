@@ -304,6 +304,35 @@ fn readonly_mutation_guard_holds_the_generation_snapshot_until_dropped() {
     ));
 }
 
+#[test]
+fn nonblocking_mutation_guard_distinguishes_contention_from_fencing() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("owners.db");
+    let original = owner();
+    let mut registry = Registry::open(&path).unwrap();
+    registry.start(&original).unwrap();
+    let permit = OwnerPermit {
+        registry_path: path.clone(),
+        thread_id: original.thread_id.clone(),
+        lease: original.lease.clone(),
+        run_id: None,
+    };
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(permit.try_mutation_guard().unwrap().is_none());
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(permit.try_mutation_guard().unwrap().is_some());
+    registry
+        .update("thread-1", |owner| {
+            owner.claim(&original.lease, "new", 200, 50)
+        })
+        .unwrap();
+    assert!(matches!(
+        permit.try_mutation_guard(),
+        Err(RegistryError::Ownership(OwnershipError::Fenced))
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn host_probes_observe_turns_and_handoff_after_reusing_the_reader() {
