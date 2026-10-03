@@ -119,10 +119,6 @@ pub fn composer_strip(
                     }
                 });
             }
-            if phase == Some(ThreadRunPhase::Running) {
-                ui.label(egui::RichText::new("実行中の送信はキューに追加され、通常は回答完了後に届きます")
-                    .small().color(palette().TEXT_MUTED));
-            }
             images::render(ui, model);
             let target = match model.resolved_model.as_deref() {
                 Some(resolved) => format!("{} · {resolved}", model.role.label()),
@@ -362,6 +358,20 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         );
+    }
+
+    #[test]
+    fn running_composer_omits_queue_explanation() {
+        for input in ["", "follow-up draft"] {
+            let mut h = harness(input);
+            h.state_mut().phase = Some(ThreadRunPhase::Running);
+            h.run();
+            assert!(
+                h.query_by_label("実行中の送信はキューに追加され、通常は回答完了後に届きます")
+                    .is_none()
+            );
+            h.get_by_label("Stop");
+        }
     }
 
     #[test]
