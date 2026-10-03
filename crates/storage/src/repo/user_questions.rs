@@ -56,8 +56,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<UserQuestion>, StorageE
             |row| row.get(0),
         )
         .optional()?;
-    json.map(|s| serde_json::from_str(&s).map_err(|e| invalid(&e.to_string())))
-        .transpose()
+    json.map(|s| hydrate(conn, &s)).transpose()
 }
 
 pub fn answer(conn: &Connection, id: &str, answer: &str) -> Result<(), StorageError> {
@@ -157,8 +156,20 @@ pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
 fn list(conn: &Connection, sql: &str, arg: &str) -> Result<Vec<UserQuestion>, StorageError> {
     let mut statement = conn.prepare(sql)?;
     let rows = statement.query_map([arg], |row| row.get::<_, String>(0))?;
-    rows.map(|s| serde_json::from_str(&s?).map_err(|e| invalid(&e.to_string())))
-        .collect()
+    rows.map(|s| hydrate(conn, &s?)).collect()
+}
+
+fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageError> {
+    let mut question: UserQuestion =
+        serde_json::from_str(payload).map_err(|e| invalid(&e.to_string()))?;
+    // Links, not a stale event/payload projection, are canonical consumer routing.
+    // Insertion order retains the continuation path, including across restarts.
+    let mut statement =
+        conn.prepare("SELECT run_id FROM user_question_links WHERE question_id=?1 ORDER BY rowid")?;
+    question.recipient_run_ids = statement
+        .query_map([&question.id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(question)
 }
 fn invalid(message: &str) -> StorageError {
     StorageError::Serialization(message.into())

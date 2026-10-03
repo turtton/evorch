@@ -18,6 +18,7 @@ fn question(id: u64) -> UserQuestion {
         run_id: format!("run-{id}"),
         root_run_id: format!("run-{id}"),
         root_name: "chat:Worker:thread".into(),
+        recipient_run_ids: Vec::new(),
         title: "Choose scope".into(),
         options: vec!["A".into(), "B".into()],
         blocking: true,
@@ -147,7 +148,10 @@ fn inheritance_is_explicit_preserves_provenance_and_cannot_read_unrelated_questi
         .unwrap();
     assert_eq!(
         database.user_questions_for_run("run-3").unwrap(),
-        vec![original.clone()]
+        vec![UserQuestion {
+            recipient_run_ids: vec!["run-3".into()],
+            ..original.clone()
+        }]
     );
     assert_eq!(
         database.user_questions_for_run("run-2").unwrap(),
@@ -212,4 +216,76 @@ fn reserved_continuation_id_survives_restart_before_run_registration() {
     drop(storage);
     let reopened = Database::open(&config).unwrap();
     assert_eq!(reopened.max_persisted_run_id().unwrap(), 1000);
+}
+
+#[test]
+fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
+    let (_dir, storage, database, config) = fixture();
+    let mut original = question(1);
+    // A stale/forged payload projection must never authorize an unrelated thread.
+    original.recipient_run_ids = vec!["run-999".into()];
+    storage.handle().create_user_question(&original).unwrap();
+    assert!(
+        database
+            .user_question(&original.id)
+            .unwrap()
+            .unwrap()
+            .recipient_run_ids
+            .is_empty()
+    );
+    for (source, target) in [
+        ("run-1", "run-20"),
+        ("run-20", "run-3"),
+        ("run-3", "run-20"),
+    ] {
+        storage
+            .handle()
+            .bind_user_questions(source, target, std::slice::from_ref(&original.id))
+            .unwrap();
+    }
+    original.recipient_run_ids = vec!["run-20".into(), "run-3".into()];
+    drop(database);
+    drop(storage);
+    let storage = Storage::open(config.clone()).unwrap();
+    let reopened = Database::open(&config).unwrap();
+    assert_eq!(
+        reopened.user_question(&original.id).unwrap(),
+        Some(original.clone())
+    );
+    assert_eq!(
+        reopened.pending_user_questions().unwrap(),
+        vec![original.clone()]
+    );
+    for run in ["run-1", "run-20", "run-3"] {
+        assert_eq!(
+            reopened.user_questions_for_run(run).unwrap(),
+            vec![original.clone()]
+        );
+    }
+    assert!(
+        reopened
+            .user_questions_for_run("run-999")
+            .unwrap()
+            .is_empty()
+    );
+    storage
+        .handle()
+        .answer_user_question(&original.id, "A")
+        .unwrap();
+    // answer persists a projection, which a later link must supersede as well.
+    storage
+        .handle()
+        .bind_user_questions("run-3", "run-4", std::slice::from_ref(&original.id))
+        .unwrap();
+    original.answer = Some("A".into());
+    original.recipient_run_ids.push("run-4".into());
+    assert_eq!(
+        reopened.user_question(&original.id).unwrap(),
+        Some(original.clone())
+    );
+    assert_eq!(
+        reopened.user_questions_for_run("run-4").unwrap(),
+        vec![original]
+    );
+    assert!(reopened.pending_user_questions().unwrap().is_empty());
 }

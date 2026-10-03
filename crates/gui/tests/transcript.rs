@@ -207,6 +207,7 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
         run_id: "child".into(),
         root_run_id: "root".into(),
         root_name: "orchestrator".into(),
+        recipient_run_ids: Vec::new(),
         title: "Which API?".into(),
         options: Vec::new(),
         blocking: true,

@@ -339,6 +339,111 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
 }
 
 #[tokio::test]
+async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalation() {
+    let call = |id: &str, name: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
+    };
+    let mut harness = harness(
+        vec![
+            call("ask", "ask_user", json!({"title":"Required scope"})),
+            call(
+                "handoff",
+                "escalate",
+                json!({"original_request":"Complete work", "escalation_reason":"Need coordination"}),
+            ),
+            call("early", "finish", json!({"result":"premature"})),
+            text_response("Waiting for scope"),
+            call("finish", "finish", json!({"result":"Applied scope A"})),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("questions.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let source =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    let mut events = Vec::new();
+    let recipient = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let event = harness.receiver.recv().await.unwrap();
+            let target = match &event.kind {
+                EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                    new_run_id, ..
+                }) => Some(RunId::new(
+                    new_run_id.strip_prefix("run-").unwrap().parse().unwrap(),
+                )),
+                _ => None,
+            };
+            events.push(event);
+            if let Some(target) = target {
+                break target;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    events.extend(through_phase(&mut harness.receiver, recipient, AgentRunPhase::Waiting).await);
+    let question = harness.runtime.user_answers(recipient).unwrap().remove(0);
+    harness
+        .runtime
+        .answer_user_question(&question.id, "A")
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, recipient, AgentRunPhase::Done).await);
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect::<Vec<_>>();
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(usage.len(), 5);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    assert_eq!(usage[0].0, &source.to_string());
+    assert_eq!(usage[2].0, &recipient.to_string());
+    assert_ne!(
+        requests[1]["tools"], requests[2]["tools"],
+        "escalation is a new role/run boundary"
+    );
+    // Assert the wire prefix independently of the input-derived mock token cache.
+    // The new Orchestrator has a fresh memo; no source-prefix reuse is promised.
+    for (previous, next) in [(0, 1), (2, 3), (3, 4)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+    assert!(requests[2].to_string().contains(&question.id));
+    assert!(!requests[2].to_string().contains("Answer: A"));
+    assert!(requests[4].to_string().contains("Answer: A"));
+    assert_eq!(
+        requests[4].to_string().matches("[user-answer id=").count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn interrupted_tool_recovery_appends_error_context_and_preserves_the_wire_prefix() {
     interrupted_tool_recovery("Explain the interrupted result", false).await;
 }

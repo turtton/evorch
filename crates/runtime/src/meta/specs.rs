@@ -182,7 +182,7 @@ pub(super) fn finish(name: &str) -> ToolSpec {
 pub(super) fn escalate(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "End a Direct run with a persisted handoff memo for an Orchestrator. Include the original request, concrete reason for escalation and enough findings/workspace state for independent continuation. Returns {escalated:true, source_run_id} after recording the memo. Missing/empty required text or unknown fields fails and leaves the run active; source_run_id is derived by runtime and must not be supplied.",
+        crate::escalation::prompt::TOOL_DESCRIPTION,
         json!({
             "original_request":{"type":"string","minLength":1},
             "escalation_reason":{"type":"string","minLength":1},

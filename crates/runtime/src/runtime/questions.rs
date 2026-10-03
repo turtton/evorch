@@ -40,6 +40,7 @@ impl AgentRuntime {
             run_id: run.to_string(),
             root_run_id: root.to_string(),
             root_name: name,
+            recipient_run_ids: Vec::new(),
             title,
             options,
             blocking,

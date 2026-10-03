@@ -1080,6 +1080,22 @@ impl AgentRuntime {
         // source question/answer therefore still needs delivery to this root.
         // Persist the explicit recipient before any provider admission or spawn.
         self.inherit_user_questions(source_run_id, run_id, &[])?;
+        let questions = self
+            .shared
+            .run_store
+            .get()
+            .map(|store| store.user_questions(run_id))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        // Publish durable routing without changing the ID or requester provenance.
+        for question in &questions {
+            self.shared
+                .bus
+                .emit(Event::new(event_bus::ToolEvent::UserQuestionUpdated {
+                    question: question.clone(),
+                }));
+        }
         // Detach before public terminal state permits a new incarnation of
         // source_run_id. The adopter must never clear the source entry later.
         if let Some(owned) = worktree.as_ref()
@@ -1100,7 +1116,7 @@ impl AgentRuntime {
             run_id,
             None,
             Role::Orchestrator,
-            crate::escalation::prompt::render_escalation_prompt(&memo),
+            crate::escalation::prompt::render_escalation_prompt(&memo, &questions),
             config,
             RunContinuation::Handoff(RunHandoff {
                 source_run_id,

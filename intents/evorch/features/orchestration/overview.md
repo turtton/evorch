@@ -100,6 +100,10 @@ Intent Gate の判定ロジックを prompt 内固定文字列から型付きポ
 ## v0.2 確定（PR #76）: direct escalation handoff
 
 - Worker 専用 meta-op `escalate` が `EscalationMemo`（source_run_id / original_request / findings / files_touched / blockers / workspace_state / escalation_reason / suggested_next）を凍結・記録し、旧 run を `Done("escalated")` へ terminal 化。`OwnedWorktree` は値移動で新規 Orchestrator root run（parent None、ADR 0022 準拠・child 経路不使用）へ排他譲渡し、memo を初期 context として起動する。`EscalationRequested`（source_run_id/new_run_id/memo summary）を LifecycleEvent として発行
+- **継承質問の担当移管（追加契約）**: escalation で継承する未回答ユーザー質問は、同一 question ID と元 requester provenance を保持し、新 Orchestrator thread に表示する。既存 ID への回答は current recipient / ownership を検証し、正当な継承先 thread だけを許可する。無関係 thread からの回答は拒否する。元 thread には「質問は継承先に引き継ぎ済み」と移動先を表示し、再質問による新 ID は作らない。
+- **Orchestrator 開始時の案内（追加契約）**: 継承した未回答質問を初期 context で明示し、`ask_user` による新 ID の再作成ではなく、継承先 thread で既存質問へ回答するよう案内する。blocking question は回答を観測してから `finish` する。storage 再起動復元と複数 continuation でも ID・provenance・配送先の追跡を維持する。
+- **handoff メモの内容（追加契約）**: 既存の構造化 memo に加えて、「ユーザーと合意した制約・完了条件」「採用/却下した案と理由」「未確認事項」を記載する。元質問の ID と引き継いだ担当を参照し、未確認事項を合意済みとして扱わない。
+- 追加契約の受入条件は [Harness reliability improvements](../../../../docs/harness-runtime-improvements.md#escalation-question-inheritance-acceptance) を参照する。PR #76 の完了済み [packet](../../../../.intent-cli/issues/v02-direct-escalation-handoff/packet.yaml) は当時の実装記録として保持し、本追加契約で上書きしない。
 - 安全網: runtime per-run detector が連続 edit 失敗（既定 3）・同一ファイル反復書き換え（既定 5）・tool call 閾値（既定 200）で観測専用 `EscalationProposed`（latch 1 回、`EscalationSettings` で調整可能）を発行。自動昇格・履歴注入は行わない
 - feasibility 確定: 実行中 tool は run 内逐次実行により構造的に in-flight 不在（batch 先行完了・後続不実行、abort 不導入）。Shared mode は逐次保証、Isolated は所有権 move。escalated run は run_result == None（契約としてテスト固定）
 - follow-up 候補: EscalationSettings の config crate 配線、GUI での escalation event 描画、handoff 後の未 commit 変更の child run 継承方針、memo store の上限/redaction 方針

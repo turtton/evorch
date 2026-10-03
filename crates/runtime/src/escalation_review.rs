@@ -1000,6 +1000,7 @@ mod tests {
             run_id: "run-81".into(),
             root_run_id: "run-81".into(),
             root_name: "Orchestrator".into(),
+            recipient_run_ids: Vec::new(),
             title: "May validation write temporary files?".into(),
             options: vec![],
             blocking: true,
