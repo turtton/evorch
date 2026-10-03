@@ -66,12 +66,35 @@ wiremock = "0.6"
 # panic messages keep file:line for OUR code (dep frames keep symbols only).
 # The main `ci` job forces CARGO_PROFILE_DEV_DEBUG=0 / CARGO_PROFILE_TEST_DEBUG=0
 # (env overrides this manifest); other CI jobs (offscreen-gate, browser-e2e)
-# pick up this slimmer profile, which only reduces their disk/link load.
+# pick up this slimmer profile to reduce their disk/link load.
 # Tradeoff: variable inspection in a debugger needs the escape-hatch profile below.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+debug = false
+
+# Font parsing/shaping and software rasterization dominate unoptimized GUI
+# tests and evidence capture. Level 1 speeds these hot paths without optimizing
+# the entire dependency graph. The test profile inherits these dev overrides.
+[profile.dev.package.epaint]
+opt-level = 1
+debug = false
+
+[profile.dev.package.harfrust]
+opt-level = 1
+debug = false
+
+[profile.dev.package.skrifa]
+opt-level = 1
+debug = false
+
+[profile.dev.package.read-fonts]
+opt-level = 1
+debug = false
+
+[profile.dev.package.vello_cpu]
+opt-level = 1
 debug = false
 
 # Escape hatch for debugger sessions (gdb/lldb with variable inspection):
@@ -85,4 +108,26 @@ inherits = "dev"
 debug = true
 
 [profile.debugging.package."*"]
+debug = true
+
+# Named overrides take precedence over "*" and are inherited from dev too.
+# Restore unoptimized code and full debuginfo for debugger variable inspection.
+[profile.debugging.package.epaint]
+opt-level = 0
+debug = true
+
+[profile.debugging.package.harfrust]
+opt-level = 0
+debug = true
+
+[profile.debugging.package.skrifa]
+opt-level = 0
+debug = true
+
+[profile.debugging.package.read-fonts]
+opt-level = 0
+debug = true
+
+[profile.debugging.package.vello_cpu]
+opt-level = 0
 debug = true
