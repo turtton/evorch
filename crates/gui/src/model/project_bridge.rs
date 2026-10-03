@@ -55,6 +55,7 @@ mod tests {
             workspace: Some(WorkspaceInspection {
                 mode: WorkspaceMode::Isolated,
                 branch: Some("evorch/task/run-1".into()),
+                active_root: worktree_path.clone(),
                 worktree_path,
                 merge_mode: MergeMode::Branch,
             }),

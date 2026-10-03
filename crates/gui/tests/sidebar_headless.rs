@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 #[path = "sidebar/project_add.rs"]
 mod project_add;
+#[path = "sidebar/workspace_visibility.rs"]
+mod workspace_visibility;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -61,6 +63,7 @@ fn inspection(run_id: u64, branch: &str, worktree_path: std::path::PathBuf) -> A
         workspace: Some(WorkspaceInspection {
             mode: WorkspaceMode::Isolated,
             branch: Some(branch.into()),
+            active_root: Some(worktree_path.clone()),
             worktree_path: Some(worktree_path),
             merge_mode: MergeMode::Branch,
         }),
