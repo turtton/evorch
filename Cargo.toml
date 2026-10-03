@@ -74,28 +74,8 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Font parsing/shaping and software rasterization dominate unoptimized GUI
-# tests and evidence capture. Level 1 speeds these hot paths without optimizing
-# the entire dependency graph. The test profile inherits these dev overrides.
-[profile.dev.package.epaint]
-opt-level = 1
-debug = false
-
-[profile.dev.package.harfrust]
-opt-level = 1
-debug = false
-
-[profile.dev.package.skrifa]
-opt-level = 1
-debug = false
-
-[profile.dev.package.read-fonts]
-opt-level = 1
-debug = false
-
-[profile.dev.package.vello_cpu]
-opt-level = 1
-debug = false
+# Named GUI dependency overrides live in .cargo/config.toml so dependency
+# caches include their optimization settings in the cache key.
 
 # Escape hatch for debugger sessions (gdb/lldb with variable inspection):
 #   cargo build --profile debugging
@@ -108,26 +88,4 @@ inherits = "dev"
 debug = true
 
 [profile.debugging.package."*"]
-debug = true
-
-# Named overrides take precedence over "*" and are inherited from dev too.
-# Restore unoptimized code and full debuginfo for debugger variable inspection.
-[profile.debugging.package.epaint]
-opt-level = 0
-debug = true
-
-[profile.debugging.package.harfrust]
-opt-level = 0
-debug = true
-
-[profile.debugging.package.skrifa]
-opt-level = 0
-debug = true
-
-[profile.debugging.package.read-fonts]
-opt-level = 0
-debug = true
-
-[profile.debugging.package.vello_cpu]
-opt-level = 0
 debug = true
