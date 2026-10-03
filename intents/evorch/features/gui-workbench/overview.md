@@ -280,3 +280,15 @@ GUI 複数起動時の連携は ADR 0024 に従う。GUI は thread へ attach �
 
 - ユーザー実機で shell tool が効いていない原因は、現在の GUI プロセスが旧バイナリ／未再起動の可能性。再ビルド済みバイナリで `cargo run -p gui --bin evorch-gui` から起動して shell tool で `pwd && ls -la` を実行して確認する必要がある。
 - 413 Payload Too Large は grep の制限で緩和したが、会話履歴全体の蓄積は runtime/compose 側のコンテキスト管理で別途対象とする必要がある。
+
+## escalation 継承質問の表示・回答契約
+
+[orchestration の追加契約](../orchestration/overview.md#v02-確定pr-76-direct-escalation-handoff) と [ADR 0027](../../decisions/0027-restore-contract.md) に従い、質問の表示先と回答認可を現在の担当に一致させる。
+
+- 継承した未回答ユーザー質問は、新 Orchestrator thread に元 question ID・requester provenance のまま表示する。元 requester は出所として保持し、現在の回答先を元 thread に固定する根拠にはしない。
+- 既存 ID への回答は current recipient / ownership を検証し、正当な継承先 thread からのみ受理する。無関係 thread からの回答は拒否する。回答によって tool 権限を増やさない。
+- 元 thread には「質問は継承先に引き継ぎ済み」と移動先を表示する。元 thread での再質問や新 ID 作成を解決策にしない。
+- Orchestrator 開始時に継承未回答質問を明示し、新 ID で再 ask せず、既存質問に回答するよう案内する。blocking question の回答観測後に finish できる契約を維持する。
+- storage 再起動復元・複数 continuation でも、同一 ID・provenance と現在の担当の追跡を維持する。既存の event fence を緩めず、回答の storage acknowledgement と現在の ownership に基づいて表示を更新する。
+
+受入条件は [Harness reliability improvements](../../../../docs/harness-runtime-improvements.md#escalation-question-inheritance-acceptance) を参照する。

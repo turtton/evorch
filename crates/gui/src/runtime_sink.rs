@@ -354,22 +354,26 @@ impl RuntimeCommandSink {
                 let chat_role = [Role::Worker, Role::Orchestrator]
                     .into_iter()
                     .find(|role| question.root_name == format!("chat:{}:{thread_id}", role.name()));
-                let bound_goal = self
+                let bound_runs = self
                     .goal_runs
                     .get(&thread_id)
-                    .or_else(|| self.chat_runs.get(&thread_id))
-                    .is_some_and(|run| run.to_string() == question.root_run_id);
-                if chat_role.is_none() && !bound_goal {
+                    .into_iter()
+                    .chain(self.chat_runs.get(&thread_id))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                // Consumer routing is not execution ownership. The shared helper
+                // matches UI projection; the caller and live recipients are fenced
+                // separately before any durable answer is written.
+                if !question.belongs_to_thread(&thread_id, &bound_runs) {
                     return vec![LoopEvent::CommandRejected { reason:"Question belongs to a different or inactive conversation; resume its goal first".into() }];
                 }
-                if let Some(previous) = &question.answer {
-                    return if previous == &answer {
-                        vec![LoopEvent::UserAnswerSaved { question_id }]
-                    } else {
-                        vec![LoopEvent::CommandRejected {
-                            reason: "Question was already answered".into(),
-                        }]
-                    };
+                if permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.thread_id != thread_id)
+                {
+                    return vec![LoopEvent::CommandRejected {
+                        reason: runtime::ownership::OwnershipError::Fenced.to_string(),
+                    }];
                 }
                 // Offline requesters have no live permit for the runtime to guard.
                 // Keep the submitting host's generation stable through durable storage.
@@ -381,6 +385,15 @@ impl RuntimeCommandSink {
                         }];
                     }
                 };
+                if let Some(previous) = &question.answer {
+                    return if previous == &answer {
+                        vec![LoopEvent::UserAnswerSaved { question_id }]
+                    } else {
+                        vec![LoopEvent::CommandRejected {
+                            reason: "Question was already answered".into(),
+                        }]
+                    };
+                }
                 let question = match self.runtime.answer_user_question(&question_id, &answer) {
                     Ok(q) => q,
                     Err(reason) => return vec![LoopEvent::CommandRejected { reason }],
@@ -1267,6 +1280,7 @@ mod tests {
             run_id: "run-99".into(),
             root_run_id: "run-99".into(),
             root_name: "chat:Worker:thread-1".into(),
+            recipient_run_ids: Vec::new(),
             title: "Which format?".into(),
             options: vec!["JSON".into()],
             blocking: true,
@@ -1342,6 +1356,129 @@ mod tests {
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn inherited_question_requires_registered_recipient_and_current_thread_ownership() {
+        let (_rt, mut sink, runtime, _) = build_sink();
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("questions.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        sink.submit(chat_command("recipient"));
+        let recipient = sink.chat_runs["recipient"];
+        let question = event_bus::UserQuestion {
+            id: "inherited".into(),
+            run_id: "run-99".into(),
+            root_run_id: "run-99".into(),
+            root_name: "chat:Worker:source".into(),
+            recipient_run_ids: Vec::new(),
+            title: "Which format?".into(),
+            options: vec![],
+            blocking: true,
+            answer: None,
+        };
+        storage.handle().create_user_question(&question).unwrap();
+        storage
+            .handle()
+            .bind_user_questions(
+                "run-99",
+                &recipient.to_string(),
+                std::slice::from_ref(&question.id),
+            )
+            .unwrap();
+        let command = |thread: &str| WorkbenchCommand::AnswerUserQuestion {
+            thread_id: thread.into(),
+            question_id: question.id.clone(),
+            answer: "JSON".into(),
+        };
+        assert!(matches!(
+            sink.submit(command("unrelated")).as_slice(),
+            [LoopEvent::CommandRejected { .. }]
+        ));
+        let bus = Arc::new(EventBus::new(64));
+        let first =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
+                .unwrap();
+        first.start("recipient").unwrap();
+        first.start("unrelated").unwrap();
+        let stale = first.owned_permit("recipient").unwrap();
+        let successor =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+        first.handoff(&stale, &successor).unwrap();
+        for permit in [stale, first.owned_permit("unrelated").unwrap()] {
+            assert!(matches!(
+                sink.submit_authorized(command("recipient"), Some(permit))
+                    .as_slice(),
+                [LoopEvent::CommandRejected { .. }]
+            ));
+            assert!(
+                runtime
+                    .user_question(&question.id)
+                    .unwrap()
+                    .unwrap()
+                    .answer
+                    .is_none()
+            );
+        }
+        // Even a bound consumer may not turn a child-to-parent question into a user prompt.
+        let child = event_bus::UserQuestion {
+            id: "child".into(),
+            root_run_id: "run-98".into(),
+            ..question.clone()
+        };
+        storage.handle().create_user_question(&child).unwrap();
+        storage
+            .handle()
+            .bind_user_questions(
+                "run-99",
+                &recipient.to_string(),
+                std::slice::from_ref(&child.id),
+            )
+            .unwrap();
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::AnswerUserQuestion {
+                thread_id: "recipient".into(),
+                question_id: child.id.clone(),
+                answer: "JSON".into(),
+            })
+            .as_slice(),
+            [LoopEvent::CommandRejected { .. }]
+        ));
+        assert!(
+            runtime
+                .user_question(&child.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .is_none()
+        );
+        assert!(matches!(
+            sink.submit_authorized(
+                command("recipient"),
+                Some(successor.owned_permit("recipient").unwrap())
+            )
+            .as_slice(),
+            [LoopEvent::UserAnswerSaved { .. }]
+        ));
+        assert_eq!(
+            runtime
+                .user_question(&question.id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .as_deref(),
+            Some("JSON")
+        );
+        // The original thread can still answer the same ID idempotently.
+        assert!(matches!(
+            sink.submit(command("source")).as_slice(),
+            [LoopEvent::UserAnswerSaved { .. }]
+        ));
     }
 
     fn chat_command(thread: &str) -> WorkbenchCommand {

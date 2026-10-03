@@ -77,7 +77,11 @@ async fn escalated_root_cannot_finish_until_inherited_required_answer_arrives() 
             serde_json::json!({"result":"premature"}),
         )),
         Ok(text_response("Waiting for scope", FinishReason::Stop)),
-        Ok(text_response("Applied scope A", FinishReason::Stop)),
+        Ok(tool_response(
+            "finish-after-answer",
+            "finish",
+            serde_json::json!({"result":"Applied scope A"}),
+        )),
     ]));
     let (_dir, _storage, _config, runtime, mut events) = setup(model.clone());
     let source = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
@@ -108,7 +112,18 @@ async fn escalated_root_cannot_finish_until_inherited_required_answer_arrives() 
         "retain requester provenance"
     );
     assert!(runtime.has_active_question_recipient(&question.id).unwrap());
+    assert_eq!(question.recipient_run_ids, [recipient.to_string()]);
+    assert_eq!(question.root_run_id, source.to_string());
     let observed = model.observed().await;
+    let initial = serde_json::to_string(&observed[2]).unwrap();
+    for text in [
+        "Inherited unanswered questions",
+        "新 ID で再 ask せず",
+        &question.id,
+        &question.root_name,
+    ] {
+        assert!(initial.contains(text), "missing {text}: {initial}");
+    }
     assert!(
         serde_json::to_string(observed.last().unwrap())
             .unwrap()
