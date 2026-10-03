@@ -417,6 +417,15 @@ pub enum LifecycleEvent {
         /// 遷移理由。異常終了やオペレーターによる停止などの理由を保持します。
         reason: Option<String>,
     },
+    /// 対話 run が 1 ターンを終えて入力待ちになった。fork / rewind の境界になる。
+    ///
+    /// 発火前に、このターン末尾までの context が永続化されている。
+    TurnCompleted {
+        /// ターンを終えた run の ID。
+        run_id: String,
+        /// ターン末尾時点の非 System メッセージ数。run 内で一意かつ単調に増える。
+        context_len: u64,
+    },
     /// セッションが完了した。
     Completed {
         /// 完了したセッションの ID。
