@@ -4,7 +4,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
-use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
+use event_bus::{
+    CACHE_RETENTION_WARNING_THRESHOLD, CacheBaselineMissing, CacheComparison, DiagnosticEvent,
+    DiagnosticSeverity, Event, EventBus, ProviderEvent,
+};
 use tokio::time::Instant;
 
 use super::AttemptObserver;
@@ -14,7 +17,6 @@ use crate::message::Usage;
 mod prefix;
 use prefix::{RequestPrefix, WireInput};
 
-const CACHE_REGRESSION_THRESHOLD: f64 = 0.5;
 const MAX_SCOPES: usize = 1024;
 // A conservative comparison window, not a guarantee of server cache residency.
 const MAX_BASELINE_AGE: Duration = Duration::from_secs(5 * 60);
@@ -42,7 +44,7 @@ struct CachedRequest {
 
 pub(super) struct CacheObservation {
     prefix: RequestPrefix,
-    baseline: Option<CachedRequest>,
+    baseline: Result<CachedRequest, CacheBaselineMissing>,
 }
 
 fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
@@ -70,6 +72,7 @@ impl AttemptObserver {
         request: &impl serde::Serialize,
     ) -> Option<CacheObservation> {
         let wire = WireInput::new(request, self.protocol)?;
+        let mut expired = false;
         let previous = self
             .bus
             .as_ref()
@@ -78,16 +81,24 @@ impl AttemptObserver {
                 let mut recent = RECENT_REQUESTS
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let in_scope = |entry: &CachedRequest| {
+                    entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope
+                };
+                expired = recent
+                    .iter()
+                    .any(|entry| in_scope(entry) && entry.started_at.elapsed() >= MAX_BASELINE_AGE);
                 recent.retain(|entry| {
                     entry.bus.strong_count() > 0 && entry.started_at.elapsed() < MAX_BASELINE_AGE
                 });
-                recent
-                    .iter()
-                    .find(|entry| entry.bus.ptr_eq(&Arc::downgrade(bus)) && entry.scope == scope)
-                    .cloned()
+                recent.iter().find(|entry| in_scope(entry)).cloned()
             });
-        let baseline =
-            previous.filter(|entry| entry.cached_tokens > 0 && wire.extends(&entry.prefix));
+        let baseline = match previous {
+            None if expired => Err(CacheBaselineMissing::Expired),
+            None => Err(CacheBaselineMissing::NoPreviousRequest),
+            Some(entry) if !wire.extends(&entry.prefix) => Err(CacheBaselineMissing::PrefixChanged),
+            Some(entry) if entry.cached_tokens == 0 => Err(CacheBaselineMissing::PreviousUncached),
+            Some(entry) => Ok(entry),
+        };
         Some(CacheObservation {
             prefix: wire.prefix()?,
             baseline,
@@ -104,7 +115,7 @@ impl AttemptObserver {
         let baseline = self
             .cache
             .as_ref()
-            .and_then(|cache| cache.baseline.as_ref());
+            .and_then(|cache| cache.baseline.as_ref().ok());
         let previous_cache_tokens = baseline.map(|entry| entry.cached_tokens);
         let retention_ratio = valid_usage.and_then(|_| {
             previous_cache_tokens.and_then(|tokens| ratio(usage.cache_read_tokens, tokens))
@@ -131,15 +142,31 @@ impl AttemptObserver {
         let Some(cache) = &self.cache else {
             return;
         };
+        let comparison = match (valid_usage, &cache.baseline) {
+            (None, _) => CacheComparison::NoBaseline {
+                reason: CacheBaselineMissing::InvalidUsage,
+            },
+            (Some(_), Ok(entry)) => CacheComparison::Compared {
+                previous_request_id: entry.request_id.clone(),
+                previous_cache_tokens: entry.cached_tokens,
+            },
+            (Some(_), Err(reason)) => CacheComparison::NoBaseline { reason: *reason },
+        };
+        self.emit(ProviderEvent::CacheReuseObserved {
+            request_id: self.request_id.clone(),
+            cache_read_tokens: usage.cache_read_tokens,
+            comparison,
+            run_id: Some(scope.run.clone()),
+        });
         if let (Some(baseline), Some(retention), Some(hit)) = (baseline, retention_ratio, hit_ratio)
-            && retention < CACHE_REGRESSION_THRESHOLD
+            && retention < CACHE_RETENTION_WARNING_THRESHOLD
         {
             bus.emit(Event::new(DiagnosticEvent {
                 source: "providers.cache".into(),
                 severity: DiagnosticSeverity::Warning,
                 code: "CacheRegression".into(),
                 detail: format!(
-                    "provider={} profile={:?} protocol={} model={} input_tokens={} cache_read_tokens={} cache_hit_ratio={} previous_request_id={} previous_cache_tokens={} cache_retention_ratio={} threshold={CACHE_REGRESSION_THRESHOLD}",
+                    "provider={} profile={:?} protocol={} model={} input_tokens={} cache_read_tokens={} cache_hit_ratio={} previous_request_id={} previous_cache_tokens={} cache_retention_ratio={} threshold={CACHE_RETENTION_WARNING_THRESHOLD}",
                     self.provider, self.profile, self.protocol, self.model,
                     usage.input_tokens, usage.cache_read_tokens, hit,
                     baseline.request_id, baseline.cached_tokens, retention,

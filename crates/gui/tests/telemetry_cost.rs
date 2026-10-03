@@ -102,30 +102,9 @@ fn cost_hidden_when_pricing_unknown() {
     // Given: completed usage without known prices.
     let mut row = TelemetryRow::default();
     row.usage = usage();
-    // When / Then: unknown does not mean free.
+    // When / Then: unknown does not mean free, and billed cache is left to the retention tooltip.
     assert_eq!(row.usage.estimated_cost(None), None);
-    assert_eq!(
-        row.compact_line_at(Instant::now(), None),
-        "113.7K tok · cache 79.7%"
-    );
-}
-
-#[test]
-fn cache_segment_hidden_below_10_percent() {
-    // Given: a rate strictly below the threshold.
-    let mut row = TelemetryRow::default();
-    row.usage = TokenUsage {
-        input: 1000,
-        cache_read: 99,
-        ..TokenUsage::default()
-    };
-    // When / Then: threshold uses unrounded percentages.
-    assert_eq!(row.compact_line_at(Instant::now(), None), "1.0K tok");
-    row.usage.cache_read = 100;
-    assert_eq!(
-        row.compact_line_at(Instant::now(), None),
-        "1.0K tok · cache 10.0%"
-    );
+    assert_eq!(row.compact_line_at(Instant::now(), None), "113.7K tok");
 }
 
 #[test]
@@ -144,6 +123,6 @@ fn compact_line_format() {
     // When / Then: stable compact presentation, with no estimated token speed marker.
     assert_eq!(
         row.compact_line_at(Instant::now(), Some(pricing)),
-        "$0.041 · 113.7K tok · 45.2 tok/s · cache 79.7%"
+        "$0.041 · 113.7K tok · 45.2 tok/s"
     );
 }

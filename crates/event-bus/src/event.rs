@@ -675,6 +675,48 @@ pub enum ProviderFailureKind {
     Other,
 }
 
+/// `cache_retention_ratio` がこの値を下回ると、prompt cache の再利用が
+/// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
+pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
+
+/// 完了した attempt を直近の比較対象 attempt と照合した結果。
+///
+/// 比較対象は同じ run / provider / profile / protocol / model の直近完了
+/// attempt で、その wire 入力全体が今回の先頭に残っている場合に限る。
+/// 再利用可能なトークン数は推定せず、比較対象の実測 cache read+write を使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CacheComparison {
+    /// 比較対象があり、`cache_read_tokens / previous_cache_tokens` を算出できる。
+    Compared {
+        /// 比較対象 attempt の request ID。
+        previous_request_id: String,
+        /// 比較対象 attempt の実測 cache read+write トークン数 (常に 1 以上)。
+        previous_cache_tokens: u64,
+    },
+    /// 比較対象がないため retention を算出しない。
+    NoBaseline {
+        /// 比較できない理由。
+        reason: CacheBaselineMissing,
+    },
+}
+
+/// [`CacheComparison::NoBaseline`] の理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheBaselineMissing {
+    /// 同じ scope で完了した attempt がまだない (初回・モデル切替直後など)。
+    NoPreviousRequest,
+    /// 直近 attempt の開始から比較窓 (5 分) 以上経過した。
+    Expired,
+    /// 直近 attempt の wire 入力が今回の先頭に残っていない
+    /// (compaction・履歴の書き換えなど)。
+    PrefixChanged,
+    /// 直近 attempt の実測 cache read+write が 0 だった。
+    PreviousUncached,
+    /// 今回の usage が不正 (cache 小計が総入力を超えるなど)。
+    InvalidUsage,
+}
+
 /// プロバイダ切替とリクエスト attempt 観測に関するイベント。
 ///
 /// attempt 観測イベント (`RequestStarted` / `FirstTokenObserved` /
@@ -759,8 +801,8 @@ pub enum ProviderEvent {
     /// [`UsageEvent::Usage`] だけを canonical な集計入力とし、本イベントの
     /// counts と合算してはならない (二重計上になる)。wire 上の相関は
     /// 「同一 provider / model で、同一 request の bus 順序が
-    /// `RequestStarted` → [`UsageEvent::Usage`] → `RequestCompleted` と
-    /// なる」ことで担保される ([`UsageEvent`] に request ID は持たせない:
+    /// `RequestStarted` → [`UsageEvent::Usage`] → (`CacheReuseObserved`) →
+    /// `RequestCompleted` となる」ことで担保される ([`UsageEvent`] に request ID は持たせない:
     /// wire format 不変制約のため)。
     RequestCompleted {
         /// attempt 相関用の request ID。
@@ -792,6 +834,22 @@ pub enum ProviderEvent {
         ///
         /// イベント発生元 agent run の ID。v0.1 で保存された旧形式ペイロード
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
+        #[serde(default)]
+        run_id: Option<String>,
+    },
+    /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
+    ///
+    /// cache 観測が有効な attempt について、同じ attempt の
+    /// `RequestCompleted` の直前に 1 回だけ発行される。`cache_read_tokens`
+    /// は `RequestCompleted` と同値の観測用複製であり、集計に合算しない。
+    CacheReuseObserved {
+        /// attempt 相関用の request ID。
+        request_id: String,
+        /// キャッシュ読み取りトークン数。
+        cache_read_tokens: u64,
+        /// 比較対象との照合結果。
+        comparison: CacheComparison,
+        /// 観測相関用の実行 ID。
         #[serde(default)]
         run_id: Option<String>,
     },

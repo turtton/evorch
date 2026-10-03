@@ -136,6 +136,15 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
             tool_name: format!("tool-{run}"),
             input: None,
         }));
+        bus.emit(Event::new(ProviderEvent::CacheReuseObserved {
+            request_id: format!("request-{run}"),
+            cache_read_tokens: 1000,
+            comparison: event_bus::CacheComparison::Compared {
+                previous_request_id: format!("previous-{run}"),
+                previous_cache_tokens: 1000,
+            },
+            run_id: Some(run.clone()),
+        }));
         bus.emit(Event::new(ProviderEvent::RequestCompleted {
             request_id: format!("request-{run}"),
             provider: "local".into(),
@@ -197,8 +206,8 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         "missing status line {cost_label}"
     );
     assert!(
-        gui.has_label("cache 100% (Δ100%)"),
-        "missing current and average cache hit rates"
+        gui.has_label("cache 100% (avg 100%)"),
+        "missing current and average cache retention"
     );
     for (index, run) in runs.iter().enumerate() {
         assert_eq!(gui.has_label(&format!("content-{run}")), index == 0);

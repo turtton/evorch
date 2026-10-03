@@ -99,10 +99,6 @@ impl TelemetryRow {
             };
             segments.push(format!("{prefix}{rate:.1} tok/s"));
         }
-        let rate = self.usage.cache_hit_rate();
-        if rate >= 10.0 {
-            segments.push(format!("cache {rate:.1}%"));
-        }
         segments
     }
 }

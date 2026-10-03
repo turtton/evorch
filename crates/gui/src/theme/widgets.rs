@@ -139,16 +139,26 @@ pub fn ghost_icon_button(ui: &mut Ui, icon: &str, text: &str) -> Response {
 }
 
 /// One telemetry value rendered as `icon value`, keeping the full textual
-/// label (`cache 50%`, `TTFT 240ms`, ...) as its accessible name.
+/// label (`cache 99%`, `TTFT 240ms`, ...) as its accessible name.
 pub fn metric(ui: &mut Ui, label: &str) -> Response {
-    let (icon, value, hint) = metric_parts(label);
+    let (_, _, hint) = metric_parts(label);
+    metric_detailed(ui, label, &format!("{hint}: {label}"), false)
+}
+
+/// [`metric`] with its own hover text, in the warning color when `warning`.
+pub fn metric_detailed(ui: &mut Ui, label: &str, tooltip: &str, warning: bool) -> Response {
+    let (icon, value, _) = metric_parts(label);
+    let mut text = muted(icons::with_icon(icon, value));
+    if warning {
+        text = text.color(palette().WARNING_FG);
+    }
     let response = ui.add(
-        egui::Label::new(muted(icons::with_icon(icon, value)))
+        egui::Label::new(text)
             .sense(Sense::hover())
             .wrap_mode(egui::TextWrapMode::Extend),
     );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
-    response.on_hover_text(format!("{hint}: {label}"))
+    response.on_hover_text(tooltip)
 }
 
 fn metric_parts(label: &str) -> (&'static str, &str, &'static str) {
@@ -159,7 +169,7 @@ fn metric_parts(label: &str) -> (&'static str, &str, &'static str) {
     let (icon, value, hint) = if let Some(value) = rest.strip_prefix('$') {
         (icons::CURRENCY_DOLLAR, value, "Cost")
     } else if let Some(value) = rest.strip_prefix("cache ") {
-        (icons::DATABASE, value, "Prompt cache hit rate")
+        (icons::DATABASE, value, "Prompt cache retention")
     } else if let Some(value) = rest.strip_prefix("TTFT ") {
         (icons::TIMER, value, "Time to first token")
     } else if let Some(value) = rest.strip_prefix("ctx ") {
@@ -176,7 +186,7 @@ fn metric_parts(label: &str) -> (&'static str, &str, &'static str) {
         (icons::DOT_OUTLINE, rest, "Metric")
     };
     let hint = match (average, hint) {
-        (true, "Prompt cache hit rate") => "Average prompt cache hit rate",
+        (true, "Prompt cache retention") => "Average prompt cache retention",
         (true, "Time to first token") => "Average time to first token",
         (true, "Output throughput") => "Average output throughput",
         (_, hint) => hint,
@@ -276,8 +286,12 @@ mod tests {
     #[test]
     fn metric_parts_strip_textual_prefixes_into_icons() {
         assert_eq!(
-            metric_parts("cache 50% (Δ25%)"),
-            (icons::DATABASE, "50% (Δ25%)", "Prompt cache hit rate")
+            metric_parts("cache 99% (avg 97%)"),
+            (icons::DATABASE, "99% (avg 97%)", "Prompt cache retention")
+        );
+        assert_eq!(
+            metric_parts("avg cache 97.0%"),
+            (icons::DATABASE, "97.0%", "Average prompt cache retention")
         );
         assert_eq!(
             metric_parts("avg TTFT 300ms"),
