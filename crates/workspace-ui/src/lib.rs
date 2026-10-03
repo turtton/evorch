@@ -4,6 +4,7 @@
 //! 公開 API に持ち込まないことで GUI framework の交換可能性を保ちます。
 
 mod errors;
+mod lineage;
 mod migrate;
 mod panels;
 mod persist;
@@ -18,6 +19,10 @@ mod validate;
 pub use errors::{
     LayoutError, PersistError, ProjectError, SettingsError, SidebarError, ThreadError,
 };
+pub use lineage::{
+    branch_versions, display_parent, normalize_versions, show_version, version_members,
+    version_root, visible_version,
+};
 pub use panels::{Panel, PanelId, PanelKind, default_panels, default_panels_v02};
 pub use persist::{
     from_json, load_from, load_settings, load_sidebar, load_workspace, save_settings, save_sidebar,
@@ -30,7 +35,8 @@ pub use settings::{
 };
 pub use sidebar::{SIDEBAR_SCHEMA_VERSION, SidebarState};
 pub use thread::{
-    ModelPreference, ThreadChatRole, ThreadId, ThreadRecord, ThreadRunPhase, ThreadState,
+    ForkPoint, LineageKind, ModelPreference, ThreadChatRole, ThreadId, ThreadLineage, ThreadRecord,
+    ThreadRunPhase, ThreadState,
 };
 pub use types::{
     Floating, FloatingPane, InsertPosition, LayoutNode, Split, SplitDirection, Tabs,
