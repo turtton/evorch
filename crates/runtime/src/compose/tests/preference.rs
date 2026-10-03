@@ -33,6 +33,7 @@ async fn preferred(
                 category: None,
                 run_id: "run-preference".into(),
                 model_preference: preference,
+                purpose: Default::default(),
             },
             Role::Worker,
             &[],

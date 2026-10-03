@@ -52,6 +52,7 @@ fn wire_response_maps_to_canonical_response() {
             output_tokens: 4,
             cache_read_tokens: 7,
             cache_write_tokens: 0,
+            reasoning_tokens: None,
         }
     );
     assert_eq!(response.finish_reason, FinishReason::ToolUse);

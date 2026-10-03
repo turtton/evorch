@@ -159,6 +159,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
                 category: None,
                 run_id: run_id.to_string(),
                 model_preference: None,
+                purpose: Default::default(),
             },
             Role::Worker,
             &[Message {

@@ -56,6 +56,7 @@ impl AgentRuntime {
                 run_id: run_id.to_string(),
                 model_preference: config.model_preference.clone(),
                 category: config.category.clone(),
+                purpose: event_bus::RequestPurpose::Agent,
             };
             let mut admitted = runtime.shared.model.admit(&invocation, role).await;
             // Cancellation and registration share this fence; no await inside it.

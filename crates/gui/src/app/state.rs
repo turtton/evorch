@@ -117,6 +117,7 @@ pub struct WorkbenchState<S> {
     pub(super) running_children: BTreeMap<String, usize>,
     /// Runs whose latest lifecycle event completed a turn: safe rewind points.
     pub(super) idle_turns: std::collections::BTreeSet<String>,
+    pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -224,6 +225,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
             idle_turns: std::collections::BTreeSet::new(),
+            usage_ledger: None,
         };
         state.tasks.refresh();
         state.register_work_panels();

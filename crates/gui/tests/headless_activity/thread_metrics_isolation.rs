@@ -66,6 +66,8 @@ fn billed(run: &str, tokens: u64) -> Event {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some(run.into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 

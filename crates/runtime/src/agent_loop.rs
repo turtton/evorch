@@ -837,6 +837,7 @@ impl LoopState {
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
+                purpose: event_bus::RequestPurpose::Agent,
             };
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}

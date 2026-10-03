@@ -305,6 +305,31 @@ impl Database {
         metrics::list_range(&self.conn, from_window_start, to_window_start)
     }
 
+    /// `[from_ns, to_ns)` の usage ledger 行を時刻順に、run の所属と結合して返します。
+    ///
+    /// # Errors
+    /// SQLite 操作または保存値の変換に失敗した場合にエラーを返します。
+    pub fn usage_requests_between(
+        &self,
+        from_ns: i64,
+        to_ns: i64,
+    ) -> Result<Vec<crate::usage::UsageRequestRow>, StorageError> {
+        crate::repo::usage::list_requests(&self.conn, from_ns, to_ns)
+    }
+
+    /// 保持期間を過ぎて日次集計へ畳み込まれた usage を、inclusive な日付範囲
+    /// (`YYYY-MM-DD`、ローカル日付) で返します。
+    ///
+    /// # Errors
+    /// SQLite 操作または保存値の変換に失敗した場合にエラーを返します。
+    pub fn usage_daily_between(
+        &self,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<Vec<crate::usage::UsageDailyRow>, StorageError> {
+        crate::repo::usage::list_daily(&self.conn, from_day, to_day)
+    }
+
     /// 指定セッションのイベントを採番順で畳み込み、復元状態を返します。
     ///
     /// # Errors

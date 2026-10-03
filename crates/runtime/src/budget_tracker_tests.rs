@@ -251,6 +251,7 @@ fn cumulative_budget_includes_cached_input_exactly_once() {
             output_tokens: 10,
             cache_read_tokens: 60,
             cache_write_tokens: 30,
+            reasoning_tokens: None,
         });
     }
     assert_eq!(counters.cumulative_input_tokens, 200);

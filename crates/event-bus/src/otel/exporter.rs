@@ -335,6 +335,8 @@ mod tests {
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
             run_id: None,
+            reasoning_tokens: None,
+            purpose: None,
         })
     }
 

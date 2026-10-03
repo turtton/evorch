@@ -60,7 +60,8 @@ impl Default for PermissionConfig {
 pub struct MetricsConfig {
     /// メトリクス収集の有効フラグ。
     pub enabled: bool,
-    /// メトリクスの保持日数。
+    /// リクエスト単位の usage を保持する日数。過ぎた分は日次集計へ畳み込む。
+    /// 0 は畳み込みを無効化する。
     pub retention_days: u32,
 }
 
@@ -68,7 +69,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            retention_days: 30,
+            retention_days: 90,
         }
     }
 }

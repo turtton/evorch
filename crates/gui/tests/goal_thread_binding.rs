@@ -159,6 +159,8 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
             cache_write_tokens: 0,
             finish_reason: "stop".into(),
             run_id: Some(run.clone()),
+            purpose: None,
+            reasoning_tokens: None,
         }));
     }
     rt.block_on(async {

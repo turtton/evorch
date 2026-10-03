@@ -34,6 +34,8 @@ fn observed(run: &str, input: u64, cached: u64, output: u64, ttft: u64) -> [Even
             cache_write_tokens: 0,
             finish_reason: "tool_use".into(),
             run_id: Some(run.into()),
+            purpose: None,
+            reasoning_tokens: None,
         }),
     ]
 }
@@ -332,6 +334,7 @@ fn streaming_estimates_and_failed_requests_do_not_change_average_throughput() {
         duration_ms: 10_000,
         failure: event_bus::ProviderFailureKind::Timeout,
         run_id: Some("run".into()),
+        purpose: None,
     }));
     let metrics = telemetry.thread_metrics(&["run".into()]);
     assert_eq!(metrics.tok_s, None);

@@ -69,6 +69,7 @@ mod repo;
 mod run;
 pub mod task_queue;
 pub mod team;
+pub mod usage;
 mod writer;
 
 pub use config::{HardLimits, LimitKind, StorageConfig};

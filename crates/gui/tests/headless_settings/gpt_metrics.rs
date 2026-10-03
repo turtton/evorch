@@ -54,6 +54,8 @@ fn completed(provider: &str, profile: Option<&str>) -> Event {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 
