@@ -52,6 +52,7 @@ pub enum AgentPaneAction {
     Sidebar(SidebarAction),
     FocusPanel(&'static str),
     OpenDiagnostics,
+    OpenContext,
     Composer(ComposerAction),
     ModelPreference(Option<workspace_ui::ModelPreference>),
     Request(super::requests::RequestAction),

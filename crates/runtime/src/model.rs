@@ -153,6 +153,16 @@ pub trait AgentModel: Send + Sync {
     fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
         Vec::new()
     }
+
+    /// Logical model and generation overrides the role binding resolves to, for inspection.
+    /// Fixed models have no binding and return `None`.
+    fn binding_preview(
+        &self,
+        _role: Role,
+        _category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        None
+    }
 }
 
 #[cfg(test)]

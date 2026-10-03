@@ -109,6 +109,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut notifications_action = None;
         let mut request_action = None;
         let mut diagnostics_request = false;
+        let mut context_request = false;
         let mut diff_request = None;
         let mut file_requests = Vec::new();
         let mut composer_action = None;
@@ -135,6 +136,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
                 diagnostics_request: &mut diagnostics_request,
+                context_request: &mut context_request,
                 user_questions: &self.user_questions,
                 question_drafts: &mut self.question_drafts,
                 notifications: &mut self.notifications,
@@ -144,6 +146,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self_improvement: &mut self.self_improvement,
                 arena: &mut self.arena,
                 usage: &mut self.usage,
+                context_inspector: &mut self.context_inspector,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -184,6 +187,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         for link in file_requests {
             self.open_file_preview(&ctx, link);
+        }
+        if context_request {
+            let run = self.active_thread_runs().last().cloned();
+            self.open_context_tab(crate::panes::context_inspector::InspectorMode::Run, run);
         }
         if diagnostics_request {
             self.diagnostics_open = true;
@@ -363,6 +370,44 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.usage.invalidate();
         }
         self.focus_panel(id.as_str());
+    }
+
+    /// Open the Context tab beside the conversation in `mode`, or focus it.
+    pub fn open_context_tab(
+        &mut self,
+        mode: crate::panes::context_inspector::InspectorMode,
+        run: Option<String>,
+    ) {
+        use workspace_ui::{Panel, PanelId, PanelKind};
+        let id = PanelId::new("context-main");
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::ContextInspector,
+            title: PanelKind::ContextInspector.default_title().into(),
+            target: None,
+        });
+        if self.dock.find_tab(&id).is_none() {
+            let neighbor = self
+                .dock
+                .find_tab(&PanelId::new("agent-main"))
+                .or_else(|| self.dock.find_tab(&PanelId::new("subagents-home")));
+            if let Some(path) = neighbor {
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+            self.dock.push_to_focused_leaf(id.clone());
+        }
+        self.context_inspector.show(mode, run);
+        self.focus_panel(id.as_str());
+    }
+
+    /// Run IDs bound to the active thread, oldest first.
+    pub(super) fn active_thread_runs(&self) -> Vec<String> {
+        self.sidebar
+            .threads
+            .iter()
+            .find(|thread| Some(&thread.id) == self.sidebar.active_thread.as_ref())
+            .map(|thread| thread.run_ids.clone())
+            .unwrap_or_default()
     }
 
     /// Open a local file in the workspace, reusing an existing tab for that path.

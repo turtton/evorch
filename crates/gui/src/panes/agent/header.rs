@@ -54,6 +54,19 @@ pub(super) fn header_strip(
                     if info.on_hover_text("実行の診断").clicked() {
                         *action = Some(AgentPaneAction::OpenDiagnostics);
                     }
+                    let context = ui.add(
+                        ghost(icon_text(icons::STACK).color(palette().TEXT_MUTED))
+                            .min_size(egui::vec2(ROW_DENSE - SP_1, ROW_DENSE - SP_1)),
+                    );
+                    context.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Agent context")
+                    });
+                    if context
+                        .on_hover_text("Context this thread's run received")
+                        .clicked()
+                    {
+                        *action = Some(AgentPaneAction::OpenContext);
+                    }
                     let response = fill_label(ui, h3(title), ROW_DENSE, egui::Sense::hover());
                     let label = format!("Thread: {title}");
                     response.widget_info(|| {

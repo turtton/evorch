@@ -12,8 +12,12 @@ mod intent_gate;
 mod intent_gate_policy;
 mod key_triggers;
 
-pub use assembly::{SystemPromptInput, assemble_system_prompt};
-pub use catalog::{SystemPromptCatalog, SystemPromptCatalogBuilder, SystemPromptCatalogError};
+pub use assembly::{
+    PromptPartKind, SystemPromptInput, assemble_system_prompt, assemble_system_prompt_parts,
+};
+pub use catalog::{
+    CatalogSection, SystemPromptCatalog, SystemPromptCatalogBuilder, SystemPromptCatalogError,
+};
 pub use composition::{CatalogBuildInput, PromptCompositionError, build_catalog};
 pub use family::{ModelFamily, classify};
 pub use intent_gate_policy::{

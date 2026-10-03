@@ -619,6 +619,14 @@ impl AgentModel for RoutedModel {
         RoutedModel::available_profiles(self)
     }
 
+    fn binding_preview(
+        &self,
+        role: Role,
+        category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        self.agents.binding_for(role_key(role), category).ok()
+    }
+
     fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
         let (_, model_id) = selected_model.split_once('/')?;
         let (base_model_id, _) = config::types::provider::parse_model_speed(model_id);
