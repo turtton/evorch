@@ -73,21 +73,6 @@ impl AgentContext {
         });
     }
 
-    /// Add a workspace prefix to restored context without moving checkpoint meaning.
-    pub(crate) fn prepend_system(&mut self, text: String) {
-        self.messages.insert(
-            0,
-            Message {
-                role: MessageRole::System,
-                content: vec![ContentBlock::Text { text }],
-            },
-        );
-        for checkpoint in &mut self.checkpoints {
-            checkpoint.range.0 += 1;
-            checkpoint.range.1 += 1;
-        }
-    }
-
     /// ユーザー発話を履歴に追加する。
     pub fn push_user(&mut self, text: &str) {
         self.messages.push(Message {
@@ -182,19 +167,6 @@ mod tests {
             },
             range,
         }
-    }
-
-    #[test]
-    fn workspace_prefix_preserves_restored_checkpoint_ranges() {
-        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
-        context.push_user("old");
-        context.push_assistant(assistant_text("answer"));
-        context.push_user("recent");
-        context.apply_checkpoint(summary_checkpoint("checkpoint", (0, 2), "summary"));
-        let before = context.visible_messages();
-        context.prepend_system("workspace".into());
-        assert_eq!(context.latest_checkpoint().unwrap().range, (1, 3));
-        assert_eq!(&context.visible_messages()[1..], before.as_slice());
     }
 
     // Given: run-1 の Worker ロール / When: new で生成 / Then: 履歴は空
