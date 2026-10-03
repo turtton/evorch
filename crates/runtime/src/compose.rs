@@ -434,6 +434,7 @@ impl RoutedModel {
                 },
                 observation: Some(ObservationContext {
                     run_id: invocation.run_id.clone(),
+                    purpose: invocation.purpose,
                 }),
             };
             let result = structured::send(provider, &mut request, bus).await;
@@ -559,6 +560,7 @@ impl AgentModel for RoutedModel {
             output_schema: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
+                purpose: event_bus::RequestPurpose::Compaction,
             }),
         };
         compactor

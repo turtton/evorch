@@ -103,6 +103,10 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// キャッシュへの書き込み (作成) トークン数。
     pub cache_write_tokens: u64,
+    /// `output_tokens` のうち reasoning に使われた数。provider が内訳を
+    /// 報告しない場合は `None` (0 と区別する)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// 応答の終了理由。
@@ -130,10 +134,13 @@ pub enum FinishReason {
 /// / `RequestCompleted` / `RequestFailed` — `event_bus` crate 参照) へ
 /// `run_id` を相関させるためのもの。
 /// OpenAI wire では run ID を `prompt_cache_key` にも使用する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ObservationContext {
     /// 相関先の agent run ID。
     pub run_id: String,
+    /// 呼び出しの目的。usage 集計で本処理と付随コストを区別する。
+    #[serde(default)]
+    pub purpose: event_bus::RequestPurpose,
 }
 
 /// Codex fast mode / OpenAI priority tier。クォータ消費は標準の約2〜2.5倍。
@@ -268,6 +275,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 3,
             cache_write_tokens: 0,
+            reasoning_tokens: None,
         };
 
         let json = serde_json::to_value(usage).unwrap();
@@ -283,6 +291,14 @@ mod tests {
         );
         let restored: Usage = serde_json::from_value(json).unwrap();
         assert_eq!(restored, usage);
+
+        let reasoning = Usage {
+            reasoning_tokens: Some(2),
+            ..usage
+        };
+        let json = serde_json::to_value(reasoning).unwrap();
+        assert_eq!(json["reasoning_tokens"], json!(2));
+        assert_eq!(serde_json::from_value::<Usage>(json).unwrap(), reasoning);
     }
 
     // Given: 全フィールドを指定した ChatRequest / When: JSON 化して復元 / Then: canonical フィールド名で往復する

@@ -63,6 +63,21 @@ pub(super) fn run_writer(
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
+            Ok(Command::RecordUsageRequests(records, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "usage writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::usage::insert_requests(&state.conn, &records)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AttributeUsageRuns(attributions)) => {
+                if let Err(error) = crate::repo::usage::attribute_runs(&state.conn, &attributions) {
+                    tracing::warn!(error = %error, "usage attribution failed");
+                }
+            }
             Ok(Command::AppendEvent(session_id, event, reply)) => {
                 let result = if state.writes_suspended {
                     handle_suspended_append(&mut state, &session_id, &event)
@@ -295,6 +310,7 @@ fn run_due_work(state: &mut WriterState) {
 /// page budget and checks storage limits against the resulting file sizes.
 fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     let removed = diagnostic::retain_recent(state, std::time::SystemTime::now())?;
+    roll_up_usage(state, std::time::SystemTime::now())?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
         vacuum_config.vacuum_freelist_threshold_pages = 1;
@@ -307,6 +323,24 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
+}
+
+/// Fold one bounded batch of ledger rows older than the retention window into
+/// daily totals. Older rows remain for the following ticks.
+fn roll_up_usage(state: &WriterState, now: std::time::SystemTime) -> Result<usize, StorageError> {
+    let days = state.config.usage_retention_days;
+    if days == 0 {
+        return Ok(0);
+    }
+    let window = std::time::Duration::from_secs(u64::from(days) * 86_400);
+    let Some(cutoff) = now.checked_sub(window) else {
+        return Ok(0);
+    };
+    let moved = crate::repo::usage::roll_up_before(&state.conn, crate::system_time_to_ns(cutoff)?)?;
+    if moved > 0 {
+        tracing::debug!(rows = moved, "usage ledger rolled up");
+    }
+    Ok(moved)
 }
 
 /// freelist が設定閾値以上のときだけ、設定 page budget 以内で incremental vacuum を実行し、

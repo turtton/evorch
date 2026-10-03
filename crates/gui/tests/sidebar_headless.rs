@@ -484,6 +484,8 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
             cache_write_tokens: 0,
             finish_reason: "stop".into(),
             run_id: Some("run-1".into()),
+            purpose: None,
+            reasoning_tokens: None,
         }),
         Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-1".into(),

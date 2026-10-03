@@ -191,7 +191,8 @@ async fn factory_builds_codex_client_from_profile() {
             input_tokens: 12,
             output_tokens: 2,
             cache_read_tokens: 0,
-            cache_write_tokens: 0
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
         }
     );
     assert_eq!(response.finish_reason, FinishReason::Stop);

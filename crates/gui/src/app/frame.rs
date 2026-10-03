@@ -76,6 +76,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
         self.telemetry.refresh_costs(&self.provider_settings);
+        self.sync_usage_ledger(Instant::now());
         self.telemetry
             .quota
             .configure_profiles(&self.provider_settings, self.credential_store.clone());

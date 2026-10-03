@@ -561,6 +561,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
         run_id: "normal-run".into(),
         category: None,
         model_preference: None,
+        purpose: Default::default(),
     };
     let tools = [ToolSpec {
         name: "read".into(),

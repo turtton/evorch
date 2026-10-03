@@ -77,6 +77,8 @@ fn request(
         cache_write_tokens: 0,
         finish_reason: "tool_use".into(),
         run_id: Some(run.into()),
+        purpose: None,
+        reasoning_tokens: None,
     }));
 }
 

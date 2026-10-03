@@ -39,6 +39,8 @@ fn completed(model: &str) -> Event {
         cache_write_tokens: 1_700,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 
@@ -87,6 +89,8 @@ fn run_cost_survives_when_another_priced_model_has_zero_usage() {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     }));
     assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.03995));
     overlay.refresh_costs(&settings);

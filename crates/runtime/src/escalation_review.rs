@@ -322,6 +322,7 @@ impl QuickModelReviewer {
             run_id: run_id.to_owned(),
             category: Some("quick".into()),
             model_preference: None,
+            purpose: event_bus::RequestPurpose::EscalationReview,
         };
         let response = tokio::time::timeout(
             self.timeout,
@@ -441,6 +442,7 @@ impl QuickModelReviewer {
             run_id: run_id.to_owned(),
             category: Some("tool-execution".to_owned()),
             model_preference: None,
+            purpose: event_bus::RequestPurpose::EscalationReview,
         };
         let response = tokio::time::timeout(
             self.timeout,

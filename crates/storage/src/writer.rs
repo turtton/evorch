@@ -30,6 +30,8 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 #[allow(clippy::large_enum_variant)]
 enum Command {
     Usage(Vec<UsageBucket>),
+    RecordUsageRequests(Vec<crate::usage::UsageRequestRecord>, ReplyTx),
+    AttributeUsageRuns(Vec<crate::usage::RunAttribution>),
     AppendEvent(Option<String>, Event, ReplyTx),
     AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
     AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
@@ -380,6 +382,40 @@ impl StorageHandle {
             .send(Command::Reconcile(reply))
             .map_err(|_| StorageError::WriterClosed)?;
         result.recv().map_err(|_| StorageError::WriterClosed)?
+    }
+
+    /// usage ledger へリクエスト単位の行を保存します。既存の request ID は維持します。
+    ///
+    /// # Errors
+    ///
+    /// 書き込み停止中、writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
+    pub fn record_usage_requests(
+        &self,
+        records: Vec<crate::usage::UsageRequestRecord>,
+    ) -> Result<(), StorageError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.request(|reply| Command::RecordUsageRequests(records, reply))
+    }
+
+    /// run の所属 thread / project を待たずに送ります。キューが満杯なら
+    /// 送らずに `false` を返すため、呼び出し側は次の機会に再送できます。
+    pub fn try_attribute_usage_runs(
+        &self,
+        attributions: Vec<crate::usage::RunAttribution>,
+    ) -> bool {
+        if attributions.is_empty() {
+            return true;
+        }
+        match self.0.try_send(Command::AttributeUsageRuns(attributions)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!("storage writer is closed; dropping usage attribution");
+                true
+            }
+        }
     }
 
     /// メモリ内の保存統計を返します。SQLiteやイベントへの永続化は行いません。

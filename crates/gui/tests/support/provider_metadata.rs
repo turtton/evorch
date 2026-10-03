@@ -78,6 +78,8 @@ pub fn completed(provider: &str, profile: &str, model: &str) -> Event {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 
@@ -128,6 +130,8 @@ pub async fn profile_slug_fixture() -> (ProviderSettingsModel, Event) {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     });
     (settings, event)
 }

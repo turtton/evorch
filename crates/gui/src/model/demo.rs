@@ -460,6 +460,8 @@ impl AgentModel for DemoScriptModel {
             cache_write_tokens: 0,
             finish_reason: finish_reason_name(&response.finish_reason).to_string(),
             run_id: Some(invocation.run_id.clone()),
+            purpose: None,
+            reasoning_tokens: None,
         }));
         Ok(response)
     }

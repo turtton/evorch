@@ -36,6 +36,8 @@ fn request_success_ends_with_usage_and_finish_reason_attributes() {
             cache_write_tokens: 0,
             finish_reason: "tool_use".to_owned(),
             run_id: Some("run-1".to_owned()),
+            purpose: None,
+            reasoning_tokens: None,
         },
         3,
     ));
@@ -86,6 +88,7 @@ fn request_failure_uses_stable_classification_without_raw_data() {
             duration_ms: 10,
             failure: ProviderFailureKind::Http { status: 503 },
             run_id: Some("run-1".to_owned()),
+            purpose: None,
         },
         3,
     ));
