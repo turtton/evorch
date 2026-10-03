@@ -1,3 +1,5 @@
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,12 +10,60 @@ use tools::tools::shell_escalation::{EscalationDecision, ShellAccess, ShellEscal
 use tools::{ToolExecutionContext, ToolExecutor, ToolResult};
 
 #[derive(Default)]
-struct ProbeSandbox(Mutex<Vec<CommandSpec>>);
+struct ProbeSandbox(Mutex<Vec<CommandSpec>>, Option<PathBuf>);
 
 impl Sandbox for ProbeSandbox {
-    fn wrap(&self, spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+    fn wrap(&self, mut spec: CommandSpec) -> Result<WrappedCommand, SandboxError> {
+        if let Some(bin) = &self.1 {
+            // Only the fixture directory is searched, so these tests can never
+            // fall back to an installed gh or its authentication/network access.
+            spec.program = bin.join("sh").to_string_lossy().into_owned();
+            spec.extra_env
+                .push(("PATH".into(), bin.to_string_lossy().into_owned()));
+        }
         self.0.lock().expect("probe lock").push(spec.clone());
         DirectSandbox::new_unchecked().wrap(spec)
+    }
+}
+
+struct FakeGh(tempfile::TempDir);
+
+impl FakeGh {
+    fn new() -> Self {
+        // Nix sandboxes do not provide /bin/sh; resolve the actual executable
+        // before restricting PATH to this fixture's gh and sh.
+        let search_path = std::env::var_os("PATH").expect("shell search path");
+        let shell = std::env::split_paths(&search_path)
+            .filter_map(|dir| std::fs::canonicalize(dir.join("sh")).ok())
+            .find(|path| {
+                path.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .expect("executable sh in PATH");
+        let dir = tempfile::tempdir().expect("fake gh directory");
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!{}\nprintf '%s\\n' \"$@\" > \"$0.called\"\nprintf 'merge executed\\n'\n",
+                shell.display()
+            ),
+        )
+        .expect("fake gh script");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))
+            .expect("executable fake gh");
+        std::os::unix::fs::symlink(shell, dir.path().join("sh"))
+            .expect("fixture shell interpreter");
+        Self(dir)
+    }
+
+    fn fixture(&self, reason: Option<&str>) -> Fixture {
+        Fixture::with_bin(reason, Some(self.0.path()))
+    }
+
+    fn invocation(&self) -> PathBuf {
+        self.0.path().join("gh.called")
     }
 }
 
@@ -97,8 +147,12 @@ struct Fixture {
 
 impl Fixture {
     fn new(reason: Option<&str>) -> Self {
-        let default = Arc::new(ProbeSandbox::default());
-        let unsandboxed = Arc::new(ProbeSandbox::default());
+        Self::with_bin(reason, None)
+    }
+
+    fn with_bin(reason: Option<&str>, bin: Option<&Path>) -> Self {
+        let default = Arc::new(ProbeSandbox(Mutex::default(), bin.map(Path::to_path_buf)));
+        let unsandboxed = Arc::new(ProbeSandbox(Mutex::default(), bin.map(Path::to_path_buf)));
         let gate = Arc::new(Gate {
             reason: reason.map(str::to_owned),
             ..Gate::default()
@@ -144,8 +198,9 @@ impl Fixture {
 async fn reviewed_call_errors_before_any_review_when_justification_is_absent_or_blank() {
     for access in ["network", "unsandboxed"] {
         for justification in [None, Some(""), Some(" \t\n")] {
-            let fixture = Fixture::new(None);
-            let mut args = json!({"command": "printf forbidden", "sandbox_access": access});
+            let fake = FakeGh::new();
+            let fixture = fake.fixture(None);
+            let mut args = json!({"command": "gh pr merge 123", "sandbox_access": access});
             if let Some(justification) = justification {
                 args["justification"] = json!(justification);
             }
@@ -157,63 +212,102 @@ async fn reviewed_call_errors_before_any_review_when_justification_is_absent_or_
             );
             assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
             fixture.assert_wraps(0, 0);
+            assert!(!fake.invocation().exists());
         }
     }
 }
 
-// Given: two sandbox probes / When: review approves / Then: only the unsandboxed probe wraps.
+// Given: a merge request / When: review approves / Then: fake gh runs with the reviewed arguments.
 #[tokio::test]
-async fn approved_escalation_wraps_with_unsandboxed_sandbox_when_gate_approves() {
+async fn approved_merge_reaches_review_and_runs_only_in_the_selected_sandbox() {
+    let sha = "a".repeat(40);
+    let command = format!("gh pr merge 123 --repo owner/repo --squash --match-head-commit {sha}");
     for interactive in [false, true] {
-        let fixture = Fixture::new(None);
-        let result = fixture
-            .execute(json!({
-                "command": "printf", "args": ["approved"], "interactive": interactive,
-                "sandbox_access": "unsandboxed", "justification": "host access", "timeout_ms": 1000
-            }))
-            .await;
-        assert!(!result.is_error);
-        assert_eq!(
-            result
-                .content
-                .strip_prefix("exit_code: 0\n")
-                .expect("successful exit")
-                .trim(),
-            "approved"
-        );
-        fixture.assert_wraps(0, 1);
-        assert_eq!(
-            *fixture.gate.scopes.lock().expect("gate lock"),
-            vec![ShellAccess::Host]
-        );
-        assert_eq!(
-            *fixture.gate.calls.lock().expect("gate lock"),
-            vec![(
+        for wrapped in [false, true] {
+            let fake = FakeGh::new();
+            let fixture = fake.fixture(None);
+            let mut args = json!({
+                "command": command,
+                "sandbox_access": "unsandboxed",
+                "justification": "User requested merging this PR after CI passed",
+                "interactive": interactive
+            });
+            if wrapped {
+                args["command"] = json!("sh");
+                args["args"] = json!(["-c", format!("'{command}'")]);
+            }
+            let result = fixture.execute(args).await;
+            assert!(!result.is_error, "{}", result.content);
+            assert_eq!(
+                std::fs::read_to_string(fake.invocation()).expect("fake gh executed"),
+                format!(
+                    "pr\nmerge\n123\n--repo\nowner/repo\n--squash\n--match-head-commit\n{sha}\n"
+                )
+            );
+            fixture.assert_wraps(0, 1);
+            let calls = fixture.gate.calls.lock().expect("gate lock");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].0,
                 ToolExecutionContext {
                     run_id: "run-escalation".into(),
                     thread_id: Some("thread-escalation".into()),
                     call_id: Some("call-escalation".into()),
-                },
-                "printf approved".into(),
-                "host access".into(),
-            )]
-        );
+                }
+            );
+            let reviewed_command = if wrapped {
+                format!("sh -c '{}'", command)
+            } else {
+                command.clone()
+            };
+            assert_eq!(calls[0].1, reviewed_command);
+            assert_eq!(calls[0].2, "User requested merging this PR after CI passed");
+            assert_eq!(
+                *fixture.gate.scopes.lock().expect("gate lock"),
+                vec![ShellAccess::Host]
+            );
+        }
     }
 }
 
-// Given: a denying gate / When: escalation is requested / Then: the exact reason returns without wrap/spawn.
+// Given: a merge request / When: review denies / Then: neither sandbox nor fake gh executes.
 #[tokio::test]
-async fn denied_escalation_surfaces_reason_without_spawn_when_gate_denies() {
-    let fixture = Fixture::new(Some("operator refused"));
+async fn denied_merge_is_reviewed_without_spawning_gh() {
+    let fake = FakeGh::new();
+    let fixture = fake.fixture(Some("merge refused by reviewer"));
     let result = fixture
         .execute(json!({
-            "command": "printf forbidden", "sandbox_access": "unsandboxed", "justification": "host access"
+            "command": "gh pr", "args": ["merge", "123"],
+            "sandbox_access": "unsandboxed", "justification": "merge requested PR"
         }))
         .await;
     assert!(result.is_error);
-    assert_eq!(result.content, "operator refused");
+    assert_eq!(result.content, "merge refused by reviewer");
     fixture.assert_wraps(0, 0);
     assert_eq!(fixture.gate.calls.lock().expect("gate lock").len(), 1);
+    assert!(!fake.invocation().exists());
+}
+
+// Given: no reviewer / When: a merge asks for host access / Then: escalation fails before spawn.
+#[tokio::test]
+async fn merge_escalation_without_a_reviewer_fails_closed() {
+    let fake = FakeGh::new();
+    let mut fixture = fake.fixture(None);
+    fixture.executor =
+        ToolExecutor::with_standard_tools(Arc::new(EventBus::new(16)), fixture.default.clone());
+    let result = fixture
+        .execute(json!({
+            "command": "gh pr merge 123", "sandbox_access": "unsandboxed",
+            "justification": "merge requested PR"
+        }))
+        .await;
+    assert!(result.is_error);
+    assert_eq!(
+        result.content,
+        "shell escalation denied: no escalation gate configured"
+    );
+    fixture.assert_wraps(0, 0);
+    assert!(!fake.invocation().exists());
 }
 
 // Given: a contract-denied command / When: escalation is requested / Then: review is never invoked.
@@ -223,7 +317,7 @@ async fn contract_denial_precedes_escalation_review_when_command_is_forbidden() 
         let fixture = Fixture::new(None);
         let result = fixture
             .execute(json!({
-                "command": "gh pr", "args": ["merge", "123"],
+                "command": "gh issue", "args": ["close", "123"],
                 "sandbox_access": "unsandboxed", "justification": justification
             }))
             .await;
@@ -238,17 +332,22 @@ async fn contract_denial_precedes_escalation_review_when_command_is_forbidden() 
     }
 }
 
-// Given: a configured gate / When: access is isolated or omitted / Then: only the default sandbox wraps.
+// Given: a merge request / When: access is isolated or omitted / Then: only the default sandbox wraps.
 #[tokio::test]
-async fn isolated_or_omitted_access_uses_default_sandbox_without_review() {
+async fn isolated_or_omitted_merge_access_uses_default_sandbox_without_review() {
     for access in [None, Some("isolated")] {
-        let fixture = Fixture::new(Some("must not review"));
-        let mut args = json!({"command": "printf normal"});
+        let fake = FakeGh::new();
+        let fixture = fake.fixture(Some("must not review"));
+        let mut args = json!({"command": "gh pr merge 123"});
         if let Some(value) = access {
             args["sandbox_access"] = json!(value);
         }
         let result = fixture.execute(args).await;
-        assert_eq!(result.content, "exit_code: 0\nnormal");
+        assert_eq!(result.content, "exit_code: 0\nmerge executed\n");
+        assert_eq!(
+            std::fs::read_to_string(fake.invocation()).expect("fake gh executed"),
+            "pr\nmerge\n123\n"
+        );
         fixture.assert_wraps(1, 0);
         assert!(fixture.gate.calls.lock().expect("gate lock").is_empty());
     }

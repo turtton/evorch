@@ -1,8 +1,9 @@
 //! shell コマンド契約（S9）。
 //!
-//! モデル起因の shell 実行からは `gh pr merge` と intent-cli の
+//! モデル起因の shell 実行からは `gh issue create|edit|close` と intent-cli の
 //! queue/automation/issue/packet/publish/run 系を拒否し、supervisor の配信
 //! アダプタ向けに delivery / merge_only の allowlist モードを提供する。
+//! `gh pr merge` は通常の sandbox / escalation review 経路で実行する。
 //! 拒否判定は [`crate::tools::shell::Shell`] が `Sandbox::wrap` の前に行う。
 
 use std::sync::OnceLock;
@@ -57,7 +58,7 @@ pub struct ShellCommandContract {
 impl ShellCommandContract {
     /// モデル起因の shell に適用する deny-list 契約。
     ///
-    /// `gh pr merge`、`gh issue create|edit|close`、intent-cli の
+    /// `gh issue create|edit|close`、intent-cli の
     /// queue/automation/issue/packet/publish/run を拒否し、それ以外
     /// （`git add/commit`、`cargo` など）は許可する。
     pub fn standard() -> Self {
@@ -201,27 +202,19 @@ fn is_40_hex(value: &str) -> bool {
 /// standard 契約の評価。deny-list に該当した場合のみ拒否する。
 fn evaluate_standard(program: &str, args: &[String]) -> CommandVerdict {
     let base = basename(program);
-    if base == "gh" {
-        if starts_with(args, &["pr", "merge"]) {
-            return CommandVerdict::Deny {
-                reason: "gh pr merge is not allowed from model-invoked shells; pull request \
-                         merges go through the supervisor delivery adapter"
-                    .to_string(),
-            };
-        }
-        if args.first().map(String::as_str) == Some("issue")
-            && matches!(
-                args.get(1).map(String::as_str),
-                Some("create" | "edit" | "close")
-            )
-        {
-            return CommandVerdict::Deny {
-                reason: format!(
-                    "gh issue {} is not allowed from model-invoked shells",
-                    args[1]
-                ),
-            };
-        }
+    if base == "gh"
+        && args.first().map(String::as_str) == Some("issue")
+        && matches!(
+            args.get(1).map(String::as_str),
+            Some("create" | "edit" | "close")
+        )
+    {
+        return CommandVerdict::Deny {
+            reason: format!(
+                "gh issue {} is not allowed from model-invoked shells",
+                args[1]
+            ),
+        };
     }
     if base == "intent-cli"
         && let Some(sub) = args.first().map(String::as_str)
@@ -252,18 +245,12 @@ fn evaluate_standard(program: &str, args: &[String]) -> CommandVerdict {
 /// インタプリタ引数は完全には解析しないため、計画 S9 通りの正規表現一致のみ
 /// 行う。
 fn interpreter_deny_reason(args: &[String]) -> Option<String> {
-    static REGEXES: OnceLock<(Regex, Regex)> = OnceLock::new();
-    let (gh_pr_merge, intent_cli_family) = REGEXES.get_or_init(|| {
-        (
-            Regex::new(r"\bgh\s+pr\s+merge\b").expect("正規表現は有効であるはずです"),
-            Regex::new(r"\bintent-cli\s+(queue|automation|issue|packet|publish|run)\b")
-                .expect("正規表現は有効であるはずです"),
-        )
+    static INTENT_CLI_FAMILY: OnceLock<Regex> = OnceLock::new();
+    let intent_cli_family = INTENT_CLI_FAMILY.get_or_init(|| {
+        Regex::new(r"\bintent-cli\s+(queue|automation|issue|packet|publish|run)\b")
+            .expect("正規表現は有効であるはずです")
     });
     for arg in args {
-        if gh_pr_merge.is_match(arg) {
-            return Some("gh pr merge".to_string());
-        }
         if let Some(captures) = intent_cli_family.captures(arg) {
             return Some(format!("intent-cli {}", &captures[1]));
         }
@@ -273,10 +260,6 @@ fn interpreter_deny_reason(args: &[String]) -> Option<String> {
 
 fn basename(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
-}
-
-fn starts_with(args: &[String], prefix: &[&str]) -> bool {
-    args.len() >= prefix.len() && args.iter().zip(prefix).all(|(arg, token)| arg == token)
 }
 
 fn render_command(program: &str, args: &[String]) -> String {
@@ -320,8 +303,13 @@ mod tests {
     #[test]
     fn standard_denies_via_zsh_and_dash_interpreters() {
         let contract = ShellCommandContract::standard();
-        assert_denied(&contract, "zsh", &argv(&["-c", "gh pr merge 1"]));
-        assert_denied(&contract, "dash", &argv(&["-c", "intent-cli queue seed"]));
+        for interpreter in ["zsh", "dash"] {
+            assert_denied(
+                &contract,
+                interpreter,
+                &argv(&["-c", "intent-cli queue seed"]),
+            );
+        }
     }
 
     // Given: standard 契約 / When: 拒否対象を含まないインタプリタ文字列を渡す / Then: 許可される

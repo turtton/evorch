@@ -114,7 +114,7 @@ mod tests {
     // Given: denied command split over command and args / When: execute / Then: contract rejects it.
     #[tokio::test]
     async fn contract_checks_combined_command() {
-        let result = execute(json!({"command": "gh pr", "args": ["merge", "123"]})).await;
+        let result = execute(json!({"command": "gh issue", "args": ["close", "123"]})).await;
         assert!(result.is_error);
         assert!(
             result
