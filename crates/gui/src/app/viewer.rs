@@ -190,6 +190,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 AgentsAction::ReturnToThread => self.return_to_thread(),
                 AgentsAction::OpenPane(run_id) => self.open_agent_pane(&run_id),
                 AgentsAction::OpenDefaultPanes => self.open_default_agent_panes(),
+                AgentsAction::StopRun(run_id) => {
+                    if let Some(thread_id) = self.sidebar.active_thread.as_ref() {
+                        self.submit_command(crate::model::commands::WorkbenchCommand::StopRun {
+                            thread_id: thread_id.to_string(),
+                            run_id,
+                        });
+                    }
+                }
                 AgentsAction::OpenTask(task_id) => {
                     // Every navigation should reveal the target, including repeated visits.
                     ctx.data_mut(|data| {
