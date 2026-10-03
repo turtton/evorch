@@ -144,20 +144,32 @@ fn init_repo() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("temp dir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("repo directory");
+    // Keep fixture identity writes inside this repo even when run from a Git hook.
+    let local_env = Command::new("git")
+        .args(["rev-parse", "--local-env-vars"])
+        .output()
+        .expect("git local environment list");
+    assert!(local_env.status.success());
+    let local_env = String::from_utf8_lossy(&local_env.stdout);
     for args in [
         &["init", "--quiet"][..],
         &["config", "user.email", "headless@evorch.local"][..],
         &["config", "user.name", "evorch headless"][..],
         &[
             "commit",
+            "--no-gpg-sign",
             "--allow-empty",
             "--quiet",
             "-m",
             "initial headless commit",
         ][..],
     ] {
+        let mut command = Command::new("git");
+        for variable in local_env.lines() {
+            command.env_remove(variable);
+        }
         assert!(
-            Command::new("git")
+            command
                 .args(args)
                 .current_dir(&repo)
                 .status()

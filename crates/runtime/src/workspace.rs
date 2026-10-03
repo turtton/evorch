@@ -477,7 +477,31 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<(), WorkspaceError> {
 }
 
 fn git_output(repo_root: &Path, args: &[&str]) -> Result<Output, WorkspaceError> {
-    Command::new("git")
+    let mut command = Command::new("git");
+    // Git hooks export repository-local variables that override `git -C`.
+    // Match `git rev-parse --local-env-vars`, plus the ref namespace, while
+    // retaining global configuration (including the user's signing settings).
+    for name in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(name);
+    }
+    command
         .arg("-C")
         .arg(repo_root)
         .args(args)
@@ -505,16 +529,11 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{OwnedWorktree, Project, WorkspaceError, WorktreeManager};
+    use super::{OwnedWorktree, Project, WorkspaceError, WorktreeManager, git_output};
     use crate::run::RunId;
 
     fn git(repo: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("git を実行できる")
+        git_output(repo, args).expect("git を実行できる")
     }
 
     fn init_repo() -> (TempDir, PathBuf) {
@@ -534,13 +553,100 @@ mod tests {
         );
         fs::write(repo.join("README.md"), "# test\n").expect("初期ファイルを書き込める");
         assert!(git(&repo, &["add", "README.md"]).status.success());
-        assert!(git(&repo, &["commit", "-m", "initial"]).status.success());
+        // Fixture commits must not depend on the user's signing key or agent.
+        assert!(
+            git(
+                &repo,
+                &["-c", "commit.gpgsign=false", "commit", "-m", "initial"]
+            )
+            .status
+            .success()
+        );
         (temp, repo)
     }
 
     fn manager(repo: &Path) -> WorktreeManager {
         let project = Project::new(repo.to_path_buf()).expect("git リポジトリを検証できる");
         WorktreeManager::new(project)
+    }
+
+    #[test]
+    fn inherited_git_environment_does_not_modify_foreign_repository() {
+        const CHILD: &str = "EVORCH_WORKSPACE_GIT_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (_temp, repo) = init_repo();
+            assert_eq!(
+                String::from_utf8(git(&repo, &["config", "--local", "user.name"]).stdout)
+                    .unwrap()
+                    .trim(),
+                "Evorch Test"
+            );
+            assert_eq!(
+                String::from_utf8(git(&repo, &["config", "--local", "user.email"]).stdout)
+                    .unwrap()
+                    .trim(),
+                "evorch@example.invalid"
+            );
+            let manager = manager(&repo);
+            let owned = manager.create(RunId::new(99)).unwrap();
+            assert_eq!(
+                manager.open_existing(RunId::new(99)).unwrap().path,
+                owned.path
+            );
+            owned.cleanup().unwrap();
+            return;
+        }
+
+        let (_foreign_temp, foreign) = init_repo();
+        assert!(
+            git(
+                &foreign,
+                &["config", "--local", "user.name", "Foreign Owner"]
+            )
+            .status
+            .success()
+        );
+        assert!(
+            git(
+                &foreign,
+                &["config", "--local", "user.email", "foreign@example.invalid"],
+            )
+            .status
+            .success()
+        );
+        let foreign_git = foreign.join(".git");
+        let config_before = fs::read(foreign_git.join("config")).unwrap();
+        let index_before = fs::read(foreign_git.join("index")).unwrap();
+        let refs_before = git(&foreign, &["show-ref"]).stdout;
+
+        // Change only a subprocess's environment, so parallel tests cannot be
+        // redirected. Every injected path belongs to this temporary fixture.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "workspace::tests::inherited_git_environment_does_not_modify_foreign_repository",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("GIT_DIR", &foreign_git)
+            .env("GIT_COMMON_DIR", &foreign_git)
+            .env("GIT_WORK_TREE", &foreign)
+            .env("GIT_INDEX_FILE", foreign_git.join("index"))
+            .env("GIT_OBJECT_DIRECTORY", foreign_git.join("objects"))
+            .env("GIT_CONFIG", foreign_git.join("config"))
+            .env("GIT_NAMESPACE", "foreign")
+            .output()
+            .unwrap();
+
+        assert_eq!(fs::read(foreign_git.join("config")).unwrap(), config_before);
+        assert_eq!(fs::read(foreign_git.join("index")).unwrap(), index_before);
+        assert_eq!(git(&foreign, &["show-ref"]).stdout, refs_before);
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // Given: 1 commit を持つ git repo / When: run-7 の worktree を作成 / Then: worktree と対応 branch が存在する

@@ -402,15 +402,16 @@ pub fn init_git_repo() -> (TempDir, PathBuf) {
 }
 
 pub fn git(repo: &Path, args: &[&str]) -> Output {
-    Command::new("git")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_NAMESPACE")
-        .env_remove("GIT_PREFIX")
+    let mut command = Command::new("git");
+    // Hooks export repository-local Git variables; fixtures must never use that repository.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .arg("-C")
         .arg(repo)
         .args(args)
