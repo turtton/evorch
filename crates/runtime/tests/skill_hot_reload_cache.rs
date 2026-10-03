@@ -5,6 +5,7 @@ mod support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};
@@ -30,6 +31,7 @@ const V1: &str = "HOT-RELOAD-BODY-SENTINEL-V1";
 const V2: &str = "HOT-RELOAD-BODY-SENTINEL-V2";
 const AGENTS_V1: &str = "USER-AGENTS-SENTINEL-V1";
 const AGENTS_V2: &str = "USER-AGENTS-SENTINEL-V2";
+const SCOPE_ENV: &str = "EVORCH_SKILL_CACHE_TEST_SCOPE";
 
 struct GatedRead {
     entered: Notify,
@@ -60,7 +62,7 @@ impl Tool for GatedRead {
 
 struct Harness {
     _directory: tempfile::TempDir,
-    repo: PathBuf,
+    skills: PathBuf,
     user_agents_md: PathBuf,
     runtime: AgentRuntime,
     receiver: EventReceiver,
@@ -68,8 +70,8 @@ struct Harness {
     read: Arc<GatedRead>,
 }
 
-fn write_skill(repo: &Path, name: &str, description: &str, body: &str) {
-    let dir = repo.join(".evorch/skills").join(name);
+fn write_skill(skills: &Path, name: &str, description: &str, body: &str) {
+    let dir = skills.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("SKILL.md"),
@@ -89,9 +91,14 @@ fn read_response(index: usize) -> ScriptedResponse {
     )
 }
 
-fn harness() -> Harness {
+fn harness(scope: &str) -> Harness {
     let (directory, repo) = support::init_git_repo();
-    write_skill(&repo, "demo", "Demo reload skill", V1);
+    let skills = match scope {
+        "repo" => repo.join(".evorch/skills"),
+        "home" => PathBuf::from(std::env::var_os("HOME").unwrap()).join(".agents/skills"),
+        _ => panic!("unknown fixture scope: {scope}"),
+    };
+    write_skill(&skills, "demo", "Demo reload skill", V1);
     let user_config = directory.path().join("user-config");
     std::fs::create_dir(&user_config).unwrap();
     let user_agents_md = user_config.join("AGENTS.md");
@@ -104,6 +111,7 @@ fn harness() -> Harness {
         read_response(3),
         ScriptedResponse::text_stream("second-done", MODEL, ["done"]),
     ]);
+    std::fs::create_dir_all(repo.join(".evorch")).unwrap();
     std::fs::write(
         config::project_main_config_path(&repo),
         format!(
@@ -158,7 +166,7 @@ summarizer = "structural"
     .with_compaction(config.compaction.clone());
     Harness {
         _directory: directory,
-        repo,
+        skills,
         user_agents_md,
         runtime,
         receiver,
@@ -267,7 +275,31 @@ fn verify_run(run: RunId, events: &[Event], requests: &[Value]) {
 
 #[tokio::test]
 async fn skill_and_user_agents_reload_preserve_wire_prefix_and_refresh_only_new_runs() {
-    let mut h = harness();
+    let Ok(scope) = std::env::var(SCOPE_ENV) else {
+        // Isolate HOME/XDG in child processes; do not mutate the test runner environment.
+        for scope in ["repo", "home"] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "skill_and_user_agents_reload_preserve_wire_prefix_and_refresh_only_new_runs",
+                    "--nocapture",
+                ])
+                .env(SCOPE_ENV, scope)
+                .env("HOME", directory.path().join("home"))
+                .env("XDG_CONFIG_HOME", directory.path().join("xdg"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{scope} fixture failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let mut h = harness(&scope);
     let load_demo = || RunConfig {
         load_skills: vec!["demo".into(), "git-best-practices".into()],
         ..Default::default()
@@ -275,7 +307,10 @@ async fn skill_and_user_agents_reload_preserve_wire_prefix_and_refresh_only_new_
     let first =
         h.runtime
             .delegate_background(Role::Orchestrator, "First skill run".into(), load_demo());
-    h.read.entered.notified().await;
+    tokio::select! {
+        _ = h.read.entered.notified() => {}
+        phase = h.runtime.wait(first) => panic!("run ended before entering the tool gate: {phase:?}"),
+    }
     let initial = requests(&h.mock);
     assert_eq!(initial.len(), 1);
     assert!(system(&initial[0]).contains(V1));
@@ -291,10 +326,10 @@ async fn skill_and_user_agents_reload_preserve_wire_prefix_and_refresh_only_new_
     assert!(!system(&initial[0]).contains(V2));
 
     // tool gate で実行を止め、既送信 System の本文と metadata の両方を陳腐化させる。
-    write_skill(&h.repo, "demo", "Demo reload skill", V2);
+    write_skill(&h.skills, "demo", "Demo reload skill", V2);
     std::fs::write(&h.user_agents_md, AGENTS_V2).unwrap();
     write_skill(
-        &h.repo,
+        &h.skills,
         "second",
         "Second reload skill",
         "SECOND-BODY-NOT-LOADED",

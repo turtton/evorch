@@ -159,7 +159,12 @@ fn all_filesystem_scopes_can_override_the_actual_builtin() {
         format!("---\nname: {NAME}\ndescription: Repository Git policy\n---\nLOCAL GIT POLICY\n"),
     )
     .unwrap();
-    for scope in [SkillScope::Repo, SkillScope::RepoAgents, SkillScope::User] {
+    for scope in [
+        SkillScope::Repo,
+        SkillScope::RepoAgents,
+        SkillScope::User,
+        SkillScope::UserAgents,
+    ] {
         let registry = discover_with_builtin(&[(scope, directory.path().to_path_buf())]);
         let entry = registry.get(NAME).unwrap();
         assert_eq!(entry.scope, scope);
