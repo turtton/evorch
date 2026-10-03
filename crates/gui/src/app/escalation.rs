@@ -42,7 +42,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .any(|entry| !matches!(entry, TranscriptEntry::UserMessage { .. }))
         });
         self.transcripts.adopt_thread_root(&thread_id, new_run_id);
-        let bound = self.bind_thread_run(&thread_id, new_run_id);
+        let bound = self.bind_conversation_run(&thread_id, new_run_id, true);
         if adopted {
             let inherited = self
                 .user_questions

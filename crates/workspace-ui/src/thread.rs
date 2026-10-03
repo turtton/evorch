@@ -71,6 +71,9 @@ pub struct ThreadRecord {
     #[serde(default)]
     pub created_at: i64,
     pub run_ids: Vec<String>,
+    /// Current conversation root; historical roots and children remain in `run_ids`.
+    #[serde(default)]
+    pub root_run_id: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
     /// Inspected active root; without a worktree path this is populated only for Shared runs.
@@ -104,6 +107,7 @@ impl ThreadRecord {
                 .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
                 .unwrap_or_default(),
             run_ids: Vec::new(),
+            root_run_id: None,
             branch: None,
             worktree_path: None,
             active_root: None,
@@ -142,6 +146,18 @@ impl ThreadRecord {
     }
 
     pub fn state(&self, phases: &BTreeMap<String, ThreadRunPhase>) -> ThreadState {
+        // A conversation's status belongs to its current root, not every run in
+        // its history. Failed children and superseded roots remain browsable.
+        if let Some(root) = &self.root_run_id {
+            return match phases.get(root) {
+                Some(ThreadRunPhase::Stopped) => ThreadState::Stopped,
+                Some(ThreadRunPhase::Pending | ThreadRunPhase::Running) => ThreadState::Running,
+                Some(ThreadRunPhase::Waiting) => ThreadState::Waiting,
+                Some(ThreadRunPhase::Done) => ThreadState::Done,
+                Some(ThreadRunPhase::Error) => ThreadState::Error,
+                None => ThreadState::Active,
+            };
+        }
         let phases = self.run_ids.iter().filter_map(|run_id| phases.get(run_id));
         let collected: Vec<&ThreadRunPhase> = phases.collect();
         if collected

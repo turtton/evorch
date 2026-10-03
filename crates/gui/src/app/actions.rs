@@ -390,7 +390,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
-                if self.bind_thread_run(&thread_id, &run_id) {
+                if self.bind_conversation_run(&thread_id, &run_id, true) {
                     self.save_sidebar();
                 }
             }
