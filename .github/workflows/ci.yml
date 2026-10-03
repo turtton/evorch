@@ -39,6 +39,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y mold ripgrep
       # ジョブ内の依存キャッシュを復元する。profile/feature が異なるジョブは別キー。
       - uses: Swatinem/rust-cache@v2
+        env:
+          # Keep the existing cache key: Cargo previously set this only per step.
+          # The action recursively caches target/, including target/ci-shared.
+          CARGO_TARGET_DIR: ""
         with:
           shared-key: ${{ runner.os }}-cargo
       - uses: taiki-e/install-action@v2
