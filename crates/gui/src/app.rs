@@ -11,6 +11,7 @@ mod frame;
 mod history;
 mod input;
 mod ownership;
+mod ownership_status;
 mod provider_settings;
 mod questions;
 mod restoration;

@@ -48,6 +48,13 @@ Never request external focus or activate a browser target from the UI.
 ## 7. Accessibility
 Label every input, retain keyboard focus, and never use color as the only status.
 No motion is introduced. Long IDs must remain inspectable without clipping.
+The ownership header abbreviates owner IDs to five characters plus `…`, with the
+full ID, generation and state on hover. Access retains the last confirmed state
+(or `checking ownership` initially) while probes retry. SQLite contention gets a
+one-second grace before an access-label `⚠` in WARNING_FG; other failures warn
+immediately. Retry details stay in the tooltip, never a raw header error or an
+agent-stopped status. Action errors stay beside ownership buttons or in the close
+dialog. Cached display state never authorizes writes; live ownership checks do.
 
 ## 8. Verification and debt
 Use egui headless interaction tests for controls and native screenshot evidence

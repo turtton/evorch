@@ -37,6 +37,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 providers = { path = "../providers" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
+rusqlite = { workspace = true }
 sandbox = { path = "../sandbox", features = ["keychain"] }
 serde = { workspace = true }
 sha2 = { workspace = true }

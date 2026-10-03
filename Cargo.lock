@@ -2398,6 +2398,7 @@ dependencies = [
  "pulldown-cmark",
  "routing",
  "runtime",
+ "rusqlite",
  "sandbox",
  "serde",
  "serde_json",
