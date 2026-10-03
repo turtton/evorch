@@ -15,6 +15,7 @@
 //!   role → model 解決を行わない。edge の [`compose`] が設定・routing・provider を接続する。
 
 mod agent_loop;
+pub mod base_context;
 pub mod budget_tracker;
 pub(crate) mod compaction;
 pub mod compose;

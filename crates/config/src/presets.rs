@@ -97,6 +97,31 @@ impl PresetStore {
     }
 }
 
+/// [`PresetStore::resolve`] が本文を読み込む層。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresetOrigin {
+    /// `<user_presets_dir>/<name>.md` のユーザー上書き。
+    User(std::path::PathBuf),
+    /// バイナリに同梱されたプリセット。
+    Bundled,
+}
+
+impl PresetStore {
+    /// [`PresetStore::resolve`] と同じ優先順位で、本文の解決元を返す。
+    ///
+    /// 名前が不正、またはどちらにも存在しなければ `None` を返す。
+    pub fn origin(name: &str, user_presets_dir: Option<&Path>) -> Option<PresetOrigin> {
+        validate_name(name).ok()?;
+        if let Some(dir) = user_presets_dir {
+            let path = dir.join(format!("{name}.md"));
+            if path.is_file() {
+                return Some(PresetOrigin::User(path));
+            }
+        }
+        bundled(name).map(|_| PresetOrigin::Bundled)
+    }
+}
+
 /// ユーザー上書きファイルを検査して読み込む。
 fn read_user_file(path: &Path) -> Result<String, ConfigError> {
     let size = std::fs::metadata(path)?.len();

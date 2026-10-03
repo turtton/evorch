@@ -28,23 +28,24 @@ use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::base_context::{self, InitialSystemPromptError};
 use crate::compaction;
-use crate::compaction::policy::{
-    CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
-};
+use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
-use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
-use crate::rules::{self, RulesSession, RulesSource};
+use crate::prompt::{SystemPromptCatalog, classify};
+use crate::rules::{RulesSession, RulesSource};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
-use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
+use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
 };
-use tool_calls::{standard_tool_specs, visible_tool_specs};
+pub(crate) use tool_calls::{
+    append_subagent_context_note, standard_tool_specs, visible_tool_specs,
+};
 
 pub(crate) struct RunTask {
     pub(crate) run_id: RunId,
@@ -257,7 +258,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     }
     // Family-scoped description variation keeps the request prefix stable within a model family,
     // so prompt-cache hit rates are unaffected.
-    tool_calls::append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
+    append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
     owned_worktree = match state.task.config.workspace_mode {
         WorkspaceMode::Shared => None,
         WorkspaceMode::Isolated => {
@@ -348,17 +349,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     }
     if let Some(root) = &active_root {
-        let workspace_note = format!(
-            "Current workspace (evorch): {}.",
-            root.display()
-        );
+        let workspace_note = base_context::workspace_note(root);
         if let Some(message) = state
             .context
             .messages
             .iter_mut()
             .find(|message| message.role == providers::Role::System)
         {
-            if let Some(ContentBlock::Text { text }) = message.content.iter_mut().find(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("Current workspace (evorch): "))) {
+            if let Some(ContentBlock::Text { text }) = message.content.iter_mut().find(|block| matches!(block, ContentBlock::Text { text } if base_context::is_workspace_note(text))) {
                 *text = workspace_note;
             } else {
                 message.content.push(ContentBlock::Text { text: workspace_note });
@@ -378,56 +376,13 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     state.finalize(owned_worktree).await;
 }
 
-fn shared_active_root(
+pub(crate) fn shared_active_root(
     rules: Option<&RulesSource>,
     sandbox_root: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     rules
         .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
         .or(sandbox_root)
-}
-
-#[cfg(test)]
-mod workspace_tests {
-    use super::shared_active_root;
-    use crate::{ProjectTrust, RulesSettings, RulesSource};
-    use std::path::PathBuf;
-
-    #[test]
-    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
-        let rules_root = PathBuf::from("/rules-project");
-        let sandbox_root = PathBuf::from("/sandbox-project");
-        let rules = RulesSource::new(
-            ProjectTrust::Approved,
-            RulesSettings::from(&config::RulesConfig::default()),
-            None,
-            Some(rules_root.clone()),
-            None,
-        );
-        assert_eq!(
-            shared_active_root(Some(&rules), Some(sandbox_root)),
-            Some(rules_root),
-        );
-    }
-
-    #[test]
-    fn shared_active_root_falls_back_to_sandbox_or_none() {
-        let sandbox_root = PathBuf::from("/sandbox-project");
-        let rules = RulesSource::new(
-            ProjectTrust::Approved,
-            RulesSettings::from(&config::RulesConfig::default()),
-            None,
-            None,
-            None,
-        );
-        for source in [None, Some(&rules)] {
-            assert_eq!(
-                shared_active_root(source, Some(sandbox_root.clone())),
-                Some(sandbox_root.clone()),
-            );
-            assert_eq!(shared_active_root(source, None), None);
-        }
-    }
 }
 
 async fn setup_isolated_workspace(
@@ -633,104 +588,35 @@ pub(crate) async fn cleanup_worktree(
     }
 }
 
-/// 初期 System メッセージの合成で失敗しうるエラー (issue #53 / AC6)。
-///
-/// Display は識別子のみを運び、skill 本文や frontmatter 値を漏らさない
-/// ([`SystemPromptCatalogError`] / [`SkillLoadError`] と同一規約)。
-#[derive(Debug, thiserror::Error)]
-enum InitialSystemPromptError {
-    /// カタログ参照の失敗 (既存のカタログエラーをそのまま運ぶ)。
-    #[error(transparent)]
-    Catalog(#[from] SystemPromptCatalogError),
-    /// skill 本文の読み込み失敗 ([`SkillLoadError`] は識別子のみを運ぶ)。
-    #[error(transparent)]
-    Skills(#[from] SkillLoadError),
-    /// load_skills が指定されたが skill レジストリが接続されていない。
-    #[error("skill registry is not configured")]
-    SkillsNotConfigured,
-}
-
 /// run 開始時の初期 System メッセージを履歴へ push する (単一 System 不変条件)。
 ///
 /// カタログテキスト・skills セクション・project rules を**1 件の** System
-/// メッセージへ合成する。各セクションは空行 1 つを挟んで連結する。すべて
-/// 無指定なら何もせず v0.1 の履歴構成を保つ。解決に失敗した場合は型付き
-/// エラーを返し、履歴へは System メッセージを追加しない (fail-closed)。
+/// メッセージへ合成する ([`crate::base_context::compose_system_sections`] が
+/// Context Inspector と共有する単一の組立経路)。すべて無指定なら何もせず
+/// v0.1 の履歴構成を保つ。解決に失敗した場合は型付きエラーを返し、履歴へは
+/// System メッセージを追加しない (fail-closed)。
 fn push_initial_system_message(
     shared: &LoopShared,
     task: &RunTask,
     rules_session: Option<&RulesSession>,
     context: &mut AgentContext,
 ) -> Result<(), InitialSystemPromptError> {
-    let catalog_text = match shared.system_prompts.as_ref() {
-        Some(catalog) => {
-            let model_id = shared
-                .model
-                .selected_model(task.role, task.config.category.as_deref());
-            Some(catalog.system_prompt_for(
-                task.role,
-                task.config.category.as_deref(),
-                &model_id,
-            )?)
-        }
-        None => None,
-    };
-    let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
-    let compaction_text = shared.compaction_configured.then(|| {
-        let model_id = shared
-            .model
-            .selected_model(task.role, task.config.category.as_deref());
-        compaction_policy_text(&shared.compaction, classify(&model_id))
-    });
-    let estimated_history_bytes = u64::try_from(
-        catalog_text.as_ref().map_or(0, String::len)
-            + skills_text.as_ref().map_or(0, String::len)
-            + compaction_text.as_ref().map_or(0, String::len)
-            + task.prompt.len(),
-    )
-    .unwrap_or(u64::MAX);
-    let rules_text = shared.rules.as_ref().and_then(|source| {
-        rules::startup_snapshot(
-            source,
-            rules_session.and_then(|session| session.active_root.as_deref()),
-            None,
-            estimated_history_bytes,
-        )
-    });
-    let mut composed = String::new();
-    for section in [catalog_text, skills_text, rules_text, compaction_text]
-        .into_iter()
-        .flatten()
-    {
-        if !composed.is_empty() {
-            composed.push_str("\n\n");
-        }
-        composed.push_str(&section);
-    }
+    let sections = base_context::compose_system_sections(
+        shared,
+        &base_context::SystemInputs {
+            role: task.role,
+            category: task.config.category.as_deref(),
+            load_skills: &task.config.load_skills,
+            prompt_len: task.prompt.len(),
+            active_root: rules_session.and_then(|session| session.active_root.as_deref()),
+        },
+    )?;
+    let composed = base_context::join_system_sections(&sections);
     if composed.is_empty() {
         return Ok(());
     }
     context.push_system(&composed);
     Ok(())
-}
-
-/// load_skills 指定時、レジストリから本文を読み込み skills セクション文字列を
-/// 返す。load_skills が空なら None (セクションなし)。
-fn resolve_skills_section(
-    shared: &LoopShared,
-    load_skills: &[String],
-) -> Result<Option<String>, InitialSystemPromptError> {
-    if load_skills.is_empty() {
-        return Ok(None);
-    }
-    let Some(registry) = shared.skills.as_ref() else {
-        return Err(InitialSystemPromptError::SkillsNotConfigured);
-    };
-    let mut loaded = Vec::with_capacity(load_skills.len());
-    for name in load_skills {
-        loaded.push((name.clone(), registry.load_body(name)?));
-    }
-    Ok(Some(render_skills_section(&loaded)))
 }
 
 impl LoopState {
@@ -1348,5 +1234,48 @@ impl LoopState {
 
     fn finish_cancelled(&mut self) {
         self.finish_error("cancelled".to_string());
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::shared_active_root;
+    use crate::{ProjectTrust, RulesSettings, RulesSource};
+    use std::path::PathBuf;
+
+    #[test]
+    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
+        let rules_root = PathBuf::from("/rules-project");
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(rules_root.clone()),
+            None,
+        );
+        assert_eq!(
+            shared_active_root(Some(&rules), Some(sandbox_root)),
+            Some(rules_root),
+        );
+    }
+
+    #[test]
+    fn shared_active_root_falls_back_to_sandbox_or_none() {
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            None,
+            None,
+        );
+        for source in [None, Some(&rules)] {
+            assert_eq!(
+                shared_active_root(source, Some(sandbox_root.clone())),
+                Some(sandbox_root.clone()),
+            );
+            assert_eq!(shared_active_root(source, None), None);
+        }
     }
 }

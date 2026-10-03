@@ -19,7 +19,7 @@ use crate::theme::text::{h3, muted};
 #[path = "usage/analysis.rs"]
 mod analysis;
 #[path = "usage/charts.rs"]
-mod charts;
+pub(crate) mod charts;
 #[path = "usage/live.rs"]
 mod live;
 #[path = "usage/overview.rs"]

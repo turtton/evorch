@@ -76,6 +76,11 @@ impl SkillCatalogSource {
         source
     }
 
+    /// preset 上書きの解決に使う user config dir を返す。
+    pub fn user_config_dir(&self) -> Option<&std::path::Path> {
+        self.user_presets_dir.as_deref()
+    }
+
     /// run 開始時の snapshot を取得する。更新を直列化し、通知はロック解放後に行う。
     ///
     /// 発見診断は直前の集合 (順序を含む) と異なる場合にのみ全件発行する。

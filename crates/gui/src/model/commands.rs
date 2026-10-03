@@ -213,6 +213,10 @@ pub enum LoopEvent {
     },
 }
 
+/// Delivers one base context preview composed off the render thread.
+pub type ContextPreviewReceiver =
+    std::sync::mpsc::Receiver<Result<runtime::base_context::BaseContextReport, String>>;
+
 pub trait CommandSink: Send {
     /// Runtime receipt observation, not an acknowledgement of command acceptance.
     fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
@@ -231,6 +235,24 @@ pub trait CommandSink: Send {
         &self,
         _run: &str,
     ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
+        Ok(None)
+    }
+
+    /// Compose the base context a new run would receive; `None` without a live runtime.
+    /// The result arrives on the receiver once the runtime has resolved model windows.
+    fn preview_base_context(
+        &self,
+        _request: runtime::base_context::BaseContextRequest,
+        _project: Option<&str>,
+    ) -> Option<ContextPreviewReceiver> {
+        None
+    }
+
+    /// The last persisted context of a run; `Ok(None)` without a run store or snapshot.
+    fn run_context_view(
+        &self,
+        _run: &str,
+    ) -> Result<Option<runtime::base_context::RunContextView>, String> {
         Ok(None)
     }
 

@@ -201,6 +201,14 @@ pub fn is_public_worker_category(name: &str) -> bool {
     public_worker_categories().any(|category| category.name == name)
 }
 
+/// Overlay preset name for any registered category, including internal ones.
+pub fn overlay_preset_for(name: &str) -> Option<&'static str> {
+    CATEGORIES
+        .iter()
+        .find(|category| category.name == name)
+        .map(|category| category.overlay_preset)
+}
+
 pub(crate) fn categories_for_role(
     role: &str,
 ) -> impl Iterator<Item = &'static CategoryDefinition> + '_ {

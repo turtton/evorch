@@ -28,7 +28,7 @@ pub use load::{
     LoadOptions, PROJECT_CONFIG_DIR, project_main_config_path, user_config_dir,
     user_main_config_path,
 };
-pub use presets::PresetStore;
+pub use presets::{PresetOrigin, PresetStore};
 pub use prompt_sources::{AgentPromptSources, resolve_prompt_sources};
 pub use save::{
     OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,

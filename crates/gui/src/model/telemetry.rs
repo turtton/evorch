@@ -420,6 +420,11 @@ impl TelemetryOverlay {
     pub fn row(&self, run_id: &str) -> Option<&TelemetryRow> {
         self.rows.get(run_id)
     }
+
+    /// Every run observed this session, in run ID order.
+    pub fn run_ids(&self) -> impl Iterator<Item = &str> {
+        self.rows.keys().map(String::as_str)
+    }
 }
 
 #[cfg(test)]

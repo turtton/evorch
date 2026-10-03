@@ -28,12 +28,16 @@ use crate::panes::{
 };
 use crate::pty::PtySession;
 
+mod context;
 mod conversation;
+
+use context::context_actuals;
 
 pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) pending_approvals: &'a PendingApprovalsModel,
     pub(super) request_action: &'a mut Option<RequestAction>,
     pub(super) diagnostics_request: &'a mut bool,
+    pub(super) context_request: &'a mut bool,
     pub(super) user_questions: &'a BTreeMap<String, event_bus::UserQuestion>,
     pub(super) question_drafts: &'a mut BTreeMap<String, String>,
     pub(super) notifications: &'a mut NotificationsModel,
@@ -41,6 +45,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
+    pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
     pub(super) transcripts: &'a TranscriptRegistry,
@@ -136,6 +141,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::Memory => icons::BRAIN,
         PanelKind::Arena => icons::SCALES,
         PanelKind::Usage => icons::CHART_BAR,
+        PanelKind::ContextInspector => icons::STACK,
     }
 }
 
@@ -175,7 +181,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Tasks
                     | PanelKind::Memory
                     | PanelKind::Arena
-                    | PanelKind::Usage => None,
+                    | PanelKind::Usage
+                    | PanelKind::ContextInspector => None,
                 };
                 match owner {
                     Some(thread) => format!("{} · {}", panel.title, thread.id),
@@ -216,10 +223,12 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
 
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
         tab.as_str().starts_with("agent-run-")
-            || self
-                .panels
-                .get(tab)
-                .is_some_and(|panel| matches!(panel.kind, PanelKind::FileViewer | PanelKind::Usage))
+            || self.panels.get(tab).is_some_and(|panel| {
+                matches!(
+                    panel.kind,
+                    PanelKind::FileViewer | PanelKind::Usage | PanelKind::ContextInspector
+                )
+            })
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -385,6 +394,12 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         workspace_ui::ThreadId::new(thread),
                     ));
                 }
+            }
+            PanelKind::ContextInspector => {
+                let choices = self.context_run_choices();
+                let telemetry = self.telemetry;
+                self.context_inspector
+                    .render(ui, &choices, |run| context_actuals(telemetry, run));
             }
         }
         let link_base = if panel.kind == PanelKind::FileViewer {

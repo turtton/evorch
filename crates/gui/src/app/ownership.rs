@@ -77,6 +77,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_role_settings();
                     ui.close();
                 }
+                if ui.button("Agent context").clicked() {
+                    self.open_context_tab(
+                        crate::panes::context_inspector::InspectorMode::Preview,
+                        None,
+                    );
+                    ui.close();
+                }
             })
             .response
             .on_hover_text("Workbench settings");
