@@ -17,6 +17,9 @@ use super::telemetry::pricing::UsagePricing;
 pub mod day;
 pub use day::LocalDay;
 
+#[path = "usage_stats/series.rs"]
+pub mod series;
+
 /// Period shown by the Usage tab, ending today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageRange {
