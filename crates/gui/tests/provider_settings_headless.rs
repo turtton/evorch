@@ -47,6 +47,11 @@ fn saves_existing_keyring_profile_without_typing_token() {
         harness.state().provider_settings().error
     );
     assert!(harness.state().provider_settings().editor.is_none());
+    assert!(harness.state().provider_settings().open);
+    assert!(harness.has_label("Provider settings"));
+    assert!(harness.has_label("A"));
+    assert!(harness.has_label("Edit"));
+    assert!(!harness.has_label("Save"));
     assert_eq!(load_config(temp.path()).providers.len(), 1);
     assert_eq!(store.get("acct-A").unwrap().unwrap().expose(), "old-token");
 }
