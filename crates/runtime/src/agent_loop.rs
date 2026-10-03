@@ -792,6 +792,15 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            for notice in self
+                .shared
+                .executor
+                .take_shell_job_notifications(&self.task.run_id.to_string())
+            {
+                // Append without rewriting the already-sent provider prefix.
+                self.context.push_user(&notice);
+                self.publish_message_count();
+            }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,

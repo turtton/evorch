@@ -316,6 +316,10 @@ impl Tool for Shell {
         self.jobs.unobserved(run_id)
     }
 
+    fn take_shell_job_notifications(&self, run_id: &str) -> Vec<String> {
+        self.jobs.take_notifications(run_id)
+    }
+
     fn retain_shell_call_guard(&self, run_id: &str, call_id: &str, guard: Box<dyn Send + Sync>) {
         self.jobs.retain_call_guard(run_id, call_id, guard);
     }
