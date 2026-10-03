@@ -31,14 +31,7 @@ async fn small_storage_limit_splits_batches_but_rejects_an_oversized_original() 
     let bus = Arc::new(EventBus::new(64));
     let bridge = StorageBridge::new(storage.handle(), "session");
     let monitor = bridge.monitor();
-    let task = tokio::spawn(run(bus.clone(), bridge, Duration::from_secs(60)));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while bus.receiver_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let task = spawn_test_bridge(&bus, bridge, Duration::from_secs(60));
 
     // When: valid originals arrive in a burst, followed by one oversized original.
     for _ in 0..25 {
@@ -46,10 +39,7 @@ async fn small_storage_limit_splits_batches_but_rejects_an_oversized_original() 
     }
     bus.emit(delta(chunk.repeat(3)));
     drop(bus);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    task.await.unwrap();
 
     // Then: batching never invalidates a valid original or bypasses the hard cap.
     let stored = db.events_all_ordered().unwrap();
@@ -103,23 +93,13 @@ async fn midnight_deltas_keep_separate_rows_and_independent_daily_budgets() {
     let bus = Arc::new(EventBus::new(32));
     let bridge = StorageBridge::new(storage.handle(), "session");
     let monitor = bridge.monitor();
-    let task = tokio::spawn(run(bus.clone(), bridge, Duration::from_secs(60)));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while bus.receiver_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let task = spawn_test_bridge(&bus, bridge, Duration::from_secs(60));
 
     // When: each day accepts its full budget before the bridge shuts down.
     bus.emit(before.clone());
     bus.emit(after.clone());
     drop(bus);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    task.await.unwrap();
 
     // Then: neither day's bytes are attributed to the other; timestamps survive.
     let stored: Vec<_> = db
@@ -145,14 +125,8 @@ async fn invalid_timestamp_deltas_remain_independently_rejected() {
     let bus = Arc::new(EventBus::new(32));
     let bridge = StorageBridge::new(storage.handle(), "session");
     let monitor = bridge.monitor();
-    let task = tokio::spawn(run(bus.clone(), bridge, Duration::from_secs(60)));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while bus.receiver_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let task = spawn_test_bridge(&bus, bridge, Duration::from_secs(60));
+
     let mut valid = Event::new(event_bus::MessageEvent::MessageDelta {
         run_id: Some("run".into()),
         delta: "accepted".into(),
@@ -166,10 +140,7 @@ async fn invalid_timestamp_deltas_remain_independently_rejected() {
         bus.emit(event);
     }
     drop(bus);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    task.await.unwrap();
     let stored: Vec<_> = db
         .events_all_ordered()
         .unwrap()

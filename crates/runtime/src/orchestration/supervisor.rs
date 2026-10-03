@@ -11,7 +11,7 @@ use event_bus::{
     GoalStage, GoalState, InvalidationReason, LifecycleEvent, OrchestratorEvent, ProviderEvent,
     RecvError, RunPurpose, SuppressReason, ToolEvent,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::{AgentRuntime, Role, RunConfig, RunId, WorkspaceMode};
@@ -220,6 +220,16 @@ impl SupervisorHandle {
         self.bus.subscribe()
     }
 
+    /// Wait for previously queued commands and the events pending when the actor
+    /// reaches this barrier. Work spawned by those commands may still be running.
+    pub async fn synchronize(&self) -> Result<(), SupervisorError> {
+        let (reply, completed) = oneshot::channel();
+        self.tx
+            .send(SupervisorCommand::Synchronize(reply))
+            .map_err(|_| SupervisorError::Closed)?;
+        completed.await.map_err(|_| SupervisorError::Closed)
+    }
+
     fn send_goal(&self, goal_id: &str, command: GoalCommand) -> Result<(), SupervisorError> {
         if !self
             .ledgers
@@ -301,6 +311,7 @@ enum GoalCommand {
 }
 
 enum SupervisorCommand {
+    Synchronize(oneshot::Sender<()>),
     ResumeTask(tasks::TaskRequest),
     RetryTask(tasks::TaskRequest),
     CancelTask(tasks::TaskRequest),
@@ -375,6 +386,14 @@ impl SupervisorActor {
 
     async fn handle_command(&mut self, command: SupervisorCommand) {
         match command {
+            SupervisorCommand::Synchronize(reply) => {
+                // Bound the drain to the entry snapshot: newly emitted events
+                // must not keep the caller waiting for unrelated future work.
+                for event in self.events.drain_pending_snapshot() {
+                    self.handle_bus_event(event).await;
+                }
+                let _ = reply.send(());
+            }
             SupervisorCommand::ResumeTask(request) | SupervisorCommand::RetryTask(request) => {
                 self.continue_task(request);
             }

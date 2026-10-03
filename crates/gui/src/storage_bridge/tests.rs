@@ -223,38 +223,36 @@ fn metrics_can_be_disabled_without_disabling_conversation_persistence() {
     assert_eq!(db.events_all_ordered().unwrap()[0].event, lifecycle);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_single_delta_flushes_on_deadline_and_shutdown_drains_the_tail() {
     let (_dir, storage, db) = fixture();
     let bus = Arc::new(EventBus::new(32));
     let bridge = StorageBridge::new(storage.handle(), "session");
     let monitor = bridge.monitor();
-    let task = tokio::spawn(run(bus.clone(), bridge, Duration::from_secs(3600)));
-    while bus.receiver_count() == 0 {
-        tokio::task::yield_now().await;
-    }
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let task = spawn_test_bridge_until_shutdown(&bus, bridge, Duration::from_secs(3600), async {
+        shutdown.await.unwrap();
+    });
+
     let event = Event::new(event_bus::MessageEvent::MessageDelta {
         run_id: Some("run".into()),
         delta: "deadline".into(),
     });
     bus.emit(event.clone());
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while monitor.snapshot().persisted_events != 1 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    monitor.wait_for(|state| state.pending_events == 1).await;
+    assert_eq!(monitor.snapshot().persisted_events, 0);
+    tokio::time::advance(COALESCE_INTERVAL).await;
+    monitor.wait_for(|state| state.persisted_events == 1).await;
     assert_eq!(db.events_all_ordered().unwrap()[0].event, event);
     bus.emit(Event::new(event_bus::MessageEvent::MessageDelta {
         run_id: Some("run".into()),
         delta: "tail".into(),
     }));
-    drop(bus);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    // The blocking SQLite worker keeps the paused runtime from automatically
+    // advancing timers. Signal shutdown explicitly rather than waiting for a
+    // future tick to discover that the last producer was dropped.
+    stop.send(()).unwrap();
+    task.await.unwrap();
     let events = db.events_all_ordered().unwrap();
     assert_eq!(events.len(), 2);
     assert!(matches!(&events[1].event.kind,
@@ -313,14 +311,8 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
     let mut live = bus.subscribe();
     let bridge = StorageBridge::new(storage.handle(), "session").with_metrics_enabled(false);
     let monitor = bridge.monitor();
-    let task = tokio::spawn(run(bus.clone(), bridge, Duration::from_millis(10)));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while bus.receiver_count() != 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let task = spawn_test_bridge(&bus, bridge, Duration::from_millis(10));
+
     let heartbeat = Event::new(OwnershipEvent {
         thread_id: "thread".into(),
         owner_id: "owner".into(),
@@ -345,10 +337,7 @@ async fn filtering_affects_only_durable_rows_and_leaves_live_observations_intact
         assert_eq!(live.recv().await.unwrap(), event);
     }
     drop(bus);
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
+    task.await.unwrap();
     assert!(db.events_all_ordered().unwrap().is_empty());
     assert!(db.metrics_range(120, 180).unwrap().is_empty());
     let snapshot = monitor.snapshot();

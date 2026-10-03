@@ -5,8 +5,29 @@ use serde_json::json;
 use std::sync::Arc;
 use tools::{Shell, Tool, ToolExecutionContext, ToolExecutor};
 
+/// Configure artifact isolation before the child starts, without mutating the
+/// process environment shared by concurrently running libtest cases.
+fn isolated_output_process(test: &str) -> bool {
+    const CHILD: &str = "EVORCH_BOUNDED_OUTPUT_TEST";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test)
+        .env("EVORCH_OUTPUT_DIR", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "isolated output test failed: {test}");
+    true
+}
+
 #[tokio::test]
 async fn large_shell_output_is_bounded_redacted_and_recoverable() {
+    if isolated_output_process("large_shell_output_is_bounded_redacted_and_recoverable") {
+        return;
+    }
     let secret = format!("sk-{}", "a".repeat(48));
     let result = Shell::new(Arc::new(DirectSandbox::new_unchecked())).execute(json!({
         "command": format!("i=0; while [ $i -lt 4000 ]; do printf 'line %s abcdefghijklmnopqrstuvwxyz\\n' \"$i\"; i=$((i+1)); done; printf '%s\\n' '{secret}'"),
@@ -25,15 +46,12 @@ async fn large_shell_output_is_bounded_redacted_and_recoverable() {
 
 #[tokio::test]
 async fn timeout_keeps_partial_output_even_when_descendant_holds_pipe() {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        Shell::new(Arc::new(DirectSandbox::new_unchecked())).execute(json!({
+    let result = Shell::new(Arc::new(DirectSandbox::new_unchecked()))
+        .execute(json!({
             "command": "printf 'before timeout\\n'; sleep 30 & wait", "timeout_ms": 100
-        })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+        }))
+        .await
+        .unwrap();
     assert!(result.is_error);
     assert!(result.content.contains("before timeout"));
     assert!(result.content.contains("timed out after 100 ms"));
@@ -80,10 +98,7 @@ async fn relative_file_paths_and_explicit_dot_share_workspace() {
     assert!(shell.content.contains(root.path().to_str().unwrap()));
     assert!(shell.content.ends_with("hello"));
     for _ in 0..6 {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let event = events.recv().await.unwrap();
         if let EventKind::Tool(ToolEvent::ToolCompleted {
             output: Some(output),
             ..
@@ -96,6 +111,9 @@ async fn relative_file_paths_and_explicit_dot_share_workspace() {
 
 #[tokio::test]
 async fn large_write_diff_is_bounded_before_reaching_the_agent_and_gui() {
+    if isolated_output_process("large_write_diff_is_bounded_before_reaching_the_agent_and_gui") {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let bus = Arc::new(EventBus::new(16));
     let mut events = bus.subscribe();

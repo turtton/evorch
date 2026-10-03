@@ -28,6 +28,18 @@ struct Inner {
     skipped_heartbeats: AtomicU64,
     skipped_diagnostics: AtomicU64,
     failed_events: AtomicU64,
+    #[cfg(test)]
+    changes: TestChanges,
+}
+
+#[cfg(test)]
+struct TestChanges(tokio::sync::watch::Sender<()>);
+
+#[cfg(test)]
+impl Default for TestChanges {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(()).0)
+    }
 }
 
 /// Memory-only health counters for one GUI storage bridge.
@@ -57,6 +69,27 @@ pub struct StorageBridgeSnapshot {
 }
 
 impl StorageBridgeMonitor {
+    /// Only tests subscribe to these changes; production adds no notification
+    /// work or synchronization to the persistence path.
+    #[cfg(test)]
+    pub(super) async fn wait_for(&self, ready: impl Fn(&StorageBridgeSnapshot) -> bool) {
+        let mut changes = self.0.changes.0.subscribe();
+        loop {
+            if ready(&self.snapshot()) {
+                return;
+            }
+            changes.changed().await.unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn wait_for_blocking(&self, ready: impl Fn(&StorageBridgeSnapshot) -> bool) {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(self.wait_for(ready));
+    }
+
     pub fn snapshot(&self) -> StorageBridgeSnapshot {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         StorageBridgeSnapshot {
@@ -78,10 +111,14 @@ impl StorageBridgeMonitor {
 
     pub(super) fn persisted(&self) {
         self.0.persisted_events.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.0.changes.0.send_replace(());
     }
 
     pub(super) fn failed(&self) {
         self.0.failed_events.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.0.changes.0.send_replace(());
     }
 
     pub(super) fn skipped_heartbeat(&self) {
@@ -109,6 +146,8 @@ impl StorageBridgeMonitor {
         self.0
             .peak_pending_bytes
             .fetch_max(state.pending_bytes, Ordering::Relaxed);
+        #[cfg(test)]
+        self.0.changes.0.send_replace(());
         PendingRegistration {
             monitor: self.clone(),
             id,
@@ -184,5 +223,7 @@ impl Drop for PendingRegistration {
         state.oldest.remove(&self.id);
         state.pending_events -= self.count;
         state.pending_bytes -= self.bytes;
+        #[cfg(test)]
+        self.monitor.0.changes.0.send_replace(());
     }
 }

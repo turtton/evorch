@@ -1091,7 +1091,6 @@ fn fallback_slug(repo_root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use async_trait::async_trait;
     use event_bus::{EventBus, EventKind, GoalReference, GoalState, OrchestratorEvent};
@@ -1114,7 +1113,10 @@ mod tests {
     ///
     /// supervisor を接続すると run の terminal 遷移が continuation / delivery
     /// 起動に繋がるため、行アサーションとの競合を避べるよう run を終端させない。
-    struct HeldModel;
+    #[derive(Default)]
+    struct HeldModel {
+        started: tokio::sync::Notify,
+    }
 
     #[async_trait]
     impl AgentModel for HeldModel {
@@ -1125,6 +1127,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
+            self.started.notify_one();
             std::future::pending().await
         }
 
@@ -1173,7 +1176,7 @@ mod tests {
         SupervisorHandle,
     ) {
         let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
-        build_sink_on(rt, Arc::new(HeldModel))
+        build_sink_on(rt, Arc::new(HeldModel::default()))
     }
 
     fn build_sink_on(
@@ -1232,12 +1235,8 @@ mod tests {
 
             // Then: 即応イベントはなく、相関 ID と判断をそのまま配送する。
             assert!(events.is_empty());
-            let event = rt.block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), subscriber.recv())
-                    .await
-                    .expect("approval delivery completes")
-                    .expect("approval resolved event")
-            });
+            let event =
+                rt.block_on(async { subscriber.recv().await.expect("approval resolved event") });
             assert!(matches!(
                 event.kind,
                 EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
@@ -1351,10 +1350,7 @@ mod tests {
         let run = sink.chat_runs["thread-1"];
         runtime.cancel(run).unwrap();
         rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                .await
-                .unwrap()
-                .unwrap();
+            runtime.wait(run).await.unwrap();
         });
     }
 
@@ -1585,21 +1581,14 @@ mod tests {
                 sink.submit(chat_command("resume"));
                 let run = sink.chat_runs["resume"];
                 rt.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(5), model.started.notified())
-                        .await
-                        .unwrap();
+                    model.started.notified().await;
                 });
                 if !error {
                     sink.submit(WorkbenchCommand::StopChat {
                         thread_id: "resume".into(),
                     });
                 }
-                let phase = rt.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                        .await
-                        .unwrap()
-                        .unwrap()
-                });
+                let phase = rt.block_on(async { runtime.wait(run).await.unwrap() });
                 assert_eq!(
                     phase,
                     if error {
@@ -1651,7 +1640,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel));
+        let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel::default()));
         sink.submit(chat_command("rapid"));
         let root = sink.chat_runs["rapid"];
         let child = {
@@ -1693,10 +1682,7 @@ mod tests {
         rt.block_on(async {
             for run in [root, child] {
                 assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                        .await
-                        .unwrap()
-                        .unwrap(),
+                    runtime.wait(run).await.unwrap(),
                     event_bus::AgentRunPhase::Stopped
                 );
             }
@@ -1762,10 +1748,7 @@ mod tests {
             );
             for run in [root, child, grandchild, late] {
                 assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                        .await
-                        .unwrap()
-                        .unwrap(),
+                    runtime.wait(run).await.unwrap(),
                     event_bus::AgentRunPhase::Error
                 );
             }
@@ -1932,12 +1915,7 @@ mod tests {
             ),
             "{events:?}"
         );
-        let phase = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
-                .await
-                .unwrap()
-                .unwrap()
-        });
+        let phase = rt.block_on(async { runtime.wait(root).await.unwrap() });
         assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
         assert_eq!(sink.chat_runs["chat-thread"], root);
         assert_eq!(runtime.live_descendants(root), vec![child, grandchild]);
@@ -1947,10 +1925,7 @@ mod tests {
         ));
         rt.block_on(async {
             for run in [child, grandchild] {
-                let phase = tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let phase = runtime.wait(run).await.unwrap();
                 assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
             }
         });
@@ -1987,7 +1962,9 @@ mod tests {
     }
 
     fn assert_goal_stop_resume(detached: bool, continue_only: bool) {
-        let (rt, mut sink, runtime, supervisor) = build_sink();
+        let model = Arc::new(HeldModel::default());
+        let (rt, mut sink, runtime, supervisor) =
+            build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("stop.sqlite3"),
@@ -2003,8 +1980,11 @@ mod tests {
         )));
         let root = sink.goal_runs["thread-1"];
         let goal_id = sink.goal_ids["thread-1"].clone();
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Active);
-        wait_for_agents(&runtime, |agent| agent.run_id == root);
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
+        // Registration happens before the initial conversation is constructed.
+        // Model entry follows context initialization and checkpoint persistence,
+        // so stopping here must leave a restorable root.
+        rt.block_on(model.started.notified());
         let events = sink.submit(WorkbenchCommand::StopChat {
             thread_id: "thread-1".into(),
         });
@@ -2012,27 +1992,15 @@ mod tests {
             matches!(events.as_slice(), [LoopEvent::ChatStopped { .. }]),
             "{events:?}"
         );
-        rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
-                .await
-                .unwrap()
-                .unwrap()
-        });
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Paused);
+        rt.block_on(async { runtime.wait(root).await.unwrap() });
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
         assert_eq!(sink.goal_runs["thread-1"], root);
         if detached {
             supervisor
                 .adopt(vec![(supervisor.snapshot(&goal_id).unwrap(), Vec::new())])
                 .unwrap();
-            rt.block_on(async {
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while !supervisor.snapshot(&goal_id).unwrap().detached {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .unwrap();
-            });
+            rt.block_on(supervisor.synchronize()).unwrap();
+            assert!(supervisor.snapshot(&goal_id).unwrap().detached);
         }
         let events = sink.submit(if continue_only {
             continue_command("thread-1")
@@ -2050,6 +2018,7 @@ mod tests {
             "{events:?}"
         );
         wait_for_goal_state(
+            &rt,
             &supervisor,
             &goal_id,
             if detached {
@@ -2061,12 +2030,62 @@ mod tests {
         assert_eq!(sink.chat_runs["thread-1"], root);
         assert!(!sink.stop_marked.contains("thread-1"));
         assert!(!sink.stopped_by_us.contains("thread-1"));
+        rt.block_on(model.started.notified());
+        rt.block_on(supervisor.synchronize()).unwrap();
         assert_eq!(
             runtime.list_agents().len(),
             1,
             "resume must not spawn a duplicate continuation"
         );
         runtime.cancel(root).unwrap();
+    }
+
+    #[test]
+    fn stop_before_goal_initialization_restarts_with_a_fresh_root() {
+        // Keep the executor idle until Stop is submitted, making the missing
+        // conversation case deterministic and separate from in-place restore.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (rt, mut sink, runtime, supervisor) = build_sink_on(rt, Arc::new(HeldModel::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("early-stop.sqlite3"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let runtime =
+            runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        let root = {
+            let _guard = rt.enter();
+            runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default())
+        };
+        let goal_id = supervisor.create_goal(spec(), root);
+        sink.bind_goal_context("thread-1", "evorch", &root.to_string());
+        sink.bind_goal_id("thread-1", &goal_id);
+        assert_eq!(
+            runtime.inspect_agent(root).unwrap().phase,
+            event_bus::AgentRunPhase::Pending
+        );
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::StopChat {
+                thread_id: "thread-1".into()
+            })
+            .as_slice(),
+            [LoopEvent::ChatStopped { .. }]
+        ));
+        assert_eq!(
+            rt.block_on(runtime.wait(root)).unwrap(),
+            event_bus::AgentRunPhase::Stopped
+        );
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
+        let events = sink.submit(chat_command("thread-1"));
+        assert!(matches!(
+            events.as_slice(),
+            [LoopEvent::ChatAccepted { .. }]
+        ));
+        assert_ne!(sink.chat_runs["thread-1"], root);
     }
 
     #[test]
@@ -2101,12 +2120,7 @@ mod tests {
         sink.submit(chat);
         // Then: the old run terminates and the next message uses a fresh run.
         assert_ne!(sink.chat_runs["chat-thread"], first);
-        let phase = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(first))
-                .await
-                .expect("cancel completes")
-                .expect("run exists")
-        });
+        let phase = rt.block_on(async { runtime.wait(first).await.expect("run exists") });
         assert_eq!(phase, event_bus::AgentRunPhase::Error);
     }
 
@@ -2123,19 +2137,16 @@ mod tests {
             })
             .is_empty()
         );
-        let phase = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(root))
-                .await
-                .unwrap()
-                .unwrap()
-        });
+        let phase = rt.block_on(async { runtime.wait(root).await.unwrap() });
         assert_eq!(phase, event_bus::AgentRunPhase::Error);
         assert_eq!(sink.goal_runs["child-thread"], root);
     }
 
     #[test]
     fn team_submission_reaches_runtime_with_shared_storage() {
-        let (rt, sink, runtime, _) = build_sink();
+        let model = Arc::new(HeldModel::default());
+        let (rt, sink, runtime, _) =
+            build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
             db_path: dir.path().join("team.db"),
@@ -2151,15 +2162,7 @@ mod tests {
             sink.submit(WorkbenchCommand::SubmitGoal(goal))[0],
             LoopEvent::GoalAccepted { .. }
         ));
-        rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while runtime.team_tasks().is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-        });
+        rt.block_on(model.started.notified());
         assert_eq!(runtime.team_tasks().len(), 1);
     }
 
@@ -2182,81 +2185,74 @@ mod tests {
         rt: &tokio::runtime::Runtime,
         bus: Arc<EventBus>,
         handle: StorageHandle,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<(String, String)>,
+    ) {
         let mut subscriber = bus.subscribe();
-        rt.spawn(async move {
+        let (persisted, completed) = tokio::sync::oneshot::channel();
+        let mut persisted = Some(persisted);
+        let task = rt.spawn(async move {
             loop {
                 match subscriber.recv().await {
                     Ok(event) => {
-                        let _ = handle.append_event(Some(STORAGE_SESSION_ID), &event);
+                        handle
+                            .append_event(Some(STORAGE_SESSION_ID), &event)
+                            .expect("persist event");
+                        if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
+                            goal_id,
+                            root_run_id,
+                            ..
+                        }) = event.kind
+                            && let Some(persisted) = persisted.take()
+                        {
+                            let _ = persisted.send((goal_id, root_run_id));
+                        }
                     }
-                    Err(_) => return,
+                    Err(error) => panic!("storage bridge event: {error:?}"),
                 }
+            }
+        });
+        (task, completed)
+    }
+
+    /// Subscribe before inspecting so registration cannot be lost between the
+    /// state check and the next lifecycle notification.
+    fn wait_for_agents(
+        rt: &tokio::runtime::Runtime,
+        runtime: &AgentRuntime,
+        supervisor: &SupervisorHandle,
+        predicate: impl Fn(&AgentSummary) -> bool,
+    ) -> Vec<AgentSummary> {
+        let mut events = supervisor.subscribe();
+        rt.block_on(async {
+            loop {
+                let agents = runtime.list_agents();
+                if agents.iter().any(&predicate) {
+                    return agents;
+                }
+                events.recv().await.expect("agent registration event");
             }
         })
     }
 
-    /// predicate を満たす agent 行が現れるまで 50ms 間隔で最大 5 秒待つ。
-    fn wait_for_agents(
-        runtime: &AgentRuntime,
-        predicate: impl Fn(&AgentSummary) -> bool,
-    ) -> Vec<AgentSummary> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let agents = runtime.list_agents();
-            if agents.iter().any(&predicate) {
-                return agents;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "agent row did not appear within 5s: {:?}",
-                runtime.list_agents()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    /// 永続化済みイベント列に最初の GoalCreated が現れるまで待ち、
-    /// (goal_id, root_run_id) を返す。
-    fn wait_for_persisted_goal_created(config: &StorageConfig) -> (String, String) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "durable GoalCreated did not appear within 5s"
-            );
-            let database = Database::open(config).expect("reader を開ける");
-            let events = database.events_all_ordered().expect("events を読める");
-            drop(database);
-            for stored in &events {
-                if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                    goal_id,
-                    root_run_id,
-                    ..
-                }) = &stored.event.kind
+    fn wait_for_goal_state(
+        rt: &tokio::runtime::Runtime,
+        supervisor: &SupervisorHandle,
+        goal_id: &str,
+        expected: GoalState,
+    ) {
+        let mut events = supervisor.subscribe();
+        rt.block_on(async {
+            loop {
+                if let Some(snapshot) = supervisor.snapshot(goal_id)
+                    && snapshot.state == expected
                 {
-                    return (goal_id.clone(), root_run_id.clone());
+                    return;
                 }
+                events.recv().await.expect("goal state event");
             }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    /// 指定 goal の状態が期待値へ遷移するまで 50ms 間隔で最大 5 秒待つ。
-    fn wait_for_goal_state(supervisor: &SupervisorHandle, goal_id: &str, expected: GoalState) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "goal {goal_id} did not reach {expected:?} within 5s"
-            );
-            if let Some(snapshot) = supervisor.snapshot(goal_id)
-                && snapshot.state == expected
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        });
     }
 
     // Given: references も constraints も空の GoalSubmission
@@ -2369,7 +2365,7 @@ mod tests {
         let storage = Storage::open(storage_config.clone()).expect("storage を開ける");
         let bus = Arc::new(EventBus::new(256));
         let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
-        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(HeldModel));
+        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(HeldModel::default()));
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
@@ -2380,7 +2376,7 @@ mod tests {
         });
         let mut sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
-        let bridge = spawn_test_bridge(&rt, Arc::clone(&bus), storage.handle());
+        let (bridge, persisted) = spawn_test_bridge(&rt, Arc::clone(&bus), storage.handle());
 
         let events = sink.submit(WorkbenchCommand::SubmitGoal(submission(
             "direct: durable goal",
@@ -2396,25 +2392,20 @@ mod tests {
             }]
         );
 
-        let (goal_id, root_run_id) = wait_for_persisted_goal_created(&storage_config);
-        let root_exists = {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                if runtime
-                    .list_agents()
-                    .iter()
-                    .any(|agent| agent.run_id.to_string() == root_run_id)
-                {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            runtime
-                .list_agents()
-                .iter()
-                .any(|agent| agent.run_id.to_string() == root_run_id)
-        };
-        assert!(root_exists, "root run {root_run_id} was not started");
+        let (goal_id, root_run_id) = rt.block_on(persisted).expect("durable GoalCreated");
+        wait_for_agents(&rt, &runtime, &supervisor, |agent| {
+            agent.run_id.to_string() == root_run_id
+        });
+        let stored = Database::open(&storage_config)
+            .expect("reader")
+            .events_all_ordered()
+            .expect("stored events");
+        assert!(stored.iter().any(|stored| matches!(
+            &stored.event.kind,
+            EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
+                goal_id: created, root_run_id: root, ..
+            }) if created == &goal_id && root == &root_run_id
+        )));
         let snapshot = supervisor
             .snapshot(&goal_id)
             .expect("supervisor knows the persisted goal");
@@ -2422,6 +2413,7 @@ mod tests {
         assert_eq!(snapshot.state, GoalState::Active);
 
         bridge.abort();
+        let _ = rt.block_on(bridge);
         storage.close();
     }
 
@@ -2430,7 +2422,7 @@ mod tests {
     // Then: role Worker・名前 goal-1 の run が現れ、Orchestrator run は現れない
     #[test]
     fn direct_goal_starts_a_worker_run_named_after_the_goal_id() {
-        let (_rt, mut sink, runtime, _supervisor) = build_sink();
+        let (rt, mut sink, runtime, supervisor) = build_sink();
 
         sink.submit(WorkbenchCommand::SubmitGoal(submission(
             "direct: fix the typo in README",
@@ -2438,7 +2430,7 @@ mod tests {
             Vec::new(),
         )));
 
-        let agents = wait_for_agents(&runtime, |agent| {
+        let agents = wait_for_agents(&rt, &runtime, &supervisor, |agent| {
             agent.role_name == "Worker" && agent.name == "goal-1"
         });
         assert!(!agents.iter().any(|agent| agent.role_name == "Orchestrator"));
@@ -2449,7 +2441,7 @@ mod tests {
     // Then: role Orchestrator・名前 goal-1 の run が現れ、Worker run は現れない
     #[test]
     fn plain_goal_starts_an_orchestrator_run() {
-        let (_rt, mut sink, runtime, _supervisor) = build_sink();
+        let (rt, mut sink, runtime, supervisor) = build_sink();
 
         sink.submit(WorkbenchCommand::SubmitGoal(submission(
             "implement issue #65",
@@ -2457,38 +2449,18 @@ mod tests {
             Vec::new(),
         )));
 
-        let agents = wait_for_agents(&runtime, |agent| {
+        let agents = wait_for_agents(&rt, &runtime, &supervisor, |agent| {
             agent.role_name == "Orchestrator" && agent.name == "goal-1"
         });
         assert!(!agents.iter().any(|agent| agent.role_name == "Worker"));
-    }
-
-    // Given: supervisor を接続した sink
-    // When: token_id なしの DecideMerge を submit する
-    // Then: CommandRejected が 1 件返る
-    #[test]
-    fn decide_merge_without_token_is_rejected() {
-        let (_rt, mut sink, _runtime, _supervisor) = build_sink();
-
-        let events = sink.submit(WorkbenchCommand::DecideMerge(MergeCommand {
-            thread_id: "thread-1".into(),
-            pr: None,
-            token_id: None,
-            decision: MergeDecision::Approve,
-        }));
-
-        assert!(
-            matches!(&events[..], [LoopEvent::CommandRejected { reason }] if !reason.is_empty()),
-            "unexpected events: {events:?}"
-        );
     }
 
     // Given: 実 runtime を接続した sink
     // When: token なし DecideMerge を submit する
     // Then: CommandRejected{reason} が返り、run も 1 つも起動されない
     #[test]
-    fn decide_merge_emits_no_loop_events_and_starts_no_run() {
-        let (_rt, mut sink, runtime, _supervisor) = build_sink();
+    fn decide_merge_without_token_is_rejected_without_starting_a_run() {
+        let (rt, mut sink, runtime, supervisor) = build_sink();
 
         let events = sink.submit(WorkbenchCommand::DecideMerge(MergeCommand {
             thread_id: "thread-1".into(),
@@ -2501,7 +2473,7 @@ mod tests {
             matches!(&events[..], [LoopEvent::CommandRejected { reason }] if !reason.is_empty()),
             "unexpected events: {events:?}"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        rt.block_on(supervisor.synchronize()).unwrap();
         assert!(runtime.list_agents().is_empty());
     }
 
@@ -2515,7 +2487,7 @@ mod tests {
             runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default())
         });
         let goal_id = supervisor.create_goal(spec(), root);
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Active);
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
 
         assert!(
             sink.submit(WorkbenchCommand::PauseGoal {
@@ -2523,7 +2495,7 @@ mod tests {
             })
             .is_empty()
         );
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Paused);
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
 
         assert!(
             sink.submit(WorkbenchCommand::ResumeGoal {
@@ -2531,7 +2503,7 @@ mod tests {
             })
             .is_empty()
         );
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Active);
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
 
         assert!(
             sink.submit(WorkbenchCommand::CancelGoal {
@@ -2539,6 +2511,6 @@ mod tests {
             })
             .is_empty()
         );
-        wait_for_goal_state(&supervisor, &goal_id, GoalState::Cancelled);
+        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Cancelled);
     }
 }

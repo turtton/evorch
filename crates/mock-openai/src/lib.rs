@@ -5,4 +5,4 @@ pub mod scenario;
 pub mod server;
 
 pub use scenario::ScriptedResponse;
-pub use server::{RecordedRequest, StreamingMockOpenAi, WriteMode};
+pub use server::{RecordedRequest, ResponseGate, StreamingMockOpenAi, WriteMode};

@@ -1,14 +1,11 @@
 use config::Config;
 use event_bus::{AgentRunPhase, EventBus};
-use mock_openai::{ScriptedResponse, StreamingMockOpenAi};
+use mock_openai::{ResponseGate, ScriptedResponse, StreamingMockOpenAi};
 use runtime::{
     CoordinationTopology, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime,
 };
 use sandbox::{DirectSandbox, credential::FileCredentialStore};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 use tools::ToolExecutor;
 
 fn mock_provider(responses: Vec<ScriptedResponse>) -> StreamingMockOpenAi {
@@ -71,16 +68,31 @@ enabled = true
     composed.runtime
 }
 
-async fn execute(parallel: bool) -> Duration {
+// Release blocked fixture threads even when an assertion panics, so teardown
+// cannot hide the original failure by waiting for an unreleased response.
+struct ReleaseResponses(ResponseGate);
+
+impl Drop for ReleaseResponses {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_team_workers_are_in_flight_together_over_mock_openai() {
     let root = tempfile::tempdir().unwrap();
-    let mock = mock_provider(
-        (0..4)
-            .map(|id| {
-                ScriptedResponse::text_stream(&id.to_string(), "mock-model", ["done"])
-                    .with_delay(Duration::from_millis(250))
-            })
-            .collect(),
-    );
+    let (gate, arrivals) = ResponseGate::new();
+    let mut responses = vec![ScriptedResponse::text_stream(
+        "root",
+        "mock-model",
+        ["done"],
+    )];
+    responses.extend((0..3).map(|id| {
+        ScriptedResponse::text_stream(&id.to_string(), "mock-model", ["done"])
+            .with_gate(gate.clone())
+    }));
+    let mock = mock_provider(responses);
+    let release = ReleaseResponses(gate);
     let runtime = configured(&root, &mock);
     let (writer, team_store) = team_storage(&root);
     let coordinator = runtime.delegate_background(
@@ -97,39 +109,33 @@ async fn execute(parallel: bool) -> Duration {
         runtime.wait(coordinator).await.unwrap(),
         AgentRunPhase::Done
     );
-    let start = Instant::now();
     let mut workers = Vec::new();
     for _ in 0..3 {
         let worker = runtime
             .delegate_background_as_child(coordinator, Role::Worker, "work", RunConfig::default())
             .unwrap();
-        if !parallel {
-            assert_eq!(runtime.wait(worker).await.unwrap(), AgentRunPhase::Done);
-        }
         workers.push(worker);
     }
-    if parallel {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !workers.iter().all(|worker| {
-                runtime
-                    .list_agents()
-                    .iter()
-                    .any(|agent| agent.run_id == *worker)
-            }) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first three workers admitted before testing the capacity limit");
-        let rejected = runtime
-            .delegate_background_as_child(coordinator, Role::Worker, "fourth", RunConfig::default())
-            .unwrap();
-        assert_eq!(runtime.wait(rejected).await.unwrap(), AgentRunPhase::Error);
-    }
+    // No worker can finish until all three HTTP requests have arrived. This
+    // proves actual overlap without turning runner speed into a correctness
+    // condition, and keeps all three capacity permits occupied below.
+    tokio::task::spawn_blocking(move || {
+        for _ in 0..3 {
+            arrivals
+                .recv()
+                .expect("worker request reached the response gate");
+        }
+    })
+    .await
+    .unwrap();
+    let rejected = runtime
+        .delegate_background_as_child(coordinator, Role::Worker, "fourth", RunConfig::default())
+        .unwrap();
+    assert_eq!(runtime.wait(rejected).await.unwrap(), AgentRunPhase::Error);
+    release.0.release();
     for worker in workers {
         assert_eq!(runtime.wait(worker).await.unwrap(), AgentRunPhase::Done);
     }
-    let elapsed = start.elapsed();
     drop(writer);
     let recorded = mock.recorded_requests();
     assert_eq!(recorded[0].path, "/v1/models");
@@ -151,18 +157,6 @@ async fn execute(parallel: bool) -> Duration {
             assert!(tools.iter().any(|tool| tool["function"]["name"] == name));
         }
     }
-    elapsed
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn three_team_workers_are_faster_than_serial_over_mock_openai() {
-    let serial = execute(false).await;
-    let parallel = execute(true).await;
-    eprintln!("team timing: parallel={parallel:?}, serial={serial:?}");
-    assert!(
-        parallel * 2 < serial,
-        "parallel={parallel:?}, serial={serial:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
