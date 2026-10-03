@@ -80,6 +80,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .response
             .on_hover_text("Workbench settings");
+            let usage_label = self.usage.today_totals_snapshot().map_or_else(
+                || "Usage".to_owned(),
+                |totals| format!("{} today", crate::panes::usage::format_cost(&totals)),
+            );
+            if crate::theme::widgets::ghost_icon_button(
+                ui,
+                crate::theme::icons::CHART_BAR,
+                &usage_label,
+            )
+            .on_hover_text("Token usage statistics")
+            .clicked()
+            {
+                self.open_usage_tab();
+            }
             crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota);
             if self.telemetry.kimi_quota.configured() {
                 ui.separator();

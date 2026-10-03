@@ -145,25 +145,63 @@ pub fn roll_up_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, Storag
     Ok(moved)
 }
 
+const REQUEST_COLUMNS: &str = "SELECT r.request_id, r.at_ns, r.provider, r.profile, r.model, \
+     r.run_id, r.parent_run_id, r.role, r.purpose, r.status, r.failure, r.finish_reason, \
+     r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, \
+     r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, t.thread_id, t.project_id, \
+     date(r.at_ns / 1000000000, 'unixepoch', 'localtime') \
+     FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id";
+
 /// Requests in `[from_ns, to_ns)` ordered by time, joined with their owner.
 pub fn list_requests(
     conn: &Connection,
     from_ns: i64,
     to_ns: i64,
 ) -> Result<Vec<UsageRequestRow>, StorageError> {
-    let mut statement = conn.prepare(
-        "SELECT r.request_id, r.at_ns, r.provider, r.profile, r.model, r.run_id, \
-         r.parent_run_id, r.role, r.purpose, r.status, r.failure, r.finish_reason, \
-         r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, \
-         r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, t.thread_id, t.project_id \
-         FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id \
-         WHERE r.at_ns >= ?1 AND r.at_ns < ?2 ORDER BY r.at_ns, r.rowid",
-    )?;
-    let mut rows = statement.query(params![from_ns, to_ns])?;
+    query_requests(
+        conn,
+        &format!(
+            "{REQUEST_COLUMNS} WHERE r.at_ns >= ?1 AND r.at_ns < ?2 ORDER BY r.at_ns, r.rowid"
+        ),
+        params![from_ns, to_ns],
+    )
+}
+
+/// Requests on the inclusive local days `[from_day, to_day]` (`YYYY-MM-DD`).
+pub fn list_requests_in_days(
+    conn: &Connection,
+    from_day: &str,
+    to_day: &str,
+) -> Result<Vec<UsageRequestRow>, StorageError> {
+    // unixepoch(day, 'utc') reads the day as local midnight and converts it to UTC.
+    query_requests(
+        conn,
+        &format!(
+            "{REQUEST_COLUMNS} WHERE r.at_ns >= unixepoch(?1, 'utc') * 1000000000 \
+             AND r.at_ns < unixepoch(?2, '+1 day', 'utc') * 1000000000 \
+             ORDER BY r.at_ns, r.rowid"
+        ),
+        params![from_day, to_day],
+    )
+}
+
+/// Today's local calendar day, `YYYY-MM-DD`, on the same clock as the ledger days.
+pub fn local_today(conn: &Connection) -> Result<String, StorageError> {
+    Ok(conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?)
+}
+
+fn query_requests(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<UsageRequestRow>, StorageError> {
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query(params)?;
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
         result.push(UsageRequestRow {
             record: request_record(row)?,
+            day: row.get(22)?,
             thread_id: row.get(20)?,
             project_id: row.get(21)?,
         });

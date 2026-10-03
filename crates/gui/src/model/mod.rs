@@ -26,5 +26,6 @@ pub mod telemetry;
 pub mod terminal;
 pub mod transcript;
 pub mod transcript_registry;
+pub mod usage_stats;
 
 pub mod kimi_quota;

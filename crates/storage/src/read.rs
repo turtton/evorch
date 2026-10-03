@@ -317,6 +317,26 @@ impl Database {
         crate::repo::usage::list_requests(&self.conn, from_ns, to_ns)
     }
 
+    /// inclusive なローカル日付範囲 (`YYYY-MM-DD`) の usage ledger 行を時刻順に返します。
+    ///
+    /// # Errors
+    /// SQLite 操作または保存値の変換に失敗した場合にエラーを返します。
+    pub fn usage_requests_in_days(
+        &self,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<Vec<crate::usage::UsageRequestRow>, StorageError> {
+        crate::repo::usage::list_requests_in_days(&self.conn, from_day, to_day)
+    }
+
+    /// usage ledger と同じ時計での今日のローカル日付 (`YYYY-MM-DD`) を返します。
+    ///
+    /// # Errors
+    /// SQLite 操作に失敗した場合にエラーを返します。
+    pub fn usage_local_today(&self) -> Result<String, StorageError> {
+        crate::repo::usage::local_today(&self.conn)
+    }
+
     /// 保持期間を過ぎて日次集計へ畳み込まれた usage を、inclusive な日付範囲
     /// (`YYYY-MM-DD`、ローカル日付) で返します。
     ///

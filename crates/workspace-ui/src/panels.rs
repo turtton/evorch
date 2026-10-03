@@ -45,6 +45,8 @@ pub enum PanelKind {
     Notifications,
     Memory,
     Arena,
+    /// Token usage statistics, opened from the footer.
+    Usage,
 }
 
 impl PanelKind {
@@ -65,6 +67,7 @@ impl PanelKind {
             Self::Notifications => "Notifications",
             Self::Memory => "Memory",
             Self::Arena => "Arena",
+            Self::Usage => "Usage",
         }
     }
 }
