@@ -526,6 +526,72 @@ async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
 }
 
 #[tokio::test]
+async fn workspace_without_initial_system_appends_note_and_reuses_wire_prefix() {
+    let mut harness = harness(
+        vec![read_response(0), read_response(2), text_response("done")],
+        1_000_000,
+    );
+    let root = harness._directory.path();
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .unwrap();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    // No prompt catalog, skills, rules files or compaction policy: workspace is the only System.
+    harness.runtime = AgentRuntime::new(bus, Arc::new(executor), model).with_project_rules(
+        Arc::new(runtime::RulesSource::new(
+            runtime::ProjectTrust::Approved,
+            runtime::RulesSettings::from(&config.rules),
+            None,
+            Some(root.into()),
+            None,
+        )),
+    );
+    let workspace_note = format!("Current workspace (evorch): {}.", root.display());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Read workspace results".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = harness.mock.recorded_requests();
+    let first = requests
+        .iter()
+        .find(|request| request.path == "/v1/chat/completions")
+        .unwrap();
+    let messages = first.body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "system");
+    assert!(messages[1]["content"].to_string().contains(&workspace_note));
+}
+
+#[tokio::test]
 async fn ordinary_tool_turns_reuse_all_previous_wire_input() {
     // Includes returned artifacts, errors, multibyte text and the former eight-result boundary.
     let script = (0..12)
