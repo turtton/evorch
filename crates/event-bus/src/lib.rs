@@ -2,7 +2,10 @@
 
 pub mod bus;
 mod fencing;
-pub use fencing::{MutationCheck, MutationGuard, MutationGuardCheck, MutationValidator};
+pub use fencing::{
+    MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
+    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
+};
 pub mod event;
 pub mod orchestrator;
 pub mod ownership;
@@ -18,8 +21,8 @@ pub use event::{
     CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent,
-    UsageEvent, UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
+    RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent,
+    ToolEvent, UsageEvent, UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

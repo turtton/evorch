@@ -3,6 +3,15 @@
 # the entire dependency graph. The test profile inherits these dev overrides.
 # Keep these in Cargo config: rust-cache hashes this file even in a virtual
 # workspace, where the root Cargo.toml is absent from its member-manifest hash.
+[build]
+# Keep compilation from saturating a shared host when several worktrees build.
+# Individual commands may override this with --jobs or CARGO_BUILD_JOBS.
+jobs = 4
+
+[env]
+# cargo test uses libtest's own thread pool, separate from build.jobs.
+RUST_TEST_THREADS = "4"
+
 [profile.dev.package.epaint]
 opt-level = 1
 debug = false

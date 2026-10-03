@@ -101,6 +101,7 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
                 run_id: "missing-route".into(),
                 category: category.map(str::to_owned),
                 model_preference: None,
+                purpose: Default::default(),
             };
             let error = model
                 .complete(&invocation, Role::Worker, &[], &[])
@@ -127,6 +128,7 @@ async fn admission_reports_the_missing_logical_route_and_invocation_context() {
                     run_id: "missing-admission-route".into(),
                     category: category.map(str::to_owned),
                     model_preference: None,
+                    purpose: Default::default(),
                 },
                 Role::Worker,
             )
@@ -162,6 +164,7 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
                     run_id: "unavailable-route-candidate".into(),
                     category: category.map(str::to_owned),
                     model_preference: None,
+                    purpose: Default::default(),
                 },
                 Role::Worker,
                 &[],
@@ -217,6 +220,7 @@ async fn explicit_model_preference_remains_authoritative_without_routes() {
                     profile: "local".into(),
                     model: None,
                 }),
+                purpose: Default::default(),
             },
             Role::Worker,
             &[],

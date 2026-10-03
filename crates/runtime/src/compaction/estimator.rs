@@ -195,6 +195,7 @@ mod tests {
             output_tokens: 30,
             cache_read_tokens: 20,
             cache_write_tokens: u64::MAX,
+            reasoning_tokens: None,
         };
 
         assert_eq!(estimate_visible(&messages, Some(&usage)), 130);

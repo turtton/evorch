@@ -30,7 +30,7 @@ fn send(state: &mut WorkbenchState<DemoSource>, text: &str) {
 }
 
 #[test]
-fn first_send_locks_role_for_tab_remapped_shortcut_and_follow_up() {
+fn first_send_locks_role_button_remapped_shortcut_and_follow_up() {
     for role in [ComposerRole::Worker, ComposerRole::Orchestrator] {
         for remapped in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -51,11 +51,9 @@ fn first_send_locks_role_for_tab_remapped_shortcut_and_follow_up() {
             harness.run();
             harness.click_label("Message or /command");
             harness.run();
-            for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
-                harness.key_press(modifiers, Key::Tab);
-                harness.run();
-                assert_eq!(harness.state().composer().role, role);
-            }
+            harness.click_label(&format!("Role: {}", role.label()));
+            harness.run();
+            assert_eq!(harness.state().composer().role, role);
             if remapped {
                 harness.key_press(Modifiers::ALT, Key::R);
                 harness.run();

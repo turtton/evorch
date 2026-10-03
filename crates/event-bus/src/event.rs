@@ -417,6 +417,15 @@ pub enum LifecycleEvent {
         /// 遷移理由。異常終了やオペレーターによる停止などの理由を保持します。
         reason: Option<String>,
     },
+    /// 対話 run が 1 ターンを終えて入力待ちになった。fork / rewind の境界になる。
+    ///
+    /// 発火前に、このターン末尾までの context が永続化されている。
+    TurnCompleted {
+        /// ターンを終えた run の ID。
+        run_id: String,
+        /// ターン末尾時点の非 System メッセージ数。run 内で一意かつ単調に増える。
+        context_len: u64,
+    },
     /// セッションが完了した。
     Completed {
         /// 完了したセッションの ID。
@@ -675,6 +684,39 @@ pub enum ProviderFailureKind {
     Other,
 }
 
+/// プロバイダ呼び出しの目的。usage 集計で本処理と付随コストを区別する。
+///
+/// 観測イベントへ載せる分類であり、v0.1 で保存された旧形式ペイロードは
+/// このフィールドを持たない (欠落時は `None`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    /// agent run の通常の応答生成。
+    #[default]
+    Agent,
+    /// 会話履歴の compaction (要約・公式 compaction)。
+    Compaction,
+    /// スレッドタイトルの自動生成。
+    Title,
+    /// entry routing の再分類。
+    Routing,
+    /// sandbox escalation のレビュー。
+    EscalationReview,
+}
+
+impl RequestPurpose {
+    /// 永続化・表示に使う snake_case のラベル。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Compaction => "compaction",
+            Self::Title => "title",
+            Self::Routing => "routing",
+            Self::EscalationReview => "escalation_review",
+        }
+    }
+}
+
 /// `cache_retention_ratio` がこの値を下回ると、prompt cache の再利用が
 /// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
 pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
@@ -836,6 +878,14 @@ pub enum ProviderEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// 出力トークンのうち reasoning に使われた数。provider が報告しない
+        /// 場合と旧形式ペイロードでは `None` (0 と区別する)。
+        #[serde(default)]
+        reasoning_tokens: Option<u64>,
+        /// 呼び出しの目的。observation context を持たない呼び出しと旧形式
+        /// ペイロードでは `None`。
+        #[serde(default)]
+        purpose: Option<RequestPurpose>,
     },
     /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
     ///
@@ -880,6 +930,10 @@ pub enum ProviderEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// 呼び出しの目的。observation context を持たない呼び出しと旧形式
+        /// ペイロードでは `None`。
+        #[serde(default)]
+        purpose: Option<RequestPurpose>,
     },
     /// routing の fallback 選択境界でフォールバック先が選択された。
     ///
@@ -1891,6 +1945,8 @@ mod tests {
                     cache_write_tokens: 1,
                     finish_reason: "stop".into(),
                     run_id: None,
+                    purpose: None,
+                    reasoning_tokens: None,
                 },
             ),
             (
@@ -1905,6 +1961,7 @@ mod tests {
                     duration_ms: 120,
                     failure: ProviderFailureKind::Http { status: 500 },
                     run_id: None,
+                    purpose: None,
                 },
             ),
             (
@@ -2317,6 +2374,8 @@ mod tests {
                 cache_write_tokens: 1,
                 finish_reason: "stop".into(),
                 run_id: None,
+                purpose: None,
+                reasoning_tokens: None,
             })
         );
     }
@@ -2366,6 +2425,7 @@ mod tests {
                 duration_ms: 120,
                 failure: ProviderFailureKind::Timeout,
                 run_id: None,
+                purpose: None,
             })
         );
     }

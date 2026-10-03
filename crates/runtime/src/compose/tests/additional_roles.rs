@@ -35,6 +35,7 @@ async fn additional_roles_keep_affinity_per_run() {
                         category: None,
                         run_id: format!("{}-{run_id}", role.name()),
                         model_preference: None,
+                        purpose: Default::default(),
                     },
                     role,
                     &[],

@@ -67,6 +67,7 @@ impl SpanMapper {
             LifecycleEvent::Delegated { .. }
             | LifecycleEvent::AgentRunRestored { .. }
             | LifecycleEvent::TaskPromptPublished { .. }
+            | LifecycleEvent::TurnCompleted { .. }
             | LifecycleEvent::BackgroundTaskCompleted { .. }
             | LifecycleEvent::BackgroundTaskCancelled { .. }
             | LifecycleEvent::RoutingDecision { .. }

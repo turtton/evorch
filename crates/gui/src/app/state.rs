@@ -48,7 +48,11 @@ pub struct WorkbenchState<S> {
     pub(super) restore_status:
         Option<Result<Option<runtime::restore::RunRestoreDiagnostics>, String>>,
     pub(super) external_job: Option<super::external_commands::Job>,
+    pub(super) mention_job: Option<super::mentions::Job>,
+    /// Whether the composer had an `@` query last frame; a new one refreshes the index.
+    pub(super) mention_active: bool,
     pub(super) arena: crate::panes::arena::ArenaPane,
+    pub(super) usage: crate::panes::usage::UsagePane,
     pub(super) memory: crate::panes::memory::MemoryPane,
     pub(super) self_improvement: crate::panes::self_improvement::SelfImprovementPane,
     pub(super) ownership: Option<Arc<runtime::ownership::OwnerHost>>,
@@ -59,6 +63,7 @@ pub struct WorkbenchState<S> {
     pub(super) close_in_flight: bool,
     pub(super) readonly_threads: std::collections::BTreeSet<String>,
     pub(super) pump: Option<EventPump>,
+    pub(super) last_slow_frame_log: Option<std::time::Instant>,
     pub(super) transcripts: TranscriptRegistry,
     pub(super) ledger: crate::model::ledger::LedgerRegistry,
     pub(super) telemetry: TelemetryOverlay,
@@ -70,7 +75,6 @@ pub struct WorkbenchState<S> {
     pub(super) dock: DockState<PanelId>,
     pub(super) panels: BTreeMap<PanelId, Panel>,
     pub(super) keymap: Keymap,
-    pub(super) pending_role_toggles: usize,
     pub(super) terminal_input: String,
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
@@ -96,6 +100,7 @@ pub struct WorkbenchState<S> {
     pub(super) sandbox_settings: super::sandbox_settings::SandboxSettings,
     pub(super) self_improvement_settings:
         crate::model::self_improvement_settings::SelfImprovementSettingsModel,
+    pub(super) storage_settings: super::storage_settings::StorageSettings,
     pub(super) codex_auth: CodexAuthModel,
     pub(super) provider_settings_path: Option<PathBuf>,
     pub(super) settings_load_options: config::LoadOptions,
@@ -111,6 +116,9 @@ pub struct WorkbenchState<S> {
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) running_children: BTreeMap<String, usize>,
+    /// Runs whose latest lifecycle event completed a turn: safe rewind points.
+    pub(super) idle_turns: std::collections::BTreeSet<String>,
+    pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -144,7 +152,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             diagnostics_run: String::new(),
             restore_status: None,
             external_job: None,
+            mention_job: None,
+            mention_active: false,
             arena: crate::panes::arena::ArenaPane::default(),
+            usage: crate::panes::usage::UsagePane::default(),
             memory: crate::panes::memory::MemoryPane::default(),
             self_improvement: crate::panes::self_improvement::SelfImprovementPane::default(),
             ownership: None,
@@ -155,6 +166,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             close_in_flight: false,
             readonly_threads: std::collections::BTreeSet::new(),
             pump: None,
+            last_slow_frame_log: None,
             transcripts: TranscriptRegistry::new(),
             ledger: crate::model::ledger::LedgerRegistry::default(),
             telemetry: TelemetryOverlay::new(),
@@ -166,7 +178,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             dock,
             panels: workspace.panels,
             keymap: Keymap::from_settings(&settings.keybinds),
-            pending_role_toggles: 0,
             terminal_input: String::new(),
             save_path: None,
             sidebar: SidebarState::default(),
@@ -191,6 +202,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sandbox_settings: super::sandbox_settings::SandboxSettings::default(),
             self_improvement_settings:
                 crate::model::self_improvement_settings::SelfImprovementSettingsModel::default(),
+            storage_settings: super::storage_settings::StorageSettings::default(),
             codex_auth: CodexAuthModel::default(),
             provider_settings_path: None,
             settings_load_options: config::LoadOptions::default(),
@@ -214,6 +226,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             issued: Vec::new(),
             phases: BTreeMap::new(),
             running_children: BTreeMap::new(),
+            idle_turns: std::collections::BTreeSet::new(),
+            usage_ledger: None,
         };
         state.tasks.refresh();
         state.register_work_panels();
@@ -275,6 +289,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.self_improvement.handle = enabled.then_some(handle);
         self.self_improvement.enabled = enabled;
         self.self_improvement.draft_dir = draft_dir;
+        self
+    }
+
+    pub fn with_diagnostic_storage(
+        mut self,
+        handle: storage::StorageHandle,
+        config: &storage::StorageConfig,
+    ) -> Self {
+        self.storage_settings.configure(handle, config);
         self
     }
 

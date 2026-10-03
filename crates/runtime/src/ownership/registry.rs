@@ -62,10 +62,22 @@ impl Registry {
         Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
     }
 
+    pub(super) fn open_readonly_nonblocking(path: &Path) -> Result<Self, RegistryError> {
+        Self::open_with_timeout(path, OpenFlags::SQLITE_OPEN_READ_ONLY, Duration::ZERO)
+    }
+
     fn open_with_flags(path: &Path, flags: OpenFlags) -> Result<Self, RegistryError> {
+        Self::open_with_timeout(path, flags, Duration::from_secs(2))
+    }
+
+    fn open_with_timeout(
+        path: &Path,
+        flags: OpenFlags,
+        timeout: Duration,
+    ) -> Result<Self, RegistryError> {
         let connection =
             Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.busy_timeout(timeout)?;
         Ok(Self { connection })
     }
 

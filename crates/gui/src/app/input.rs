@@ -8,12 +8,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.role_settings.open
             || self.sandbox_settings.open
             || self.self_improvement_settings.open
+            || self.storage_settings.open
             || self.theme_settings.open
     }
 
-    /// Filters physical role shortcuts before egui derives focus and key state.
+    /// Captures Tab for composer completion before egui derives focus and key state.
+    ///
+    /// Only a focused composer claims it, so other panes keep Tab.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
-        if self.settings_owns_input() {
+        if self.settings_owns_input() || !self.composer.focused {
             return;
         }
         raw_input.events.retain(|event| match event {
@@ -25,7 +28,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ..
             } if modifiers.is_none() || modifiers.shift_only() => {
                 if *pressed && !repeat {
-                    self.pending_role_toggles += 1;
+                    self.composer.tab_presses.push(modifiers.shift);
                 }
                 false
             }

@@ -165,6 +165,7 @@ fn send(world: &mut World, text: &str) -> Vec<LoopEvent> {
     world
         .sink
         .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            fork_seed: None,
             thread_id: "thread".into(),
             text: text.into(),
             composer_role: Default::default(),
@@ -305,6 +306,7 @@ fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch()
     let events = original
         .sink
         .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            fork_seed: None,
             thread_id: "thread".into(),
             text: "original chat task".into(),
             composer_role: gui::model::composer::ComposerRole::Orchestrator,

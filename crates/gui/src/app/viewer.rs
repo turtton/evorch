@@ -24,6 +24,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        // The composer re-asserts focus when it renders; a hidden one must not keep claiming Tab.
+        self.composer.focused = false;
+        self.refresh_mention_index(ui.ctx());
         self.poll_role_save();
         self.refresh_image_capability();
         self.composer.running_children = self
@@ -120,7 +123,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             enabled: !self.settings_save_in_progress(),
         };
         {
+            let rewind_block = self
+                .sidebar
+                .active_thread
+                .as_ref()
+                .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id))
+                .and_then(|thread| self.rewind_block(thread));
             let mut viewer = WorkbenchTabViewer {
+                rewind_block,
                 sandbox_picker,
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
@@ -133,6 +143,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
                 arena: &mut self.arena,
+                usage: &mut self.usage,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
                 telemetry: &self.telemetry,
@@ -168,6 +179,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
         }
+        if self.usage.take_conversation_request() {
+            self.focus_panel("agent-main");
+        }
         for link in file_requests {
             self.open_file_preview(&ctx, link);
         }
@@ -190,6 +204,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 AgentsAction::ReturnToThread => self.return_to_thread(),
                 AgentsAction::OpenPane(run_id) => self.open_agent_pane(&run_id),
                 AgentsAction::OpenDefaultPanes => self.open_default_agent_panes(),
+                AgentsAction::StopRun(run_id) => {
+                    if let Some(thread_id) = self.sidebar.active_thread.as_ref() {
+                        self.submit_command(crate::model::commands::WorkbenchCommand::StopRun {
+                            thread_id: thread_id.to_string(),
+                            run_id,
+                        });
+                    }
+                }
                 AgentsAction::OpenTask(task_id) => {
                     // Every navigation should reveal the target, including repeated visits.
                     ctx.data_mut(|data| {
@@ -250,6 +272,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
+                SidebarAction::ForkAtTurn { thread, entry_id } => {
+                    self.fork_at_turn(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::RewindToTurn { thread, entry_id } => {
+                    self.rewind_to_turn(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::EditFromMessage { thread, entry_id } => {
+                    self.edit_from_message(thread, entry_id).map(|_| ())
+                }
+                SidebarAction::SwitchVersion(thread_id) => self.switch_version(thread_id),
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
@@ -257,6 +289,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
         }
+        // Tab presses only apply to the composer frame they were captured for.
+        self.composer.tab_presses.clear();
         if let Some(action) = composer_action {
             match action {
                 ComposerAction::Send => self.submit_composer(),
@@ -268,17 +302,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::OpenSelfImprovementSettings => {
                     self.open_self_improvement_settings()
                 }
-                ComposerAction::Complete(name) => {
-                    self.composer_mut().input = format!("/{name} ");
-                }
-                ComposerAction::CompleteExternal(name) => {
-                    self.composer_mut().input = format!("/{name} ");
-                }
+                ComposerAction::OpenStorageSettings => self.open_storage_settings(),
+                ComposerAction::Complete(item) => self.composer.apply_completion(&item),
+                ComposerAction::ToggleRole => self.composer.toggle_role(),
             }
         }
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());
+        self.render_storage_settings(ui.ctx());
         if self.routing_settings.open {
             use crate::panes::routing_settings::{RoutingSettingsAction, routing_settings_modal};
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {
@@ -308,6 +340,31 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Open the usage statistics tab beside the conversation, or focus it.
+    /// The conversation leaf is the widest, which the tables need.
+    pub fn open_usage_tab(&mut self) {
+        use workspace_ui::{Panel, PanelId, PanelKind};
+        let id = PanelId::new("usage-main");
+        self.panels.entry(id.clone()).or_insert_with(|| Panel {
+            id: id.clone(),
+            kind: PanelKind::Usage,
+            title: PanelKind::Usage.default_title().into(),
+            target: None,
+        });
+        if self.dock.find_tab(&id).is_none() {
+            let neighbor = self
+                .dock
+                .find_tab(&PanelId::new("agent-main"))
+                .or_else(|| self.dock.find_tab(&PanelId::new("subagents-home")));
+            if let Some(path) = neighbor {
+                self.dock.set_focused_node_and_surface(path.node_path());
+            }
+            self.dock.push_to_focused_leaf(id.clone());
+            self.usage.invalidate();
+        }
+        self.focus_panel(id.as_str());
+    }
+
     /// Open a local file in the workspace, reusing an existing tab for that path.
     pub fn open_file_preview(
         &mut self,

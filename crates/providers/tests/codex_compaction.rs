@@ -43,7 +43,8 @@ async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
             input_tokens: 42,
             output_tokens: 7,
             cache_read_tokens: 30,
-            cache_write_tokens: 0
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
         }
     );
     let received = server.received_requests().await.unwrap();

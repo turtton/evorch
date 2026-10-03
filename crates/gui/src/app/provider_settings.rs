@@ -235,7 +235,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(crate) fn receive_provider_save(&mut self, timeout: std::time::Duration) {
-        let close_after_save = self.provider_settings.editor.is_some();
+        let close_after_save = match &self.provider_settings.editor {
+            Some(ProfileEditor::OpenAiCompatible(editor)) => editor.original_name.is_none(),
+            Some(ProfileEditor::Codex(editor)) => editor.original_name.is_none(),
+            None => false,
+        };
         let Some(rx) = self.provider_save_rx.take() else {
             return;
         };

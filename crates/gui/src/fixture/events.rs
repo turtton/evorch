@@ -119,5 +119,7 @@ fn request_completed(run_id: &str, input_tokens: u64, output_tokens: u64) -> Eve
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some(run_id.into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }

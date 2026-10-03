@@ -72,6 +72,40 @@ fn replaces_profile_when_renaming_with_existing_token() {
     );
     assert_eq!(store.get("B").unwrap().unwrap().expose(), "old-token");
     assert!(store.get("acct-A").unwrap().is_none());
+    assert!(harness.state().provider_settings().error.is_none());
+    assert!(harness.state().provider_settings().open);
+    assert!(harness.state().provider_settings().editor.is_none());
+    assert!(harness.has_label("B"));
+    assert!(!harness.has_label("A"));
+    assert!(harness.has_label("Edit"));
+    assert!(!harness.has_label("Save"));
+}
+
+#[test]
+fn failed_edit_save_keeps_editor_open() {
+    // Given: an existing keyring profile has lost its stored credential.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut harness, store) = keyring_editor(temp.path());
+    store.delete("acct-A").unwrap();
+    let path = config::project_main_config_path(temp.path());
+    let before = std::fs::read_to_string(&path).unwrap();
+    // When: saving fails in the credential worker.
+    harness.click_label("Save");
+    finish_save(&mut harness);
+    // Then: the error and editable settings stay visible, and config is unchanged.
+    assert!(harness.state().provider_settings().open);
+    assert!(harness.state().provider_settings().editor.is_some());
+    let error = harness
+        .state()
+        .provider_settings()
+        .error
+        .as_deref()
+        .expect("inline error");
+    assert!(error.contains("Enter an API key before saving"), "{error}");
+    assert!(harness.has_label(error));
+    assert!(harness.has_label("Save"));
+    assert!(!harness.has_label("Edit"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 
 #[test]
@@ -167,17 +201,29 @@ fn replaces_profile_when_renaming_codex_profile() {
     let mut harness = workbench_with_config_path(temp.path());
     *harness.state_mut().provider_settings_mut() =
         ProviderSettingsModel::seed_from_config(&load_config(temp.path()));
-    harness.state_mut().provider_settings_mut().edit("A");
+    harness.state_mut().open_provider_settings();
+    harness.run();
+    harness.click_label("Edit");
+    harness.run();
     harness
         .state_mut()
         .provider_settings_mut()
         .codex_mut()
         .unwrap()
         .name = "B".into();
-    // When
-    harness.state_mut().submit_provider_settings();
+    harness.run();
+    // When: saving an edit from the provider list.
+    harness.click_label("Save");
     finish_save(&mut harness);
-    // Then
+    // Then: the refreshed provider list remains open with the renamed profile.
+    assert!(harness.state().provider_settings().error.is_none());
+    assert!(harness.state().provider_settings().open);
+    assert!(harness.state().provider_settings().editor.is_none());
+    assert!(harness.has_label("Provider settings"));
+    assert!(harness.has_label("B"));
+    assert!(!harness.has_label("A"));
+    assert!(harness.has_label("Edit"));
+    assert!(!harness.has_label("Save"));
     let cfg = load_config(temp.path());
     assert_eq!(
         cfg.providers.keys().map(String::as_str).collect::<Vec<_>>(),

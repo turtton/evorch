@@ -96,8 +96,9 @@ pub fn sidebar_to_json(sidebar: &SidebarState) -> Result<String, SidebarError> {
 }
 
 pub fn sidebar_from_json(json: &str) -> Result<SidebarState, SidebarError> {
-    let sidebar: SidebarState = serde_json::from_str(json)
+    let mut sidebar: SidebarState = serde_json::from_str(json)
         .map_err(|error| SidebarError::Serialization(error.to_string()))?;
+    crate::normalize_versions(&mut sidebar.threads);
     sidebar.validate()?;
     Ok(sidebar)
 }

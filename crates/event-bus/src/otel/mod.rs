@@ -627,6 +627,8 @@ mod tests {
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
             run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
         })
     }
 
@@ -646,6 +648,7 @@ mod tests {
             duration_ms,
             failure,
             run_id: None,
+            purpose: None,
         })
     }
 
@@ -1197,6 +1200,8 @@ mod tests {
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
             run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
         })
     }
 

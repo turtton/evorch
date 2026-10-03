@@ -41,6 +41,7 @@ fn apply_events_surfaces_provider_failures_in_chat() {
             duration_ms: 42,
             failure,
             run_id: Some("run-provider".into()),
+            purpose: None,
         })
     }));
     // Then: the thread model and rendered chat both surface the failures.

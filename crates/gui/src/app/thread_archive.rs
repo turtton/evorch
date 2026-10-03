@@ -14,7 +14,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(ThreadError::UnknownThread)?;
         // A family is archived as a unit. Ignore stale child actions as well as
         // clicks on a pinned root, even when they arrive outside the sidebar UI.
-        if thread.parent_thread_id.is_some() || (!thread.archived && thread.pinned) {
+        if workspace_ui::display_parent(&self.sidebar.threads, &thread_id).is_some()
+            || (!thread.archived && thread.pinned)
+        {
             return Ok(());
         }
         let archived = !thread.archived;

@@ -65,6 +65,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .is_some_and(|thread| self.bind_conversation_run(&thread, new_run_id, true)),
             _ => false,
         };
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::TurnCompleted { run_id, .. }) => {
+                self.idle_turns.insert(run_id.clone());
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, .. }) => {
+                self.idle_turns.remove(run_id);
+            }
+            _ => {}
+        }
         self.transcripts.apply(event);
         changed || role_changed
     }

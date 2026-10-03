@@ -41,6 +41,7 @@ fn send_button_round_trip_issues_send_chat() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),

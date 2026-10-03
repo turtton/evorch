@@ -837,6 +837,7 @@ impl LoopState {
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
+                purpose: event_bus::RequestPurpose::Agent,
             };
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
@@ -1083,8 +1084,17 @@ impl LoopState {
                 return false;
             }
         }
+        let turn_end = self.persist_turn_boundary();
         if self.transition(AgentRunPhase::Waiting, None).is_err() {
             return false;
+        }
+        if let Some(context_len) = turn_end {
+            self.shared
+                .bus
+                .emit(Event::new(event_bus::LifecycleEvent::TurnCompleted {
+                    run_id: self.task.run_id.to_string(),
+                    context_len,
+                }));
         }
         loop {
             tokio::select! {
@@ -1175,6 +1185,26 @@ impl LoopState {
             self.shared.bus.emit(Event::new(event));
         }
         Ok(())
+    }
+
+    /// Persist the finished turn before it becomes a fork boundary. Only an
+    /// assistant reply without tool calls ends a turn; a failed write publishes none.
+    fn persist_turn_boundary(&self) -> Option<u64> {
+        let last = self.context.messages.last()?;
+        if last.role != providers::Role::Assistant
+            || last
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        {
+            return None;
+        }
+        if let Err(error) = crate::restore::persist_checkpoint(self) {
+            tracing::warn!(run_id = %self.task.run_id, %error, "turn checkpoint failed");
+            self.snapshot_diagnostic(&error);
+            return None;
+        }
+        u64::try_from(crate::restore::conversation_len(&self.context.messages)).ok()
     }
 
     fn save_checkpoint(&self) {

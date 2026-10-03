@@ -31,11 +31,7 @@ fn tool_card_bash_shows_command_inline_and_in_expanded_input() {
     for tool in ["bash", "shell"] {
         let mut harness = harness(tool, serde_json::json!({"command": "git status"}), "");
         // Then
-        assert!(
-            harness
-                .query_by_label(&format!("✓ {tool} git status"))
-                .is_some()
-        );
+        assert!(harness.query_by_label("✓ Shell git status").is_some());
         assert!(harness.query_by_label_contains("cli-test").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("Input").is_some());
@@ -49,7 +45,8 @@ fn tool_card_read_shows_path_inline_and_in_expanded_input() {
     for field in ["file_path", "path", "filePath", "file"] {
         let mut harness = harness("read", serde_json::json!({field: "src/main.rs"}), "");
         // Then
-        assert!(harness.query_by_label("✓ read src/main.rs").is_some());
+        // The file name leads; its directory follows as muted context.
+        assert!(harness.query_by_label("✓ Read main.rs src").is_some());
         assert!(harness.query_by_label_contains("cli-test").is_none());
         expand(&mut harness);
         assert!(harness.query_by_label("src/main.rs").is_some());
@@ -59,12 +56,12 @@ fn tool_card_read_shows_path_inline_and_in_expanded_input() {
 #[test]
 fn tool_card_write_and_edit_show_path_inline_and_in_expanded_input() {
     // Given / When
-    for tool in ["write", "edit"] {
+    for (tool, verb) in [("write", "Write"), ("edit", "Edit")] {
         let mut harness = harness(tool, serde_json::json!({"file": "test.txt"}), "");
         // Then
         assert!(
             harness
-                .query_by_label(&format!("✓ {tool} test.txt"))
+                .query_by_label(&format!("✓ {verb} test.txt"))
                 .is_some()
         );
         assert!(harness.query_by_label_contains("cli-test").is_none());
@@ -152,12 +149,12 @@ fn tool_card_summary_is_single_line_and_unicode_bounded() {
     let command = format!("echo\n\t{}", "界".repeat(130));
     let harness = harness("bash", serde_json::json!({"command": command}), "hidden");
     // Then
-    let expected = format!("✓ bash echo {}…", "界".repeat(115));
+    let expected = format!("✓ Shell echo {}…", "界".repeat(115));
     assert!(harness.query_by_label(&expected).is_some());
-    // The painted header swaps the textual mark for the Phosphor check glyph.
+    // The painted header swaps the textual mark for the tool's icon.
     let painted = format!(
-        "{} bash echo {}…",
-        gui::theme::icons::CHECK,
+        "{} Shell echo {}…",
+        gui::theme::icons::TERMINAL_WINDOW,
         "界".repeat(115)
     );
     let text = harness
@@ -176,14 +173,18 @@ fn tool_card_summary_is_single_line_and_unicode_bounded() {
 #[test]
 fn tool_card_omits_empty_or_unfocused_summary() {
     // Given / When
-    for (tool, input) in [
-        ("bash", serde_json::json!({"command": " \n\t"})),
-        ("read", serde_json::json!({})),
-        ("custom", serde_json::json!({"command": "not focused"})),
+    for (tool, input, label) in [
+        ("bash", serde_json::json!({"command": " \n\t"}), "✓ Shell"),
+        ("read", serde_json::json!({}), "✓ Read"),
+        (
+            "custom",
+            serde_json::json!({"command": "not focused"}),
+            "✓ custom",
+        ),
     ] {
         let harness = harness(tool, input, "");
         // Then
-        assert!(harness.query_by_label(&format!("✓ {tool}")).is_some());
+        assert!(harness.query_by_label(label).is_some());
     }
 }
 

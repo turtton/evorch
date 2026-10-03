@@ -60,6 +60,17 @@ pub struct WireUsage {
     /// Legacy Kimi cache-read count; details take precedence when present.
     #[serde(default)]
     pub cached_tokens: Option<u64>,
+    /// 出力トークンの内訳。
+    #[serde(default)]
+    pub completion_tokens_details: Option<WireCompletionTokensDetails>,
+}
+
+/// OpenAI の出力トークン内訳。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct WireCompletionTokensDetails {
+    /// reasoning に使われた出力トークン数 (`completion_tokens` に含まれる)。
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// OpenAI の入力トークン内訳。

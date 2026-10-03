@@ -97,6 +97,9 @@ pub(super) fn to_usage(usage: &WireUsage) -> Usage {
             .prompt_tokens_details
             .and_then(|details| details.cache_write_tokens)
             .unwrap_or_default(),
+        reasoning_tokens: usage
+            .completion_tokens_details
+            .and_then(|details| details.reasoning_tokens),
     }
 }
 
@@ -138,6 +141,7 @@ mod tests {
                     output_tokens: 10,
                     cache_read_tokens: read,
                     cache_write_tokens: write,
+                    reasoning_tokens: None,
                 }
             );
         }

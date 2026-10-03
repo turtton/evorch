@@ -97,6 +97,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
             run_id: "session".into(),
             category: None,
             model_preference: None,
+            purpose: Default::default(),
         };
         // When
         let result = model
@@ -200,6 +201,7 @@ async fn explicit_preference_never_falls_back_on_timeout() {
             profile: "profile-0".into(),
             model: None,
         }),
+        purpose: Default::default(),
     };
     // When
     let result = model.complete(&invocation, Role::Worker, &[], &[]).await;
@@ -224,6 +226,7 @@ async fn explicit_preference_never_falls_back_on_http_400() {
             profile: "profile-0".into(),
             model: None,
         }),
+        purpose: Default::default(),
     };
     let result = model.complete(&invocation, Role::Worker, &[], &[]).await;
     assert!(result.is_err());

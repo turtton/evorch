@@ -136,6 +136,7 @@ pub(crate) async fn compact_now(
         run_id: state.caller_run_id().to_string(),
         category: state.task.config.category.clone(),
         model_preference: model_preference.clone(),
+        purpose: event_bus::RequestPurpose::Compaction,
     };
     let official = state
         .shared

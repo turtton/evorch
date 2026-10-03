@@ -98,6 +98,7 @@ fn issued_decisions(
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
@@ -174,6 +175,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }

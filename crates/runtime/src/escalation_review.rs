@@ -322,6 +322,7 @@ impl QuickModelReviewer {
             run_id: run_id.to_owned(),
             category: Some("quick".into()),
             model_preference: None,
+            purpose: event_bus::RequestPurpose::EscalationReview,
         };
         let response = tokio::time::timeout(
             self.timeout,
@@ -439,13 +440,18 @@ impl QuickModelReviewer {
         ];
         let invocation = AgentInvocationContext {
             run_id: run_id.to_owned(),
-            category: Some("quick".to_owned()),
+            category: Some("tool-execution".to_owned()),
             model_preference: None,
+            purpose: event_bus::RequestPurpose::EscalationReview,
         };
         let response = tokio::time::timeout(
             self.timeout,
-            self.model
-                .complete_structured(&invocation, Role::Worker, &messages, &verdict_schema()),
+            self.model.complete_structured(
+                &invocation,
+                Role::Reviewer,
+                &messages,
+                &verdict_schema(),
+            ),
         )
         .await
         .map_err(|_| ReviewError::Timeout)?
@@ -691,7 +697,7 @@ mod tests {
 
     struct ReviewModel {
         inner: ScriptedModel,
-        delay: Duration,
+        stall: bool,
     }
 
     #[async_trait::async_trait]
@@ -704,12 +710,12 @@ mod tests {
             tools: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
             assert_eq!(invocation.run_id, "run-review");
-            assert_eq!(invocation.category.as_deref(), Some("quick"));
+            assert_eq!(invocation.category.as_deref(), Some("tool-execution"));
             assert_eq!(invocation.model_preference, None);
-            assert_eq!(role, Role::Worker);
+            assert_eq!(role, Role::Reviewer);
             assert!(tools.is_empty());
-            if !self.delay.is_zero() {
-                tokio::time::sleep(self.delay).await;
+            if self.stall {
+                std::future::pending::<()>().await;
             }
             self.inner.complete(invocation, role, messages, tools).await
         }
@@ -737,12 +743,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn reviewer_reports_timeout_when_model_stalls() {
-        // Given: a provider sleeping much longer than the review deadline.
+        // Given: a provider that never completes under virtual time.
         let model = Arc::new(ReviewModel {
             inner: ScriptedModel::new([]),
-            delay: Duration::from_secs(60),
+            stall: true,
         });
         let reviewer = QuickModelReviewer::new(model).with_timeout(Duration::from_millis(1));
         // When: a review reaches its deadline.
@@ -984,7 +990,7 @@ mod tests {
                 r#"{"approve":false,"reason":"inspect","risk_level":"high","authorization_level":"low"}"#,
                 FinishReason::Stop,
             ))]),
-            delay: Duration::ZERO,
+            stall: false,
         });
         let reviewer = QuickModelReviewer::new(model.clone());
         let run = ReviewRunContext {
@@ -1046,7 +1052,7 @@ mod tests {
                 r#"{"approve":true}"#,
                 FinishReason::Stop,
             ))]),
-            delay: Duration::ZERO,
+            stall: false,
         });
         let reviewer = QuickModelReviewer::new(model.clone());
         let command = "printf \"hello\"\npwd";

@@ -7,6 +7,8 @@ use crate::model::model_picker::{ModelPickerState, preference_label, profile_opt
 pub struct ModelPickerContext<'a> {
     pub profiles: &'a [ProfileSummary],
     pub preference: Option<&'a ModelPreference>,
+    /// The role's routed model, shown while no explicit preference is set.
+    pub default_model: Option<&'a str>,
     pub enabled: bool,
 }
 
@@ -19,6 +21,7 @@ pub fn model_picker(
     let label = context
         .preference
         .map(preference_label)
+        .or_else(|| context.default_model.map(str::to_owned))
         .unwrap_or_else(|| "Select model".into());
     let response = ui
         .add_enabled_ui(context.enabled && !context.profiles.is_empty(), |ui| {

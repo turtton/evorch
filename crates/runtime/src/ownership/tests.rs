@@ -304,6 +304,35 @@ fn readonly_mutation_guard_holds_the_generation_snapshot_until_dropped() {
     ));
 }
 
+#[test]
+fn nonblocking_mutation_guard_distinguishes_contention_from_fencing() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("owners.db");
+    let original = owner();
+    let mut registry = Registry::open(&path).unwrap();
+    registry.start(&original).unwrap();
+    let permit = OwnerPermit {
+        registry_path: path.clone(),
+        thread_id: original.thread_id.clone(),
+        lease: original.lease.clone(),
+        run_id: None,
+    };
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(permit.try_mutation_guard().unwrap().is_none());
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(permit.try_mutation_guard().unwrap().is_some());
+    registry
+        .update("thread-1", |owner| {
+            owner.claim(&original.lease, "new", 200, 50)
+        })
+        .unwrap();
+    assert!(matches!(
+        permit.try_mutation_guard(),
+        Err(RegistryError::Ownership(OwnershipError::Fenced))
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn host_probes_observe_turns_and_handoff_after_reusing_the_reader() {
@@ -427,37 +456,243 @@ fn repeated_host_display_probes_have_bounded_read_io() {
 }
 
 #[cfg(unix)]
-#[test]
-fn deferred_quiesce_keeps_generation_valid_through_checkpoint_and_heartbeats() {
+#[tokio::test]
+async fn deferred_quiesce_keeps_generation_valid_through_checkpoint_and_heartbeats() {
     let directory = tempfile::tempdir().unwrap();
     let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
     let settings = config::OwnershipConfig {
         heartbeat_ms: std::num::NonZeroU64::new(10).unwrap(),
         ..Default::default()
     };
-    let host = OwnerHost::open(directory.path(), settings, bus).unwrap();
+    let host = OwnerHost::open(directory.path(), settings, bus.clone()).unwrap();
     let permit = host.start("thread").unwrap();
     permit.begin_turn().unwrap();
     assert!(host.begin_quiesce().unwrap());
     assert!(permit.begin_turn().is_err());
     permit.checkpoint(&[]).unwrap();
-    let initial_expiry = host.attach("thread").unwrap().lease.expires_at;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut receiver = bus.subscribe();
     loop {
-        let owner = host.attach("thread").unwrap();
-        assert_eq!(owner.state, OwnerState::Quiescing);
-        permit.validate_generation().unwrap();
-        if owner.lease.expires_at > initial_expiry {
+        let event = match receiver.recv().await {
+            Ok(event) => event,
+            Err(event_bus::RecvError::Lagged(_)) => continue,
+            Err(error) => panic!("ownership events ended: {error:?}"),
+        };
+        if matches!(event.kind, event_bus::EventKind::Ownership(event)
+            if event.thread_id == "thread" && event.action == event_bus::OwnershipAction::Heartbeat)
+        {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "heartbeat must continue while release is deferred"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    assert_eq!(host.attach("thread").unwrap().state, OwnerState::Quiescing);
+    permit.validate_generation().unwrap();
     assert!(!host.begin_quiesce().unwrap());
     assert!(!host.release_ready().unwrap());
     assert_eq!(host.attach("thread").unwrap().state, OwnerState::Released);
     assert!(permit.validate_generation().is_err());
+}
+
+#[test]
+fn delayed_turn_and_child_start_renew_the_current_generation() {
+    let mut idle = owner();
+    let token = idle.lease.clone();
+    idle.begin_turn(&token, 20_000).expect("delayed turn");
+    assert!(idle.active_turn);
+    assert_eq!(idle.lease.generation, token.generation);
+    assert_eq!(idle.lease.expires_at, 25_000);
+
+    let mut running = owner();
+    running.begin_run(&token, "parent", 1).expect("parent");
+    running
+        .begin_run(&token, "child", 20_000)
+        .expect("delayed child");
+    assert_eq!(
+        running.active_runs,
+        ["parent".into(), "child".into()].into()
+    );
+    assert_eq!(running.lease.generation, token.generation);
+    assert_eq!(running.lease.expires_at, 25_000);
+}
+
+#[test]
+fn expired_permit_recovers_active_work_before_the_heartbeat_worker() {
+    for run_id in [None, Some("parent")] {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("owners.db");
+        let mut original = owner();
+        let token = original.lease.clone();
+        if let Some(run) = run_id {
+            original.begin_run(&token, run, 1).expect("parent");
+            original.begin_run(&token, "child", 1).expect("child");
+        } else {
+            original.begin_turn(&token, 1).expect("turn");
+        }
+        let mut registry = Registry::open(&path).expect("registry");
+        registry.start(&original).expect("start");
+        let permit = OwnerPermit {
+            registry_path: path,
+            thread_id: original.thread_id.clone(),
+            lease: token.clone(),
+            run_id: run_id.map(str::to_owned),
+        };
+
+        // The entire lease and grace period passed while this process was busy.
+        permit
+            .validate_mutation_with_clock(|| 20_000)
+            .expect("same generation must recover");
+        let renewed = registry.attach(&original.thread_id).expect("renewed owner");
+        assert_eq!(renewed.lease.expires_at, 25_000);
+        assert_eq!(renewed.lease.generation, token.generation);
+        assert_eq!(renewed.active_runs, original.active_runs);
+        assert!(renewed.active_turn);
+        assert!(matches!(
+            registry.update(&original.thread_id, |owner| {
+                owner.claim(&token, "next", 20_000, owner.settings.grace_ms.get())
+            }),
+            Err(RegistryError::Ownership(OwnershipError::NotClaimable))
+        ));
+        // A subsequent healthy probe stays read-only and cannot contend with
+        // another connection holding the reserved write lock.
+        let writer = rusqlite::Connection::open(&permit.registry_path).expect("writer");
+        writer.execute_batch("BEGIN IMMEDIATE").expect("write lock");
+        permit
+            .validate_mutation_with_clock(|| 20_001)
+            .expect("read-only healthy probe");
+        writer.execute_batch("ROLLBACK").expect("unlock");
+    }
+}
+
+#[test]
+fn expired_permit_rechecks_a_claim_committed_after_its_read() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("owners.db");
+    let mut original = owner();
+    let token = original.lease.clone();
+    original.begin_run(&token, "parent", 1).expect("parent");
+    let mut registry = Registry::open(&path).expect("registry");
+    registry.start(&original).expect("start");
+    let permit = OwnerPermit {
+        registry_path: path.clone(),
+        thread_id: original.thread_id.clone(),
+        lease: token.clone(),
+        run_id: Some("parent".into()),
+    };
+    let claimed = std::cell::Cell::new(false);
+    let result = permit.validate_mutation_with_clock(|| {
+        // Interleave a committed claim between the initial read and renewal.
+        if !claimed.replace(true) {
+            Registry::open_existing(&path)
+                .expect("claimant")
+                .update(&original.thread_id, |owner| {
+                    owner.claim(&token, "next", 20_000, owner.settings.grace_ms.get())
+                })
+                .expect("claim wins first");
+        }
+        20_000
+    });
+    assert!(matches!(
+        result,
+        Err(RegistryError::Ownership(OwnershipError::Fenced))
+    ));
+    assert!(matches!(
+        registry.update(&original.thread_id, |owner| owner.heartbeat(&token, 20_000)),
+        Err(RegistryError::Ownership(OwnershipError::Fenced))
+    ));
+    let successor = registry.attach(&original.thread_id).expect("successor");
+    assert_eq!(successor.lease.owner_id, "next");
+    assert_eq!(successor.lease.generation, token.generation + 1);
+    assert!(!successor.active_turn);
+    assert!(successor.active_runs.is_empty());
+}
+
+#[test]
+fn expired_permit_cannot_revive_a_run_checkpointed_after_its_read() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("owners.db");
+    let mut original = owner();
+    let token = original.lease.clone();
+    original.begin_run(&token, "parent", 1).expect("parent");
+    original.begin_run(&token, "child", 1).expect("child");
+    let mut registry = Registry::open(&path).expect("registry");
+    registry.start(&original).expect("start");
+    let permit = OwnerPermit {
+        registry_path: path,
+        thread_id: original.thread_id.clone(),
+        lease: token,
+        run_id: Some("parent".into()),
+    };
+    let checkpointed = std::cell::Cell::new(false);
+    let result = permit.validate_mutation_with_clock(|| {
+        if !checkpointed.replace(true) {
+            permit.checkpoint(&[]).expect("checkpoint wins first");
+        }
+        20_000
+    });
+    assert!(matches!(
+        result,
+        Err(RegistryError::Ownership(OwnershipError::Active))
+    ));
+    let owner = registry
+        .attach(&original.thread_id)
+        .expect("checkpointed owner");
+    assert_eq!(owner.lease, original.lease);
+    assert_eq!(owner.active_runs, ["child".into()].into());
+    assert!(owner.active_turn);
+}
+
+#[test]
+fn quiescing_runs_can_recover_and_drain_without_reviving_released_owners() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("owners.db");
+    let mut original = owner();
+    let token = original.lease.clone();
+    original.begin_run(&token, "parent", 1).expect("parent");
+    original.begin_run(&token, "child", 1).expect("child");
+    original.quiesce(&token).expect("quiesce");
+    let mut registry = Registry::open(&path).expect("registry");
+    registry.start(&original).expect("start");
+    let permit = OwnerPermit {
+        registry_path: path,
+        thread_id: original.thread_id.clone(),
+        lease: token.clone(),
+        run_id: Some("parent".into()),
+    };
+
+    permit
+        .validate_mutation_with_clock(|| 20_000)
+        .expect("drain after delay");
+    assert_eq!(
+        registry.attach(&original.thread_id).unwrap().state,
+        OwnerState::Quiescing
+    );
+    assert!(matches!(
+        registry.update(&original.thread_id, |owner| owner
+            .begin_run(&token, "new", 30_000)),
+        Err(RegistryError::Ownership(OwnershipError::Quiescing))
+    ));
+    permit.checkpoint(&[]).expect("parent checkpoint");
+    let checkpointed = registry.attach(&original.thread_id).unwrap();
+    assert!(matches!(
+        permit.validate_mutation_with_clock(|| 30_000),
+        Err(RegistryError::Ownership(OwnershipError::Active))
+    ));
+    assert_eq!(registry.attach(&original.thread_id).unwrap(), checkpointed);
+    let child = OwnerPermit {
+        run_id: Some("child".into()),
+        ..permit.clone()
+    };
+    child
+        .validate_mutation_with_clock(|| 30_000)
+        .expect("child drains");
+    child.checkpoint(&[]).expect("child checkpoint");
+    registry
+        .update(&original.thread_id, |owner| owner.release(&token))
+        .expect("release");
+    let released = registry.attach(&original.thread_id).unwrap();
+    assert!(child.validate_mutation_with_clock(|| 40_000).is_err());
+    assert!(
+        registry
+            .update(&original.thread_id, |owner| owner.heartbeat(&token, 40_000))
+            .is_err()
+    );
+    assert_eq!(registry.attach(&original.thread_id).unwrap(), released);
 }

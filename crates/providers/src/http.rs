@@ -273,6 +273,7 @@ mod tests {
             output_tokens: 5,
             cache_read_tokens: 3,
             cache_write_tokens: 1,
+            reasoning_tokens: None,
         };
 
         emitter.emit_usage("kimi-k3", &usage);

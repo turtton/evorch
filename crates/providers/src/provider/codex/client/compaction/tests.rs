@@ -42,7 +42,8 @@ fn captures_blob_usage_and_ignores_other_output() {
             input_tokens: 42,
             output_tokens: 7,
             cache_read_tokens: 30,
-            cache_write_tokens: 0
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
         }
     );
 }

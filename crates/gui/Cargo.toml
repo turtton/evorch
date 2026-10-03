@@ -26,6 +26,7 @@ config = { path = "../config" }
 eframe = { workspace = true }
 egui = { workspace = true }
 egui_extras = { version = "0.36", default-features = false }
+egui_plot = "0.37"
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
 egui_dock = { workspace = true }
 egui-phosphor = { version = "0.14", default-features = false, features = ["regular", "fill"] }

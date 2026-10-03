@@ -40,6 +40,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) arena: &'a mut crate::panes::arena::ArenaPane,
+    pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
     pub(super) transcripts: &'a TranscriptRegistry,
@@ -71,6 +72,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) preference_action: &'a mut Option<Option<workspace_ui::ModelPreference>>,
     pub(super) repo_root: Option<&'a Path>,
     pub(super) sandbox_picker: crate::panes::composer::SandboxPickerContext,
+    pub(super) rewind_block: Option<&'static str>,
 }
 
 impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
@@ -133,6 +135,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::Notifications => icons::BELL,
         PanelKind::Memory => icons::BRAIN,
         PanelKind::Arena => icons::SCALES,
+        PanelKind::Usage => icons::CHART_BAR,
     }
 }
 
@@ -171,7 +174,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     | PanelKind::Terminal
                     | PanelKind::Tasks
                     | PanelKind::Memory
-                    | PanelKind::Arena => None,
+                    | PanelKind::Arena
+                    | PanelKind::Usage => None,
                 };
                 match owner {
                     Some(thread) => format!("{} · {}", panel.title, thread.id),
@@ -215,7 +219,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             || self
                 .panels
                 .get(tab)
-                .is_some_and(|panel| panel.kind == PanelKind::FileViewer)
+                .is_some_and(|panel| matches!(panel.kind, PanelKind::FileViewer | PanelKind::Usage))
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -369,6 +373,18 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     .map(ToString::to_string);
                 self.arena
                     .render(ui, self.memory.config.as_ref().zip(project.as_deref()));
+            }
+            PanelKind::Usage => {
+                if let Some(thread) = self.usage.render(
+                    ui,
+                    self.memory.config.as_ref(),
+                    self.sidebar,
+                    &self.telemetry.quota,
+                ) {
+                    *self.sidebar_action = Some(SidebarAction::SwitchThread(
+                        workspace_ui::ThreadId::new(thread),
+                    ));
+                }
             }
         }
         let link_base = if panel.kind == PanelKind::FileViewer {
