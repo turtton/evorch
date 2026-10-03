@@ -632,7 +632,7 @@ impl LoopState {
                                 tokio::select! {
                                     biased;
                                     _=cancel.wait_for(|interrupt| interrupt.is_interrupted())=>Err(match self.interrupted() { Some(InterruptKind::Stop) => "stopped while waiting for workspace", _ => "cancelled while waiting for workspace" }.into()),
-                                    result=self.snapshot_before_tool(&name,&id)=>result,
+                                    result=self.snapshot_before_tool(&name,&id,&input)=>result,
                                 }
                             };
                             let guard = match snapshot {

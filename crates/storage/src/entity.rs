@@ -176,7 +176,7 @@ pub struct CatalogUpdateRecord {
     pub recorded_at_ns: i64,
 }
 
-/// Sanitize persisted tool payloads without changing the live event or protocol identifiers.
+/// Sanitize persisted tool and wait payloads without changing the live event or protocol identifiers.
 pub(crate) fn redact_tool_event(event: &event_bus::Event) -> event_bus::Event {
     let mut persisted = event.clone();
     let redactor = secret_guard::SecretRedactor::from_env();
@@ -194,6 +194,19 @@ pub(crate) fn redact_tool_event(event: &event_bus::Event) -> event_bus::Event {
             }
             if let Some(detail) = detail {
                 redactor.redact_json(detail);
+            }
+        }
+        EventKind::Lifecycle(LifecycleEvent::WorkspaceWaitChanged {
+            waiting: Some(wait),
+            ..
+        }) => {
+            if let Some(command) = &mut wait.command {
+                *command = redactor.redact(command).text;
+            }
+            if let Some(holder) = &mut wait.holder
+                && let Some(command) = &mut holder.command
+            {
+                *command = redactor.redact(command).text;
             }
         }
         _ => {}
@@ -261,6 +274,14 @@ impl SecretGuard {
             }
             EventKind::Lifecycle(LifecycleEvent::Failed { reason, .. }) => {
                 self.check_text("event", "Failed.reason", reason)
+            }
+            EventKind::Lifecycle(LifecycleEvent::WorkspaceWaitChanged {
+                waiting: Some(wait),
+                ..
+            }) => {
+                let payload = serde_json::to_string(wait)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "WorkspaceWaitChanged.waiting", &payload)
             }
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
                 reason: Some(reason),

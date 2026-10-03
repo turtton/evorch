@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 mod history;
 mod service;
 pub use history::SnapshotHistory;
-pub use service::{SnapshotService, WorkspaceSnapshots};
+pub use service::{SnapshotService, WorkspaceSnapshotGuard, WorkspaceSnapshots};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotId(String);

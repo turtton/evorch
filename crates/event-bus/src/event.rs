@@ -316,10 +316,36 @@ pub struct ContextComposition {
     pub window_tokens: u64,
 }
 
+/// The tool whose live guard currently owns a workspace. Observation only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceLockHolder {
+    pub run_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    /// Bounded, redacted shell command preview, when available.
+    pub command: Option<String>,
+}
+
+/// A tool waiting for workspace access, independent of the run's phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWait {
+    pub workspace_root: std::path::PathBuf,
+    pub tool_name: String,
+    pub command: Option<String>,
+    /// Unknown for callers without a run-owned tool guard.
+    pub holder: Option<WorkspaceLockHolder>,
+}
+
 /// セッションおよびタスクのライフサイクルに関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum LifecycleEvent {
+    /// Observational lock contention. None clears only this run/call's wait.
+    WorkspaceWaitChanged {
+        run_id: String,
+        call_id: String,
+        waiting: Option<WorkspaceWait>,
+    },
     /// Observational activity and request composition; does not transition run phase.
     RunProgress {
         run_id: String,

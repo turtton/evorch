@@ -2,6 +2,8 @@
 #[path = "shell_jobs_integration/finalization.rs"]
 mod finalization;
 mod support;
+#[path = "shell_jobs_integration/workspace_wait.rs"]
+mod workspace_wait;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
