@@ -53,6 +53,7 @@ enabled = true
     .unwrap();
     let bus = Arc::new(EventBus::new(256));
     let composed = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(root.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(ToolExecutor::with_standard_tools(
             bus.clone(),

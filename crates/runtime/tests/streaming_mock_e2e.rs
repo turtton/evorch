@@ -142,6 +142,7 @@ fn composition<'a>(
     let credential_store: Arc<dyn CredentialStore> =
         Arc::new(FileCredentialStore::open(root.join("credentials")).expect("credential store"));
     RuntimeComposition {
+        user_config_dir: Some(root.join("empty-user-config")),
         config,
         bus,
         executor,

@@ -380,6 +380,7 @@ async fn shared_inspection_keeps_startup_root_after_default_cwd_changes() {
             RulesSettings::from(&config::RulesConfig::default()),
             None,
             Some(root.path().to_path_buf()),
+            None,
         ),
     ));
     let run_id = runtime.delegate_background(Role::Worker, "work".into(), RunConfig::default());
@@ -444,6 +445,7 @@ async fn inspecting_workspace_preserves_already_sent_model_prefix() {
             RulesSettings::from(&config::RulesConfig::default()),
             None,
             Some(root.path().to_path_buf()),
+            None,
         )));
     let run = runtime.delegate_background(
         Role::Orchestrator,

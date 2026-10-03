@@ -129,6 +129,7 @@ fn composition<'a>(
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     RuntimeComposition {
+        user_config_dir: Some(root.join("empty-user-config")),
         config,
         bus,
         executor,

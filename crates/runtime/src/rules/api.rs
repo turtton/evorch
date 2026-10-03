@@ -31,6 +31,9 @@ pub fn startup_snapshot(
     {
         rules.push(rule);
     }
+    if let Some(rule) = user_agents_rule(source, &mut markers) {
+        rules.push(rule);
+    }
     render_snapshot(
         rules,
         markers,
@@ -94,6 +97,35 @@ fn user_startup_rules(source: &RulesSource, markers: &mut Vec<String>) -> Vec<Re
             }
         })
         .collect()
+}
+
+fn user_agents_rule(source: &RulesSource, markers: &mut Vec<String>) -> Option<ResolvedRule> {
+    let path = source.user_agents_md.as_deref()?;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(source) => {
+            disable(
+                &RulesError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                },
+                markers,
+            );
+            return None;
+        }
+    }
+    let directory = path.parent()?;
+    match source_for_path(directory, path, RuleKind::AgentsMd, RuleScope::User, 0)
+        .and_then(resolve_agents)
+    {
+        Ok(rule) => Some(rule),
+        Err(error) => {
+            disable(&error, markers);
+            None
+        }
+    }
 }
 
 fn project_root_rule(root: &Path, markers: &mut Vec<String>) -> Option<ResolvedRule> {

@@ -87,6 +87,7 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
         providers::FinishReason::Stop,
     ))]));
     let runtime = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         bus,
         executor: executor.clone(),

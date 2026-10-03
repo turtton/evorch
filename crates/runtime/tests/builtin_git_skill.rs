@@ -26,6 +26,7 @@ fn compose(model: Arc<ScriptedModel>) -> (AgentRuntime, tempfile::TempDir) {
     let bus = Arc::new(EventBus::new(128));
     let (factory, _) = recording_factory();
     let composed = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config::Config::default(),
         executor: Arc::new(ToolExecutor::new(bus.clone())),
         bus,

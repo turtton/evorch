@@ -108,6 +108,7 @@ async fn startup_system_message_contains_root_and_user_always_apply_only() {
             settings(65_536),
             Some(user),
             Some(root),
+            None,
         ),
     );
 
@@ -155,6 +156,7 @@ async fn unapproved_startup_loads_user_scope_only() {
             settings(65_536),
             Some(user),
             Some(root),
+            None,
         ),
     );
 
@@ -190,6 +192,7 @@ async fn rules_only_run_creates_single_system_message_when_no_catalog_or_skills(
             settings(65_536),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         ),
     );
 
@@ -244,6 +247,7 @@ async fn tiny_budget_keeps_closest_rule_and_marks_omissions() {
             settings(220),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         ),
     );
 
@@ -278,6 +282,7 @@ async fn run_once_and_observe(root: &Path, target: &Path) -> Vec<Vec<Message>> {
             settings(65_536),
             None,
             Some(root.to_path_buf()),
+            None,
         ),
     );
     let run_id =
@@ -334,6 +339,7 @@ async fn truncation_respects_utf8_boundary_and_keeps_deep_rule() {
             settings(180),
             None,
             Some(tmp.path().to_path_buf()),
+            None,
         ),
     );
 

@@ -47,6 +47,7 @@ async fn composed_runtime_compacts_with_preset_window() {
     ])
     .with_selected_model("local/deepseek-v4-flash-0731");
     let composed = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(dir.path().join("empty-user-config")),
         config: &config,
         executor: Arc::new(tools::ToolExecutor::with_standard_tools(
             bus.clone(),

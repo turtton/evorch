@@ -165,6 +165,7 @@ summarizer = "structural"
         prompts = prompts.family_section(family, "Use tools and preserve context");
     }
     let runtime = compose_runtime(RuntimeComposition {
+        user_config_dir: Some(directory.path().join("empty-user-config")),
         config: &config,
         bus,
         executor: Arc::new(executor),
