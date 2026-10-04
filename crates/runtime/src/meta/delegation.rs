@@ -1,5 +1,6 @@
 //! delegate メタ操作のハンドラ。
 
+use config::agent_categories::CategoryId;
 use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
@@ -71,24 +72,25 @@ impl DelegateTarget {
         };
         let categories: Vec<_> = config::agent_categories::public_categories()
             .filter(|category| category.role == self.role)
-            .map(|category| category.name)
+            .map(|category| category.id)
             .collect();
         if categories.is_empty() {
             return Err(format!(
-                "target.role={} has no public categories; omit target.category. Use target={{\"role\":\"{}\"}}. For plan review use target={{\"role\":\"reviewer\",\"category\":\"plan-review\"}}.",
-                self.role, self.role
+                "target.role={} has no public categories; omit target.category. Use target={{\"role\":\"{}\"}}. For plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
+                self.role,
+                self.role,
+                CategoryId::PlanReview
             ));
         }
         let category = parse_category(&category)?;
-        if !categories.contains(&category.as_str()) {
-            let owner =
-                config::agent_categories::public_category_role(&category).expect("public category");
+        if !categories.contains(&category) {
+            let owner = category.role();
             return Err(format!(
                 "target.category `{category}` is only valid for target.role={owner}. Use target={{\"role\":\"{owner}\",\"category\":\"{category}\"}}, or omit target.category to use the {} base binding.",
                 self.role
             ));
         }
-        Ok((role, Some(category)))
+        Ok((role, Some(category.to_string())))
     }
 }
 
@@ -148,9 +150,10 @@ pub(crate) fn spawn_delegate(
     input: serde_json::Value,
 ) -> Result<crate::RunId, DispatchResult> {
     if input.get("role").is_some() || input.get("category").is_some() {
-        return Err(error(
-            "invalid arguments: put role and category inside the required target object. For planning use target={\"role\":\"planner\"}; for plan review use target={\"role\":\"reviewer\",\"category\":\"plan-review\"}.",
-        ));
+        return Err(error(format!(
+            "invalid arguments: put role and category inside the required target object. For planning use target={{\"role\":\"planner\"}}; for plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
+            CategoryId::PlanReview
+        )));
     }
     let args = match parse::<DelegateArgs>(input) {
         Ok(args) => args,

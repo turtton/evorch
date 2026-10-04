@@ -347,7 +347,7 @@ fn strip_role_binding(value: &mut toml::Value, path: &str, role: &str, ignored: 
     {
         let categories_path = format!("{path}.categories");
         let category_names: Vec<_> = categories_for_role(role)
-            .map(|category| category.name)
+            .map(|category| category.id.as_str())
             .collect();
         retain_known(categories, &categories_path, &category_names, ignored);
         for (name, value) in categories {
@@ -584,7 +584,7 @@ fn validate_role_categories(
                 message: format!(
                     "unknown category, expected one of: {}",
                     categories_for_role(role)
-                        .map(|category| category.name)
+                        .map(|category| category.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),

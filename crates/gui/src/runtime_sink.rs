@@ -5,6 +5,7 @@
 // (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
 // テストを別ファイルへ分離すると impl+test ペアリング規約に反する。
 
+use config::agent_categories::CategoryId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -987,7 +988,7 @@ impl RuntimeCommandSink {
                 submission.text.clone(),
                 RunConfig {
                     conversation,
-                    category: conversation.then(|| "conversation".into()),
+                    category: conversation.then(|| CategoryId::Conversation.to_string()),
                     ownership: permit.clone(),
                     images: submission.images.clone(),
                     model_preference: submission.model_preference.clone(),
@@ -1032,7 +1033,7 @@ impl RuntimeCommandSink {
             submission.text,
             RunConfig {
                 conversation,
-                category: conversation.then(|| "conversation".into()),
+                category: conversation.then(|| CategoryId::Conversation.to_string()),
                 images: submission.images,
                 ownership: permit,
                 interactive: true,

@@ -101,7 +101,7 @@ fn resolve_categories(presets_dir: Option<&Path>) -> Result<BTreeMap<String, Str
     let mut sources = BTreeMap::new();
     for category in CATEGORIES {
         let body = PresetStore::resolve(category.overlay_preset, presets_dir)?;
-        sources.insert(category.name.to_string(), body);
+        sources.insert(category.id.as_str().to_string(), body);
     }
     Ok(sources)
 }

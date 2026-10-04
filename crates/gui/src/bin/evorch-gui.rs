@@ -1,4 +1,5 @@
 // allow: SIZE_OK - Existing GUI composition root; T3 only wires UI settings into startup, without restructuring runtime ownership.
+use config::agent_categories::CategoryId;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -743,7 +744,7 @@ fn run() -> Result<(), GuiError> {
     };
     let quick_route = composition_config
         .agents
-        .binding_for("worker", Some("quick"))
+        .binding_for("worker", Some(CategoryId::Quick.as_str()))
         .ok()
         .and_then(|binding| {
             composition_config

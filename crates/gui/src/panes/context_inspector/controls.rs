@@ -1,5 +1,6 @@
 //! Toolbar of the Context tab: view switcher, run shape editors and run picker.
 
+use config::agent_categories::CategoryId;
 use runtime::Role;
 
 use super::{ContextInspectorPane, InspectorMode, RunChoice, Selection};
@@ -84,11 +85,15 @@ fn spec_editor(ui: &mut egui::Ui, id: &str, spec: &mut PreviewSpec) -> bool {
     let categories = categories_for(spec.role);
     if !categories.is_empty() {
         egui::ComboBox::from_id_salt((id, "category"))
-            .selected_text(spec.category.as_deref().unwrap_or("no category"))
+            .selected_text(
+                spec.category
+                    .map(CategoryId::as_str)
+                    .unwrap_or("no category"),
+            )
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut spec.category, None, "no category");
                 for category in categories {
-                    ui.selectable_value(&mut spec.category, Some(category.to_owned()), category);
+                    ui.selectable_value(&mut spec.category, Some(category), category.as_str());
                 }
             });
     }
@@ -102,8 +107,8 @@ fn spec_editor(ui: &mut egui::Ui, id: &str, spec: &mut PreviewSpec) -> bool {
     }
     ui.checkbox(&mut spec.isolated, "Isolated worktree");
     if spec.conversation {
-        spec.category = Some("conversation".into());
-    } else if spec.category.as_deref() == Some("conversation") {
+        spec.category = Some(CategoryId::Conversation);
+    } else if spec.category == Some(CategoryId::Conversation) {
         spec.category = None;
     }
     *spec != before

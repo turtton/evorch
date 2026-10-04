@@ -1,3 +1,4 @@
+use config::agent_categories::CategoryId;
 use std::collections::BTreeSet;
 
 use crate::learning::{LessonCandidate, LessonVerdict};
@@ -100,7 +101,7 @@ impl LearningQueue {
             ),
             RunConfig {
                 name: Some("lesson".into()),
-                category: Some("lesson".into()),
+                category: Some(CategoryId::Lesson.to_string()),
                 purpose: RunPurpose::LessonExtract { source_run_id },
                 learning_internal: true,
                 model_preference: Some(self.quick.clone()),
@@ -143,7 +144,7 @@ impl LearningQueue {
             ),
             RunConfig {
                 name: Some("learning-evidence-review".into()),
-                category: Some("lesson_review".into()),
+                category: Some(CategoryId::LessonReview.to_string()),
                 purpose: RunPurpose::LessonReview {
                     source_run_id,
                     extraction_run_id: extractor,

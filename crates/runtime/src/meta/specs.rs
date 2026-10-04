@@ -1,3 +1,4 @@
+use config::agent_categories::CategoryId;
 use providers::ToolSpec;
 use serde_json::{Value, json};
 
@@ -12,7 +13,10 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Delegate a task to a child agent using the required target object. Choose target.role first, then an optional target.category from that role's branch. For planning use target={\"role\":\"planner\"} without category; for plan review use target={\"role\":\"reviewer\",\"category\":\"plan-review\"}. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
+        description: format!(
+            "Delegate a task to a child agent using the required target object. Choose target.role first, then an optional target.category from that role's branch. For planning use target={{\"role\":\"planner\"}} without category; for plan review use target={{\"role\":\"reviewer\",\"category\":\"{plan_review}\"}}. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.",
+            plan_review = CategoryId::PlanReview
+        ),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -320,14 +324,14 @@ fn delegate_target_schema() -> Value {
             .filter(|category| category.role == *role)
             .collect();
         let guidance = match *role {
-            "orchestrator" => "Coordinate agents and execution.",
-            "explorer" => "Read-only local code investigation.",
-            "worker" => "Implement a task; choose a category by its primary difficulty.",
-            "reviewer" => "Review work; plan-review reviews a planner-produced plan.",
-            "web_researcher" => "Collect external source evidence.",
-            "planner" => "Create a plan before implementation. Omit category; plan-review belongs to reviewer.",
-            "oracle" => "Provide expert reasoning and advice.",
-            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images.",
+            "orchestrator" => "Coordinate agents and execution.".to_owned(),
+            "explorer" => "Read-only local code investigation.".to_owned(),
+            "worker" => "Implement a task; choose a category by its primary difficulty.".to_owned(),
+            "reviewer" => format!("Review work; {} reviews a planner-produced plan.", CategoryId::PlanReview),
+            "web_researcher" => "Collect external source evidence.".to_owned(),
+            "planner" => format!("Create a plan before implementation. Omit category; {} belongs to reviewer.", CategoryId::PlanReview),
+            "oracle" => "Provide expert reasoning and advice.".to_owned(),
+            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images.".to_owned(),
             _ => unreachable!("registered delegate role"),
         };
         let mut branch = json!({
@@ -336,9 +340,9 @@ fn delegate_target_schema() -> Value {
             "required": ["role"], "additionalProperties": false
         });
         if !categories.is_empty() {
-            let names: Vec<_> = categories.iter().map(|category| category.name).collect();
+            let names: Vec<_> = categories.iter().map(|category| category.id.as_str()).collect();
             let criteria = categories.iter()
-                .map(|category| format!("{}: {}", category.name, category.guidance))
+                .map(|category| format!("{}: {}", category.id.as_str(), category.guidance))
                 .collect::<Vec<_>>().join(" ");
             branch["properties"]["category"] = json!({
                 "type": "string", "enum": names,
@@ -399,7 +403,7 @@ mod tests {
             assert_eq!(branch["properties"]["role"]["const"], *role);
             let public: Vec<_> = config::agent_categories::public_categories()
                 .filter(|category| category.role == *role)
-                .map(|category| category.name)
+                .map(|category| category.id.as_str())
                 .collect();
             if public.is_empty() {
                 assert!(branch["properties"].get("category").is_none());
@@ -408,8 +412,7 @@ mod tests {
             }
             assert!(validator.is_valid(&json!({"target":{"role":role}, "prompt":"task"})));
             for category in config::agent_categories::public_categories() {
-                let input =
-                    json!({"target":{"role":role,"category":category.name}, "prompt":"task"});
+                let input = json!({"target":{"role":role,"category":category.id.as_str()}, "prompt":"task"});
                 assert_eq!(
                     validator.is_valid(&input),
                     category.role == *role,

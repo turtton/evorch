@@ -71,9 +71,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .flat_map(|(role_key, role)| {
                         categories_for_role(role_key).map(move |category| {
                             (
-                                format!("{role_key}.categories.{}", category.name),
+                                format!("{role_key}.categories.{}", category.id.as_str()),
                                 role,
-                                Some(category.name),
+                                Some(category.id.as_str()),
                             )
                         })
                     }),
