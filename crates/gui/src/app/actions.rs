@@ -376,6 +376,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
+                // Acceptance indexes the run; lifecycle events identify the current
+                // conversation root. Follow-up receipts must not reroute its transcript.
                 if self.bind_thread_run(&thread_id, &run_id) {
                     self.save_sidebar();
                 }

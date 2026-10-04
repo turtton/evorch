@@ -41,11 +41,12 @@ pub fn demo_events() -> Vec<Event> {
     ]
 }
 
-/// demo の active thread (run-3 経由) を Error 状態にする追加 event。headless capture の赤ドット検証用。
+/// demo の active thread の会話 root を Error 状態にする追加 event。
+/// 子エージェントの失敗は会話全体の表示状態を上書きしない。
 pub fn demo_error_events() -> Vec<Event> {
     vec![run_state_changed(
-        "run-3",
-        AgentRunPhase::Waiting,
+        "run-1",
+        AgentRunPhase::Running,
         AgentRunPhase::Error,
     )]
 }
