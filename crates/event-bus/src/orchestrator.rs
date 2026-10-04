@@ -434,6 +434,8 @@ pub enum CloseoutStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum OrchestratorEvent {
+    /// Latest bounded durable state of a generic thread objective.
+    ThreadGoalUpdated { snapshot: crate::ThreadGoalSnapshot },
     /// task の進捗を記録した。
     TaskProgressed {
         /// task の永続識別子。

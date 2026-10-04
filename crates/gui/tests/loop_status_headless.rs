@@ -133,7 +133,9 @@ fn control_commands(harness: &HeadlessWorkbench<MockSource>) -> (Vec<&str>, Vec<
             WorkbenchCommand::PauseGoal { goal_id } => pauses.push(goal_id.as_str()),
             WorkbenchCommand::ResumeGoal { goal_id } => resumes.push(goal_id.as_str()),
             WorkbenchCommand::CancelGoal { goal_id } => cancels.push(goal_id.as_str()),
-            WorkbenchCommand::SubmitGoal(_)
+            WorkbenchCommand::SetGoalReview { .. }
+            | WorkbenchCommand::SetGoalChecksPaused { .. }
+            | WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
@@ -244,7 +246,9 @@ fn merge_state_requires_binding_and_retains_head_and_token() {
         .iter()
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
-            WorkbenchCommand::SubmitGoal(_)
+            WorkbenchCommand::SetGoalReview { .. }
+            | WorkbenchCommand::SetGoalChecksPaused { .. }
+            | WorkbenchCommand::SubmitGoal(_)
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }

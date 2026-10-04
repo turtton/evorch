@@ -422,3 +422,53 @@ async fn latest_chat_run_finds_the_newest_root_across_roles_after_restart() {
         fixture.runtime.latest_chat_run("thread").unwrap()
     );
 }
+
+#[tokio::test]
+async fn rejected_manual_goal_preserves_the_existing_restorable_checkpoint() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let run = runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            "Original".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    runtime.wait(run).await.unwrap();
+    runtime
+        .create_thread_goal("thread", run, "Original".into(), vec!["Evidence".into()])
+        .unwrap();
+    let store = runtime.shared.run_store.get().unwrap();
+    let before = store.restore_record(run).unwrap().unwrap();
+    let before_goal = runtime.thread_goal("thread").unwrap();
+    for objective in ["Replacement".into(), "x".repeat(8193)] {
+        assert!(
+            runtime
+                .continue_goal(
+                    run,
+                    objective.clone(),
+                    RunConfig {
+                        initial_thread_goal: Some((objective, vec!["Criterion".into()])),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        let after = store.restore_record(run).unwrap().unwrap();
+        assert_eq!(after.config_json, before.config_json);
+        assert_eq!(after.restorable, before.restorable);
+        assert_eq!(runtime.thread_goal("thread").unwrap(), before_goal);
+    }
+    runtime
+        .set_goal_checks_paused("thread", &before_goal.goal_id, true)
+        .unwrap();
+    assert_eq!(
+        runtime
+            .continue_goal(run, "Continue the original".into(), RunConfig::default())
+            .unwrap(),
+        run
+    );
+    runtime.stop(run, StopScope::SelfOnly).unwrap();
+    runtime.wait(run).await.unwrap();
+}

@@ -59,6 +59,11 @@ pub enum MergeMode {
 pub enum RunPurpose {
     #[default]
     General,
+    /// Runtime-issued, read-only review of a generic thread objective.
+    ThreadGoalReview {
+        root_run_id: RunId,
+        epoch: u64,
+    },
     LessonExtract {
         source_run_id: RunId,
     },
@@ -71,6 +76,8 @@ pub enum RunPurpose {
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
+    /// Explicit host /goal input, consumed before starting a chat root.
+    pub initial_thread_goal: Option<(String, Vec<String>)>,
     pub budget: crate::budget_tracker::BudgetSettings,
     /// Durable task identity when this run is attached to a task.
     pub task_id: Option<String>,

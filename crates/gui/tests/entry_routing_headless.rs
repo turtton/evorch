@@ -1,8 +1,10 @@
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use event_bus::{EventBus, EventKind, EventReceiver, LifecycleEvent, RoutingSource};
+use event_bus::{
+    AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent, OrchestratorEvent,
+    ThreadGoalSnapshot,
+};
 use gui::app::WorkbenchState;
 use gui::events::EventPump;
 use gui::headless::HeadlessWorkbench;
@@ -10,17 +12,14 @@ use gui::runtime_sink::RuntimeCommandSink;
 use providers::{ChatResponse, Message, ToolSpec};
 use runtime::{
     AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSupervisor,
-    OrchestrationSettings, Role, RuntimeError,
+    OrchestrationSettings, Role, RunId, RuntimeError, SupervisorHandle,
 };
-use tokio::time::timeout;
 use tools::ToolExecutor;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
-/// どんなプロンプトにも応答せず run を走らせ続ける stub モデル。
+/// 最初の通常メッセージだけに応答し、goal 作業は完了させない stub モデル。
 ///
-/// supervisor を接続すると run の terminal 遷移が continuation 起動に繋がり、
-/// 行アサーション (「Orchestrator 行は現れない」等) と競合するため、
-/// ルーティング検証に不要な run 終端を行わない。
+/// 入力時の goal 登録・会話 root の選択だけを検証するため、完了処理は行わない。
 struct HeldModel;
 
 #[async_trait]
@@ -29,9 +28,25 @@ impl AgentModel for HeldModel {
         &self,
         _invocation: &AgentInvocationContext,
         _role: Role,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        if messages.last().is_some_and(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, providers::ContentBlock::Text { text } if text == "Investigate the issue")
+            })
+        }) {
+            return Ok(ChatResponse {
+                message: Message {
+                    role: providers::Role::Assistant,
+                    content: vec![providers::ContentBlock::Text {
+                        text: "Ready to investigate".into(),
+                    }],
+                },
+                usage: providers::Usage::default(),
+                finish_reason: providers::FinishReason::Stop,
+            });
+        }
         std::future::pending().await
     }
 
@@ -63,6 +78,9 @@ struct Fixture {
     runtime: tokio::runtime::Runtime,
     _temp_dir: tempfile::TempDir,
     bus: Arc<EventBus>,
+    agent_runtime: AgentRuntime,
+    supervisor: SupervisorHandle,
+    repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
 }
 
@@ -93,53 +111,74 @@ impl Fixture {
         let state = WorkbenchState::new(runtime.clone(), &UiSettings::default())
             .expect("default state builds")
             .with_pump(pump)
+            .with_provider_status(gui::model::composer::ProviderStatus::Configured)
             .with_sidebar(sidebar_with_thread(temp_dir.path()))
             .with_command_sink(Box::new(RuntimeCommandSink::new(
                 runtime.clone(),
                 rt.handle().clone(),
-                supervisor,
+                supervisor.clone(),
             )));
         let mut harness = HeadlessWorkbench::new(state, [800.0, 600.0]);
-        // Agents タブはサブエージェントのみ表示に変わったため、ルート run の
-        // 行待機は行わずイベント駆動の repaint 通知も不要になった。
-        drop(repaint_rx);
         harness.run();
         Self {
             runtime: rt,
             _temp_dir: temp_dir,
             bus,
+            agent_runtime: runtime,
+            supervisor,
+            repaint_rx,
             harness,
         }
+    }
+
+    fn wait_for_goal_ui(&mut self, goal: &ThreadGoalSnapshot) {
+        while !self.harness.has_label(&format!("Goal: {}", goal.objective)) {
+            self.repaint_rx.recv().expect("event pump remains alive");
+            self.harness.run();
+        }
+        assert!(
+            self.harness
+                .has_label(&format!("accepted: {}", goal.goal_id))
+        );
+        assert!(self.supervisor.snapshot(&goal.goal_id).is_none());
+        assert_no_row_with_role(self, "Worker");
+        assert_no_row_with_role(self, "Orchestrator");
+    }
+
+    fn stop(&self, root: &str) {
+        let root = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
+        self.agent_runtime.cancel(root).expect("cancel held root");
+        self.runtime
+            .block_on(self.agent_runtime.wait(root))
+            .expect("held root stops");
     }
 }
 
 fn submit_goal(fixture: &mut Fixture, goal: &str) {
     fixture.harness.state_mut().composer_mut().input = format!("/goal {goal}");
     fixture.harness.run();
+    while !fixture.harness.has_label("Send") {
+        fixture.repaint_rx.recv().expect("event pump remains alive");
+        fixture.harness.run();
+    }
     fixture.harness.click_label("Send");
     fixture.harness.run();
 }
 
-/// Skips unrelated events until the RoutingDecision lifecycle event arrives and
-/// returns its shape and source, or panics after the 5s deadline.
-fn wait_for_routing_decision(
-    rt: &tokio::runtime::Runtime,
-    rx: &mut EventReceiver,
-) -> (String, RoutingSource) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+/// The goal registration is the completion signal for the UI's submission.
+/// Legacy PR goals and keyword routing must not intercept this generic entry.
+fn wait_for_goal(rt: &tokio::runtime::Runtime, rx: &mut EventReceiver) -> ThreadGoalSnapshot {
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "RoutingDecision event did not arrive within 5s"
-        );
-        let received = rt.block_on(async { timeout(Duration::from_secs(2), rx.recv()).await });
-        let event = received
-            .expect("RoutingDecision event must arrive within the 2s recv timeout")
-            .expect("event bus remains open");
-        if let EventKind::Lifecycle(LifecycleEvent::RoutingDecision { shape, source, .. }) =
-            event.kind
-        {
-            return (shape, source);
+        let event = rt.block_on(rx.recv()).expect("event bus remains open");
+        match event.kind {
+            EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
+                return snapshot;
+            }
+            EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. })
+            | EventKind::Lifecycle(LifecycleEvent::RoutingDecision { .. }) => {
+                panic!("generic goal submission entered legacy PR routing");
+            }
+            _ => {}
         }
     }
 }
@@ -153,50 +192,68 @@ fn assert_no_row_with_role(fixture: &Fixture, role: &str) {
 }
 
 #[test]
-fn direct_keyword_goal_starts_worker_run_through_the_ui() {
-    // Given: a workbench with the production sink and a routing subscription
-    // created before submission
-    // When: the direct-keyword goal is submitted through the Submit button
+fn direct_keyword_goal_registers_a_generic_conversation_objective() {
     let mut fixture = Fixture::new();
-    let mut routing_rx = fixture.bus.subscribe();
-    submit_goal(&mut fixture, "direct: fix the typo in README");
+    let mut goal_rx = fixture.bus.subscribe();
+    let objective = "direct: fix the typo in README";
+    submit_goal(&mut fixture, objective);
 
-    // Then: the goal is accepted, a Worker run named goal-1 appears with no
-    // Orchestrator row, and the Direct local-rule decision is published
-    assert!(fixture.harness.has_label("accepted: goal-1"));
-    fixture.harness.run();
-    assert_no_row_with_role(&fixture, "Worker");
-    assert_no_row_with_role(&fixture, "Orchestrator");
-    let (shape, source) = wait_for_routing_decision(&fixture.runtime, &mut routing_rx);
-    assert_eq!(shape, "Direct");
-    assert_eq!(
-        source,
-        RoutingSource::LocalRule {
-            rule: "direct-keyword:direct".into()
-        }
-    );
+    let goal = wait_for_goal(&fixture.runtime, &mut goal_rx);
+    assert_eq!(goal.thread_id, "thread-1");
+    assert_eq!(goal.objective, objective);
+    assert_eq!(goal.original_request, objective);
+    assert_eq!(goal.criteria, [objective]);
+    assert!(!goal.review_enabled);
+    fixture.wait_for_goal_ui(&goal);
+    fixture.stop(&goal.root_run_id);
 }
 
 #[test]
-fn plain_goal_starts_orchestrator_run_through_the_ui() {
-    // Given: a workbench with the production sink and a routing subscription
-    // created before submission
-    // When: the plain goal is submitted through the Submit button
+fn plain_goal_reuses_an_existing_worker_conversation_root() {
     let mut fixture = Fixture::new();
-    let mut routing_rx = fixture.bus.subscribe();
-    submit_goal(&mut fixture, "implement issue #65");
-
-    // Then: an Orchestrator run named goal-1 appears with no Worker row, and
-    // the Coordinated local-rule decision is published
+    let mut goal_rx = fixture.bus.subscribe();
+    fixture.harness.state_mut().composer_mut().input = "Investigate the issue".into();
     fixture.harness.run();
-    assert_no_row_with_role(&fixture, "Orchestrator");
-    assert_no_row_with_role(&fixture, "Worker");
-    let (shape, source) = wait_for_routing_decision(&fixture.runtime, &mut routing_rx);
-    assert_eq!(shape, "Coordinated");
-    assert_eq!(
-        source,
-        RoutingSource::LocalRule {
-            rule: "no-direct-keyword".into()
+    fixture.harness.click_label("Send");
+    fixture.harness.run();
+    let root = loop {
+        let event = fixture.runtime.block_on(goal_rx.recv()).unwrap();
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+            run_id,
+            parent_run_id,
+            role,
+            ..
+        }) = event.kind
+        {
+            assert!(parent_run_id.is_none());
+            assert_eq!(role, "worker");
+            break run_id;
         }
+    };
+
+    let objective = "implement issue #65";
+    loop {
+        let event = fixture.runtime.block_on(goal_rx.recv()).unwrap();
+        if matches!(event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == root)
+        {
+            break;
+        }
+    }
+    submit_goal(&mut fixture, objective);
+    let goal = wait_for_goal(&fixture.runtime, &mut goal_rx);
+    assert_eq!(goal.root_run_id, root, "goal must retain the conversation");
+    assert_eq!(goal.objective, objective);
+    assert_eq!(goal.original_request, objective);
+    fixture.wait_for_goal_ui(&goal);
+    let root_id = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
+    assert_eq!(
+        fixture
+            .agent_runtime
+            .inspect_agent(root_id)
+            .unwrap()
+            .role_name,
+        Role::Worker.name(),
+        "goal creation must preserve the existing conversation role"
     );
+    fixture.stop(&root);
 }

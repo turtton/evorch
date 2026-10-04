@@ -12,7 +12,9 @@ pub mod ownership;
 pub use ownership::{OwnershipAction, OwnershipEvent};
 pub mod otel;
 pub mod ring;
+pub mod thread_goal;
 pub mod usage;
+pub use thread_goal::{ThreadGoalCheck, ThreadGoalPhase, ThreadGoalSnapshot, ThreadGoalUsage};
 
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{

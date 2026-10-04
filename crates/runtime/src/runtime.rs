@@ -62,6 +62,7 @@ pub struct AgentRuntime {
 type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(), String>>>>>;
 
 pub(crate) struct Shared {
+    pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
@@ -250,6 +251,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
                 question_version: watch::channel(0).0,
                 reviewer_results: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
@@ -501,6 +503,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
                 question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),
@@ -1070,8 +1073,12 @@ impl AgentRuntime {
         worktree: &mut Option<OwnedWorktree>,
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
+        let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
         let config = RunConfig {
-            interactive: false,
+            budget: source_config.budget.clone(),
+            ownership: source_config.ownership.clone(),
+            interactive: carries_thread_goal && source_config.interactive,
+            keep_alive: carries_thread_goal && source_config.keep_alive,
             name: Some("escalation-orchestrator".to_string()),
             category: None,
             load_skills: Vec::new(),
@@ -1116,6 +1123,7 @@ impl AgentRuntime {
             source.worktree_path = None;
             source.active_root = None;
         }
+        self.transfer_thread_goal_root(source_run_id, run_id)?;
         before_spawn();
         let summary = memo.summary();
         Ok(self.spawn_run_with_handoff(
@@ -1151,7 +1159,7 @@ impl AgentRuntime {
         text: String,
         images: Vec<crate::DelegateImage>,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, images, true)
+        self.send_inbox_message(run_id, text, images, true, None)
     }
 
     pub(crate) fn send_internal_message(
@@ -1159,7 +1167,7 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, Vec::new(), false)
+        self.send_inbox_message(run_id, text, Vec::new(), false, None)
     }
 
     fn send_inbox_message(
@@ -1168,6 +1176,7 @@ impl AgentRuntime {
         text: String,
         images: Vec<crate::DelegateImage>,
         trusted_user: bool,
+        initial_goal: Option<(String, Vec<String>)>,
     ) -> Result<(), RuntimeError> {
         self.validate_run_mutation(run_id)?;
         let phase = *self.entry(run_id)?.phase_rx.borrow();
@@ -1183,12 +1192,33 @@ impl AgentRuntime {
             let entry = self.entry(run_id)?;
             (entry.inbox_tx.clone(), Arc::clone(&entry.user_inbox))
         };
-        let send = || {
-            sender
-                .try_send((text.clone(), images, trusted_user))
-                .map_err(|_| RuntimeError::RunTerminated {
+        let permit = sender
+            .try_reserve()
+            .map_err(|_| RuntimeError::RunTerminated {
+                run_id: run_id.to_string(),
+            })?;
+        if let Some((objective, criteria)) = initial_goal {
+            let thread =
+                self.goal_thread(run_id)
+                    .ok_or_else(|| RuntimeError::RunRestoreFailed {
+                        run_id: run_id.to_string(),
+                        reason: crate::RunRestoreFailure::CorruptContext(
+                            "missing thread binding".into(),
+                        ),
+                    })?;
+            self.create_thread_goal(&thread, run_id, objective, criteria)
+                .map_err(|reason| RuntimeError::RunRestoreFailed {
                     run_id: run_id.to_string(),
-                })
+                    reason: crate::RunRestoreFailure::CorruptContext(reason),
+                })?;
+        }
+        // Invalidate the old check before the model can consume new host input.
+        if trusted_user {
+            self.goal_user_input(run_id, &text);
+        }
+        let send = || {
+            permit.send((text.clone(), images, trusted_user));
+            Ok::<_, RuntimeError>(())
         };
         if trusted_user {
             inbox.enqueue(send)?;
@@ -1237,6 +1267,7 @@ impl AgentRuntime {
     /// # Errors
     /// run_id が存在しない場合 [`RuntimeError::UnknownRun`] を返す。
     pub fn stop(&self, run_id: RunId, scope: StopScope) -> Result<(), RuntimeError> {
+        self.goal_work_stopped(run_id);
         // Collect before taking admissions: spawning locks intents before admissions.
         let targets = match scope {
             StopScope::SelfOnly => HashSet::from([run_id]),

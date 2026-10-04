@@ -564,7 +564,7 @@ fn v02_end_to_end_chained_scenario() {
     fixture.workbench.state_mut().submit_goal();
 
     // Then: exactly one typed command is issued and the fixture loop adapter
-    // answered with acceptance and a pending merge view.
+    // answered with acceptance without imposing a PR flow.
     let submissions: Vec<&GoalSubmission> = fixture
         .workbench
         .state()
@@ -573,6 +573,8 @@ fn v02_end_to_end_chained_scenario() {
         .filter_map(|command| match command {
             WorkbenchCommand::SubmitGoal(submission) => Some(submission),
             WorkbenchCommand::DecideMerge(_)
+            | WorkbenchCommand::SetGoalReview { .. }
+            | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
@@ -601,7 +603,7 @@ fn v02_end_to_end_chained_scenario() {
             .as_deref(),
         Some("goal-1")
     );
-    assert!(fixture.workbench.state().merge().view.pr.is_some());
+    assert!(fixture.workbench.state().merge().view.pr.is_none());
 
     // When: the loop publishes a pending merge view and the operator approves.
     fixture
@@ -622,6 +624,8 @@ fn v02_end_to_end_chained_scenario() {
         .filter_map(|command| match command {
             WorkbenchCommand::DecideMerge(merge) => Some(merge),
             WorkbenchCommand::SubmitGoal(_)
+            | WorkbenchCommand::SetGoalReview { .. }
+            | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }

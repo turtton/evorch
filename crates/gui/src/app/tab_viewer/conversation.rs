@@ -63,6 +63,9 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
         });
         let default_model = self.composer.resolved_model.clone();
         let ctx = ConversationContext {
+            goal: thread_id
+                .as_deref()
+                .and_then(|id| self.thread_goals.get(id)),
             requests,
             sandbox_picker: self.sandbox_picker,
             task_rows: self.tasks.rows(),
@@ -129,6 +132,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             self.repo_root,
         ) {
             match action {
+                AgentPaneAction::Goal(a) => *self.goal_action = Some(a),
                 AgentPaneAction::Request(a) => *self.request_action = Some(a),
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),

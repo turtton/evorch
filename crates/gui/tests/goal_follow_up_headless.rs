@@ -1,6 +1,5 @@
 // allow: SIZE_OK — Shared real-runtime contract fixture; task scope forbids extracting another file.
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use event_bus::{
     AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent, OrchestratorEvent,
@@ -78,7 +77,11 @@ impl runtime::AgentModel for ToolThenAnswer {
 #[path = "support/goal_restore_contract.rs"]
 mod goal_restore_contract;
 
+#[path = "support/legacy_goal.rs"]
+mod legacy_goal;
+
 struct Fixture {
+    supervisor: runtime::SupervisorHandle,
     state: WorkbenchState<DemoSource>,
     sink: RuntimeCommandSink,
     runtime: AgentRuntime,
@@ -160,7 +163,8 @@ impl Fixture {
                 },
             )
         });
-        let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor);
+        let sink =
+            RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
         let mut sidebar = SidebarState::default();
         let project = ProjectId::new("test");
         let thread = ThreadId::new("thread-1");
@@ -177,6 +181,7 @@ impl Fixture {
             .with_sidebar(sidebar)
             .with_provider_status(ProviderStatus::Configured);
         Self {
+            supervisor,
             state,
             sink,
             runtime,
@@ -192,9 +197,26 @@ impl Fixture {
     fn submit(&mut self, input: &str) -> Vec<LoopEvent> {
         self.state.composer_mut().input = input.into();
         self.state.submit_composer();
-        let events = self
-            .sink
-            .submit(self.state.issued().last().unwrap().clone());
+        let command = self.state.issued().last().unwrap().clone();
+        // These tests protect saved legacy PR-root authority, independently of
+        // the generic /goal UI covered by thread_goals_headless.
+        let events = if let WorkbenchCommand::SubmitGoal(submission) = command {
+            let _guard = self.rt.enter();
+            legacy_goal::start(
+                &self.runtime,
+                &self.supervisor,
+                &mut self.sink,
+                submission,
+                runtime::Role::Orchestrator,
+                runtime::RunConfig::default(),
+            );
+            vec![LoopEvent::GoalAccepted {
+                thread_id: "thread-1".into(),
+                goal_id: format!("goal-{}", self.created + 1),
+            }]
+        } else {
+            self.sink.submit(command)
+        };
         for event in &events {
             self.state.apply_loop_event(event.clone());
         }
@@ -207,25 +229,21 @@ impl Fixture {
 
     fn wait_phase(&mut self, phase: AgentRunPhase) -> RunId {
         let id = self.rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let event = self.events.recv().await.unwrap();
-                    self.state.apply_events([event.clone()]);
-                    match event.kind {
-                        EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. }) => {
-                            self.created += 1
-                        }
-                        EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                            run_id,
-                            to,
-                            ..
-                        }) if to == phase => break run_id,
-                        _ => {}
+            loop {
+                let event = self.events.recv().await.unwrap();
+                self.state.apply_events([event.clone()]);
+                match event.kind {
+                    EventKind::Orchestrator(OrchestratorEvent::GoalCreated { .. }) => {
+                        self.created += 1
                     }
+                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                        run_id,
+                        to,
+                        ..
+                    }) if to == phase => break run_id,
+                    _ => {}
                 }
-            })
-            .await
-            .unwrap()
+            }
         });
         self.runtime
             .list_agents()

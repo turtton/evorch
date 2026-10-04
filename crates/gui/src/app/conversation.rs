@@ -14,6 +14,12 @@ use crate::model::tasks::AgentRunSource;
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Returns whether sidebar conversation identity or its run index changed. Never performs I/O.
     pub(super) fn apply_conversation_event(&mut self, event: &Event) -> bool {
+        if let EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) =
+            &event.kind
+        {
+            self.thread_goals
+                .insert(snapshot.thread_id.clone(), snapshot.clone());
+        }
         let role_changed = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                 agent_name,
@@ -50,6 +56,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                     owner.is_some_and(|thread| self.bind_thread_run(&thread, run_id))
                 }
+            }
+            EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) => {
+                self.bind_conversation_run(&snapshot.thread_id, &snapshot.root_run_id, true)
             }
             EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
                 thread_id,

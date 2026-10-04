@@ -417,8 +417,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 tracing::warn!(%reason, "chat command rejected");
                 self.push_notice(format!("chat failed: {reason}"));
             }
-            LoopEvent::GoalAccepted { goal_id, .. } => {
-                self.push_notice(format!("accepted: {goal_id}"));
+            LoopEvent::GoalAccepted { thread_id, goal_id } => {
+                if self
+                    .sidebar
+                    .active_thread
+                    .as_ref()
+                    .is_some_and(|id| id.to_string() == thread_id)
+                {
+                    self.push_notice(format!("accepted: {goal_id}"));
+                }
                 self.goal_form.last_accepted = Some(goal_id);
             }
             LoopEvent::MergeStateUpdated(view) => {

@@ -8,6 +8,7 @@ workflow は固定しない。Agent の責任・認知モード・権限・実�
 
 ## 要件
 
+- **汎用thread goal（2026-10-04）**: root agentは依頼の完遂に必要と判断したら会話途中でgoalを設定できる。調査やローカル修正も対象とし、PRは必須にしない。ターン終了時の自己確認を基本とし、利用者が有効化した独立reviewで未達が見つかれば修正・再確認・再reviewしてから完了する。checks Pauseは作業を止めず確認機構だけを止める。詳細は[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)。
 - **Intent Gate**: task type / required capabilities / mutation allowed? / scope / uncertainty / expected output / completion criteria / likely need for delegation を抽出する。workflow は決めない
 - **Execution Shape**: Direct（単純な質問・局所的修正）または Coordinated（複雑な調査・実装・並列探索）だけを決める
 - **Role 分離**: Orchestrator / Explorer / Librarian / Oracle / Planner / Reviewer / Worker / Multimodal Looker を capability boundary として分離する。cognitive isolation（生成と独立レビューの分離）を徹底する（Librarian / Oracle / Planner / Multimodal Looker は v0.6 Bundle B で追加）
@@ -51,6 +52,8 @@ v0.1.1 確定（PR #20、issue #19）: role の network capability は `crates/r
 oh-my-pi（can1357/oh-my-pi）の設計参照は commit 51f0380 の調査に基づく（参照ファイルの一覧は [ADR 0022](../../decisions/0022-parent-child-tree-addressing-and-nested-delegation.md) の References を参照）。
 
 ### ループ継続保証・merge 承認の確定（grill grill-v02-loop-foundation、2026-09-02）
+
+以下は旧PR delivery supervisorの履歴である。汎用goalへの「PR必須」「起点はGUIのみ」の適用は[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)で廃止し、現在の`/goal`は汎用thread goalへ投入する。
 
 omo（oh-my-openagent 4.19.4 調査）の /goal + continuation 機構を踏襲し、委譲ループの完結をシステムで保証する:
 

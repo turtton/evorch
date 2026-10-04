@@ -105,7 +105,10 @@ async fn finish(
         Ok(_) => {}
         Err(reason) => return error(reason),
     }
-    let Some(gate) = runtime.goal_gate() else {
+    let gate = runtime
+        .goal_gate()
+        .filter(|_| runtime.goal_for_root(state.caller_run_id()).is_none());
+    let Some(gate) = gate else {
         return DispatchResult {
             result: ToolResult::success(&args.result),
             terminal: Terminal::Finish(args.result),

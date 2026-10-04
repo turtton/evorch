@@ -111,6 +111,7 @@ pub(crate) struct LoopState {
     answered_questions: std::collections::HashSet<String>,
     resumed: bool,
     pending_user_messages: Vec<crate::runtime::user_inbox::UserInput>,
+    pub(crate) goal_wake_pending: bool,
     pending_escalation: Option<EscalationMemo>,
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
@@ -202,6 +203,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         answered_questions: Default::default(),
         resumed: is_restored,
         pending_user_messages: Vec::new(),
+        goal_wake_pending: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -777,6 +779,16 @@ impl LoopState {
                 return;
             }
             self.publish_context(&visible_messages, estimated, window);
+            if let Some(runtime) = self.runtime()
+                && !runtime.goal_model_request(
+                    self.task.run_id,
+                    self.task.config.purpose,
+                    self.task.config.budget.max_tokens,
+                )
+            {
+                self.finish_error("Goal cumulative budget exhausted".into());
+                return;
+            }
             let completion = tokio::select! {
                 biased;
                 changed = self.channels.cancel_rx.changed() => {
@@ -809,6 +821,9 @@ impl LoopState {
             }
             self.last_usage = Some(response.usage);
             self.budget.usage(response.usage);
+            if let Some(runtime) = self.runtime() {
+                runtime.goal_usage(self.task.run_id, self.task.config.purpose, response.usage);
+            }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
@@ -951,6 +966,16 @@ impl LoopState {
                             }
                         }
                     }
+                    if self.thread_goal_boundary().await {
+                        continue;
+                    }
+                    if let Some(kind) = self.interrupted() {
+                        self.finish_interrupted(kind);
+                        return;
+                    }
+                    if self.flush_aside() {
+                        continue;
+                    }
                     if !self.task.config.interactive
                         || (self.resumed && !self.task.config.keep_alive)
                     {
@@ -978,6 +1003,14 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        // Resume can arrive after the final goal boundary but before Waiting.
+        // Keep the scheduling bit when the post-boundary inbox drain sees it.
+        if self.goal_wake_pending {
+            self.goal_wake_pending = false;
+            if self.user_question_completion_check().is_ok() && self.thread_goal_boundary().await {
+                return true;
+            }
+        }
         self.activity(event_bus::RunActivity::User);
         let Some(runtime) = self.runtime() else {
             return false;
@@ -1025,6 +1058,12 @@ impl LoopState {
                         self.finish_error("interactive inbox closed".to_string());
                         return false;
                     };
+                    if !message.2 && message.0 == crate::thread_goals::CHECKS_WAKE {
+                        if self.user_question_completion_check().is_ok() && self.thread_goal_boundary().await {
+                            return self.transition(AgentRunPhase::Running, None).is_ok();
+                        }
+                        continue;
+                    }
                         self.context.push_user(&message.0);
                         if let Some(user) = self.context.messages.last_mut() {
                             user.content.extend(message.1.into_iter().map(|image| ContentBlock::Image {
@@ -1149,7 +1188,7 @@ impl LoopState {
         }));
     }
 
-    fn publish_message_count(&self) {
+    pub(crate) fn publish_message_count(&self) {
         self.channels
             .message_count_tx
             .send_replace(self.context.messages.len());

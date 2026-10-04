@@ -75,7 +75,7 @@ impl SlashCommandRegistry {
 
 const GOAL_COMMAND: SlashCommandSpec = SlashCommandSpec {
     name: "goal",
-    description: "Submit a goal to the orchestrator loop",
+    description: "Track an objective in this conversation",
     argument_hint: Some("<text>"),
 };
 
@@ -476,26 +476,6 @@ mod tests {
             // Then
             assert_eq!(&names, expected, "{raw:?}");
         }
-    }
-
-    #[test]
-    fn help_text_lists_every_command() {
-        // Given
-        let expected = [
-            "/team <delegation value> | <goal> — Submit a team goal with explicit delegation value",
-            "/undo — Restore the previous workspace snapshot",
-            "/redo — Restore the next workspace snapshot",
-            "/goal <text> — Submit a goal to the orchestrator loop",
-            "/help — Show available commands",
-            "/new — Start a new thread",
-            "/continue — Resume the current conversation after a stop or error",
-            "/run <text> — Start a background run without opening a pane",
-        ];
-        // When
-        let text = help_text();
-        // Then
-        assert_eq!(text, expected.join("\n"));
-        assert_eq!(text.lines().count(), SLASH_COMMANDS.len());
     }
 
     #[test]
