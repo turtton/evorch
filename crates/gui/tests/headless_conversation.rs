@@ -27,6 +27,8 @@ mod thread_archive;
 mod thread_drafts;
 #[path = "headless_conversation/thread_history.rs"]
 mod thread_history;
+#[path = "headless_conversation/thread_resume_status.rs"]
+mod thread_resume_status;
 #[path = "headless_conversation/thread_role_lock.rs"]
 mod thread_role_lock;
 #[path = "headless_conversation/thread_role_restore.rs"]
