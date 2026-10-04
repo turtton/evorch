@@ -54,6 +54,7 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
                     profile: "local".into(),
                     model: None,
                 }),
+                purpose: Default::default(),
             },
             Role::Worker,
             &[],

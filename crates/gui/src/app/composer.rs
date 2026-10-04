@@ -107,7 +107,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.push_notice(guidance.clone());
                     }
                     ProviderStatus::Configured => {
+                        let prompt = match self.expand_skill_mentions(text) {
+                            Ok(prompt) => prompt,
+                            Err(notice) => {
+                                self.push_notice(notice);
+                                return;
+                            }
+                        };
                         let submission = ChatSubmission {
+                            fork_seed: self.fork_seed(thread_id),
                             composer_role: self.composer.role,
                             images: self
                                 .composer
@@ -119,7 +127,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 })
                                 .collect(),
                             thread_id: thread_id.to_string(),
-                            text: text.into(),
+                            text: prompt.clone(),
                             model_preference: self
                                 .sidebar
                                 .threads
@@ -138,9 +146,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 return;
                             }
                         };
-                        let title_chat = self
-                            .title_candidate(&submission)
-                            .then(|| submission.clone());
+                        let title_chat =
+                            self.title_candidate(&submission).then(|| ChatSubmission {
+                                text: text.into(),
+                                ..submission.clone()
+                            });
                         if let Some(thread) = self
                             .sidebar
                             .threads
@@ -157,8 +167,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             text: text.into(),
                             at: std::time::SystemTime::now(),
                         });
+                        // The runtime echoes the expanded prompt; matching it avoids a duplicate bubble.
                         self.transcripts
-                            .push_thread(TranscriptEntry::UserMessage { text: text.into() });
+                            .push_thread(TranscriptEntry::UserMessage { text: prompt });
                         self.save_sidebar();
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));
@@ -315,6 +326,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.persist_composer_draft();
+    }
+
+    /// Inlines skills written as `@name`, read fresh so edits apply on the next send.
+    fn expand_skill_mentions(&self, text: &str) -> Result<String, String> {
+        if !text.contains('@') {
+            return Ok(text.into());
+        }
+        let root = self.active_repo_root();
+        let skills = runtime::skill::build_standard_registry(root.as_deref());
+        crate::model::composer::expand_skill_mentions(text, root.as_deref(), &skills)
+            .map_err(|name| format!("skill @{name} を読み込めませんでした"))
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {

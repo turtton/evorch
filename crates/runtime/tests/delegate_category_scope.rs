@@ -160,13 +160,16 @@ async fn async_delegate_accepts_explorer_when_category_is_absent() {
 }
 
 #[tokio::test]
-async fn delegate_accepts_reviewer_categories_in_awaited_and_background_modes() {
-    for category in ["plan", "tool-execution"] {
-        for background in [false, true] {
-            delegate_case("delegate", json!({
-                "role": "reviewer", "category": category, "background": background, "prompt": "CHILD"
-            }), true).await;
-        }
+async fn delegate_accepts_plan_review_in_awaited_and_background_modes() {
+    for background in [false, true] {
+        delegate_case(
+            "delegate",
+            json!({
+                "role": "reviewer", "category": "plan", "background": background, "prompt": "CHILD"
+            }),
+            true,
+        )
+        .await;
     }
 }
 
@@ -175,7 +178,6 @@ async fn delegate_rejects_mismatched_category_roles_before_spawning() {
     for background in [false, true] {
         for (role, category) in [
             ("worker", "plan"),
-            ("worker", "tool-execution"),
             ("reviewer", "quick"),
             ("planner", "plan"),
         ] {
@@ -200,14 +202,22 @@ async fn delegate_rejects_mismatched_category_roles_before_spawning() {
 }
 
 #[tokio::test]
-async fn delegate_rejects_internal_categories_before_spawning() {
-    for (role, category) in [("worker", "lesson"), ("reviewer", "lesson_review")] {
-        delegate_case(
-            "delegate",
-            json!({"role": role, "category": category, "prompt": "CHILD"}),
-            false,
-        )
-        .await;
+async fn delegate_rejects_internal_categories_before_spawning_in_both_modes() {
+    for background in [false, true] {
+        for (role, category) in [
+            (Some("worker"), "lesson"),
+            (Some("reviewer"), "lesson_review"),
+            (Some("reviewer"), "tool-execution"),
+            (Some("worker"), "tool-execution"),
+            (None, "tool-execution"),
+        ] {
+            delegate_case(
+                "delegate",
+                json!({"role": role, "category": category, "background": background, "prompt": "CHILD"}),
+                false,
+            )
+            .await;
+        }
     }
 }
 
@@ -229,7 +239,7 @@ async fn delegate_rejects_conversation_before_spawning_in_both_modes() {
 }
 
 #[test]
-fn public_reviewer_categories_keep_standard_reviewer_capabilities() {
+fn reviewer_categories_keep_standard_reviewer_capabilities() {
     let standard = runtime::ExecutionPolicy::for_role(Role::Reviewer);
     for category in ["plan", "tool-execution"] {
         let policy = standard.clone().for_run_config(

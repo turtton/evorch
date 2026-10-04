@@ -16,6 +16,7 @@ fn failed(failure: ProviderFailureKind, run_id: Option<&str>) -> Event {
         duration_ms: 42,
         failure,
         run_id: run_id.map(str::to_owned),
+        purpose: None,
     })
 }
 

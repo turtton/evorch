@@ -10,8 +10,10 @@ use crate::agent_loop::LoopState;
 use crate::{CoordinationTopology, ModelPreference, RunId, WorkspaceMode};
 
 mod diagnostics;
+mod fork_seed;
 mod recovery;
 pub use diagnostics::RunRestoreDiagnostics;
+pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
     pub(crate) messages: Vec<providers::Message>,
@@ -117,6 +119,12 @@ pub struct RunRestoreDescriptor {
     pub interrupted_tool_calls: Vec<InterruptedToolCall>,
     #[serde(default)]
     pub durable_task_id: Option<String>,
+    /// Model identity at the last snapshot, for inspection only; restore never routes by it.
+    #[serde(default)]
+    pub selected_model: Option<String>,
+    /// Tool definitions visible to the model at the last snapshot, for inspection only.
+    #[serde(default)]
+    pub tool_names: Vec<String>,
 }
 
 impl RunRestoreDescriptor {
@@ -196,6 +204,28 @@ pub(crate) fn persist_terminal_snapshot(state: &LoopState) -> Result<(), Snapsho
         return Ok(());
     }
     write_snapshot(state, phase, end)
+}
+
+/// Non-system message count. System messages are rewritten on every restore,
+/// so fork boundaries count only the append-only conversation.
+pub(crate) fn conversation_len(messages: &[providers::Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.role != providers::Role::System)
+        .count()
+}
+
+/// Raw index just past the `len`-th non-system message, if the history has that many.
+pub(crate) fn conversation_end(messages: &[providers::Message], len: usize) -> Option<usize> {
+    if len == 0 {
+        return Some(0);
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role != providers::Role::System)
+        .nth(len - 1)
+        .map(|(index, _)| index + 1)
 }
 
 /// A pending batch is omitted as a whole, so restored history never asks a provider
@@ -345,6 +375,12 @@ fn write_snapshot(
         renewable_team,
         interrupted_tool_calls,
         durable_task_id: config.task_id.clone(),
+        selected_model: Some(crate::compaction::selected_model(state)),
+        tool_names: state
+            .tool_specs
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),

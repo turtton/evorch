@@ -473,6 +473,8 @@ mod tests {
                     cache_write_tokens: 4,
                     finish_reason: format!("other {KNOWN_VALUE}"),
                     run_id: None,
+                    purpose: None,
+                    reasoning_tokens: None,
                 }
                 .into(),
             ),

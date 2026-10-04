@@ -13,6 +13,7 @@ use crate::{HardLimits, LimitKind, StorageError};
 mod accounting;
 #[cfg(test)]
 mod compaction_window_tests;
+pub(crate) mod diagnostic;
 use accounting::{day_start_ns, enforce_limit};
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;

@@ -20,6 +20,16 @@ pub struct PublicCategory {
     pub guidance: &'static str,
 }
 
+/// A category whose model and generation settings can be edited in the GUI.
+///
+/// Settings visibility is independent of public delegation: shell execution
+/// audits have a configurable reviewer binding without being delegatable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsCategory {
+    pub name: &'static str,
+    pub role: &'static str,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Delegation {
     Public { guidance: &'static str },
@@ -30,6 +40,7 @@ pub(crate) struct CategoryDefinition {
     pub name: &'static str,
     pub role: &'static str,
     delegation: Delegation,
+    settings_visible: bool,
     pub overlay_preset: &'static str,
     pub overlay_body: &'static str,
 }
@@ -39,6 +50,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "quick",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "bounded, well-specified mechanical work such as a typo, localized fix, or routine commit of reviewed changes with an exact staging scope; give explicit checks and forbidden actions.",
         },
@@ -48,6 +60,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "deep",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "multi-step implementation requiring codebase investigation, dependent edits, or broad verification.",
         },
@@ -57,6 +70,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "high-reasoning",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "subtle invariants, hard debugging, or competing designs where reasoning is the bottleneck, even with few files; use deep when breadth is the main challenge.",
         },
@@ -66,6 +80,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "visual",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "UI layout, styling, design, or screenshot-driven visual work; use multimodal_looker for image interpretation alone.",
         },
@@ -75,6 +90,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "writing",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "documentation, prose, or copy where audience and wording dominate.",
         },
@@ -84,6 +100,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "research",
         role: "worker",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "multi-source evidence synthesis with a worker deliverable; use explorer for read-only local code investigation and web_researcher for external source collection alone.",
         },
@@ -93,6 +110,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "plan",
         role: "reviewer",
+        settings_visible: true,
         delegation: Delegation::Public {
             guidance: "review a planner-produced plan before execution: requirement coverage, feasibility, task decomposition, dependency ordering, risks, and missing acceptance criteria.",
         },
@@ -102,15 +120,15 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "tool-execution",
         role: "reviewer",
-        delegation: Delegation::Public {
-            guidance: "review tool executions and approval requests, especially sandbox-external shell/bash commands: verify safety, scope confinement, and exact match to the approved intent before they run.",
-        },
+        settings_visible: true,
+        delegation: Delegation::Internal,
         overlay_preset: "category-tool-execution",
         overlay_body: include_str!("../assets/presets/category-tool-execution.md"),
     },
     CategoryDefinition {
         name: "conversation",
         role: "worker",
+        settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-conversation",
         overlay_body: include_str!("../assets/presets/category-conversation.md"),
@@ -118,6 +136,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "lesson",
         role: "worker",
+        settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-lesson",
         overlay_body: include_str!("../assets/presets/category-lesson.md"),
@@ -125,6 +144,7 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
     CategoryDefinition {
         name: "lesson_review",
         role: "reviewer",
+        settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-lesson-review",
         overlay_body: include_str!("../assets/presets/category-lesson-review.md"),
@@ -153,6 +173,17 @@ pub fn public_category_role(name: &str) -> Option<&'static str> {
         .map(|category| category.role)
 }
 
+/// Enumerate categories exposed in role settings, including internal shell audits.
+pub fn settings_categories() -> impl Iterator<Item = SettingsCategory> {
+    CATEGORIES
+        .iter()
+        .filter(|category| category.settings_visible)
+        .map(|category| SettingsCategory {
+            name: category.name,
+            role: category.role,
+        })
+}
+
 /// Enumerate public worker categories and their selection criteria in stable order.
 ///
 /// This compatibility view excludes reviewer and internal categories.
@@ -168,6 +199,14 @@ pub fn public_worker_categories() -> impl Iterator<Item = PublicWorkerCategory> 
 /// Whether a category may be selected for a worker through public delegation.
 pub fn is_public_worker_category(name: &str) -> bool {
     public_worker_categories().any(|category| category.name == name)
+}
+
+/// Overlay preset name for any registered category, including internal ones.
+pub fn overlay_preset_for(name: &str) -> Option<&'static str> {
+    CATEGORIES
+        .iter()
+        .find(|category| category.name == name)
+        .map(|category| category.overlay_preset)
 }
 
 pub(crate) fn categories_for_role(
@@ -219,6 +258,7 @@ mod tests {
             ("conversation", "worker"),
             ("lesson", "worker"),
             ("lesson_review", "reviewer"),
+            ("tool-execution", "reviewer"),
         ] {
             let definition = category_for_role(role, name).expect("internal category exists");
             assert!(matches!(definition.delegation, Delegation::Internal));
@@ -236,17 +276,15 @@ mod tests {
     #[test]
     fn public_reviewer_categories_have_roles_and_do_not_enter_worker_projection() {
         let categories: Vec<_> = public_categories().collect();
-        assert_eq!(categories.len(), 8);
+        assert_eq!(categories.len(), 7);
         assert_eq!(
             categories[6..]
                 .iter()
                 .map(|category| category.name)
                 .collect::<Vec<_>>(),
-            ["plan", "tool-execution"]
+            ["plan"]
         );
-        for name in ["plan", "tool-execution"] {
-            assert_eq!(public_category_role(name), Some("reviewer"));
-        }
+        assert_eq!(public_category_role("plan"), Some("reviewer"));
         for category in categories {
             assert_eq!(public_category_role(category.name), Some(category.role));
             assert!(!category.guidance.is_empty());
@@ -254,6 +292,26 @@ mod tests {
             if category.role == "reviewer" {
                 assert!(!is_public_worker_category(category.name));
             }
+        }
+    }
+
+    #[test]
+    fn settings_categories_include_shell_audits_without_exposing_other_internal_bindings() {
+        let categories: Vec<_> = settings_categories().collect();
+        assert_eq!(
+            categories
+                .iter()
+                .filter(|category| category.role == "reviewer")
+                .map(|category| category.name)
+                .collect::<Vec<_>>(),
+            ["plan", "tool-execution"]
+        );
+        for category in categories {
+            assert!(category_for_role(category.role, category.name).is_some());
+            assert!(!matches!(
+                category.name,
+                "conversation" | "lesson" | "lesson_review"
+            ));
         }
     }
 

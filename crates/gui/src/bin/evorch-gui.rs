@@ -14,6 +14,7 @@ use gui::model::codex_auth_backend::{
 use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
+use gui::model::telemetry::pricing::SharedUsagePricing;
 use gui::pty::{PtySession, resolve_terminal_cwd};
 use gui::runtime_sink::{
     RuntimeCommandSink, STORAGE_SESSION_ID, derive_base_ref, derive_repo_slug,
@@ -366,6 +367,7 @@ fn spawn_storage_bridge(
     session_id: &'static str,
     diagnostics: config::DiagnosticPersistence,
     metrics_enabled: bool,
+    usage_pricing: SharedUsagePricing,
 ) -> Result<OwnedStorageBridge, GuiError> {
     let persistence = match diagnostics {
         config::DiagnosticPersistence::Off => storage_bridge::DiagnosticPersistence::Off,
@@ -379,6 +381,7 @@ fn spawn_storage_bridge(
             StorageBridge::new(handle, session_id)
                 .with_diagnostic_persistence(persistence)
                 .with_metrics_enabled(metrics_enabled)
+                .with_usage_ledger(usage_pricing)
         },
         Duration::from_secs(60),
     )?)
@@ -727,6 +730,7 @@ fn run() -> Result<(), GuiError> {
     ));
     let storage_config = StorageConfig {
         db_path: storage_db_path,
+        usage_retention_days: composition_config.metrics.retention_days,
         ..StorageConfig::default()
     };
     let storage = Storage::open(storage_config.clone())?;
@@ -908,12 +912,20 @@ fn run() -> Result<(), GuiError> {
 
     // From this point onward every early-return path joins the bridge before
     // closing SQLite, even while runtime owners still hold the event bus.
+    // Seeded from static profile prices; the GUI adds the model catalog once loaded.
+    let usage_pricing: SharedUsagePricing = Arc::new(std::sync::RwLock::new(
+        gui::model::telemetry::pricing::UsagePricing::new(
+            composition_config.providers.clone(),
+            None,
+        ),
+    ));
     let storage = spawn_storage_bridge(
         Arc::clone(&bus),
         storage,
         STORAGE_SESSION_ID,
         composition_config.diagnostics.persistence,
         composition_config.metrics.enabled,
+        Arc::clone(&usage_pricing),
     )?;
     restore_goals(&storage_config, &supervisor);
 
@@ -1006,11 +1018,13 @@ fn run() -> Result<(), GuiError> {
     }
     state = state
         .with_memory_storage(storage_config.clone())
+        .with_diagnostic_storage(storage.handle(), &storage_config)
         .with_self_improvement(
             storage.handle(),
             self_improvement.enabled,
             improvement_draft_dir,
-        );
+        )
+        .with_usage_ledger(storage.handle(), usage_pricing);
     state.restore_history(&storage::Database::open(&storage_config)?)?;
 
     if arguments.demo {
@@ -1384,6 +1398,7 @@ mod storage_shutdown_tests {
             "session",
             config::DiagnosticPersistence::Warnings,
             true,
+            SharedUsagePricing::default(),
         )
         .unwrap();
         let monitor = bridge.monitor();

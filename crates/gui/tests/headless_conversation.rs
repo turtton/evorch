@@ -3,6 +3,8 @@
 
 #[path = "headless_conversation/compaction_ledger.rs"]
 mod compaction_ledger;
+#[path = "headless_conversation/composer_mention.rs"]
+mod composer_mention;
 #[path = "headless_conversation/composer_tab.rs"]
 mod composer_tab;
 #[path = "headless_conversation/continuation_transcript_headless.rs"]
@@ -31,3 +33,5 @@ mod thread_role_lock;
 mod thread_role_restore;
 #[path = "headless_conversation/thread_tree.rs"]
 mod thread_tree;
+#[path = "headless_conversation/turn_branching.rs"]
+mod turn_branching;

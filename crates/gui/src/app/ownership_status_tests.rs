@@ -169,3 +169,84 @@ fn switching_threads_or_deselecting_resets_snapshot_and_failure() {
     assert!(status.snapshot.is_none());
     assert!(status.failure.is_none());
 }
+
+#[test]
+fn blocked_probe_keeps_refresh_nonblocking_and_coalesces_thread_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(
+        OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    );
+    let (started, starts) = mpsc::channel();
+    let (release, releases) = mpsc::channel();
+    let worker = ProbeWorker::start(move |_, thread, readonly| {
+        started.send((thread.to_owned(), readonly)).unwrap();
+        releases.recv().unwrap();
+        Ok(owned(!readonly))
+    })
+    .unwrap();
+    let mut status = OwnershipStatus {
+        worker: Some(worker),
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    let now = Instant::now();
+    status.select_thread(Some("first"));
+    status.refresh(host.clone(), "first", false, &ctx, now);
+    assert_eq!(starts.recv().unwrap(), ("first".into(), false));
+    // The probe cannot finish until release; these calls must never wait for it.
+    for thread in ["second", "third", "first"] {
+        status.select_thread(Some(thread));
+        status.refresh(host.clone(), thread, false, &ctx, now);
+        assert_eq!(status.display(now).access, "checking ownership");
+    }
+    assert!(matches!(starts.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    release.send(()).unwrap();
+    let result = status.worker.as_ref().unwrap().results.recv().unwrap();
+    status.accept_result(result, "first", false);
+    // Returning to the original thread must not accept its pre-switch result.
+    assert!(status.snapshot.is_none());
+    status.refresh(host, "first", true, &ctx, now);
+    assert_eq!(starts.recv().unwrap(), ("first".into(), true));
+    release.send(()).unwrap();
+    let result = status.worker.as_ref().unwrap().results.recv().unwrap();
+    let observed_at = result.observed_at;
+    status.accept_result(result, "first", true);
+    assert_eq!(status.display(observed_at).access, "read-only");
+    assert!(!status.stale(observed_at));
+    assert!(status.stale(observed_at + CONTENTION_GRACE));
+    assert!(status.display(observed_at + CONTENTION_GRACE).warning);
+}
+
+#[test]
+fn readonly_change_and_action_invalidation_discard_pending_write_results() {
+    let now = Instant::now();
+    let mut status = OwnershipStatus::default();
+    status.select_thread(Some("thread"));
+    let result = || ProbeResult {
+        revision: status.revision,
+        thread: "thread".into(),
+        readonly: false,
+        result: Ok(owned(true)),
+        observed_at: now,
+    };
+    let readonly_changed = result();
+    let action_changed = result();
+    status.accept_result(readonly_changed, "thread", true);
+    assert!(status.snapshot.is_none());
+    status.observe("thread", Ok(owned(true)), now);
+    assert!(!status.stale(now));
+    status.invalidate();
+    assert!(status.stale(now));
+    assert!(status.display(now).warning);
+    status.accept_result(action_changed, "thread", false);
+    assert_eq!(status.snapshot, Some(owned(true)));
+    assert!(status.stale(now));
+    status.observe("thread", Ok(owned(false)), now);
+    assert!(!status.stale(now));
+    assert!(!status.display(now).warning);
+}

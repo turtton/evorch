@@ -1,6 +1,6 @@
 //! Composer strip rendering and action reporting without dispatch.
 
-use crate::model::composer::{ComposerModel, completions};
+use crate::model::composer::{CompletionItem, CompletionKind, ComposerModel};
 use crate::theme::icons;
 use crate::theme::tokens::{
     COMPOSER_MAX_HEIGHT, COMPOSER_MIN_HEIGHT, R_2XL, ROW_COMPACT, SP_1, SP_2, SP_3, palette,
@@ -26,11 +26,12 @@ pub enum ComposerAction {
     Stop,
     DeliverNextTurn,
     Discard,
-    Complete(&'static str),
-    CompleteExternal(String),
+    Complete(CompletionItem),
+    ToggleRole,
     ModelPreference(Option<workspace_ui::ModelPreference>),
     OpenSandboxSettings,
     OpenSelfImprovementSettings,
+    OpenStorageSettings,
 }
 
 pub fn stopped_banner(running_children: usize) -> String {
@@ -69,6 +70,7 @@ pub fn composer_strip(
     sandbox: SandboxPickerContext,
 ) -> Option<ComposerAction> {
     let mut action = None;
+    let input_id = ui.id().with("composer-input");
     surface_frame(palette().SURFACE_RAISED)
         .corner_radius(R_2XL)
         .inner_margin(egui::vec2(SP_3, SP_2))
@@ -76,26 +78,17 @@ pub fn composer_strip(
         ui.vertical(|ui| {
             ui.set_min_height(ROW_COMPACT);
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_1);
-            let candidates = completions(&model.input);
-            if model.completions_visible() {
-                ui.horizontal_wrapped(|ui| {
-                    for spec in candidates {
-                        let label = match spec.argument_hint {
-                            Some(hint) => format!("/{} {hint}", spec.name),
-                            None => format!("/{}", spec.name),
-                        };
-                        if ui.push_id(("completion", spec.name), |ui| ui.button(label)).inner.clicked() {
-                            action = Some(ComposerAction::Complete(spec.name));
-                        }
-                    }
-                    for spec in model.registry.completions(&model.input) {
-                        if ui.button(format!("/{}", spec.name)).clicked() {
-                            action = Some(ComposerAction::CompleteExternal(spec.name.clone()));
-                        }
-                    }
-                });
+            let ime_id = ui.id().with("ime-composing");
+            let ime_composing = ime_composing(ui, ime_id);
+            let items = model.completion_items();
+            model.completion_selected = model.completion_selected.min(items.len().saturating_sub(1));
+            if let Some(item) = completion_keys(ui, model, &items, ime_composing) {
+                action = Some(ComposerAction::Complete(item));
             }
-            if let Some(selected) = selectors::row(ui, sandbox, (picker, picker_state)) {
+            if let Some(item) = completion_list(ui, &items, model.completion_selected) {
+                action = Some(ComposerAction::Complete(item));
+            }
+            if let Some(selected) = selectors::row(ui, sandbox, (model.role, model.role_locked), (picker, picker_state)) {
                 action = Some(selected);
             }
             if phase == Some(ThreadRunPhase::Stopped) {
@@ -119,25 +112,10 @@ pub fn composer_strip(
                     }
                 });
             }
-            if phase == Some(ThreadRunPhase::Running) {
-                ui.label(egui::RichText::new("実行中の送信はキューに追加され、通常は回答完了後に届きます")
-                    .small().color(palette().TEXT_MUTED));
-            }
             images::render(ui, model);
-            let target = match model.resolved_model.as_deref() {
-                Some(resolved) => format!("{} · {resolved}", model.role.label()),
-                None => model.role.label().to_owned(),
-            };
-            let role_hint = if model.role_locked {
-                "このスレッドで固定"
-            } else {
-                "Tab で切替"
-            };
-            ui.label(egui::RichText::new(format!("送信先: {target}  ({role_hint})"))
-                .small().color(palette().TEXT_MUTED));
             ui.horizontal(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                 let can_send = !model.input.trim().is_empty() || !model.attachments.is_empty();
-                let can_stop = (phase == Some(ThreadRunPhase::Running) && !model.completions_visible())
+                let can_stop = (phase == Some(ThreadRunPhase::Running) && items.is_empty())
                     || (phase == Some(ThreadRunPhase::Stopped) && model.running_children > 0);
                 let queued_send = if can_stop && can_send && phase == Some(ThreadRunPhase::Running) {
                     Some(primary_button(ui, "Queue").on_hover_text("配送待ちに追加（Enter）。送信後に「次のターンで届ける」を選べます。"))
@@ -152,20 +130,6 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                     accessible(&send, "Send");
                     send
                 };
-                let ime_id = ui.id().with("ime-composing");
-                let mut ime_composing = ui.data(|data| data.get_temp::<bool>(ime_id).unwrap_or_default());
-                ui.input(|input| {
-                    for event in &input.events {
-                        if let egui::Event::Ime(event) = event {
-                            #[allow(deprecated)] // Accept legacy backend Enabled/Disabled events too.
-                            match event {
-                                egui::ImeEvent::Preedit { text, .. } => ime_composing = !text.is_empty(),
-                                egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => ime_composing = false,
-                                egui::ImeEvent::Enabled | egui::ImeEvent::DeleteSurrounding { .. } => {}
-                            }
-                        }
-                    }
-                });
                 let rows = model.input.split('\n').count().max(1);
                 let input_height = (rows as f32 * ui.text_style_height(&egui::TextStyle::Body) + 2.0 * SP_2)
                     .clamp(COMPOSER_MIN_HEIGHT - 2.0 * SP_2, COMPOSER_MAX_HEIGHT);
@@ -177,11 +141,16 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        if let Some(cursor) = model.pending_cursor.take() {
+                            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), input_id).unwrap_or_default();
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+                            state.store(ui.ctx(), input_id);
+                        }
                         ui.add(egui::TextEdit::multiline(&mut model.input)
-                            .id_salt("composer-input")
-                            .hint_text("Message or /command  (Enter to send, Shift+Enter for newline)")
-                            // Retain editor focus semantics; raw_input_hook owns Tab
-                            // before egui, so toggling no longer relies on this filter.
+                            .id(input_id)
+                            .hint_text("Message, /command or @file  (Shift+Enter: newline)")
+                            // raw_input_hook captures Tab for completion while focused;
+                            // this keeps any leaked Tab from moving focus.
                             .lock_focus(true)
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
@@ -203,10 +172,16 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
                     && ui.input(|input| {
                         input.key_pressed(egui::Key::Enter) && !input.modifiers.shift && !input.modifiers.command
                     }) && !ime_composing;
-                let focused = input.has_focus();
-                ui.data_mut(|data| data.insert_temp(ime_id, ime_composing && focused));
+                if std::mem::take(&mut model.focus_requested) {
+                    input.request_focus();
+                }
+                model.focused = input.has_focus();
+                model.cursor = egui::text_edit::TextEditState::load(ui.ctx(), input_id)
+                    .and_then(|state| state.cursor.char_range())
+                    .map(|range| range.primary.index.0);
+                ui.data_mut(|data| data.insert_temp(ime_id, ime_composing && model.focused));
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    if model.completions_visible() {
+                    if !items.is_empty() {
                         model.dismiss_completions();
                     } else if can_stop {
                         action = Some(ComposerAction::Stop);
@@ -223,6 +198,104 @@ ui.add(egui::Button::new(egui::RichText::new(if phase == Some(ThreadRunPhase::St
         });
     });
     action
+}
+
+/// Tracks IME preedit across frames so Enter can confirm a conversion without sending.
+fn ime_composing(ui: &egui::Ui, id: egui::Id) -> bool {
+    let mut composing = ui.data(|data| data.get_temp::<bool>(id).unwrap_or_default());
+    ui.input(|input| {
+        for event in &input.events {
+            if let egui::Event::Ime(event) = event {
+                #[allow(deprecated)] // Accept legacy backend Enabled/Disabled events too.
+                match event {
+                    egui::ImeEvent::Preedit { text, .. } => composing = !text.is_empty(),
+                    egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => composing = false,
+                    egui::ImeEvent::Enabled | egui::ImeEvent::DeleteSurrounding { .. } => {}
+                }
+            }
+        }
+    });
+    composing
+}
+
+/// Tab accepts, Shift+Tab / arrows move the highlight, and Enter accepts only
+/// when that changes the draft, so a fully typed `/new` still sends.
+fn completion_keys(
+    ui: &mut egui::Ui,
+    model: &mut ComposerModel,
+    items: &[CompletionItem],
+    ime_composing: bool,
+) -> Option<CompletionItem> {
+    let tabs = std::mem::take(&mut model.tab_presses);
+    if items.is_empty() || ime_composing {
+        return None;
+    }
+    let len = items.len();
+    let mut selected = model.completion_selected;
+    let mut accept = false;
+    for shift in tabs {
+        if shift {
+            selected = (selected + len - 1) % len;
+        } else {
+            accept = true;
+            break;
+        }
+    }
+    if model.focused && !accept {
+        ui.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                selected = (selected + 1) % len;
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                selected = (selected + len - 1) % len;
+            }
+            accept = items[selected].changes(&model.input)
+                && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        });
+    }
+    model.completion_selected = selected;
+    accept.then(|| items[selected].clone())
+}
+
+fn completion_list(
+    ui: &mut egui::Ui,
+    items: &[CompletionItem],
+    selected: usize,
+) -> Option<CompletionItem> {
+    let mut picked = None;
+    for (index, item) in items.iter().enumerate() {
+        ui.push_id(("completion", index), |ui| {
+            ui.horizontal(|ui| {
+                let icon = match item.kind {
+                    CompletionKind::Command => icons::TERMINAL_WINDOW,
+                    CompletionKind::File => icons::FILE,
+                    CompletionKind::Dir => icons::FOLDER,
+                    CompletionKind::Skill => icons::SPARKLE,
+                };
+                ui.label(egui::RichText::new(icon).color(palette().TEXT_MUTED));
+                // The theme's selection fill hides default text; keep the label legible.
+                let response = ui.selectable_label(
+                    index == selected,
+                    egui::RichText::new(&item.label).color(palette().TEXT),
+                );
+                if index == selected {
+                    response.scroll_to_me(None);
+                }
+                if response.clicked() {
+                    picked = Some(item.clone());
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&item.detail)
+                            .small()
+                            .color(palette().TEXT_MUTED),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+    }
+    picked
 }
 
 #[cfg(test)]
@@ -252,6 +325,7 @@ mod tests {
                     crate::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,
+                        default_model: None,
                         enabled: false,
                     },
                     &mut state.picker_state,
@@ -362,6 +436,20 @@ mod tests {
                 .accesskit_node()
                 .is_disabled()
         );
+    }
+
+    #[test]
+    fn running_composer_omits_queue_explanation() {
+        for input in ["", "follow-up draft"] {
+            let mut h = harness(input);
+            h.state_mut().phase = Some(ThreadRunPhase::Running);
+            h.run();
+            assert!(
+                h.query_by_label("実行中の送信はキューに追加され、通常は回答完了後に届きます")
+                    .is_none()
+            );
+            h.get_by_label("Stop");
+        }
     }
 
     #[test]
@@ -499,6 +587,18 @@ mod tests {
     }
 
     #[test]
+    fn storage_button_opens_cleanup_controls() {
+        let mut harness = harness("");
+        harness.run();
+        harness.get_by_label("Storage settings").click();
+        harness.run();
+        assert_eq!(
+            harness.state().action,
+            Some(ComposerAction::OpenStorageSettings)
+        );
+    }
+
+    #[test]
     fn slash_prefix_shows_completion_candidates_and_click_fills_via_action() {
         // Given
         let mut harness = harness("/");
@@ -508,11 +608,82 @@ mod tests {
         harness.get_by_label("/goal <text>").click();
         harness.run();
         // Then
-        assert_eq!(
-            harness.state().action,
-            Some(ComposerAction::Complete("goal"))
-        );
+        assert!(matches!(&harness.state().action,
+            Some(ComposerAction::Complete(item)) if item.replacement == "/goal "));
         assert_eq!(harness.state().model.input, "/");
+    }
+
+    fn mention_harness(input: &str, files: &[&str]) -> Harness<'static, Fixture> {
+        let mut h = harness(input);
+        let files: Vec<_> = files.iter().map(|file| (*file).to_owned()).collect();
+        h.state_mut().model.mentions =
+            crate::model::composer::MentionIndex::from_parts(None, &files, []);
+        h
+    }
+
+    fn accept(h: &mut Harness<'static, Fixture>) {
+        if let Some(ComposerAction::Complete(item)) = h.state_mut().action.take() {
+            h.state_mut().model.apply_completion(&item);
+        }
+        h.run();
+    }
+
+    #[test]
+    fn tab_accepts_highlighted_completion_and_shift_tab_moves_back() {
+        let mut h = harness("/r");
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        // Shift+Tab wraps to the last candidate; Tab accepts it.
+        h.state_mut().model.tab_presses = vec![true, false];
+        h.run();
+        accept(&mut h);
+        assert_eq!(h.state().model.input, "/run ");
+        assert!(h.query_by_label("/redo").is_none());
+        // Without candidates Tab is a no-op that keeps the draft.
+        h.state_mut().model.tab_presses = vec![false];
+        h.run();
+        assert_eq!(h.state().action, None);
+        assert_eq!(h.state().model.input, "/run ");
+    }
+
+    #[test]
+    fn arrows_and_enter_complete_mentions_but_exact_tokens_still_send() {
+        let mut h = mention_harness("open @", &["src/lib.rs", "README.md"]);
+        h.get_by_label("Message or /command").focus();
+        h.run();
+        h.get_by_label("@README.md");
+        h.key_press(egui::Key::ArrowDown);
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        accept(&mut h);
+        assert_eq!(h.state().model.input, "open @src/");
+        h.get_by_label("@src/lib.rs");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        accept(&mut h);
+        assert_eq!(h.state().model.input, "open @src/lib.rs ");
+        // The finished token no longer offers completions, so Enter sends.
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::Send));
+    }
+
+    #[test]
+    fn role_button_toggles_unless_the_thread_locked_it() {
+        let mut h = harness("");
+        h.run();
+        h.get_by_label("Role: worker").click();
+        h.run();
+        assert_eq!(h.state().action, Some(ComposerAction::ToggleRole));
+        h.state_mut().action = None;
+        h.state_mut().model.role_locked = true;
+        h.run();
+        assert!(
+            h.get_by_label("Role: worker")
+                .accesskit_node()
+                .is_disabled()
+        );
     }
 
     #[test]

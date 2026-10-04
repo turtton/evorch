@@ -378,6 +378,8 @@ mod tests {
                 cache_write_tokens: 0,
                 finish_reason: "stop".into(),
                 run_id: Some("run-3".into()),
+                purpose: None,
+                reasoning_tokens: None,
             },
             ProviderEvent::RequestFailed {
                 request_id: "request-2".into(),
@@ -389,6 +391,7 @@ mod tests {
                 duration_ms: 1,
                 failure: ProviderFailureKind::Timeout,
                 run_id: Some("run-3".into()),
+                purpose: None,
             },
         ];
         for event in events {

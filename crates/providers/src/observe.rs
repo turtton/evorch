@@ -150,6 +150,8 @@ impl AttemptObserver {
             cache_write_tokens: usage.cache_write_tokens,
             finish_reason,
             run_id: self.observation_run_id(),
+            reasoning_tokens: usage.reasoning_tokens,
+            purpose: self.observation_purpose(),
         });
         self.terminal_emitted = true;
     }
@@ -173,6 +175,7 @@ impl AttemptObserver {
             duration_ms: self.elapsed_ms(),
             failure,
             run_id: self.observation_run_id(),
+            purpose: self.observation_purpose(),
         });
         self.terminal_emitted = true;
     }
@@ -195,6 +198,10 @@ impl AttemptObserver {
             "observation context が設定されている場合、emit される全 attempt イベントに run_id を載せる"
         );
         run_id
+    }
+
+    fn observation_purpose(&self) -> Option<event_bus::RequestPurpose> {
+        self.observation.as_ref().map(|context| context.purpose)
     }
 
     fn emit(&self, event: ProviderEvent) {
@@ -436,6 +443,7 @@ mod tests {
             output_tokens: 3,
             cache_read_tokens: 4,
             cache_write_tokens: 5,
+            reasoning_tokens: None,
         };
         observer.emit_started();
         let started = next_provider_event(&mut rx).await;

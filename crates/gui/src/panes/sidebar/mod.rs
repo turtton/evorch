@@ -25,10 +25,30 @@ pub enum SidebarAction {
     BrowseForProject,
     CreateThread(String),
     ForkThread(ThreadId),
+    /// Fork a child thread from a completed turn (transcript entry id).
+    ForkAtTurn {
+        thread: ThreadId,
+        entry_id: usize,
+    },
+    /// Rewind to a completed turn, keeping the current conversation as a version.
+    RewindToTurn {
+        thread: ThreadId,
+        entry_id: usize,
+    },
+    /// Rewind to before a turn's first message and return it to the composer.
+    EditFromMessage {
+        thread: ThreadId,
+        entry_id: usize,
+    },
+    /// Show another version of a rewound conversation.
+    SwitchVersion(ThreadId),
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
     ToggleArchive(ThreadId),
-    SetTrust { path: PathBuf, trust: TrustState },
+    SetTrust {
+        path: PathBuf,
+        trust: TrustState,
+    },
 }
 
 pub fn sidebar_pane(

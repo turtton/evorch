@@ -9,7 +9,7 @@ use runtime::compose::SwitchableModel;
 use sandbox::credential::{CredentialStore, FileCredentialStore, Secret};
 use serde_json::json;
 
-use super::MODEL;
+use super::{MODEL, REVIEW_MODEL};
 
 const KEY_ENV: &str = "EVORCH_STRUCTURED_REVIEW_KEY";
 
@@ -19,6 +19,19 @@ pub(super) struct Harness {
 }
 
 pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness {
+    harness_with_model(base_url, codex, timeout, MODEL)
+}
+
+pub(super) fn harness_with_reviewer_model(base_url: &str, timeout: Duration) -> Harness {
+    harness_with_model(base_url, false, timeout, REVIEW_MODEL)
+}
+
+fn harness_with_model(
+    base_url: &str,
+    codex: bool,
+    timeout: Duration,
+    review_model: &str,
+) -> Harness {
     let directory = tempfile::tempdir().expect("test directory");
     let store = Arc::new(
         FileCredentialStore::open(directory.path().join("credentials")).expect("credential store"),
@@ -54,26 +67,54 @@ pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness
                 var: KEY_ENV.into(),
             }
         },
-        models: vec![config::ModelEntryConfig::enabled(MODEL)],
+        models: [MODEL, review_model]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(config::ModelEntryConfig::enabled)
+            .collect(),
         excluded_models: vec![],
         default_model: MODEL.into(),
     };
     let mut config = Config {
         providers: BTreeMap::from([("local".into(), profile)]),
         routing: config::RoutingConfig {
-            routes: BTreeMap::from([(
-                "worker".into(),
-                vec![config::RouteCandidateConfig {
-                    profile: "local".into(),
-                    model: None,
-                }],
-            )]),
+            routes: BTreeMap::from([
+                (
+                    "worker".into(),
+                    vec![config::RouteCandidateConfig {
+                        profile: "local".into(),
+                        model: Some(MODEL.into()),
+                    }],
+                ),
+                (
+                    "reviewer-audit".into(),
+                    vec![config::RouteCandidateConfig {
+                        profile: "local".into(),
+                        model: Some(review_model.into()),
+                    }],
+                ),
+            ]),
         },
         ..Config::default()
     };
     // Nondefault settings make accidental regeneration of the fallback request visible.
-    config.agents.worker.base.generation.temperature = Some(0.25);
-    config.agents.worker.base.generation.max_tokens = Some(321);
+    config.agents.worker.base.generation.temperature = Some(0.9);
+    config.agents.worker.base.generation.max_tokens = Some(111);
+    config.agents.reviewer.generation.temperature = Some(0.7);
+    config.agents.reviewer.generation.max_tokens = Some(444);
+    config.agents.reviewer.categories.insert(
+        "tool-execution".into(),
+        config::CategoryBindingConfig {
+            logical_model: Some("reviewer-audit".into()),
+            generation: config::GenerationOverridesConfig {
+                temperature: Some(0.25),
+                max_tokens: Some(321),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {
@@ -136,21 +177,47 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
             })
             .collect(),
         routing: config::RoutingConfig {
-            routes: BTreeMap::from([(
-                "worker".into(),
-                profiles
-                    .iter()
-                    .map(|(name, _)| config::RouteCandidateConfig {
-                        profile: (*name).into(),
-                        model: None,
-                    })
-                    .collect(),
-            )]),
+            routes: BTreeMap::from([
+                (
+                    "worker".into(),
+                    profiles
+                        .iter()
+                        .map(|(name, _)| config::RouteCandidateConfig {
+                            profile: (*name).into(),
+                            model: None,
+                        })
+                        .collect(),
+                ),
+                (
+                    "reviewer-audit".into(),
+                    profiles
+                        .iter()
+                        .map(|(name, _)| config::RouteCandidateConfig {
+                            profile: (*name).into(),
+                            model: None,
+                        })
+                        .collect(),
+                ),
+            ]),
         },
         ..Config::default()
     };
-    config.agents.worker.base.generation.temperature = Some(0.25);
-    config.agents.worker.base.generation.max_tokens = Some(321);
+    config.agents.worker.base.generation.temperature = Some(0.9);
+    config.agents.worker.base.generation.max_tokens = Some(111);
+    config.agents.reviewer.generation.temperature = Some(0.7);
+    config.agents.reviewer.generation.max_tokens = Some(444);
+    config.agents.reviewer.categories.insert(
+        "tool-execution".into(),
+        config::CategoryBindingConfig {
+            logical_model: Some("reviewer-audit".into()),
+            generation: config::GenerationOverridesConfig {
+                temperature: Some(0.25),
+                max_tokens: Some(321),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
     let model = runtime::compose::compose_routed_model(
         &config,
         ComposeDeps {

@@ -39,6 +39,8 @@ fn completed(input: u64) -> Event {
         cache_write_tokens: 100,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 

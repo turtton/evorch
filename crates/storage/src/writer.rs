@@ -1,5 +1,6 @@
 //! 専用スレッド上の単一 SQLite writer を管理します。
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
@@ -7,8 +8,14 @@ use event_bus::{Event, UsageBucket, UsageSink};
 
 use crate::db::{file_sizes, temp_files_bytes};
 use crate::entity::SecretGuard;
-use crate::{CatalogUpdateRecord, Database, ReconcileSummary, StorageConfig, StorageError};
+use crate::{
+    CatalogUpdateRecord, Database, DiagnosticCleanupScope, DiagnosticCleanupSummary,
+    ReconcileSummary, StorageConfig, StorageError,
+};
 
+mod cleanup;
+#[cfg(test)]
+mod manual_cleanup_tests;
 mod state;
 #[cfg(test)]
 mod stream_tests;
@@ -23,6 +30,8 @@ type ReconcileReplyTx = mpsc::Sender<Result<ReconcileSummary, StorageError>>;
 #[allow(clippy::large_enum_variant)]
 enum Command {
     Usage(Vec<UsageBucket>),
+    RecordUsageRequests(Vec<crate::usage::UsageRequestRecord>, ReplyTx),
+    AttributeUsageRuns(Vec<crate::usage::RunAttribution>),
     AppendEvent(Option<String>, Event, ReplyTx),
     AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
     AppendStreamEvent(String, Event, Option<event_bus::MutationValidator>, ReplyTx),
@@ -47,6 +56,17 @@ enum Command {
     FlushUsage(ReplyTx),
     Checkpoint(ReplyTx),
     Statistics(ReplyTx<StorageStatistics>),
+    DiagnosticCleanupStatus(DiagnosticCleanupScope, ReplyTx<cleanup::CleanupStatus>),
+    CleanupDiagnosticBatch(
+        DiagnosticCleanupScope,
+        Option<crate::repo::event::diagnostic::Cursor>,
+        crate::repo::event::diagnostic::Cursor,
+        ReplyTx<(
+            DiagnosticCleanupSummary,
+            Option<crate::repo::event::diagnostic::Cursor>,
+        )>,
+    ),
+    ReclaimDiagnosticSpace(u64, ReplyTx<cleanup::ReclaimStep>),
     Shutdown,
 }
 
@@ -81,6 +101,7 @@ impl Storage {
         log_temp_state(temp_bytes, config.temp_warn_bytes, temp_warned);
         let (tx, rx) = mpsc::sync_channel(config.channel_capacity);
         let max_event_bytes = config.hard_limits.max_event_bytes;
+        let reader_config = Arc::new(config.clone());
         let writer = std::thread::Builder::new()
             .name("storage-writer".into())
             .spawn(move || {
@@ -95,7 +116,10 @@ impl Storage {
                 )
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
-        Ok(Self(StorageHandle(tx, max_event_bytes), Some(writer)))
+        Ok(Self(
+            StorageHandle(tx, max_event_bytes, reader_config),
+            Some(writer),
+        ))
     }
 
     /// 複数スレッドから共有可能な writer handle を返します。
@@ -122,7 +146,7 @@ impl Drop for Storage {
 
 /// single-writer へ同期要求または lossy usage を送る共有 handle です。
 #[derive(Debug, Clone)]
-pub struct StorageHandle(SyncSender<Command>, u64);
+pub struct StorageHandle(SyncSender<Command>, u64, Arc<StorageConfig>);
 
 impl StorageHandle {
     /// Serialized payload limit, retained in memory without contacting the writer.
@@ -360,6 +384,40 @@ impl StorageHandle {
         result.recv().map_err(|_| StorageError::WriterClosed)?
     }
 
+    /// usage ledger へリクエスト単位の行を保存します。既存の request ID は維持します。
+    ///
+    /// # Errors
+    ///
+    /// 書き込み停止中、writer が終了済み、または SQLite 操作に失敗した場合にエラーを返します。
+    pub fn record_usage_requests(
+        &self,
+        records: Vec<crate::usage::UsageRequestRecord>,
+    ) -> Result<(), StorageError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.request(|reply| Command::RecordUsageRequests(records, reply))
+    }
+
+    /// run の所属 thread / project を待たずに送ります。キューが満杯なら
+    /// 送らずに `false` を返すため、呼び出し側は次の機会に再送できます。
+    pub fn try_attribute_usage_runs(
+        &self,
+        attributions: Vec<crate::usage::RunAttribution>,
+    ) -> bool {
+        if attributions.is_empty() {
+            return true;
+        }
+        match self.0.try_send(Command::AttributeUsageRuns(attributions)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!("storage writer is closed; dropping usage attribution");
+                true
+            }
+        }
+    }
+
     /// メモリ内の保存統計を返します。SQLiteやイベントへの永続化は行いません。
     pub fn statistics(&self) -> Result<StorageStatistics, StorageError> {
         self.request(Command::Statistics)
@@ -374,8 +432,8 @@ impl StorageHandle {
         self.request(Command::FlushUsage)
     }
 
-    /// PASSIVE WAL checkpoint、サイズ状態の再評価、閾値条件付きの budgeted incremental
-    /// vacuum、および temp 容量検査（maintenance tick）を直ちに実行します。
+    /// Run one maintenance tick: bounded 30-day diagnostic retention and
+    /// incremental vacuum, WAL checkpoint, size reevaluation and temp checks.
     ///
     /// # Errors
     ///

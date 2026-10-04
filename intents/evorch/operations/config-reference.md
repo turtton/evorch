@@ -111,8 +111,8 @@ claude-main = [
 
 | キー | 型 | 説明 |
 |---|---|---|
-| `enabled` | bool | downsampled metrics 記録の有効化（ADR 0012） |
-| `retention_days` | u32 | 保持日数 |
+| `enabled` | bool | downsampled metrics とリクエスト単位の usage ledger 記録の有効化（ADR 0012） |
+| `retention_days` | u32 | usage ledger のリクエスト単位の行を保持する日数（既定 90）。過ぎた行は日次集計 `usage_daily` へ畳み込む。0 は畳み込みを無効化 |
 
 ## self_improvement（`SelfImprovementConfig`）
 

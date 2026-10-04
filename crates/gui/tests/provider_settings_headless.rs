@@ -47,6 +47,11 @@ fn saves_existing_keyring_profile_without_typing_token() {
         harness.state().provider_settings().error
     );
     assert!(harness.state().provider_settings().editor.is_none());
+    assert!(harness.state().provider_settings().open);
+    assert!(harness.has_label("Provider settings"));
+    assert!(harness.has_label("A"));
+    assert!(harness.has_label("Edit"));
+    assert!(!harness.has_label("Save"));
     assert_eq!(load_config(temp.path()).providers.len(), 1);
     assert_eq!(store.get("acct-A").unwrap().unwrap().expose(), "old-token");
 }
@@ -249,6 +254,7 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),

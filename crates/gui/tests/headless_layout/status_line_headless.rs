@@ -1,7 +1,9 @@
 use egui::epaint::Shape;
 use egui_kittest::{Harness, kittest::Queryable};
 use gui::model::{
-    composer::ComposerModel, model_picker::ModelPickerState, telemetry::ThreadMetrics,
+    composer::ComposerModel,
+    model_picker::ModelPickerState,
+    telemetry::{CacheReuseSummary, RequestReuse, ThreadMetrics},
     transcript::TranscriptModel,
 };
 use gui::panes::agent::{ConversationContext, agent_pane};
@@ -31,6 +33,16 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                         conversation_cost: Some(0.125),
                         cache_hit_rate: Some(50.0),
                         average_cache_hit_rate: Some(25.0),
+                        cache_reuse: CacheReuseSummary {
+                            latest: Some(RequestReuse::Compared {
+                                read: 99,
+                                previous: 100,
+                            }),
+                            retained_tokens: 97,
+                            baseline_tokens: 100,
+                            compared_requests: 2,
+                            completed_requests: 3,
+                        },
                         context_pressure: Some(25),
                         context_used_tokens: Some(200_900),
                         wall_time: std::time::Duration::from_secs(12),
@@ -42,9 +54,11 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     phase,
                     next_thread_title: String::new(),
                     sandbox_picker: Default::default(),
+                    branch: None,
                     model_picker: gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,
+                        default_model: None,
                         enabled: false,
                     },
                 },
@@ -63,7 +77,7 @@ fn status_line_renders_below_composer_with_metrics_order() {
     // Then: the status dot precedes ordered metrics below the composer.
     let labels = [
         "$0.125",
-        "cache 50% (Δ25%)",
+        "cache 99% (avg 97%)",
         "TTFT —",
         "— tok/s",
         "ctx 200K(25%)",
@@ -91,10 +105,10 @@ fn running_phase_shows_spinner_without_badge_text() {
     // Then: the spinner is at the left of the status row with no running text.
     assert!(h.query_by_label("running").is_none());
     let cost = h.get_by_label("$0.125").rect();
-    assert!(h.get_by_label("TTFT 240ms (Δ400ms)").rect().left() > cost.right());
+    assert!(h.get_by_label("TTFT 240ms (avg 400ms)").rect().left() > cost.right());
     assert!(
-        h.get_by_label("40.0 tok/s (Δ35.0 tok/s)").rect().left()
-            > h.get_by_label("TTFT 240ms (Δ400ms)").rect().right()
+        h.get_by_label("40.0 tok/s (avg 35.0 tok/s)").rect().left()
+            > h.get_by_label("TTFT 240ms (avg 400ms)").rect().right()
     );
     assert!(
         h.output().shapes.iter().any(|shape| matches!(&shape.shape,

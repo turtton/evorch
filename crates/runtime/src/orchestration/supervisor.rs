@@ -906,6 +906,7 @@ impl SupervisorActor {
             ProviderEvent::RequestStarted { run_id, .. }
             | ProviderEvent::FirstTokenObserved { run_id, .. }
             | ProviderEvent::RequestCompleted { run_id, .. }
+            | ProviderEvent::CacheReuseObserved { run_id, .. }
             | ProviderEvent::RequestFailed { run_id, .. } => run_id,
             ProviderEvent::ProviderFallback { .. } | ProviderEvent::FallbackTriggered { .. } => {
                 None

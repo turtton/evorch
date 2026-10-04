@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use agents::Role;
 
-use crate::prompt::assembly::{SystemPromptInput, assemble_system_prompt};
+use crate::prompt::assembly::{PromptPartKind, SystemPromptInput, assemble_system_prompt_parts};
 use crate::prompt::family::{ModelFamily, classify};
 use crate::prompt::key_triggers::TriggerSource;
 
@@ -66,8 +66,8 @@ pub struct SystemPromptCatalog {
     role_baselines: BTreeMap<String, String>,
     family_sections: BTreeMap<String, String>,
     category_overlays: BTreeMap<String, String>,
-    appendices: BTreeMap<String, String>,
-    category_appendices: BTreeMap<(String, String), String>,
+    appendices: BTreeMap<String, AppendixPart>,
+    category_appendices: BTreeMap<(String, String), AppendixPart>,
     triggers: Vec<TriggerSource>,
 }
 
@@ -95,6 +95,24 @@ impl SystemPromptCatalog {
         category: Option<&str>,
         model_id: &str,
     ) -> Result<String, SystemPromptCatalogError> {
+        Ok(self
+            .system_prompt_sections_for(role, category, model_id)?
+            .into_iter()
+            .map(|section| section.text)
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
+    /// [`Self::system_prompt_for`] の連結前セクションを由来付きで返す。
+    ///
+    /// 各セクションの `text` を空行 1 つで連結した結果は
+    /// [`Self::system_prompt_for`] とバイト単位で一致する。
+    pub fn system_prompt_sections_for(
+        &self,
+        role: Role,
+        category: Option<&str>,
+        model_id: &str,
+    ) -> Result<Vec<CatalogSection>, SystemPromptCatalogError> {
         let family = classify(model_id);
         let role_baseline = self.role_baselines.get(role.name()).ok_or_else(|| {
             SystemPromptCatalogError::MissingRoleBaseline {
@@ -121,20 +139,58 @@ impl SystemPromptCatalog {
             self.category_appendices
                 .get(&(role.name().to_lowercase(), category.to_owned()))
         });
-        let appendix = scoped_appendix
-            .or_else(|| self.appendices.get(role.name()))
-            .map(String::as_str);
-        Ok(assemble_system_prompt(&SystemPromptInput {
+        let appendix = scoped_appendix.or_else(|| self.appendices.get(role.name()));
+        let parts = assemble_system_prompt_parts(&SystemPromptInput {
             role,
             category,
             family,
             role_baseline,
             family_section,
             category_overlay,
-            appendix,
+            appendix: appendix.map(|part| part.text.as_str()),
             triggers: &self.triggers,
-        }))
+        });
+        Ok(parts
+            .into_iter()
+            .map(|(kind, text)| CatalogSection {
+                kind,
+                preset: match kind {
+                    PromptPartKind::RoleBaseline => {
+                        Some(format!("role-{}", role.name().to_lowercase()))
+                    }
+                    PromptPartKind::ModelFamily => Some(family.base_section_key().to_owned()),
+                    PromptPartKind::CategoryOverlay => category.map(category_overlay_preset),
+                    PromptPartKind::IntentGate => None,
+                    PromptPartKind::Appendix => appendix.and_then(|part| part.preset.clone()),
+                },
+                text,
+            })
+            .collect())
     }
+}
+
+/// カタログが返す連結前セクション。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSection {
+    /// セクション種別。
+    pub kind: PromptPartKind,
+    /// 本文の解決元 preset 名 (生成テキストや名前なしで登録された appendix は None)。
+    pub preset: Option<String>,
+    /// 末尾余白を除去済みの本文。
+    pub text: String,
+}
+
+/// 登録済み appendix 本文と、解決元 preset 名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppendixPart {
+    preset: Option<String>,
+    text: String,
+}
+
+/// カテゴリ名から overlay preset 名を引く (未登録カテゴリは `category-<name>` 規約)。
+fn category_overlay_preset(category: &str) -> String {
+    config::agent_categories::overlay_preset_for(category)
+        .map_or_else(|| format!("category-{category}"), str::to_owned)
 }
 
 /// [`SystemPromptCatalog`] のビルダー。部品を登録し、`build` で完全性を
@@ -144,8 +200,8 @@ pub struct SystemPromptCatalogBuilder {
     role_baselines: BTreeMap<String, String>,
     family_sections: BTreeMap<String, String>,
     category_overlays: BTreeMap<String, String>,
-    appendices: BTreeMap<String, String>,
-    category_appendices: BTreeMap<(String, String), String>,
+    appendices: BTreeMap<String, AppendixPart>,
+    category_appendices: BTreeMap<(String, String), AppendixPart>,
     triggers: Vec<TriggerSource>,
 }
 
@@ -175,7 +231,30 @@ impl SystemPromptCatalogBuilder {
 
     /// ロールの appendix を登録する (任意)。
     pub fn appendix(mut self, role: Role, text: impl Into<String>) -> Self {
-        self.appendices.insert(role.name().to_owned(), text.into());
+        self.appendices.insert(
+            role.name().to_owned(),
+            AppendixPart {
+                preset: None,
+                text: text.into(),
+            },
+        );
+        self
+    }
+
+    /// 解決元 preset 名付きでロールの appendix を登録する (任意)。
+    pub fn appendix_preset(
+        mut self,
+        role: Role,
+        preset: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.appendices.insert(
+            role.name().to_owned(),
+            AppendixPart {
+                preset: Some(preset.into()),
+                text: text.into(),
+            },
+        );
         self
     }
 
@@ -189,8 +268,31 @@ impl SystemPromptCatalogBuilder {
         category: impl Into<String>,
         text: impl Into<String>,
     ) -> Self {
-        self.category_appendices
-            .insert((role.name().to_lowercase(), category.into()), text.into());
+        self.category_appendices.insert(
+            (role.name().to_lowercase(), category.into()),
+            AppendixPart {
+                preset: None,
+                text: text.into(),
+            },
+        );
+        self
+    }
+
+    /// 解決元 preset 名付きでカテゴリスコープの appendix を登録する (任意)。
+    pub fn category_appendix_preset(
+        mut self,
+        role: Role,
+        category: impl Into<String>,
+        preset: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.category_appendices.insert(
+            (role.name().to_lowercase(), category.into()),
+            AppendixPart {
+                preset: Some(preset.into()),
+                text: text.into(),
+            },
+        );
         self
     }
 
@@ -395,6 +497,40 @@ mod tests {
             !prompt.contains(&format!("ORCH-APPENDIX {SENTINEL}")),
             "ロールレベルの本文はスコープ優先で置き換わるはずです"
         );
+    }
+
+    // Given: preset 名付きのロール appendix とカテゴリスコープ appendix
+    // When: system_prompt_sections_for する
+    // Then: 連結結果は system_prompt_for と一致し、採用された appendix の preset 名を返す
+    #[test]
+    fn sections_join_to_system_prompt_and_name_the_chosen_appendix() {
+        let catalog = complete_builder()
+            .appendix_preset(Role::Worker, "worker-extra", "WORKER-APPENDIX")
+            .category_appendix_preset(Role::Worker, "bug", "bug-extra", "BUG-APPENDIX")
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        for (category, preset) in [(None, "worker-extra"), (Some("bug"), "bug-extra")] {
+            let sections = catalog
+                .system_prompt_sections_for(Role::Worker, category, "claude-opus-4-1")
+                .expect("登録済みの部品のみを参照するはずです");
+            let joined = sections
+                .iter()
+                .map(|section| section.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            assert_eq!(
+                joined,
+                catalog
+                    .system_prompt_for(Role::Worker, category, "claude-opus-4-1")
+                    .unwrap()
+            );
+            let appendix = sections.last().expect("appendix が末尾のはずです");
+            assert_eq!(appendix.kind, crate::prompt::PromptPartKind::Appendix);
+            assert_eq!(appendix.preset.as_deref(), Some(preset));
+            assert_eq!(sections[0].preset.as_deref(), Some("role-worker"));
+            assert_eq!(sections[1].preset.as_deref(), Some("family-claude"));
+        }
     }
 
     // Given: ロールレベル appendix のみを持ち bug スコープは未登録のカタログ

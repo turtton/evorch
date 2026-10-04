@@ -60,6 +60,7 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
     let mut request = request();
     request.observation = Some(ObservationContext {
         run_id: "codex-run".into(),
+        purpose: Default::default(),
     });
     // When: consume through the new completion path rather than raw DeltaStream.
     let response = client

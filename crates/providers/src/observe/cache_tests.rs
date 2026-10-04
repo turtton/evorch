@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use event_bus::EventKind;
+use event_bus::{CacheBaselineMissing, CacheComparison, EventKind};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tracing::field::{Field, Visit};
@@ -21,7 +21,10 @@ fn scoped_observer(bus: &Arc<EventBus>, run: &str, request: &Value) -> AttemptOb
         "test",
         "test",
         false,
-        Some(ObservationContext { run_id: run.into() }),
+        Some(ObservationContext {
+            run_id: run.into(),
+            purpose: Default::default(),
+        }),
     )
     .with_cache_observation(request)
 }
@@ -228,4 +231,117 @@ async fn a_long_completion_does_not_refresh_cache_residency() {
     slow.emit_completed(&usage(100), FinishReason::Stop);
     scoped_observer(&bus, "run", &wire()).emit_completed(&usage(0), FinishReason::Stop);
     assert_eq!(diagnostics(&mut receiver), 0);
+}
+
+/// Provider events in emission order, keeping only reuse observations and completions.
+fn reuse_events(receiver: &mut event_bus::EventReceiver) -> Vec<ProviderEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().now_or_never() {
+        if let EventKind::Provider(
+            event @ (ProviderEvent::CacheReuseObserved { .. }
+            | ProviderEvent::RequestCompleted { .. }),
+        ) = event.expect("test events must not lag").kind
+        {
+            events.push(event);
+        }
+    }
+    events
+}
+
+fn comparisons(receiver: &mut event_bus::EventReceiver) -> Vec<CacheComparison> {
+    reuse_events(receiver)
+        .into_iter()
+        .filter_map(|event| match event {
+            ProviderEvent::CacheReuseObserved { comparison, .. } => Some(comparison),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn reuse_is_reported_before_completion_against_the_measured_baseline() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    let mut first = scoped_observer(&bus, "run", &wire());
+    let first_id = first.request_id.clone();
+    first.emit_completed(&usage(100), FinishReason::Stop);
+    let mut second = scoped_observer(&bus, "run", &wire());
+    let second_id = second.request_id.clone();
+    second.emit_completed(&usage(80), FinishReason::Stop);
+
+    let events = reuse_events(&mut receiver);
+    assert!(matches!(
+        &events[..],
+        [
+            ProviderEvent::CacheReuseObserved {
+                comparison: CacheComparison::NoBaseline {
+                    reason: CacheBaselineMissing::NoPreviousRequest
+                },
+                ..
+            },
+            ProviderEvent::RequestCompleted { .. },
+            ProviderEvent::CacheReuseObserved { .. },
+            ProviderEvent::RequestCompleted { .. },
+        ]
+    ));
+    assert_eq!(
+        events[2],
+        ProviderEvent::CacheReuseObserved {
+            request_id: second_id,
+            cache_read_tokens: 80,
+            comparison: CacheComparison::Compared {
+                previous_request_id: first_id,
+                previous_cache_tokens: 100,
+            },
+            run_id: Some("run".into()),
+        }
+    );
+}
+
+#[test]
+fn missing_baseline_reports_why_reuse_was_not_compared() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    scoped_observer(&bus, "run", &wire()).emit_completed(&usage(0), FinishReason::Stop);
+    scoped_observer(&bus, "run", &wire()).emit_completed(&usage(100), FinishReason::Stop);
+    let compacted = json!({"model":"test", "messages":[{"role":"user","content":"compacted"}]});
+    scoped_observer(&bus, "run", &compacted).emit_completed(&usage(0), FinishReason::Stop);
+    scoped_observer(&bus, "run", &compacted).emit_completed(
+        &Usage {
+            input_tokens: 1,
+            ..usage(100)
+        },
+        FinishReason::Stop,
+    );
+    let reasons: Vec<_> = comparisons(&mut receiver)
+        .into_iter()
+        .map(|comparison| match comparison {
+            CacheComparison::NoBaseline { reason } => Some(reason),
+            CacheComparison::Compared { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            Some(CacheBaselineMissing::NoPreviousRequest),
+            Some(CacheBaselineMissing::PreviousUncached),
+            Some(CacheBaselineMissing::PrefixChanged),
+            Some(CacheBaselineMissing::InvalidUsage),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_baseline_is_reported_as_expired() {
+    let bus = Arc::new(EventBus::new(16));
+    let mut receiver = bus.subscribe();
+    scoped_observer(&bus, "run", &wire()).emit_completed(&usage(100), FinishReason::Stop);
+    tokio::time::advance(std::time::Duration::from_secs(301)).await;
+    scoped_observer(&bus, "run", &wire()).emit_completed(&usage(0), FinishReason::Stop);
+    assert_eq!(
+        comparisons(&mut receiver).last(),
+        Some(&CacheComparison::NoBaseline {
+            reason: CacheBaselineMissing::Expired
+        })
+    );
 }

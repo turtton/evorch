@@ -144,7 +144,7 @@ fn subscriptions_harness(state: KimiQuotaState) -> Harness<'static> {
 }
 
 #[test]
-fn multiple_kimi_subscriptions_popup_shows_each_profile_quota_and_errors() {
+fn multiple_kimi_subscriptions_show_first_usage_and_switch_from_details() {
     let config = subscriptions_config(&["personal", "work", "unavailable"]);
     let mut state = KimiQuotaState::default();
     state.configure(&ProviderSettingsModel::seed_from_config(&config), None);
@@ -171,7 +171,7 @@ fn multiple_kimi_subscriptions_popup_shows_each_profile_quota_and_errors() {
     let mut harness = subscriptions_harness(state);
     harness.run();
     assert!(harness.query_by_label("personal · Kimi").is_none());
-    harness.get_by_label("Kimi · 3 subscriptions").click();
+    harness.get_by_label("Kimi · personal · 75% wk").click();
     harness.run();
     for profile in ["personal", "work", "unavailable"] {
         harness.get_by_label(&format!("{profile} · Kimi"));
@@ -182,9 +182,15 @@ fn multiple_kimi_subscriptions_popup_shows_each_profile_quota_and_errors() {
     harness.get_by_label("Quota error: quota request timed out");
     harness.get_by_label("Kimi · unavailable");
     harness.get_by_label(&format!("Quota error: {}", QuotaError::Credentials));
-    harness.get_by_label("Kimi · 3 subscriptions").click();
+    harness.get_by_label("work · Kimi").click();
     harness.run();
-    assert!(harness.query_by_label("personal · Kimi").is_none());
+    harness.get_by_label("Kimi · work · 20% wk · stale");
+    harness.get_by_label("Kimi · work · 20% wk · stale").click();
+    harness.run();
+    harness.get_by_label("work · Kimi");
+    harness.get_by_label("unavailable · Kimi").click();
+    harness.run();
+    harness.get_by_label("Kimi · unavailable · unavailable");
 }
 
 #[test]

@@ -160,6 +160,8 @@ fn request_completed(run_id: &str, input_tokens: u64, output_tokens: u64) -> Eve
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some(run_id.into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 
@@ -329,7 +331,9 @@ fn assert_run_transcript(
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }
-            | TranscriptEntry::Compaction { .. } => None,
+            | TranscriptEntry::Compaction { .. }
+            | TranscriptEntry::TurnEnd { .. }
+            | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
     let contents = entries
@@ -343,7 +347,9 @@ fn assert_run_transcript(
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::Error { .. }
-            | TranscriptEntry::Compaction { .. } => None,
+            | TranscriptEntry::Compaction { .. }
+            | TranscriptEntry::TurnEnd { .. }
+            | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -570,6 +576,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }
@@ -618,6 +625,7 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::SendChat(_)
             | WorkbenchCommand::ContinueChat(_)
             | WorkbenchCommand::StopChat { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
             | WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::PauseGoal { .. }

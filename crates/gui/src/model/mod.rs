@@ -4,6 +4,7 @@ pub mod codex_auth;
 pub mod codex_auth_backend;
 pub mod commands;
 pub mod composer;
+pub mod context_inspector;
 pub mod demo;
 pub mod durable_tasks;
 pub mod folder_picker;
@@ -26,5 +27,6 @@ pub mod telemetry;
 pub mod terminal;
 pub mod transcript;
 pub mod transcript_registry;
+pub mod usage_stats;
 
 pub mod kimi_quota;

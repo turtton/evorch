@@ -142,7 +142,24 @@ impl AgentRuntime {
         thread_id: &str,
         role: Role,
         prompt: String,
+        config: RunConfig,
+    ) -> Result<RunId, RuntimeError> {
+        self.delegate_chat_seeded(thread_id, role, prompt, config, None)
+    }
+
+    /// Like [`Self::delegate_chat`], but a thread without saved history starts from
+    /// `seed`: another root chat's context truncated at a completed turn.
+    /// The source run keeps its execution, questions and saved context unchanged.
+    ///
+    /// # Errors
+    /// Rejects a seed whose boundary or identity no longer matches saved history.
+    pub fn delegate_chat_seeded(
+        &self,
+        thread_id: &str,
+        role: Role,
+        prompt: String,
         mut config: RunConfig,
+        seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
         let name = format!("chat:{}:{thread_id}", role.name());
         let mut restored_source = None;
@@ -161,7 +178,10 @@ impl AgentRuntime {
                     .latest_terminal_named(&name)
                     .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
                 {
-                    None => None,
+                    None => match seed {
+                        None => None,
+                        Some(seed) => Some(self.fork_seed_history(store, &seed, role, &config)?),
+                    },
                     Some(record) => {
                         let descriptor: RunRestoreDescriptor =
                             serde_json::from_str(&record.config_json).map_err(|error| {
@@ -201,5 +221,37 @@ impl AgentRuntime {
         }
         let continuation = restored.map_or(RunContinuation::Fresh, RunContinuation::Restored);
         Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
+    }
+
+    fn fork_seed_history(
+        &self,
+        store: &crate::run_store::RunStore,
+        seed: &crate::restore::ChatForkSeed,
+        role: Role,
+        authority: &RunConfig,
+    ) -> Result<RestoredState, RuntimeError> {
+        let fail = |reason| RuntimeError::RunRestoreFailed {
+            run_id: seed.source_run_id.clone(),
+            reason,
+        };
+        if let Some(permit) = &authority.ownership {
+            permit
+                .validate_generation()
+                .map_err(|_| RuntimeError::StaleOwnership {
+                    run_id: seed.source_run_id.clone(),
+                })?;
+        }
+        let source = crate::meta::parse_run_id(&seed.source_run_id)
+            .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+        let record = store
+            .restore_record(source)
+            .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
+            .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
+        if record.role != role.name() {
+            return Err(fail(RunRestoreFailure::UnsupportedConfig(
+                "fork_seed: chat role differs from the source conversation".into(),
+            )));
+        }
+        RestoredState::for_fork_seed(&record, seed.context_len)
     }
 }

@@ -11,6 +11,9 @@ use crate::projection;
 use crate::repo::{catalog, event, metrics};
 use crate::{HardLimits, LimitKind, StorageConfig, StorageError};
 
+#[path = "diagnostic.rs"]
+mod diagnostic;
+
 #[cfg(test)]
 #[path = "accounting_tests.rs"]
 mod accounting_tests;
@@ -27,6 +30,8 @@ struct WriterState {
     temp_warned: bool,
     next_flush_at: Instant,
     next_checkpoint_at: Instant,
+    diagnostic_cursor: Option<event::diagnostic::Cursor>,
+    reclaim_wal_pending: bool,
 }
 
 pub(super) fn run_writer(
@@ -51,11 +56,28 @@ pub(super) fn run_writer(
         soft_warned,
         suspend_logged,
         temp_warned,
+        diagnostic_cursor: None,
+        reclaim_wal_pending: false,
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Command::Usage(buckets)) => merge_usage(&mut state.pending, buckets),
+            Ok(Command::RecordUsageRequests(records, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "usage writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::usage::insert_requests(&state.conn, &records)
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::AttributeUsageRuns(attributions)) => {
+                if let Err(error) = crate::repo::usage::attribute_runs(&state.conn, &attributions) {
+                    tracing::warn!(error = %error, "usage attribution failed");
+                }
+            }
             Ok(Command::AppendEvent(session_id, event, reply)) => {
                 let result = if state.writes_suspended {
                     handle_suspended_append(&mut state, &session_id, &event)
@@ -217,6 +239,17 @@ pub(super) fn run_writer(
             Ok(Command::Statistics(reply)) => {
                 let _ = reply.send(Ok(state.statistics.clone()));
             }
+            Ok(Command::DiagnosticCleanupStatus(scope, reply)) => {
+                let _ = reply.send(diagnostic::status(&state, scope));
+            }
+            Ok(Command::CleanupDiagnosticBatch(scope, cursor, through, reply)) => {
+                let _ = reply.send(diagnostic::cleanup_batch(
+                    &mut state, scope, cursor, through,
+                ));
+            }
+            Ok(Command::ReclaimDiagnosticSpace(pages, reply)) => {
+                let _ = reply.send(diagnostic::reclaim_step(&mut state, pages));
+            }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                 if let Err(error) = flush_usage(&mut state) {
                     tracing::warn!(error = %error, "storage final usage flush failed");
@@ -273,15 +306,41 @@ fn run_due_work(state: &mut WriterState) {
     }
 }
 
-/// maintenance tick: PASSIVE checkpoint・サイズ状態の再評価に続けて、閾値条件付きの
-/// budgeted incremental vacuum と temp 容量検査を実行します。各処理は bounded page
-/// budget・ファイル存在検査のみで、通常の read/write を無制限には block しません。
+/// Maintenance scans one bounded diagnostic batch, then reclaims a bounded
+/// page budget and checks storage limits against the resulting file sizes.
 fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
+    let removed = diagnostic::retain_recent(state, std::time::SystemTime::now())?;
+    roll_up_usage(state, std::time::SystemTime::now())?;
+    let mut vacuum_config = state.config.clone();
+    if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
+        vacuum_config.vacuum_freelist_threshold_pages = 1;
+    }
+    run_budgeted_vacuum(&state.conn, &vacuum_config)?;
+    if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
+        diagnostic::reclaim_wal(state)?;
+    }
     checkpoint(state)?;
-    run_budgeted_vacuum(&state.conn, &state.config)?;
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
+}
+
+/// Fold one bounded batch of ledger rows older than the retention window into
+/// daily totals. Older rows remain for the following ticks.
+fn roll_up_usage(state: &WriterState, now: std::time::SystemTime) -> Result<usize, StorageError> {
+    let days = state.config.usage_retention_days;
+    if days == 0 {
+        return Ok(0);
+    }
+    let window = std::time::Duration::from_secs(u64::from(days) * 86_400);
+    let Some(cutoff) = now.checked_sub(window) else {
+        return Ok(0);
+    };
+    let moved = crate::repo::usage::roll_up_before(&state.conn, crate::system_time_to_ns(cutoff)?)?;
+    if moved > 0 {
+        tracing::debug!(rows = moved, "usage ledger rolled up");
+    }
+    Ok(moved)
 }
 
 /// freelist が設定閾値以上のときだけ、設定 page budget 以内で incremental vacuum を実行し、
@@ -293,12 +352,12 @@ fn run_budgeted_vacuum(conn: &Connection, config: &StorageConfig) -> Result<(), 
         return Ok(());
     }
     let before = freelist_pages(conn)?;
-    if before < threshold {
+    if before == 0 || before < threshold {
         return Ok(());
     }
     // rusqlite の ToSql は u64 未対応のため i64 へ飽和変換します。
     let pages = i64::try_from(budget.min(before)).unwrap_or(i64::MAX);
-    conn.pragma_update(None, "incremental_vacuum", pages)?;
+    diagnostic::vacuum_pages(conn, pages)?;
     let after = freelist_pages(conn)?;
     tracing::info!(
         freelist_before_pages = before,
@@ -442,18 +501,21 @@ fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
             max_bytes = state.config.hard_limits.max_wal_bytes,
             "WAL truncate"
         );
-        state
-            .conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        diagnostic::reclaim_wal(state)?;
         sizes = file_sizes(&state.config.db_path)?;
     }
-    let suspended = sizes.total() >= state.config.hard_limits.max_db_bytes;
+    refresh_size_state(state, sizes.total());
+    Ok(())
+}
+
+fn refresh_size_state(state: &mut WriterState, total_bytes: u64) {
+    let suspended = total_bytes >= state.config.hard_limits.max_db_bytes;
     let threshold =
         state.config.hard_limits.max_db_bytes as f64 * state.config.hard_limits.soft_warn_ratio;
     if suspended {
         if !state.suspend_logged {
             tracing::error!(
-                total_bytes = sizes.total(),
+                total_bytes,
                 max_bytes = state.config.hard_limits.max_db_bytes,
                 "event writes suspended"
             );
@@ -462,10 +524,10 @@ fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
         state.soft_warned = false;
     } else {
         state.suspend_logged = false;
-        if sizes.total() as f64 >= threshold {
+        if total_bytes as f64 >= threshold {
             if !state.soft_warned {
                 tracing::warn!(
-                    total_bytes = sizes.total(),
+                    total_bytes,
                     max_bytes = state.config.hard_limits.max_db_bytes,
                     "storage soft limit"
                 );
@@ -476,7 +538,6 @@ fn checkpoint(state: &mut WriterState) -> Result<(), StorageError> {
         }
     }
     state.writes_suspended = suspended;
-    Ok(())
 }
 
 pub(super) fn log_size_state(total: u64, limits: &HardLimits, suspended: bool) {
@@ -644,6 +705,8 @@ mod tests {
             writes_suspended: false,
             soft_warned: false,
             suspend_logged: false,
+            diagnostic_cursor: None,
+            reclaim_wal_pending: false,
         }
     }
 

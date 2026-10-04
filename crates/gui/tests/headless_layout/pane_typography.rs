@@ -102,9 +102,11 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     phase: None,
                     next_thread_title: String::new(),
                     sandbox_picker: Default::default(),
+                    branch: None,
                     model_picker: gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,
+                        default_model: None,
                         enabled: false,
                     },
                 },

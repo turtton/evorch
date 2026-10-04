@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use catalog::ModelCatalog;
 use config::ModelEntryConfig;
 use config::types::provider::ModelPricing;
 
@@ -20,12 +23,91 @@ impl ModelKey {
     ) -> Option<config::ProviderTypeConfig> {
         settings
             .provider_type(Some(self.profile.as_deref().unwrap_or(&self.provider)))
-            .or(match self.provider.as_str() {
-                // Direct clients and saved Codex observations can lack a profile.
-                "openai" => Some(config::ProviderTypeConfig::OpenAi),
-                "openai-codex" => Some(config::ProviderTypeConfig::OpenAiCodex),
-                _ => None,
-            })
+            .or(fallback_provider_type(&self.provider))
+    }
+}
+
+/// Direct clients and saved Codex observations can lack a profile.
+fn fallback_provider_type(provider: &str) -> Option<config::ProviderTypeConfig> {
+    match provider {
+        "openai" => Some(config::ProviderTypeConfig::OpenAi),
+        "openai-codex" => Some(config::ProviderTypeConfig::OpenAiCodex),
+        _ => None,
+    }
+}
+
+/// Static TOML prices first, then the catalog entry the profile resolves to.
+fn resolve_model_pricing(
+    entry: Option<&ModelEntryConfig>,
+    provider_type: Option<config::ProviderTypeConfig>,
+    catalog: Option<&ModelCatalog>,
+    profile: &str,
+    model: &str,
+) -> Option<ModelPricing> {
+    let fallback = ModelEntryConfig::enabled(model);
+    let entry = entry.unwrap_or(&fallback);
+    let catalog = catalog
+        .and_then(|catalog| {
+            runtime::model_resolve::resolve_catalog_entry(
+                entry,
+                catalog,
+                Some(profile),
+                provider_type,
+            )
+        })
+        .map(|model| ModelPricing {
+            input: model.input_price,
+            output: model.output_price,
+            cache_read: model.cache_read_price,
+            cache_write: model.cache_write_price,
+        });
+    entry.pricing_for(catalog)
+}
+
+/// Thread-safe price snapshot shared with the storage bridge, which records
+/// each request's cost at the rates in force when it completes.
+pub type SharedUsagePricing = Arc<RwLock<UsagePricing>>;
+
+/// Provider profiles and catalog captured from the provider settings.
+#[derive(Debug, Clone, Default)]
+pub struct UsagePricing {
+    entries: BTreeMap<String, config::ProviderProfileConfig>,
+    catalog: Option<Arc<ModelCatalog>>,
+}
+
+impl UsagePricing {
+    pub fn new(
+        entries: BTreeMap<String, config::ProviderProfileConfig>,
+        catalog: Option<Arc<ModelCatalog>>,
+    ) -> Self {
+        Self { entries, catalog }
+    }
+
+    /// Prices for one observed model, or `None` when every price is unknown.
+    pub fn pricing(
+        &self,
+        provider: &str,
+        profile: Option<&str>,
+        model: &str,
+    ) -> Option<ModelPricing> {
+        let name = profile.unwrap_or(provider);
+        let profile_config = self.entries.get(name);
+        let provider_type = profile_config
+            .map(|profile| profile.provider_type)
+            .or(fallback_provider_type(provider));
+        let entry = profile_config
+            .and_then(|profile| profile.models.iter().find(|entry| entry.id == model));
+        resolve_model_pricing(entry, provider_type, self.catalog.as_deref(), name, model)
+    }
+
+    /// Whether a refresh would change any price, comparing the catalog by identity.
+    pub fn same_source(&self, other: &Self) -> bool {
+        self.entries == other.entries
+            && match (&self.catalog, &other.catalog) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -99,10 +181,6 @@ impl TelemetryRow {
             };
             segments.push(format!("{prefix}{rate:.1} tok/s"));
         }
-        let rate = self.usage.cache_hit_rate();
-        if rate >= 10.0 {
-            segments.push(format!("cache {rate:.1}%"));
-        }
         segments
     }
 }
@@ -129,30 +207,15 @@ impl TelemetryOverlay {
             .get(run_id)?
             .iter()
             .try_fold(0.0, |total, (key, usage)| {
-                let fallback = ModelEntryConfig::enabled(&key.model);
-                let provider_type = key.provider_type(settings);
-                let entry = settings
-                    .model_entry(key.profile.as_deref().unwrap_or(&key.provider), &key.model)
-                    .unwrap_or(&fallback);
-                let catalog = settings
-                    .catalog
-                    .catalog
-                    .as_deref()
-                    .and_then(|catalog| {
-                        runtime::model_resolve::resolve_catalog_entry(
-                            entry,
-                            catalog,
-                            Some(key.profile.as_deref().unwrap_or(&key.provider)),
-                            provider_type,
-                        )
-                    })
-                    .map(|model| ModelPricing {
-                        input: model.input_price,
-                        output: model.output_price,
-                        cache_read: model.cache_read_price,
-                        cache_write: model.cache_write_price,
-                    });
-                let cost = total + usage.estimated_cost(entry.pricing_for(catalog))?;
+                let profile = key.profile.as_deref().unwrap_or(&key.provider);
+                let pricing = resolve_model_pricing(
+                    settings.model_entry(profile, &key.model),
+                    key.provider_type(settings),
+                    settings.catalog.catalog.as_deref(),
+                    profile,
+                    &key.model,
+                );
+                let cost = total + usage.estimated_cost(pricing)?;
                 cost.is_finite().then_some(cost)
             })
     }

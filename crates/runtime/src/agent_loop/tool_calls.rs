@@ -1071,7 +1071,7 @@ impl LoopState {
 
 /// 標準ツール定義を返す。
 /// Web tools are filtered by role and the current Web tool switch.
-pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
+pub(crate) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpec> {
     let mut specs: Vec<_> = executor
         .tool_specs()
         .into_iter()
@@ -1085,7 +1085,7 @@ pub(super) fn standard_tool_specs(executor: &tools::ToolExecutor) -> Vec<ToolSpe
     specs
 }
 
-pub(super) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate::ModelFamily) {
+pub(crate) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate::ModelFamily) {
     if !matches!(
         family,
         crate::ModelFamily::Gpt5 | crate::ModelFamily::OpenAiReasoning
@@ -1106,7 +1106,7 @@ pub(super) fn append_subagent_context_note(specs: &mut [ToolSpec], family: crate
 /// Orchestrator/Worker に許可されているが、レジストリなしでは呼び出しが
 /// 必ず失敗するため、失敗前提の定義をモデルに見せない (model only sees
 /// tools that can work)。子 run では Direct 専用の escalate も除く。
-pub(super) fn visible_tool_specs(
+pub(crate) fn visible_tool_specs(
     specs: Vec<ToolSpec>,
     policy: &ExecutionPolicy,
     skills_configured: bool,

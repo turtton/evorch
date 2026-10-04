@@ -19,11 +19,12 @@ impl AgentModel for RecordingReviewer {
     async fn complete(
         &self,
         invocation: &crate::AgentInvocationContext,
-        _: Role,
+        role: Role,
         messages: &[Message],
         tools: &[providers::ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        assert_eq!(invocation.category.as_deref(), Some("quick"));
+        assert_eq!(role, Role::Reviewer);
+        assert_eq!(invocation.category.as_deref(), Some("tool-execution"));
         assert!(tools.is_empty());
         let [ContentBlock::Text { text }] = messages[1].content.as_slice() else {
             panic!("expected review JSON");

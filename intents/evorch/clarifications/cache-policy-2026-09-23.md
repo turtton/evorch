@@ -1,5 +1,8 @@
 # Cache-first: 出力境界と実測指標（2026-09-23）
 
+> 更新: GUI の主表示は [2026-10-03 の補足](cache-policy-2026-10-03.md) で retention に変更した。
+> 以下の指標定義・回帰判定は維持する。
+
 ## 背景・観測
 
 [ADR 0003](../decisions/0003-cache-first-context-engine.md) の append-only 要件と、

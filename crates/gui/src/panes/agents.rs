@@ -8,7 +8,7 @@ use crate::theme::tokens::{
     CELL_PAD_X, DOT_SIZE, ROW_DENSE, SP_1, SP_3, agent_phase_color, palette,
 };
 use crate::theme::widgets::{
-    empty_state, ghost, halo_dot, metric, pane_root, soft_frame, status_dot,
+    empty_state, ghost, halo_dot, metric, metric_detailed, pane_root, soft_frame, status_dot,
 };
 use egui::{Align, Button, Label, Layout};
 
@@ -19,6 +19,7 @@ pub enum AgentsAction {
     OpenPane(String),
     OpenDefaultPanes,
     OpenTask(String),
+    StopRun(String),
 }
 
 const HEADERS: [&str; 9] = [
@@ -103,6 +104,14 @@ pub fn agents_pane<S: AgentRunSource>(
                                 ui.label(muted("·"));
                             }
                             ui.label(muted(segment));
+                        }
+                        if let Some(rate) = value.cache_reuse.average_retention() {
+                            ui.label(muted("·"));
+                            let mut text = muted(format!("cache {rate:.1}%"));
+                            if value.cache_reuse.average_is_low() {
+                                text = text.color(palette().WARNING_FG);
+                            }
+                            ui.label(text).on_hover_text(value.cache_tooltip());
                         }
                         if let Some(ttft) = value.average_ttft_ms() {
                             ui.label(muted(format!(
@@ -334,6 +343,9 @@ pub fn subagents_pane<S: AgentRunSource>(
                                         }
                                     }
                                 }
+                                if stop_run_button(ui, &run_id, row.status) {
+                                    action = Some(AgentsAction::StopRun(run_id.clone()));
+                                }
                             });
                             if let Some(value) = telemetry.row(&run_id) {
                                 // Keep useful live activity (model/tool/compaction),
@@ -361,6 +373,50 @@ pub fn subagents_pane<S: AgentRunSource>(
     })
 }
 
+/// Each run has its own two-click confirmation, using egui's frame time.
+fn stop_run_button(ui: &mut egui::Ui, run_id: &str, phase: event_bus::AgentRunPhase) -> bool {
+    let id = ui.make_persistent_id(("stop-run-confirmation", run_id));
+    if !matches!(
+        phase,
+        event_bus::AgentRunPhase::Pending
+            | event_bus::AgentRunPhase::Running
+            | event_bus::AgentRunPhase::Waiting
+    ) {
+        ui.ctx().data_mut(|data| data.remove::<f64>(id));
+        return false;
+    }
+    let now = ui.input(|input| input.time);
+    let deadline = ui.ctx().data_mut(|data| {
+        let deadline = data.get_temp::<f64>(id);
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            data.remove::<f64>(id);
+            None
+        } else {
+            deadline
+        }
+    });
+    let text = if deadline.is_some() {
+        egui::RichText::new("Confirm?").color(palette().WARNING_FG)
+    } else {
+        muted("Stop")
+    };
+    let response = ui.add(ghost(text)).on_hover_text("Stop this agent run");
+    if response.clicked() {
+        if deadline.is_some() {
+            ui.ctx().data_mut(|data| data.remove::<f64>(id));
+            return true;
+        }
+        ui.ctx().data_mut(|data| data.insert_temp(id, now + 2.0));
+        ui.ctx().request_repaint();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(2));
+    } else if let Some(deadline) = deadline {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(deadline - now));
+    }
+    false
+}
+
 fn role_label(row: &TaskRow) -> String {
     match &row.category {
         Some(category) if row.role.eq_ignore_ascii_case("worker") => {
@@ -373,13 +429,19 @@ fn role_label(row: &TaskRow) -> String {
 fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
-        for label in [
-            metrics
+        metric(
+            ui,
+            &metrics
                 .cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-            metrics
-                .average_cache_hit_rate
-                .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.1}%")),
+        );
+        metric_detailed(
+            ui,
+            &metrics.cache_reuse.average_label(),
+            &metrics.cache_tooltip(),
+            metrics.cache_reuse.average_is_low(),
+        );
+        for label in [
             metrics.average_tok_s.map_or_else(
                 || "avg — tok/s".into(),
                 |rate| format!("avg {rate:.1} tok/s"),
@@ -394,4 +456,133 @@ fn render_run_metrics(ui: &mut egui::Ui, metrics: ThreadMetrics) {
             metric(ui, label);
         }
     });
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+    use event_bus::{AgentRunPhase, Event, LifecycleEvent};
+    use runtime::{AgentSummary, RunId};
+
+    struct Source(Vec<AgentSummary>);
+    impl AgentRunSource for Source {
+        fn list(&self) -> Vec<AgentSummary> {
+            self.0.clone()
+        }
+    }
+
+    type State = (TasksModel<Source>, Vec<AgentsAction>);
+
+    fn harness(phases: &[AgentRunPhase]) -> Harness<'static, State> {
+        let mut tasks = TasksModel::new(Source(
+            phases
+                .iter()
+                .enumerate()
+                .map(|(index, phase)| AgentSummary {
+                    run_id: RunId::new(index as u64 + 2),
+                    parent_run_id: Some(RunId::new(1)),
+                    name: format!("Agent {}", index + 2),
+                    role_name: "worker".into(),
+                    phase: *phase,
+                    model: "test".into(),
+                    category: None,
+                })
+                .collect(),
+        ));
+        tasks.refresh();
+        let run_ids: Vec<_> = tasks
+            .rows()
+            .iter()
+            .map(|row| row.run_id.to_string())
+            .collect();
+        Harness::builder()
+            .with_size(egui::vec2(1000.0, 1400.0))
+            .build_ui_state(
+                move |ui, (tasks, actions)| {
+                    if let Some(action) = subagents_pane(
+                        ui,
+                        tasks,
+                        &Default::default(),
+                        &Default::default(),
+                        &run_ids,
+                    ) {
+                        actions.push(action);
+                    }
+                },
+                (tasks, Vec::new()),
+            )
+    }
+
+    fn frame_at(harness: &mut Harness<'_, State>, time: f64) {
+        harness.input_mut().time = Some(time);
+        harness.step();
+    }
+
+    #[test]
+    fn subagents_stop_requires_two_clicks_on_the_same_live_run() {
+        let mut h = harness(&[
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+            AgentRunPhase::Waiting,
+            AgentRunPhase::Stopped,
+            AgentRunPhase::Done,
+            AgentRunPhase::Error,
+        ]);
+        frame_at(&mut h, 0.0);
+        assert_eq!(h.query_all_by_label("Stop").count(), 3);
+        h.query_all_by_label("Stop").next().unwrap().click();
+        frame_at(&mut h, 0.0);
+        frame_at(&mut h, 0.0);
+        h.query_all_by_label("Stop").next().unwrap().click();
+        frame_at(&mut h, 0.5);
+        frame_at(&mut h, 0.5);
+        assert_eq!(h.query_all_by_label("Confirm?").count(), 2);
+        assert!(h.state().1.is_empty());
+        h.query_all_by_label("Confirm?").next().unwrap().click();
+        frame_at(&mut h, 1.0);
+        frame_at(&mut h, 1.0);
+        assert_eq!(h.state().1, [AgentsAction::StopRun("run-2".into())]);
+        assert_eq!(h.query_all_by_label("Confirm?").count(), 1);
+    }
+
+    #[test]
+    fn subagents_stop_confirmation_expires_and_clears_on_terminal_state() {
+        let mut h = harness(&[AgentRunPhase::Running]);
+        frame_at(&mut h, 0.0);
+        h.get_by_label("Stop").click();
+        frame_at(&mut h, 0.0);
+        frame_at(&mut h, 1.99);
+        h.get_by_label("Confirm?");
+        frame_at(&mut h, 2.0);
+        h.get_by_label("Stop");
+        assert!(h.query_by_label("Confirm?").is_none());
+        h.get_by_label("Stop").click();
+        frame_at(&mut h, 2.0);
+        frame_at(&mut h, 2.0);
+        h.get_by_label("Confirm?");
+        assert!(h.state().1.is_empty());
+        h.state_mut()
+            .0
+            .apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Stopped,
+                reason: None,
+            }));
+        frame_at(&mut h, 2.5);
+        assert!(h.query_by_label("Stop").is_none());
+        assert!(h.query_by_label("Confirm?").is_none());
+        h.state_mut()
+            .0
+            .apply_event(&Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-2".into(),
+                from: AgentRunPhase::Stopped,
+                to: AgentRunPhase::Running,
+                reason: None,
+            }));
+        frame_at(&mut h, 2.5);
+        h.get_by_label("Stop");
+        assert!(h.query_by_label("Confirm?").is_none());
+    }
 }

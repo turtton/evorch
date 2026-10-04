@@ -119,6 +119,7 @@ pub(crate) async fn reclassify(model: &Arc<dyn AgentModel>, message: &str) -> Re
         category: None,
         model_preference: None,
         run_id: ENTRY_INVOCATION_RUN_ID.to_string(),
+        purpose: event_bus::RequestPurpose::Routing,
     };
 
     match model

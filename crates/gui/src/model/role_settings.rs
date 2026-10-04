@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
-/// 公開委譲カテゴリを設定側の共通定義から取得する。内部カテゴリは編集欄に出さない。
+/// 設定用の共通定義からカテゴリを取得する。shell 監査専用の reviewer 設定も含む。
 pub fn categories_for_role(
     role: &str,
-) -> impl Iterator<Item = config::agent_categories::PublicCategory> + '_ {
-    config::agent_categories::public_categories().filter(move |category| category.role == role)
+) -> impl Iterator<Item = config::agent_categories::SettingsCategory> + '_ {
+    config::agent_categories::settings_categories().filter(move |category| category.role == role)
 }
 
 /// モデルに effort_levels が未設定のときに提示する共通の推論強度一覧。

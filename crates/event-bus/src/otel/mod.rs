@@ -354,6 +354,7 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
                 operation_attrs(provider, model, profile.as_deref(), None),
             )],
             ProviderEvent::RequestStarted { .. }
+            | ProviderEvent::CacheReuseObserved { .. }
             | ProviderEvent::ProviderFallback { .. }
             | ProviderEvent::FallbackTriggered { .. } => Vec::new(),
         },
@@ -626,6 +627,8 @@ mod tests {
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
             run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
         })
     }
 
@@ -645,6 +648,7 @@ mod tests {
             duration_ms,
             failure,
             run_id: None,
+            purpose: None,
         })
     }
 
@@ -1196,6 +1200,8 @@ mod tests {
             cache_write_tokens: 0,
             finish_reason: "stop".to_owned(),
             run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
         })
     }
 

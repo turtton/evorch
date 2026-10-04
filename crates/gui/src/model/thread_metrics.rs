@@ -1,4 +1,4 @@
-use super::{TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
+use super::{CacheReuseSummary, TelemetryOverlay, TelemetryRow, ThreadMetrics, TokenUsage};
 use std::time::{Duration, Instant};
 
 impl ThreadMetrics {
@@ -15,7 +15,7 @@ impl ThreadMetrics {
             |ttft| format!("TTFT {}ms", ttft.as_millis()),
         );
         match self.average_ttft {
-            Some(average) => format!("{current} (Δ{}ms)", average.as_millis()),
+            Some(average) => format!("{current} (avg {}ms)", average.as_millis()),
             None => current,
         }
     }
@@ -25,19 +25,18 @@ impl ThreadMetrics {
             .tok_s
             .map_or_else(|| "— tok/s".into(), |rate| format!("{rate:.1} tok/s"));
         match self.average_tok_s {
-            Some(average) => format!("{current} (Δ{average:.1} tok/s)"),
+            Some(average) => format!("{current} (avg {average:.1} tok/s)"),
             None => current,
         }
     }
 
-    pub fn cache_hit_rate_label(&self) -> String {
-        let current = self
-            .cache_hit_rate
-            .map_or_else(|| "cache —".into(), |rate| format!("cache {rate:.0}%"));
-        match self.average_cache_hit_rate {
-            Some(average) => format!("{current} (Δ{average:.0}%)"),
-            None => current,
-        }
+    pub fn cache_label(&self) -> String {
+        self.cache_reuse.label()
+    }
+
+    pub fn cache_tooltip(&self) -> String {
+        self.cache_reuse
+            .tooltip(self.cache_hit_rate, self.average_cache_hit_rate)
     }
 }
 
@@ -110,6 +109,7 @@ impl TelemetryOverlay {
         let mut ttft_sum_ms = 0_u64;
         let mut ttft_count = 0_u64;
         let mut provider_duration = Duration::ZERO;
+        let mut cache_reuse = CacheReuseSummary::default();
         for row in roots.iter().copied() {
             has_usage |= row.latest_context.is_some();
             usage.input = usage.input.saturating_add(row.usage.input);
@@ -118,8 +118,10 @@ impl TelemetryOverlay {
             ttft_count = ttft_count.saturating_add(row.ttft_count);
             provider_duration = provider_duration.saturating_add(row.completed_request_duration);
             usage.cache_read = usage.cache_read.saturating_add(row.usage.cache_read);
+            cache_reuse.add_totals(&row.cache_reuse);
         }
         let latest = roots.into_iter().max_by_key(|row| row.context_order);
+        cache_reuse.latest = latest.and_then(|row| row.cache_reuse.latest);
         ThreadMetrics {
             cost: has_cost.then_some(cost_total),
             conversation_cost: has_conversation_cost.then_some(conversation_cost_total),
@@ -127,6 +129,7 @@ impl TelemetryOverlay {
                 .and_then(|row| row.latest_context.as_ref())
                 .map(|request| request.usage.cache_hit_rate()),
             average_cache_hit_rate: has_usage.then(|| usage.cache_hit_rate()),
+            cache_reuse,
             wall_time,
             context_pressure: latest.and_then(TelemetryRow::context_pressure),
             context_used_tokens: latest.and_then(TelemetryRow::context_used_tokens),

@@ -229,6 +229,7 @@ fn transport_attempt_failure_keeps_partial_display_with_retrying_notice() {
         duration_ms: 42,
         failure: event_bus::ProviderFailureKind::Transport,
         run_id: Some("stream".into()),
+        purpose: None,
     }));
 
     // Then: retrying Noticeが部分表示に続き、両transcriptが一致する。

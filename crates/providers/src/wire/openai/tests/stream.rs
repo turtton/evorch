@@ -99,6 +99,7 @@ fn stream_interpreter_emits_deltas_and_captures_completion_parts() {
                 output_tokens: 3,
                 cache_read_tokens: 2,
                 cache_write_tokens: 0,
+                reasoning_tokens: None,
             }),
             Some(FinishReason::ToolUse)
         )
@@ -191,6 +192,7 @@ fn assert_chunk_is_skipped_without_state_change(chunk: serde_json::Value) {
                 output_tokens: 3,
                 cache_read_tokens: 2,
                 cache_write_tokens: 0,
+                reasoning_tokens: None,
             }),
             Some(FinishReason::ToolUse)
         )

@@ -41,6 +41,63 @@ pub fn startup_snapshot(
     )
 }
 
+/// [`startup_snapshot`] が読む候補ファイルと、その採否。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRuleFile {
+    /// 候補ファイルのパス。
+    pub path: PathBuf,
+    /// `None` なら採用、`Some` なら除外理由。
+    pub excluded: Option<StartupRuleExclusion>,
+}
+
+/// startup rules から候補ファイルが除外される理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupRuleExclusion {
+    /// project が未承認のため project AGENTS.md を読まない。
+    ProjectUntrusted,
+}
+
+/// [`startup_snapshot`] と同じ採否規則で、存在する候補ファイルを列挙する (検査用)。
+///
+/// ファイルの読み込み・frontmatter 検証は行わないため、読み込み失敗の診断は
+/// [`startup_snapshot`] の marker 側にのみ現れる。
+pub fn startup_rule_files(
+    source: &RulesSource,
+    active_root: Option<&Path>,
+) -> Vec<StartupRuleFile> {
+    let mut files = Vec::new();
+    if let Some(directory) = source.user_rules_dir.as_deref() {
+        files.extend(
+            direct_markdown_files(directory)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|path| StartupRuleFile {
+                    path,
+                    excluded: None,
+                }),
+        );
+    }
+    if let Some(root) = active_root {
+        let path = root.join("AGENTS.md");
+        if path.is_file() {
+            files.push(StartupRuleFile {
+                path,
+                excluded: (source.trust != ProjectTrust::Approved)
+                    .then_some(StartupRuleExclusion::ProjectUntrusted),
+            });
+        }
+    }
+    if let Some(path) = source.user_agents_md.as_deref()
+        && path.is_file()
+    {
+        files.push(StartupRuleFile {
+            path: path.to_path_buf(),
+            excluded: None,
+        });
+    }
+    files
+}
+
 /// 成功したツール呼び出しの対象パスに適用されるルールを再読して生成する。
 pub fn after_successful_tools(session: &mut RulesSession, targets: &[PathBuf]) -> Option<String> {
     if session.source.trust != ProjectTrust::Approved || targets.is_empty() {

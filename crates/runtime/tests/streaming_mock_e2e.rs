@@ -60,6 +60,7 @@ async fn streaming_deltas_reach_bus_before_completion() {
         category: None,
         run_id: "stream-run".into(),
         model_preference: None,
+        purpose: Default::default(),
     };
     // When: drive the real model while independently receiving bus events.
     let completion = model.complete_streaming(&invocation, Role::Worker, &[], &[], &bus);

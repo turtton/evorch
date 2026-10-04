@@ -54,6 +54,7 @@ async fn streaming_falls_back_after_provider_retries_are_exhausted() {
         run_id: "session".into(),
         category: None,
         model_preference: None,
+        purpose: Default::default(),
     };
     // When
     let result = model

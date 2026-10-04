@@ -54,12 +54,21 @@ struct ResolvedKey {
 
 impl Keymap {
     /// 設定からキーマップを構築します。解決不能なキーは無視されます。
+    ///
+    /// 修飾なし Tab は composer の補完専用のため、旧既定の role 切替割当は無効化します。
     pub fn from_settings(settings: &KeybindSettings) -> Self {
         let bindings = settings
             .bindings
             .iter()
             .filter_map(|(action, chord)| {
                 let key = egui::Key::from_name(&chord.key)?;
+                if *action == KeyAction::CycleAgentRole
+                    && key == egui::Key::Tab
+                    && !chord.ctrl
+                    && !chord.alt
+                {
+                    return None;
+                }
                 Some((
                     *action,
                     ResolvedKey {
@@ -79,12 +88,7 @@ impl Keymap {
         for (action, resolved) in &self.bindings {
             if input.key_pressed(resolved.key)
                 && (input.modifiers.command || input.modifiers.ctrl) == resolved.ctrl
-                && (input.modifiers.shift == resolved.shift
-                    || (*action == KeyAction::CycleAgentRole
-                        && resolved.key == egui::Key::Tab
-                        && !resolved.ctrl
-                        && !resolved.alt
-                        && !resolved.shift))
+                && input.modifiers.shift == resolved.shift
                 && input.modifiers.alt == resolved.alt
             {
                 return Some(*action);

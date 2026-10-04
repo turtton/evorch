@@ -63,6 +63,7 @@ fn conversation(model: &str) -> Vec<ChatRequest> {
     .unwrap();
     request.observation = Some(ObservationContext {
         run_id: "stable-cache-prefix-conversation".into(),
+        purpose: Default::default(),
     });
     let mut turns = vec![request.clone()];
 

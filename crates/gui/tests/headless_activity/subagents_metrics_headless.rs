@@ -1,6 +1,8 @@
 use config::{Config, ModelEntryConfig, ProviderProfileConfig};
 use egui_kittest::{Harness, kittest::Queryable};
-use event_bus::{AgentRunPhase, Event, LifecycleEvent, ProviderEvent};
+use event_bus::{
+    AgentRunPhase, CacheBaselineMissing, CacheComparison, Event, LifecycleEvent, ProviderEvent,
+};
 use gui::model::{
     provider_settings::ProviderSettingsModel,
     tasks::{AgentRunSource, TasksModel},
@@ -32,7 +34,8 @@ fn request(
     telemetry: &mut TelemetryOverlay,
     run: &str,
     input: u64,
-    cached: u64,
+    // Cache read tokens and the compared previous request's cache, if any.
+    (cached, previous_cache): (u64, Option<u64>),
     output: u64,
     ttft_ms: u64,
     duration_ms: u64,
@@ -44,6 +47,20 @@ fn request(
         protocol: "fixture".into(),
         model: "model".into(),
         ttft_ms,
+        run_id: Some(run.into()),
+    }));
+    telemetry.apply_event(&Event::new(ProviderEvent::CacheReuseObserved {
+        request_id: format!("{run}-{ttft_ms}"),
+        cache_read_tokens: cached,
+        comparison: match previous_cache {
+            Some(previous_cache_tokens) => CacheComparison::Compared {
+                previous_request_id: format!("{run}-previous"),
+                previous_cache_tokens,
+            },
+            None => CacheComparison::NoBaseline {
+                reason: CacheBaselineMissing::NoPreviousRequest,
+            },
+        },
         run_id: Some(run.into()),
     }));
     telemetry.apply_event(&Event::new(ProviderEvent::RequestCompleted {
@@ -60,6 +77,8 @@ fn request(
         cache_write_tokens: 0,
         finish_reason: "tool_use".into(),
         run_id: Some(run.into()),
+        purpose: None,
+        reasoning_tokens: None,
     }));
 }
 
@@ -91,9 +110,26 @@ fn subagents_cards_show_only_their_own_cost_cache_and_request_averages() {
             role: "worker".into(),
         }));
     }
-    request(&mut telemetry, "run-1", 1_000, 0, 80, 100, 1_000);
-    request(&mut telemetry, "run-1", 3_000, 3_000, 60, 500, 3_000);
-    request(&mut telemetry, "run-2", 10_000, 10_000, 1_000, 900, 2_000);
+    // run-1 warms up (billed 0% then 100%); run-2 reads half of its previous cache.
+    request(&mut telemetry, "run-1", 1_000, (0, None), 80, 100, 1_000);
+    request(
+        &mut telemetry,
+        "run-1",
+        3_000,
+        (3_000, Some(1_000)),
+        60,
+        500,
+        3_000,
+    );
+    request(
+        &mut telemetry,
+        "run-2",
+        10_000,
+        (10_000, Some(20_000)),
+        1_000,
+        900,
+        2_000,
+    );
     let mut config = Config::default();
     let mut model = ModelEntryConfig::enabled("model");
     model.input_price = Some(100.0);
@@ -111,12 +147,17 @@ fn subagents_cards_show_only_their_own_cost_cache_and_request_averages() {
     let mut harness = harness(telemetry);
     harness.run_steps(4);
     let child_top = harness.get_by_label("worker-2").rect().top();
-    for label in ["$0.414", "cache 75.0%", "avg 35.0 tok/s", "avg TTFT 300ms"] {
+    for label in [
+        "$0.414",
+        "avg cache 100.0%",
+        "avg 35.0 tok/s",
+        "avg TTFT 300ms",
+    ] {
         assert!(harness.get_by_label(label).rect().bottom() < child_top);
     }
     for label in [
         "$1.100",
-        "cache 100.0%",
+        "avg cache 50.0%",
         "avg 500.0 tok/s",
         "avg TTFT 900ms",
     ] {
@@ -128,7 +169,7 @@ fn subagents_cards_show_only_their_own_cost_cache_and_request_averages() {
 fn subagents_cards_keep_unknown_metrics_distinct_from_zero() {
     let mut harness = harness(TelemetryOverlay::new());
     harness.run_steps(4);
-    for label in ["$—", "cache —", "avg — tok/s", "avg TTFT —"] {
+    for label in ["$—", "avg cache —", "avg — tok/s", "avg TTFT —"] {
         assert_eq!(harness.query_all_by_label(label).count(), 2, "{label}");
     }
 }

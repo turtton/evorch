@@ -35,9 +35,11 @@ fn narrow_conversation_keeps_message_input_and_send_inside_its_width() {
                             model_picker: gui::panes::model_picker::ModelPickerContext {
                                 profiles: &[],
                                 preference: None,
+                                default_model: None,
                                 enabled: false,
                             },
                             sandbox_picker: Default::default(),
+                            branch: None,
                         },
                         &mut state.0,
                         &mut state.1,
@@ -324,9 +326,11 @@ fn multiline_composer_grows_upward_and_shrinks_without_covering_the_transcript()
                         model_picker: gui::panes::model_picker::ModelPickerContext {
                             profiles: &[],
                             preference: None,
+                            default_model: None,
                             enabled: false,
                         },
                         sandbox_picker: Default::default(),
+                        branch: None,
                     },
                     &mut state.0,
                     &mut state.1,

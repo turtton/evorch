@@ -30,7 +30,10 @@ async fn cache_key_is_serialized_when_run_is_set_and_omitted_otherwise() {
     let client = client(&server, Duration::from_secs(1), None);
     for run in [Some("run-cache-affinity"), None] {
         let mut input = request();
-        input.observation = run.map(|id| providers::ObservationContext { run_id: id.into() });
+        input.observation = run.map(|id| providers::ObservationContext {
+            run_id: id.into(),
+            purpose: Default::default(),
+        });
         // When: sent through the real HTTP adapter.
         client
             .send(&ProviderAuth::new("sk-contract"), &input)
@@ -134,6 +137,7 @@ fn expected_usage() -> Usage {
         output_tokens: 7,
         cache_read_tokens: 3,
         cache_write_tokens: 0,
+        reasoning_tokens: None,
     }
 }
 

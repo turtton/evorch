@@ -15,6 +15,7 @@
 //!   role → model 解決を行わない。edge の [`compose`] が設定・routing・provider を接続する。
 
 mod agent_loop;
+pub mod base_context;
 pub mod budget_tracker;
 pub(crate) mod compaction;
 pub mod compose;
@@ -66,6 +67,7 @@ pub use entry_routing::{
 pub use error::{RunRestoreFailure, RuntimeError};
 pub use escalation::{EscalationMemo, EscalationSettings};
 pub use event_bus::{AgentRunPhase, RoutingSource};
+pub use restore::ChatForkSeed;
 // Role は delegate API の引数型として既に露出しており、呼出側が agents crate 直接依存なしに使えるようにする。
 pub use agents::Role;
 pub use mailbox::{MAILBOX_CAPACITY, RunMailbox};
