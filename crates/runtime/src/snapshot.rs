@@ -1,8 +1,9 @@
 //! Workspace snapshots stored outside the user's repository metadata.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
+mod benchmark;
 mod history;
 mod service;
 pub use history::SnapshotHistory;
@@ -12,6 +13,12 @@ pub use service::{SnapshotService, WorkspaceSnapshotGuard, WorkspaceSnapshots};
 pub struct SnapshotId(String);
 
 impl SnapshotId {
+    pub fn from_hex(value: String) -> Result<Self, SnapshotError> {
+        if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(SnapshotError::Git("invalid snapshot object id".into()));
+        }
+        Ok(Self(value))
+    }
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -85,18 +92,47 @@ impl SnapshotStore {
     }
 
     pub fn diff(&self, before: &SnapshotId, after: &SnapshotId) -> Result<String, SnapshotError> {
-        let output = self.git(&[
+        let before_tree = self.file_tree(before)?;
+        let after_tree = self.file_tree(after)?;
+        let benchmark = &before_tree != before || &after_tree != after;
+        let arguments = [
             "diff",
             "--no-ext-diff",
             "--no-textconv",
-            before.as_str(),
-            after.as_str(),
+            before_tree.as_str(),
+            after_tree.as_str(),
             "--",
-        ])?;
+        ];
+        let output = if benchmark {
+            self.benchmark_git(&arguments, None)?
+        } else {
+            self.git(&arguments)?
+        };
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn git(&self, arguments: &[&str]) -> Result<Output, SnapshotError> {
+        self.git_input(arguments, None)
+    }
+
+    fn git_input(&self, arguments: &[&str], input: Option<&[u8]>) -> Result<Output, SnapshotError> {
+        self.git_options(arguments, input, false)
+    }
+
+    fn benchmark_git(
+        &self,
+        arguments: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<Output, SnapshotError> {
+        self.git_options(arguments, input, true)
+    }
+
+    fn git_options(
+        &self,
+        arguments: &[&str],
+        input: Option<&[u8]>,
+        benchmark: bool,
+    ) -> Result<Output, SnapshotError> {
         let mut command = Command::new("git");
         // Inherited GIT_INDEX_FILE/GIT_COMMON_DIR must never redirect writes to user metadata.
         for (name, _) in std::env::vars_os() {
@@ -104,7 +140,7 @@ impl SnapshotStore {
                 command.env_remove(name);
             }
         }
-        let output = command
+        command
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .arg("--git-dir")
@@ -112,9 +148,28 @@ impl SnapshotStore {
             .arg("--work-tree")
             .arg(&self.root)
             .args(["-c", "core.hooksPath=/dev/null"])
-            .current_dir(&self.root)
-            .args(arguments)
-            .output()?;
+            .current_dir(&self.root);
+        if benchmark {
+            command.env("GIT_ATTR_NOSYSTEM", "1").args([
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.attributesFile=/dev/null",
+            ]);
+        }
+        command.args(arguments);
+        let output = if let Some(input) = input {
+            use std::io::Write;
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            child.stdin.take().expect("piped stdin").write_all(input)?;
+            child.wait_with_output()?
+        } else {
+            command.output()?
+        };
         if output.status.success() {
             Ok(output)
         } else {

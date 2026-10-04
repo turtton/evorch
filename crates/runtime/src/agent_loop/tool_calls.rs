@@ -366,6 +366,10 @@ impl LoopState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
     ) -> bool {
+        if let Err(error) = self.benchmark_tools_supported(&tool_uses) {
+            self.finish_error(error.to_string());
+            return false;
+        }
         let ctx = ToolExecutionContext {
             run_id: self.task.run_id.to_string(),
             // THREAD_ID_SEAM: RunTask currently carries run identity only.

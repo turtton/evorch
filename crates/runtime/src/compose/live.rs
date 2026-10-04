@@ -40,6 +40,21 @@ impl SwitchableModel {
 
 #[async_trait]
 impl AgentModel for SwitchableModel {
+    fn benchmark_settings(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+    ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
+        self.current().benchmark_settings(invocation, role, tools)
+    }
+
+    fn freeze_for_benchmark(
+        self: Arc<Self>,
+        settings: crate::benchmark::BenchmarkModelSettings,
+    ) -> Result<Arc<dyn AgentModel>, RuntimeError> {
+        self.current().freeze_for_benchmark(settings)
+    }
     fn requires_admission(&self) -> bool {
         self.current().requires_admission()
     }

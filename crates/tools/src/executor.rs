@@ -24,6 +24,7 @@ use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write}
 
 mod prepared;
 mod specs;
+mod workspace_boundary;
 pub use prepared::{PreparedToolCall, ValidatedToolCall};
 pub use specs::ToolSpec;
 
@@ -72,6 +73,7 @@ pub struct ToolExecutor {
     /// 利用者の承認応答を待つ任意のゲート。
     gate: Option<ApprovalGate>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
+    workspace_boundary: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl ToolExecutor {
@@ -83,6 +85,7 @@ impl ToolExecutor {
             policy: ApprovalPolicy::allow_all(),
             gate: None,
             default_cwd: RwLock::new(None),
+            workspace_boundary: RwLock::new(None),
         }
     }
 
@@ -149,6 +152,14 @@ impl ToolExecutor {
             executor.set_default_cwd(cwd);
         }
         executor
+    }
+
+    /// Return the trusted workspace used to resolve relative tool arguments.
+    pub fn default_cwd(&self) -> Option<std::path::PathBuf> {
+        self.default_cwd
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
@@ -433,6 +444,16 @@ impl ToolExecutor {
             return Err(error);
         }
 
+        if let Err(error) =
+            self.validate_workspace_args(tool_name, &args, registered.tool.permissions())
+        {
+            if let ToolError::ExecutionDenied { reason, .. } = &error {
+                return self.deny(ctx, tool_name, call_id, reason);
+            }
+            self.emit_completed(ctx, tool_name, call_id, Err(&error));
+            return Err(error);
+        }
+
         let permissions = registered.tool.permissions();
         let capabilities = capabilities_of(&permissions);
         let action = authorized.unwrap_or_else(|| {
@@ -506,6 +527,10 @@ impl ToolExecutor {
                 // 由来はツールの申告ではなく権限宣言から機械導出して上書きする (AC5)。
                 // detail はサーバー制御の文字列を含み得るため本文と同様にエスケープする。
                 result = crate::output::limit_result(result);
+                if let Err(error) = self.isolate_output_artifact(&mut result) {
+                    self.emit_completed(ctx, tool_name, call_id, Err(&error));
+                    return Err(error);
+                }
                 result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);

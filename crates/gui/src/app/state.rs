@@ -235,6 +235,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
         };
+        // Older saved layouts contain the former automatically registered tab.
+        let arena = PanelId::new("arena-main");
+        if state
+            .panels
+            .get(&arena)
+            .is_some_and(|panel| panel.kind == PanelKind::Arena)
+        {
+            while let Some(path) = state.dock.find_tab(&arena) {
+                state.dock.remove_tab(path);
+            }
+            state.panels.remove(&arena);
+        }
         state.tasks.refresh();
         state.register_work_panels();
         Ok(state)
@@ -254,7 +266,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // preserve that schema and dispatch by this distinct ID in the viewer.
             ("self-improvement-main", PanelKind::Memory),
             ("tasks-main", PanelKind::Tasks),
-            ("arena-main", PanelKind::Arena),
         ] {
             let id = PanelId::new(id);
             if self.dock.find_tab(&id).is_none() {

@@ -1871,12 +1871,14 @@ name = "evorch"
 version = "0.1.0"
 dependencies = [
  "agents",
+ "async-trait",
  "config",
  "event-bus",
  "mock-openai",
  "routing",
  "runtime",
  "sandbox",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
