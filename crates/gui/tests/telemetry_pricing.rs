@@ -39,6 +39,8 @@ fn completed(model: &str) -> Event {
         cache_write_tokens: 1_700,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     })
 }
 
@@ -87,6 +89,8 @@ fn run_cost_survives_when_another_priced_model_has_zero_usage() {
         cache_write_tokens: 0,
         finish_reason: "stop".into(),
         run_id: Some("run-1".into()),
+        purpose: None,
+        reasoning_tokens: None,
     }));
     assert_eq!(overlay.estimated_cost("run-1", &settings), Some(0.03995));
     overlay.refresh_costs(&settings);
@@ -221,7 +225,19 @@ fn capture_telemetry_cost_png() {
         .expect("state")
         .with_sidebar(sidebar)
         .with_provider_settings(settings());
-    state.apply_events([completed("model")]);
+    // The billed ratio is 80%; retention compares against an 80K-token previous cache.
+    state.apply_events([
+        Event::new(ProviderEvent::CacheReuseObserved {
+            request_id: "model".into(),
+            cache_read_tokens: 78_300,
+            comparison: event_bus::CacheComparison::Compared {
+                previous_request_id: "previous".into(),
+                previous_cache_tokens: 80_000,
+            },
+            run_id: Some("run-1".into()),
+        }),
+        completed("model"),
+    ]);
     let path = state
         .dock()
         .find_tab(&workspace_ui::PanelId::new("agent-main"))
@@ -233,7 +249,7 @@ fn capture_telemetry_cost_png() {
     let mut harness = HeadlessWorkbench::new(state, [1280.0, 720.0]);
     harness.run();
     assert!(harness.has_label("$0.041"));
-    assert!(harness.has_label("cache 80% (Δ80%)"));
+    assert!(harness.has_label("cache 98% (avg 98%)"));
     if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
         let path = std::env::var_os("EVORCH_TELEMETRY_PNG")
             .map(std::path::PathBuf::from)

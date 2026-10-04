@@ -57,7 +57,7 @@ pub enum ConfigError {
     #[error(
         "unknown agent category `{category}` for role `{role}`, expected one of: {}",
         crate::agent_categories::categories_for_role(role)
-            .map(|category| category.name)
+            .map(|category| category.id.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     )]

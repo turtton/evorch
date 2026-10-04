@@ -29,6 +29,8 @@ pub struct AgentInvocationContext {
     pub run_id: String,
     pub model_preference: Option<ModelPreference>,
     pub category: Option<String>,
+    /// 呼び出しの目的。provider 観測イベントへ写し、usage 集計で付随コストを区別する。
+    pub purpose: event_bus::RequestPurpose,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -151,6 +153,16 @@ pub trait AgentModel: Send + Sync {
     fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
         Vec::new()
     }
+
+    /// Logical model and generation overrides the role binding resolves to, for inspection.
+    /// Fixed models have no binding and return `None`.
+    fn binding_preview(
+        &self,
+        _role: Role,
+        _category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +249,7 @@ mod tests {
             category: None,
             run_id: "run-1".to_string(),
             model_preference: None,
+            purpose: Default::default(),
         };
         let response = model
             .complete(&invocation, Role::Worker, &history, &[])

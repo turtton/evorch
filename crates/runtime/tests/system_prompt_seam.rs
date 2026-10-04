@@ -99,7 +99,7 @@ async fn orchestrator_delegate_script(model: &ScriptedModel, category: &str, clo
         Ok(tool_response(
             "delegate-worker",
             "delegate",
-            json!({ "background": true, "role": "worker", "prompt": "W1", "category": category }),
+            json!({"target": {"role": "worker", "category": category}, "background": true, "prompt": "W1"}),
         )),
         Ok(text_response(closing, FinishReason::Stop)),
     ];

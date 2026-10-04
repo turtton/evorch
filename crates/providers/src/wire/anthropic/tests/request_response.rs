@@ -165,7 +165,8 @@ fn wire_response_converts_to_canonical_response() {
                 input_tokens: 19,
                 output_tokens: 7,
                 cache_read_tokens: 3,
-                cache_write_tokens: 5
+                cache_write_tokens: 5,
+                reasoning_tokens: None,
             },
             finish_reason: FinishReason::ToolUse,
         }
@@ -215,6 +216,7 @@ fn canonical_input_includes_cache_reads_and_writes_once() {
                 output_tokens: 7,
                 cache_read_tokens: read,
                 cache_write_tokens: write,
+                reasoning_tokens: None,
             }
         );
     }

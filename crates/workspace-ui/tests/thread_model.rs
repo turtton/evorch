@@ -77,6 +77,34 @@ fn thread_state_precedence_stopped_error_running_waiting_done_active() {
 }
 
 #[test]
+fn current_root_state_ignores_historical_roots_and_children() {
+    let mut thread =
+        workspace_ui::ThreadRecord::new(ThreadId::new("t1"), ProjectId::new("p1"), "Thread");
+    thread.run_ids = vec!["old-root".into(), "root".into(), "child".into()];
+    thread.root_run_id = Some("root".into());
+    let mut phases = BTreeMap::from([
+        ("old-root".into(), ThreadRunPhase::Error),
+        ("child".into(), ThreadRunPhase::Stopped),
+    ]);
+    assert_eq!(thread.state(&phases), ThreadState::Active);
+    for (phase, expected) in [
+        (ThreadRunPhase::Pending, ThreadState::Running),
+        (ThreadRunPhase::Running, ThreadState::Running),
+        (ThreadRunPhase::Waiting, ThreadState::Waiting),
+        (ThreadRunPhase::Done, ThreadState::Done),
+        (ThreadRunPhase::Stopped, ThreadState::Stopped),
+        (ThreadRunPhase::Error, ThreadState::Error),
+    ] {
+        phases.insert("root".into(), phase);
+        assert_eq!(thread.state(&phases), expected);
+    }
+    let saved = serde_json::to_string(&thread).unwrap();
+    let restored: workspace_ui::ThreadRecord = serde_json::from_str(&saved).unwrap();
+    assert_eq!(restored.root_run_id.as_deref(), Some("root"));
+    assert_eq!(restored.run_ids, thread.run_ids);
+}
+
+#[test]
 fn thread_creation_rejects_unknown_project() {
     // Given: an empty sidebar.
     let mut sidebar = SidebarState::default();

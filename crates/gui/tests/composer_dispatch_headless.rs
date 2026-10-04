@@ -386,6 +386,7 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
     assert_eq!(
         harness.state().issued(),
         &[WorkbenchCommand::SendChat(ChatSubmission {
+            fork_seed: None,
             composer_role: gui::model::composer::ComposerRole::Worker,
             images: Vec::new(),
             thread_id: "thread-1".into(),

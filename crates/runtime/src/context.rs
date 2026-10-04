@@ -16,7 +16,27 @@ pub struct CompactionCheckpoint {
     /// 表示窓の切替位置へ挿入するユーザーロールの要約メッセージ。
     pub summary: Message,
     /// 表示窓で `summary` に置換する raw message index の半開区間 `[start, end)`。
+    /// 範囲内の System メッセージは要約直前に原文・順序を保って残す。
     pub range: (usize, usize),
+}
+
+impl CompactionCheckpoint {
+    /// Keep durable instructions even when they were appended after conversation
+    /// history, such as a workspace note added while restoring a run.
+    pub(crate) fn project(&self, messages: &[Message]) -> Vec<Message> {
+        let (start, end) = self.range;
+        let mut visible = Vec::with_capacity(messages.len() - (end - start) + 1);
+        visible.extend_from_slice(&messages[..start]);
+        visible.extend(
+            messages[start..end]
+                .iter()
+                .filter(|message| message.role == MessageRole::System)
+                .cloned(),
+        );
+        visible.push(self.summary.clone());
+        visible.extend_from_slice(&messages[end..]);
+        visible
+    }
 }
 
 /// 単一 AgentRun の会話コンテキスト。
@@ -71,21 +91,6 @@ impl AgentContext {
                 text: text.to_string(),
             }],
         });
-    }
-
-    /// Add a workspace prefix to restored context without moving checkpoint meaning.
-    pub(crate) fn prepend_system(&mut self, text: String) {
-        self.messages.insert(
-            0,
-            Message {
-                role: MessageRole::System,
-                content: vec![ContentBlock::Text { text }],
-            },
-        );
-        for checkpoint in &mut self.checkpoints {
-            checkpoint.range.0 += 1;
-            checkpoint.range.1 += 1;
-        }
     }
 
     /// ユーザー発話を履歴に追加する。
@@ -149,12 +154,7 @@ impl AgentContext {
         let Some(checkpoint) = self.latest_checkpoint() else {
             return self.messages.clone();
         };
-        let (start, end) = checkpoint.range;
-        let mut visible = Vec::with_capacity(self.messages.len() - (end - start) + 1);
-        visible.extend_from_slice(&self.messages[..start]);
-        visible.push(checkpoint.summary.clone());
-        visible.extend_from_slice(&self.messages[end..]);
-        visible
+        checkpoint.project(&self.messages)
     }
 }
 
@@ -182,19 +182,6 @@ mod tests {
             },
             range,
         }
-    }
-
-    #[test]
-    fn workspace_prefix_preserves_restored_checkpoint_ranges() {
-        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
-        context.push_user("old");
-        context.push_assistant(assistant_text("answer"));
-        context.push_user("recent");
-        context.apply_checkpoint(summary_checkpoint("checkpoint", (0, 2), "summary"));
-        let before = context.visible_messages();
-        context.prepend_system("workspace".into());
-        assert_eq!(context.latest_checkpoint().unwrap().range, (1, 3));
-        assert_eq!(&context.visible_messages()[1..], before.as_slice());
     }
 
     // Given: run-1 の Worker ロール / When: new で生成 / Then: 履歴は空
@@ -350,28 +337,53 @@ mod tests {
         assert_eq!(visible, vec![context.messages[0].clone(), latest.summary]);
     }
 
-    // Given: 保護された System prefix を持つ raw 履歴 / When: 内部範囲を要約 / Then: 先頭の System メッセージは byte-identical に残る
+    // Instructions before, inside and after a restored checkpoint all remain
+    // verbatim and ordered, including after a later compaction replaces it.
     #[test]
-    fn visible_messages_preserves_protected_system_prefix_for_interior_checkpoint() {
+    fn restored_checkpoints_preserve_all_system_messages_without_resurrecting_history() {
         let mut context = AgentContext::new(RunId::new(1), Role::Worker);
-        context.push_system("この指示は保存する");
-        context.push_user("古い依頼");
+        context.push_system("最初の指示");
+        context.push_user("目的");
         context.push_assistant(assistant_text("古い応答"));
+        context.push_system("追加の workspace 指示");
+        context.push_user("次の依頼");
+        context.push_assistant(assistant_text("次の応答"));
+        context.push_system("後続の指示");
         context.push_user("最新の依頼");
-        let protected_system = context.messages[0].clone();
-        let checkpoint = summary_checkpoint("ckpt-run-1-1", (1, 3), "古い会話の要約");
-
-        context.apply_checkpoint(checkpoint.clone());
-        let visible = context.visible_messages();
-
-        assert_eq!(visible[0], protected_system);
-        assert_eq!(
-            visible,
-            vec![
-                protected_system,
-                checkpoint.summary,
-                context.messages[3].clone()
-            ]
+        let raw = context.messages.clone();
+        let first = summary_checkpoint("ckpt-run-1-1", (2, 4), "最初の要約");
+        let mut restored = AgentContext::from_restored(
+            context.run_id,
+            context.role,
+            raw.clone(),
+            vec![first.clone()],
         );
+        assert_eq!(
+            restored.visible_messages(),
+            vec![
+                raw[0].clone(),
+                raw[1].clone(),
+                raw[3].clone(),
+                first.summary,
+                raw[4].clone(),
+                raw[5].clone(),
+                raw[6].clone(),
+                raw[7].clone(),
+            ],
+        );
+        let latest = summary_checkpoint("ckpt-run-1-2", (2, 7), "全体の要約");
+        restored.apply_checkpoint(latest.clone());
+        assert_eq!(
+            restored.visible_messages(),
+            vec![
+                raw[0].clone(),
+                raw[1].clone(),
+                raw[3].clone(),
+                raw[6].clone(),
+                latest.summary,
+                raw[7].clone()
+            ],
+        );
+        assert_eq!(restored.messages, raw);
     }
 }

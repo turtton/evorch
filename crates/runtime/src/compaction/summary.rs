@@ -139,6 +139,7 @@ impl ModelSummarizer {
             category: self.category.clone(),
             model_preference: self.model_preference.clone(),
             run_id: self.run_id.clone(),
+            purpose: event_bus::RequestPurpose::Compaction,
         };
         // A private bus keeps summary reasoning/text out of the conversation UI.
         // Streaming avoids the non-streaming provider's whole-request timeout.

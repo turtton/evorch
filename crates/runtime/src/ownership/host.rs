@@ -262,33 +262,45 @@ fn serve(
             Err(_) => break,
         }
         if heartbeat.elapsed() >= Duration::from_millis(settings.heartbeat_ms.get()) {
-            if let Ok(owners) = registry.list() {
-                for owner in owners.into_iter().filter(|owner| {
-                    owner.lease.owner_id == id && owner.state != OwnerState::Released
-                }) {
-                    let result = registry.update(&owner.thread_id, |state| {
-                        state.validate(&owner.lease)?;
-                        if state.state == OwnerState::Quiescing
-                            && !state.active_turn
-                            && !release_deferred.load(Ordering::SeqCst)
-                        {
-                            state.release(&owner.lease)?;
-                        } else {
-                            state.heartbeat(&owner.lease, now_ms())?;
-                        }
-                        Ok(())
-                    });
-                    if let Ok(changed) = result {
-                        emit(
-                            bus,
-                            &changed,
-                            if changed.state == OwnerState::Released {
-                                OwnershipAction::Released
+            match registry.list() {
+                Ok(owners) => {
+                    for owner in owners.into_iter().filter(|owner| {
+                        owner.lease.owner_id == id && owner.state != OwnerState::Released
+                    }) {
+                        let result = registry.update(&owner.thread_id, |state| {
+                            state.validate(&owner.lease)?;
+                            if state.state == OwnerState::Quiescing
+                                && !state.active_turn
+                                && !release_deferred.load(Ordering::SeqCst)
+                            {
+                                state.release(&owner.lease)?;
                             } else {
-                                OwnershipAction::Heartbeat
-                            },
-                        );
+                                state.heartbeat(&owner.lease, now_ms())?;
+                            }
+                            Ok(())
+                        });
+                        match result {
+                            Ok(changed) => emit(
+                                bus,
+                                &changed,
+                                if changed.state == OwnerState::Released {
+                                    OwnershipAction::Released
+                                } else {
+                                    OwnershipAction::Heartbeat
+                                },
+                            ),
+                            Err(error) => tracing::warn!(
+                                thread_id = %owner.thread_id,
+                                owner_id = %owner.lease.owner_id,
+                                generation = owner.lease.generation,
+                                %error,
+                                "owner heartbeat update failed"
+                            ),
+                        }
                     }
+                }
+                Err(error) => {
+                    tracing::warn!(owner_id = %id, %error, "owner heartbeat registry scan failed")
                 }
             }
             heartbeat = std::time::Instant::now();

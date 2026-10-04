@@ -813,13 +813,19 @@ impl AgentRuntime {
         if let Some(permit) = &mut config.ownership {
             permit.run_id = Some(run_id.to_string());
             let token = permit.clone();
-            self.shared.bus.register_mutation_guard(
+            let nonblocking_token = permit.clone();
+            self.shared.bus.register_nonblocking_mutation_guard(
                 run_id.to_string(),
                 Arc::new(move || {
                     token
                         .mutation_guard()
                         .ok()
                         .map(|guard| Box::new(guard) as Box<dyn event_bus::MutationGuard>)
+                }),
+                Arc::new(move || match nonblocking_token.try_mutation_guard() {
+                    Ok(Some(guard)) => event_bus::MutationGuardAttempt::Acquired(Box::new(guard)),
+                    Ok(None) => event_bus::MutationGuardAttempt::Busy,
+                    Err(_) => event_bus::MutationGuardAttempt::Rejected,
                 }),
             );
         }

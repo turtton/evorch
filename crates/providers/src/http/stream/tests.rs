@@ -60,6 +60,7 @@ impl FakeInterpreter {
                     output_tokens: 5,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    reasoning_tokens: None,
                 },
                 FinishReason::Stop,
             )),
@@ -197,6 +198,7 @@ async fn sse_chunks_flow_as_ordered_events_then_completed() {
         output_tokens: 5,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        reasoning_tokens: None,
     };
     assert_eq!(
         items,

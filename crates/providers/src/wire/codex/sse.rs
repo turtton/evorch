@@ -198,12 +198,20 @@ struct ResponseUsage {
     output_tokens: u64,
     #[serde(default)]
     input_tokens_details: InputTokenDetails,
+    #[serde(default)]
+    output_tokens_details: OutputTokenDetails,
 }
 
 #[derive(Deserialize, Default)]
 struct InputTokenDetails {
     #[serde(default)]
     cached_tokens: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct OutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 impl From<ResponseUsage> for Usage {
@@ -213,6 +221,7 @@ impl From<ResponseUsage> for Usage {
             output_tokens: value.output_tokens,
             cache_read_tokens: value.input_tokens_details.cached_tokens,
             cache_write_tokens: 0,
+            reasoning_tokens: value.output_tokens_details.reasoning_tokens,
         }
     }
 }

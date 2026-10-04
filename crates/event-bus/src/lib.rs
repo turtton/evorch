@@ -2,7 +2,10 @@
 
 pub mod bus;
 mod fencing;
-pub use fencing::{MutationCheck, MutationGuard, MutationGuardCheck, MutationValidator};
+pub use fencing::{
+    MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
+    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
+};
 pub mod event;
 pub mod orchestrator;
 pub mod ownership;
@@ -13,12 +16,13 @@ pub mod usage;
 
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, CompactionEvent,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase,
+    CACHE_RETENTION_WARNING_THRESHOLD, CacheBaselineMissing, CacheComparison, CompactionEvent,
     CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
     FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent, ToolEvent,
-    UsageEvent, UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
+    RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION, SkillDiagnosticKind, SnapshotEvent,
+    ToolEvent, UsageEvent, UserQuestion, WindowSource, WorkspaceLockHolder, WorkspaceWait,
 };
 pub use orchestrator::{
     ApprovalDecision, CiState, CloseoutStep, CriterionCheck, CriterionStatus, GateEvidence,

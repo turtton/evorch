@@ -45,6 +45,10 @@ pub enum PanelKind {
     Notifications,
     Memory,
     Arena,
+    /// Token usage statistics, opened from the footer.
+    Usage,
+    /// Base context inspector for orchestrator and worker runs.
+    ContextInspector,
 }
 
 impl PanelKind {
@@ -65,6 +69,8 @@ impl PanelKind {
             Self::Notifications => "Notifications",
             Self::Memory => "Memory",
             Self::Arena => "Arena",
+            Self::Usage => "Usage",
+            Self::ContextInspector => "Context",
         }
     }
 }

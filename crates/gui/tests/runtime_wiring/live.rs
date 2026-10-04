@@ -69,6 +69,7 @@ worker = [{{ profile = "live" }}]
                 category: None,
                 run_id: "gui-chat".into(),
                 model_preference: None,
+                purpose: Default::default(),
             },
             Role::Worker,
             &[Message {

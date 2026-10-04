@@ -42,7 +42,7 @@ impl Default for HardLimits {
             max_session_bytes: 67_108_864,
             max_daily_event_bytes: 268_435_456,
             max_wal_bytes: 67_108_864,
-            max_db_bytes: 1_073_741_824,
+            max_db_bytes: 10 * 1024 * 1024 * 1024,
             soft_warn_ratio: 0.8,
         }
     }
@@ -71,6 +71,9 @@ pub struct StorageConfig {
     /// SQLite 管理 temp 副産物（rollback journal `<db>-journal`）の合計バイト数が
     /// この値以上で警告を出す閾値です。警告は閾値の超過/復帰の遷移時にのみ 1 回出ます。
     pub temp_warn_bytes: u64,
+    /// usage ledger のリクエスト単位の行を保持する日数です。過ぎた行は日次集計へ
+    /// 畳み込みます。0 は畳み込みを無効化します。
+    pub usage_retention_days: u32,
 }
 
 impl Default for StorageConfig {
@@ -85,6 +88,7 @@ impl Default for StorageConfig {
             vacuum_freelist_threshold_pages: 1_024,
             vacuum_page_budget_per_tick: 256,
             temp_warn_bytes: 268_435_456,
+            usage_retention_days: crate::usage::USAGE_RETENTION_DAYS,
         }
     }
 }
@@ -106,7 +110,7 @@ mod tests {
         assert_eq!(limits.max_session_bytes, 67_108_864);
         assert_eq!(limits.max_daily_event_bytes, 268_435_456);
         assert_eq!(limits.max_wal_bytes, 67_108_864);
-        assert_eq!(limits.max_db_bytes, 1_073_741_824);
+        assert_eq!(limits.max_db_bytes, 10 * 1024 * 1024 * 1024);
         assert_eq!(limits.soft_warn_ratio, 0.8);
     }
 
@@ -126,5 +130,6 @@ mod tests {
         assert_eq!(config.vacuum_freelist_threshold_pages, 1_024);
         assert_eq!(config.vacuum_page_budget_per_tick, 256);
         assert_eq!(config.temp_warn_bytes, 268_435_456);
+        assert_eq!(config.usage_retention_days, 90);
     }
 }

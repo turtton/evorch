@@ -41,7 +41,7 @@ async fn list_agents_reports_name_role_and_model() {
         "W".to_string(),
         RunConfig {
             name: Some("worker-w1".to_string()),
-            category: Some("plan".to_string()),
+            category: Some("quick".to_string()),
             ..RunConfig::default()
         },
     );
@@ -60,7 +60,7 @@ async fn list_agents_reports_name_role_and_model() {
     assert_eq!(summaries[1].model, "scripted-worker");
     assert_eq!(summaries[1].phase, AgentRunPhase::Done);
     assert_eq!(summaries[0].category, None);
-    assert_eq!(summaries[1].category.as_deref(), Some("plan"));
+    assert_eq!(summaries[1].category.as_deref(), Some("quick"));
 }
 
 // Given: name / role_name / model がすべて異なる値の AgentSummary / When: JSON 化 /

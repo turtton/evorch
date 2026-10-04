@@ -119,7 +119,12 @@ fn retire_agents(workspace: &mut Workspace) {
         .filter(|panel| {
             matches!(
                 panel.kind,
-                PanelKind::Tasks | PanelKind::Notifications | PanelKind::Memory | PanelKind::Arena
+                PanelKind::Tasks
+                    | PanelKind::Notifications
+                    | PanelKind::Memory
+                    | PanelKind::Arena
+                    | PanelKind::Usage
+                    | PanelKind::ContextInspector
             )
         })
         .map(|panel| panel.id.clone())

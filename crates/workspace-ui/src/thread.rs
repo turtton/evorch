@@ -71,6 +71,9 @@ pub struct ThreadRecord {
     #[serde(default)]
     pub created_at: i64,
     pub run_ids: Vec<String>,
+    /// Current conversation root; historical roots and children remain in `run_ids`.
+    #[serde(default)]
+    pub root_run_id: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
     /// Inspected active root; without a worktree path this is populated only for Shared runs.
@@ -87,8 +90,37 @@ pub struct ThreadRecord {
     /// Worker run that requested this independent orchestrator conversation.
     #[serde(default)]
     pub escalation_source_run_id: Option<String>,
+    /// How this conversation branched from `parent_thread_id`, if it did.
     #[serde(default)]
-    pub fork_event_id: Option<i64>,
+    pub lineage: Option<ThreadLineage>,
+    /// A rewound version kept for restoration but hidden behind its visible version.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superseded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageKind {
+    /// A separate conversation shown as a child thread.
+    Fork,
+    /// A replacement version of the parent conversation.
+    Rewind,
+}
+
+/// A completed-turn boundary in the run that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ForkPoint {
+    pub run_id: String,
+    /// Non-system message count published with the turn completion.
+    pub context_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadLineage {
+    pub kind: LineageKind,
+    /// `None` branches before the first turn.
+    #[serde(default)]
+    pub point: Option<ForkPoint>,
 }
 
 impl ThreadRecord {
@@ -104,6 +136,7 @@ impl ThreadRecord {
                 .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
                 .unwrap_or_default(),
             run_ids: Vec::new(),
+            root_run_id: None,
             branch: None,
             worktree_path: None,
             active_root: None,
@@ -112,7 +145,8 @@ impl ThreadRecord {
             draft_input: String::new(),
             parent_thread_id: None,
             escalation_source_run_id: None,
-            fork_event_id: None,
+            lineage: None,
+            superseded: false,
         }
     }
 
@@ -122,7 +156,7 @@ impl ThreadRecord {
     ) -> (Vec<&'a Self>, Vec<&'a Self>) {
         let (mut archived, mut main): (Vec<_>, Vec<_>) = threads
             .iter()
-            .filter(|thread| &thread.project_id == project)
+            .filter(|thread| &thread.project_id == project && !thread.superseded)
             .partition(|thread| thread.archived);
         let newest_first = |left: &&Self, right: &&Self| {
             right
@@ -141,7 +175,25 @@ impl ThreadRecord {
         (main, archived)
     }
 
+    pub fn is_rewind(&self) -> bool {
+        self.lineage
+            .as_ref()
+            .is_some_and(|lineage| lineage.kind == LineageKind::Rewind)
+    }
+
     pub fn state(&self, phases: &BTreeMap<String, ThreadRunPhase>) -> ThreadState {
+        // A conversation's status belongs to its current root, not every run in
+        // its history. Failed children and superseded roots remain browsable.
+        if let Some(root) = &self.root_run_id {
+            return match phases.get(root) {
+                Some(ThreadRunPhase::Stopped) => ThreadState::Stopped,
+                Some(ThreadRunPhase::Pending | ThreadRunPhase::Running) => ThreadState::Running,
+                Some(ThreadRunPhase::Waiting) => ThreadState::Waiting,
+                Some(ThreadRunPhase::Done) => ThreadState::Done,
+                Some(ThreadRunPhase::Error) => ThreadState::Error,
+                None => ThreadState::Active,
+            };
+        }
         let phases = self.run_ids.iter().filter_map(|run_id| phases.get(run_id));
         let collected: Vec<&ThreadRunPhase> = phases.collect();
         if collected

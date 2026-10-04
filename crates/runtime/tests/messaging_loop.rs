@@ -125,7 +125,7 @@ async fn running_recipient_injects_parent_steering_before_next_completion() {
                 Ok(tool_response(
                     "denied-delegate",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "unused" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "unused" }),
                 )),
                 Ok(text_response("done", FinishReason::Stop)),
             ],

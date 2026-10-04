@@ -14,20 +14,14 @@ use tools::ToolExecutor;
 
 use support::{ScriptedModel, text_response, tool_response};
 
-async fn delegate_case(tool: &str, args: Value, accepted: bool) {
+async fn delegate_case(args: Value, accepted: bool) -> String {
     // Given: 親と子を識別できるスクリプトとカタログ未接続のランタイム
-    let expected_error = args["category"].as_str().map(|category| {
-        match config::agent_categories::public_category_role(category) {
-            Some(role) => format!("category `{category}` is only valid for role={role}"),
-            None => format!("unknown category: {category}"),
-        }
-    });
     let model = Arc::new(ScriptedModel::new([]));
     model
         .add_keyed(
             "ORCH",
             [
-                Ok(tool_response("delegate-child", tool, args)),
+                Ok(tool_response("delegate-child", "delegate", args)),
                 Ok(text_response("done", FinishReason::Stop)),
             ],
         )
@@ -81,157 +75,101 @@ async fn delegate_case(tool: &str, args: Value, accepted: bool) {
     });
     assert_eq!(child_seen, accepted);
     assert_eq!(is_error, !accepted);
-    if !accepted {
-        assert!(content.iter().any(|item| matches!(
-            item,
-            ToolResultContent::Text { text } if text.contains(expected_error.as_deref().expect("category error"))
-        )));
-    }
+    let text = content
+        .iter()
+        .map(|item| match item {
+            ToolResultContent::Text { text } => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.is_empty());
+    text
 }
 
 #[tokio::test]
-async fn delegate_accepts_category_when_role_is_omitted() {
-    delegate_case(
-        "delegate",
-        json!({"category": "quick", "prompt": "CHILD"}),
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn delegate_rejects_category_when_role_is_explorer() {
-    delegate_case(
-        "delegate",
-        json!({"role": "explorer", "category": "quick", "prompt": "CHILD"}),
-        false,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn async_delegate_rejects_category_when_role_is_explorer() {
-    delegate_case(
-        "delegate",
-        json!({"background": true, "role": "explorer", "category": "quick", "prompt": "CHILD"}),
-        false,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn delegate_accepts_category_when_role_is_worker() {
-    delegate_case(
-        "delegate",
-        json!({"role": "worker", "category": "quick", "prompt": "CHILD"}),
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn async_delegate_accepts_category_when_role_is_worker() {
-    delegate_case(
-        "delegate",
-        json!({"background": true, "role": "worker", "category": "quick", "prompt": "CHILD"}),
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn delegate_accepts_explorer_when_category_is_absent() {
-    delegate_case(
-        "delegate",
-        json!({"role": "explorer", "prompt": "CHILD"}),
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn async_delegate_accepts_explorer_when_category_is_absent() {
-    delegate_case(
-        "delegate",
-        json!({"background": true, "role": "explorer", "prompt": "CHILD"}),
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn delegate_accepts_reviewer_categories_in_awaited_and_background_modes() {
-    for category in ["plan", "tool-execution"] {
-        for background in [false, true] {
-            delegate_case("delegate", json!({
-                "role": "reviewer", "category": category, "background": background, "prompt": "CHILD"
-            }), true).await;
-        }
-    }
-}
-
-#[tokio::test]
-async fn delegate_rejects_mismatched_category_roles_before_spawning() {
+async fn delegate_routes_public_targets_in_awaited_and_background_modes() {
     for background in [false, true] {
-        for (role, category) in [
-            ("worker", "plan"),
-            ("worker", "tool-execution"),
-            ("reviewer", "quick"),
-            ("planner", "plan"),
+        for role in [
+            "worker",
+            "explorer",
+            "planner",
+            "reviewer",
+            "multimodallooker",
         ] {
             delegate_case(
-                "delegate",
-                json!({
-                    "role": role, "category": category, "background": background, "prompt": "CHILD"
-                }),
-                false,
+                json!({"target":{"role":role}, "background":background, "prompt":"CHILD"}),
+                true,
             )
             .await;
         }
-        delegate_case(
-            "delegate",
-            json!({
-                "category": "plan", "background": background, "prompt": "CHILD"
-            }),
-            false,
-        )
-        .await;
+        for category in config::agent_categories::public_categories() {
+            delegate_case(json!({"target":{"role":category.role,"category":category.id.as_str()}, "background":background, "prompt":"CHILD"}), true).await;
+        }
     }
 }
 
 #[tokio::test]
-async fn delegate_rejects_internal_categories_before_spawning() {
-    for (role, category) in [("worker", "lesson"), ("reviewer", "lesson_review")] {
-        delegate_case(
-            "delegate",
-            json!({"role": role, "category": category, "prompt": "CHILD"}),
-            false,
-        )
-        .await;
-    }
-}
-
-#[tokio::test]
-async fn delegate_rejects_conversation_before_spawning_in_both_modes() {
+async fn delegate_rejects_invalid_targets_before_spawning_in_both_modes() {
     for background in [false, true] {
-        for role in [Some("worker"), None] {
-            delegate_case(
-                "delegate",
-                json!({
-                    "role": role, "category": "conversation",
-                    "background": background, "prompt": "CHILD"
-                }),
-                false,
-            )
-            .await;
+        for target in [
+            json!({"role":"worker","category":"plan-review"}),
+            json!({"role":"reviewer","category":"quick"}),
+            json!({"role":"explorer","category":"quick"}),
+            json!({"role":"planner","category":"plan-review"}),
+            json!({"role":"worker","category":"plan"}),
+            json!({"role":"worker","category":"lesson"}),
+            json!({"role":"reviewer","category":"lesson_review"}),
+            json!({"role":"reviewer","category":"tool-execution"}),
+            json!({"role":"worker","category":"conversation"}),
+            json!({"role":"worker","category":null}),
+            json!({"role":null}),
+            json!({"role":"Planner"}),
+            json!({"role":"unknown"}),
+            json!({"role":"worker","extra":true}),
+            json!({"category":"quick"}),
+        ] {
+            let args = json!({"target":target,"background":background,"prompt":"CHILD"});
+            delegate_case(args, false).await;
         }
+        for mut args in [
+            json!({"prompt":"CHILD"}),
+            json!({"role":"worker","category":"quick","prompt":"CHILD"}),
+            json!({"target":{"role":"worker"},"role":"planner","prompt":"CHILD"}),
+            json!({"target":{"role":"worker"},"category":"quick","prompt":"CHILD"}),
+            json!({"target":{"role":"worker"},"extra":true,"prompt":"CHILD"}),
+        ] {
+            args["background"] = json!(background);
+            delegate_case(args, false).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_planner_category_returns_an_executable_planner_correction() {
+    for category in ["plan", "plan-review", "deep", "research"] {
+        let error = delegate_case(
+            json!({"target":{"role":"planner","category":category},"prompt":"CHILD"}),
+            false,
+        )
+        .await;
+        // Execute the correction extracted from the actual error response.
+        let correction = error
+            .split("Use target=")
+            .nth(1)
+            .unwrap()
+            .split(". For plan review")
+            .next()
+            .unwrap();
+        let target: Value = serde_json::from_str(correction).unwrap();
+        assert_eq!(target, json!({"role":"planner"}));
+        delegate_case(json!({"target":target,"prompt":"CHILD"}), true).await;
     }
 }
 
 #[test]
-fn public_reviewer_categories_keep_standard_reviewer_capabilities() {
+fn reviewer_categories_keep_standard_reviewer_capabilities() {
     let standard = runtime::ExecutionPolicy::for_role(Role::Reviewer);
-    for category in ["plan", "tool-execution"] {
+    for category in ["plan-review", "tool-execution"] {
         let policy = standard.clone().for_run_config(
             &RunConfig {
                 category: Some(category.into()),

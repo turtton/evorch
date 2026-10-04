@@ -96,7 +96,8 @@ fn interpreter_maps_scripted_stream_and_merges_result() {
                 input_tokens: 16,
                 output_tokens: 8,
                 cache_read_tokens: 2,
-                cache_write_tokens: 4
+                cache_write_tokens: 4,
+                reasoning_tokens: None,
             },
             FinishReason::ToolUse,
         )

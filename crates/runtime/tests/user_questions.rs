@@ -811,7 +811,7 @@ impl runtime::AgentModel for ResolvingParentModel {
             0 => tool_response(
                 "delegate",
                 "delegate",
-                serde_json::json!({"role":"worker","prompt":"CHILD"}),
+                serde_json::json!({"target": {"role": "worker"},"prompt":"CHILD"}),
             ),
             1 if !self.ask_user => text_response("I am done", FinishReason::Stop),
             n if n == (if self.ask_user { 1 } else { 2 }) => {

@@ -142,6 +142,11 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Take one-shot completion notices without acknowledging output or effects.
+    fn take_shell_job_notifications(&self, _run_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Retain a starting call's lease even when cancellation prevents delivery
     /// of its job ID. Completed or absent jobs release the lease immediately.
     fn retain_shell_call_guard(&self, _run_id: &str, _call_id: &str, _guard: Box<dyn Send + Sync>) {

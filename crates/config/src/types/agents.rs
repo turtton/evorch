@@ -160,7 +160,9 @@ impl AgentsConfig {
         if let Some(category) = category
             && category_for_role(role, category).is_none()
             && (!matches!(role, "worker" | "reviewer")
-                || CATEGORIES.iter().any(|defined| defined.name == category))
+                || CATEGORIES
+                    .iter()
+                    .any(|defined| defined.id.as_str() == category))
         {
             return Err(ConfigError::CategoryNotAllowedForRole {
                 role: role.to_string(),
@@ -356,7 +358,7 @@ mod tests {
         .map(String::from)
         .chain(
             categories_for_role("worker")
-                .map(|category| format!("worker.categories.{}", category.name)),
+                .map(|category| format!("worker.categories.{}", category.id.as_str())),
         )
         .collect::<Vec<_>>();
         let document = addresses
@@ -488,7 +490,7 @@ logical_model = "old"
         let mut agents = AgentsConfig::default();
         for category in categories_for_role("worker") {
             agents.worker.categories.insert(
-                category.name.into(),
+                category.id.as_str().into(),
                 CategoryBindingConfig {
                     logical_model: Some("old".into()),
                     preset: Some("old".into()),
@@ -836,9 +838,9 @@ temperature = 0.2
 top_p = 0.8
 max_tokens = 4096
 reasoning_effort = "medium"
-[agents.reviewer.categories.plan]
+[agents.reviewer.categories.plan-review]
 logical_model = "plan-model"
-[agents.reviewer.categories.plan.generation]
+[agents.reviewer.categories.plan-review.generation]
 temperature = 0.6
 reasoning_effort = "high"
 [agents.reviewer.categories.tool-execution]
@@ -850,7 +852,7 @@ max_tokens = 2048
         )
         .unwrap();
         let agents = config.agents;
-        let plan = agents.binding_for("reviewer", Some("plan")).unwrap();
+        let plan = agents.binding_for("reviewer", Some("plan-review")).unwrap();
         assert_eq!(plan.logical_model, "plan-model");
         assert_eq!(plan.preset.as_deref(), Some("base-appendix"));
         assert_eq!(plan.generation.temperature, Some(0.6));
@@ -873,7 +875,7 @@ max_tokens = 2048
             agents.binding_for("reviewer", None).unwrap()
         );
         let defaults = AgentsConfig::default();
-        for category in ["plan", "tool-execution"] {
+        for category in ["plan-review", "tool-execution"] {
             assert_eq!(
                 defaults.binding_for("reviewer", Some(category)).unwrap(),
                 defaults.binding_for("reviewer", None).unwrap()
@@ -886,9 +888,9 @@ max_tokens = 2048
         let agents = AgentsConfig::default();
         for (role, category) in [
             ("reviewer", "quick"),
-            ("worker", "plan"),
+            ("worker", "plan-review"),
             ("worker", "tool-execution"),
-            ("planner", "plan"),
+            ("planner", "plan-review"),
         ] {
             assert!(matches!(
                 agents.binding_for(role, Some(category)),
@@ -906,7 +908,7 @@ max_tokens = 2048
     #[test]
     fn reviewer_category_model_refs_are_explicit_and_renamed() {
         let mut agents = AgentsConfig::default();
-        for category in ["plan", "tool-execution", "lesson_review"] {
+        for category in ["plan-review", "tool-execution", "lesson_review"] {
             agents.reviewer.categories.insert(
                 category.into(),
                 CategoryBindingConfig {
@@ -918,7 +920,7 @@ max_tokens = 2048
         }
         let expected_addresses = vec![
             "reviewer.categories.lesson_review",
-            "reviewer.categories.plan",
+            "reviewer.categories.plan-review",
             "reviewer.categories.tool-execution",
         ];
         assert_eq!(roles_using("old", &agents), expected_addresses);
@@ -936,8 +938,8 @@ max_tokens = 2048
     fn reviewer_bindings_reject_unknown_fields() {
         for doc in [
             "[agents.reviewer]\nprompt = 'not allowed'",
-            "[agents.reviewer.categories.plan]\nweight = 0.5",
-            "[agents.reviewer.categories.plan.generation]\nseed = 42",
+            "[agents.reviewer.categories.plan-review]\nweight = 0.5",
+            "[agents.reviewer.categories.plan-review.generation]\nseed = 42",
         ] {
             assert!(toml::from_str::<Config>(doc).is_err(), "{doc}");
         }

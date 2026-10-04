@@ -23,6 +23,8 @@ fn writer_state(conn: Connection, config: StorageConfig) -> WriterState {
         soft_warned: false,
         suspend_logged: false,
         temp_warned: false,
+        diagnostic_cursor: None,
+        reclaim_wal_pending: false,
     }
 }
 

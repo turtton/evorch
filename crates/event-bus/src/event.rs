@@ -417,6 +417,15 @@ pub enum LifecycleEvent {
         /// 遷移理由。異常終了やオペレーターによる停止などの理由を保持します。
         reason: Option<String>,
     },
+    /// 対話 run が 1 ターンを終えて入力待ちになった。fork / rewind の境界になる。
+    ///
+    /// 発火前に、このターン末尾までの context が永続化されている。
+    TurnCompleted {
+        /// ターンを終えた run の ID。
+        run_id: String,
+        /// ターン末尾時点の非 System メッセージ数。run 内で一意かつ単調に増える。
+        context_len: u64,
+    },
     /// セッションが完了した。
     Completed {
         /// 完了したセッションの ID。
@@ -675,6 +684,81 @@ pub enum ProviderFailureKind {
     Other,
 }
 
+/// プロバイダ呼び出しの目的。usage 集計で本処理と付随コストを区別する。
+///
+/// 観測イベントへ載せる分類であり、v0.1 で保存された旧形式ペイロードは
+/// このフィールドを持たない (欠落時は `None`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    /// agent run の通常の応答生成。
+    #[default]
+    Agent,
+    /// 会話履歴の compaction (要約・公式 compaction)。
+    Compaction,
+    /// スレッドタイトルの自動生成。
+    Title,
+    /// entry routing の再分類。
+    Routing,
+    /// sandbox escalation のレビュー。
+    EscalationReview,
+}
+
+impl RequestPurpose {
+    /// 永続化・表示に使う snake_case のラベル。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Compaction => "compaction",
+            Self::Title => "title",
+            Self::Routing => "routing",
+            Self::EscalationReview => "escalation_review",
+        }
+    }
+}
+
+/// `cache_retention_ratio` がこの値を下回ると、prompt cache の再利用が
+/// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
+pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
+
+/// 完了した attempt を直近の比較対象 attempt と照合した結果。
+///
+/// 比較対象は同じ run / provider / profile / protocol / model の直近完了
+/// attempt で、その wire 入力全体が今回の先頭に残っている場合に限る。
+/// 再利用可能なトークン数は推定せず、比較対象の実測 cache read+write を使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CacheComparison {
+    /// 比較対象があり、`cache_read_tokens / previous_cache_tokens` を算出できる。
+    Compared {
+        /// 比較対象 attempt の request ID。
+        previous_request_id: String,
+        /// 比較対象 attempt の実測 cache read+write トークン数 (常に 1 以上)。
+        previous_cache_tokens: u64,
+    },
+    /// 比較対象がないため retention を算出しない。
+    NoBaseline {
+        /// 比較できない理由。
+        reason: CacheBaselineMissing,
+    },
+}
+
+/// [`CacheComparison::NoBaseline`] の理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheBaselineMissing {
+    /// 同じ scope で完了した attempt がまだない (初回・モデル切替直後など)。
+    NoPreviousRequest,
+    /// 直近 attempt の開始から比較窓 (5 分) 以上経過した。
+    Expired,
+    /// 直近 attempt の wire 入力が今回の先頭に残っていない
+    /// (compaction・履歴の書き換えなど)。
+    PrefixChanged,
+    /// 直近 attempt の実測 cache read+write が 0 だった。
+    PreviousUncached,
+    /// 今回の usage が不正 (cache 小計が総入力を超えるなど)。
+    InvalidUsage,
+}
+
 /// プロバイダ切替とリクエスト attempt 観測に関するイベント。
 ///
 /// attempt 観測イベント (`RequestStarted` / `FirstTokenObserved` /
@@ -759,8 +843,8 @@ pub enum ProviderEvent {
     /// [`UsageEvent::Usage`] だけを canonical な集計入力とし、本イベントの
     /// counts と合算してはならない (二重計上になる)。wire 上の相関は
     /// 「同一 provider / model で、同一 request の bus 順序が
-    /// `RequestStarted` → [`UsageEvent::Usage`] → `RequestCompleted` と
-    /// なる」ことで担保される ([`UsageEvent`] に request ID は持たせない:
+    /// `RequestStarted` → [`UsageEvent::Usage`] → (`CacheReuseObserved`) →
+    /// `RequestCompleted` となる」ことで担保される ([`UsageEvent`] に request ID は持たせない:
     /// wire format 不変制約のため)。
     RequestCompleted {
         /// attempt 相関用の request ID。
@@ -794,6 +878,30 @@ pub enum ProviderEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// 出力トークンのうち reasoning に使われた数。provider が報告しない
+        /// 場合と旧形式ペイロードでは `None` (0 と区別する)。
+        #[serde(default)]
+        reasoning_tokens: Option<u64>,
+        /// 呼び出しの目的。observation context を持たない呼び出しと旧形式
+        /// ペイロードでは `None`。
+        #[serde(default)]
+        purpose: Option<RequestPurpose>,
+    },
+    /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
+    ///
+    /// cache 観測が有効な attempt について、同じ attempt の
+    /// `RequestCompleted` の直前に 1 回だけ発行される。`cache_read_tokens`
+    /// は `RequestCompleted` と同値の観測用複製であり、集計に合算しない。
+    CacheReuseObserved {
+        /// attempt 相関用の request ID。
+        request_id: String,
+        /// キャッシュ読み取りトークン数。
+        cache_read_tokens: u64,
+        /// 比較対象との照合結果。
+        comparison: CacheComparison,
+        /// 観測相関用の実行 ID。
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// リクエスト attempt が失敗して終了した。
     ///
@@ -822,6 +930,10 @@ pub enum ProviderEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// 呼び出しの目的。observation context を持たない呼び出しと旧形式
+        /// ペイロードでは `None`。
+        #[serde(default)]
+        purpose: Option<RequestPurpose>,
     },
     /// routing の fallback 選択境界でフォールバック先が選択された。
     ///
@@ -1833,6 +1945,8 @@ mod tests {
                     cache_write_tokens: 1,
                     finish_reason: "stop".into(),
                     run_id: None,
+                    purpose: None,
+                    reasoning_tokens: None,
                 },
             ),
             (
@@ -1847,6 +1961,7 @@ mod tests {
                     duration_ms: 120,
                     failure: ProviderFailureKind::Http { status: 500 },
                     run_id: None,
+                    purpose: None,
                 },
             ),
             (
@@ -2259,6 +2374,8 @@ mod tests {
                 cache_write_tokens: 1,
                 finish_reason: "stop".into(),
                 run_id: None,
+                purpose: None,
+                reasoning_tokens: None,
             })
         );
     }
@@ -2308,6 +2425,7 @@ mod tests {
                 duration_ms: 120,
                 failure: ProviderFailureKind::Timeout,
                 run_id: None,
+                purpose: None,
             })
         );
     }

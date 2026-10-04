@@ -196,6 +196,7 @@ fn assert_usage_event(event: UsageEvent, expected: Usage) {
                     output_tokens,
                     cache_read_tokens,
                     cache_write_tokens,
+                    reasoning_tokens: None,
                 },
                 expected
             );
@@ -234,6 +235,7 @@ async fn send_text_maps_response_usage_and_capabilities() {
             output_tokens: 5,
             cache_read_tokens: 2,
             cache_write_tokens: 4,
+            reasoning_tokens: None,
         }
     );
     assert_eq!(response.finish_reason, FinishReason::Stop);
@@ -322,6 +324,7 @@ async fn stream_text_emits_deltas_and_completed_response() {
             output_tokens: 5,
             cache_read_tokens: 2,
             cache_write_tokens: 4,
+            reasoning_tokens: None,
         }
     );
     assert_eq!(response.finish_reason, FinishReason::Stop);
@@ -404,6 +407,7 @@ async fn send_emits_usage_event() {
             output_tokens: 5,
             cache_read_tokens: 2,
             cache_write_tokens: 4,
+            reasoning_tokens: None,
         },
     );
     assert!(matches!(
@@ -454,6 +458,7 @@ async fn stream_emits_usage_event() {
             output_tokens: 5,
             cache_read_tokens: 2,
             cache_write_tokens: 4,
+            reasoning_tokens: None,
         },
     );
     assert!(matches!(

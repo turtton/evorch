@@ -1,6 +1,7 @@
 //! ロールの capability boundary を実行ポリシーへ適用する (ADR 0002)。
 
 use agents::{CapabilityDecision, Role, RoleCapabilities};
+use config::agent_categories::CategoryId;
 use providers::ToolSpec;
 
 use crate::error::RuntimeError;
@@ -35,7 +36,7 @@ impl ExecutionPolicy {
         let tools: &[&str] = match config.purpose {
             RunPurpose::General => {
                 if config.conversation
-                    && config.category.as_deref() == Some("conversation")
+                    && config.category.as_deref() == Some(CategoryId::Conversation.as_str())
                     && is_root
                     && self.role_name == Role::Worker.name()
                 {

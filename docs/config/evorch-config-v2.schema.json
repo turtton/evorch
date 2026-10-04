@@ -90,7 +90,7 @@
       "$ref": "#/$defs/MetricsConfig",
       "default": {
         "enabled": true,
-        "retention_days": 30
+        "retention_days": 90
       }
     },
     "model_presets": {
@@ -690,10 +690,10 @@
           "default": true
         },
         "retention_days": {
-          "description": "メトリクスの保持日数。",
+          "description": "リクエスト単位の usage を保持する日数。過ぎた分は日次集計へ畳み込む。\n0 は畳み込みを無効化する。",
           "type": "integer",
           "format": "uint32",
-          "default": 30,
+          "default": 90,
           "minimum": 0
         }
       },

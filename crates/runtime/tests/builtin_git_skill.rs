@@ -150,6 +150,29 @@ fn git_guidance_is_independent_of_repository_and_agent_runtime() {
 }
 
 #[test]
+fn git_guidance_checks_real_commit_identity_and_conditional_signatures() {
+    for required in [
+        "git var GIT_AUTHOR_IDENT",
+        "git var GIT_COMMITTER_IDENT",
+        "テストfixture用identityを実コミットに流用しない",
+        "repoが署名を要求する場合",
+        "`--no-gpg-sign` や署名設定の無効化で迂回しない",
+        "署名を全repoで一律必須にはしない",
+        "解決できなければコミットを中断して報告する",
+        "git show -s --format=fuller HEAD",
+        "git log -1 --format='%G? %GK'",
+        "複数commitを送る場合は対象の各commitを確認する",
+        "`G` だけを全環境共通の合格条件にせず",
+        "ローカルの検証成功と公開先のVerified判定は別",
+    ] {
+        assert!(
+            SKILL_MD.contains(required),
+            "Git safety guidance must include {required}"
+        );
+    }
+}
+
+#[test]
 fn all_filesystem_scopes_can_override_the_actual_builtin() {
     let directory = tempfile::tempdir().unwrap();
     let skill = directory.path().join(NAME);

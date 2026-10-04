@@ -3,6 +3,7 @@
 mod actions;
 mod attention;
 pub mod auto_title;
+mod branching;
 mod composer;
 mod conversation;
 mod escalation;
@@ -10,6 +11,7 @@ mod external_commands;
 mod frame;
 mod history;
 mod input;
+mod mentions;
 mod ownership;
 mod ownership_status;
 mod provider_settings;
@@ -20,10 +22,12 @@ mod routing_settings;
 mod sandbox_settings;
 mod self_improvement_settings;
 mod state;
+mod storage_settings;
 mod subagent_dock;
 mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
+mod usage_ledger;
 mod viewer;
 mod work_panels;
 
@@ -48,6 +52,8 @@ pub enum WorkbenchError {
     Project(#[from] workspace_ui::ProjectError),
     #[error("thread state failed: {0}")]
     Thread(#[from] workspace_ui::ThreadError),
+    #[error("{0}")]
+    Branch(&'static str),
 }
 
 /// eframe::App 実装。WorkbenchState をラップします。

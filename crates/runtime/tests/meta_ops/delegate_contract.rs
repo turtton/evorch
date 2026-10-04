@@ -5,7 +5,11 @@ async fn delegate_is_single_meta_op_and_delegate_background_is_unknown_tool() {
     // Given: the obsolete name, assembled to keep retired tool literals out of callers.
     let old_name = ["delegate", "background"].join("_");
     let model = Arc::new(ScriptedModel::new([
-        Ok(tool_response("old", &old_name, json!({"prompt": "unused"}))),
+        Ok(tool_response(
+            "old",
+            &old_name,
+            json!({"target": {"role": "worker"},"prompt": "unused"}),
+        )),
         Ok(text_response("done", FinishReason::Stop)),
     ]));
     let runtime = runtime_with(Arc::clone(&model));
@@ -30,8 +34,8 @@ async fn delegate_is_single_meta_op_and_delegate_background_is_unknown_tool() {
 }
 
 #[tokio::test]
-async fn delegate_defaults_role_to_worker_when_omitted() {
-    // Given: a foreground delegation with no role.
+async fn delegate_uses_explicit_worker_target() {
+    // Given: a foreground delegation with an explicit worker target.
     let model = Arc::new(ScriptedModel::new([]));
     model
         .add_keyed(
@@ -40,7 +44,7 @@ async fn delegate_defaults_role_to_worker_when_omitted() {
                 Ok(tool_response(
                     "child",
                     "delegate",
-                    json!({"prompt": "CHILD"}),
+                    json!({"target": {"role": "worker"},"prompt": "CHILD"}),
                 )),
                 Ok(text_response("done", FinishReason::Stop)),
             ],
@@ -57,7 +61,7 @@ async fn delegate_defaults_role_to_worker_when_omitted() {
     let parent =
         runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
-    // Then: the default role is Worker and the result is the foreground phase.
+    // Then: the requested role is Worker and the result is the foreground phase.
     let children = runtime.list_agents();
     assert_eq!(children.len(), 2);
     assert_eq!(children[1].role_name, "Worker");
@@ -74,8 +78,8 @@ async fn delegate_rejects_interactive_without_background() {
     // Given: both absent and explicitly false background flags.
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("ROOT", [
-        Ok(tool_response("absent", "delegate", json!({"role": "worker", "prompt": "unused", "interactive": true}))),
-        Ok(tool_response("false", "delegate", json!({"role": "worker", "prompt": "unused", "interactive": true, "background": false}))),
+        Ok(tool_response("absent", "delegate", json!({"target": {"role": "worker"}, "prompt": "unused", "interactive": true}))),
+        Ok(tool_response("false", "delegate", json!({"target": {"role": "worker"}, "prompt": "unused", "interactive": true, "background": false}))),
         Ok(text_response("done", FinishReason::Stop)),
     ]).await;
     model
@@ -114,7 +118,7 @@ async fn delegate_background_true_returns_run_id_without_waiting() {
     // Given: an interactive child cannot finish until the parent cancels it.
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("ROOT", [
-        Ok(tool_response("child", "delegate", json!({"role": "worker", "prompt": "CHILD", "background": true, "interactive": true}))),
+        Ok(tool_response("child", "delegate", json!({"target": {"role": "worker"}, "prompt": "CHILD", "background": true, "interactive": true}))),
         Ok(tool_response("stop-child", "cancel", json!({"run_id": "run-2"}))),
         Ok(text_response("done", FinishReason::Stop)),
     ]).await;

@@ -54,6 +54,7 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
                     profile: "local".into(),
                     model: None,
                 }),
+                purpose: Default::default(),
             },
             Role::Worker,
             &[],
@@ -153,7 +154,7 @@ async fn configured_runtime_runs_blocking_delegate_and_worker_edit_end_to_end() 
             openai_tool_response(
                 "delegate-1",
                 "delegate",
-                json!({ "role": "worker", "prompt": "WORKER-EDIT" }),
+                json!({"target": {"role": "worker"}, "prompt": "WORKER-EDIT" }),
             ),
             openai_tool_response(
                 "edit-1",

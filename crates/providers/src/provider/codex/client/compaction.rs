@@ -101,6 +101,7 @@ impl CompactionStream {
                         output_tokens: usage.output_tokens,
                         cache_read_tokens: usage.input_tokens_details.cached_tokens,
                         cache_write_tokens: 0,
+                        reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
                     },
                 }));
             }
@@ -126,12 +127,20 @@ struct ResponseUsage {
     output_tokens: u64,
     #[serde(default)]
     input_tokens_details: InputTokenDetails,
+    #[serde(default)]
+    output_tokens_details: OutputTokenDetails,
 }
 
 #[derive(Deserialize, Default)]
 struct InputTokenDetails {
     #[serde(default)]
     cached_tokens: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct OutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[cfg(test)]

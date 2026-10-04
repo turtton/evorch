@@ -1,5 +1,6 @@
 //! delegate メタ操作のハンドラ。
 
+use config::agent_categories::CategoryId;
 use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, parse_category, parse_role, success};
@@ -7,12 +8,13 @@ use crate::agent_loop::LoopState;
 use crate::{AgentRuntime, InterruptKind, RunConfig, WorkspaceMode};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DelegateArgs {
     #[serde(default)]
     task: Option<crate::team::TaskSpec>,
     #[serde(default)]
     images: Vec<crate::run::DelegateImage>,
-    role: Option<String>,
+    target: DelegateTarget,
     prompt: String,
     #[serde(default)]
     background: bool,
@@ -21,8 +23,6 @@ pub(super) struct DelegateArgs {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
     workspace_mode: Option<WorkspaceMode>,
     #[serde(default)]
     workspace_branch: Option<String>,
@@ -30,8 +30,68 @@ pub(super) struct DelegateArgs {
     load_skills: Vec<String>,
 }
 
-fn parse_args_category(category: Option<String>) -> Result<Option<String>, String> {
-    category.as_deref().map(parse_category).transpose()
+/// Stable public role order shared by the schema and runtime validation.
+pub(super) const DELEGATE_ROLES: &[&str] = &[
+    "orchestrator",
+    "explorer",
+    "worker",
+    "reviewer",
+    "web_researcher",
+    "planner",
+    "oracle",
+    "multimodal_looker",
+    "multimodallooker",
+];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DelegateTarget {
+    role: String,
+    #[serde(default, deserialize_with = "present_category")]
+    category: Option<String>,
+}
+
+fn present_category<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+impl DelegateTarget {
+    fn resolve(self) -> Result<(agents::Role, Option<String>), String> {
+        if !DELEGATE_ROLES.contains(&self.role.as_str()) {
+            return Err(serde_json::json!({
+                "code":"unknown_role", "role":self.role,
+                "message":format!("unknown target.role: {}", self.role)
+            })
+            .to_string());
+        }
+        let role = parse_role(&self.role)?;
+        let Some(category) = self.category else {
+            return Ok((role, None));
+        };
+        let categories: Vec<_> = config::agent_categories::public_categories()
+            .filter(|category| category.role == self.role)
+            .map(|category| category.id)
+            .collect();
+        if categories.is_empty() {
+            return Err(format!(
+                "target.role={} has no public categories; omit target.category. Use target={{\"role\":\"{}\"}}. For plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
+                self.role,
+                self.role,
+                CategoryId::PlanReview
+            ));
+        }
+        let category = parse_category(&category)?;
+        if !categories.contains(&category) {
+            let owner = category.role();
+            return Err(format!(
+                "target.category `{category}` is only valid for target.role={owner}. Use target={{\"role\":\"{owner}\",\"category\":\"{category}\"}}, or omit target.category to use the {} base binding.",
+                self.role
+            ));
+        }
+        Ok((role, Some(category.to_string())))
+    }
 }
 
 /// load_skills を検証し、重複を除去した注入名リストを返す (issue #53 / AC6)。
@@ -89,6 +149,12 @@ pub(crate) fn spawn_delegate(
     runtime: &AgentRuntime,
     input: serde_json::Value,
 ) -> Result<crate::RunId, DispatchResult> {
+    if input.get("role").is_some() || input.get("category").is_some() {
+        return Err(error(format!(
+            "invalid arguments: put role and category inside the required target object. For planning use target={{\"role\":\"planner\"}}; for plan review use target={{\"role\":\"reviewer\",\"category\":\"{}\"}}.",
+            CategoryId::PlanReview
+        )));
+    }
     let args = match parse::<DelegateArgs>(input) {
         Ok(args) => args,
         Err(message) => return Err(error(message)),
@@ -98,24 +164,12 @@ pub(crate) fn spawn_delegate(
             "invalid arguments: interactive=true requires background=true",
         ));
     }
-    let role = match parse_role(args.role.as_deref().unwrap_or("worker")) {
-        Ok(role) => role,
+    let (role, category) = match args.target.resolve() {
+        Ok(target) => target,
         Err(message) => return Err(error(message)),
     };
     if !args.images.is_empty() && role != agents::Role::MultimodalLooker {
         return Err(error("image payload requires MultimodalLooker"));
-    }
-    let category = match parse_args_category(args.category) {
-        Ok(category) => category,
-        Err(message) => return Err(error(message)),
-    };
-    if let Some(category) = category.as_deref()
-        && let Some(category_role) = config::agent_categories::public_category_role(category)
-        && parse_role(category_role).ok() != Some(role)
-    {
-        return Err(error(format!(
-            "category `{category}` is only valid for role={category_role}"
-        )));
     }
     let load_skills = match validate_load_skills(state, &args.load_skills) {
         Ok(load_skills) => load_skills,

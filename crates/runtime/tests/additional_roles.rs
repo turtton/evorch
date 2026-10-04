@@ -64,11 +64,11 @@ async fn delegate_spawns_additional_roles_and_rejects_unknown_names() {
     // Given: a coordinator requesting all new roles and an invalid one.
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("ROOT", [
-        Ok(tool_response("researcher", "delegate", json!({"role":"web_researcher", "prompt":"CHILD"}))),
-        Ok(tool_response("planner", "delegate", json!({"role":"Planner", "prompt":"CHILD"}))),
-        Ok(tool_response("oracle", "delegate", json!({"role":"Oracle", "prompt":"CHILD"}))),
-        Ok(tool_response("looker", "delegate", json!({"role":"MultimodalLooker", "prompt":"CHILD", "images":[{"media_type":"image/png", "data":"aGVsbG8="}]}))),
-        Ok(tool_response("invalid", "delegate", json!({"role":"invalid", "prompt":"CHILD"}))),
+        Ok(tool_response("researcher", "delegate", json!({"target": {"role": "web_researcher"}, "prompt":"CHILD"}))),
+        Ok(tool_response("planner", "delegate", json!({"target": {"role": "planner"}, "prompt":"CHILD"}))),
+        Ok(tool_response("oracle", "delegate", json!({"target": {"role": "oracle"}, "prompt":"CHILD"}))),
+        Ok(tool_response("looker", "delegate", json!({"target": {"role": "multimodal_looker"}, "prompt":"CHILD", "images":[{"media_type":"image/png", "data":"aGVsbG8="}]}))),
+        Ok(tool_response("invalid", "delegate", json!({"target": {"role": "invalid"}, "prompt":"CHILD"}))),
         Ok(text_response("done", FinishReason::Stop)),
     ]).await;
     model

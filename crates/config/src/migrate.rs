@@ -135,7 +135,7 @@ mod tests {
             metrics
                 .get("retention_days")
                 .and_then(toml::Value::as_integer),
-            Some(30)
+            Some(90)
         );
     }
 }

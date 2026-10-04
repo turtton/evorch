@@ -65,6 +65,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .is_some_and(|thread| self.bind_conversation_run(&thread, new_run_id, true)),
             _ => false,
         };
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::TurnCompleted { run_id, .. }) => {
+                self.idle_turns.insert(run_id.clone());
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, .. }) => {
+                self.idle_turns.remove(run_id);
+            }
+            _ => {}
+        }
         self.transcripts.apply(event);
         changed || role_changed
     }
@@ -90,7 +99,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.bind_conversation_run(thread_id, run_id, false)
     }
 
-    fn bind_conversation_run(&mut self, thread_id: &str, run_id: &str, root: bool) -> bool {
+    pub(super) fn bind_conversation_run(
+        &mut self,
+        thread_id: &str,
+        run_id: &str,
+        root: bool,
+    ) -> bool {
         let Some(thread) = self
             .sidebar
             .threads
@@ -99,11 +113,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         else {
             return false;
         };
-        let changed = !thread.run_ids.iter().any(|run| run == run_id);
+        let mut changed = !thread.run_ids.iter().any(|run| run == run_id);
         if changed {
             thread.run_ids.push(run_id.into());
         }
         if root {
+            if thread.root_run_id.as_deref() != Some(run_id) {
+                thread.root_run_id = Some(run_id.into());
+                changed = true;
+            }
             self.transcripts.bind_thread_root(thread_id, run_id);
         } else {
             self.transcripts.bind_run(run_id, thread_id);

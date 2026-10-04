@@ -4,7 +4,7 @@ use crate::theme::{
     icons,
     text::{h3, muted},
     tokens::*,
-    widgets::{fill_label, ghost, icon_text, metric},
+    widgets::{fill_label, ghost, icon_text, metric, metric_detailed},
 };
 
 pub(super) fn header_strip(
@@ -53,6 +53,19 @@ pub(super) fn header_strip(
                     });
                     if info.on_hover_text("実行の診断").clicked() {
                         *action = Some(AgentPaneAction::OpenDiagnostics);
+                    }
+                    let context = ui.add(
+                        ghost(icon_text(icons::STACK).color(palette().TEXT_MUTED))
+                            .min_size(egui::vec2(ROW_DENSE - SP_1, ROW_DENSE - SP_1)),
+                    );
+                    context.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Agent context")
+                    });
+                    if context
+                        .on_hover_text("Context this thread's run received")
+                        .clicked()
+                    {
+                        *action = Some(AgentPaneAction::OpenContext);
                     }
                     let response = fill_label(ui, h3(title), ROW_DENSE, egui::Sense::hover());
                     let label = format!("Thread: {title}");
@@ -114,11 +127,19 @@ pub(super) fn status_strip(ui: &mut egui::Ui, ctx: &ConversationContext<'_>) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_3;
         crate::panes::phase_indicator::phase_circle(ui, ctx.phase);
-        for segment in [
-            metrics
+        metric(
+            ui,
+            &metrics
                 .conversation_cost
                 .map_or_else(|| "$—".into(), |cost| format!("${cost:.3}")),
-            metrics.cache_hit_rate_label(),
+        );
+        metric_detailed(
+            ui,
+            &metrics.cache_label(),
+            &metrics.cache_tooltip(),
+            metrics.cache_reuse.latest_is_low(),
+        );
+        for segment in [
             metrics.ttft_label(),
             metrics.tok_s_label(),
             metrics.context_label(),

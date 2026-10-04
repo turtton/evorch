@@ -84,6 +84,7 @@ impl AgentModel for ProviderCorrelatedModel {
             output_schema: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
+                purpose: Default::default(),
             }),
         };
         self.client

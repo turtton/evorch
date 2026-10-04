@@ -41,6 +41,11 @@ impl TelemetryRow {
         text
     }
 
+    /// Provider-reported usage of the latest completed request.
+    pub fn latest_request_usage(&self) -> Option<TokenUsage> {
+        self.latest_context.as_ref().map(|context| context.usage)
+    }
+
     pub fn context_used_tokens(&self) -> Option<u128> {
         let usage = self.latest_context.as_ref()?.usage;
         let output = if self.in_flight {

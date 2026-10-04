@@ -85,7 +85,7 @@ pub fn role_settings_modal(
                                     });
                                     if let Some(categories) = categories {
                                         ui.label(muted("Category overrides"));
-                                        for category in categories_for_role(role_key).map(|category| category.name) {
+                                        for category in categories_for_role(role_key).map(|category| category.id.as_str()) {
                                             ui.collapsing(badge(category), |ui| {
                                                 let mut draft = categories
                                                     .get(category)

@@ -99,7 +99,7 @@ fn registry_with_demo_skill() -> (SkillRegistry, TempDir) {
 /// Orchestrator が load_skills 付き非同期 delegate を呼ぶスクリプトを登録する。
 /// `None` なら引数自体を省略する (AC9 の未指定経路)。
 async fn orchestrator_async_delegate_script(model: &ScriptedModel, load_skills: Option<&[&str]>) {
-    let mut args = json!({ "background": true, "role": "worker", "prompt": "W1" });
+    let mut args = json!({"target": {"role": "worker"}, "background": true, "prompt": "W1" });
     if let Some(names) = load_skills {
         args["load_skills"] = json!(names);
     }
@@ -340,7 +340,7 @@ async fn foreground_delegate_with_load_skills_composes_skill_body_into_single_sy
         Ok(tool_response(
             "delegate-worker",
             "delegate",
-            json!({ "role": "worker", "prompt": "W1", "load_skills": ["demo"] }),
+            json!({"target": {"role": "worker"}, "prompt": "W1", "load_skills": ["demo"] }),
         )),
         Ok(text_response("all done", FinishReason::Stop)),
     ];

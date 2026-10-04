@@ -190,3 +190,30 @@ fn interpreter_skips_unknown_events() {
         }]
     );
 }
+
+// Given: a completed response reporting a reasoning breakdown / When: interpreted
+// Then: reasoning tokens are kept as a subset of output, absent ones stay unknown
+#[test]
+fn completion_usage_reports_reasoning_breakdown_when_present() {
+    for (details, expected) in [
+        (
+            r#","output_tokens_details":{"reasoning_tokens":5}"#,
+            Some(5),
+        ),
+        ("", None),
+    ] {
+        let mut interpreter = CodexStreamInterpreter::new();
+        let interpreted = interpreter
+            .interpret(SseFrame {
+                event: Some("response.completed".to_string()),
+                data: format!(
+                    r#"{{"type":"response.completed","response":{{"status":"completed","usage":{{"input_tokens":12,"output_tokens":9{details}}}}}}}"#
+                ),
+            })
+            .unwrap();
+
+        let (usage, _) = interpreted.completion.unwrap();
+        assert_eq!(usage.output_tokens, 9);
+        assert_eq!(usage.reasoning_tokens, expected);
+    }
+}

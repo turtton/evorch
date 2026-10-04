@@ -58,6 +58,9 @@ pub struct ChatSubmission {
     pub text: String,
     #[serde(default)]
     pub model_preference: Option<runtime::ModelPreference>,
+    /// Completed-turn boundary a forked thread starts from until it saves its own history.
+    #[serde(default)]
+    pub fork_seed: Option<runtime::ChatForkSeed>,
 }
 
 /// A host continuation request, not a new user message or a new conversation.
@@ -83,6 +86,10 @@ pub enum WorkbenchCommand {
     ContinueChat(ChatContinuation),
     StopChat {
         thread_id: String,
+    },
+    StopRun {
+        thread_id: String,
+        run_id: String,
     },
     DeliverFollowUpsNextTurn {
         thread_id: String,
@@ -206,6 +213,10 @@ pub enum LoopEvent {
     },
 }
 
+/// Delivers one base context preview composed off the render thread.
+pub type ContextPreviewReceiver =
+    std::sync::mpsc::Receiver<Result<runtime::base_context::BaseContextReport, String>>;
+
 pub trait CommandSink: Send {
     /// Runtime receipt observation, not an acknowledgement of command acceptance.
     fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
@@ -224,6 +235,24 @@ pub trait CommandSink: Send {
         &self,
         _run: &str,
     ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
+        Ok(None)
+    }
+
+    /// Compose the base context a new run would receive; `None` without a live runtime.
+    /// The result arrives on the receiver once the runtime has resolved model windows.
+    fn preview_base_context(
+        &self,
+        _request: runtime::base_context::BaseContextRequest,
+        _project: Option<&str>,
+    ) -> Option<ContextPreviewReceiver> {
+        None
+    }
+
+    /// The last persisted context of a run; `Ok(None)` without a run store or snapshot.
+    fn run_context_view(
+        &self,
+        _run: &str,
+    ) -> Result<Option<runtime::base_context::RunContextView>, String> {
         Ok(None)
     }
 
@@ -311,6 +340,7 @@ impl CommandSink for FixtureLoopAdapter {
             }],
             WorkbenchCommand::CancelChat { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }
@@ -576,6 +606,7 @@ mod tests {
         // When: both chats are submitted in order.
         let events = ["t1", "t2"].map(|thread_id| {
             adapter.submit(WorkbenchCommand::SendChat(ChatSubmission {
+                fork_seed: None,
                 composer_role: crate::model::composer::ComposerRole::Worker,
                 images: Vec::new(),
                 thread_id: thread_id.into(),

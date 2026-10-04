@@ -35,6 +35,7 @@ fn paste_and_drop_render_real_thumbnails_without_pasting_base64_into_text() {
                     gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,
+                        default_model: None,
                         enabled: false,
                     },
                     &mut ModelPickerState::default(),

@@ -88,12 +88,12 @@ async fn orchestrator_drives_children_entirely_through_meta_tool_uses() {
                     (
                         "delegate-worker",
                         "delegate",
-                        json!({ "background": true, "role": "worker", "prompt": "W1" }),
+                        json!({"target": {"role": "worker"}, "background": true, "prompt": "W1" }),
                     ),
                     (
                         "delegate-explorer",
                         "delegate",
-                        json!({ "background": true, "role": "explorer", "prompt": "E1", "interactive": true }),
+                        json!({"target": {"role": "explorer"}, "background": true, "prompt": "E1", "interactive": true }),
                     ),
                 ])),
                 Ok(tool_response(
@@ -231,7 +231,7 @@ async fn worker_cannot_spawn_child_through_meta_tool_use() {
         Ok(tool_response(
             "denied-delegate",
             "delegate",
-            json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
+            json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
         )),
         Ok(text_response("done", FinishReason::Stop)),
     ]));

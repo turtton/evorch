@@ -30,7 +30,7 @@ fn categories_are_visible_only_on_their_own_role() {
                 "{role}: {category}"
             );
         }
-        for category in ["plan", "tool-execution"] {
+        for category in ["plan-review", "tool-execution"] {
             assert_eq!(
                 harness.has_label(category),
                 role == "Reviewer",
@@ -45,7 +45,7 @@ fn categories_are_visible_only_on_their_own_role() {
 
 #[test]
 fn reviewer_category_edit_saves_reloads_and_previews_each_route() {
-    for category in ["plan", "tool-execution"] {
+    for category in ["plan-review", "tool-execution"] {
         let temp = tempfile::tempdir().expect("temp");
         let (mut harness, model) = fixture(temp.path());
         harness
@@ -133,7 +133,7 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
     harness.run();
     harness.click_label("Reviewer");
     harness.run();
-    harness.click_label("plan");
+    harness.click_label("plan-review");
     harness.run();
     assert!(!harness.has_label("未定義 (route なし)"));
     assert!(
@@ -152,7 +152,7 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
         .reviewer
         .categories
         .insert(
-            "plan".into(),
+            "plan-review".into(),
             config::CategoryBindingConfig {
                 logical_model: Some("missing-category".into()),
                 ..Default::default()

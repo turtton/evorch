@@ -321,6 +321,12 @@ impl ToolExecutor {
             .is_some_and(|shell| shell.tool.has_unobserved_shell_jobs(run_id))
     }
 
+    pub fn take_shell_job_notifications(&self, run_id: &str) -> Vec<String> {
+        self.tools.get("shell").map_or_else(Vec::new, |shell| {
+            shell.tool.take_shell_job_notifications(run_id)
+        })
+    }
+
     pub fn retain_shell_call_guard(
         &self,
         run_id: &str,

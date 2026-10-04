@@ -191,14 +191,20 @@ fn default_keybinds_cover_every_action() {
         KeyAction::FocusTasksPane,
         KeyAction::SaveLayout,
         KeyAction::ResetLayout,
-        KeyAction::CycleAgentRole,
     ];
 
-    // Then: every action has exactly one binding.
+    // Then: every action has exactly one binding, except role cycling, which
+    // the composer button owns so plain Tab stays free for completion.
     assert_eq!(settings.keybinds.bindings.len(), actions.len());
     for action in actions {
         assert!(settings.keybinds.bindings.contains_key(&action));
     }
+    assert!(
+        !settings
+            .keybinds
+            .bindings
+            .contains_key(&KeyAction::CycleAgentRole)
+    );
 }
 
 #[test]

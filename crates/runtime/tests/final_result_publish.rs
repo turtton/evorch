@@ -204,10 +204,8 @@ async fn foreground_and_background_delegates_publish_one_task_prompt() {
                     Ok(tool_response(
                         "delegate",
                         "delegate",
-                        json!({
-                            "role": "worker", "name": "named-child", "prompt": "child task",
-                            "background": background,
-                        }),
+                        json!({"target": {"role": "worker"}, "name": "named-child", "prompt": "child task",
+                            "background": background}),
                     )),
                     Ok(text_response("parent done", FinishReason::Stop)),
                 ],

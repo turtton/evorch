@@ -58,7 +58,7 @@ fn grep_harness(input: serde_json::Value) -> Harness<'static> {
 }
 
 fn expand<State>(harness: &mut Harness<'_, State>) {
-    harness.get_by_label_contains("bash find missing").click();
+    harness.get_by_label_contains("Shell find missing").click();
     harness.run_steps(3);
 }
 
@@ -79,7 +79,7 @@ fn tool_card_collapsed_hides_sections() {
     // Given / When
     let harness = harness(false);
     // Then
-    assert!(harness.query_by_label("✓ bash find missing").is_some());
+    assert!(harness.query_by_label("✓ Shell find missing").is_some());
     assert!(harness.query_by_label_contains("abcdefgh").is_none());
     assert!(harness.query_by_label_contains("OK").is_none());
     assert!(harness.query_by_label_contains("ERROR").is_none());
@@ -94,7 +94,11 @@ fn grep_tool_card_header_shows_pattern_and_root_relative_path() {
     // Given
     let harness = grep_harness(serde_json::json!({"pattern": "foo", "path": "/repo/src/main.rs"}));
     // When / Then
-    assert!(harness.query_by_label("✓ grep foo src/main.rs").is_some());
+    assert!(
+        harness
+            .query_by_label("✓ Grep \"foo\" in src/main.rs · 0 matches")
+            .is_some()
+    );
 }
 
 #[test]
@@ -102,7 +106,11 @@ fn grep_tool_card_header_shows_pattern_when_path_is_absent() {
     // Given
     let harness = grep_harness(serde_json::json!({"pattern": "foo"}));
     // When / Then
-    assert!(harness.query_by_label("✓ grep foo").is_some());
+    assert!(
+        harness
+            .query_by_label("✓ Grep \"foo\" · 0 matches")
+            .is_some()
+    );
 }
 
 #[test]
@@ -125,7 +133,7 @@ fn tool_card_error_status_shows_error_label_and_red_output() {
     // When
     expand(&mut harness);
     // Then
-    assert!(harness.query_by_label("✗ bash find missing").is_some());
+    assert!(harness.query_by_label("✗ Shell find missing").is_some());
     assert!(harness.query_by_label_contains("ERROR").is_none());
     assert!(harness.query_by_label("Error").is_some());
     assert!(
@@ -145,7 +153,7 @@ fn tool_card_toggle_click_changes_expanded_state() {
     expand(&mut harness);
     assert!(harness.query_by_label("Output").is_some());
     // When
-    harness.get_by_label("✓ bash find missing").click();
+    harness.get_by_label("✓ Shell find missing").click();
     harness.run_steps(3);
     // Then
     assert!(harness.query_by_label("Output").is_none());
@@ -244,4 +252,38 @@ fn tool_card_capture_states_when_evidence_directory_is_set() {
             .save(directory.join(format!("tool-{kind}-expanded.png")))
             .expect("save capture");
     }
+}
+
+#[test]
+fn read_tool_card_keeps_file_name_visible_in_narrow_pane() {
+    // Given: a read of a deep worktree path rendered in a narrow pane.
+    let path = "/repo/.evorch/worktrees/run-12/crates/gui/src/panes/agent/thinking_block.rs";
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "read".into(),
+        call_id: "read-2".into(),
+        input: Some(serde_json::json!({"path": path})),
+        run_id: None,
+    }));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(300.0, 200.0))
+        .build_ui(move |ui| {
+            gui::theme::install(ui.ctx());
+            transcript_body_with_repo_root(ui, &model, Some(std::path::Path::new("/repo")));
+        });
+    harness.run_steps(2);
+    // When / Then: the directory is shortened from the left, not the file name.
+    let painted = harness
+        .output()
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            Shape::Text(text) if text.galley.text().starts_with("Read thinking_block.rs") => {
+                Some(text.galley.text().to_owned())
+            }
+            _ => None,
+        })
+        .expect("painted read header");
+    assert!(painted.contains("…/"), "{painted}");
+    assert!(!painted.contains(".evorch"), "{painted}");
 }

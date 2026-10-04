@@ -58,6 +58,19 @@ impl EventBus {
         self.fences.register_guard(run, check)
     }
 
+    /// Register an ownership guard with a nonblocking acquisition for GUI batches.
+    /// `attempt` must return Busy immediately on lock contention. Existing bus
+    /// emission and synchronous consumers continue using the blocking callback.
+    pub fn register_nonblocking_mutation_guard(
+        &self,
+        run: String,
+        blocking: crate::MutationGuardCheck,
+        attempt: crate::MutationGuardTryCheck,
+    ) -> bool {
+        self.fences
+            .register_nonblocking_guard(run, blocking, attempt)
+    }
+
     pub fn mutation_validator(&self) -> crate::MutationValidator {
         crate::MutationValidator::new(std::sync::Arc::clone(&self.fences))
     }

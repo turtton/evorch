@@ -66,13 +66,16 @@ wiremock = "0.6"
 # panic messages keep file:line for OUR code (dep frames keep symbols only).
 # The main `ci` job forces CARGO_PROFILE_DEV_DEBUG=0 / CARGO_PROFILE_TEST_DEBUG=0
 # (env overrides this manifest); other CI jobs (offscreen-gate, browser-e2e)
-# pick up this slimmer profile, which only reduces their disk/link load.
+# pick up this slimmer profile to reduce their disk/link load.
 # Tradeoff: variable inspection in a debugger needs the escape-hatch profile below.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# Named GUI dependency overrides live in .cargo/config.toml so dependency
+# caches include their optimization settings in the cache key.
 
 # Escape hatch for debugger sessions (gdb/lldb with variable inspection):
 #   cargo build --profile debugging

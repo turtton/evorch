@@ -119,7 +119,7 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
         .categories
         .insert("deep".into(), CategoryBindingConfig::default());
 
-    for category in ["plan", "tool-execution", "lesson_review"] {
+    for category in ["plan-review", "tool-execution", "lesson_review"] {
         agents.reviewer.categories.insert(
             category.into(),
             CategoryBindingConfig {

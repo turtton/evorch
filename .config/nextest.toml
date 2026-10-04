@@ -1,6 +1,7 @@
 [profile.default]
 fail-fast = false
 retries = 0
+test-threads = 4
 
 # ハング検知はテスト内の壁時計ではなくランナー側に集約する。
 # 共有 CI ランナーの負荷で正当なテストが遅延しても失敗にしないため

@@ -182,7 +182,8 @@ async fn send_sets_codex_headers_and_aggregates_stream() {
             input_tokens: 12,
             output_tokens: 2,
             cache_read_tokens: 0,
-            cache_write_tokens: 0
+            cache_write_tokens: 0,
+            reasoning_tokens: None,
         }
     );
     assert_eq!(response.finish_reason, FinishReason::Stop);

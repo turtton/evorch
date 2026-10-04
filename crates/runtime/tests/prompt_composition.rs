@@ -311,7 +311,7 @@ fn reviewer_categories_compose_scoped_appendices_without_leaking_to_other_scopes
     let mut config = Config::default();
     config.agents.reviewer.preset = Some(ROLE_APPENDIX_PRESET.into());
     config.agents.reviewer.categories.insert(
-        "plan".into(),
+        "plan-review".into(),
         CategoryBindingConfig {
             preset: Some(CATEGORY_APPENDIX_PRESET.into()),
             ..Default::default()
@@ -321,13 +321,13 @@ fn reviewer_categories_compose_scoped_appendices_without_leaking_to_other_scopes
     let catalog = build_catalog(&build_input(&config, &user_dir, &[], &[])).unwrap();
     let role_body = sources.appendices[ROLE_APPENDIX_PRESET].trim_end();
     let scoped_body = sources.appendices[CATEGORY_APPENDIX_PRESET].trim_end();
-    for category in ["plan", "tool-execution"] {
+    for category in ["plan-review", "tool-execution"] {
         let prompt = catalog
             .system_prompt_for(Role::Reviewer, Some(category), "claude-opus-4-1")
             .unwrap();
         assert!(prompt.contains(sources.role_baselines["reviewer"].trim_end()));
         assert!(prompt.contains(sources.category_overlays[category].trim_end()));
-        if category == "plan" {
+        if category == "plan-review" {
             assert!(prompt.ends_with(scoped_body));
             assert!(!prompt.contains(role_body));
         } else {

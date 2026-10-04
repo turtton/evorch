@@ -53,9 +53,8 @@ impl ScriptedModel {
                         tool_response(
                             "delegate-worker",
                             "delegate",
-                            serde_json::json!({
+                            serde_json::json!({"target": {"role": "worker"},
                                 "background": true,
-                                "role": "worker",
                                 "prompt": "W1",
                                 "name": "worker-w1"
                             }),

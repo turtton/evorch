@@ -1,7 +1,6 @@
 //! Offline cost-regression contract through runtime, routing, HTTP/SSE and usage.
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
 use std::sync::Arc;
-use std::time::Duration;
 
 use config::{Config, LoadOptions};
 use event_bus::{
@@ -127,6 +126,8 @@ default_model = "{MODEL}"
 profile = "local"
 [[routing.routes.worker]]
 profile = "local"
+[[routing.routes.planner]]
+profile = "local"
 [compaction]
 context_window_tokens = {window}
 threshold = 0.5
@@ -164,6 +165,7 @@ summarizer = "structural"
         Role::Explorer,
         Role::Worker,
         Role::Reviewer,
+        Role::Planner,
     ] {
         prompts = prompts.role_baseline(role, "Stable cache contract instructions");
     }
@@ -223,11 +225,22 @@ async fn through_phase(
     let mut events = Vec::new();
     loop {
         let event = receiver.recv().await.unwrap();
-        let done = matches!(&event.kind,
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to, ..})
-                if run_id == &run.to_string() && *to == phase);
+        let reached_phase = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. })
+                if run_id == &run.to_string() =>
+            {
+                if matches!(
+                    to,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                ) {
+                    assert_eq!(*to, phase, "unexpected terminal event: {event:?}");
+                }
+                *to == phase
+            }
+            _ => false,
+        };
         events.push(event);
-        if done {
+        if reached_phase {
             return events;
         }
     }
@@ -349,6 +362,107 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
 }
 
 #[tokio::test]
+async fn invalid_delegate_target_then_planner_recovery_preserves_the_wire_prefix() {
+    let call = |id: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, "delegate", [input.to_string()])
+    };
+    let mut harness = harness(
+        vec![
+            call(
+                "invalid-planner",
+                json!({"target":{"role":"planner","category":"plan-review"},"prompt":"Create a plan"}),
+            ),
+            call(
+                "planner",
+                json!({"target":{"role":"planner"},"prompt":"Create a plan"}),
+            ),
+            text_response("Plan ready"),
+            text_response("Planning complete"),
+        ],
+        1_000_000,
+    );
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate planning".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    // Completion is detected from the lifecycle event, without a wall-clock deadline.
+    let mut events = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let done = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to:AgentRunPhase::Done, ..})
+                if run_id == &parent.to_string());
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(harness.runtime.list_agents().len(), 2);
+    assert!(
+        harness
+            .runtime
+            .list_agents()
+            .iter()
+            .any(|run| run.role_name == "Planner" && run.category.is_none())
+    );
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect();
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(usage.len(), 4);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    for index in [0, 1, 3] {
+        assert_eq!(usage[index].0, &parent.to_string());
+    }
+    assert_ne!(usage[2].0, &parent.to_string());
+    // Both the rejection and corrected child result append to the parent's input.
+    for (previous, next) in [(0, 1), (1, 3)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+    let delegate = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "delegate")
+        .unwrap();
+    let branches = delegate["function"]["parameters"]["properties"]["target"]["anyOf"]
+        .as_array()
+        .unwrap();
+    let planner = branches
+        .iter()
+        .find(|branch| branch["properties"]["role"]["const"] == "planner")
+        .unwrap();
+    assert!(planner["properties"].get("category").is_none());
+    assert!(requests[1].to_string().contains("omit target.category"));
+}
+
+#[tokio::test]
 async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalation() {
     let call = |id: &str, name: &str, input: Value| {
         ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
@@ -380,25 +494,19 @@ async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalat
             .runtime
             .delegate_background(Role::Worker, "work".into(), RunConfig::default());
     let mut events = Vec::new();
-    let recipient = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let event = harness.receiver.recv().await.unwrap();
-            let target = match &event.kind {
-                EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
-                    new_run_id, ..
-                }) => Some(RunId::new(
-                    new_run_id.strip_prefix("run-").unwrap().parse().unwrap(),
-                )),
-                _ => None,
-            };
-            events.push(event);
-            if let Some(target) = target {
-                break target;
-            }
+    let recipient = loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let target = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => Some(
+                RunId::new(new_run_id.strip_prefix("run-").unwrap().parse().unwrap()),
+            ),
+            _ => None,
+        };
+        events.push(event);
+        if let Some(target) = target {
+            break target;
         }
-    })
-    .await
-    .unwrap();
+    };
     events.extend(through_phase(&mut harness.receiver, recipient, AgentRunPhase::Waiting).await);
     let question = harness.runtime.user_answers(recipient).unwrap().remove(0);
     harness
@@ -493,9 +601,7 @@ async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
         "Keep this conversation".into(),
         RunConfig::default(),
     );
-    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
-        .await
-        .unwrap();
+    read.started.notified().await;
     if stopped {
         harness
             .runtime
@@ -531,6 +637,115 @@ async fn interrupted_tool_recovery(prompt: &str, stopped: bool) {
     assert!(text.contains(prompt));
     if !stopped {
         assert!(text.contains("cancelled"));
+    }
+}
+
+#[tokio::test]
+async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_prefix() {
+    let mut harness = harness(
+        vec![
+            read_response(0),
+            text_response(&"Old workspace analysis ".repeat(6000)),
+            read_response(1),
+            read_response(2),
+            text_response("done"),
+        ],
+        64_000,
+    );
+    let root = harness._directory.path();
+    let config = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let model = runtime::compose::compose_routed_model(
+        &config,
+        routing::ComposeDeps {
+            credential_store: Arc::new(
+                FileCredentialStore::open(root.join("credentials")).unwrap(),
+            ),
+            event_bus: Some(bus.clone()),
+            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+            catalog: model::ModelCatalog::new(),
+            factory: routing::factory::FactoryOptions::default(),
+        },
+    )
+    .unwrap();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    // No prompt catalog, skills or rules files: workspace is the only System.
+    harness.runtime = AgentRuntime::new(bus, Arc::new(executor), model).with_project_rules(
+        Arc::new(runtime::RulesSource::new(
+            runtime::ProjectTrust::Approved,
+            runtime::RulesSettings::from(&config.rules),
+            None,
+            Some(root.into()),
+            None,
+        )),
+    );
+    let storage_config = storage::StorageConfig {
+        db_path: root.join("workspace-history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+    let workspace_note = format!("Current workspace (evorch): {}.", root.display());
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Read workspace results".into(),
+        RunConfig::default(),
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    // Restoring with compaction enabled must keep the existing tail System;
+    // enabling its policy on a fresh run would create an initial System instead.
+    harness.runtime = harness.runtime.with_compaction(config.compaction.clone());
+    harness
+        .runtime
+        .continue_goal(run, "Continue workspace work".into(), RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Error
+    );
+
+    verify_trace(&harness, run, &events, 1);
+    let requests = harness.mock.recorded_requests();
+    let first = requests
+        .iter()
+        .find(|request| request.path == "/v1/chat/completions")
+        .unwrap();
+    let messages = first.body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "system");
+    assert!(messages[1]["content"].to_string().contains(&workspace_note));
+    for request in requests
+        .iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+    {
+        let systems = request.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            systems,
+            vec![&messages[1]],
+            "workspace instructions must survive compaction unchanged"
+        );
     }
 }
 
@@ -812,16 +1027,12 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
         prompt.into(),
         RunConfig::default(),
     );
-    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
-        .await
-        .unwrap();
+    read.started.notified().await;
     let child = harness
         .runtime
         .delegate_background_as_child(run, Role::Worker, "Blocked child", RunConfig::default())
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(20), read.child_started.notified())
-        .await
-        .unwrap();
+    read.child_started.notified().await;
     read.release.notify_one();
     let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
     harness
@@ -930,9 +1141,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             "Original task".into(),
             RunConfig::default(),
         );
-        tokio::time::timeout(Duration::from_secs(20), read.started.notified())
-            .await
-            .unwrap();
+        read.started.notified().await;
         harness
             .runtime
             .send_message_with_images(
@@ -1046,9 +1255,7 @@ async fn stopped_run_keeps_undelivered_status_and_rejects_early_delivery() {
         harness
             .runtime
             .delegate_background(Role::Worker, "task".into(), RunConfig::default());
-    tokio::time::timeout(Duration::from_secs(20), read.started.notified())
-        .await
-        .unwrap();
+    read.started.notified().await;
     harness
         .runtime
         .send_message(run, "undelivered".into())

@@ -108,12 +108,12 @@ async fn cancellation_between_delegate_spawns_drains_first_child() {
                 (
                     "first".into(),
                     "delegate".into(),
-                    serde_json::json!({"prompt":"first"})
+                    serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
                 ),
                 (
                     "second".into(),
                     "delegate".into(),
-                    serde_json::json!({"prompt":"second"})
+                    serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
                 ),
             ])
             .await
@@ -136,10 +136,16 @@ async fn rejected_waiting_transition_drains_all_spawned_children() {
     // Given: a Pending LoopState rejects Waiting; real children use the existing spawn path.
     let (_cancel, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(cancel_rx);
-    let first =
-        crate::meta::spawn_delegate(&mut state, &runtime, serde_json::json!({"prompt":"first"}));
-    let second =
-        crate::meta::spawn_delegate(&mut state, &runtime, serde_json::json!({"prompt":"second"}));
+    let first = crate::meta::spawn_delegate(
+        &mut state,
+        &runtime,
+        serde_json::json!({"target": {"role": "worker"},"prompt":"first"}),
+    );
+    let second = crate::meta::spawn_delegate(
+        &mut state,
+        &runtime,
+        serde_json::json!({"target": {"role": "worker"},"prompt":"second"}),
+    );
     assert!(first.is_ok() && second.is_ok());
     // When: the parent cannot enter Waiting, with a pre-existing per-call rejection interleaved.
     let results = crate::meta::wait_delegates(
@@ -197,12 +203,12 @@ async fn stop_between_delegate_spawns_preserves_first_child_and_defers_terminal_
                 (
                     "first".into(),
                     "delegate".into(),
-                    serde_json::json!({"prompt":"first"})
+                    serde_json::json!({"target": {"role": "worker"},"prompt":"first"})
                 ),
                 (
                     "second".into(),
                     "delegate".into(),
-                    serde_json::json!({"prompt":"second"})
+                    serde_json::json!({"target": {"role": "worker"},"prompt":"second"})
                 ),
             ])
             .await
@@ -233,10 +239,13 @@ async fn stopped_wait_keeps_awaited_child_and_preserves_wait_error_contract() {
     let (interrupt, interrupt_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = fixture(interrupt_rx);
     state.transition(AgentRunPhase::Running, None).unwrap();
-    let child =
-        crate::meta::spawn_delegate(&mut state, &runtime, serde_json::json!({"prompt":"child"}))
-            .ok()
-            .unwrap();
+    let child = crate::meta::spawn_delegate(
+        &mut state,
+        &runtime,
+        serde_json::json!({"target": {"role": "worker"},"prompt":"child"}),
+    )
+    .ok()
+    .unwrap();
     interrupt.send_replace(RunInterrupt::Stop);
     let results = crate::meta::wait_delegates(&mut state, &runtime, vec![Ok(child)]).await;
     assert_eq!(results.len(), 1);

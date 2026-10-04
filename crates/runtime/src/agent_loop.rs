@@ -28,23 +28,24 @@ use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
 use tokio::sync::{mpsc, watch};
 use tools::ToolExecutor;
 
+use crate::base_context::{self, InitialSystemPromptError};
 use crate::compaction;
-use crate::compaction::policy::{
-    CompactionLoopState, CompactionSettings, TriggerDecision, compaction_policy_text,
-};
+use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
-use crate::prompt::{SystemPromptCatalog, SystemPromptCatalogError, classify};
-use crate::rules::{self, RulesSession, RulesSource};
+use crate::prompt::{SystemPromptCatalog, classify};
+use crate::rules::{RulesSession, RulesSource};
 use crate::runtime::{Shared, WorkspaceContext, loop_shared};
-use crate::skill::{SkillLoadError, SkillRegistry, render_skills_section};
+use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection, WorkspaceMode,
 };
-use tool_calls::{standard_tool_specs, visible_tool_specs};
+pub(crate) use tool_calls::{
+    append_subagent_context_note, standard_tool_specs, visible_tool_specs,
+};
 
 pub(crate) struct RunTask {
     pub(crate) run_id: RunId,
@@ -211,242 +212,227 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
     let mut owned_worktree = None;
     // Every setup/execute return flows through one finalization boundary.
     async {
-    if state.cancelled()
-        || state
-            .runtime()
-            .is_some_and(|runtime| runtime.spawn_cancelled(state.task.run_id))
-    {
-        state.finish_cancelled();
-        return;
-    }
-    if state.interrupted() == Some(InterruptKind::Stop) {
-        state.finish_stopped();
-        return;
-    }
-    if state.task.config.workspace_mode == WorkspaceMode::Shared
-        && let Some(root) = sandbox_root.clone()
-    {
-        let checker_config = state.shared.runtime.upgrade()
-            .and_then(|shared| shared.comment_checker.get().cloned())
-            .unwrap_or_default();
-        // Reuse the existing explicit workspace sandbox seam for shared runs too.
-        // Production's factory has the same fail-closed base config as build_sandbox.
-        let sandbox = match state.shared.runtime.upgrade().and_then(|runtime| {
-            runtime.workspace.as_ref().map(|workspace| Arc::clone(&workspace.factory))
-        }) {
-            Some(factory) => factory.build(&state.policy, &crate::IsolatedMounts {
-                workspace_root: root.clone(), ro_binds: Vec::new(), rw_binds: Vec::new(),
-            }),
-            None => crate::network::build_sandbox(&state.policy, root.clone()),
-        };
-        let executor = sandbox
-            .map_err(|error| crate::RuntimeError::Sandbox { detail: error.to_string() })
-            .and_then(|sandbox| crate::runtime::configured_executor(
-                Arc::clone(&state.shared.bus), sandbox, root.clone(), &checker_config, &[root],
-                state.shared.executor.approval_policy(),
-            ));
-        match executor {
-            Ok(executor) => {
-                if let Some(runtime) = state.runtime() {
-                    runtime.configure_shell_escalation(&executor);
-                }
-                state.shared.executor = executor;
-            }
-            Err(error) => {
-                state.finish_error(error.to_string());
-                return;
-            }
+        if state.cancelled()
+            || state
+                .runtime()
+                .is_some_and(|runtime| runtime.spawn_cancelled(state.task.run_id))
+        {
+            state.finish_cancelled();
+            return;
         }
-    }
-    // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
-    // 決まるため、LoopState 構築後に確定させる。
-    let selected_model = state
-        .shared
-        .model
-        .selected_model(state.task.role, state.task.config.category.as_deref());
-    state.tool_specs = visible_tool_specs(
-        standard_tool_specs(&state.shared.executor),
-        &state.policy,
-        state.skills().is_some(),
-        state.task.parent.is_some(),
-        state.runtime().is_some_and(|runtime| runtime.web_tools_enabled()),
-    );
-    if !is_restored {
-        state.add_team_tools();
-    }
-    // Family-scoped description variation keeps the request prefix stable within a model family,
-    // so prompt-cache hit rates are unaffected.
-    tool_calls::append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
-    owned_worktree = match state.task.config.workspace_mode {
-        WorkspaceMode::Shared => None,
-        WorkspaceMode::Isolated => {
-            let Some(runtime_shared) = shared.upgrade() else {
-                return;
+        if state.interrupted() == Some(InterruptKind::Stop) {
+            state.finish_stopped();
+            return;
+        }
+        if state.task.config.workspace_mode == WorkspaceMode::Shared
+            && let Some(root) = sandbox_root.clone()
+        {
+            let checker_config = state
+                .shared
+                .runtime
+                .upgrade()
+                .and_then(|shared| shared.comment_checker.get().cloned())
+                .unwrap_or_default();
+            // Reuse the existing explicit workspace sandbox seam for shared runs too.
+            // Production's factory has the same fail-closed base config as build_sandbox.
+            let sandbox = match state.shared.runtime.upgrade().and_then(|runtime| {
+                runtime
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| Arc::clone(&workspace.factory))
+            }) {
+                Some(factory) => factory.build(
+                    &state.policy,
+                    &crate::IsolatedMounts {
+                        workspace_root: root.clone(),
+                        ro_binds: Vec::new(),
+                        rw_binds: Vec::new(),
+                    },
+                ),
+                None => crate::network::build_sandbox(&state.policy, root.clone()),
             };
-            let Some(workspace) = runtime_shared.workspace.as_ref() else {
-                state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
-                return;
-            };
-            let adopted = state
-                .task
-                .handoff
-                .as_mut()
-                .and_then(|handoff| handoff.worktree.take());
-            let setup = match adopted {
-                Some(owned) => {
-                    attach_adopted_workspace(workspace, &runtime_shared, &state, owned).await
-                }
-                None => setup_isolated_workspace(workspace, &runtime_shared, &state).await,
-            };
-            match setup {
-                Ok((owned, executor)) => {
+            let executor = sandbox
+                .map_err(|error| crate::RuntimeError::Sandbox {
+                    detail: error.to_string(),
+                })
+                .and_then(|sandbox| {
+                    crate::runtime::configured_executor(
+                        Arc::clone(&state.shared.bus),
+                        sandbox,
+                        root.clone(),
+                        &checker_config,
+                        &[root],
+                        state.shared.executor.approval_policy(),
+                    )
+                });
+            match executor {
+                Ok(executor) => {
+                    if let Some(runtime) = state.runtime() {
+                        runtime.configure_shell_escalation(&executor);
+                    }
                     state.shared.executor = executor;
-                    Some(owned)
                 }
-                Err(reason) => {
-                    state.finish_error(reason);
+                Err(error) => {
+                    state.finish_error(error.to_string());
                     return;
                 }
             }
         }
-    };
-    let active_root = match owned_worktree.as_ref() {
-        Some(owned) => Some(owned.path.clone()),
-        None => shared_active_root(state.shared.rules.as_deref(), sandbox_root),
-    };
-    if state.task.config.workspace_mode == WorkspaceMode::Shared
-        && let Some(runtime_shared) = shared.upgrade()
-    {
-        runtime_shared
-            .workspaces
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                state.task.run_id,
-                WorkspaceInspection {
-                    mode: WorkspaceMode::Shared,
-                    branch: None,
-                    worktree_path: None,
-                    active_root: active_root.clone(),
-                    merge_mode: state.task.config.merge_mode,
-                },
-            );
-    }
-    if let Some(source) = state.shared.rules.as_ref() {
-        state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
-    }
-    if !is_restored {
-        if let Err(error) = push_initial_system_message(
-            &state.shared,
-            &state.task,
-            state.rules_session.as_ref(),
-            &mut state.context,
-        ) {
-            // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
-            // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
-            // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
-            state.finish_error(error.to_string());
+        // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
+        // 決まるため、LoopState 構築後に確定させる。
+        let selected_model = state
+            .shared
+            .model
+            .selected_model(state.task.role, state.task.config.category.as_deref());
+        state.tool_specs = visible_tool_specs(
+            standard_tool_specs(&state.shared.executor),
+            &state.policy,
+            state.skills().is_some(),
+            state.task.parent.is_some(),
+            state
+                .runtime()
+                .is_some_and(|runtime| runtime.web_tools_enabled()),
+        );
+        if !is_restored {
+            state.add_team_tools();
+        }
+        // Family-scoped description variation keeps the request prefix stable within a model family,
+        // so prompt-cache hit rates are unaffected.
+        append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
+        owned_worktree = match state.task.config.workspace_mode {
+            WorkspaceMode::Shared => None,
+            WorkspaceMode::Isolated => {
+                let Some(runtime_shared) = shared.upgrade() else {
+                    return;
+                };
+                let Some(workspace) = runtime_shared.workspace.as_ref() else {
+                    state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
+                    return;
+                };
+                let adopted = state
+                    .task
+                    .handoff
+                    .as_mut()
+                    .and_then(|handoff| handoff.worktree.take());
+                let setup = match adopted {
+                    Some(owned) => {
+                        attach_adopted_workspace(workspace, &runtime_shared, &state, owned).await
+                    }
+                    None => setup_isolated_workspace(workspace, &runtime_shared, &state).await,
+                };
+                match setup {
+                    Ok((owned, executor)) => {
+                        state.shared.executor = executor;
+                        Some(owned)
+                    }
+                    Err(reason) => {
+                        state.finish_error(reason);
+                        return;
+                    }
+                }
+            }
+        };
+        let active_root = match owned_worktree.as_ref() {
+            Some(owned) => Some(owned.path.clone()),
+            None => shared_active_root(state.shared.rules.as_deref(), sandbox_root),
+        };
+        if state.task.config.workspace_mode == WorkspaceMode::Shared
+            && let Some(runtime_shared) = shared.upgrade()
+        {
+            runtime_shared
+                .workspaces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    state.task.run_id,
+                    WorkspaceInspection {
+                        mode: WorkspaceMode::Shared,
+                        branch: None,
+                        worktree_path: None,
+                        active_root: active_root.clone(),
+                        merge_mode: state.task.config.merge_mode,
+                    },
+                );
+        }
+        if let Some(source) = state.shared.rules.as_ref() {
+            state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
+        }
+        if !is_restored {
+            if let Err(error) = push_initial_system_message(
+                &state.shared,
+                &state.task,
+                state.rules_session.as_ref(),
+                &mut state.context,
+            ) {
+                // fail-closed: System プロンプトの解決に失敗した run はモデル呼び出し前に
+                // Error へ遷移する。reason はカタログ / skill の型付きエラー Display であり、
+                // 識別子 (ロール名・キー名・カテゴリ名・skill 名) のみを運ぶ。
+                state.finish_error(error.to_string());
+                cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
+                return;
+            }
+            state.context.push_user(&state.task.prompt);
+            if let Some(message) = state.context.messages.last_mut() {
+                message
+                    .content
+                    .extend(
+                        state
+                            .task
+                            .config
+                            .images
+                            .iter()
+                            .map(|image| ContentBlock::Image {
+                                media_type: image.media_type.clone(),
+                                data: image.data.clone(),
+                            }),
+                    );
+            }
+        }
+        if let Some(root) = &active_root {
+            update_workspace_system_message(&mut state.context, root);
+        }
+        state.publish_message_count();
+        if state.transition(AgentRunPhase::Running, None).is_err() {
             cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
             return;
         }
-        state.context.push_user(&state.task.prompt);
-        if let Some(message) = state.context.messages.last_mut() {
-            message
-                .content
-                .extend(
-                    state
-                        .task
-                        .config
-                        .images
-                        .iter()
-                        .map(|image| ContentBlock::Image {
-                            media_type: image.media_type.clone(),
-                            data: image.data.clone(),
-                        }),
-                );
-        }
+        state.save_checkpoint();
+        state.execute().await;
     }
-    if let Some(root) = &active_root {
-        let workspace_note = format!(
-            "Current workspace (evorch): {}.",
-            root.display()
-        );
-        if let Some(message) = state
-            .context
-            .messages
-            .iter_mut()
-            .find(|message| message.role == providers::Role::System)
-        {
-            if let Some(ContentBlock::Text { text }) = message.content.iter_mut().find(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("Current workspace (evorch): "))) {
-                *text = workspace_note;
-            } else {
-                message.content.push(ContentBlock::Text { text: workspace_note });
-            }
-        } else {
-            state.context.prepend_system(workspace_note);
-        }
-    }
-    state.publish_message_count();
-    if state.transition(AgentRunPhase::Running, None).is_err() {
-        cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
-        return;
-    }
-    state.save_checkpoint();
-    state.execute().await;
-    }.await;
+    .await;
     state.finalize(owned_worktree).await;
 }
 
-fn shared_active_root(
+/// workspace 情報は既存 System 内で更新し、System がなければ履歴末尾へ追加する。
+/// 先頭へ挿入すると既存 prefix と圧縮チェックポイントの位置が変わるため避ける。
+fn update_workspace_system_message(context: &mut AgentContext, root: &std::path::Path) {
+    let workspace_note = base_context::workspace_note(root);
+    if let Some(message) = context
+        .messages
+        .iter_mut()
+        .find(|message| message.role == providers::Role::System)
+    {
+        if let Some(ContentBlock::Text { text }) = message.content.iter_mut().find(|block| {
+            matches!(block, ContentBlock::Text { text } if base_context::is_workspace_note(text))
+        }) {
+            *text = workspace_note;
+        } else {
+            message.content.push(ContentBlock::Text {
+                text: workspace_note,
+            });
+        }
+    } else {
+        context.push_system(&workspace_note);
+    }
+}
+
+pub(crate) fn shared_active_root(
     rules: Option<&RulesSource>,
     sandbox_root: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     rules
         .and_then(|source| source.project_root().map(std::path::Path::to_path_buf))
         .or(sandbox_root)
-}
-
-#[cfg(test)]
-mod workspace_tests {
-    use super::shared_active_root;
-    use crate::{ProjectTrust, RulesSettings, RulesSource};
-    use std::path::PathBuf;
-
-    #[test]
-    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
-        let rules_root = PathBuf::from("/rules-project");
-        let sandbox_root = PathBuf::from("/sandbox-project");
-        let rules = RulesSource::new(
-            ProjectTrust::Approved,
-            RulesSettings::from(&config::RulesConfig::default()),
-            None,
-            Some(rules_root.clone()),
-            None,
-        );
-        assert_eq!(
-            shared_active_root(Some(&rules), Some(sandbox_root)),
-            Some(rules_root),
-        );
-    }
-
-    #[test]
-    fn shared_active_root_falls_back_to_sandbox_or_none() {
-        let sandbox_root = PathBuf::from("/sandbox-project");
-        let rules = RulesSource::new(
-            ProjectTrust::Approved,
-            RulesSettings::from(&config::RulesConfig::default()),
-            None,
-            None,
-            None,
-        );
-        for source in [None, Some(&rules)] {
-            assert_eq!(
-                shared_active_root(source, Some(sandbox_root.clone())),
-                Some(sandbox_root.clone()),
-            );
-            assert_eq!(shared_active_root(source, None), None);
-        }
-    }
 }
 
 async fn setup_isolated_workspace(
@@ -661,104 +647,35 @@ pub(crate) async fn cleanup_worktree(
     }
 }
 
-/// 初期 System メッセージの合成で失敗しうるエラー (issue #53 / AC6)。
-///
-/// Display は識別子のみを運び、skill 本文や frontmatter 値を漏らさない
-/// ([`SystemPromptCatalogError`] / [`SkillLoadError`] と同一規約)。
-#[derive(Debug, thiserror::Error)]
-enum InitialSystemPromptError {
-    /// カタログ参照の失敗 (既存のカタログエラーをそのまま運ぶ)。
-    #[error(transparent)]
-    Catalog(#[from] SystemPromptCatalogError),
-    /// skill 本文の読み込み失敗 ([`SkillLoadError`] は識別子のみを運ぶ)。
-    #[error(transparent)]
-    Skills(#[from] SkillLoadError),
-    /// load_skills が指定されたが skill レジストリが接続されていない。
-    #[error("skill registry is not configured")]
-    SkillsNotConfigured,
-}
-
 /// run 開始時の初期 System メッセージを履歴へ push する (単一 System 不変条件)。
 ///
 /// カタログテキスト・skills セクション・project rules を**1 件の** System
-/// メッセージへ合成する。各セクションは空行 1 つを挟んで連結する。すべて
-/// 無指定なら何もせず v0.1 の履歴構成を保つ。解決に失敗した場合は型付き
-/// エラーを返し、履歴へは System メッセージを追加しない (fail-closed)。
+/// メッセージへ合成する ([`crate::base_context::compose_system_sections`] が
+/// Context Inspector と共有する単一の組立経路)。すべて無指定なら何もせず
+/// v0.1 の履歴構成を保つ。解決に失敗した場合は型付きエラーを返し、履歴へは
+/// System メッセージを追加しない (fail-closed)。
 fn push_initial_system_message(
     shared: &LoopShared,
     task: &RunTask,
     rules_session: Option<&RulesSession>,
     context: &mut AgentContext,
 ) -> Result<(), InitialSystemPromptError> {
-    let catalog_text = match shared.system_prompts.as_ref() {
-        Some(catalog) => {
-            let model_id = shared
-                .model
-                .selected_model(task.role, task.config.category.as_deref());
-            Some(catalog.system_prompt_for(
-                task.role,
-                task.config.category.as_deref(),
-                &model_id,
-            )?)
-        }
-        None => None,
-    };
-    let skills_text = resolve_skills_section(shared, &task.config.load_skills)?;
-    let compaction_text = shared.compaction_configured.then(|| {
-        let model_id = shared
-            .model
-            .selected_model(task.role, task.config.category.as_deref());
-        compaction_policy_text(&shared.compaction, classify(&model_id))
-    });
-    let estimated_history_bytes = u64::try_from(
-        catalog_text.as_ref().map_or(0, String::len)
-            + skills_text.as_ref().map_or(0, String::len)
-            + compaction_text.as_ref().map_or(0, String::len)
-            + task.prompt.len(),
-    )
-    .unwrap_or(u64::MAX);
-    let rules_text = shared.rules.as_ref().and_then(|source| {
-        rules::startup_snapshot(
-            source,
-            rules_session.and_then(|session| session.active_root.as_deref()),
-            None,
-            estimated_history_bytes,
-        )
-    });
-    let mut composed = String::new();
-    for section in [catalog_text, skills_text, rules_text, compaction_text]
-        .into_iter()
-        .flatten()
-    {
-        if !composed.is_empty() {
-            composed.push_str("\n\n");
-        }
-        composed.push_str(&section);
-    }
+    let sections = base_context::compose_system_sections(
+        shared,
+        &base_context::SystemInputs {
+            role: task.role,
+            category: task.config.category.as_deref(),
+            load_skills: &task.config.load_skills,
+            prompt_len: task.prompt.len(),
+            active_root: rules_session.and_then(|session| session.active_root.as_deref()),
+        },
+    )?;
+    let composed = base_context::join_system_sections(&sections);
     if composed.is_empty() {
         return Ok(());
     }
     context.push_system(&composed);
     Ok(())
-}
-
-/// load_skills 指定時、レジストリから本文を読み込み skills セクション文字列を
-/// 返す。load_skills が空なら None (セクションなし)。
-fn resolve_skills_section(
-    shared: &LoopShared,
-    load_skills: &[String],
-) -> Result<Option<String>, InitialSystemPromptError> {
-    if load_skills.is_empty() {
-        return Ok(None);
-    }
-    let Some(registry) = shared.skills.as_ref() else {
-        return Err(InitialSystemPromptError::SkillsNotConfigured);
-    };
-    let mut loaded = Vec::with_capacity(load_skills.len());
-    for name in load_skills {
-        loaded.push((name.clone(), registry.load_body(name)?));
-    }
-    Ok(Some(render_skills_section(&loaded)))
 }
 
 impl LoopState {
@@ -820,6 +737,15 @@ impl LoopState {
                 return;
             }
             self.inject_parent_messages();
+            for notice in self
+                .shared
+                .executor
+                .take_shell_job_notifications(&self.task.run_id.to_string())
+            {
+                // Append without rewriting the already-sent provider prefix.
+                self.context.push_user(&notice);
+                self.publish_message_count();
+            }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
                 crate::budget_tracker::BudgetDecision::Exhausted(_) => return,
@@ -865,6 +791,7 @@ impl LoopState {
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
                 model_preference: self.channels.model_preference_rx.borrow().clone(),
+                purpose: event_bus::RequestPurpose::Agent,
             };
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}
@@ -1111,8 +1038,17 @@ impl LoopState {
                 return false;
             }
         }
+        let turn_end = self.persist_turn_boundary();
         if self.transition(AgentRunPhase::Waiting, None).is_err() {
             return false;
+        }
+        if let Some(context_len) = turn_end {
+            self.shared
+                .bus
+                .emit(Event::new(event_bus::LifecycleEvent::TurnCompleted {
+                    run_id: self.task.run_id.to_string(),
+                    context_len,
+                }));
         }
         loop {
             tokio::select! {
@@ -1203,6 +1139,26 @@ impl LoopState {
             self.shared.bus.emit(Event::new(event));
         }
         Ok(())
+    }
+
+    /// Persist the finished turn before it becomes a fork boundary. Only an
+    /// assistant reply without tool calls ends a turn; a failed write publishes none.
+    fn persist_turn_boundary(&self) -> Option<u64> {
+        let last = self.context.messages.last()?;
+        if last.role != providers::Role::Assistant
+            || last
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        {
+            return None;
+        }
+        if let Err(error) = crate::restore::persist_checkpoint(self) {
+            tracing::warn!(run_id = %self.task.run_id, %error, "turn checkpoint failed");
+            self.snapshot_diagnostic(&error);
+            return None;
+        }
+        u64::try_from(crate::restore::conversation_len(&self.context.messages)).ok()
     }
 
     fn save_checkpoint(&self) {
@@ -1346,5 +1302,167 @@ impl LoopState {
 
     fn finish_cancelled(&mut self) {
         self.finish_error("cancelled".to_string());
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::{shared_active_root, update_workspace_system_message};
+    use crate::{
+        AgentContext, CompactionCheckpoint, ProjectTrust, Role, RulesSettings, RulesSource, RunId,
+    };
+    use providers::{ContentBlock, Message, Role as MessageRole};
+    use std::path::{Path, PathBuf};
+
+    fn text_message(role: MessageRole, text: &str) -> Message {
+        Message {
+            role,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn workspace_system_message_appends_without_changing_existing_history() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_user("work");
+        context.push_assistant(text_message(MessageRole::Assistant, "answer"));
+        let before = context.messages.clone();
+
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+
+        assert_eq!(context.messages.len(), before.len() + 1);
+        assert_eq!(&context.messages[..before.len()], before.as_slice());
+        assert_eq!(
+            context.messages.last().unwrap(),
+            &text_message(
+                MessageRole::System,
+                "Current workspace (evorch): /workspace."
+            ),
+        );
+        let after = context.clone();
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+        assert_eq!(context, after);
+    }
+
+    #[test]
+    fn workspace_system_message_appends_to_empty_context() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+
+        assert_eq!(
+            context.messages,
+            vec![text_message(
+                MessageRole::System,
+                "Current workspace (evorch): /workspace."
+            )],
+        );
+    }
+
+    #[test]
+    fn workspace_system_message_appends_block_to_existing_system() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_system("stable instructions");
+        context.messages[0].content.push(ContentBlock::Text {
+            text: "Mention Current workspace (evorch): without replacing this block".to_string(),
+        });
+        context.push_user("work");
+        let mut expected = context.clone();
+        expected.messages[0].content.push(ContentBlock::Text {
+            text: "Current workspace (evorch): /workspace.".to_string(),
+        });
+
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+        assert_eq!(context, expected);
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+        assert_eq!(context, expected);
+    }
+
+    #[test]
+    fn workspace_system_message_updates_only_matching_block_in_place() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_user("work");
+        context.push_system("stable instructions");
+        context.messages[1].content.extend([
+            ContentBlock::Text {
+                text: "Current workspace (evorch): /old.".to_string(),
+            },
+            ContentBlock::Text {
+                text: "keep trailing instructions".to_string(),
+            },
+        ]);
+        context.push_system("another system message");
+        let mut expected = context.clone();
+        expected.messages[1].content[1] = ContentBlock::Text {
+            text: "Current workspace (evorch): /new.".to_string(),
+        };
+
+        update_workspace_system_message(&mut context, Path::new("/new"));
+
+        assert_eq!(context, expected);
+    }
+
+    #[test]
+    fn workspace_system_message_preserves_restored_checkpoints_and_visible_prefix() {
+        let mut context = AgentContext::new(RunId::new(1), Role::Worker);
+        context.push_user("old");
+        context.push_assistant(text_message(MessageRole::Assistant, "answer"));
+        context.push_user("recent");
+        context.apply_checkpoint(CompactionCheckpoint {
+            id: "checkpoint".to_string(),
+            summary: text_message(MessageRole::User, "summary"),
+            range: (0, 2),
+        });
+        let mut expected = context.clone();
+        let mut expected_visible = context.visible_messages();
+        let workspace = text_message(
+            MessageRole::System,
+            "Current workspace (evorch): /workspace.",
+        );
+        expected.messages.push(workspace.clone());
+        expected_visible.push(workspace);
+
+        update_workspace_system_message(&mut context, Path::new("/workspace"));
+
+        assert_eq!(context, expected);
+        assert_eq!(context.visible_messages(), expected_visible);
+    }
+
+    #[test]
+    fn shared_active_root_prefers_rules_root_over_sandbox_root() {
+        let rules_root = PathBuf::from("/rules-project");
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            Some(rules_root.clone()),
+            None,
+        );
+        assert_eq!(
+            shared_active_root(Some(&rules), Some(sandbox_root)),
+            Some(rules_root),
+        );
+    }
+
+    #[test]
+    fn shared_active_root_falls_back_to_sandbox_or_none() {
+        let sandbox_root = PathBuf::from("/sandbox-project");
+        let rules = RulesSource::new(
+            ProjectTrust::Approved,
+            RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            None,
+            None,
+        );
+        for source in [None, Some(&rules)] {
+            assert_eq!(
+                shared_active_root(source, Some(sandbox_root.clone())),
+                Some(sandbox_root.clone()),
+            );
+            assert_eq!(shared_active_root(source, None), None);
+        }
     }
 }

@@ -32,14 +32,13 @@ impl ScriptedModel {
                                 tool(
                                     "delegate-worker",
                                     "delegate",
-                                    json!({ "background": true, "role": "worker", "prompt": "W1" }),
+                                    json!({"target": {"role": "worker"}, "background": true, "prompt": "W1" }),
                                 ),
                                 tool(
                                     "delegate-explorer",
                                     "delegate",
-                                    json!({
+                                    json!({"target": {"role": "explorer"},
                                         "background": true,
-                                        "role": "explorer",
                                         "prompt": "E1",
                                         "interactive": true
                                     }),
@@ -63,9 +62,8 @@ impl ScriptedModel {
                             vec![tool(
                                 "delegate-reviewer",
                                 "delegate",
-                                json!({
+                                json!({"target": {"role": "reviewer"},
                                     "background": true,
-                                    "role": "reviewer",
                                     "prompt": "R1",
                                     "interactive": true
                                 }),

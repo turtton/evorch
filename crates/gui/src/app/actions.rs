@@ -94,40 +94,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
+    /// Fork from the latest completed turn, or an empty child before any turn.
     pub fn fork_thread(&mut self, source: ThreadId) -> Result<ThreadId, WorkbenchError> {
-        let original = self
-            .sidebar
-            .threads
-            .iter()
-            .find(|thread| thread.id == source)
-            .cloned()
-            .ok_or(ThreadError::UnknownThread)?;
-        let id = ThreadId::new(format!(
-            "{}-fork-{}",
-            source,
-            self.sidebar.threads.len() + 1
-        ));
-        let mut fork = workspace_ui::ThreadRecord {
-            archived: original.archived,
-            pinned: original.pinned,
-            model_preference: original.model_preference,
-            ..workspace_ui::ThreadRecord::new(id.clone(), original.project_id, original.title)
-        };
-        fork.id = id.clone();
-        fork.title = format!("{} (fork)", fork.title);
-        fork.parent_thread_id = Some(source);
-        fork.fork_event_id = None;
-        fork.run_ids.clear();
-        fork.branch = None;
-        fork.worktree_path = None;
-        fork.active_root = None;
-        self.sidebar.threads.push(fork);
-        self.switch_thread(id.clone())?;
-        self.save_sidebar();
-        Ok(id)
+        let point = self
+            .thread_transcript(&source)
+            .and_then(crate::model::transcript::TranscriptModel::last_fork_point);
+        self.branch_thread(&source, point, workspace_ui::LineageKind::Fork)
     }
 
     pub fn switch_thread(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
+        // A hidden version is reached through its group's visible version.
+        let thread_id = if self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| thread.id == thread_id && thread.superseded)
+        {
+            workspace_ui::visible_version(&self.sidebar.threads, &thread_id).unwrap_or(thread_id)
+        } else {
+            thread_id
+        };
         let previous = self.sidebar.active_thread.clone();
         self.sidebar.switch_thread(&thread_id)?;
         if let Some(previous) = previous
@@ -390,6 +376,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             LoopEvent::ChatAccepted { thread_id, run_id } => {
+                // Acceptance indexes the run; lifecycle events identify the current
+                // conversation root. Follow-up receipts must not reroute its transcript.
                 if self.bind_thread_run(&thread_id, &run_id) {
                     self.save_sidebar();
                 }

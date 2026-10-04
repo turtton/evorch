@@ -273,7 +273,7 @@ impl QuotaState {
             store,
             account.into(),
         ));
-        match CodexQuotaClient::new(QuotaConfig::default(), store) {
+        match CodexQuotaClient::new_for_account(QuotaConfig::default(), store) {
             Ok(client) => self.backend = Some(Box::new(client)),
             Err(error) => self.error = Some(error),
         }

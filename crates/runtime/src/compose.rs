@@ -434,6 +434,7 @@ impl RoutedModel {
                 },
                 observation: Some(ObservationContext {
                     run_id: invocation.run_id.clone(),
+                    purpose: invocation.purpose,
                 }),
             };
             let result = structured::send(provider, &mut request, bus).await;
@@ -559,6 +560,7 @@ impl AgentModel for RoutedModel {
             output_schema: None,
             observation: Some(ObservationContext {
                 run_id: invocation.run_id.clone(),
+                purpose: event_bus::RequestPurpose::Compaction,
             }),
         };
         compactor
@@ -615,6 +617,14 @@ impl AgentModel for RoutedModel {
 
     fn available_profiles(&self) -> Vec<ProfileSummary> {
         RoutedModel::available_profiles(self)
+    }
+
+    fn binding_preview(
+        &self,
+        role: Role,
+        category: Option<&str>,
+    ) -> Option<config::types::agents::ResolvedAgentBinding> {
+        self.agents.binding_for(role_key(role), category).ok()
     }
 
     fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {

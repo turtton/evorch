@@ -51,11 +51,14 @@ impl ThreadOwner {
 
     pub fn begin_turn(&mut self, token: &Lease, now_ms: u64) -> Result<(), OwnershipError> {
         self.validate(token)?;
-        if self.state != OwnerState::Running || now_ms >= self.lease.expires_at {
+        if self.state != OwnerState::Running {
             return Err(OwnershipError::Quiescing);
         }
         if self.active_turn {
             return Err(OwnershipError::Active);
+        }
+        if now_ms >= self.lease.expires_at {
+            self.heartbeat(token, now_ms)?;
         }
         self.active_turn = true;
         Ok(())
@@ -94,11 +97,14 @@ impl ThreadOwner {
         now_ms: u64,
     ) -> Result<(), OwnershipError> {
         self.validate(token)?;
-        if self.state != OwnerState::Running || now_ms >= self.lease.expires_at {
+        if self.state != OwnerState::Running {
             return Err(OwnershipError::Quiescing);
         }
         if self.active_runs.contains(run) || (self.active_turn && self.active_runs.is_empty()) {
             return Err(OwnershipError::Active);
+        }
+        if now_ms >= self.lease.expires_at {
+            self.heartbeat(token, now_ms)?;
         }
         self.active_runs.insert(run.into());
         self.active_turn = true;
@@ -167,8 +173,17 @@ impl ThreadOwner {
                 return Err(OwnershipError::NotClaimable);
             }
         }
-        if self.lease.observe(now_ms, self.settings.grace_ms.get()) == OwnerState::Stale {
-            return Err(OwnershipError::NotClaimable);
+        // Expiry makes an unresponsive owner eligible for claim; only a release
+        // or a committed owner/generation change revokes its authority. The
+        // registry serializes this renewal with claims in an IMMEDIATE transaction.
+        if now_ms >= self.lease.expires_at {
+            tracing::warn!(
+                thread_id = %self.thread_id,
+                owner_id = %self.lease.owner_id,
+                generation = self.lease.generation,
+                overdue_ms = now_ms.saturating_sub(self.lease.expires_at),
+                "owner heartbeat missed lease deadline; renewing current generation"
+            );
         }
         self.lease.expires_at = now_ms.saturating_add(self.settings.lease_ms.get());
         Ok(())

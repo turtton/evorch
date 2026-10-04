@@ -85,6 +85,7 @@ async fn client_stream_text_yields_text_deltas_then_completed() {
                         output_tokens: 0,
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
+                        reasoning_tokens: None,
                     },
                     finish_reason: FinishReason::Stop,
                 },

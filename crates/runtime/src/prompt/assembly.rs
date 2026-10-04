@@ -31,6 +31,21 @@ pub struct SystemPromptInput<'a> {
     pub triggers: &'a [TriggerSource],
 }
 
+/// 組立後のシステムプロンプトを構成するセクションの種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PromptPartKind {
+    /// ロールの baseline。
+    RoleBaseline,
+    /// モデルファミリの base section。
+    ModelFamily,
+    /// カテゴリ overlay。
+    CategoryOverlay,
+    /// Orchestrator 専用の Intent Gate (keyTriggers を含む生成テキスト)。
+    IntentGate,
+    /// ロール / カテゴリ binding の preset appendix。
+    Appendix,
+}
+
 /// システムプロンプトを組立てる純粋関数 (AC3)。
 ///
 /// - 各セクションは末尾の余白を削除してから扱う。
@@ -38,21 +53,46 @@ pub struct SystemPromptInput<'a> {
 /// - Intent Gate はロールが Orchestrator のときのみ挿入する (AC7)。
 /// - セクションは空行 1 つ (`\n\n`) で連結し、末尾に改行を付けない。
 pub fn assemble_system_prompt(input: &SystemPromptInput<'_>) -> String {
-    let mut sections: Vec<String> = vec![
-        input.role_baseline.trim_end().to_owned(),
-        input.family_section.trim_end().to_owned(),
+    assemble_system_prompt_parts(input)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// [`assemble_system_prompt`] が連結する前のセクションを種別付きで返す。
+///
+/// 連結結果は常に [`assemble_system_prompt`] とバイト単位で一致する。
+pub fn assemble_system_prompt_parts(
+    input: &SystemPromptInput<'_>,
+) -> Vec<(PromptPartKind, String)> {
+    let mut sections = vec![
+        (
+            PromptPartKind::RoleBaseline,
+            input.role_baseline.trim_end().to_owned(),
+        ),
+        (
+            PromptPartKind::ModelFamily,
+            input.family_section.trim_end().to_owned(),
+        ),
     ];
     if let Some(overlay) = input.category_overlay {
-        sections.push(overlay.trim_end().to_owned());
+        sections.push((
+            PromptPartKind::CategoryOverlay,
+            overlay.trim_end().to_owned(),
+        ));
     }
     if input.role == Role::Orchestrator {
-        sections.push(render_intent_gate(input.triggers).trim_end().to_owned());
+        sections.push((
+            PromptPartKind::IntentGate,
+            render_intent_gate(input.triggers).trim_end().to_owned(),
+        ));
     }
     if let Some(appendix) = input.appendix {
-        sections.push(appendix.trim_end().to_owned());
+        sections.push((PromptPartKind::Appendix, appendix.trim_end().to_owned()));
     }
-    sections.retain(|section| !section.is_empty());
-    sections.join("\n\n")
+    sections.retain(|(_, section)| !section.is_empty());
+    sections
 }
 
 #[cfg(test)]

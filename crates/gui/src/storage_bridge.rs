@@ -10,6 +10,7 @@ use storage::{StorageError, StorageHandle};
 mod coalescing;
 mod lifecycle;
 mod monitor;
+mod usage_ledger;
 use coalescing::{COALESCE_INTERVAL, EventQueue, QueuedEvent, WRITE_QUEUE_CAPACITY};
 pub use lifecycle::OwnedStorageBridge;
 pub use monitor::{StorageBridgeMonitor, StorageBridgeSnapshot};
@@ -70,6 +71,7 @@ pub struct StorageBridge {
     validator: Option<event_bus::MutationValidator>,
     policy: PersistencePolicy,
     monitor: StorageBridgeMonitor,
+    ledger: Option<usage_ledger::UsageRecorder>,
     #[cfg(test)]
     automatic_flush_enabled: bool,
 }
@@ -84,6 +86,7 @@ impl StorageBridge {
             validator: None,
             policy: PersistencePolicy::default(),
             monitor: StorageBridgeMonitor::default(),
+            ledger: None,
             #[cfg(test)]
             automatic_flush_enabled: true,
         }
@@ -99,7 +102,21 @@ impl StorageBridge {
         if !enabled {
             self.usage = UsageAggregator::new();
             self.usage_dirty = false;
+            self.ledger = None;
         }
+        self
+    }
+
+    /// Record one usage ledger row per provider attempt, priced from `pricing`.
+    /// Has no effect while metrics are disabled.
+    pub fn with_usage_ledger(
+        mut self,
+        pricing: crate::model::telemetry::pricing::SharedUsagePricing,
+    ) -> Self {
+        self.ledger = self
+            .policy
+            .metrics_enabled
+            .then(|| usage_ledger::UsageRecorder::new(pricing));
         self
     }
 
@@ -116,6 +133,15 @@ impl StorageBridge {
             self.usage.record(usage, &event.meta);
             self.usage_dirty = true;
             return Ok(());
+        }
+        if let Some(record) = self
+            .ledger
+            .as_mut()
+            .and_then(|ledger| ledger.observe(event))
+            && let Err(error) = self.storage.record_usage_requests(vec![record])
+        {
+            self.monitor
+                .warn(&format!("failed to record usage ledger row: {error}"));
         }
         let result =
             self.storage
@@ -374,3 +400,7 @@ mod tests;
 #[cfg(test)]
 #[path = "storage_bridge/limit_tests.rs"]
 mod limit_tests;
+
+#[cfg(test)]
+#[path = "storage_bridge/usage_ledger_tests.rs"]
+mod usage_ledger_tests;
