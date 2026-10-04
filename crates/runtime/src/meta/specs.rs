@@ -12,19 +12,15 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Delegate a task to a child agent. Role defaults to worker. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Choose a category using the category field's criteria and pair it with its owning role: worker categories require role=worker (default); reviewer category plan requires role=reviewer. Omission uses the worker base binding, with no automatic task classification. Images require multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
+        description: "Delegate a task to a child agent using the required target object. Choose target.role first, then an optional target.category from that role's branch. For planning use target={\"role\":\"planner\"} without category; for plan review use target={\"role\":\"reviewer\",\"category\":\"plan-review\"}. Category omission uses the selected role's base binding, with no automatic task classification. By default, wait for the child and return its phase or an attention snapshot if it asks a question; use subagent_questions and answer_subagent_question to resolve that question. background=true returns immediately with a run_id. interactive=true requires background=true. Images require target.role=multimodal_looker (alias: multimodallooker). Provide a self-contained prompt with purpose, file/responsibility ownership, constraints, expected outcome and validation. Ask for a final report covering outcome, changes, verification and unresolved issues. Let clear tasks finish independently; send intermediate messages only for blockers, scope/ownership changes or findings affecting other work.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "role": {"type": "string", "default": "worker", "enum": [
-                    "orchestrator", "explorer", "worker", "reviewer", "web_researcher", "planner", "oracle",
-                    "multimodal_looker", "multimodallooker"
-                ]},
+                "target": delegate_target_schema(),
                 "prompt": {"type": "string", "description": "Self-contained task instructions and relevant context."},
                 "background": {"type": "boolean", "default": false, "description": "Return the child run_id immediately instead of waiting."},
                 "interactive": {"type": "boolean", "default": false, "description": "Keep the child available for messages; requires background=true."},
                 "name": {"type": "string", "description": "Human-readable child name."},
-                "category": delegate_category_schema(),
                 "workspace_mode": {"type": "string", "enum": ["shared", "isolated"], "default": "shared"},
                 "workspace_branch": {"type": "string", "description": "Existing branch for an isolated workspace."},
                 "load_skills": {"type": "array", "items": {"type": "string"}, "description": "Registered skills to load into the child."},
@@ -40,7 +36,8 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
                     }, "required": ["media_type", "data"], "additionalProperties": false}
                 }
             },
-            "required": ["prompt"]
+            "required": ["target", "prompt"],
+            "additionalProperties": false
         }),
     }
 }
@@ -317,21 +314,40 @@ pub(super) fn answer_subagent_question(name: &str) -> ToolSpec {
     )
 }
 
-fn delegate_category_schema() -> Value {
-    let categories: Vec<_> = config::agent_categories::public_categories().collect();
-    let category_names: Vec<_> = categories.iter().map(|category| category.name).collect();
-    let category_description = format!(
-        "Pair each category with its tagged role (worker by default; plan requires reviewer). Choose by the task's primary difficulty, not prompt length. {} Omit only when no category fits; omission uses the worker base binding, not quick.",
-        categories
-            .iter()
-            .map(|category| format!(
-                "{} ({}): {}",
-                category.name, category.role, category.guidance
-            ))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    json!({"type": "string", "enum": category_names, "description": category_description})
+fn delegate_target_schema() -> Value {
+    let branches: Vec<_> = super::delegation::DELEGATE_ROLES.iter().map(|role| {
+        let categories: Vec<_> = config::agent_categories::public_categories()
+            .filter(|category| category.role == *role)
+            .collect();
+        let guidance = match *role {
+            "orchestrator" => "Coordinate agents and execution.",
+            "explorer" => "Read-only local code investigation.",
+            "worker" => "Implement a task; choose a category by its primary difficulty.",
+            "reviewer" => "Review work; plan-review reviews a planner-produced plan.",
+            "web_researcher" => "Collect external source evidence.",
+            "planner" => "Create a plan before implementation. Omit category; plan-review belongs to reviewer.",
+            "oracle" => "Provide expert reasoning and advice.",
+            "multimodal_looker" | "multimodallooker" => "Interpret images supplied in images.",
+            _ => unreachable!("registered delegate role"),
+        };
+        let mut branch = json!({
+            "type": "object", "description": guidance,
+            "properties": {"role": {"type": "string", "const": role}},
+            "required": ["role"], "additionalProperties": false
+        });
+        if !categories.is_empty() {
+            let names: Vec<_> = categories.iter().map(|category| category.name).collect();
+            let criteria = categories.iter()
+                .map(|category| format!("{}: {}", category.name, category.guidance))
+                .collect::<Vec<_>>().join(" ");
+            branch["properties"]["category"] = json!({
+                "type": "string", "enum": names,
+                "description": format!("{criteria} Omit when no category fits to use the {role} base binding.")
+            });
+        }
+        branch
+    }).collect();
+    json!({"description": "Select a role, then a category only if that role's branch offers one.", "anyOf": branches})
 }
 
 fn run_id() -> Value {
@@ -361,101 +377,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delegate_schema_exposes_optional_role_and_execution_flags() {
-        // Given: the public delegate definition.
-        let spec = tool_spec("delegate");
-        // When: inspecting the machine-consumed schema.
-        let properties = &spec.input_schema["properties"];
-        // Then: prompt alone is required; both accepted multimodal aliases are advertised.
-        assert_eq!(spec.input_schema["required"], serde_json::json!(["prompt"]));
-        assert_eq!(
-            properties["role"]["enum"],
-            serde_json::json!([
-                "orchestrator",
-                "explorer",
-                "worker",
-                "reviewer",
-                "web_researcher",
-                "planner",
-                "oracle",
-                "multimodal_looker",
-                "multimodallooker"
-            ])
-        );
-        assert_eq!(properties["role"]["default"], "worker");
-        for name in ["background", "interactive"] {
-            assert_eq!(properties[name]["type"], "boolean");
-            assert_eq!(properties[name]["default"], false);
-        }
-        for name in [
-            "prompt",
-            "name",
-            "category",
-            "workspace_mode",
-            "workspace_branch",
-        ] {
-            assert_eq!(properties[name]["type"], "string");
-        }
-        assert_eq!(properties["load_skills"]["type"], "array");
-        assert_eq!(properties["task"]["type"], "object");
-        assert_eq!(properties["images"]["type"], "array");
-    }
-
-    #[test]
-    fn delegate_schema_explains_category_routing() {
-        let spec = tool_spec("delegate");
-        let category = &spec.input_schema["properties"]["category"];
-        let help = category["description"].as_str().expect("category help");
-        let names = category["enum"].as_array().expect("category names");
-
-        for name in names {
-            let name = name.as_str().expect("category name");
-            assert!(
-                help.contains(&format!(
-                    "{name} ({}):",
-                    config::agent_categories::public_category_role(name).expect("public role")
-                )),
-                "missing {name} criteria"
-            );
-        }
-        assert!(help.contains("routine commit of reviewed changes"));
-        assert!(help.contains("omission uses the worker base binding, not quick"));
-        assert!(
-            spec.description
-                .contains("no automatic task classification")
-        );
-    }
-
-    #[test]
-    fn orchestrator_delegate_advertises_only_public_callable_categories() {
+    fn delegate_schema_requires_target_and_matches_public_role_category_ownership() {
         let specs = crate::META_OPS.iter().map(|name| tool_spec(name)).collect();
         let visible =
             crate::ExecutionPolicy::for_role(agents::Role::Orchestrator).filter_tool_specs(specs);
-        let delegate = visible
-            .iter()
-            .find(|spec| spec.name == "delegate")
-            .expect("orchestrator can delegate");
-        let advertised: Vec<_> = delegate.input_schema["properties"]["category"]["enum"]
-            .as_array()
-            .expect("category enum")
-            .iter()
-            .map(|value| value.as_str().expect("category name"))
-            .collect();
-        let public: Vec<_> = config::agent_categories::public_categories()
-            .map(|category| category.name)
-            .collect();
-        assert_eq!(advertised, public);
-        assert!(advertised.contains(&"plan"));
-        assert!(!advertised.contains(&"tool-execution"));
-        assert!(!delegate.description.contains("tool-execution"));
-        assert!(
-            !delegate.input_schema["properties"]["category"]["description"]
-                .as_str()
-                .expect("category guidance")
-                .contains("tool-execution")
+        let spec = visible.iter().find(|spec| spec.name == "delegate").unwrap();
+        let schema = &spec.input_schema;
+        let validator = jsonschema::validator_for(schema).unwrap();
+        assert_eq!(schema["required"], json!(["target", "prompt"]));
+        assert!(schema["properties"].get("role").is_none());
+        assert!(schema["properties"].get("category").is_none());
+        let branches = schema["properties"]["target"]["anyOf"].as_array().unwrap();
+        assert_eq!(
+            branches.len(),
+            super::super::delegation::DELEGATE_ROLES.len()
         );
-        for category in advertised {
-            assert!(super::super::parse_category(category).is_ok());
+        for (branch, role) in branches
+            .iter()
+            .zip(super::super::delegation::DELEGATE_ROLES)
+        {
+            assert_eq!(branch["properties"]["role"]["const"], *role);
+            let public: Vec<_> = config::agent_categories::public_categories()
+                .filter(|category| category.role == *role)
+                .map(|category| category.name)
+                .collect();
+            if public.is_empty() {
+                assert!(branch["properties"].get("category").is_none());
+            } else {
+                assert_eq!(branch["properties"]["category"]["enum"], json!(public));
+            }
+            assert!(validator.is_valid(&json!({"target":{"role":role}, "prompt":"task"})));
+            for category in config::agent_categories::public_categories() {
+                let input =
+                    json!({"target":{"role":role,"category":category.name}, "prompt":"task"});
+                assert_eq!(
+                    validator.is_valid(&input),
+                    category.role == *role,
+                    "{input}"
+                );
+            }
+            for category in [
+                "plan",
+                "tool-execution",
+                "conversation",
+                "lesson",
+                "lesson_review",
+                "unknown",
+            ] {
+                assert!(!validator.is_valid(
+                    &json!({"target":{"role":role,"category":category}, "prompt":"task"})
+                ));
+            }
+        }
+        for input in [
+            json!({"prompt":"task"}),
+            json!({"role":"worker","prompt":"task"}),
+            json!({"target":{"category":"quick"},"prompt":"task"}),
+            json!({"target":{"role":"worker"},"role":"planner","prompt":"task"}),
+            json!({"target":{"role":"worker","extra":true},"prompt":"task"}),
+            json!({"target":{"role":"worker","category":null},"prompt":"task"}),
+        ] {
+            assert!(!validator.is_valid(&input), "{input}");
+        }
+        for name in ["background", "interactive"] {
+            assert_eq!(schema["properties"][name]["type"], "boolean");
+            assert_eq!(schema["properties"][name]["default"], false);
         }
     }
 

@@ -60,9 +60,8 @@ impl DemoScriptModel {
                         tool_response(
                             "demo-delegate-w1",
                             "delegate",
-                            serde_json::json!({
+                            serde_json::json!({"target": {"role": "worker"},
                                 "background": true,
-                                "role": "worker",
                                 "prompt": "DEMO-W1",
                                 "name": "worker-w1"
                             }),
@@ -70,9 +69,8 @@ impl DemoScriptModel {
                         tool_response(
                             "demo-delegate-r1",
                             "delegate",
-                            serde_json::json!({
+                            serde_json::json!({"target": {"role": "reviewer"},
                                 "background": true,
-                                "role": "reviewer",
                                 "prompt": "DEMO-R1",
                                 "name": "reviewer-r1"
                             }),
@@ -132,9 +130,8 @@ impl DemoScriptModel {
                         tool_response(
                             "demo-goal-delegate",
                             "delegate",
-                            serde_json::json!({
+                            serde_json::json!({"target": {"role": "worker"},
                                 "background": true,
-                                "role": "worker",
                                 "prompt": "DEMO-IMPL implement the fixture unit",
                                 "workspace_mode": "isolated"
                             }),

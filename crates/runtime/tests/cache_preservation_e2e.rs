@@ -116,6 +116,8 @@ default_model = "{MODEL}"
 profile = "local"
 [[routing.routes.worker]]
 profile = "local"
+[[routing.routes.planner]]
+profile = "local"
 [compaction]
 context_window_tokens = {window}
 threshold = 0.5
@@ -150,6 +152,7 @@ summarizer = "structural"
         Role::Explorer,
         Role::Worker,
         Role::Reviewer,
+        Role::Planner,
     ] {
         prompts = prompts.role_baseline(role, "Stable cache contract instructions");
     }
@@ -343,6 +346,107 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         total_cached
     );
     assert!(total_cached > 0);
+}
+
+#[tokio::test]
+async fn invalid_delegate_target_then_planner_recovery_preserves_the_wire_prefix() {
+    let call = |id: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, "delegate", [input.to_string()])
+    };
+    let mut harness = harness(
+        vec![
+            call(
+                "invalid-planner",
+                json!({"target":{"role":"planner","category":"plan-review"},"prompt":"Create a plan"}),
+            ),
+            call(
+                "planner",
+                json!({"target":{"role":"planner"},"prompt":"Create a plan"}),
+            ),
+            text_response("Plan ready"),
+            text_response("Planning complete"),
+        ],
+        1_000_000,
+    );
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate planning".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    // Completion is detected from the lifecycle event, without a wall-clock deadline.
+    let mut events = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let done = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to:AgentRunPhase::Done, ..})
+                if run_id == &parent.to_string());
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(harness.runtime.list_agents().len(), 2);
+    assert!(
+        harness
+            .runtime
+            .list_agents()
+            .iter()
+            .any(|run| run.role_name == "Planner" && run.category.is_none())
+    );
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect();
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(usage.len(), 4);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    for index in [0, 1, 3] {
+        assert_eq!(usage[index].0, &parent.to_string());
+    }
+    assert_ne!(usage[2].0, &parent.to_string());
+    // Both the rejection and corrected child result append to the parent's input.
+    for (previous, next) in [(0, 1), (1, 3)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+    let delegate = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "delegate")
+        .unwrap();
+    let branches = delegate["function"]["parameters"]["properties"]["target"]["anyOf"]
+        .as_array()
+        .unwrap();
+    let planner = branches
+        .iter()
+        .find(|branch| branch["properties"]["role"]["const"] == "planner")
+        .unwrap();
+    assert!(planner["properties"].get("category").is_none());
+    assert!(requests[1].to_string().contains("omit target.category"));
 }
 
 #[tokio::test]

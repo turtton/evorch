@@ -84,14 +84,13 @@ async fn orchestrator_dispatches_remaining_runtime_meta_operations() {
                 Ok(tool_response(
                     "delegate",
                     "delegate",
-                    json!({ "role": "worker", "prompt": "SYNC" }),
+                    json!({"target": {"role": "worker"}, "prompt": "SYNC" }),
                 )),
                 Ok(tool_response(
                     "spawn-interactive",
                     "delegate",
-                    json!({
+                    json!({"target": {"role": "explorer"},
                         "background": true,
-                        "role": "explorer",
                         "prompt": "HOLD",
                         "interactive": true,
                         "name": "held-explorer"
@@ -307,9 +306,8 @@ async fn delegate_background_accepts_isolated_workspace_mode() {
                 Ok(tool_response(
                     "delegate-isolated",
                     "delegate",
-                    json!({
+                    json!({"target": {"role": "worker"},
                         "background": true,
-                        "role": "worker",
                         "prompt": "ISOLATED",
                         "interactive": true,
                         "workspace_mode": "isolated"
@@ -365,7 +363,7 @@ async fn async_delegate_rejects_unknown_workspace_mode() {
         Ok(tool_response(
             "invalid-workspace",
             "delegate",
-            json!({ "background": true, "role": "worker", "prompt": "unused", "workspace_mode": "hybrid" }),
+            json!({"target": {"role": "worker"}, "background": true, "prompt": "unused", "workspace_mode": "hybrid" }),
         )),
         Ok(tool_response(
             "finish",
@@ -438,7 +436,7 @@ async fn invalid_meta_arguments_return_error_and_run_continues() {
         Ok(tool_response(
             "unknown-role",
             "delegate",
-            json!({ "background": true, "role": "unknown", "prompt": "unused" }),
+            json!({"target": {"role": "unknown"}, "background": true, "prompt": "unused" }),
         )),
         Ok(tool_response(
             "finish",

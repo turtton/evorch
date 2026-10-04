@@ -154,7 +154,7 @@ async fn send_message_meta_op_is_fire_and_forget_alias() {
                 Ok(tool_response(
                     "spawn-child",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
                 )),
                 Ok(tool_response(
                     "fire-and-forget",
@@ -242,7 +242,7 @@ async fn send_meta_op_returns_message_id() {
                 Ok(tool_response(
                     "spawn-child",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
                 )),
                 Ok(tool_response(
                     "ping",
@@ -322,7 +322,7 @@ async fn wait_reply_meta_op_returns_reply_and_transitions_waiting() {
                 Ok(tool_response(
                     "spawn-child",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
                 )),
                 Ok(tool_response(
                     "await-reply",
@@ -457,7 +457,7 @@ async fn wait_reply_meta_op_times_out_with_error_result() {
                 Ok(tool_response(
                     "spawn-child",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD" }),
                 )),
                 Ok(tool_response(
                     "ask",
@@ -757,12 +757,12 @@ async fn send_meta_op_enforces_addressing_for_all_kinds() {
                 Ok(tool_response(
                     "spawn-c1",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD1" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD1" }),
                 )),
                 Ok(tool_response(
                     "spawn-c2",
                     "delegate",
-                    json!({ "background": true, "role": "worker", "prompt": "CHILD2" }),
+                    json!({"target": {"role": "worker"}, "background": true, "prompt": "CHILD2" }),
                 )),
                 Ok(tool_response(
                     "seed-send",

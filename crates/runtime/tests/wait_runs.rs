@@ -23,12 +23,12 @@ async fn execute_wait_with_message(arguments: Value, send_message: bool) -> (Str
                 Ok(tool_response(
                     "first",
                     "delegate",
-                    json!({"prompt":"CHILD", "background":true}),
+                    json!({"target": {"role": "worker"},"prompt":"CHILD", "background":true}),
                 )),
                 Ok(tool_response(
                     "second",
                     "delegate",
-                    json!({"prompt":"CHILD2", "background":true}),
+                    json!({"target": {"role": "worker"},"prompt":"CHILD2", "background":true}),
                 )),
                 Ok(tool_response("wait-result", "wait", arguments)),
                 Ok(tool_response("finish", "finish", json!({"result":"done"}))),

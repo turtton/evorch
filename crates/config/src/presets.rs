@@ -198,7 +198,7 @@ mod tests {
             "category-visual",
             "category-writing",
             "category-research",
-            "category-plan",
+            "category-plan-review",
             "category-tool-execution",
             "category-lesson",
             "category-lesson-review",

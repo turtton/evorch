@@ -377,7 +377,7 @@ fn subagent_cards_show_category_and_model_provider_on_one_line() {
         role_name: "Worker".into(),
         phase: event_bus::AgentRunPhase::Done,
         model: "local/worker-model".into(),
-        category: Some("plan".into()),
+        category: Some("quick".into()),
     }]));
     tasks.refresh();
     let mut harness = Harness::builder().build_ui(move |ui| {
@@ -390,7 +390,7 @@ fn subagent_cards_show_category_and_model_provider_on_one_line() {
         );
     });
     harness.run_steps(2);
-    let role = harness.get_by_label("Worker(plan) · Done").rect();
+    let role = harness.get_by_label("Worker(quick) · Done").rect();
     let model = harness.get_by_label("local/worker-model · local").rect();
     assert!((role.center().y - model.center().y).abs() < role.height());
 }

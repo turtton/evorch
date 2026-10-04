@@ -108,14 +108,14 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         overlay_body: include_str!("../assets/presets/category-research.md"),
     },
     CategoryDefinition {
-        name: "plan",
+        name: "plan-review",
         role: "reviewer",
         settings_visible: true,
         delegation: Delegation::Public {
             guidance: "review a planner-produced plan before execution: requirement coverage, feasibility, task decomposition, dependency ordering, risks, and missing acceptance criteria.",
         },
-        overlay_preset: "category-plan",
-        overlay_body: include_str!("../assets/presets/category-plan.md"),
+        overlay_preset: "category-plan-review",
+        overlay_body: include_str!("../assets/presets/category-plan-review.md"),
     },
     CategoryDefinition {
         name: "tool-execution",
@@ -282,9 +282,9 @@ mod tests {
                 .iter()
                 .map(|category| category.name)
                 .collect::<Vec<_>>(),
-            ["plan"]
+            ["plan-review"]
         );
-        assert_eq!(public_category_role("plan"), Some("reviewer"));
+        assert_eq!(public_category_role("plan-review"), Some("reviewer"));
         for category in categories {
             assert_eq!(public_category_role(category.name), Some(category.role));
             assert!(!category.guidance.is_empty());
@@ -304,7 +304,7 @@ mod tests {
                 .filter(|category| category.role == "reviewer")
                 .map(|category| category.name)
                 .collect::<Vec<_>>(),
-            ["plan", "tool-execution"]
+            ["plan-review", "tool-execution"]
         );
         for category in categories {
             assert!(category_for_role(category.role, category.name).is_some());

@@ -532,7 +532,7 @@ fn worker_category_config_accepts_public_and_internal_categories() {
             format!("{name}-model")
         );
     }
-    for name in ["lesson_review", "plan", "tool-execution", "unknown"] {
+    for name in ["lesson_review", "plan-review", "tool-execution", "unknown"] {
         let document = format!("[agents.worker.categories.{name}]\nlogical_model = 'invalid'\n");
         let error = load_project(&tmp, &document).expect_err("not a worker category");
         assert!(matches!(error, ConfigError::InvalidField { path, .. }
@@ -575,7 +575,7 @@ fn oracle_categories_are_rejected_with_uncategorized_role_path() {
 #[test]
 fn reviewer_categories_accept_own_names_and_reject_worker_names() {
     let tmp = tempfile::tempdir().unwrap();
-    for name in ["plan", "tool-execution", "lesson_review"] {
+    for name in ["plan-review", "tool-execution", "lesson_review"] {
         let document =
             format!("[agents.reviewer.categories.{name}]\nlogical_model = '{name}-model'\n");
         let config = load_project(&tmp, &document).expect("reviewer category");
@@ -588,22 +588,22 @@ fn reviewer_categories_accept_own_names_and_reject_worker_names() {
             format!("{name}-model")
         );
     }
-    for name in ["quick", "lesson", "unknown"] {
+    for name in ["quick", "lesson", "plan", "unknown"] {
         let document = format!("[agents.reviewer.categories.{name}]\npreset = 'p'\n");
         assert_error_contains(
             load_project(&tmp, &document),
             &[
                 &format!("agents.reviewer.categories.{name}"),
-                "expected one of: plan, tool-execution, lesson_review",
+                "expected one of: plan-review, tool-execution, lesson_review",
             ],
         );
     }
     for (suffix, field) in [("", "typo"), (".generation", "seed")] {
-        let document = format!("[agents.reviewer.categories.plan{suffix}]\n{field} = 42\n");
+        let document = format!("[agents.reviewer.categories.plan-review{suffix}]\n{field} = 42\n");
         assert_error_contains(
             load_project(&tmp, &document),
             &[
-                &format!("agents.reviewer.categories.plan{suffix}.{field}"),
+                &format!("agents.reviewer.categories.plan-review{suffix}.{field}"),
                 "unknown field",
             ],
         );

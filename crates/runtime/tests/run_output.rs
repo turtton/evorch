@@ -74,7 +74,7 @@ fn spawn() -> providers::ChatResponse {
     tool_response(
         "spawn",
         "delegate",
-        json!({"background":true, "role":"worker", "prompt":"CHILD"}),
+        json!({"target": {"role": "worker"},"background":true, "prompt":"CHILD"}),
     )
 }
 
