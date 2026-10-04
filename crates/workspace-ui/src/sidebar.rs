@@ -83,6 +83,20 @@ impl SidebarState {
         Ok(())
     }
 
+    /// Renames the display name only; the id keeps threads and the primary project bound.
+    pub fn rename_project(&mut self, id: &ProjectId, name: &str) -> Result<(), ProjectError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProjectError::EmptyName);
+        }
+        self.projects
+            .iter_mut()
+            .find(|project| &project.id == id)
+            .ok_or(ProjectError::UnknownProject)?
+            .name = name.to_owned();
+        Ok(())
+    }
+
     pub fn select_project(&mut self, id: &ProjectId) -> Result<(), ProjectError> {
         if !self.projects.iter().any(|project| &project.id == id) {
             return Err(ProjectError::UnknownProject);

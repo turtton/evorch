@@ -18,6 +18,7 @@ pub mod model_metadata;
 pub mod model_picker;
 pub mod notifications;
 pub mod phase_indicator;
+pub mod project_dialog;
 pub mod provider_models;
 pub mod provider_settings;
 pub mod quota_footer;
