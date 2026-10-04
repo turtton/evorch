@@ -513,3 +513,60 @@ async fn terminal_release_rejects_live_jobs_and_preserves_other_owners() {
     shell.drain_shell_jobs("second").await.unwrap();
     shell.release_shell_jobs("second").unwrap();
 }
+
+#[tokio::test]
+async fn completion_notices_are_owner_scoped_once_and_do_not_observe_results() {
+    let shell = shell();
+    let start = invoke(
+        &shell,
+        "owner",
+        json!({"command":"read value", "yield_ms":0}),
+    )
+    .await;
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+    let owner = context("owner");
+    let job_id = id(&start);
+    for other in [
+        context("other"),
+        ToolExecutionContext {
+            thread_id: Some("other-thread".into()),
+            ..context("owner")
+        },
+    ] {
+        assert!(shell.wait_for_job(&other, &job_id).await.is_err());
+    }
+    let mut waiting = std::pin::pin!(shell.wait_for_job(&owner, &job_id));
+    std::future::poll_fn(|cx| {
+        // Register the watch while the child is still blocked on stdin.
+        assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    shell.cancel_shell_jobs("owner");
+    waiting.await.unwrap();
+    // Completion before subscription must also return without observing it.
+    shell.wait_for_job(&owner, &job_id).await.unwrap();
+    assert!(!shell.has_running_shell_jobs("owner"));
+    assert!(shell.take_shell_job_notifications("other").is_empty());
+    let notices = shell.take_shell_job_notifications("owner");
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].contains(&id(&start)));
+    assert!(notices[0].contains("status: cancelled"));
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    invoke(
+        &shell,
+        "owner",
+        json!({"action":"poll", "job_id":id(&start)}),
+    )
+    .await;
+    assert!(!shell.has_unobserved_shell_jobs("owner"));
+}
+
+#[tokio::test]
+async fn observed_completion_does_not_generate_a_notice() {
+    let shell = shell();
+    let start = invoke(&shell, "owner", json!({"command":"true", "yield_ms":1000})).await;
+    assert_eq!(job(&start)["status"], "completed");
+    assert!(shell.take_shell_job_notifications("owner").is_empty());
+}

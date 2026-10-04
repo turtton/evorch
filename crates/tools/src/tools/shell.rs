@@ -194,6 +194,17 @@ impl Shell {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd);
         self
     }
+
+    /// Wait for an owned job to finish without cancelling it, observing its
+    /// result, or consuming its completion notification. The handle must match
+    /// both the run and thread in `ctx`, just as shell control calls do.
+    pub async fn wait_for_job(
+        &self,
+        ctx: &ToolExecutionContext,
+        job_id: &str,
+    ) -> Result<(), ToolError> {
+        self.jobs.wait(ctx, job_id).await
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
@@ -314,6 +325,10 @@ impl Tool for Shell {
     }
     fn has_unobserved_shell_jobs(&self, run_id: &str) -> bool {
         self.jobs.unobserved(run_id)
+    }
+
+    fn take_shell_job_notifications(&self, run_id: &str) -> Vec<String> {
+        self.jobs.take_notifications(run_id)
     }
 
     fn retain_shell_call_guard(&self, run_id: &str, call_id: &str, guard: Box<dyn Send + Sync>) {

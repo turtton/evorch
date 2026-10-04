@@ -99,6 +99,7 @@ struct State {
     output: LiveOutput,
     completion: Option<Completion>,
     observed: bool,
+    completion_notified: bool,
     artifact: Option<serde_json::Value>,
     artifact_notice: Option<String>,
     // Dropped on terminal completion, not when the starting tool returns.
@@ -144,6 +145,7 @@ impl JobRegistry {
                 output: LiveOutput::default(),
                 completion: None,
                 observed: false,
+                completion_notified: false,
                 artifact: None,
                 artifact_notice: None,
                 guard: None,
@@ -288,6 +290,25 @@ impl JobRegistry {
         Ok(job.snapshot(args.cursor))
     }
 
+    pub(super) async fn wait(
+        &self,
+        ctx: &ToolExecutionContext,
+        job_id: &str,
+    ) -> Result<(), ToolError> {
+        let job = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(job_id)
+            .filter(|job| job.owner == ctx.run_id && job.thread == ctx.thread_id).cloned()
+            .ok_or_else(|| invalid("shell job is unavailable for this run (expired, restarted, or a different owner); commands are never automatically replayed"))?;
+        // Subscribe before checking completion so finishing during registration
+        // cannot be missed. An already completed job returns immediately.
+        let mut changed = job.changed.subscribe();
+        while job.running() {
+            changed.changed().await.map_err(|_| {
+                io_failed("shell job completion signal closed before process teardown")
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn cancel(&self, run_id: &str) {
         for job in self
             .jobs
@@ -365,6 +386,35 @@ impl JobRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .any(|job| job.owner == run_id && job.unobserved())
+    }
+
+    pub(super) fn take_notifications(&self, run_id: &str) -> Vec<String> {
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut notices = Vec::new();
+        for job in jobs.values().filter(|job| job.owner == run_id) {
+            let mut state = job
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.observed || state.completion_notified {
+                continue;
+            }
+            if let Some(done) = &state.completion {
+                let mut notice =
+                    format!("Shell job completed: {}\nstatus: {}\n", job.id, done.status);
+                if let Some(code) = done.exit_code {
+                    notice.push_str(&format!("exit_code: {code}\n"));
+                }
+                notice.push_str("Use shell action poll with this job_id to retrieve its output before finishing.");
+                notices.push((job.id.clone(), notice));
+                state.completion_notified = true;
+            }
+        }
+        notices.sort_by(|a, b| a.0.cmp(&b.0));
+        notices.into_iter().map(|(_, notice)| notice).collect()
     }
 
     pub(super) fn retain_call_guard(
