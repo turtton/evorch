@@ -41,6 +41,27 @@ pub struct AgentInvocationContext {
 /// (routing profiles) がモデル解決に使う引数である。
 #[async_trait]
 pub trait AgentModel: Send + Sync {
+    /// Resolve exact model and effective generation for a trusted benchmark.
+    fn benchmark_settings(
+        &self,
+        _invocation: &AgentInvocationContext,
+        _role: Role,
+        _tools: &[ToolSpec],
+    ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
+        Err(crate::benchmark::unsupported(
+            "model cannot freeze request settings",
+        ))
+    }
+
+    /// Return a model with an explicit route, stable settings and no fallback.
+    fn freeze_for_benchmark(
+        self: std::sync::Arc<Self>,
+        _settings: crate::benchmark::BenchmarkModelSettings,
+    ) -> Result<std::sync::Arc<dyn AgentModel>, RuntimeError> {
+        Err(crate::benchmark::unsupported(
+            "model cannot replay request settings",
+        ))
+    }
     fn requires_admission(&self) -> bool {
         false
     }

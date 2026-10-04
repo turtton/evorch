@@ -13,7 +13,12 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = match headless::parse_args(std::env::args().skip(1)) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|command| command == "benchmark") {
+        return benchmark(argv);
+    }
+
+    let args = match headless::parse_args(argv.into_iter()) {
         Ok(args) => args,
         Err(error) => {
             eprintln!("{error}");
@@ -48,6 +53,40 @@ fn main() -> ExitCode {
                 eprintln!("{text}");
             }
             ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn benchmark(argv: Vec<String>) -> ExitCode {
+    let args = match evorch::benchmark::parse_args(argv.into_iter()) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start async runtime: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(evorch::benchmark::run(
+        args,
+        Arc::new(ProcessEnv),
+        SandboxChoice::Production,
+    )) {
+        Ok(result) => {
+            println!("{result}");
+            ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("{error}");

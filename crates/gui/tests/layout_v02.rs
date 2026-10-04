@@ -6,7 +6,9 @@ use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::tasks::AgentRunSource;
 use runtime::{AgentSummary, RunId};
-use workspace_ui::{LayoutNode, PanelId, Split, SplitDirection, Tabs, UiSettings, Workspace};
+use workspace_ui::{
+    LayoutNode, Panel, PanelId, PanelKind, Split, SplitDirection, Tabs, UiSettings, Workspace,
+};
 
 #[derive(Clone)]
 struct Source(Vec<AgentSummary>);
@@ -274,9 +276,27 @@ fn assert_work_tabs<S: AgentRunSource>(state: &WorkbenchState<S>) {
 }
 
 #[test]
-fn memory_storage_keeps_one_tasks_tab_in_current_and_legacy_layouts() {
-    for mut workspace in [Workspace::default_v01(), Workspace::default_v02()] {
+fn memory_storage_registers_operational_tabs_without_arena_in_current_and_legacy_layouts() {
+    for (mut workspace, restored_arena) in [Workspace::default_v01(), Workspace::default_v02()]
+        .into_iter()
+        .flat_map(|workspace| [(workspace.clone(), false), (workspace, true)])
+    {
         workspace.version = workspace_ui::WORKSPACE_SCHEMA_VERSION;
+        if restored_arena {
+            let id = PanelId::new("arena-main");
+            let mut dock = gui::dock::to_dock_state(&workspace).expect("dock");
+            dock.push_to_focused_leaf(id.clone());
+            workspace.panels.insert(
+                id.clone(),
+                Panel {
+                    id,
+                    kind: PanelKind::Arena,
+                    title: "Arena".into(),
+                    target: None,
+                },
+            );
+            workspace = gui::dock::from_dock_state(&dock, &workspace.panels).expect("saved layout");
+        }
         let mut settings = UiSettings::default();
         settings.layout.workspace = Some(workspace);
         let dir = tempfile::tempdir().expect("temp dir");
@@ -294,7 +314,16 @@ fn memory_storage_keeps_one_tasks_tab_in_current_and_legacy_layouts() {
             .find_tab(&PanelId::new("tasks-main"))
             .unwrap()
             .node_path();
-        for global in ["memory-main", "arena-main"] {
+        for global in ["memory-main", "self-improvement-main"] {
+            assert_eq!(
+                state
+                    .dock()
+                    .iter_all_tabs()
+                    .filter(|(_, panel)| panel.as_str() == global)
+                    .count(),
+                1,
+                "one canonical {global} tab"
+            );
             assert_eq!(
                 state
                     .dock()
@@ -304,5 +333,6 @@ fn memory_storage_keeps_one_tasks_tab_in_current_and_legacy_layouts() {
                 tasks
             );
         }
+        assert!(state.dock().find_tab(&PanelId::new("arena-main")).is_none());
     }
 }

@@ -1,6 +1,8 @@
 //! AgentRun の登録と公開操作を提供するランタイム表層。
 
 mod admission;
+mod benchmark;
+pub(crate) use benchmark::production_executor as benchmark_executor;
 mod cancellation;
 mod chat_restore;
 mod completion_relay;
@@ -63,6 +65,9 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 
 pub(crate) struct Shared {
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
+    pub(crate) benchmark_recording: OnceLock<crate::benchmark::Recording>,
+    pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
+    pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
     pub(crate) reviewer_results: Mutex<HashMap<RunId, crate::orchestration::review::ReviewResult>>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
@@ -252,6 +257,9 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                benchmark_recording: OnceLock::new(),
+                benchmark_replays: Mutex::new(HashMap::new()),
+                benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 reviewer_results: Mutex::new(HashMap::new()),
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
@@ -504,6 +512,9 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                benchmark_recording: OnceLock::new(),
+                benchmark_replays: Mutex::new(HashMap::new()),
+                benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 spawn_intents: Mutex::new(HashMap::new()),

@@ -49,6 +49,9 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        benchmark: None,
+        benchmark_checked: false,
+        benchmark_replay: false,
         task: RunTask {
             run_id: parent,
             role: Role::Orchestrator,

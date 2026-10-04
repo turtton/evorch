@@ -49,9 +49,9 @@ evorch-gui の検証は 8 つのレイヤー (L1 から L8) で構成する。L1
   -  ignored テスト一括: `cargo test -p gui --tests -- --ignored --nocapture`
   -  証跡マトリクス: `scripts/gui-evidence-matrix.sh [OUT]`
      (デフォルト出力 `target/gui-evidence`。3 テーマそれぞれで 6 状態 x 4 サイズ、
-     demo / edit-profile x 2 DPI、既定の 7 パネルと Memory/Arena の 2 パネル、
+     demo / edit-profile x 2 DPI、既定の 7 パネルと Memory パネル、
      追加の 4 設定画面を撮影し、
-     テーマごとに 41 枚、合計 123 PNG の枚数を検査する)
+     テーマごとに 40 枚、合計 120 PNG の枚数を検査する)
 - 環境変数: `EVORCH_REQUIRE_ADAPTER=1` (CI で必須化)、
   `EVORCH_METADATA_EVIDENCE` (model_metadata 証跡の出力先)、
   `WGPU_BACKEND=vulkan` (lavapipe 利用時の推奨指定)
@@ -204,7 +204,7 @@ secret 未設定時は投稿 workflow が理由を示して失敗し、CI の画
 | `CHROME` | 環境変数 | chromiumoxide の実行ファイル検出が参照する Chromium パス。browser-e2e で設定 | L6 |
 | `WGPU_BACKEND` | 環境変数 | wgpu のバックエンド指定。lavapipe 環境では `vulkan` を推奨 | L4 |
 | `cargo test -p gui --tests -- --ignored --nocapture` | コマンド | ignored オフスクリーンレンダテストの一括スイープ | L4 |
-| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 41 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
+| `scripts/gui-evidence-matrix.sh [OUT]` | スクリプト | 3 テーマ x 40 PNG のサイズ・DPI・パネル・設定画面の証跡を生成し枚数を検査 | L4 |
 | `cargo test -j 1 -p gui --features browser --test browser -- --test-threads=1` | コマンド | ブラウザ fake-source テスト | L5 |
 | `cargo test -p gui --features browser --lib browser::tests::chromium_screencast_and_action_evidence -- --ignored --exact --nocapture` | コマンド | 実 Chromium E2E | L6 |
 | `scripts/check-gui-native.sh [OUT]` | コマンド | 専用 Xvfb 内の実ウィンドウを自動操作し、PNG・レイアウト・ログを残す | L7 |

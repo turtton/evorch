@@ -16,7 +16,7 @@ use tokio::time::Instant;
 #[path = "budget_tracker_tests.rs"]
 mod tests;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetSettings {
     pub max_tool_calls: u32,
     pub max_elapsed: Duration,

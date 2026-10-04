@@ -20,6 +20,7 @@ use crate::skill::default_skill_dirs;
 use crate::skill_source::SkillCatalogSource;
 use crate::workspace::{Project, WorktreeManager};
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
+mod benchmark;
 
 /// composition root に production workspace context を渡す seam。
 pub struct WorkspaceSeam {
@@ -333,6 +334,7 @@ impl RoutedModel {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_request(
         &self,
         invocation: &AgentInvocationContext,
@@ -341,8 +343,10 @@ impl RoutedModel {
         tools: &[ToolSpec],
         bus: Option<&EventBus>,
         output_schema: Option<&providers::JsonSchema>,
+        benchmark: Option<&crate::benchmark::BenchmarkModelSettings>,
     ) -> Result<ChatResponse, RuntimeError> {
         let (mut route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
         let logical = match &invocation.model_preference {
             Some(_) => None,
             None => Some(LogicalModelId::from(
@@ -418,6 +422,11 @@ impl RoutedModel {
             } else {
                 Vec::new()
             };
+            if benchmark.is_some() && tools.is_empty() {
+                return Err(crate::benchmark::unsupported(
+                    "candidate cannot preserve tool calling",
+                ));
+            }
             let mut request = ChatRequest {
                 output_schema: output_schema.cloned(),
                 model: base_model_id.to_owned(),
@@ -426,12 +435,15 @@ impl RoutedModel {
                 temperature: generation.temperature,
                 max_tokens: generation.max_tokens.map(u64::from),
                 reasoning_effort: generation.reasoning_effort.clone(),
-                service_tier: match speed {
-                    config::types::provider::ModelSpeed::Fast => {
-                        Some(providers::ServiceTier::Priority)
-                    }
-                    config::types::provider::ModelSpeed::Standard => None,
-                },
+                service_tier: benchmark.map_or_else(
+                    || match speed {
+                        config::types::provider::ModelSpeed::Fast => {
+                            Some(providers::ServiceTier::Priority)
+                        }
+                        config::types::provider::ModelSpeed::Standard => None,
+                    },
+                    |settings| settings.service_tier,
+                ),
                 observation: Some(ObservationContext {
                     run_id: invocation.run_id.clone(),
                     purpose: invocation.purpose,
@@ -505,6 +517,34 @@ impl RoutedModel {
 
 #[async_trait]
 impl AgentModel for RoutedModel {
+    fn benchmark_settings(
+        &self,
+        invocation: &AgentInvocationContext,
+        role: Role,
+        tools: &[ToolSpec],
+    ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
+        let (route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
+        Ok(crate::benchmark::BenchmarkModelSettings {
+            protocol: self.providers[&route.profile].profile.api_protocol,
+            preference: crate::ModelPreference {
+                profile: route.profile,
+                model: Some(route.model_id.clone()),
+            },
+            generation,
+            service_tier: match speed {
+                config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
+                config::types::provider::ModelSpeed::Standard => None,
+            },
+        })
+    }
+
+    fn freeze_for_benchmark(
+        self: Arc<Self>,
+        settings: crate::benchmark::BenchmarkModelSettings,
+    ) -> Result<Arc<dyn AgentModel>, RuntimeError> {
+        benchmark::freeze(self, settings)
+    }
     fn requires_admission(&self) -> bool {
         true
     }
@@ -577,7 +617,7 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, None, None)
+        self.complete_request(invocation, role, messages, tools, None, None, None)
             .await
     }
 
@@ -588,7 +628,7 @@ impl AgentModel for RoutedModel {
         messages: &[Message],
         schema: &providers::JsonSchema,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, &[], None, Some(schema))
+        self.complete_request(invocation, role, messages, &[], None, Some(schema), None)
             .await
     }
 
@@ -600,7 +640,7 @@ impl AgentModel for RoutedModel {
         tools: &[ToolSpec],
         bus: &EventBus,
     ) -> Result<ChatResponse, RuntimeError> {
-        self.complete_request(invocation, role, messages, tools, Some(bus), None)
+        self.complete_request(invocation, role, messages, tools, Some(bus), None, None)
             .await
     }
 

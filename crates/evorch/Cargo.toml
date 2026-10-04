@@ -12,20 +12,20 @@ name = "evorch"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 agents = { path = "../agents" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 sandbox = { path = "../sandbox", features = ["keychain"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tools = { path = "../tools" }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 mock-openai = { path = "../mock-openai" }
-serde_json = { workspace = true }
-tempfile = { workspace = true }
-# E2E テストで run の hang 検出 (timeout) に使う。
-tokio = { workspace = true, features = ["time"] }

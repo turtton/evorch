@@ -3,6 +3,7 @@
 // allow: SIZE_OK — select 駆動の単一 AgentRun 実行ループとその状態 (LoopState) が
 // 一体の状態機械であり、分割すると遷移・注入・wake の相互関係が追えなくなる。
 
+mod benchmark;
 mod budget;
 #[cfg(test)]
 mod delegate_cleanup_tests;
@@ -98,6 +99,9 @@ pub(crate) struct LoopShared {
 }
 
 pub(crate) struct LoopState {
+    benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
+    benchmark_checked: bool,
+    benchmark_replay: bool,
     pub(crate) task: RunTask,
     pub(crate) shared: LoopShared,
     pub(crate) channels: LoopChannels,
@@ -143,53 +147,82 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     });
+    let benchmark = shared.upgrade().and_then(|runtime| {
+        runtime
+            .benchmark_replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task.run_id)
+    });
+    let benchmark_replay = benchmark.is_some();
+    let benchmark_mode = benchmark_replay
+        || shared
+            .upgrade()
+            .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
-    let context = match restored {
-        Some(restored) => {
-            let mut context = AgentContext::from_restored(
-                task.run_id,
-                task.role,
-                restored.messages,
-                restored.checkpoints,
-            );
-            if let Some(runtime) = shared.upgrade()
-                && let Some(store) = runtime.run_store.get()
-            {
-                match store.ledger_entries(task.run_id) {
-                    Ok(entries) => {
-                        if !entries.is_empty() {
-                            let mut text = String::from("[run-ledger]");
-                            for entry in entries {
-                                text.push_str(&format!("\n- seq {}: {}", entry.seq, entry.body));
+    let context = if let Some(checkpoint) = &benchmark {
+        AgentContext::from_restored(
+            task.run_id,
+            task.role,
+            checkpoint.messages.clone(),
+            Vec::new(),
+        )
+    } else {
+        match restored {
+            Some(restored) => {
+                let mut context = AgentContext::from_restored(
+                    task.run_id,
+                    task.role,
+                    restored.messages,
+                    restored.checkpoints,
+                );
+                if let Some(runtime) = shared.upgrade()
+                    && let Some(store) = runtime.run_store.get()
+                {
+                    match store.ledger_entries(task.run_id) {
+                        Ok(entries) => {
+                            if !entries.is_empty() {
+                                let mut text = String::from("[run-ledger]");
+                                for entry in entries {
+                                    text.push_str(&format!(
+                                        "\n- seq {}: {}",
+                                        entry.seq, entry.body
+                                    ));
+                                }
+                                context.push_user(&text);
                             }
-                            context.push_user(&text);
+                        }
+                        Err(error) => {
+                            tracing::warn!(run_id = %task.run_id, %error, "restored run ledger read failed")
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(run_id = %task.run_id, %error, "restored run ledger read failed")
+                }
+                match restored.trigger {
+                    Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
+                    None => {
+                        context.push_user(&task.prompt);
+                        if let Some(message) = context.messages.last_mut() {
+                            message
+                                .content
+                                .extend(task.config.images.iter().map(|image| {
+                                    ContentBlock::Image {
+                                        media_type: image.media_type.clone(),
+                                        data: image.data.clone(),
+                                    }
+                                }));
+                        }
                     }
                 }
+                context
             }
-            match restored.trigger {
-                Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
-                None => {
-                    context.push_user(&task.prompt);
-                    if let Some(message) = context.messages.last_mut() {
-                        message
-                            .content
-                            .extend(task.config.images.iter().map(|image| ContentBlock::Image {
-                                media_type: image.media_type.clone(),
-                                data: image.data.clone(),
-                            }));
-                    }
-                }
-            }
-            context
+            None => AgentContext::new(task.run_id, task.role),
         }
-        None => AgentContext::new(task.run_id, task.role),
     };
     let mut state = LoopState {
+        benchmark,
+        benchmark_checked: benchmark_replay,
+        benchmark_replay,
         task,
         shared: loop_shared,
         channels,
@@ -226,10 +259,26 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_stopped();
             return;
         }
+        if benchmark_mode
+            && (state.task.config.initial_thread_goal.is_some()
+                || state
+                    .runtime()
+                    .is_some_and(|runtime| runtime.goal_owner_for_run(state.task.run_id).is_some()))
+        {
+            state.finish_error(
+                "benchmark unsupported: thread-goal-bound runs require live goal state".into(),
+            );
+            return;
+        }
         if state.task.config.workspace_mode == WorkspaceMode::Shared
             && let Some(root) = sandbox_root.clone()
         {
-            match crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root) {
+            let executor = if benchmark_mode {
+                crate::runtime::benchmark_executor(Arc::clone(&state.shared.bus), root)
+            } else {
+                crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root)
+            };
+            match executor {
                 Ok(executor) => {
                     if let Some(runtime) = state.runtime() {
                         runtime.configure_shell_escalation(&executor);
@@ -245,14 +294,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
         // 決まるため、LoopState 構築後に確定させる。
         let selected_model = state
-            .shared
-            .model
-            .selected_model(state.task.role, state.task.config.category.as_deref());
+            .benchmark
+            .as_ref()
+            .map(|checkpoint| checkpoint.selected_model.clone())
+            .unwrap_or_else(|| {
+                state
+                    .shared
+                    .model
+                    .selected_model(state.task.role, state.task.config.category.as_deref())
+            });
         state.tool_specs = visible_tool_specs(
             standard_tool_specs(&state.shared.executor),
             &state.policy,
             state.skills().is_some(),
-            state.task.parent.is_some(),
+            state.task.parent.is_some() || benchmark_replay,
             state
                 .runtime()
                 .is_some_and(|runtime| runtime.web_tools_enabled()),
@@ -263,6 +318,28 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         // Family-scoped description variation keeps the request prefix stable within a model family,
         // so prompt-cache hit rates are unaffected.
         append_subagent_context_note(&mut state.tool_specs, classify(&selected_model));
+        if benchmark_mode {
+            state.filter_benchmark_tools();
+        }
+        if let Some(checkpoint) = &state.benchmark {
+            if checkpoint.tools != state.tool_specs {
+                state.finish_error(
+                    "benchmark unsupported: available tool schemas/order differ from checkpoint"
+                        .into(),
+                );
+                return;
+            }
+            match Arc::clone(&state.shared.model).freeze_for_benchmark(checkpoint.model.clone()) {
+                Ok(model) => {
+                    state.shared.model = model;
+                    state.shared.compaction.enabled = false;
+                }
+                Err(error) => {
+                    state.finish_error(error.to_string());
+                    return;
+                }
+            }
+        }
         owned_worktree = match state.task.config.workspace_mode {
             WorkspaceMode::Shared => None,
             WorkspaceMode::Isolated => {
@@ -298,8 +375,19 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         };
         let active_root = match owned_worktree.as_ref() {
             Some(owned) => Some(owned.path.clone()),
-            None => shared_active_root(state.shared.rules.as_deref(), sandbox_root),
+            None => shared_active_root(state.shared.rules.as_deref(), sandbox_root).or_else(|| {
+                benchmark_mode
+                    .then(|| state.shared.executor.default_cwd())
+                    .flatten()
+            }),
         };
+        if benchmark_mode
+            && let Some(root) = &active_root
+            && let Err(error) = state.shared.executor.set_workspace_boundary(root.clone())
+        {
+            state.finish_error(error.to_string());
+            return;
+        }
         if state.task.config.workspace_mode == WorkspaceMode::Shared
             && let Some(runtime_shared) = shared.upgrade()
         {
@@ -321,7 +409,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         if let Some(source) = state.shared.rules.as_ref() {
             state.rules_session = Some(RulesSession::new(Arc::clone(source), active_root.clone()));
         }
-        if !is_restored {
+        if !is_restored && !benchmark_replay {
             if let Err(error) = push_initial_system_message(
                 &state.shared,
                 &state.task,
@@ -334,6 +422,9 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 state.finish_error(error.to_string());
                 cleanup_worktree(&state.shared, state.task.run_id, owned_worktree.take()).await;
                 return;
+            }
+            if benchmark_mode {
+                state.append_benchmark_instructions();
             }
             state.context.push_user(&state.task.prompt);
             if let Some(message) = state.context.messages.last_mut() {
@@ -352,8 +443,22 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     );
             }
         }
-        if let Some(root) = &active_root {
+        if let Some(root) = &active_root
+            && !benchmark_replay
+        {
             update_workspace_system_message(&mut state.context, root);
+        }
+        if let Some(runtime) = shared.upgrade()
+            && benchmark_mode
+        {
+            runtime
+                .benchmark_executors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(state.task.run_id, Arc::clone(&state.shared.executor));
+            // Startup rules are already in the frozen context. Dynamic host-side
+            // discovery could follow a trial-created symlink outside the sandbox.
+            state.rules_session = None;
         }
         state.publish_message_count();
         if state.transition(AgentRunPhase::Running, None).is_err() {
@@ -709,6 +814,12 @@ impl LoopState {
             self.compaction.compacted_this_boundary = false;
             let requested_gen = *self.channels.compact_rx.borrow();
             if requested_gen > self.compaction.last_handled_gen {
+                if self.benchmark.is_some() {
+                    self.finish_error(
+                        "benchmark unsupported: selected leaf requested manual compaction".into(),
+                    );
+                    return;
+                }
                 self.compaction.last_handled_gen = requested_gen;
                 if let Err(error) = compaction::compact_now(self, CompactionReason::Manual).await {
                     tracing::warn!(%error, "manual compaction failed");
@@ -758,6 +869,12 @@ impl LoopState {
             // A cooldown or the post-compaction latch must not terminate a run
             // when one more compaction can still make the next request fit.
             while estimated >= window {
+                if self.benchmark.is_some() {
+                    self.finish_error(
+                        "benchmark unsupported: selected leaf requires context compaction".into(),
+                    );
+                    return;
+                }
                 match compaction::compact_now(self, CompactionReason::Automatic).await {
                     Ok(_) => {
                         visible_messages = self.context.visible_messages();
@@ -787,6 +904,10 @@ impl LoopState {
                 )
             {
                 self.finish_error("Goal cumulative budget exhausted".into());
+                return;
+            }
+            if let Err(error) = self.capture_benchmark(&invocation, &visible_messages).await {
+                self.finish_error(error.to_string());
                 return;
             }
             let completion = tokio::select! {
