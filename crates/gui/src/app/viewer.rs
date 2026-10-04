@@ -267,16 +267,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(action) = sidebar_action {
             let result = match action {
-                SidebarAction::BrowseForProject => {
-                    set_sidebar_error(&ctx, self.folder_picker.start().err());
-                    ctx.request_repaint();
-                    return;
+                SidebarAction::OpenAddProject => {
+                    self.open_add_project();
+                    Ok(())
+                }
+                SidebarAction::OpenProjectSettings(project_id) => {
+                    self.open_project_settings(project_id);
+                    Ok(())
                 }
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),
                 SidebarAction::SetPrimaryProject(project_id) => {
                     self.set_primary_project(project_id)
                 }
-                SidebarAction::AddProject(path) => self.add_project(path).map(|_| ()),
                 SidebarAction::CreateThread(title) => self.create_thread(title).map(|_| ()),
                 SidebarAction::ForkThread(thread_id) => self.fork_thread(thread_id).map(|_| ()),
                 SidebarAction::ForkAtTurn { thread, entry_id } => {
@@ -292,7 +294,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
-                SidebarAction::SetTrust { path, trust } => self.set_allowed_trust(path, trust),
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
         }
@@ -314,6 +315,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::ToggleRole => self.composer.toggle_role(),
             }
         }
+        self.render_project_dialog(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());

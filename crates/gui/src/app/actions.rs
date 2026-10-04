@@ -67,18 +67,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
+    pub fn rename_project(
+        &mut self,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> Result<(), WorkbenchError> {
+        self.sidebar.rename_project(project_id, name)?;
+        self.save_sidebar();
+        Ok(())
+    }
+
     pub fn set_allowed_trust(
         &mut self,
+        project_id: &ProjectId,
         path: impl AsRef<Path>,
         trust: TrustState,
     ) -> Result<(), WorkbenchError> {
-        let project_id = self
-            .sidebar
-            .selected_project
-            .clone()
-            .ok_or(ProjectError::UnknownProject)?;
         self.sidebar
-            .set_allowed_trust(&project_id, path.as_ref(), trust)?;
+            .set_allowed_trust(project_id, path.as_ref(), trust)?;
+        self.save_sidebar();
         Ok(())
     }
 

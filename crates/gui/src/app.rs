@@ -14,6 +14,7 @@ mod input;
 mod mentions;
 mod ownership;
 mod ownership_status;
+mod project_dialog;
 mod provider_settings;
 mod questions;
 mod restoration;

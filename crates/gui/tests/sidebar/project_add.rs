@@ -3,9 +3,11 @@ use egui_kittest::{Harness, kittest::Queryable};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::folder_picker::FolderPicker;
+use gui::model::project_dialog::ProjectDialog;
+use gui::panes::project_dialog::{NAME_LABEL, PATH_LABEL};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
-use workspace_ui::SidebarState;
+use workspace_ui::{ProjectId, SidebarState};
 
 struct ScriptedFolderPicker(Result<Option<PathBuf>, String>);
 
@@ -17,54 +19,81 @@ impl FolderPicker for ScriptedFolderPicker {
     }
 }
 
-#[test]
-fn add_project_expands_tilde_before_dispatch() {
-    // Given: a distinct, injected home directory and an empty sidebar.
-    let temp = tempfile::tempdir().expect("temp dir");
-    let home = temp.path().join("home");
-    let repo = home.join("repo");
-    std::fs::create_dir_all(&repo).expect("repo");
-    let workbench = state(MockSource::default(), SidebarState::default()).with_home_dir(home);
-    let mut harness = Harness::builder()
+fn typing_harness(
+    workbench: WorkbenchState<MockSource>,
+) -> Harness<'static, WorkbenchState<MockSource>> {
+    Harness::builder()
         .with_size(egui::vec2(1000.0, 700.0))
         .build_ui_state(
             |ui, state: &mut WorkbenchState<MockSource>| {
                 state.ui(ui, &mut eframe::Frame::_new_kittest())
             },
             workbench,
-        );
-    // When: the operator types a tilde path and presses Add project.
-    harness.get_by_label("Project path (~ allowed)").click();
+        )
+}
+
+fn type_into(harness: &mut Harness<'static, WorkbenchState<MockSource>>, label: &str, text: &str) {
+    harness.get_by_label(label).click();
     harness.run_steps(4);
-    harness
-        .get_by_label("Project path (~ allowed)")
-        .type_text("~/repo");
+    harness.get_by_label(label).type_text(text);
     harness.run_steps(4);
-    harness.get_by_label("Add project").click();
+}
+
+fn click(harness: &mut Harness<'static, WorkbenchState<MockSource>>, label: &str) {
+    harness.get_by_label(label).click();
     harness.run_steps(4);
-    // Then: the registered root is the canonical home-relative path.
-    assert_eq!(
-        harness.state().sidebar().projects[0].repo_root,
-        repo.canonicalize().expect("canonical repo")
-    );
 }
 
 #[test]
-fn project_row_shows_repo_root_path() {
-    // Given: a registered project.
+fn add_modal_expands_tilde_registers_persists_and_closes() {
+    // Given: a distinct, injected home directory and an empty, persisted sidebar.
     let temp = tempfile::tempdir().expect("temp dir");
-    let sidebar = sidebar_with_project(temp.path());
-    let root = sidebar.projects[0].repo_root.display().to_string();
-    let mut harness =
-        HeadlessWorkbench::new(state(MockSource::default(), sidebar), [1000.0, 700.0]);
-    // When: the sidebar renders.
-    harness.run();
-    // Then: the project's root is exposed under its name.
-    assert!(harness.has_label(&root));
+    let home = temp.path().join("home");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo");
+    let save = temp.path().join("sidebar.json");
+    let workbench = state(MockSource::default(), SidebarState::default())
+        .with_home_dir(home)
+        .with_sidebar_path(save.clone());
+    let mut harness = typing_harness(workbench);
+    // When: the operator opens the add modal, types a tilde path and presses Add.
+    click(&mut harness, "Add project");
+    type_into(&mut harness, PATH_LABEL, "~/repo");
+    click(&mut harness, "Add");
+    // Then: the canonical home-relative root is registered, persisted and the modal closes.
+    let canonical = repo.canonicalize().expect("canonical repo");
+    assert_eq!(harness.state().sidebar().projects[0].repo_root, canonical);
+    assert_eq!(
+        workspace_ui::load_sidebar(&save)
+            .expect("saved sidebar")
+            .projects[0]
+            .repo_root,
+        canonical
+    );
+    assert_eq!(harness.state().project_dialog(), &ProjectDialog::Closed);
 }
 
 #[test]
-fn browse_button_dispatches_picker_and_adds_selected_folder() {
+fn add_modal_keeps_input_and_shows_error_when_registration_fails() {
+    // Given: an empty sidebar and a path that does not exist.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("missing").display().to_string();
+    let mut harness = typing_harness(state(MockSource::default(), SidebarState::default()));
+    // When: the operator submits the missing path.
+    click(&mut harness, "Add project");
+    type_into(&mut harness, PATH_LABEL, &missing);
+    click(&mut harness, "Add");
+    // Then: nothing is registered and the modal stays open with the typed path and an error.
+    assert!(harness.state().sidebar().projects.is_empty());
+    let ProjectDialog::Add { path, error } = harness.state().project_dialog() else {
+        panic!("add modal must stay open");
+    };
+    assert_eq!(path, &missing);
+    assert!(error.is_some());
+}
+
+#[test]
+fn browse_fills_add_modal_and_add_registers_selected_folder() {
     // Given: a picker returning an existing folder and sidebar persistence.
     let temp = tempfile::tempdir().expect("temp dir");
     let save = temp.path().join("sidebar.json");
@@ -73,10 +102,22 @@ fn browse_button_dispatches_picker_and_adds_selected_folder() {
         .with_folder_picker(Arc::new(ScriptedFolderPicker(Ok(Some(temp.path().into())))));
     let mut harness = HeadlessWorkbench::new(workbench, [1000.0, 700.0]);
     harness.run();
-    // When: Browse dispatches the picker and a following frame consumes it.
+    harness.click_label("Add project");
+    harness.run();
+    // When: Browse resolves to a folder.
     harness.click_label("Browse…");
     harness.run();
-    // Then: the selected project is added and persisted.
+    // Then: the folder only fills the form until Add confirms it.
+    assert!(harness.state().sidebar().projects.is_empty());
+    assert_eq!(
+        harness.state().project_dialog(),
+        &ProjectDialog::Add {
+            path: temp.path().display().to_string(),
+            error: None,
+        }
+    );
+    harness.click_label("Add");
+    harness.run();
     assert_eq!(
         harness.state().sidebar().projects[0].repo_root,
         temp.path().canonicalize().expect("root")
@@ -91,12 +132,14 @@ fn browse_button_dispatches_picker_and_adds_selected_folder() {
 }
 
 #[test]
-fn picker_error_surfaces_in_sidebar() {
+fn picker_error_surfaces_in_add_modal() {
     // Given: an unavailable portal.
     let workbench = state(MockSource::default(), SidebarState::default()).with_folder_picker(
         Arc::new(ScriptedFolderPicker(Err("portal unavailable".into()))),
     );
     let mut harness = HeadlessWorkbench::new(workbench, [1000.0, 700.0]);
+    harness.run();
+    harness.click_label("Add project");
     harness.run();
     // When: the operator tries Browse.
     harness.click_label("Browse…");
@@ -107,33 +150,30 @@ fn picker_error_surfaces_in_sidebar() {
 }
 
 #[test]
-fn allowed_directories_section_hidden_when_empty_and_collapsed_when_present() {
-    // Given: a selected project with no external directories.
+fn settings_modal_reveals_root_and_renames_without_changing_id() {
+    // Given: a registered, persisted project whose root is not printed in the sidebar.
     let temp = tempfile::tempdir().expect("temp dir");
-    let allowed = tempfile::tempdir().expect("allowed dir");
-    let mut harness = HeadlessWorkbench::new(
-        state(MockSource::default(), sidebar_with_project(temp.path())),
-        [1000.0, 700.0],
+    let save = temp.path().join("sidebar.json");
+    let sidebar = sidebar_with_project(temp.path());
+    let root = sidebar.projects[0].repo_root.display().to_string();
+    let mut harness =
+        typing_harness(state(MockSource::default(), sidebar).with_sidebar_path(save.clone()));
+    harness.run_steps(4);
+    assert!(harness.query_by_label(&root).is_none());
+    // When: the operator opens its settings and renames it.
+    click(&mut harness, "Project settings");
+    assert!(harness.query_by_label(&root).is_some());
+    type_into(&mut harness, NAME_LABEL, "-fork");
+    click(&mut harness, "Rename");
+    // Then: only the display name changes, and the change is persisted.
+    let project = &harness.state().sidebar().projects[0];
+    assert_eq!(project.id, ProjectId::new("demo"));
+    assert_eq!(project.name, "demo-fork");
+    assert_eq!(
+        workspace_ui::load_sidebar(&save)
+            .expect("saved sidebar")
+            .projects[0]
+            .name,
+        "demo-fork"
     );
-    harness.run();
-    assert!(!harness.has_label("Allowed directories"));
-    assert!(!harness.has_label("Allowed directories (0)"));
-    harness
-        .state_mut()
-        .add_allowed_directory(allowed.path())
-        .expect("allowed");
-    harness.run();
-    let path = allowed
-        .path()
-        .canonicalize()
-        .expect("canonical path")
-        .display()
-        .to_string();
-    assert!(harness.has_label("Allowed directories (1)"));
-    assert!(!harness.has_label(&path));
-    // When: the counted disclosure is expanded.
-    harness.click_label("Allowed directories (1)");
-    harness.run();
-    // Then: its path is exposed.
-    assert!(harness.has_label(&path));
 }

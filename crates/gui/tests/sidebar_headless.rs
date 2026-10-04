@@ -99,7 +99,7 @@ fn add_and_select_project_persists_to_sidebar_file() {
 }
 
 #[test]
-fn trust_click_approves_allowed_directory_and_persists_sidebar() {
+fn settings_modal_trust_click_approves_allowed_directory_and_persists_sidebar() {
     // Given: a selected project with one unapproved allowed directory and persistence path.
     let temp = tempfile::tempdir().expect("temp dir");
     let root = temp.path().join("demo");
@@ -114,13 +114,19 @@ fn trust_click_approves_allowed_directory_and_persists_sidebar() {
     let workbench = state(MockSource::default(), sidebar).with_sidebar_path(sidebar_path.clone());
     let mut harness = HeadlessWorkbench::new(workbench, [800.0, 600.0]);
     harness.run();
+    let path = allowed
+        .canonicalize()
+        .expect("canonical path")
+        .display()
+        .to_string();
+    assert!(!harness.has_label(&path));
 
-    // When: the operator clicks Trust and saves through the public state surface.
-    harness.click_label("Allowed directories (1)");
+    // When: the operator opens the project settings and clicks Trust.
+    harness.click_label("Project settings");
     harness.run();
+    assert!(harness.has_label(&path));
     harness.click_label("Trust");
     harness.run();
-    harness.state().save_sidebar();
 
     // Then: both rendered state and persisted state report approved trust.
     assert_eq!(

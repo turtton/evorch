@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
-use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase, TrustState};
+use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase};
 
 use crate::theme::widgets::pane_root;
 
@@ -12,17 +11,15 @@ const UI_STATE_ID: &str = "sidebar-ui-state";
 
 #[derive(Clone, Default)]
 struct SidebarUiState {
-    project_path: String,
     error: Option<String>,
-    picker_busy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarAction {
     SelectProject(ProjectId),
     SetPrimaryProject(Option<ProjectId>),
-    AddProject(PathBuf),
-    BrowseForProject,
+    OpenAddProject,
+    OpenProjectSettings(ProjectId),
     CreateThread(String),
     ForkThread(ThreadId),
     /// Fork a child thread from a completed turn (transcript entry id).
@@ -45,10 +42,6 @@ pub enum SidebarAction {
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
     ToggleArchive(ThreadId),
-    SetTrust {
-        path: PathBuf,
-        trust: TrustState,
-    },
 }
 
 pub fn sidebar_pane(
@@ -58,10 +51,9 @@ pub fn sidebar_pane(
     telemetry: &crate::model::telemetry::TelemetryOverlay,
     question_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
-    let id = egui::Id::new(UI_STATE_ID);
-    let mut pane_state = ui
+    let pane_state = ui
         .ctx()
-        .data_mut(|data| data.get_temp::<SidebarUiState>(id))
+        .data(|data| data.get_temp::<SidebarUiState>(egui::Id::new(UI_STATE_ID)))
         .unwrap_or_default();
     let mut action = None;
 
@@ -72,7 +64,7 @@ pub fn sidebar_pane(
             .show(ui, |ui| {
                 // The pane itself is the surface; nesting another frame only adds borders.
                 let selected = selected_project(sidebar);
-                projects::render(ui, sidebar, selected, &mut pane_state, &mut action);
+                projects::render(ui, sidebar, selected, &pane_state, &mut action);
                 if let Some(project) = selected {
                     threads::render(
                         ui,
@@ -87,7 +79,6 @@ pub fn sidebar_pane(
             });
     });
 
-    ui.ctx().data_mut(|data| data.insert_temp(id, pane_state));
     action
 }
 
@@ -96,13 +87,6 @@ pub fn set_sidebar_error(ctx: &egui::Context, error: Option<String>) {
     ctx.data_mut(|data| {
         let state = data.get_temp_mut_or_default::<SidebarUiState>(id);
         state.error = error;
-    });
-}
-
-pub fn set_picker_busy(ctx: &egui::Context, busy: bool) {
-    ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<SidebarUiState>(egui::Id::new(UI_STATE_ID))
-            .picker_busy = busy;
     });
 }
 

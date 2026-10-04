@@ -50,21 +50,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             ctx.request_repaint();
         }
         if let Some(result) = self.folder_picker.poll() {
-            let error = match result {
-                Ok(Some(path)) => {
-                    let result = self.add_project(path);
-                    if result.is_ok() {
-                        self.save_sidebar();
-                    }
-                    result.err().map(|error| error.to_string())
-                }
-                Ok(None) => None,
-                Err(error) => Some(error),
-            };
-            crate::panes::sidebar::set_sidebar_error(&ctx, error);
+            self.apply_picked_folder(result);
             ctx.request_repaint();
         }
-        crate::panes::sidebar::set_picker_busy(&ctx, self.folder_picker.is_busy());
         if self.provider_settings.poll_models() {
             ctx.request_repaint();
         }

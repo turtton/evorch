@@ -26,6 +26,30 @@ fn add_project_canonicalizes_and_rejects_duplicate_root() {
 }
 
 #[test]
+fn rename_project_trims_name_and_keeps_id() {
+    // Given: a registered project.
+    let directory = tempdir().expect("temporary directory must be created");
+    let mut sidebar = SidebarState::default();
+    let id = ProjectId::new("p1");
+    sidebar
+        .add_project(id.clone(), "One", directory.path())
+        .expect("project must be added");
+
+    // When: it is renamed, then renamed to blank and an unknown id is renamed.
+    sidebar
+        .rename_project(&id, "  evorch (fork)  ")
+        .expect("rename must succeed");
+    let blank = sidebar.rename_project(&id, "   ");
+    let unknown = sidebar.rename_project(&ProjectId::new("missing"), "x");
+
+    // Then: only the trimmed display name changes and invalid renames are rejected.
+    assert_eq!(sidebar.projects[0].id, id);
+    assert_eq!(sidebar.projects[0].name, "evorch (fork)");
+    assert_eq!(blank, Err(ProjectError::EmptyName));
+    assert_eq!(unknown, Err(ProjectError::UnknownProject));
+}
+
+#[test]
 fn allowed_directory_rejects_relative_missing_and_nested_paths() {
     // Given: a project with an existing allowed directory.
     let directory = tempdir().expect("temporary directory must be created");
