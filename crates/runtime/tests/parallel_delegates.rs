@@ -27,11 +27,11 @@ impl Fixture {
                 "ROOT",
                 [
                     Ok(tool_responses([
-                        ("first", "delegate", json!({"prompt": "FIRST"})),
+                        ("first", "delegate", json!({"target": {"role": "worker"},"prompt": "FIRST"})),
                         (
                             "second",
                             "delegate",
-                            json!({"prompt": "SECOND", "background": false}),
+                            json!({"target": {"role": "worker"},"prompt": "SECOND", "background": false}),
                         ),
                     ])),
                     Ok(text_response("done", FinishReason::Stop)),
@@ -184,10 +184,22 @@ async fn non_delegate_meta_op_remains_a_wave_barrier() {
             "ROOT",
             [
                 Ok(tool_responses([
-                    ("first", "delegate", json!({"prompt": "FIRST"})),
-                    ("second", "delegate", json!({"prompt": "SECOND"})),
+                    (
+                        "first",
+                        "delegate",
+                        json!({"target": {"role": "worker"},"prompt": "FIRST"}),
+                    ),
+                    (
+                        "second",
+                        "delegate",
+                        json!({"target": {"role": "worker"},"prompt": "SECOND"}),
+                    ),
                     ("barrier", "list_agents", json!({})),
-                    ("tail", "delegate", json!({"prompt": "TAIL"})),
+                    (
+                        "tail",
+                        "delegate",
+                        json!({"target": {"role": "worker"},"prompt": "TAIL"}),
+                    ),
                 ])),
                 Ok(text_response("done", FinishReason::Stop)),
             ],

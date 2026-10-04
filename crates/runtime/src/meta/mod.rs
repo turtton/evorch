@@ -196,7 +196,7 @@ pub(super) fn error(content: impl Into<String>) -> DispatchResult {
 mod private_category_tests {
     #[test]
     fn normal_delegation_reserves_internal_categories() {
-        assert_eq!(super::parse_category("plan").unwrap(), "plan");
+        assert_eq!(super::parse_category("plan-review").unwrap(), "plan-review");
         for name in ["lesson", "lesson_review", "tool-execution"] {
             assert!(super::parse_category(name).is_err());
         }

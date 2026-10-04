@@ -12,7 +12,7 @@ fn route_rename_updates_reviewer_categories_and_live_runtime() {
         &path,
         format!(
             "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
-         [agents.reviewer.categories.plan]\nlogical_model = 'old'\n\
+         [agents.reviewer.categories.plan-review]\nlogical_model = 'old'\n\
          [agents.reviewer.categories.tool-execution]\nlogical_model = 'old'\n\
          [agents.reviewer.categories.lesson_review]\nlogical_model = 'old'\n"
         ),
@@ -28,7 +28,7 @@ fn route_rename_updates_reviewer_categories_and_live_runtime() {
     finish(&mut harness);
     assert_eq!(harness.state().routing_settings().validation_error, None);
     harness.state_mut().open_role_settings();
-    for category in ["plan", "tool-execution", "lesson_review"] {
+    for category in ["plan-review", "tool-execution", "lesson_review"] {
         assert_eq!(
             harness.state().role_settings().agents.reviewer.categories[category]
                 .logical_model
@@ -44,7 +44,7 @@ fn route_rename_updates_reviewer_categories_and_live_runtime() {
         harness.state().routing_settings().route_users["new"],
         [
             "reviewer.categories.lesson_review",
-            "reviewer.categories.plan",
+            "reviewer.categories.plan-review",
             "reviewer.categories.tool-execution",
         ]
     );

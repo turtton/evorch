@@ -45,7 +45,7 @@ impl Fixture {
                 [Ok(tool_response(
                     "await-child",
                     "delegate",
-                    json!({"prompt":"CHILD", "role":"worker"}),
+                    json!({"target": {"role": "worker"},"prompt":"CHILD"}),
                 ))],
             )
             .await;

@@ -176,10 +176,10 @@ fn tolerant_category_pruning_preserves_reviewer_bindings_and_known_fields() {
     let document = r#"
 [agents.reviewer]
 logical_model = "review-base"
-[agents.reviewer.categories.plan]
+[agents.reviewer.categories.plan-review]
 logical_model = "plan-model"
 unknown = "ignored"
-[agents.reviewer.categories.plan.generation]
+[agents.reviewer.categories.plan-review.generation]
 max_tokens = 1024
 seed = 42
 [agents.reviewer.categories.tool-execution]
@@ -193,7 +193,10 @@ logical_model = "unknown-model"
 "#;
     let config = load(document, false).expect("invalid category fields are ignored");
     assert_eq!(config.agents.reviewer.categories.len(), 3);
-    let plan = config.agents.binding_for("reviewer", Some("plan")).unwrap();
+    let plan = config
+        .agents
+        .binding_for("reviewer", Some("plan-review"))
+        .unwrap();
     assert_eq!(plan.logical_model, "plan-model");
     assert_eq!(plan.generation.max_tokens, Some(1024));
     let tool = config

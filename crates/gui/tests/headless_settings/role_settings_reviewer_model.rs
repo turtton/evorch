@@ -18,7 +18,7 @@ fn editor_categories_follow_settings_registry_including_shell_audits() {
         categories_for_role("reviewer")
             .map(|category| category.name)
             .collect::<Vec<_>>(),
-        ["plan", "tool-execution"]
+        ["plan-review", "tool-execution"]
     );
 }
 
@@ -35,7 +35,7 @@ fn reviewer_explicit_category_models_and_efforts_are_seeded() {
         },
     );
     config.agents.reviewer.categories.insert(
-        "plan".into(),
+        "plan-review".into(),
         config::CategoryBindingConfig {
             logical_model: Some("category-model".into()),
             ..Default::default()
@@ -51,7 +51,7 @@ fn reviewer_explicit_category_models_and_efforts_are_seeded() {
 #[test]
 fn category_validation_uses_owning_role_and_preserves_internal_bindings() {
     let mut editor = RoleSettingsModel::default();
-    for category in ["plan", "tool-execution", "lesson_review"] {
+    for category in ["plan-review", "tool-execution", "lesson_review"] {
         editor
             .agents
             .reviewer
@@ -75,9 +75,9 @@ fn category_validation_uses_owning_role_and_preserves_internal_bindings() {
         .agents
         .worker
         .categories
-        .insert("plan".into(), Default::default());
+        .insert("plan-review".into(), Default::default());
     assert!(editor.validate().is_err());
-    editor.agents.worker.categories.remove("plan");
+    editor.agents.worker.categories.remove("plan-review");
     editor
         .agents
         .reviewer
@@ -88,7 +88,7 @@ fn category_validation_uses_owning_role_and_preserves_internal_bindings() {
 
 #[test]
 fn reviewer_category_rejects_blank_models_and_invalid_generation_before_save() {
-    for category in ["plan", "tool-execution", "lesson_review"] {
+    for category in ["plan-review", "tool-execution", "lesson_review"] {
         let mut editor = RoleSettingsModel::default();
         editor.agents.reviewer.categories.insert(
             category.into(),

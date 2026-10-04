@@ -143,9 +143,8 @@ async fn goal_runs_to_awaiting_merge_then_complete_with_one_request_update_round
                 Ok(tool_response(
                     "worker",
                     "delegate",
-                    json!({
+                    json!({"target": {"role": "worker"},
                         "background": true,
-                        "role": "worker",
                         "prompt": "IMPLEMENT-LOOP",
                         "workspace_mode": "isolated"
                     }),

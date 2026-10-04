@@ -47,7 +47,7 @@ impl AgentModel for WaitingModel {
             0 => tool_response(
                 "delegate",
                 "delegate",
-                json!({"prompt":"CHILD", "background":true}),
+                json!({"target": {"role": "worker"},"prompt":"CHILD", "background":true}),
             ),
             1 => {
                 self.wait_requested.notify_one();
