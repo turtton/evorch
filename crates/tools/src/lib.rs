@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod network_guard;
 pub mod origin;
 pub mod output;
+pub mod post_edit;
 pub mod result;
 pub mod sanitize;
 pub(crate) mod schema;

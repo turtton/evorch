@@ -6,6 +6,9 @@ use event_bus::{AgentRunPhase, LifecycleEvent};
 impl LoopState {
     pub(super) async fn finalize(&mut self, mut owned: Option<OwnedWorktree>) {
         let run_id = self.task.run_id.to_string();
+        // Cancelled tool futures may leave a supervisor reaping its child.
+        // Every terminal path waits before shell, ownership or workspace teardown.
+        self.shared.executor.drain_post_edit_hooks().await;
         let drained = match self.shared.executor.drain_shell_jobs(&run_id).await {
             Ok(()) => true,
             Err(error) => {

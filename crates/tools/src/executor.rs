@@ -16,6 +16,7 @@ use sandbox::{
 use crate::error::ToolError;
 use crate::network_guard::NetworkGuardError;
 use crate::origin::derive_content_origin;
+use crate::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
@@ -26,6 +27,43 @@ mod prepared;
 mod specs;
 pub use prepared::{PreparedToolCall, ValidatedToolCall};
 pub use specs::ToolSpec;
+
+/// Internal policy identity, never a model-visible tool or an approval dialog.
+pub const COMMENT_CHECKER_TOOL_NAME: &str = "comment_checker";
+
+struct PolicyCheckedPostEditHook {
+    inner: Arc<dyn PostEditHook>,
+    policy: ApprovalPolicy,
+}
+
+#[async_trait::async_trait]
+impl PostEditHook for PolicyCheckedPostEditHook {
+    async fn check(&self, input: &PostEditInput) -> PostEditOutcome {
+        let capabilities = Capabilities {
+            fs_read: false,
+            fs_write: false,
+            process_spawn: true,
+            network: false,
+        };
+        match resolve(
+            self.policy
+                .classify(COMMENT_CHECKER_TOOL_NAME, &capabilities),
+            self.policy.mode(),
+        ) {
+            Action::Proceed | Action::AskOnFailure => self.inner.check(input).await,
+            // Advisory checks never prompt, retry or fail the successful edit.
+            Action::Deny | Action::AskFirst => PostEditOutcome::Pass,
+        }
+    }
+
+    async fn drain(&self) {
+        self.inner.drain().await;
+    }
+
+    fn take_unavailable_notification(&self) -> bool {
+        self.inner.take_unavailable_notification()
+    }
+}
 
 /// ツール実行時の文脈情報。
 ///
@@ -72,6 +110,7 @@ pub struct ToolExecutor {
     /// 利用者の承認応答を待つ任意のゲート。
     gate: Option<ApprovalGate>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
+    post_edit_hook: Option<Arc<dyn PostEditHook>>,
 }
 
 impl ToolExecutor {
@@ -83,6 +122,7 @@ impl ToolExecutor {
             policy: ApprovalPolicy::allow_all(),
             gate: None,
             default_cwd: RwLock::new(None),
+            post_edit_hook: None,
         }
     }
 
@@ -131,10 +171,11 @@ impl ToolExecutor {
             Some(cwd) => shell.with_default_cwd(cwd),
             None => shell,
         };
+        let (edit, write) = executor.post_edit_tools();
         let standard: [Arc<dyn Tool>; 6] = [
             Arc::new(Read),
-            Arc::new(Edit),
-            Arc::new(Write),
+            edit,
+            write,
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
@@ -149,6 +190,50 @@ impl ToolExecutor {
             executor.set_default_cwd(cwd);
         }
         executor
+    }
+
+    /// Attach a shared hook to registered standard Write/Edit tools. None restores
+    /// their hook-free behavior without changing tool schemas or permissions.
+    pub fn with_post_edit_hook(mut self, hook: Option<Arc<dyn PostEditHook>>) -> Self {
+        self.post_edit_hook = hook;
+        self.refresh_post_edit_tools();
+        self
+    }
+
+    fn refresh_post_edit_tools(&mut self) {
+        let (edit, write) = self.post_edit_tools();
+        for tool in [edit, write] {
+            if let Some(registered) = self.tools.get_mut(tool.name()) {
+                // Standard Write/Edit schemas do not depend on the hook.
+                registered.tool = tool;
+            }
+        }
+    }
+
+    fn policy_checked_hook(&self) -> Option<Arc<dyn PostEditHook>> {
+        self.post_edit_hook.as_ref().map(|inner| {
+            Arc::new(PolicyCheckedPostEditHook {
+                inner: Arc::clone(inner),
+                policy: self.policy.clone(),
+            }) as Arc<dyn PostEditHook>
+        })
+    }
+
+    /// Reap checker supervisors before shell teardown or workspace lease release.
+    pub async fn drain_post_edit_hooks(&self) {
+        if let Some(hook) = self.policy_checked_hook() {
+            hook.drain().await;
+        }
+    }
+
+    fn post_edit_tools(&self) -> (Arc<dyn Tool>, Arc<dyn Tool>) {
+        match &self.policy_checked_hook() {
+            Some(hook) => (
+                Arc::new(Edit.with_post_edit_hook(Arc::clone(hook))),
+                Arc::new(Write.with_post_edit_hook(Arc::clone(hook))),
+            ),
+            None => (Arc::new(Edit), Arc::new(Write)),
+        }
     }
 
     /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
@@ -322,6 +407,18 @@ impl ToolExecutor {
     /// 実行判定に使う承認方針を設定する。
     pub fn set_policy(&mut self, policy: ApprovalPolicy) -> &mut Self {
         self.policy = policy;
+        if self.post_edit_hook.is_some() {
+            self.refresh_post_edit_tools();
+        }
+        self
+    }
+
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        self.policy.clone()
+    }
+
+    pub fn with_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.set_policy(policy);
         self
     }
 
@@ -497,10 +594,20 @@ impl ToolExecutor {
         };
         match outcome {
             Ok(mut result) => {
-                // 由来はツールの申告ではなく権限宣言から機械導出して上書きする (AC5)。
-                // detail はサーバー制御の文字列を含み得るため本文と同様にエスケープする。
+                // Derive origin before output limiting can replace diagnostic detail.
+                // External checker text is never promoted to trusted command output.
+                result.origin = if matches!(tool_name, "write" | "edit")
+                    && result
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail["comment_checker"]["outcome"] == "warning")
+                {
+                    // Trusted executable output can still quote untrusted repository comments.
+                    crate::origin::ContentOrigin::RepositoryUntrusted
+                } else {
+                    derive_content_origin(&permissions)
+                };
                 result = crate::output::limit_result(result);
-                result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
                 let result = ToolResult {

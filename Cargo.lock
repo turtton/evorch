@@ -6052,6 +6052,7 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "config",
  "dom_smoothie",
  "event-bus",
  "flate2",
@@ -6075,6 +6076,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

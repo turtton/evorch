@@ -532,7 +532,7 @@ extern crate self as runtime;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 
 #[cfg(test)]
 #[path = "escalation_review/gate_tests.rs"]

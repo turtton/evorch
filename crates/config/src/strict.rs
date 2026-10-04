@@ -24,6 +24,7 @@ const ROOT_KEYS: &[&str] = &[
     "ownership",
     "team",
     "sandbox",
+    "comment_checker",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -121,6 +122,7 @@ const SANDBOX_KEYS: &[&str] = &[
     "escalation_approval",
     "escalate_to_user_on_deny",
 ];
+const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
 const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens", "reasoning_effort"];
@@ -186,6 +188,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "ownership", OWNERSHIP_KEYS)?;
     validate_section(root, "team", TEAM_KEYS)?;
     validate_section(root, "sandbox", SANDBOX_KEYS)?;
+    validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
 }
 
@@ -314,6 +317,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("ownership", OWNERSHIP_KEYS),
         ("team", TEAM_KEYS),
         ("sandbox", SANDBOX_KEYS),
+        ("comment_checker", COMMENT_CHECKER_KEYS),
         ("orchestration", ORCHESTRATION_KEYS),
     ];
     for &(name, allowed) in sections {

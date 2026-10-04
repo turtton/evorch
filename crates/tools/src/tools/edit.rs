@@ -7,6 +7,12 @@
 //! ToolExecutor が結果正規化で担う）。
 
 use std::io::Write;
+use std::sync::Arc;
+
+use crate::post_edit::{
+    PostEditHook, PostEditInput, UnavailableReason, apply_post_edit, apply_unavailable, input_fits,
+};
+
 use std::path::{Path, PathBuf};
 
 use super::file_diff;
@@ -15,8 +21,29 @@ use crate::result::ToolResult;
 use crate::tool::{Permissions, Tool, ToolExecutionMode};
 
 /// ファイル内の文字列を置換するツール。
-#[derive(Debug, Clone, Copy)]
-pub struct Edit;
+#[derive(Clone, Default)]
+pub struct Edit {
+    post_edit: Option<Arc<dyn PostEditHook>>,
+}
+
+// Preserve the existing hook-free value constructor as well as the type name.
+#[allow(non_upper_case_globals)]
+pub const Edit: Edit = Edit { post_edit: None };
+
+impl std::fmt::Debug for Edit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Edit")
+            .field("post_edit", &self.post_edit.is_some())
+            .finish()
+    }
+}
+
+impl Edit {
+    pub fn with_post_edit_hook(mut self, hook: Arc<dyn PostEditHook>) -> Self {
+        self.post_edit = Some(hook);
+        self
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for Edit {
@@ -41,6 +68,7 @@ impl Tool for Edit {
         })
     }
 
+    /// 編集の承認分類は不変。追加検査のプロセス起動は executor が別途承認する。
     fn permissions(&self) -> Permissions {
         Permissions::read_write()
     }
@@ -80,11 +108,38 @@ impl Tool for Edit {
             }
         })?;
         write_atomically(path, &next_content)?;
-        Ok(ToolResult::success(file_diff::changed_file(
+        let mut result = ToolResult::success(file_diff::changed_file(
             path_text,
             Some(&current),
             &next_content,
-        )))
+        ));
+        if let Some(hook) = &self.post_edit {
+            if old_string == new_string {
+                return Ok(result);
+            }
+            if !input_fits(path, &[old_string, new_string]) {
+                apply_unavailable(
+                    hook.as_ref(),
+                    UnavailableReason::InputTooLarge,
+                    "checker input exceeds 2 MiB",
+                    &mut result,
+                );
+                return Ok(result);
+            }
+            apply_post_edit(
+                hook.as_ref(),
+                &PostEditInput {
+                    tool_name: "Edit",
+                    file_path: path.to_path_buf(),
+                    content: None,
+                    old_string: Some(old_string.to_owned()),
+                    new_string: Some(new_string.to_owned()),
+                },
+                &mut result,
+            )
+            .await;
+        }
+        Ok(result)
     }
 }
 

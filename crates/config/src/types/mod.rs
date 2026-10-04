@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod budget;
+pub mod comment_checker;
 pub mod compaction;
 pub mod misc;
 pub mod model_preset;
@@ -24,6 +25,7 @@ pub use agents::{
     ResolvedAgentBinding, RoleBindingConfig, WorkerBindingConfig,
 };
 pub use budget::BudgetConfig;
+pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
 pub use misc::{
     DiagnosticPersistence, DiagnosticsConfig, MetricsConfig, PermissionConfig,
@@ -85,6 +87,8 @@ pub struct Config {
     pub ownership: OwnershipConfig,
     pub team: TeamConfig,
     pub sandbox: SandboxConfig,
+    /// Write/Edit 成功後の外部コメント検査。
+    pub comment_checker: CommentCheckerConfig,
 }
 
 impl Default for Config {
@@ -107,6 +111,7 @@ impl Default for Config {
             ownership: OwnershipConfig::default(),
             team: TeamConfig::default(),
             sandbox: SandboxConfig::default(),
+            comment_checker: CommentCheckerConfig::default(),
         }
     }
 }
