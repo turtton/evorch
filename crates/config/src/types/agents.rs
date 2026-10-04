@@ -160,7 +160,9 @@ impl AgentsConfig {
         if let Some(category) = category
             && category_for_role(role, category).is_none()
             && (!matches!(role, "worker" | "reviewer")
-                || CATEGORIES.iter().any(|defined| defined.name == category))
+                || CATEGORIES
+                    .iter()
+                    .any(|defined| defined.id.as_str() == category))
         {
             return Err(ConfigError::CategoryNotAllowedForRole {
                 role: role.to_string(),
@@ -356,7 +358,7 @@ mod tests {
         .map(String::from)
         .chain(
             categories_for_role("worker")
-                .map(|category| format!("worker.categories.{}", category.name)),
+                .map(|category| format!("worker.categories.{}", category.id.as_str())),
         )
         .collect::<Vec<_>>();
         let document = addresses
@@ -488,7 +490,7 @@ logical_model = "old"
         let mut agents = AgentsConfig::default();
         for category in categories_for_role("worker") {
             agents.worker.categories.insert(
-                category.name.into(),
+                category.id.as_str().into(),
                 CategoryBindingConfig {
                     logical_model: Some("old".into()),
                     preset: Some("old".into()),

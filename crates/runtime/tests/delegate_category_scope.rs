@@ -103,7 +103,7 @@ async fn delegate_routes_public_targets_in_awaited_and_background_modes() {
             .await;
         }
         for category in config::agent_categories::public_categories() {
-            delegate_case(json!({"target":{"role":category.role,"category":category.name}, "background":background, "prompt":"CHILD"}), true).await;
+            delegate_case(json!({"target":{"role":category.role,"category":category.id.as_str()}, "background":background, "prompt":"CHILD"}), true).await;
         }
     }
 }

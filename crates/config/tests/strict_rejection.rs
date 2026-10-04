@@ -511,7 +511,7 @@ fn agents_category_unknown_name_is_rejected_with_path() {
 fn worker_category_config_accepts_public_and_internal_categories() {
     let tmp = tempfile::tempdir().expect("temporary directory");
     let names: Vec<_> = config::agent_categories::public_worker_categories()
-        .map(|category| category.name)
+        .map(|category| category.id.as_str())
         .chain(["lesson", "conversation"])
         .collect();
     let document = names

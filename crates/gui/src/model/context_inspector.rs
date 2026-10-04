@@ -2,6 +2,7 @@
 //!
 //! Pure functions over runtime reports so the pane only lays out what these return.
 
+use config::agent_categories::CategoryId;
 use providers::{ContentBlock, Message, Role as MessageRole, ToolResultContent};
 use runtime::Role;
 use runtime::base_context::{
@@ -25,7 +26,7 @@ pub const ROLES: [Role; 8] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewSpec {
     pub role: Role,
-    pub category: Option<String>,
+    pub category: Option<CategoryId>,
     pub conversation: bool,
     pub child: bool,
     pub isolated: bool,
@@ -44,7 +45,7 @@ impl PreviewSpec {
 
     pub fn request(&self) -> BaseContextRequest {
         BaseContextRequest {
-            category: self.category.clone(),
+            category: self.category.map(|category| category.to_string()),
             conversation: self.conversation,
             child: self.child,
             workspace_mode: if self.isolated {
@@ -58,7 +59,7 @@ impl PreviewSpec {
 }
 
 /// Categories selectable for `role`; only workers and reviewers take one.
-pub fn categories_for(role: Role) -> Vec<&'static str> {
+pub fn categories_for(role: Role) -> Vec<CategoryId> {
     let key = match role {
         Role::Worker => "worker",
         Role::Reviewer => "reviewer",
@@ -66,7 +67,7 @@ pub fn categories_for(role: Role) -> Vec<&'static str> {
     };
     config::agent_categories::settings_categories()
         .filter(|category| category.role == key)
-        .map(|category| category.name)
+        .map(|category| category.id)
         .collect()
 }
 

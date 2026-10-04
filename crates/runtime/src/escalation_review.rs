@@ -1,5 +1,6 @@
 //! Clean-context review of shell sandbox escalation requests.
 
+use config::agent_categories::CategoryId;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -320,7 +321,7 @@ impl QuickModelReviewer {
         ];
         let invocation = AgentInvocationContext {
             run_id: run_id.to_owned(),
-            category: Some("quick".into()),
+            category: Some(CategoryId::Quick.to_string()),
             model_preference: None,
             purpose: event_bus::RequestPurpose::EscalationReview,
         };
@@ -440,7 +441,7 @@ impl QuickModelReviewer {
         ];
         let invocation = AgentInvocationContext {
             run_id: run_id.to_owned(),
-            category: Some("tool-execution".to_owned()),
+            category: Some(CategoryId::ToolExecution.to_string()),
             model_preference: None,
             purpose: event_bus::RequestPurpose::EscalationReview,
         };

@@ -170,8 +170,11 @@ fn message_rows_label_tool_traffic_and_summarize_first_line() {
 fn preview_spec_defaults_delegated_roles_to_child_runs() {
     assert!(!PreviewSpec::new(Role::Orchestrator).child);
     assert!(PreviewSpec::new(Role::Worker).child);
-    assert!(categories_for(Role::Worker).contains(&"deep"));
+    assert!(categories_for(Role::Worker).contains(&config::agent_categories::CategoryId::Deep));
     assert!(categories_for(Role::Orchestrator).is_empty());
+    let mut spec = PreviewSpec::new(Role::Reviewer);
+    spec.category = Some(config::agent_categories::CategoryId::PlanReview);
+    assert_eq!(spec.request().category.as_deref(), Some("plan-review"));
     assert_eq!(compact_tokens(950), "950");
     assert_eq!(compact_tokens(12_400), "12.4K");
 }

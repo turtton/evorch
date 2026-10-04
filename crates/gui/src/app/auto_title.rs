@@ -1,3 +1,4 @@
+use config::agent_categories::CategoryId;
 use std::sync::{Arc, mpsc};
 
 use runtime::{AgentInvocationContext, AgentModel, ModelPreference, Role};
@@ -18,8 +19,11 @@ pub fn select_model(
     agents: &config::AgentsConfig,
     thread: Option<ModelPreference>,
 ) -> TitleSelection {
-    if agents.worker.categories.contains_key("quick")
-        && let Ok(binding) = agents.binding_for("worker", Some("quick"))
+    if agents
+        .worker
+        .categories
+        .contains_key(CategoryId::Quick.as_str())
+        && let Ok(binding) = agents.binding_for("worker", Some(CategoryId::Quick.as_str()))
     {
         return TitleSelection::Quick(binding);
     }

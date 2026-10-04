@@ -6,7 +6,7 @@
 /// tool enums and selection guidance spanning all public roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicWorkerCategory {
-    pub name: &'static str,
+    pub id: CategoryId,
     pub guidance: &'static str,
 }
 
@@ -15,7 +15,7 @@ pub struct PublicWorkerCategory {
 /// Use [`public_categories`] for model-facing schemas and guidance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicCategory {
-    pub name: &'static str,
+    pub id: CategoryId,
     pub role: &'static str,
     pub guidance: &'static str,
 }
@@ -26,7 +26,7 @@ pub struct PublicCategory {
 /// audits have a configurable reviewer binding without being delegatable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsCategory {
-    pub name: &'static str,
+    pub id: CategoryId,
     pub role: &'static str,
 }
 
@@ -37,7 +37,7 @@ enum Delegation {
 }
 
 pub(crate) struct CategoryDefinition {
-    pub name: &'static str,
+    pub id: CategoryId,
     pub role: &'static str,
     delegation: Delegation,
     settings_visible: bool,
@@ -45,9 +45,66 @@ pub(crate) struct CategoryDefinition {
     pub overlay_body: &'static str,
 }
 
+// One declaration generates both typed IDs and their ordered metadata registry.
+macro_rules! define_categories {
+    ($($variant:ident { name: $name:literal, role: $role:literal,
+        settings_visible: $visible:literal, delegation: $delegation:expr,
+        overlay_preset: $preset:literal, overlay_body: $body:expr,
+    })*) => {
+        /// A registered category shared by config, the GUI, and runtime code.
+        /// Convert to its canonical string only at external storage/tool boundaries.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum CategoryId { $($variant),* }
+
+        impl CategoryId {
+            /// Registry order is part of the model-facing schema contract.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),*];
+
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $name),* }
+            }
+
+            /// Parse an exact canonical name, including internal categories.
+            pub fn parse(name: &str) -> Option<Self> {
+                match name { $($name => Some(Self::$variant),)* _ => None }
+            }
+
+            const fn definition(self) -> &'static CategoryDefinition {
+                &CATEGORIES[self as usize]
+            }
+
+            pub const fn role(self) -> &'static str { self.definition().role }
+            pub const fn settings_visible(self) -> bool { self.definition().settings_visible }
+            pub const fn public_guidance(self) -> Option<&'static str> {
+                match self.definition().delegation {
+                    Delegation::Public { guidance } => Some(guidance),
+                    Delegation::Internal => None,
+                }
+            }
+            pub const fn overlay_preset(self) -> &'static str {
+                self.definition().overlay_preset
+            }
+        }
+
+        impl std::fmt::Display for CategoryId {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        pub(crate) const CATEGORIES: &[CategoryDefinition] = &[$(
+            CategoryDefinition {
+                id: CategoryId::$variant, role: $role,
+                settings_visible: $visible, delegation: $delegation,
+                overlay_preset: $preset, overlay_body: $body,
+            }
+        ),*];
+    };
+}
+
 // Order is part of the model-facing tool schema and must remain stable.
-pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
-    CategoryDefinition {
+define_categories! {
+    Quick {
         name: "quick",
         role: "worker",
         settings_visible: true,
@@ -56,8 +113,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-quick",
         overlay_body: include_str!("../assets/presets/category-quick.md"),
-    },
-    CategoryDefinition {
+    }
+    Deep {
         name: "deep",
         role: "worker",
         settings_visible: true,
@@ -66,8 +123,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-deep",
         overlay_body: include_str!("../assets/presets/category-deep.md"),
-    },
-    CategoryDefinition {
+    }
+    HighReasoning {
         name: "high-reasoning",
         role: "worker",
         settings_visible: true,
@@ -76,8 +133,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-high-reasoning",
         overlay_body: include_str!("../assets/presets/category-high-reasoning.md"),
-    },
-    CategoryDefinition {
+    }
+    Visual {
         name: "visual",
         role: "worker",
         settings_visible: true,
@@ -86,8 +143,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-visual",
         overlay_body: include_str!("../assets/presets/category-visual.md"),
-    },
-    CategoryDefinition {
+    }
+    Writing {
         name: "writing",
         role: "worker",
         settings_visible: true,
@@ -96,8 +153,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-writing",
         overlay_body: include_str!("../assets/presets/category-writing.md"),
-    },
-    CategoryDefinition {
+    }
+    Research {
         name: "research",
         role: "worker",
         settings_visible: true,
@@ -106,8 +163,8 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-research",
         overlay_body: include_str!("../assets/presets/category-research.md"),
-    },
-    CategoryDefinition {
+    }
+    PlanReview {
         name: "plan-review",
         role: "reviewer",
         settings_visible: true,
@@ -116,47 +173,47 @@ pub(crate) const CATEGORIES: &[CategoryDefinition] = &[
         },
         overlay_preset: "category-plan-review",
         overlay_body: include_str!("../assets/presets/category-plan-review.md"),
-    },
-    CategoryDefinition {
+    }
+    ToolExecution {
         name: "tool-execution",
         role: "reviewer",
         settings_visible: true,
         delegation: Delegation::Internal,
         overlay_preset: "category-tool-execution",
         overlay_body: include_str!("../assets/presets/category-tool-execution.md"),
-    },
-    CategoryDefinition {
+    }
+    Conversation {
         name: "conversation",
         role: "worker",
         settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-conversation",
         overlay_body: include_str!("../assets/presets/category-conversation.md"),
-    },
-    CategoryDefinition {
+    }
+    Lesson {
         name: "lesson",
         role: "worker",
         settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-lesson",
         overlay_body: include_str!("../assets/presets/category-lesson.md"),
-    },
-    CategoryDefinition {
+    }
+    LessonReview {
         name: "lesson_review",
         role: "reviewer",
         settings_visible: false,
         delegation: Delegation::Internal,
         overlay_preset: "category-lesson-review",
         overlay_body: include_str!("../assets/presets/category-lesson-review.md"),
-    },
-];
+    }
+}
 
 /// Enumerate all public categories with their owning roles in stable order.
 pub fn public_categories() -> impl Iterator<Item = PublicCategory> {
     CATEGORIES.iter().filter_map(|category| {
         if let Delegation::Public { guidance } = category.delegation {
             Some(PublicCategory {
-                name: category.name,
+                id: category.id,
                 role: category.role,
                 guidance,
             })
@@ -168,9 +225,9 @@ pub fn public_categories() -> impl Iterator<Item = PublicCategory> {
 
 /// Return the owning role only for publicly delegatable categories.
 pub fn public_category_role(name: &str) -> Option<&'static str> {
-    public_categories()
-        .find(|category| category.name == name)
-        .map(|category| category.role)
+    CategoryId::parse(name)
+        .filter(|category| category.public_guidance().is_some())
+        .map(CategoryId::role)
 }
 
 /// Enumerate categories exposed in role settings, including internal shell audits.
@@ -179,7 +236,7 @@ pub fn settings_categories() -> impl Iterator<Item = SettingsCategory> {
         .iter()
         .filter(|category| category.settings_visible)
         .map(|category| SettingsCategory {
-            name: category.name,
+            id: category.id,
             role: category.role,
         })
 }
@@ -191,22 +248,19 @@ pub fn public_worker_categories() -> impl Iterator<Item = PublicWorkerCategory> 
     public_categories()
         .filter(|category| category.role == "worker")
         .map(|category| PublicWorkerCategory {
-            name: category.name,
+            id: category.id,
             guidance: category.guidance,
         })
 }
 
 /// Whether a category may be selected for a worker through public delegation.
 pub fn is_public_worker_category(name: &str) -> bool {
-    public_worker_categories().any(|category| category.name == name)
+    public_category_role(name) == Some("worker")
 }
 
 /// Overlay preset name for any registered category, including internal ones.
 pub fn overlay_preset_for(name: &str) -> Option<&'static str> {
-    CATEGORIES
-        .iter()
-        .find(|category| category.name == name)
-        .map(|category| category.overlay_preset)
+    CategoryId::parse(name).map(CategoryId::overlay_preset)
 }
 
 pub(crate) fn categories_for_role(
@@ -218,7 +272,9 @@ pub(crate) fn categories_for_role(
 }
 
 pub(crate) fn category_for_role(role: &str, name: &str) -> Option<&'static CategoryDefinition> {
-    categories_for_role(role).find(|category| category.name == name)
+    CategoryId::parse(name)
+        .filter(|category| category.role() == role)
+        .map(CategoryId::definition)
 }
 
 #[cfg(test)]
@@ -231,7 +287,7 @@ mod tests {
         assert_eq!(
             categories
                 .iter()
-                .map(|category| category.name)
+                .map(|category| category.id.as_str())
                 .collect::<Vec<_>>(),
             [
                 "quick",
@@ -246,9 +302,9 @@ mod tests {
             assert!(
                 !category.guidance.is_empty(),
                 "{} needs guidance",
-                category.name
+                category.id.as_str()
             );
-            assert!(category_for_role("worker", category.name).is_some());
+            assert!(category_for_role("worker", category.id.as_str()).is_some());
         }
     }
 
@@ -280,17 +336,20 @@ mod tests {
         assert_eq!(
             categories[6..]
                 .iter()
-                .map(|category| category.name)
+                .map(|category| category.id.as_str())
                 .collect::<Vec<_>>(),
             ["plan-review"]
         );
         assert_eq!(public_category_role("plan-review"), Some("reviewer"));
         for category in categories {
-            assert_eq!(public_category_role(category.name), Some(category.role));
+            assert_eq!(
+                public_category_role(category.id.as_str()),
+                Some(category.role)
+            );
             assert!(!category.guidance.is_empty());
-            assert!(category_for_role(category.role, category.name).is_some());
+            assert!(category_for_role(category.role, category.id.as_str()).is_some());
             if category.role == "reviewer" {
-                assert!(!is_public_worker_category(category.name));
+                assert!(!is_public_worker_category(category.id.as_str()));
             }
         }
     }
@@ -302,28 +361,31 @@ mod tests {
             categories
                 .iter()
                 .filter(|category| category.role == "reviewer")
-                .map(|category| category.name)
+                .map(|category| category.id.as_str())
                 .collect::<Vec<_>>(),
             ["plan-review", "tool-execution"]
         );
         for category in categories {
-            assert!(category_for_role(category.role, category.name).is_some());
+            assert!(category_for_role(category.role, category.id.as_str()).is_some());
             assert!(!matches!(
-                category.name,
+                category.id.as_str(),
                 "conversation" | "lesson" | "lesson_review"
             ));
         }
     }
 
     #[test]
-    fn registry_names_and_overlay_presets_are_unique() {
+    fn canonical_ids_round_trip_and_overlay_presets_are_unique() {
         let mut names = std::collections::BTreeSet::new();
         let mut presets = std::collections::BTreeSet::new();
-        for category in CATEGORIES {
+        for &id in CategoryId::ALL {
+            assert_eq!(CategoryId::parse(id.as_str()), Some(id));
+            assert_eq!(id.to_string(), id.as_str());
+            let category = id.definition();
             assert!(
-                names.insert(category.name),
+                names.insert(category.id.as_str()),
                 "duplicate category {}",
-                category.name
+                category.id.as_str()
             );
             assert!(
                 presets.insert(category.overlay_preset),
@@ -334,5 +396,9 @@ mod tests {
                 assert!(matches!(category.role, "worker" | "reviewer"));
             }
         }
+        assert_eq!(CategoryId::LessonReview.as_str(), "lesson_review");
+        assert_eq!(CategoryId::parse("lesson-review"), None);
+        assert_eq!(CategoryId::parse("Quick"), None);
+        assert_eq!(CategoryId::parse("unknown"), None);
     }
 }
