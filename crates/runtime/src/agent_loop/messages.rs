@@ -18,6 +18,16 @@ impl LoopState {
         while let Ok(message) = self.channels.inbox_rx.try_recv() {
             messages.push(message);
         }
+        // A trusted goal wake is a scheduling signal, not a new human request.
+        // When already running, the normal Stop boundary will perform the check.
+        messages.retain(|(text, _, trusted_user)| {
+            if !trusted_user && text == crate::thread_goals::CHECKS_WAKE {
+                self.goal_wake_pending = true;
+                false
+            } else {
+                true
+            }
+        });
         let received = !messages.is_empty();
         let count = messages.iter().filter(|message| message.2).count();
         for (text, images, _) in messages {

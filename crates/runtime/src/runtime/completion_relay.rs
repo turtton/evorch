@@ -4,6 +4,22 @@ use super::*;
 mod tests;
 
 impl AgentRuntime {
+    pub(crate) fn spawn_goal_reviewer(
+        &self,
+        parent: RunId,
+        run_id: RunId,
+        prompt: String,
+        config: RunConfig,
+    ) {
+        self.spawn_run_with_handoff(
+            run_id,
+            Some(parent),
+            Role::Reviewer,
+            prompt,
+            config,
+            RunContinuation::Awaited,
+        );
+    }
     pub(crate) fn delegate_awaited_child(
         &self,
         parent: RunId,

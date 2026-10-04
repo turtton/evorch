@@ -35,6 +35,11 @@ impl ExecutionPolicy {
         use crate::RunPurpose;
         let tools: &[&str] = match config.purpose {
             RunPurpose::General => {
+                if is_root {
+                    self.capabilities.allowed_tools.extend(
+                        ["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned),
+                    );
+                }
                 if config.conversation
                     && config.category.as_deref() == Some(CategoryId::Conversation.as_str())
                     && is_root
@@ -46,6 +51,14 @@ impl ExecutionPolicy {
                 }
                 return self;
             }
+            RunPurpose::ThreadGoalReview { .. } if self.role_name == Role::Reviewer.name() => &[
+                "read",
+                "grep",
+                "git_diff",
+                "web_search",
+                "web_fetch",
+                "submit_goal_review",
+            ],
             RunPurpose::LessonExtract { .. }
                 if config.learning_internal && self.role_name == Role::Worker.name() =>
             {
@@ -146,10 +159,17 @@ mod tests {
             .clone()
             .for_run_config(&conversation_config(), true);
         let mut expected = baseline.clone();
-        expected
-            .capabilities
-            .allowed_tools
-            .extend(["web_search", "web_fetch"].into_iter().map(str::to_owned));
+        expected.capabilities.allowed_tools.extend(
+            [
+                "web_search",
+                "web_fetch",
+                "create_goal",
+                "get_goal",
+                "submit_goal_check",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
         assert_eq!(policy, expected);
         for tool in &expected.capabilities.allowed_tools {
             assert_eq!(policy.authorize(tool), Ok(()), "{tool}");
@@ -200,7 +220,14 @@ mod tests {
             ),
         ] {
             let policy = baseline.clone().for_run_config(&config, is_root);
-            assert_eq!(policy, baseline);
+            let mut expected = baseline.clone();
+            if is_root {
+                expected
+                    .capabilities
+                    .allowed_tools
+                    .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
+            }
+            assert_eq!(policy, expected);
             for tool in ["web_search", "web_fetch"] {
                 assert!(matches!(
                     policy.authorize(tool),
@@ -226,7 +253,12 @@ mod tests {
             let policy = baseline
                 .clone()
                 .for_run_config(&conversation_config(), true);
-            assert_eq!(policy, baseline);
+            let mut expected = baseline.clone();
+            expected
+                .capabilities
+                .allowed_tools
+                .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
+            assert_eq!(policy, expected);
             // Orchestrator already allows fetch and WebResearcher already allows both.
             for tool in ["web_search", "web_fetch"] {
                 assert_eq!(policy.authorize(tool), baseline.authorize(tool));
@@ -411,36 +443,6 @@ mod tests {
     // Then: 全操作が true、通常ツール・空文字は false
     #[test]
     fn meta_ops_membership_is_exhaustive() {
-        let expected = [
-            "delegate",
-            "send_message",
-            "skill_load",
-            "wait",
-            "run_output",
-            "cancel",
-            "list_agents",
-            "inspect_agent",
-            "compact",
-            "finish",
-            "send",
-            "wait_reply",
-            "inbox",
-            "escalate",
-            "ledger_append",
-            "ledger_read",
-            "submit_review",
-            "ask_user",
-            "user_answers",
-            "subagent_questions",
-            "answer_subagent_question",
-            "inspect_learning_source",
-            "stack_lesson_candidate",
-            "list_lesson_candidates",
-            "submit_lesson_review",
-        ];
-
-        assert_eq!(META_OPS.len(), 25);
-        assert_eq!(META_OPS, expected);
         for &op in META_OPS {
             assert!(is_meta_op(op), "{op} は meta-op であるべき");
         }

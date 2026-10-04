@@ -23,7 +23,7 @@ use runtime::{
 };
 use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tempfile::TempDir;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, timeout};
 
 pub struct ScriptedModel {
@@ -31,6 +31,7 @@ pub struct ScriptedModel {
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
     keyed_gates: Mutex<HashMap<String, Arc<Notify>>>,
     observed: Mutex<Vec<Vec<Message>>>,
+    observed_count: watch::Sender<usize>,
     gate: Option<Arc<Notify>>,
     selected_model: Option<String>,
 }
@@ -60,6 +61,7 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
+            observed_count: watch::channel(0).0,
             gate: None,
             selected_model: None,
         }
@@ -74,6 +76,7 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
+            observed_count: watch::channel(0).0,
             gate: Some(gate),
             selected_model: None,
         }
@@ -105,6 +108,15 @@ impl ScriptedModel {
     pub async fn observed(&self) -> Vec<Vec<Message>> {
         self.observed.lock().await.clone()
     }
+
+    pub async fn wait_for_request(&self, index: usize) -> Vec<Message> {
+        let mut count = self.observed_count.subscribe();
+        count
+            .wait_for(|count| *count > index)
+            .await
+            .expect("model remains alive while waiting for its request");
+        self.observed.lock().await[index].clone()
+    }
 }
 
 #[async_trait]
@@ -116,7 +128,11 @@ impl AgentModel for ScriptedModel {
         messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        self.observed.lock().await.push(messages.to_vec());
+        {
+            let mut observed = self.observed.lock().await;
+            observed.push(messages.to_vec());
+            self.observed_count.send_replace(observed.len());
+        }
         if let Some(gate) = &self.gate {
             gate.notified().await;
         }

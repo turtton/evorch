@@ -592,7 +592,8 @@ impl GoalLedger {
                 });
                 Ok(())
             }
-            OrchestratorEvent::ShellCommandDenied { .. } => Ok(()),
+            OrchestratorEvent::ShellCommandDenied { .. }
+            | OrchestratorEvent::ThreadGoalUpdated { .. } => Ok(()),
         }
     }
 
@@ -735,7 +736,8 @@ pub(super) fn event_goal_id(event: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::MergeExecuted { goal_id, .. }
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
         OrchestratorEvent::ShellCommandDenied { goal_id, .. } => goal_id.as_deref(),
-        OrchestratorEvent::TaskProgressed { .. }
+        OrchestratorEvent::ThreadGoalUpdated { .. }
+        | OrchestratorEvent::TaskProgressed { .. }
         | OrchestratorEvent::TaskCheckpoint { .. }
         | OrchestratorEvent::TaskStaleMarked { .. } => None,
     }

@@ -321,6 +321,83 @@ impl DemoScriptModel {
         );
     }
 
+    async fn thread_goal_for_run(&self, run: &str) -> Option<event_bus::ThreadGoalSnapshot> {
+        self.ensure_drain();
+        loop {
+            let notified = self.inbox_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let inbox = self
+                    .inbox
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for event in inbox.iter().rev() {
+                    match &event.kind {
+                        EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated {
+                            snapshot,
+                        }) if snapshot.root_run_id == run => return Some(snapshot.clone()),
+                        EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
+                            root_run_id,
+                            ..
+                        }) if root_run_id == run => return None,
+                        _ => {}
+                    }
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn generic_goal_response(
+        snapshot: &event_bus::ThreadGoalSnapshot,
+        messages: &[Message],
+        review: bool,
+    ) -> ChatResponse {
+        let latest = messages
+            .last()
+            .and_then(|message| {
+                message.content.iter().find_map(|block| {
+                    if let ContentBlock::Text { text } = block {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if review || latest.starts_with("[goal self-check]") {
+            let epoch = if review {
+                snapshot.epoch
+            } else {
+                latest
+                    .split("with epoch ")
+                    .nth(1)
+                    .and_then(|part| part.split_whitespace().next())
+                    .and_then(|epoch| epoch.parse().ok())
+                    .unwrap_or(snapshot.epoch)
+            };
+            let checks = snapshot.criteria.iter().enumerate().map(|(criterion, _)| serde_json::json!({ "criterion": criterion, "met": true, "evidence": "The demo result is recorded in this conversation." })).collect::<Vec<_>>();
+            let mut input = serde_json::json!({"epoch": epoch, "checks": checks});
+            if review {
+                input["findings"] = serde_json::json!([]);
+            }
+            tool_response(
+                "demo-generic-goal-check",
+                if review {
+                    "submit_goal_review"
+                } else {
+                    "submit_goal_check"
+                },
+                input,
+            )
+        } else {
+            text_response(
+                "The demo objective is fulfilled. The result is recorded in this conversation.",
+            )
+        }
+    }
+
     /// worker 系 script の `{worktree}` placeholder を run の isolated worktree
     /// path (`<root>/.evorch/worktrees/<run_id>`) で置き換える。
     ///
@@ -372,32 +449,56 @@ impl AgentModel for DemoScriptModel {
         messages: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
-        let marker = script_key(initial_marker(messages)?);
-        if marker == DEMO_GOAL_KEY && self.remaining_turns(marker) == 1 {
-            // 最終ターン (finish せず終わる応答) は ReadyToFinish まで待つ。
-            // issue #83: 以前は ReviewRoundStarted 待ち + 固定 sleep だったが、
-            // round 不問の待機は subscribe 後のイベントしか捕捉できず、root
-            // 終端と pipeline drain の相対順で supervisor の
-            // ContinuationSuppressed の有無・位置が変わる flake の根因だった。
-            // ReadyToFinish は必ず全 Implement/Review/Repair run の終端後に
-            // 発行され、この待機は turn-2 (早期 finish 拒否) より後に張るため
-            // 取り逃しも起きない。root 終端時に pipeline は必ず空になり、
-            // continuation dispatch は suppress を経ない単一経路に決定される。
-            self.wait_for_event(is_ready_to_finish).await;
-        }
-        if marker == DEMO_IMPL_KEY && self.mark_worker_gate(&invocation.run_id) {
-            // 初回応答は root の早期 finish 拒否 (FinishRejected) まで遅らせ、
-            // branch 束縛が拒否イベントへ後追いする bus 順序を固定する。
-            self.wait_for_event(is_finish_rejected).await;
-        }
-        if marker == "DEMO-ORCH"
-            && messages.iter().any(is_demo_review_result)
-            && !self.children_joined.swap(true, Ordering::AcqRel)
-        {
-            self.worker_reply_sent.notified().await;
-            self.reviewer_reply_sent.notified().await;
-        }
-        let (remaining_turns, response) = self.scripted_response(marker)?;
+        let initial = initial_marker(messages)?;
+        let marker = script_key(initial);
+        let review_snapshot = if role == Role::Reviewer {
+            initial
+                .split("GOAL SNAPSHOT:\n")
+                .nth(1)
+                .and_then(|part| part.split("\nRECENT WORK").next())
+                .and_then(|json| serde_json::from_str::<event_bus::ThreadGoalSnapshot>(json).ok())
+        } else {
+            None
+        };
+        let generic = if let Some(snapshot) = review_snapshot {
+            Some(snapshot)
+        } else if marker == DEMO_GOAL_KEY {
+            self.thread_goal_for_run(&invocation.run_id).await
+        } else {
+            None
+        };
+        let (remaining_turns, response) = if let Some(snapshot) = generic {
+            (
+                0,
+                Self::generic_goal_response(&snapshot, messages, role == Role::Reviewer),
+            )
+        } else {
+            if marker == DEMO_GOAL_KEY && self.remaining_turns(marker) == 1 {
+                // 最終ターン (finish せず終わる応答) は ReadyToFinish まで待つ。
+                // issue #83: 以前は ReviewRoundStarted 待ち + 固定 sleep だったが、
+                // round 不問の待機は subscribe 後のイベントしか捕捉できず、root
+                // 終端と pipeline drain の相対順で supervisor の
+                // ContinuationSuppressed の有無・位置が変わる flake の根因だった。
+                // ReadyToFinish は必ず全 Implement/Review/Repair run の終端後に
+                // 発行され、この待機は turn-2 (早期 finish 拒否) より後に張るため
+                // 取り逃しも起きない。root 終端時に pipeline は必ず空になり、
+                // continuation dispatch は suppress を経ない単一経路に決定される。
+                self.wait_for_event(is_ready_to_finish).await;
+            }
+            if marker == DEMO_IMPL_KEY && self.mark_worker_gate(&invocation.run_id) {
+                // 初回応答は root の早期 finish 拒否 (FinishRejected) まで遅らせ、
+                // branch 束縛が拒否イベントへ後追いする bus 順序を固定する。
+                self.wait_for_event(is_finish_rejected).await;
+            }
+            if marker == "DEMO-ORCH"
+                && messages.iter().any(is_demo_review_result)
+                && !self.children_joined.swap(true, Ordering::AcqRel)
+            {
+                self.worker_reply_sent.notified().await;
+                self.reviewer_reply_sent.notified().await;
+            }
+            self.scripted_response(marker)?
+        };
         let response = self.rewrite_worktree(marker, &invocation.run_id, response)?;
         let turn = match marker {
             "DEMO-ORCH" => 5 - remaining_turns,

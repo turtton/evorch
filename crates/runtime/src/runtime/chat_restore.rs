@@ -53,7 +53,13 @@ impl AgentRuntime {
             ))
         ) {
             self.set_model_preference(run_id, authority.model_preference)?;
-            self.send_message_with_images(run_id, prompt, authority.images)?;
+            self.send_inbox_message(
+                run_id,
+                prompt,
+                authority.images,
+                true,
+                authority.initial_thread_goal,
+            )?;
             return Ok(run_id);
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
@@ -75,6 +81,21 @@ impl AgentRuntime {
                 "goal identity".into(),
             )));
         }
+        let thread = self.goal_thread(run_id).or_else(|| {
+            descriptor.name.as_deref().and_then(|name| {
+                name.strip_prefix(&format!("chat:{}:", role.name()))
+                    .map(str::to_owned)
+            })
+        });
+        if let Some((objective, criteria)) = &authority.initial_thread_goal {
+            let thread = thread.as_deref().ok_or_else(|| {
+                fail(RunRestoreFailure::CorruptContext(
+                    "missing thread binding".into(),
+                ))
+            })?;
+            self.validate_new_thread_goal(thread, objective, criteria)
+                .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+        }
         let restored = RestoredState::for_conversation(&record)?;
         descriptor.restorable = false;
         descriptor.non_restorable_reason = Some("snapshot_consumed".into());
@@ -85,12 +106,26 @@ impl AgentRuntime {
             .handle
             .upsert_run_context(&record)
             .map_err(|error| fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string())))?;
-        let config = RunConfig {
+        let mut config = RunConfig {
             name: descriptor.name,
             interactive: true,
             keep_alive: true,
             ..authority
         };
+        if let Some(thread) = &thread {
+            self.bind_thread_root(thread, run_id)
+                .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+        }
+        if let Some((objective, criteria)) = config.initial_thread_goal.take() {
+            let thread = self.goal_thread(run_id).ok_or_else(|| {
+                fail(RunRestoreFailure::CorruptContext(
+                    "missing thread binding".into(),
+                ))
+            })?;
+            self.create_thread_goal(&thread, run_id, objective, criteria)
+                .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+        }
+        self.goal_user_input(run_id, &prompt);
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,
@@ -161,6 +196,13 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        if let Some((objective, criteria)) = &config.initial_thread_goal {
+            self.validate_new_thread_goal(thread_id, objective, criteria)
+                .map_err(|reason| RuntimeError::RunRestoreFailed {
+                    run_id: format!("chat:{thread_id}"),
+                    reason: RunRestoreFailure::CorruptContext(reason),
+                })?;
+        }
         let name = format!("chat:{}:{thread_id}", role.name());
         let mut restored_source = None;
         let restored = match self.shared.run_store.get() {
@@ -220,6 +262,20 @@ impl AgentRuntime {
                 })?;
         }
         let continuation = restored.map_or(RunContinuation::Fresh, RunContinuation::Restored);
+        self.bind_thread_root(thread_id, run_id).map_err(|reason| {
+            RuntimeError::RunRestoreFailed {
+                run_id: run_id.to_string(),
+                reason: RunRestoreFailure::CorruptContext(reason),
+            }
+        })?;
+        if let Some((objective, criteria)) = config.initial_thread_goal.take() {
+            self.create_thread_goal(thread_id, run_id, objective, criteria)
+                .map_err(|reason| RuntimeError::RunRestoreFailed {
+                    run_id: run_id.to_string(),
+                    reason: RunRestoreFailure::CorruptContext(reason),
+                })?;
+        }
+        self.goal_user_input(run_id, &prompt);
         Ok(self.spawn_run_with_handoff(run_id, None, role, prompt, config, continuation))
     }
 

@@ -44,7 +44,6 @@ use providers::{
 use runtime::{AgentModel, AgentRuntime, ExecutionPolicy, Role, RunConfig, RuntimeError};
 use sandbox::DirectSandbox;
 use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 use tools::{ToolError, ToolExecutor};
 
 use support::{ScriptedModel, load_compaction_fixture, text_response};
@@ -306,43 +305,40 @@ fn agent_body(message: &Message) -> &str {
         .expect("fixture agent message has a header line and a body")
 }
 
-async fn wait_for_phase(runtime: &AgentRuntime, run_id: runtime::RunId, phase: AgentRunPhase) {
-    timeout(Duration::from_secs(10), async {
-        loop {
-            if runtime
-                .inspect_agent(run_id)
-                .expect("run remains inspectable")
-                .phase
-                == phase
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
+async fn wait_for_phase(
+    receiver: &mut EventReceiver,
+    run_id: runtime::RunId,
+    phase: AgentRunPhase,
+) {
+    loop {
+        let event = receiver.recv().await.expect("event bus remains open");
+        if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id: event_run_id,
+            to,
+            ..
+        }) = event.kind
+            && event_run_id == run_id.to_string()
+            && to == phase
+        {
+            return;
         }
-    })
-    .await
-    .expect("phase transition timeout");
+    }
 }
 
 async fn collect_compactions(receiver: &mut EventReceiver, run_id: &str) -> Vec<CompactionEvent> {
     let mut compacted = Vec::new();
-    timeout(Duration::from_secs(10), async {
-        loop {
-            let event = receiver.recv().await.expect("event bus remains open");
-            match event.kind {
-                EventKind::Compaction(event) => compacted.push(event),
-                EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id })
-                    if task_id == run_id =>
-                {
-                    return;
-                }
-                _ => {}
+    loop {
+        let event = receiver.recv().await.expect("event bus remains open");
+        match event.kind {
+            EventKind::Compaction(event) => compacted.push(event),
+            EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id })
+                if task_id == run_id =>
+            {
+                return compacted;
             }
+            _ => {}
         }
-    })
-    .await
-    .expect("run completion event timeout");
-    compacted
+    }
 }
 
 // Given: fixture 再生の実ランターン (Explorer 子 run + 親 run、小さめ window)
@@ -361,7 +357,9 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     let closeout_text = text_of(&fixture[27]);
     let agent1 = agent_message_text("msg-1", "run-1", "send", &body_send);
     let agent2 = agent_message_text("msg-2", "run-1", "send", &body_reply);
-    let request_context = compaction_context::probe_for_role(Role::Explorer, |model| {
+    // Root runs have goal tools that delegated children cannot use. Calibrate
+    // against the same child topology as the fixture rather than a root run.
+    let request_context = compaction_context::probe_for_child_role(Role::Explorer, |model| {
         runtime_with(model, compaction_settings(1_000_000))
     })
     .await;
@@ -404,6 +402,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
 
     let (runtime, bus) = runtime_with(model.clone(), compaction_settings(window));
     let mut receiver = bus.subscribe();
+    let mut phases = bus.subscribe();
 
     let parent = runtime.delegate_background(
         Role::Explorer,
@@ -424,19 +423,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
 
     // When: 各 provider 呼び出しを観測 → 検証 → (所定点で agent-message 注入) → 解放
     for step in 0..16usize {
-        timeout(Duration::from_secs(10), async {
-            while model.observed().await.len() <= step {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "provider call timeout at step {step}: {:?}",
-                runtime.inspect_agent(child)
-            )
-        });
-        let request = &model.observed().await[step];
+        let request = &model.wait_for_request(step).await;
         match step {
             0 => {
                 assert!(request_texts(request).contains(&PARENT_MARKER));
@@ -505,7 +492,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         gate.notify_one();
         if step == 12 {
             // fixture[26] の text-only Stop で対話待機になる → fixture[27] をそのまま送る
-            wait_for_phase(&runtime, child, AgentRunPhase::Waiting).await;
+            wait_for_phase(&mut phases, child, AgentRunPhase::Waiting).await;
             runtime
                 .send_message(child, closeout_text.clone())
                 .expect("waiting run accepts the closeout message");
@@ -513,10 +500,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     }
 
     // Then: run は圧縮後も継続し Done に至る (長セッション継続)
-    assert_eq!(
-        timeout(Duration::from_secs(10), runtime.wait(child)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(child).await, Ok(AgentRunPhase::Done));
     let events = collect_compactions(&mut receiver, &child.to_string()).await;
 
     // (a) 自動圧縮はちょうど 1 回

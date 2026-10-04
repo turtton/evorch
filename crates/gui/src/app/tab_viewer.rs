@@ -69,6 +69,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) file_requests: &'a mut Vec<FileLink>,
     pub(super) diff_request: &'a mut Option<DiffMode>,
     pub(super) composer: &'a mut ComposerModel,
+    pub(super) thread_goals: &'a BTreeMap<String, event_bus::ThreadGoalSnapshot>,
+    pub(super) goal_action: &'a mut Option<crate::panes::agent::GoalAction>,
     pub(super) composer_action: &'a mut Option<ComposerAction>,
     pub(super) focus_request: &'a mut Option<&'static str>,
     pub(super) dock_tab_style: &'a egui_dock::TabStyle,

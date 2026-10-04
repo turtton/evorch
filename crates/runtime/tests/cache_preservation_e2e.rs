@@ -118,6 +118,8 @@ profile = "local"
 profile = "local"
 [[routing.routes.planner]]
 profile = "local"
+[[routing.routes.reviewer]]
+profile = "local"
 [compaction]
 context_window_tokens = {window}
 threshold = 0.5
@@ -1268,4 +1270,249 @@ async fn stopped_run_keeps_undelivered_status_and_rejects_early_delivery() {
         harness.runtime.deliver_follow_ups_next_turn(run),
         Err(runtime::RuntimeError::RunTerminated { .. })
     ));
+}
+
+#[tokio::test]
+async fn proactive_goal_self_check_preserves_wire_prefix_and_cache() {
+    let call = |id: &str, name: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
+    };
+    let mut harness = harness(
+        vec![
+            call(
+                "goal",
+                "create_goal",
+                json!({"objective":"Research the requested options","criteria":["Explain verified differences"]}),
+            ),
+            text_response("The requested comparison is ready"),
+            call(
+                "check",
+                "submit_goal_check",
+                json!({"epoch":1,"checks":[{"criterion":0,"met":true,"evidence":"Comparison cites the original sources"}]}),
+            ),
+            text_response("Verified the comparison against the request"),
+        ],
+        1_000_000,
+    );
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "goal-cache",
+            Role::Worker,
+            "Research the requested options".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.thread_goal("goal-cache").unwrap().phase,
+        event_bus::ThreadGoalPhase::Complete
+    );
+    verify_trace(&harness, run, &events, 0);
+}
+
+#[tokio::test]
+async fn goal_review_repair_preserves_original_roots_wire_prefix_and_cumulative_cache() {
+    let call = |id: &str, name: &str, input: Value| {
+        ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
+    };
+    let checks = |met| json!([{"criterion":0,"met":met,"evidence":"Evidence in the requested comparison report"}]);
+    let mut harness = harness(
+        vec![
+            text_response("Initial comparison"),
+            call(
+                "self1",
+                "submit_goal_check",
+                json!({"epoch":2,"checks":checks(true)}),
+            ),
+            text_response("Initial output is ready"),
+            call(
+                "review1",
+                "submit_goal_review",
+                json!({"epoch":2,"checks":checks(false),"findings":["One difference needs a supporting source"]}),
+            ),
+            text_response("Added the missing original source"),
+            call(
+                "self2",
+                "submit_goal_check",
+                json!({"epoch":4,"checks":checks(true)}),
+            ),
+            text_response("Rechecked the corrected comparison"),
+            call(
+                "review2",
+                "submit_goal_review",
+                json!({"epoch":4,"checks":checks(true),"findings":[]}),
+            ),
+        ],
+        1_000_000,
+    );
+    let run = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("review-cache", run)
+        .unwrap();
+    let goal = harness
+        .runtime
+        .create_thread_goal(
+            "review-cache",
+            run,
+            "Research options".into(),
+            vec!["Supported differences".into()],
+        )
+        .unwrap();
+    harness
+        .runtime
+        .set_goal_review("review-cache", &goal.goal_id, true)
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        run,
+        None,
+        Role::Worker,
+        "Research options",
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    let goal = harness.runtime.thread_goal("review-cache").unwrap();
+    assert_eq!(goal.phase, event_bus::ThreadGoalPhase::Complete);
+    assert_eq!(goal.review_round, 2);
+    assert_eq!(goal.usage.model_requests, 8);
+    let requests = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .map(|r| r.body)
+        .collect::<Vec<_>>();
+    let usage = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run, *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 8);
+    assert_eq!(usage.len(), 8);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    for (before, after) in [(0, 1), (1, 2), (2, 4), (4, 5), (5, 6)] {
+        assert_eq!(usage[before].0, &run.to_string());
+        assert_eq!(usage[after].0, &run.to_string());
+        assert_append_only(CacheProtocol::OpenAi, &requests[before], &requests[after]).unwrap();
+        assert!(
+            usage[after].2 >= usage[before].1,
+            "review/repair must reuse the working run's previously processed input"
+        );
+    }
+    assert_ne!(
+        usage[3].0, usage[7].0,
+        "each independent review has a fresh context"
+    );
+    assert_ne!(
+        requests[2]["tools"], requests[3]["tools"],
+        "review has read-only capabilities"
+    );
+}
+
+#[tokio::test]
+async fn paused_goal_restore_and_idle_checks_resume_preserve_the_wire_cache() {
+    let mut harness=harness(vec![
+        text_response("Initial requested work"),
+        text_response("Applied the new user clarification while checks remain paused"),
+        ScriptedResponse::tool_call("check",MODEL,0,"check","submit_goal_check",[json!({"epoch":7,"checks":[{"criterion":0,"met":true,"evidence":"The report includes the requested clarification and sources"}]}).to_string()]),
+        text_response("Verified the complete report"),
+    ],1_000_000);
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("goal-restore.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let root = harness.runtime.reserve_run_id();
+    harness
+        .runtime
+        .bind_thread_root("restored-goal", root)
+        .unwrap();
+    let goal = harness
+        .runtime
+        .create_thread_goal(
+            "restored-goal",
+            root,
+            "Research options".into(),
+            vec!["Report verified differences".into()],
+        )
+        .unwrap();
+    harness
+        .runtime
+        .set_goal_checks_paused("restored-goal", &goal.goal_id, true)
+        .unwrap();
+    harness.runtime.spawn_reserved(
+        root,
+        None,
+        Role::Worker,
+        "Research options",
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            name: Some("chat:worker:restored-goal".into()),
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(root, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, root, AgentRunPhase::Stopped).await);
+    let saved = harness.runtime.thread_goal("restored-goal").unwrap();
+    let usage = saved.usage.clone();
+    harness.runtime.restore_thread_goal(saved).unwrap();
+    harness
+        .runtime
+        .continue_goal(
+            root,
+            "Include the clarified requirement".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await);
+    assert!(
+        harness
+            .runtime
+            .thread_goal("restored-goal")
+            .unwrap()
+            .checks_paused
+    );
+    assert!(
+        harness
+            .runtime
+            .thread_goal("restored-goal")
+            .unwrap()
+            .usage
+            .model_requests
+            > usage.model_requests
+    );
+    harness
+        .runtime
+        .set_goal_checks_paused("restored-goal", &goal.goal_id, false)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, root, AgentRunPhase::Waiting).await);
+    assert_eq!(
+        harness.runtime.thread_goal("restored-goal").unwrap().phase,
+        event_bus::ThreadGoalPhase::Complete
+    );
+    verify_trace(&harness, root, &events, 0);
+    harness
+        .runtime
+        .stop(root, runtime::StopScope::SelfOnly)
+        .unwrap();
+    harness.runtime.wait(root).await.unwrap();
 }

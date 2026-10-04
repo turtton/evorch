@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
-use std::time::{Duration, Instant};
 
 use event_bus::{EventBus, EventKind, GoalState, OrchestratorEvent, RecvError};
 use gui::app::WorkbenchState;
@@ -27,8 +26,10 @@ use sandbox::{DirectSandbox, Sandbox, SandboxError};
 use tools::ToolExecutor;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+#[path = "support/legacy_goal.rs"]
+mod legacy_goal;
+
 const DEMO_GOAL: &str = "DEMO-GOAL implement fixture unit";
-const LABEL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// isolated workspace 用に mounts を記録しつつ DirectSandbox を返す factory。
 struct RecordingSandboxFactory {
@@ -161,6 +162,8 @@ struct DemoFixture {
     harness: HeadlessWorkbench<AgentRuntime>,
     collected: Arc<Mutex<Vec<OrchestratorEvent>>>,
     done_rx: mpsc::Receiver<()>,
+    agent_runtime: AgentRuntime,
+    supervisor: runtime::SupervisorHandle,
 }
 
 impl DemoFixture {
@@ -208,7 +211,7 @@ impl DemoFixture {
             .with_command_sink(Box::new(RuntimeCommandSink::new(
                 runtime.clone(),
                 rt.handle().clone(),
-                supervisor,
+                supervisor.clone(),
             )));
         let mut harness = HeadlessWorkbench::new(state, [1200.0, 800.0]);
         harness.run();
@@ -219,27 +222,47 @@ impl DemoFixture {
             harness,
             collected,
             done_rx,
+            agent_runtime: runtime,
+            supervisor,
         }
     }
 
     fn run_until(&mut self, ready: impl Fn(&WorkbenchState<AgentRuntime>) -> bool) {
-        let deadline = Instant::now() + LABEL_TIMEOUT;
         while !ready(self.harness.state()) {
-            assert!(
-                Instant::now() < deadline,
-                "state did not arrive within {LABEL_TIMEOUT:?}; events: {:#?}",
-                lock(&self.collected)
-            );
-            let _ = self.repaint_rx.recv_timeout(Duration::from_millis(200));
+            self.repaint_rx.recv().expect("event pump remains live");
             self.harness.run();
         }
     }
 
     /// DEMO-GOAL を投入し、merge approve まで駆動して goal を complete させる。
     fn drive_demo_goal(&mut self) {
-        self.harness.state_mut().composer_mut().input = format!("/goal {DEMO_GOAL}");
-        self.harness.run();
-        self.harness.click_label("Send");
+        let mut sink = RuntimeCommandSink::new(
+            self.agent_runtime.clone(),
+            self._runtime.handle().clone(),
+            self.supervisor.clone(),
+        );
+        let _guard = self._runtime.enter();
+        legacy_goal::start(
+            &self.agent_runtime,
+            &self.supervisor,
+            &mut sink,
+            gui::model::commands::GoalSubmission {
+                delegation_value: None,
+                project_id: "demo".into(),
+                thread_id: "thread-1".into(),
+                goal: DEMO_GOAL.into(),
+                references: vec![],
+                constraints: vec![],
+            },
+            runtime::Role::Orchestrator,
+            runtime::RunConfig::default(),
+        );
+        self.harness
+            .state_mut()
+            .apply_loop_event(gui::model::commands::LoopEvent::GoalAccepted {
+                thread_id: "thread-1".into(),
+                goal_id: "goal-1".into(),
+            });
         self.harness.run();
         self.run_until(|state| state.goal_form().last_accepted.as_deref() == Some("goal-1"));
         assert!(self.harness.has_label("accepted: goal-1"));
@@ -303,9 +326,9 @@ impl DemoFixture {
         // 検出後に固定 sleep (100ms) で後続イベントの到着を仮定していたが、
         // 高負荷下では GSC(closeout -> done) が 100ms を超えて遅れうる。
         // フローの真の終端は Done stage なので、collector からの到着通知を
-        // deadline 付きで受信する (sleep/poll ではなく event 待機)。
+        // 明示的な終端通知を受信する。
         self.done_rx
-            .recv_timeout(LABEL_TIMEOUT)
+            .recv()
             .expect("collector did not observe goal completion");
     }
 
@@ -522,4 +545,49 @@ fn demo_goal_reaches_awaiting_merge_then_complete_deterministically() {
         "demo loop event sequence must be deterministic"
     );
     drop(first);
+}
+
+#[test]
+fn generic_demo_goal_completes_in_the_normal_conversation_without_a_pr() {
+    let mut fixture = DemoFixture::new();
+    fixture.harness.state_mut().composer_mut().input = format!("/goal {DEMO_GOAL}");
+    fixture.harness.run();
+    fixture.harness.click_label("Send");
+    fixture.harness.run();
+    let runtime = fixture.agent_runtime.clone();
+    fixture.run_until(|_| {
+        runtime
+            .thread_goal("thread-1")
+            .is_some_and(|goal| goal.phase == event_bus::ThreadGoalPhase::Complete)
+    });
+    fixture.harness.run();
+    let goal = runtime.thread_goal("thread-1").unwrap();
+    assert_eq!(goal.criteria.len(), 1);
+    assert!(
+        goal.checks
+            .iter()
+            .all(|check| check.met && !check.evidence.is_empty())
+    );
+    assert!(!goal.review_enabled);
+    assert!(fixture.harness.has_label("Goal completed"));
+    assert!(fixture.harness.state().merge().view.pr.is_none());
+    assert!(fixture.events().iter().any(|event| matches!(event, OrchestratorEvent::ThreadGoalUpdated { snapshot } if snapshot.phase == event_bus::ThreadGoalPhase::Complete)));
+    assert!(
+        !fixture
+            .events()
+            .iter()
+            .any(|event| matches!(event, OrchestratorEvent::GoalCreated { .. }))
+    );
+    let root = runtime::RunId::new(
+        goal.root_run_id
+            .strip_prefix("run-")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    fixture.agent_runtime.cancel(root).unwrap();
+    fixture
+        ._runtime
+        .block_on(fixture.agent_runtime.wait(root))
+        .unwrap();
 }

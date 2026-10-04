@@ -98,6 +98,16 @@ pub enum WorkbenchCommand {
         thread_id: String,
     },
     SubmitGoal(GoalSubmission),
+    SetGoalReview {
+        thread_id: String,
+        goal_id: String,
+        enabled: bool,
+    },
+    SetGoalChecksPaused {
+        thread_id: String,
+        goal_id: String,
+        paused: bool,
+    },
     DecideMerge(MergeCommand),
     DecideToolApproval {
         call_id: String,
@@ -223,6 +233,7 @@ pub trait CommandSink: Send {
         None
     }
     fn bind_goal_id(&mut self, _thread: &str, _goal: &str) {}
+    fn bind_thread_goal(&mut self, _snapshot: &event_bus::ThreadGoalSnapshot, _project: &str) {}
     /// Refresh counts on lifecycle events, including descendants that just settled.
     fn observe_lifecycle(&mut self, _event: &event_bus::Event) {}
     /// Live count for the stopped banner; None leaves fixture/event state intact.
@@ -307,25 +318,6 @@ pub struct FixtureLoopAdapter {
     accepted_chats: u64,
 }
 
-impl FixtureLoopAdapter {
-    fn fixture_view(resolution: Option<MergeDecision>) -> MergeApprovalView {
-        MergeApprovalView {
-            pr: Some(PrRef {
-                number: 65,
-                title: "Workbench restructure".into(),
-                url: "https://github.com/turtton/evorch/pull/65".into(),
-            }),
-            ci: CiStatus::Pending,
-            reviewer: ReviewerStatus::Pending,
-            diff_summary: Some("model-only change".into()),
-            resolution,
-            binding: None,
-            gate: Vec::new(),
-            blocked: None,
-        }
-    }
-}
-
 impl CommandSink for FixtureLoopAdapter {
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent> {
         match cmd {
@@ -354,13 +346,10 @@ impl CommandSink for FixtureLoopAdapter {
             }
             WorkbenchCommand::SubmitGoal(submission) => {
                 self.accepted_goals = self.accepted_goals.saturating_add(1);
-                vec![
-                    LoopEvent::GoalAccepted {
-                        thread_id: submission.thread_id,
-                        goal_id: format!("goal-{}", self.accepted_goals),
-                    },
-                    LoopEvent::MergeStateUpdated(Box::new(Self::fixture_view(None))),
-                ]
+                vec![LoopEvent::GoalAccepted {
+                    thread_id: submission.thread_id,
+                    goal_id: format!("goal-{}", self.accepted_goals),
+                }]
             }
             WorkbenchCommand::DecideMerge(command) => vec![LoopEvent::MergeResolved {
                 thread_id: command.thread_id,
@@ -368,7 +357,9 @@ impl CommandSink for FixtureLoopAdapter {
             }],
             // 一時停止/再開/取消の結果はバス上の OrchestratorEvent として届くため、
             // fixture は即応イベントを発行しない。
-            WorkbenchCommand::PauseGoal { .. }
+            WorkbenchCommand::SetGoalReview { .. }
+            | WorkbenchCommand::SetGoalChecksPaused { .. }
+            | WorkbenchCommand::PauseGoal { .. }
             | WorkbenchCommand::ResumeGoal { .. }
             | WorkbenchCommand::CancelGoal { .. } => Vec::new(),
         }
@@ -510,7 +501,8 @@ fn orchestrator_goal_id(ev: &OrchestratorEvent) -> Option<&str> {
         | OrchestratorEvent::MergeApprovalInvalidated { goal_id, .. }
         | OrchestratorEvent::MergeExecuted { goal_id, .. }
         | OrchestratorEvent::CloseoutStepRecorded { goal_id, .. } => Some(goal_id),
-        OrchestratorEvent::TaskProgressed { .. }
+        OrchestratorEvent::ThreadGoalUpdated { .. }
+        | OrchestratorEvent::TaskProgressed { .. }
         | OrchestratorEvent::TaskCheckpoint { .. }
         | OrchestratorEvent::TaskRetryScheduled { .. }
         | OrchestratorEvent::TaskStaleMarked { .. }
@@ -668,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_adapter_accepts_goal_and_publishes_pending_merge_view() {
+    fn fixture_adapter_accepts_goal_without_a_pr_flow() {
         let mut adapter = FixtureLoopAdapter::default();
         let events = adapter.submit(WorkbenchCommand::SubmitGoal(GoalSubmission {
             delegation_value: None,
@@ -681,13 +673,10 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![
-                LoopEvent::GoalAccepted {
-                    thread_id: "thread-1".into(),
-                    goal_id: "goal-1".into(),
-                },
-                LoopEvent::MergeStateUpdated(Box::new(pending_view())),
-            ]
+            vec![LoopEvent::GoalAccepted {
+                thread_id: "thread-1".into(),
+                goal_id: "goal-1".into(),
+            },]
         );
     }
 

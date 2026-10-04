@@ -113,6 +113,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut diff_request = None;
         let mut file_requests = Vec::new();
         let mut composer_action = None;
+        let mut goal_action = None;
         let mut focus_request = None;
         let mut preference_action = None;
         let profiles = self.available_profiles();
@@ -169,6 +170,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 file_requests: &mut file_requests,
                 composer: &mut self.composer,
                 composer_action: &mut composer_action,
+                thread_goals: &self.thread_goals,
+                goal_action: &mut goal_action,
                 focus_request: &mut focus_request,
                 dock_tab_style: &tab_style,
                 profiles: &profiles,
@@ -198,6 +201,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(id) = focus_request {
             self.focus_panel(id);
+        }
+        if let Some(action) = goal_action {
+            self.submit_command(action.into_command());
         }
         if let Some(preference) = preference_action {
             self.set_thread_model_preference(preference);
