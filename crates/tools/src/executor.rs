@@ -25,6 +25,7 @@ use crate::tools::{Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write}
 
 mod prepared;
 mod specs;
+mod workspace_boundary;
 pub use prepared::{PreparedToolCall, ValidatedToolCall};
 pub use specs::ToolSpec;
 
@@ -111,6 +112,7 @@ pub struct ToolExecutor {
     gate: Option<ApprovalGate>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
     post_edit_hook: Option<Arc<dyn PostEditHook>>,
+    workspace_boundary: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl ToolExecutor {
@@ -123,6 +125,7 @@ impl ToolExecutor {
             gate: None,
             default_cwd: RwLock::new(None),
             post_edit_hook: None,
+            workspace_boundary: RwLock::new(None),
         }
     }
 
@@ -234,6 +237,14 @@ impl ToolExecutor {
             ),
             None => (Arc::new(Edit), Arc::new(Write)),
         }
+    }
+
+    /// Return the trusted workspace used to resolve relative tool arguments.
+    pub fn default_cwd(&self) -> Option<std::path::PathBuf> {
+        self.default_cwd
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// 登録済みの shell ツールがあれば、その既定作業ディレクトリを更新する。
@@ -530,6 +541,16 @@ impl ToolExecutor {
             return Err(error);
         }
 
+        if let Err(error) =
+            self.validate_workspace_args(tool_name, &args, registered.tool.permissions())
+        {
+            if let ToolError::ExecutionDenied { reason, .. } = &error {
+                return self.deny(ctx, tool_name, call_id, reason);
+            }
+            self.emit_completed(ctx, tool_name, call_id, Err(&error));
+            return Err(error);
+        }
+
         let permissions = registered.tool.permissions();
         let capabilities = capabilities_of(&permissions);
         let action = authorized.unwrap_or_else(|| {
@@ -614,6 +635,10 @@ impl ToolExecutor {
                     derive_content_origin(&permissions)
                 };
                 result = crate::output::limit_result(result);
+                if let Err(error) = self.isolate_output_artifact(&mut result) {
+                    self.emit_completed(ctx, tool_name, call_id, Err(&error));
+                    return Err(error);
+                }
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
                 let result = ToolResult {
@@ -745,6 +770,85 @@ mod tests {
             result.content
         );
         assert!(result.content.contains("本文"));
+    }
+
+    struct WarningHook;
+
+    #[async_trait::async_trait]
+    impl PostEditHook for WarningHook {
+        async fn check(&self, _: &PostEditInput) -> PostEditOutcome {
+            PostEditOutcome::Warning {
+                message: "repository comment diagnostic\n".repeat(5000),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_artifact_isolation_preserves_untrusted_warning_and_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let bus = Arc::new(EventBus::new(16));
+        let mut events = bus.subscribe();
+        let executor = ToolExecutor::with_standard_tools_in(
+            bus,
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            Some(root.clone()),
+        )
+        .with_post_edit_hook(Some(Arc::new(WarningHook)));
+        executor.set_workspace_boundary(root.clone()).unwrap();
+        let ctx = ToolExecutionContext {
+            run_id: "warning-artifact".into(),
+            thread_id: None,
+            call_id: None,
+        };
+        let content = "// edited comment\n".repeat(5000);
+        let result = executor
+            .execute(
+                &ctx,
+                "write",
+                "write-warning",
+                serde_json::json!({"path":"source.rs", "content":content}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.origin, ContentOrigin::RepositoryUntrusted);
+        assert_eq!(
+            std::fs::read_to_string(root.join("source.rs")).unwrap(),
+            content
+        );
+        let artifact = result.detail.as_ref().unwrap()["output_artifact"]["path"]
+            .as_str()
+            .unwrap();
+        assert!(std::path::Path::new(artifact).starts_with(root.join(".benchmark-tool-output")));
+        assert!(result.content.contains(artifact));
+        let full_output = std::fs::read_to_string(artifact).unwrap();
+        assert!(full_output.contains("\n[comment-checker warning]\n"));
+        assert!(full_output.contains("> repository comment diagnostic"));
+        loop {
+            if let event_bus::EventKind::Tool(ToolEvent::ToolCompleted {
+                call_id,
+                output,
+                is_error,
+                ..
+            }) = events.recv().await.unwrap().kind
+            {
+                assert_eq!(call_id, "write-warning");
+                assert!(!is_error);
+                assert_eq!(output.as_deref(), Some(result.content.as_str()));
+                break;
+            }
+        }
+        let read = executor
+            .execute(
+                &ctx,
+                "read",
+                "read-artifact",
+                serde_json::json!({"path":artifact, "offset":1, "limit":1}),
+            )
+            .await
+            .unwrap();
+        assert!(!read.is_error);
     }
 
     /// 権限と矛盾する origin を申告して返すテスト用ツール。

@@ -1756,6 +1756,7 @@ impl SupervisorActor {
             return false;
         };
         match event {
+            OrchestratorEvent::ThreadGoalUpdated { .. } => false,
             OrchestratorEvent::GoalCreated { .. } => true,
             OrchestratorEvent::TaskProgressed {
                 task_id,

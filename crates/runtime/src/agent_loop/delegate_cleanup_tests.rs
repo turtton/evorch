@@ -49,6 +49,9 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        benchmark: None,
+        benchmark_checked: false,
+        benchmark_replay: false,
         task: RunTask {
             run_id: parent,
             role: Role::Orchestrator,
@@ -82,6 +85,7 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
         answered_questions: Default::default(),
         resumed: false,
         pending_user_messages: Vec::new(),
+        goal_wake_pending: false,
         pending_escalation: None,
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
@@ -259,4 +263,39 @@ async fn stopped_wait_keeps_awaited_child_and_preserves_wait_error_contract() {
         runtime.cancel(run).unwrap();
         runtime.wait(run).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn goal_resume_after_paused_boundary_survives_post_boundary_inbox_drain() {
+    let (_, cancel_rx) = watch::channel(RunInterrupt::None);
+    let (runtime, mut state) = fixture(cancel_rx);
+    let root = state.task.run_id;
+    runtime.bind_thread_root("resume-race", root).unwrap();
+    let goal = runtime
+        .create_thread_goal("resume-race", root, "Work".into(), vec!["Evidence".into()])
+        .unwrap();
+    runtime
+        .set_goal_checks_paused("resume-race", &goal.goal_id, true)
+        .unwrap();
+    state.transition(AgentRunPhase::Running, None).unwrap();
+    // Precisely interleave Resume between boundary=false and the post-boundary
+    // flush used by both natural Stop and explicit finish, without a timed race.
+    assert!(!state.thread_goal_boundary().await);
+    runtime
+        .set_goal_checks_paused("resume-race", &goal.goal_id, false)
+        .unwrap();
+    state.queue_user_message((crate::thread_goals::CHECKS_WAKE.into(), Vec::new(), false));
+    assert!(!state.flush_aside());
+    assert!(state.goal_wake_pending);
+    assert!(
+        state.wait_for_input().await,
+        "the root must check before parking"
+    );
+    assert_eq!(
+        runtime.thread_goal("resume-race").unwrap().phase,
+        event_bus::ThreadGoalPhase::Checking
+    );
+    assert!(!state.goal_wake_pending);
+    runtime.cancel(root).unwrap();
+    runtime.wait(root).await.unwrap();
 }

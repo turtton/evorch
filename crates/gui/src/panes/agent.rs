@@ -13,6 +13,8 @@ use crate::theme::text::medium;
 use crate::theme::tokens::*;
 use crate::theme::widgets::{empty_state, pane_root, soft_frame};
 
+mod goal;
+pub use goal::GoalAction;
 mod branch;
 pub use branch::BranchContext;
 mod header;
@@ -30,6 +32,7 @@ pub struct AgentIdentity<'a> {
 
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
+    pub goal: Option<&'a event_bus::ThreadGoalSnapshot>,
     pub requests: Option<super::requests::ConversationRequests<'a>>,
     pub task_rows: &'a [crate::model::tasks::TaskRow],
     pub phase_unread: bool,
@@ -48,6 +51,7 @@ pub struct ConversationContext<'a> {
 
 /// Agent 会話ペインから発生するアクションです。
 pub enum AgentPaneAction {
+    Goal(GoalAction),
     Agents(AgentsAction),
     Sidebar(SidebarAction),
     FocusPanel(&'static str),
@@ -109,6 +113,13 @@ pub fn agent_pane_with_repo_root(
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let strip = ui.scope(|ui| {
+                    let vertical_spacing = ui.spacing().item_spacing.y;
+                    if let Some(goal) = ctx.goal {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if let Some(goal_action) = goal::goal_strip(ui, goal) {
+                            action = Some(AgentPaneAction::Goal(goal_action));
+                        }
+                    }
                     let result = ui
                         .push_id("composer-strip", |ui| {
                             composer_strip(
@@ -121,6 +132,7 @@ pub fn agent_pane_with_repo_root(
                             )
                         })
                         .inner;
+                    ui.spacing_mut().item_spacing.y = vertical_spacing;
                     status_strip(ui, &ctx);
                     result
                 });
@@ -199,7 +211,7 @@ fn empty_state_body(
         empty_state(
             ui,
             "No messages yet",
-            "Type a message below, or /goal <text> to start the loop.",
+            "Type a message below, or /goal <text> to track an objective.",
             None,
         );
     }
@@ -617,6 +629,7 @@ mod tests {
                 .build_ui(move |ui| {
                     crate::theme::install(ui.ctx());
                     let ctx = ConversationContext {
+                        goal: None,
                         requests: None,
                         task_rows: &[],
                         phase_unread: true,

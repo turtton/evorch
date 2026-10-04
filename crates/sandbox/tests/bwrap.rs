@@ -25,6 +25,52 @@ fn run(wrapped: WrappedCommand) -> Output {
     command.output().expect("隔離コマンドを起動できるはずです")
 }
 
+#[ignore = "bwrap 実行環境が必要"]
+#[test]
+fn private_process_namespace_hides_host_root_and_cwd() {
+    let workspace = workspace();
+    fs::write(
+        workspace.path().join("rust-toolchain.toml"),
+        include_str!("../../../rust-toolchain.toml"),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n[package]\nname = \"evorch-private-offline-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n").unwrap();
+    fs::create_dir(workspace.path().join("src")).unwrap();
+    fs::write(
+        workspace.path().join("src/lib.rs"),
+        "#[test] fn offline_test() { assert_eq!(2 + 2, 4); }\n",
+    )
+    .unwrap();
+    let outside = tempdir().unwrap();
+    let sentinel = outside.path().join("baseline-future.json");
+    fs::write(&sentinel, "future-baseline-secret").unwrap();
+    let host_pid = std::process::id();
+    assert!(Path::new(&format!("/proc/{host_pid}/root")).exists());
+    let sandbox =
+        BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()).isolate_processes())
+            .expect("bwrap 実行環境が必要です");
+    let script = format!(
+        "test -r /proc/self/status && test ! -e /proc/{host_pid}/root && test ! -e /proc/{host_pid}/cwd && test ! -e /proc/{host_pid}/root{} && cargo test --offline --quiet && printf isolated",
+        sentinel.display()
+    );
+    let output = run(sandbox
+        .wrap(CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), script],
+            cwd: None,
+            extra_env: Vec::new(),
+        })
+        .unwrap());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(stdout.ends_with("isolated"), "{stdout}");
+}
+
 // Given: 親環境の秘密変数と作業領域外の資格情報ファイル / When: 隔離シェルから読む / Then: どちらも取得できない
 #[ignore = "bwrap 実行環境が必要"]
 #[test]

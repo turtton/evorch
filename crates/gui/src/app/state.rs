@@ -83,6 +83,7 @@ pub struct WorkbenchState<S> {
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) home_dir: Option<PathBuf>,
     pub(super) folder_picker: crate::model::folder_picker::FolderPickerModel,
+    pub(super) project_dialog: crate::model::project_dialog::ProjectDialog,
     pub(super) focus: ConversationFocus,
     pub(super) theme_installed: bool,
     pub(super) theme_preset: crate::theme::style::ThemePreset,
@@ -113,6 +114,7 @@ pub struct WorkbenchState<S> {
     )>,
     pub(super) merge: MergeApprovalModel,
     pub(super) loop_status: LoopStatusView,
+    pub(super) thread_goals: BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     pub(super) sink: Box<dyn CommandSink>,
     pub(super) issued: Vec<WorkbenchCommand>,
     pub(super) phases: BTreeMap<String, workspace_ui::ThreadRunPhase>,
@@ -187,6 +189,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             history: Vec::new(),
             home_dir: std::env::home_dir(),
             folder_picker: crate::model::folder_picker::FolderPickerModel::default(),
+            project_dialog: crate::model::project_dialog::ProjectDialog::default(),
             focus: ConversationFocus::Thread,
             theme_installed: false,
             theme_preset: settings.theme_preset.into(),
@@ -224,6 +227,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 },
             },
             loop_status: LoopStatusView::default(),
+            thread_goals: BTreeMap::new(),
             sink: Box::new(FixtureLoopAdapter::default()),
             issued: Vec::new(),
             phases: BTreeMap::new(),
@@ -231,6 +235,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
         };
+        // Older saved layouts contain the former automatically registered tab.
+        let arena = PanelId::new("arena-main");
+        if state
+            .panels
+            .get(&arena)
+            .is_some_and(|panel| panel.kind == PanelKind::Arena)
+        {
+            while let Some(path) = state.dock.find_tab(&arena) {
+                state.dock.remove_tab(path);
+            }
+            state.panels.remove(&arena);
+        }
         state.tasks.refresh();
         state.register_work_panels();
         Ok(state)
@@ -250,7 +266,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // preserve that schema and dispatch by this distinct ID in the viewer.
             ("self-improvement-main", PanelKind::Memory),
             ("tasks-main", PanelKind::Tasks),
-            ("arena-main", PanelKind::Arena),
         ] {
             let id = PanelId::new(id);
             if self.dock.find_tab(&id).is_none() {

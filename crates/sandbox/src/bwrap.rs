@@ -18,6 +18,7 @@ const DEFAULT_RO_BINDS: [&str; 6] = ["/usr", "/bin", "/lib", "/lib64", "/etc", "
 pub struct BwrapConfig {
     workspace_root: PathBuf,
     allow_network: bool,
+    isolate_processes: bool,
     ro_binds: Vec<PathBuf>,
     rw_binds: Vec<PathBuf>,
     cargo_home: Option<PathBuf>,
@@ -29,6 +30,7 @@ impl BwrapConfig {
         Self {
             workspace_root,
             allow_network: false,
+            isolate_processes: false,
             ro_binds: DEFAULT_RO_BINDS.into_iter().map(PathBuf::from).collect(),
             rw_binds: Vec::new(),
             cargo_home: tool_home("CARGO_HOME", ".cargo"),
@@ -50,6 +52,14 @@ impl BwrapConfig {
 
     pub const fn allow_network(mut self, allow: bool) -> Self {
         self.allow_network = allow;
+        self
+    }
+
+    /// Hide host processes and terminate sandbox descendants when its PID
+    /// namespace exits. Required when host-side files must remain inaccessible
+    /// through `/proc/<pid>/root` or `/proc/<pid>/cwd`.
+    pub const fn isolate_processes(mut self) -> Self {
+        self.isolate_processes = true;
         self
     }
 
@@ -112,6 +122,9 @@ impl BwrapSandbox {
 
     pub fn build_argv(&self, spec: &CommandSpec) -> Vec<String> {
         let mut args = vec!["--die-with-parent".to_owned()];
+        if self.config.isolate_processes {
+            args.push("--unshare-pid".to_owned());
+        }
         args.extend([
             "--bind".to_owned(),
             self.scratch.path().to_string_lossy().into_owned(),
@@ -171,6 +184,13 @@ impl BwrapSandbox {
             }
         }
         if let Some(home) = &self.config.rustup_home {
+            if self.config.isolate_processes && home.is_absolute() {
+                // Nix-patched linker scripts embed their original toolchain
+                // path. Preserve that read-only alias without exposing the
+                // original HOME, Rustup settings or Cargo credentials.
+                let toolchains = home.join("toolchains");
+                bind_cache(args, &toolchains, &toolchains);
+            }
             for relative in ["toolchains", "settings.toml"] {
                 bind_cache(
                     args,
@@ -220,10 +240,26 @@ impl Sandbox for BwrapSandbox {
             ("CARGO_HOME".to_owned(), "/tmp/home/.cargo".to_owned()),
             ("RUSTUP_HOME".to_owned(), "/tmp/home/.rustup".to_owned()),
         ]);
+        let mut fallback = "/tmp/home/.cargo/bin".to_owned();
+        if self.config.isolate_processes {
+            fallback.push_str(":/usr/bin:/bin");
+            // Nix system profiles live under unmounted /run. Their canonical
+            // store paths are already read-only mounted, including bash needed
+            // by compiler/linker wrappers. No additional host mount is needed.
+            if let Ok(system_bin) = Path::new("/run/current-system/sw/bin").canonicalize()
+                && system_bin.starts_with("/nix/store")
+            {
+                fallback.push(':');
+                fallback.push_str(&system_bin.to_string_lossy());
+            }
+        }
         if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
-            // Preserve the host-selected compiler (notably Nix wrappers). Rustup
-            // shims are a fallback when the original host HOME is not mounted.
-            *path = format!("{path}:/tmp/home/.cargo/bin");
+            // Preserve host-selected compiler priority (notably Nix wrappers).
+            // Rustup and mounted system binaries supply missing host paths.
+            path.push(':');
+            path.push_str(&fallback);
+        } else if self.config.isolate_processes {
+            env.push(("PATH".to_owned(), fallback));
         }
         Ok(WrappedCommand {
             program: self.program.to_string_lossy().into_owned(),
@@ -294,6 +330,70 @@ mod tests {
         let argv = sandbox(BwrapConfig::new(PathBuf::from("/workspace")).allow_network(true))
             .build_argv(&spec(None));
         assert!(!argv.contains(&"--unshare-net".to_owned()));
+    }
+
+    #[test]
+    fn private_processes_are_opt_in_and_preserved_with_network_access() {
+        let rustup = tempfile::tempdir().unwrap();
+        let toolchains = rustup.path().join("toolchains");
+        std::fs::create_dir(&toolchains).unwrap();
+        std::fs::write(rustup.path().join("settings.toml"), "private settings").unwrap();
+        let mut config = BwrapConfig::new(PathBuf::from("/workspace"));
+        config.rustup_home = Some(rustup.path().to_path_buf());
+        let default = sandbox(config.clone());
+        let mut command = spec(None);
+        command.extra_env = vec![(
+            "PATH".into(),
+            "/preferred/bin:/run/current-system/sw/bin".into(),
+        )];
+        let path = |wrapped: &WrappedCommand| {
+            wrapped
+                .env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(
+            path(&default.wrap(command.clone()).unwrap()),
+            "/preferred/bin:/run/current-system/sw/bin:/tmp/home/.cargo/bin"
+        );
+        assert!(
+            !default
+                .build_argv(&spec(None))
+                .iter()
+                .any(|arg| arg == "--unshare-pid")
+        );
+        let toolchains = toolchains.to_string_lossy().into_owned();
+        assert!(!default.build_argv(&command).windows(3).any(|args| {
+            args[0] == "--ro-bind" && args[1] == toolchains && args[2] == toolchains
+        }));
+        let isolated = sandbox(config.isolate_processes());
+        for boundary in [
+            isolated.wrap(command.clone()).unwrap(),
+            isolated
+                .with_network_access()
+                .unwrap()
+                .wrap(command)
+                .unwrap(),
+        ] {
+            assert!(boundary.args.iter().any(|arg| arg == "--unshare-pid"));
+            assert!(boundary.args.windows(3).any(|args| {
+                args[0] == "--ro-bind" && args[1] == toolchains && args[2] == toolchains
+            }));
+            for forbidden in [
+                rustup.path().to_path_buf(),
+                rustup.path().join("settings.toml"),
+            ] {
+                assert!(!boundary.args.windows(3).any(|args| {
+                    args[0] == "--ro-bind" && args[2] == forbidden.to_string_lossy()
+                }));
+            }
+            assert!(path(&boundary).starts_with(
+                "/preferred/bin:/run/current-system/sw/bin:/tmp/home/.cargo/bin:/usr/bin:/bin"
+            ));
+        }
     }
 
     #[test]

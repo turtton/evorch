@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use event_bus::{
@@ -93,7 +93,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         state.apply_loop_event(event);
     }
     rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        {
             loop {
                 let event = receiver.recv().await.unwrap();
                 let started = matches!(
@@ -108,9 +108,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
                     break;
                 }
             }
-        })
-        .await
-        .unwrap();
+        }
     });
     let root = runtime.list_agents()[0].run_id;
     let children = rt.block_on(async {
@@ -164,7 +162,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
         }));
     }
     rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        {
             let mut billed = 0;
             while billed < 3 {
                 let event = receiver.recv().await.unwrap();
@@ -176,9 +174,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
                 }
                 state.apply_events([event]);
             }
-        })
-        .await
-        .unwrap();
+        }
     });
 
     // Then: A owns neither usage nor transcript; B owns root and both children.

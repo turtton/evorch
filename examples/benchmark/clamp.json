@@ -1,0 +1,20 @@
+{
+  "fixture_dir": "clamp",
+  "root_prompt": "Complete this small Rust repair using exactly one synchronous delegation to worker with category quick. Ask that worker to repair src/lib.rs so clamp(value, lower, upper) clamps to the inclusive interval, preserves in-range values, handles i64 extremes without overflow, and panics for reversed bounds. The worker must keep Cargo.toml, Cargo.lock, rust-toolchain.toml, .gitignore, and tests/clamp.rs unchanged, verify with cargo test --offline, and report its changes and checks. Use the shared workspace, do not start background agents, and do not solve the repair yourself. After the worker returns, summarize the reported task outcome. The benchmark harness independently runs the final verifier. Do not delegate additional work or request input from a user.",
+  "target": {
+    "role": "worker",
+    "category": "quick",
+    "occurrence": 1
+  },
+  "verifier": {
+    "program": "cargo",
+    "args": ["test", "--offline"],
+    "protected_paths": ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".gitignore", "tests/clamp.rs"],
+    "allowed_changed_paths": ["src/lib.rs"]
+  },
+  "budget": {
+    "max_tokens": 100000,
+    "max_tool_calls": 40,
+    "timeout_seconds": 300
+  }
+}

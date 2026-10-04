@@ -22,6 +22,7 @@ Panel は left / right / bottom / tabs / floating / separate OS window に自由
 
 ## 要件
 
+- **Thread goalの継続表示（2026-10-04）**: Conversationのchatbox直上に接続した狭い丸角の一段を置き、goal本文・review切替・checks Pause/Resume・詳細を1行で表示する。操作はtooltipとアクセシブル名付きアイコンにし、「作業中」ラベルや重複Stopを置かない。詳細は依頼・条件・証拠・review指摘を示す。reviewは既定OFF、チェックのPauseは作業を止めず明示Resumeまで保持する。thread別に永続復元する。[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)参照。
 - **Subagent の可視化**: background agent を「裏で動いている何か」にしない。可能なら全 agent を表示し、難しくてもデフォルトで3つ程度を常時表示。各 Agent Panel で status / role / model / provider / reasoning / tool execution / transcript / cache / usage を確認できる
 - **GUI framework と Workspace Model の分離**: GUI framework を application architecture の中心にしない。Agent Kernel → UI Event Bus → Workspace Model → GUI Renderer の層構造。Workspace Model / Layout（Split / Tabs / Panel / Floating / Window）は framework-independent data として保持し、Floem から egui への切り替えが可能にする
 - **Semantic UI API**: Agent から GUI を pixel surface として扱わせず、semantic object graph として expose する（ui.inspect / ui.find / ui.open_panel / ui.close_panel / ui.move_panel / ui.focus / ui.set_layout / ui.save_workspace / ui.screenshot）。GUI 自体も agent から理解・改善可能にする

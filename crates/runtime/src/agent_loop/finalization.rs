@@ -63,6 +63,20 @@ impl LoopState {
                 }
             ))
         );
+        if !self.benchmark_replay
+            && let Some(checkpoint) = &self.benchmark
+            && let Some(runtime) = self.shared.runtime.upgrade()
+            && let Some(recording) = runtime.benchmark_recording.get()
+        {
+            let result = self.channels.result_tx.borrow().clone();
+            if let Err(error) = recording
+                .recorder
+                .completed(checkpoint, self.phase(), result.as_deref())
+                .await
+            {
+                self.finalization_error(format!("benchmark completion recording failed: {error}"));
+            }
+        }
         if released {
             match self.take_pending_escalation() {
                 Some(memo) => {

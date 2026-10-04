@@ -6,7 +6,6 @@ use std::sync::Arc;
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent};
 use providers::{FinishReason, Message};
 use runtime::{AgentRuntime, Role, RunConfig};
-use tokio::time::{Duration, timeout};
 
 use super::support::{ScriptedModel, text_response};
 
@@ -38,40 +37,58 @@ pub async fn probe_for_role(
     role: Role,
     build: impl FnOnce(Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>),
 ) -> RequestContext {
-    let model = Arc::new(ScriptedModel::new([Ok(text_response(
-        "probe-done",
-        FinishReason::Stop,
-    ))]));
+    probe_for_topology(role, false, build).await
+}
+
+#[allow(dead_code)] // Only continuation exercises a delegated child.
+pub async fn probe_for_child_role(
+    role: Role,
+    build: impl FnOnce(Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>),
+) -> RequestContext {
+    probe_for_topology(role, true, build).await
+}
+
+async fn probe_for_topology(
+    role: Role,
+    child: bool,
+    build: impl FnOnce(Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>),
+) -> RequestContext {
+    let model = Arc::new(ScriptedModel::new(
+        (0..=usize::from(child)).map(|_| Ok(text_response("probe-done", FinishReason::Stop))),
+    ));
     let (runtime, bus) = build(Arc::clone(&model));
     let mut events = bus.subscribe();
-    let run_id = runtime.delegate_background(role, "probe".into(), RunConfig::default());
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(run_id)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
-    let tool_tokens = timeout(Duration::from_secs(5), async {
-        loop {
-            if let EventKind::Lifecycle(LifecycleEvent::RunProgress {
-                context: Some(context),
-                ..
-            }) = events
-                .recv()
-                .await
-                .expect("probe event receiver remains open")
-                .kind
-            {
-                break context.tool_definitions;
-            }
+    let run_id = if child {
+        let parent = runtime.delegate_background(role, "probe-parent".into(), RunConfig::default());
+        assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
+        runtime
+            .delegate_background_as_child(parent, role, "probe", RunConfig::default())
+            .expect("probe child is admitted")
+    } else {
+        runtime.delegate_background(role, "probe".into(), RunConfig::default())
+    };
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+    let tool_tokens = loop {
+        if let EventKind::Lifecycle(LifecycleEvent::RunProgress {
+            run_id: event_run_id,
+            context: Some(context),
+            ..
+        }) = events
+            .recv()
+            .await
+            .expect("probe event receiver remains open")
+            .kind
+            && event_run_id == run_id.to_string()
+        {
+            break context.tool_definitions;
         }
-    })
-    .await
-    .expect("request composition is published");
+    };
     assert!(
         tool_tokens > 0,
         "standard tool schemas contribute to context"
     );
     RequestContext {
-        system: model.observed().await[0][0].clone(),
+        system: model.wait_for_request(usize::from(child)).await[0].clone(),
         tool_tokens,
     }
 }

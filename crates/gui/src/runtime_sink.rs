@@ -1,5 +1,4 @@
-//! goal 投入を runtime の background run 起動 + GoalSupervisor へ接続する
-//! production CommandSink (issue #71, #73)。
+//! Conversation commands and generic thread goals, with legacy PR supervisor controls.
 
 // allow: SIZE_OK - RuntimeCommandSink 本体に、pinned された 9 件の振る舞いテスト
 // (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
@@ -8,17 +7,17 @@
 use config::agent_categories::CategoryId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use event_bus::{ApprovalDecision, Event, EventBus, GoalReference};
+use event_bus::{ApprovalDecision, Event, EventBus};
 use runtime::orchestration::supervisor::SupervisorError;
-use runtime::{AgentRuntime, GoalSpec, Role, RunConfig, RunId, SupervisorHandle};
+use runtime::{AgentRuntime, Role, RunConfig, RunId, SupervisorHandle};
 
 use crate::model::commands::{
     CommandSink, GoalSubmission, LoopEvent, MergeDecision, ReferenceKind, WorkbenchCommand,
 };
 
-/// storage bridge と [`GoalSpec::session_id`] で共有する永続化セッション ID。
+/// storage bridge と [`runtime::GoalSpec::session_id`] で共有する永続化セッション ID。
 ///
 /// 固定値にすることで、再起動後の `Database::agent_messages_by_session` が
 /// 前セッションの transcript を引き続き復元できる。
@@ -39,18 +38,9 @@ pub fn finish_chat_start(
     }
 }
 
-/// goal の配送先リポジトリ識別子。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RepoIdentity {
-    repo: String,
-    base_ref: String,
-}
-
-/// goal 投入を runtime の background run 起動へ接続する production CommandSink。
+/// Persistent conversations and generic objectives share this production command sink.
 ///
-/// SubmitGoal ごとに goal-N を採番し、entry pre-routing (EntryRouter) で判定した
-/// role (Direct→Worker / Coordinated→Orchestrator) の background run を起動し、
-/// その root run に紐付けて supervisor へ goal を登録する (issue #71, #73)。
+/// SubmitGoal joins the normal persistent conversation and creates a generic objective.
 /// DecideMerge / PauseGoal / ResumeGoal / CancelGoal は supervisor へ転送する。
 pub struct RuntimeCommandSink {
     event_bus: Option<Arc<EventBus>>,
@@ -60,8 +50,6 @@ pub struct RuntimeCommandSink {
     shell_cwd: Option<PathBuf>,
     handle: tokio::runtime::Handle,
     supervisor: SupervisorHandle,
-    accepted_goals: u64,
-    repo_identity: OnceLock<RepoIdentity>,
     chat_runs: BTreeMap<String, RunId>,
     goal_runs: BTreeMap<String, RunId>,
     goal_ids: BTreeMap<String, String>,
@@ -106,8 +94,6 @@ impl RuntimeCommandSink {
             shell_cwd: None,
             handle,
             supervisor,
-            accepted_goals: 0,
-            repo_identity: OnceLock::new(),
             chat_runs: BTreeMap::new(),
             goal_runs: BTreeMap::new(),
             goal_ids: BTreeMap::new(),
@@ -148,17 +134,6 @@ impl RuntimeCommandSink {
     pub fn with_team_writer(mut self, writer: storage::StorageHandle) -> Self {
         self.team_writer = Some(writer);
         self
-    }
-
-    /// goal の配送先リポジトリ識別子を初回提出時に 1 度だけ解決する。
-    fn repo_identity(&self) -> &RepoIdentity {
-        self.repo_identity.get_or_init(|| {
-            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            RepoIdentity {
-                repo: derive_repo_slug(&root),
-                base_ref: derive_base_ref(&root),
-            }
-        })
     }
 
     fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
@@ -221,6 +196,19 @@ impl CommandSink for RuntimeCommandSink {
             for thread in threads {
                 self.running_children(&thread);
             }
+        }
+    }
+
+    fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
+        self.goal_projects
+            .insert(snapshot.thread_id.clone(), project.into());
+        if let Some(id) = snapshot
+            .root_run_id
+            .strip_prefix("run-")
+            .and_then(|id| id.parse::<u64>().ok())
+        {
+            self.chat_runs
+                .insert(snapshot.thread_id.clone(), RunId::new(id));
         }
     }
 
@@ -338,7 +326,9 @@ impl CommandSink for RuntimeCommandSink {
                 WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::ContinueChat(value) => Some(value.thread_id.as_str()),
                 WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::StopChat { thread_id }
+                WorkbenchCommand::SetGoalReview { thread_id, .. }
+                | WorkbenchCommand::SetGoalChecksPaused { thread_id, .. }
+                | WorkbenchCommand::StopChat { thread_id }
                 | WorkbenchCommand::StopRun { thread_id, .. }
                 | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
                 | WorkbenchCommand::CancelChat { thread_id }
@@ -682,107 +672,86 @@ impl RuntimeCommandSink {
                 }
             }
             WorkbenchCommand::SubmitGoal(submission) => {
-                let team_store = match submission.delegation_value.as_deref() {
-                    Some(value) if value.trim().is_empty() => {
+                let thread_id = submission.thread_id.clone();
+                let objective = submission.goal.clone();
+                let criteria = vec![objective.clone()];
+                let prompt = render_entry_prompt(&submission);
+                self.goal_projects
+                    .insert(thread_id.clone(), submission.project_id.clone());
+                let mut initial = RunConfig::default();
+                if let Some(value) = submission.delegation_value {
+                    if value.trim().is_empty() {
                         return vec![LoopEvent::CommandRejected {
                             reason: "team mode requires explicit delegation value".into(),
                         }];
                     }
-                    Some(_) => match (&self.memory_config, &self.team_writer) {
-                        (Some(config), Some(writer)) => Some(runtime::team_context::TeamStore {
-                            config: config.clone(),
-                            writer: writer.clone(),
-                            id: format!("{}:{}", submission.project_id, submission.thread_id),
-                        }),
-                        _ => {
+                    let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer)
+                    else {
+                        return vec![LoopEvent::CommandRejected {
+                            reason: "team storage is unavailable".into(),
+                        }];
+                    };
+                    initial.team_store = Some(runtime::team_context::TeamStore {
+                        config: config.clone(),
+                        writer: writer.clone(),
+                        id: format!("{}:{}", submission.project_id, thread_id),
+                    });
+                    initial.topology =
+                        runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+                    initial.delegation_value = Some(value);
+                    initial.finding_store = Some(config.db_path.clone());
+                    initial.memory = match runtime::memory::MemoryBoundary::capture(
+                        config,
+                        &submission.project_id,
+                    ) {
+                        Ok(memory) => Some(memory),
+                        Err(error) => {
                             return vec![LoopEvent::CommandRejected {
-                                reason: "team storage is unavailable".into(),
+                                reason: error.to_string(),
                             }];
                         }
+                    };
+                }
+                initial.initial_thread_goal = Some((objective, criteria));
+                let mut events = self.submit_chat_config(
+                    crate::model::commands::ChatSubmission {
+                        thread_id: thread_id.clone(),
+                        text: prompt,
+                        composer_role: crate::model::composer::ComposerRole::Orchestrator,
+                        images: Vec::new(),
+                        model_preference: None,
+                        fork_seed: None,
                     },
-                    None => None,
-                };
-                self.goal_projects
-                    .insert(submission.thread_id.clone(), submission.project_id.clone());
-                let delegation_value = submission.delegation_value.clone();
-                let memory = match self
-                    .memory_config
-                    .as_ref()
-                    .map(|config| {
-                        runtime::memory::MemoryBoundary::capture(config, &submission.project_id)
-                    })
-                    .transpose()
+                    permit,
+                    false,
+                    initial,
+                );
+                if events
+                    .iter()
+                    .any(|event| matches!(event, LoopEvent::ChatAccepted { .. }))
+                    && let Some(goal) = self.runtime.thread_goal(&thread_id)
                 {
-                    Ok(memory) => memory,
-                    Err(error) => {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: error.to_string(),
-                        }];
-                    }
-                };
-                self.accepted_goals = self.accepted_goals.saturating_add(1);
-                let goal_id = format!("goal-{}", self.accepted_goals);
-                let prompt = render_entry_prompt(&submission);
-                let runtime = self.runtime.clone();
-                let goal_for_log = submission.goal.clone();
-                let thread_id = submission.thread_id.clone();
-                let goal_id_for_run = goal_id.clone();
-                let spec = GoalSpec {
-                    session_id: STORAGE_SESSION_ID.to_owned(),
-                    project_id: submission.project_id,
-                    thread_id: submission.thread_id,
-                    goal: submission.goal,
-                    references: submission
-                        .references
-                        .iter()
-                        .map(|reference| GoalReference {
-                            kind: reference_kind_label(&reference.kind).to_owned(),
-                            value: reference.value.clone(),
-                        })
-                        .collect(),
-                    constraints: submission.constraints,
-                    repo: self.repo_identity().repo.clone(),
-                    base_ref: self.repo_identity().base_ref.clone(),
-                };
-                let finding_store = self
-                    .memory_config
-                    .as_ref()
-                    .map(|config| config.db_path.clone());
-                let root_run = runtime.reserve_run_id();
-                self.goal_runs.insert(thread_id.clone(), root_run);
-                // Supervisor IDs are durable unique IDs, not the local goal-N
-                // acknowledgement/run label. Bind the real ID before spawning.
-                let supervisor_goal_id = self.supervisor.create_goal(spec, root_run);
-                self.goal_ids.insert(thread_id.clone(), supervisor_goal_id);
-                self.handle.spawn(async move {
-                    let decision = runtime.entry_router().classify(&goal_for_log).await;
-                    runtime.spawn_reserved(
-                        root_run,
-                        None,
-                        if team_store.is_some() {
-                            Role::Orchestrator
-                        } else {
-                            decision.role()
-                        },
-                        prompt,
-                        RunConfig {
-                            name: Some(goal_id_for_run),
-                            topology: if team_store.is_some() {
-                                runtime::CoordinationTopology::DynamicTeam { max_workers: 3 }
-                            } else {
-                                runtime::CoordinationTopology::Single
-                            },
-                            team_store,
-                            delegation_value,
-                            finding_store,
-                            memory,
-                            ownership: permit,
-                            ..RunConfig::default()
-                        },
-                    );
-                });
-                vec![LoopEvent::GoalAccepted { thread_id, goal_id }]
+                    events.push(LoopEvent::GoalAccepted {
+                        thread_id,
+                        goal_id: goal.goal_id,
+                    });
+                }
+                events
             }
+            WorkbenchCommand::SetGoalReview {
+                thread_id,
+                goal_id,
+                enabled,
+            } => self.goal_control(&thread_id, permit, |runtime| {
+                runtime.set_goal_review(&thread_id, &goal_id, enabled)
+            }),
+            WorkbenchCommand::SetGoalChecksPaused {
+                thread_id,
+                goal_id,
+                paused,
+            } => self.goal_control(&thread_id, permit, |runtime| {
+                runtime.set_goal_checks_paused(&thread_id, &goal_id, paused)
+            }),
             WorkbenchCommand::DecideMerge(command) => {
                 let Some(token_id) = command.token_id.clone() else {
                     return vec![LoopEvent::CommandRejected {
@@ -827,11 +796,93 @@ impl RuntimeCommandSink {
         }
     }
 
+    fn renew_team_authority(
+        &self,
+        thread: &str,
+        run: RunId,
+        prompt: &str,
+        authority: &mut RunConfig,
+    ) -> Result<(), String> {
+        if !self
+            .runtime
+            .restore_diagnostics(run)
+            .ok()
+            .flatten()
+            .is_some_and(|diagnostics| diagnostics.renewable_team.is_some())
+        {
+            return Ok(());
+        }
+        let project = self
+            .goal_projects
+            .get(thread)
+            .ok_or("Current project binding is required to continue this team")?;
+        let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer) else {
+            return Err("Current team storage is unavailable".into());
+        };
+        authority.team_store = Some(runtime::team_context::TeamStore {
+            config: config.clone(),
+            writer: writer.clone(),
+            id: format!("{project}:{thread}"),
+        });
+        authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+        authority.delegation_value = Some(prompt.into());
+        authority.finding_store = Some(config.db_path.clone());
+        authority.memory = Some(
+            runtime::memory::MemoryBoundary::capture(config, project)
+                .map_err(|error| error.to_string())?,
+        );
+        Ok(())
+    }
+
+    fn goal_control(
+        &self,
+        thread_id: &str,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        control: impl FnOnce(&AgentRuntime) -> Result<(), String>,
+    ) -> Vec<LoopEvent> {
+        if permit
+            .as_ref()
+            .is_some_and(|permit| permit.thread_id != thread_id)
+            || (self.ownership.is_some() && permit.is_none())
+        {
+            return vec![LoopEvent::CommandRejected {
+                reason: runtime::ownership::OwnershipError::Fenced.to_string(),
+            }];
+        }
+        let _guard = match permit
+            .as_ref()
+            .map(|permit| permit.mutation_guard())
+            .transpose()
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                return vec![LoopEvent::CommandRejected {
+                    reason: error.to_string(),
+                }];
+            }
+        };
+        let _runtime = self.handle.enter();
+        match control(&self.runtime) {
+            Ok(()) => Vec::new(),
+            Err(reason) => vec![LoopEvent::CommandRejected { reason }],
+        }
+    }
+
     fn submit_chat(
         &mut self,
         submission: crate::model::commands::ChatSubmission,
         permit: Option<runtime::ownership::OwnerPermit>,
         resume_only: bool,
+    ) -> Vec<LoopEvent> {
+        self.submit_chat_config(submission, permit, resume_only, RunConfig::default())
+    }
+
+    fn submit_chat_config(
+        &mut self,
+        submission: crate::model::commands::ChatSubmission,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        resume_only: bool,
+        initial: RunConfig,
     ) -> Vec<LoopEvent> {
         let thread_id = submission.thread_id;
         if resume_only {
@@ -881,7 +932,7 @@ impl RuntimeCommandSink {
                 ownership: permit.clone(),
                 images: submission.images.clone(),
                 model_preference: submission.model_preference.clone(),
-                ..RunConfig::default()
+                ..initial.clone()
             };
             if self
                 .runtime
@@ -982,19 +1033,24 @@ impl RuntimeCommandSink {
                 .ok()
                 .flatten()
                 .is_some_and(|saved| saved.role_name == Role::Worker.name());
+            let mut authority = RunConfig {
+                conversation,
+                category: conversation.then(|| CategoryId::Conversation.to_string()),
+                ownership: permit.clone(),
+                images: submission.images.clone(),
+                model_preference: submission.model_preference.clone(),
+                ..initial.clone()
+            };
+            if let Err(reason) =
+                self.renew_team_authority(&thread_id, run_id, &submission.text, &mut authority)
+            {
+                return vec![LoopEvent::ChatRejected { thread_id, reason }];
+            }
             let _guard = self.handle.enter();
-            match self.runtime.continue_goal(
-                run_id,
-                submission.text.clone(),
-                RunConfig {
-                    conversation,
-                    category: conversation.then(|| CategoryId::Conversation.to_string()),
-                    ownership: permit.clone(),
-                    images: submission.images.clone(),
-                    model_preference: submission.model_preference.clone(),
-                    ..RunConfig::default()
-                },
-            ) {
+            match self
+                .runtime
+                .continue_goal(run_id, submission.text.clone(), authority)
+            {
                 Ok(run_id) => {
                     self.stop_marked.remove(&thread_id);
                     self.stopped_by_us.remove(&thread_id);
@@ -1039,7 +1095,7 @@ impl RuntimeCommandSink {
                 interactive: true,
                 keep_alive: true,
                 model_preference: submission.model_preference,
-                ..RunConfig::default()
+                ..initial
             },
             submission.fork_seed,
         );
@@ -1074,8 +1130,7 @@ fn supervisor_decision(decision: MergeDecision) -> ApprovalDecision {
 ///
 /// goal 本文を先頭に置き、references / constraints は空でない場合のみ
 /// `References:` / `Constraints:` セクションとして 1 行 1 項目で続ける。
-/// 分類 (`EntryRouter::classify`) は goal 本文のみを受け、references /
-/// constraints は起動される run の prompt 側にのみ載る。
+/// 参照と制約は通常会話へ渡す文脈であり、PR や固定フローの起動条件ではない。
 pub fn render_entry_prompt(submission: &GoalSubmission) -> String {
     let mut prompt = submission.goal.clone();
     if !submission.references.is_empty() {
@@ -1180,9 +1235,8 @@ mod tests {
     use event_bus::{EventBus, EventKind, GoalReference, GoalState, OrchestratorEvent};
     use providers::{ChatResponse, Message, ToolSpec};
     use runtime::{
-        AgentInvocationContext, AgentModel, AgentRuntime, AgentSummary, FixtureDeliveryAdapter,
-        GoalSpec, GoalSupervisor, OrchestrationSettings, Role, RunConfig, RuntimeError,
-        SupervisorHandle,
+        AgentInvocationContext, AgentModel, AgentRuntime, FixtureDeliveryAdapter, GoalSpec,
+        GoalSupervisor, OrchestrationSettings, Role, RunConfig, RuntimeError, SupervisorHandle,
     };
     use storage::{Database, Storage, StorageConfig, StorageHandle};
     use tools::ToolExecutor;
@@ -2215,144 +2269,231 @@ mod tests {
     }
 
     #[test]
-    fn stop_run_in_goal_keeps_supervisor_active() {
-        let model = Arc::new(HeldModel::default());
-        let (rt, mut sink, runtime, supervisor) =
-            build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
+    fn generic_goal_controls_require_current_thread_owner() {
+        let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "implement stop",
+            "Verify current behavior",
             vec![],
             vec![],
         )));
-        let root = sink.goal_runs["thread-1"];
-        let goal_id = sink.goal_ids["thread-1"].clone();
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
-        rt.block_on(model.started.notified());
-        let child = rt.block_on(async {
-            runtime
-                .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
-                .unwrap()
-        });
-        assert!(sink.submit(stop_run_command("thread-1", child)).is_empty());
-        rt.block_on(async {
-            assert_eq!(
-                runtime.wait(child).await.unwrap(),
-                event_bus::AgentRunPhase::Stopped
-            );
-            supervisor.synchronize().await.unwrap();
-        });
-        assert_eq!(
-            supervisor.snapshot(&goal_id).unwrap().state,
-            GoalState::Active
+        let goal = runtime.thread_goal("thread-1").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bus = Arc::new(EventBus::new(64));
+        let previous =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone())
+                .unwrap();
+        previous.start("thread-1").unwrap();
+        previous.start("other").unwrap();
+        let stale = previous.owned_permit("thread-1").unwrap();
+        let successor =
+            runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+        previous.handoff(&stale, &successor).unwrap();
+        sink.ownership = Some(Arc::new(previous));
+        let control = WorkbenchCommand::SetGoalChecksPaused {
+            thread_id: "thread-1".into(),
+            goal_id: goal.goal_id,
+            paused: true,
+        };
+        for permit in [
+            None,
+            Some(stale),
+            Some(
+                sink.ownership
+                    .as_ref()
+                    .unwrap()
+                    .owned_permit("other")
+                    .unwrap(),
+            ),
+        ] {
+            assert!(matches!(
+                sink.submit_authorized(control.clone(), permit).as_slice(),
+                [LoopEvent::CommandRejected { .. }]
+            ));
+            assert!(!runtime.thread_goal("thread-1").unwrap().checks_paused);
+        }
+        assert!(
+            sink.submit_authorized(control, Some(successor.owned_permit("thread-1").unwrap()))
+                .is_empty()
         );
-        assert_eq!(
-            runtime.inspect_agent(root).unwrap().phase,
-            event_bus::AgentRunPhase::Running
-        );
-        assert_eq!(sink.goal_runs["thread-1"], root);
-        assert!(sink.stop_marked.is_empty());
-        assert!(sink.stopped_by_us.is_empty());
-        runtime.cancel_subtree(root).unwrap();
-        rt.block_on(async {
-            runtime.wait(root).await.unwrap();
-        });
+        assert!(runtime.thread_goal("thread-1").unwrap().checks_paused);
+        let root = sink.chat_runs["thread-1"];
+        runtime.cancel(root).unwrap();
+        rt.block_on(runtime.wait(root)).unwrap();
     }
 
-    #[test]
-    fn stop_goal_before_first_followup_pauses_and_send_resumes_supervisor() {
-        assert_goal_stop_resume(false, false);
-    }
+    struct TextThenHold(std::sync::atomic::AtomicBool);
 
-    #[test]
-    fn stopped_detached_goal_send_does_not_dispatch_recovery_root() {
-        assert_goal_stop_resume(true, false);
-    }
-
-    #[test]
-    fn continue_resumes_goal_without_a_duplicate_root() {
-        for detached in [false, true] {
-            assert_goal_stop_resume(detached, true);
+    #[async_trait]
+    impl AgentModel for TextThenHold {
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            _: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending().await
+            } else {
+                Ok(ChatResponse {
+                    message: Message {
+                        role: providers::Role::Assistant,
+                        content: vec![providers::ContentBlock::Text {
+                            text: "Initial response".into(),
+                        }],
+                    },
+                    usage: Default::default(),
+                    finish_reason: providers::FinishReason::Stop,
+                })
+            }
+        }
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "fixture".into()
         }
     }
 
-    fn assert_goal_stop_resume(detached: bool, continue_only: bool) {
+    #[test]
+    fn explicit_goal_joins_waiting_or_stopped_chat_with_the_current_request() {
+        for stopped in [false, true] {
+            let (rt, mut sink, runtime, supervisor) = build_sink_on(
+                tokio::runtime::Runtime::new().unwrap(),
+                Arc::new(TextThenHold(false.into())),
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let config = StorageConfig {
+                db_path: dir.path().join("chat.sqlite"),
+                ..Default::default()
+            };
+            let storage = Storage::open(config.clone()).unwrap();
+            let runtime =
+                runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+            let mut events = supervisor.subscribe();
+            sink.submit(chat_command("thread-1"));
+            let root = sink.chat_runs["thread-1"];
+            rt.block_on(async {
+                while runtime.inspect_agent(root).unwrap().phase
+                    != event_bus::AgentRunPhase::Waiting
+                {
+                    events.recv().await.unwrap();
+                }
+            });
+            if stopped {
+                sink.submit(WorkbenchCommand::StopChat {
+                    thread_id: "thread-1".into(),
+                });
+                rt.block_on(runtime.wait(root)).unwrap();
+            }
+            let objective = "Document the observed cause";
+            let events = sink.submit(WorkbenchCommand::SubmitGoal(submission(
+                objective,
+                vec![],
+                vec![],
+            )));
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        LoopEvent::ChatAccepted { .. },
+                        LoopEvent::GoalAccepted { .. }
+                    ]
+                ),
+                "{events:?}"
+            );
+            let goal = runtime.thread_goal("thread-1").unwrap();
+            assert_eq!(goal.root_run_id, root.to_string());
+            assert!(goal.original_request.contains(objective));
+            assert!(!goal.review_enabled);
+            runtime.stop(root, runtime::StopScope::SelfOnly).unwrap();
+            rt.block_on(runtime.wait(root)).unwrap();
+            let rejection = sink.submit(WorkbenchCommand::SubmitGoal(submission(
+                "Replace the active objective",
+                vec![],
+                vec![],
+            )));
+            assert!(
+                matches!(
+                    rejection.as_slice(),
+                    [LoopEvent::ChatRejected { .. } | LoopEvent::CommandRejected { .. }]
+                ),
+                "{rejection:?}"
+            );
+            assert_eq!(
+                runtime.thread_goal("thread-1").unwrap().goal_id,
+                goal.goal_id
+            );
+            assert!(matches!(
+                sink.submit(continue_command("thread-1")).as_slice(),
+                [LoopEvent::ChatAccepted { .. }]
+            ));
+            runtime.cancel(root).unwrap();
+            rt.block_on(runtime.wait(root)).unwrap();
+        }
+    }
+
+    #[test]
+    fn generic_goal_checks_pause_keeps_work_running_and_survives_chat_resume() {
         let model = Arc::new(HeldModel::default());
-        let (rt, mut sink, runtime, supervisor) =
+        let (rt, mut sink, runtime, _) =
             build_sink_on(tokio::runtime::Runtime::new().unwrap(), model.clone());
         let dir = tempfile::tempdir().unwrap();
         let config = StorageConfig {
-            db_path: dir.path().join("stop.sqlite3"),
+            db_path: dir.path().join("goal.sqlite3"),
             ..Default::default()
         };
         let storage = Storage::open(config.clone()).unwrap();
         let runtime =
             runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "implement stop",
+            "investigate a slow query",
             vec![],
             vec![],
         )));
-        let root = sink.goal_runs["thread-1"];
-        let goal_id = sink.goal_ids["thread-1"].clone();
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Active);
-        // Registration happens before the initial conversation is constructed.
-        // Model entry follows context initialization and checkpoint persistence,
-        // so stopping here must leave a restorable root.
+        let root = sink.chat_runs["thread-1"];
         rt.block_on(model.started.notified());
-        let events = sink.submit(WorkbenchCommand::StopChat {
-            thread_id: "thread-1".into(),
-        });
+        let goal = runtime.thread_goal("thread-1").unwrap();
         assert!(
-            matches!(events.as_slice(), [LoopEvent::ChatStopped { .. }]),
-            "{events:?}"
-        );
-        rt.block_on(async { runtime.wait(root).await.unwrap() });
-        wait_for_goal_state(&rt, &supervisor, &goal_id, GoalState::Paused);
-        assert_eq!(sink.goal_runs["thread-1"], root);
-        if detached {
-            supervisor
-                .adopt(vec![(supervisor.snapshot(&goal_id).unwrap(), Vec::new())])
-                .unwrap();
-            rt.block_on(supervisor.synchronize()).unwrap();
-            assert!(supervisor.snapshot(&goal_id).unwrap().detached);
-        }
-        let events = sink.submit(if continue_only {
-            continue_command("thread-1")
-        } else {
-            WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
-                fork_seed: None,
-                composer_role: crate::model::composer::ComposerRole::Orchestrator,
-                images: Vec::new(),
+            sink.submit(WorkbenchCommand::SetGoalChecksPaused {
                 thread_id: "thread-1".into(),
-                text: "resume with authority".into(),
-                model_preference: None,
+                goal_id: goal.goal_id.clone(),
+                paused: true
             })
-        });
-        assert!(
-            matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == root.to_string()),
-            "{events:?}"
+            .is_empty()
         );
-        wait_for_goal_state(
-            &rt,
-            &supervisor,
-            &goal_id,
-            if detached {
-                GoalState::Paused
-            } else {
-                GoalState::Active
-            },
-        );
-        assert_eq!(sink.chat_runs["thread-1"], root);
-        assert!(!sink.stop_marked.contains("thread-1"));
-        assert!(!sink.stopped_by_us.contains("thread-1"));
-        rt.block_on(model.started.notified());
-        rt.block_on(supervisor.synchronize()).unwrap();
+        assert!(runtime.thread_goal("thread-1").unwrap().checks_paused);
         assert_eq!(
-            runtime.list_agents().len(),
-            1,
-            "resume must not spawn a duplicate continuation"
+            runtime.inspect_agent(root).unwrap().phase,
+            event_bus::AgentRunPhase::Running
         );
+        assert!(
+            sink.submit(WorkbenchCommand::SetGoalReview {
+                thread_id: "thread-1".into(),
+                goal_id: goal.goal_id.clone(),
+                enabled: true
+            })
+            .is_empty()
+        );
+        assert!(runtime.thread_goal("thread-1").unwrap().review_enabled);
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::StopChat {
+                thread_id: "thread-1".into()
+            })
+            .as_slice(),
+            [LoopEvent::ChatStopped { .. }]
+        ));
+        rt.block_on(runtime.wait(root)).unwrap();
+        assert!(runtime.thread_goal("thread-1").unwrap().work_stopped);
+        assert!(matches!(
+            sink.submit(continue_command("thread-1")).as_slice(),
+            [LoopEvent::ChatAccepted { .. }]
+        ));
+        rt.block_on(model.started.notified());
+        let resumed = runtime.thread_goal("thread-1").unwrap();
+        assert!(resumed.checks_paused);
+        assert!(resumed.review_enabled);
+        assert!(!resumed.work_stopped);
+        assert_eq!(sink.chat_runs["thread-1"], root);
         runtime.cancel(root).unwrap();
+        rt.block_on(runtime.wait(root)).unwrap();
     }
 
     #[test]
@@ -2476,7 +2617,7 @@ mod tests {
         goal.delegation_value = Some("independent paths".into());
         assert!(matches!(
             sink.submit(WorkbenchCommand::SubmitGoal(goal))[0],
-            LoopEvent::GoalAccepted { .. }
+            LoopEvent::ChatAccepted { .. }
         ));
         rt.block_on(model.started.notified());
         assert_eq!(runtime.team_tasks().len(), 1);
@@ -2515,14 +2656,12 @@ mod tests {
                         handle
                             .append_event(Some(STORAGE_SESSION_ID), &event)
                             .expect("persist event");
-                        if let EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                            goal_id,
-                            root_run_id,
-                            ..
+                        if let EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated {
+                            snapshot,
                         }) = event.kind
                             && let Some(persisted) = persisted.take()
                         {
-                            let _ = persisted.send((goal_id, root_run_id));
+                            let _ = persisted.send((snapshot.goal_id, snapshot.root_run_id));
                         }
                     }
                     Err(error) => panic!("storage bridge event: {error:?}"),
@@ -2530,26 +2669,6 @@ mod tests {
             }
         });
         (task, completed)
-    }
-
-    /// Subscribe before inspecting so registration cannot be lost between the
-    /// state check and the next lifecycle notification.
-    fn wait_for_agents(
-        rt: &tokio::runtime::Runtime,
-        runtime: &AgentRuntime,
-        supervisor: &SupervisorHandle,
-        predicate: impl Fn(&AgentSummary) -> bool,
-    ) -> Vec<AgentSummary> {
-        let mut events = supervisor.subscribe();
-        rt.block_on(async {
-            loop {
-                let agents = runtime.list_agents();
-                if agents.iter().any(&predicate) {
-                    return agents;
-                }
-                events.recv().await.expect("agent registration event");
-            }
-        })
     }
 
     fn wait_for_goal_state(
@@ -2632,143 +2751,82 @@ mod tests {
         assert_eq!(super::parse_remote_slug("https://github.com/only"), None);
     }
 
-    // Given: 実 runtime を接続した sink
-    // When: SubmitGoal を 2 回 submit する
-    // Then: goal-1 / goal-2 の GoalAccepted がそれぞれちょうど 1 件ずつ返る
     #[test]
-    fn submit_goal_returns_goal_accepted_with_sequential_ids_and_nothing_else() {
-        let (_rt, mut sink, _runtime, _supervisor) = build_sink();
-
+    fn submit_goal_joins_chat_and_rejects_replacing_an_active_objective() {
+        let (_rt, mut sink, runtime, _) = build_sink();
         let first = sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "implement issue #65",
-            Vec::new(),
-            Vec::new(),
+            "research a bottleneck",
+            vec![],
+            vec![],
         )));
-        let second = sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "direct: fix the typo in README",
-            Vec::new(),
-            Vec::new(),
-        )));
-
-        assert_eq!(
-            first,
-            vec![LoopEvent::GoalAccepted {
-                thread_id: "thread-1".into(),
-                goal_id: "goal-1".into(),
-            }]
+        let snapshot = runtime.thread_goal("thread-1").unwrap();
+        assert!(
+            matches!(first.as_slice(), [LoopEvent::ChatAccepted { .. }, LoopEvent::GoalAccepted { goal_id, .. }] if goal_id == &snapshot.goal_id)
         );
+        assert_eq!(snapshot.root_run_id, sink.chat_runs["thread-1"].to_string());
+        assert!(!snapshot.review_enabled);
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::SubmitGoal(submission(
+                "replace it",
+                vec![],
+                vec![]
+            )))
+            .as_slice(),
+            [LoopEvent::CommandRejected { .. } | LoopEvent::ChatRejected { .. }]
+        ));
         assert_eq!(
-            second,
-            vec![LoopEvent::GoalAccepted {
-                thread_id: "thread-1".into(),
-                goal_id: "goal-2".into(),
-            }]
+            runtime.thread_goal("thread-1").unwrap().goal_id,
+            snapshot.goal_id
         );
     }
 
-    // Given: storage bridge と supervisor を接続した実 runtime の sink
-    // When: SubmitGoal する
-    // Then: 永続化された GoalCreated の root_run_id が実在する root run と一致し、
-    //       supervisor の ledger にも同じ root が Active 状態で記録される
     #[test]
-    fn submit_goal_creates_durable_goal_bound_to_root_run() {
-        let rt = tokio::runtime::Runtime::new().expect("multi-thread test runtime");
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let storage_config = StorageConfig {
-            db_path: temp.path().join("events.db"),
-            ..StorageConfig::default()
-        };
-        let storage = Storage::open(storage_config.clone()).expect("storage を開ける");
+    fn submit_goal_creates_durable_generic_goal_bound_to_root_chat() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let bus = Arc::new(EventBus::new(256));
-        let executor = Arc::new(ToolExecutor::new(Arc::clone(&bus)));
-        let runtime = AgentRuntime::new(Arc::clone(&bus), executor, Arc::new(HeldModel::default()));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus.clone())),
+            Arc::new(HeldModel::default()),
+        );
         let supervisor = rt.block_on(async {
             GoalSupervisor::spawn(
                 runtime.clone(),
-                Arc::clone(&bus),
+                bus.clone(),
                 Arc::new(FixtureDeliveryAdapter::default()),
                 OrchestrationSettings::default(),
             )
         });
         let mut sink =
             RuntimeCommandSink::new(runtime.clone(), rt.handle().clone(), supervisor.clone());
-        let (bridge, persisted) = spawn_test_bridge(&rt, Arc::clone(&bus), storage.handle());
-
-        let events = sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "direct: durable goal",
-            Vec::new(),
-            Vec::new(),
+        let temp = tempfile::tempdir().unwrap();
+        let storage_config = StorageConfig {
+            db_path: temp.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(storage_config.clone()).unwrap();
+        let (bridge, persisted) = spawn_test_bridge(&rt, bus, storage.handle());
+        sink.submit(WorkbenchCommand::SubmitGoal(submission(
+            "investigate without a PR",
+            vec![],
+            vec![],
         )));
-
-        assert_eq!(
-            events,
-            vec![LoopEvent::GoalAccepted {
-                thread_id: "thread-1".into(),
-                goal_id: "goal-1".into(),
-            }]
-        );
-
-        let (goal_id, root_run_id) = rt.block_on(persisted).expect("durable GoalCreated");
-        wait_for_agents(&rt, &runtime, &supervisor, |agent| {
-            agent.run_id.to_string() == root_run_id
-        });
-        let stored = Database::open(&storage_config)
-            .expect("reader")
-            .events_all_ordered()
-            .expect("stored events");
-        assert!(stored.iter().any(|stored| matches!(
-            &stored.event.kind,
-            EventKind::Orchestrator(OrchestratorEvent::GoalCreated {
-                goal_id: created, root_run_id: root, ..
-            }) if created == &goal_id && root == &root_run_id
-        )));
-        let snapshot = supervisor
-            .snapshot(&goal_id)
-            .expect("supervisor knows the persisted goal");
+        let (goal_id, root_run_id) = rt.block_on(persisted).unwrap();
+        let snapshot = runtime.thread_goal("thread-1").unwrap();
+        assert_eq!(snapshot.goal_id, goal_id);
         assert_eq!(snapshot.root_run_id, root_run_id);
-        assert_eq!(snapshot.state, GoalState::Active);
-
+        assert!(supervisor.snapshot(&goal_id).is_none());
+        let stored = Database::open(&storage_config)
+            .unwrap()
+            .events_all_ordered()
+            .unwrap();
+        assert!(stored.iter().any(|stored| matches!(&stored.event.kind, EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) if snapshot.goal_id == goal_id)));
         bridge.abort();
         let _ = rt.block_on(bridge);
+        runtime.cancel(sink.chat_runs["thread-1"]).unwrap();
+        rt.block_on(runtime.wait(sink.chat_runs["thread-1"]))
+            .unwrap();
         storage.close();
-    }
-
-    // Given: 実 runtime を接続した sink
-    // When: direct キーワードつき goal を submit する
-    // Then: role Worker・名前 goal-1 の run が現れ、Orchestrator run は現れない
-    #[test]
-    fn direct_goal_starts_a_worker_run_named_after_the_goal_id() {
-        let (rt, mut sink, runtime, supervisor) = build_sink();
-
-        sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "direct: fix the typo in README",
-            Vec::new(),
-            Vec::new(),
-        )));
-
-        let agents = wait_for_agents(&rt, &runtime, &supervisor, |agent| {
-            agent.role_name == "Worker" && agent.name == "goal-1"
-        });
-        assert!(!agents.iter().any(|agent| agent.role_name == "Orchestrator"));
-    }
-
-    // Given: 実 runtime を接続した sink
-    // When: direct キーワードを含まない goal を submit する
-    // Then: role Orchestrator・名前 goal-1 の run が現れ、Worker run は現れない
-    #[test]
-    fn plain_goal_starts_an_orchestrator_run() {
-        let (rt, mut sink, runtime, supervisor) = build_sink();
-
-        sink.submit(WorkbenchCommand::SubmitGoal(submission(
-            "implement issue #65",
-            Vec::new(),
-            Vec::new(),
-        )));
-
-        let agents = wait_for_agents(&rt, &runtime, &supervisor, |agent| {
-            agent.role_name == "Orchestrator" && agent.name == "goal-1"
-        });
-        assert!(!agents.iter().any(|agent| agent.role_name == "Worker"));
     }
 
     // Given: 実 runtime を接続した sink

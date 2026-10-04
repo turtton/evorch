@@ -11,6 +11,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=codex_cache_regression)))
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)
+      | binary(=benchmark_wire)
       | binary(=structured_escalation)
       | binary(=tool_output_history)
       | binary(=system_prompt_seam)

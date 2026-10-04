@@ -2,6 +2,157 @@ use super::*;
 use std::fs;
 use std::process::Command;
 
+#[test]
+fn benchmark_snapshot_roundtrip_restores_ignored_files_and_removes_future_artifacts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("trial");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join(".gitignore"), "ignored*\n").unwrap();
+    fs::write(root.join("ignored-config"), "checkpoint").unwrap();
+    fs::create_dir_all(root.join("original-empty/nested")).unwrap();
+    let directory = temp.path().join("snapshots");
+    let mut store = SnapshotStore::open(&root, &directory).unwrap();
+    let snapshot = store.capture_all().unwrap();
+    let persisted = snapshot.as_str().to_owned();
+    fs::remove_dir_all(root.join("original-empty")).unwrap();
+    fs::create_dir_all(root.join("future-outcome/empty")).unwrap();
+    let directory_only = store.capture_all().unwrap();
+    assert_ne!(
+        snapshot, directory_only,
+        "directory names are snapshot state"
+    );
+    assert_eq!(store.diff(&snapshot, &directory_only).unwrap(), "");
+    fs::write(root.join("ignored-config"), "future changed config").unwrap();
+    fs::write(root.join("ignored-future-evidence"), "future outcome").unwrap();
+    drop(store);
+    let mut reopened = SnapshotStore::open(&root, &directory).unwrap();
+    reopened
+        .restore_all(&SnapshotId::from_hex(persisted).unwrap())
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("ignored-config")).unwrap(),
+        "checkpoint"
+    );
+    assert!(!root.join("ignored-future-evidence").exists());
+    assert!(root.join("original-empty/nested").is_dir());
+    assert!(!root.join("future-outcome").exists());
+    reopened.restore_all(&directory_only).unwrap();
+    assert!(!root.join("original-empty").exists());
+    assert!(root.join("future-outcome/empty").is_dir());
+    assert!(SnapshotId::from_hex("--all".into()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_snapshot_preserves_crlf_bytes_and_unix_modes_despite_git_defaults() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("trial");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
+    fs::set_permissions(root.join("nested"), fs::Permissions::from_mode(0o750)).unwrap();
+    let file = root.join("nested/input.txt");
+    let bytes = b"one\r\ntwo\r\n";
+    fs::write(&file, bytes).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots")).unwrap();
+    // Host defaults that would normalize captured bytes are overridden per
+    // benchmark command without modifying the user's or snapshot Git config.
+    let attributes = temp.path().join("host-attributes");
+    fs::write(&attributes, "* text eol=lf\n").unwrap();
+    store.git(&["config", "core.autocrlf", "input"]).unwrap();
+    store
+        .git(&[
+            "config",
+            "core.attributesFile",
+            attributes.to_str().unwrap(),
+        ])
+        .unwrap();
+    let snapshot = store.capture_all().unwrap();
+    let tree = store.file_tree(&snapshot).unwrap();
+    let stored = store
+        .git(&["show", &format!("{}:nested/input.txt", tree.as_str())])
+        .unwrap();
+    assert_eq!(
+        stored.stdout, bytes,
+        "snapshot blob must preserve exact bytes"
+    );
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(root.join("nested"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let changed_modes = store.capture_all().unwrap();
+    assert_ne!(
+        snapshot, changed_modes,
+        "mode-only changes are snapshot state"
+    );
+    store.restore_all(&snapshot).unwrap();
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+        0o644
+    );
+    assert_eq!(
+        fs::metadata(root.join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o750
+    );
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o7777,
+        0o750
+    );
+    fs::write(&file, "changed\n").unwrap();
+    store.restore_all(&snapshot).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+    assert_eq!(
+        store.git(&["config", "core.autocrlf"]).unwrap().stdout,
+        b"input\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_snapshot_rejects_special_files_and_attributes_before_index_or_workspace_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("trial");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("file"), "original").unwrap();
+    let mut store = SnapshotStore::open(&root, &temp.path().join("snapshots")).unwrap();
+    let snapshot = store.capture_all().unwrap();
+    fs::write(root.join("file"), "future").unwrap();
+    for name in ["pipe", "socket", ".gitattributes", "nested/.gitattributes"] {
+        let path = root.join(name);
+        let _listener = match name {
+            "pipe" => {
+                assert!(
+                    Command::new("mkfifo")
+                        .arg(&path)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                None
+            }
+            "socket" => Some(std::os::unix::net::UnixListener::bind(&path).unwrap()),
+            _ => {
+                fs::write(&path, "* text eol=lf\n").unwrap();
+                None
+            }
+        };
+        let index = fs::read(store.git_dir.join("index")).unwrap();
+        let capture_error = store.capture_all().unwrap_err().to_string();
+        let restore_error = store.restore_all(&snapshot).unwrap_err().to_string();
+        assert!(capture_error.contains(name), "{capture_error}");
+        assert!(restore_error.contains(name), "{restore_error}");
+        assert_eq!(fs::read(store.git_dir.join("index")).unwrap(), index);
+        assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "future");
+        fs::remove_file(path).unwrap();
+    }
+    store.restore_all(&snapshot).unwrap();
+    assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "original");
+}
+
 #[cfg(unix)]
 #[test]
 fn store_rejects_repository_symlink() {

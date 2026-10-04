@@ -403,7 +403,31 @@ fn spawn_storage_bridge(
     )?)
 }
 
-/// 前セッションの goal 状態を永続化イベントから復元し、supervisor へ移管する。
+/// Restore each thread's latest objective without restarting work or old authority.
+fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
+    let result = Database::open(storage_config).and_then(|database| database.events_all_ordered());
+    match result {
+        Ok(events) => {
+            let mut latest = std::collections::BTreeMap::new();
+            for stored in events {
+                if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+                    snapshot,
+                }) = stored.event.kind
+                {
+                    latest.insert(snapshot.thread_id.clone(), snapshot);
+                }
+            }
+            for snapshot in latest.into_values() {
+                if let Err(error) = runtime.restore_thread_goal(snapshot) {
+                    tracing::warn!(%error, "failed to restore thread goal");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "failed to read thread goals"),
+    }
+}
+
+/// 前セッションの PR goal 状態を永続化イベントから復元し、supervisor へ移管する。
 ///
 /// `Database::events_all_ordered()` → `GoalLedger::replay_partial` で goal ごとの
 /// snapshot を再構築し、transcript を `agent_messages_by_session` で付与して
@@ -931,6 +955,7 @@ fn run() -> Result<(), GuiError> {
         Arc::clone(&usage_pricing),
     )?;
     restore_goals(&storage_config, &supervisor);
+    restore_thread_goals(&storage_config, &runtime);
 
     let home = std::env::home_dir()
         .ok_or_else(|| GuiError::Arguments("No home directory for terminal cwd".into()))?;

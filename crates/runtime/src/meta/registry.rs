@@ -55,6 +55,18 @@ macro_rules! define_meta_ops {
 }
 
 define_meta_ops! {
+    CreateGoal => "create_goal" => crate::thread_goals::tools::spec => |state, runtime, input| {
+        crate::thread_goals::tools::dispatch(state, runtime, "create_goal", input)
+    },
+    GetGoal => "get_goal" => crate::thread_goals::tools::spec => |state, runtime, input| {
+        crate::thread_goals::tools::dispatch(state, runtime, "get_goal", input)
+    },
+    SubmitGoalCheck => "submit_goal_check" => crate::thread_goals::tools::spec => |state, runtime, input| {
+        crate::thread_goals::tools::dispatch(state, runtime, "submit_goal_check", input)
+    },
+    SubmitGoalReview => "submit_goal_review" => crate::thread_goals::tools::spec => |state, runtime, input| {
+        crate::thread_goals::tools::dispatch(state, runtime, "submit_goal_review", input)
+    },
     Delegate => "delegate" => specs::delegate => |state, runtime, input| {
         delegation::delegate(state, runtime, input).await
     },

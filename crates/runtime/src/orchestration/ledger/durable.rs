@@ -7,6 +7,7 @@ impl GoalLedger {
     /// goal ID のない task イベントを既存の run/task linkage へ解決する。
     pub(crate) fn owns_event(&self, event: &OrchestratorEvent) -> bool {
         match event {
+            OrchestratorEvent::ThreadGoalUpdated { .. } => false,
             OrchestratorEvent::TaskProgressed { run_id, .. }
             | OrchestratorEvent::TaskCheckpoint { run_id, .. }
             | OrchestratorEvent::TaskStaleMarked { run_id, .. } => self
@@ -45,6 +46,7 @@ impl GoalLedger {
             return Err(LedgerError::UnresolvedEvent(format!("{event:?}")));
         }
         match event {
+            OrchestratorEvent::ThreadGoalUpdated { .. } => return Ok(()),
             OrchestratorEvent::TaskProgressed {
                 task_id, run_id, ..
             }
@@ -213,7 +215,8 @@ impl GoalLedger {
                     *last_heartbeat_ns,
                 ));
             }
-            OrchestratorEvent::GoalCreated { .. }
+            OrchestratorEvent::ThreadGoalUpdated { .. }
+            | OrchestratorEvent::GoalCreated { .. }
             | OrchestratorEvent::GoalStateChanged { .. }
             | OrchestratorEvent::GoalStageChanged { .. }
             | OrchestratorEvent::RunAttached { .. }

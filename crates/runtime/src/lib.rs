@@ -51,8 +51,10 @@ pub mod snapshot;
 pub mod state;
 pub mod team;
 pub mod team_context;
+pub mod thread_goals;
 pub mod topology;
 pub use topology::CoordinationTopology;
+pub mod benchmark;
 pub mod workspace;
 
 pub use compose::{

@@ -40,6 +40,8 @@ pub enum ProjectError {
     Canonicalize(String),
     #[error("project already exists")]
     DuplicateProject,
+    #[error("project name must not be empty")]
+    EmptyName,
     #[error("allowed directory already exists")]
     DuplicateAllowedDirectory,
     #[error("allowed directory is nested in the project root")]

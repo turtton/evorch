@@ -30,7 +30,7 @@ for theme in graphite tokyo-night high-contrast; do
         cargo run -q -p gui --bin headless_capture -- --theme "$theme" --demo --activate "$panel" --out "$path"
     done
 
-    for panel in memory-main arena-main; do
+    for panel in memory-main; do
         path="$theme_out/panel-$panel-1280x720@1.0.png"
         cargo run -q -p gui --bin headless_capture -- --theme "$theme" --demo --with-memory --activate "$panel" --out "$path"
     done
@@ -61,8 +61,8 @@ done
 shopt -s nullglob dotglob
 for theme in graphite tokyo-night high-contrast; do
     pngs=("$OUT/$theme"/*.png)
-    if [[ ${#pngs[@]} -ne 41 ]]; then
-        printf 'Expected 41 matrix PNGs in %s, found %s\n' "$OUT/$theme" "${#pngs[@]}" >&2
+    if [[ ${#pngs[@]} -ne 40 ]]; then
+        printf 'Expected 40 matrix PNGs in %s, found %s\n' "$OUT/$theme" "${#pngs[@]}" >&2
         exit 1
     fi
     printf '%s\n' "${pngs[@]}"

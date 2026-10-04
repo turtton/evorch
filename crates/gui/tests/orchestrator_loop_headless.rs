@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use event_bus::{
@@ -29,11 +28,13 @@ use storage::{Database, Storage, StorageConfig, StorageHandle};
 use tools::ToolExecutor;
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+#[path = "support/legacy_goal.rs"]
+mod legacy_goal;
+
 const GOAL: &str = "DEMO-GOAL implement queued fixture unit";
 const HEAD_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const HEAD_B: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
 const HEAD_C: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
-const TIMEOUT: Duration = Duration::from_secs(60);
 
 struct RecordingSandboxFactory;
 
@@ -217,24 +218,22 @@ fn spawn_storage_bridge(
 }
 
 type SharedOrchestratorEvents = Arc<Mutex<Vec<OrchestratorEvent>>>;
-type SharedEventLog = Arc<Mutex<Vec<String>>>;
 
 fn spawn_collector(
     runtime: &tokio::runtime::Runtime,
     bus: &Arc<EventBus>,
-) -> (SharedOrchestratorEvents, SharedEventLog) {
+) -> (SharedOrchestratorEvents, mpsc::Receiver<()>) {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let all_events = Arc::new(Mutex::new(Vec::new()));
+    let (observed_tx, observed_rx) = mpsc::channel();
     let sink = Arc::clone(&events);
-    let all_sink = Arc::clone(&all_events);
     let mut receiver = bus.subscribe();
     runtime.spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    lock(&all_sink).push(format!("{:?}", event.kind));
                     if let EventKind::Orchestrator(event) = event.kind {
                         lock(&sink).push(event);
+                        let _ = observed_tx.send(());
                     }
                 }
                 Err(RecvError::Lagged(skipped)) => panic!("collector lagged by {skipped}"),
@@ -242,7 +241,7 @@ fn spawn_collector(
             }
         }
     });
-    (events, all_events)
+    (events, observed_rx)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -293,7 +292,9 @@ struct Fixture {
     repaint_rx: mpsc::Receiver<()>,
     harness: HeadlessWorkbench<AgentRuntime>,
     events: SharedOrchestratorEvents,
-    all_events: SharedEventLog,
+    event_rx: mpsc::Receiver<()>,
+    agent_runtime: AgentRuntime,
+    supervisor: runtime::SupervisorHandle,
 }
 
 impl Fixture {
@@ -331,7 +332,7 @@ impl Fixture {
         let storage = Storage::open(storage_config.clone()).expect("storage opens");
         let bus = Arc::new(EventBus::new(2048));
         let bridge = spawn_storage_bridge(&runtime, &bus, storage.handle());
-        let (events, all_events) = spawn_collector(&runtime, &bus);
+        let (events, event_rx) = spawn_collector(&runtime, &bus);
         let executor = Arc::new(ToolExecutor::with_standard_tools(
             Arc::clone(&bus),
             Arc::new(DirectSandbox::new_unchecked()),
@@ -366,9 +367,9 @@ impl Fixture {
             .with_pump(pump)
             .with_sidebar(sidebar(&repo))
             .with_command_sink(Box::new(RuntimeCommandSink::new(
-                agent_runtime,
+                agent_runtime.clone(),
                 runtime.handle().clone(),
-                supervisor,
+                supervisor.clone(),
             )));
         let mut harness = HeadlessWorkbench::new(state, [1200.0, 800.0]);
         harness.run();
@@ -383,40 +384,53 @@ impl Fixture {
             repaint_rx,
             harness,
             events,
-            all_events,
+            event_rx,
+            agent_runtime,
+            supervisor,
         }
     }
 
     fn submit(&mut self) {
-        self.harness.state_mut().goal_form_mut().goal = GOAL.into();
+        let mut sink = RuntimeCommandSink::new(
+            self.agent_runtime.clone(),
+            self.runtime.handle().clone(),
+            self.supervisor.clone(),
+        );
+        let _guard = self.runtime.enter();
+        legacy_goal::start(
+            &self.agent_runtime,
+            &self.supervisor,
+            &mut sink,
+            gui::model::commands::GoalSubmission {
+                delegation_value: None,
+                project_id: "evorch".into(),
+                thread_id: "thread-73".into(),
+                goal: GOAL.into(),
+                references: vec![],
+                constraints: vec![],
+            },
+            Role::Orchestrator,
+            runtime::RunConfig::default(),
+        );
+        self.harness
+            .state_mut()
+            .apply_loop_event(gui::model::commands::LoopEvent::GoalAccepted {
+                thread_id: "thread-73".into(),
+                goal_id: "goal-1".into(),
+            });
         self.harness.run();
-        self.harness.state_mut().submit_goal();
-        self.harness.run();
-        self.wait_state(|state| state.goal_form().last_accepted.as_deref() == Some("goal-1"));
     }
 
     fn wait_state(&mut self, ready: impl Fn(&WorkbenchState<AgentRuntime>) -> bool) {
-        let deadline = Instant::now() + TIMEOUT;
         while !ready(self.harness.state()) {
-            assert!(
-                Instant::now() < deadline,
-                "state missing; all_events={:#?}",
-                lock(&self.all_events)
-            );
-            let _ = self.repaint_rx.recv_timeout(Duration::from_millis(100));
+            self.repaint_rx.recv().expect("event pump remains live");
             self.harness.run();
         }
     }
 
     fn wait_event(&self, predicate: impl Fn(&OrchestratorEvent) -> bool) {
-        let deadline = Instant::now() + TIMEOUT;
         while !lock(&self.events).iter().any(&predicate) {
-            assert!(
-                Instant::now() < deadline,
-                "event missing; events={:#?}",
-                lock(&self.events)
-            );
-            std::thread::sleep(Duration::from_millis(20));
+            self.event_rx.recv().expect("collector remains live");
         }
     }
 
@@ -690,21 +704,20 @@ fn approval_invalidated_on_head_change_shows_stale() {
         .state_mut()
         .decide_merge(gui::model::commands::MergeDecision::Approve);
     fixture.harness.run();
-    let deadline = Instant::now() + TIMEOUT;
-    while fixture
-        .delivery
-        .recorded()
-        .iter()
-        .filter(|call| matches!(call, DeliveryCall::PrStatus { .. }))
-        .count()
-        < 3
-    {
-        assert!(
-            Instant::now() < deadline,
-            "approval did not refresh pr_status"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    fixture
+        .runtime
+        .block_on(fixture.supervisor.synchronize())
+        .unwrap();
+    assert!(
+        fixture
+            .delivery
+            .recorded()
+            .iter()
+            .filter(|call| matches!(call, DeliveryCall::PrStatus { .. }))
+            .count()
+            >= 3,
+        "approval refreshed remote status before UI invalidation"
+    );
     fixture
         .bus
         .emit(Event::new(OrchestratorEvent::MergeApprovalInvalidated {
@@ -721,7 +734,10 @@ fn approval_invalidated_on_head_change_shows_stale() {
                 to: HEAD_C.into(),
             },
         }));
-    let _ = fixture.repaint_rx.recv_timeout(Duration::from_secs(1));
+    fixture
+        .repaint_rx
+        .recv()
+        .expect("invalidated event delivery");
     fixture.harness.run();
 
     // Then: the Merge pane exposes the stale state and cannot approve the old binding again.

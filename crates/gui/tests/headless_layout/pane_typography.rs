@@ -91,6 +91,7 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     ledger: &[],
                 }),
                 gui::panes::agent::ConversationContext {
+                    goal: None,
                     requests: None,
                     task_rows: &[],
                     phase_unread: false,

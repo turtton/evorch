@@ -52,7 +52,11 @@ struct Fixture {
     rt: tokio::runtime::Runtime,
     messages: Arc<Mutex<Vec<Vec<Message>>>>,
 }
+#[path = "support/legacy_goal.rs"]
+mod legacy_goal;
+
 struct World {
+    supervisor: runtime::SupervisorHandle,
     runtime: AgentRuntime,
     sink: RuntimeCommandSink,
     events: EventReceiver,
@@ -97,32 +101,57 @@ impl Fixture {
                 },
             )
         });
-        let sink = RuntimeCommandSink::new(runtime.clone(), self.rt.handle().clone(), supervisor)
-            .with_memory_storage(self.config.clone())
-            .with_team_writer(self.storage.handle());
+        let sink = RuntimeCommandSink::new(
+            runtime.clone(),
+            self.rt.handle().clone(),
+            supervisor.clone(),
+        )
+        .with_memory_storage(self.config.clone())
+        .with_team_writer(self.storage.handle());
         World {
+            supervisor,
             runtime,
             sink,
             events,
         }
     }
     fn root(&self, world: &mut World, team: bool) -> RunId {
-        let result = world
-            .sink
-            .submit(WorkbenchCommand::SubmitGoal(GoalSubmission {
-                delegation_value: team.then(|| "independent work".into()),
+        let mut config = RunConfig::default();
+        if team {
+            config.team_store = Some(runtime::team_context::TeamStore {
+                config: self.config.clone(),
+                writer: self.storage.handle(),
+                id: "project:thread".into(),
+            });
+            config.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
+            config.delegation_value = Some("independent work".into());
+            config.finding_store = Some(self.config.db_path.clone());
+        }
+        config.finding_store = Some(self.config.db_path.clone());
+        config.memory =
+            Some(runtime::memory::MemoryBoundary::capture(&self.config, "project").unwrap());
+        let _guard = self.rt.enter();
+        legacy_goal::start(
+            &world.runtime,
+            &world.supervisor,
+            &mut world.sink,
+            GoalSubmission {
+                delegation_value: None,
                 project_id: "project".into(),
                 thread_id: "thread".into(),
                 goal: "direct: original goal".into(),
-                references: Vec::new(),
-                constraints: Vec::new(),
-            }));
-        assert!(matches!(
-            result.as_slice(),
-            [LoopEvent::GoalAccepted { .. }]
-        ));
+                references: vec![],
+                constraints: vec![],
+            },
+            if team {
+                Role::Orchestrator
+            } else {
+                Role::Worker
+            },
+            config,
+        );
         self.rt.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            {
                 let mut root = None;
                 loop {
                     let event = world.events.recv().await.unwrap();
@@ -139,18 +168,16 @@ impl Fixture {
                         _ => {}
                     }
                 }
-            })
-            .await
-            .unwrap()
+            }
         })
     }
     fn waiting(&self, world: &mut World, root: RunId) {
         self.rt.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            {
                 loop {
                     if matches!(world.events.recv().await.unwrap().kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Waiting, .. }) if run_id == root.to_string()) { break; }
                 }
-            }).await.unwrap();
+            }
         });
     }
     fn stop(&self, world: &World, root: RunId) {

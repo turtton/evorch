@@ -72,6 +72,7 @@ impl ToolExecutor {
             .ok_or_else(|| ToolError::UnknownTool { name: name.clone() })?;
         let args = self.scoped_args(&name, args);
         schema::validate_args(&registered.validator, &args)?;
+        self.validate_workspace_args(&name, &args, registered.tool.permissions())?;
         let action = resolve(
             self.policy
                 .classify(&name, &capabilities_of(&registered.tool.permissions())),

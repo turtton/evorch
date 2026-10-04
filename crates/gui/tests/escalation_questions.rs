@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, LifecycleEvent, ToolEvent};
 use gui::{
@@ -138,33 +137,32 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     state.submit_composer();
     let mut updated = None;
     let root = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut destination = None;
-            loop {
-                let event = receiver.recv().await.unwrap();
-                storage.handle().append_event(Some("gui"), &event).unwrap();
-                state.apply_events([event.clone()]);
-                match event.kind {
-                    EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
-                        if !question.recipient_run_ids.is_empty() =>
-                    {
-                        updated = Some(question)
-                    }
-                    EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
-                        new_run_id,
-                        ..
-                    }) => destination = Some(new_run_id),
-                    EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
-                        run_id,
-                        to: AgentRunPhase::Waiting,
-                        ..
-                    }) if destination.as_ref() == Some(&run_id) => break run_id,
-                    _ => {}
+        let mut destination = None;
+        loop {
+            let event = receiver.recv().await.unwrap();
+            storage.handle().append_event(Some("gui"), &event).unwrap();
+            state.apply_events([event.clone()]);
+            match event.kind {
+                EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
+                    if !question.recipient_run_ids.is_empty() =>
+                {
+                    updated = Some(question)
                 }
+                EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
+                    new_run_id, ..
+                }) => destination = Some(new_run_id),
+                EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                    run_id, to, ..
+                }) if destination.as_ref() == Some(&run_id) => match to {
+                    AgentRunPhase::Waiting => break run_id,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped => {
+                        panic!("escalated run {run_id} terminated before waiting: {to:?}")
+                    }
+                    AgentRunPhase::Pending | AgentRunPhase::Running => {}
+                },
+                _ => {}
             }
-        })
-        .await
-        .unwrap()
+        }
     });
     let question = updated.expect("routing update published after durable inheritance");
     assert_eq!(question.recipient_run_ids, std::slice::from_ref(&root));
@@ -223,15 +221,7 @@ fn inherited_question_is_visible_after_restart_and_answered_in_destination_befor
     ui.click_label("回答を送信");
     ui.run();
     let run = RunId::new(root.strip_prefix("run-").unwrap().parse().unwrap());
-    assert_eq!(
-        rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait(run))
-                .await
-                .unwrap()
-                .unwrap()
-        }),
-        AgentRunPhase::Done
-    );
+    assert_eq!(rt.block_on(runtime.wait(run)).unwrap(), AgentRunPhase::Done);
     assert_eq!(runtime.user_answers(run).unwrap().len(), 1);
     let answered = runtime.user_question(&question.id).unwrap().unwrap();
     assert_eq!(answered.answer.as_deref(), Some("JSON"));

@@ -414,7 +414,9 @@ fn purpose(caller: RunId, config: &RunConfig) -> Result<(RunId, RunId, bool), St
             source_run_id,
             extraction_run_id,
         } => Ok((source_run_id, extraction_run_id, true)),
-        RunPurpose::General => Err("this run has no learning authority".into()),
+        RunPurpose::General | RunPurpose::ThreadGoalReview { .. } => {
+            Err("this run has no learning authority".into())
+        }
     }
 }
 

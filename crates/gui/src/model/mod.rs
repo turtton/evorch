@@ -16,6 +16,7 @@ pub mod notifications;
 pub mod pending_approvals;
 pub mod production;
 pub mod project_bridge;
+pub mod project_dialog;
 pub mod project_path;
 pub mod provider_settings;
 pub mod role_settings;

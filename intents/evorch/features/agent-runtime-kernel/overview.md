@@ -23,6 +23,7 @@ Agent Kernel
 
 ## 要件
 
+- **汎用goalの完了境界（2026-10-04）**: keep-alive runのターン終了と`finish`の両方で自己確認を行い、任意の独立reviewを含めて同じ依頼の完遂を保証する。履歴・累積予算・安定したtool schemaを維持し、Stopやchecks Pauseで失効した確認結果を拒否する。永続状態の復元から旧権限で自動起動しない。[ADR 0028](../../decisions/0028-thread-goals-and-completion-checks.md)参照。
 - AgentRun 構造: id / role / category / skills / route / context / policy を持つ
 - Runtime 内部は event-driven とする（Started / MessageDelta / ReasoningDelta / ToolStarted / ToolCompleted / Delegated / BackgroundTaskStarted / BackgroundTaskCompleted / Usage / CacheStats / ProviderFallback / Completed / Failed）
 - GUI は Event Stream を購読する。UI と runtime が密結合しない

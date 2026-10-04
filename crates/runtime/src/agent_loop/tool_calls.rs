@@ -366,6 +366,10 @@ impl LoopState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
     ) -> bool {
+        if let Err(error) = self.benchmark_tools_supported(&tool_uses) {
+            self.finish_error(error.to_string());
+            return false;
+        }
         let ctx = ToolExecutionContext {
             run_id: self.task.run_id.to_string(),
             // THREAD_ID_SEAM: RunTask currently carries run identity only.
@@ -502,6 +506,9 @@ impl LoopState {
                 });
             }
             while let Some(first) = calls.pop_front() {
+                if let Some(runtime) = self.runtime() {
+                    runtime.goal_tool_activity(self.task.run_id, &first.name);
+                }
                 match self.publish_budget() {
                     crate::budget_tracker::BudgetDecision::Continue => {}
                     crate::budget_tracker::BudgetDecision::Exhausted(_) => return false,
@@ -770,6 +777,23 @@ impl LoopState {
                                 meta::Terminal::Continue => continue,
                                 meta::Terminal::Finish(result) => {
                                     self.push_final_result(&result);
+                                    if self.runtime().is_some_and(|runtime| {
+                                        runtime.goal_for_root(self.task.run_id).is_some()
+                                    }) {
+                                        if self.flush_aside() || self.thread_goal_boundary().await {
+                                            return true;
+                                        }
+                                        if let Some(kind) = self.interrupted() {
+                                            self.finish_interrupted(kind);
+                                            return false;
+                                        }
+                                        if self.flush_aside() {
+                                            return true;
+                                        }
+                                        if self.task.config.keep_alive {
+                                            return self.wait_for_input().await;
+                                        }
+                                    }
                                     self.finish_success();
                                     return false;
                                 }

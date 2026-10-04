@@ -165,7 +165,8 @@ impl DurableTasksModel {
                     self.row(goal_id).last_artifact = Some(artifact.clone());
                 }
             }
-            OrchestratorEvent::GoalStageChanged { .. }
+            OrchestratorEvent::ThreadGoalUpdated { .. }
+            | OrchestratorEvent::GoalStageChanged { .. }
             | OrchestratorEvent::DeliverableBranchBound { .. }
             | OrchestratorEvent::FinishRejected { .. }
             | OrchestratorEvent::FinishAccepted { .. }
