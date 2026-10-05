@@ -49,6 +49,16 @@
         "max_tool_calls": 400
       }
     },
+    "comment_checker": {
+      "description": "Write/Edit 成功後の外部コメント検査。",
+      "$ref": "#/$defs/CommentCheckerConfig",
+      "default": {
+        "binary": "comment-checker",
+        "enabled": true,
+        "prompt": null,
+        "timeout_ms": 15000
+      }
+    },
     "compaction": {
       "description": "コンテキスト圧縮設定。",
       "$ref": "#/$defs/CompactionConfig",
@@ -407,6 +417,34 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommentCheckerConfig": {
+      "type": "object",
+      "properties": {
+        "binary": {
+          "description": "裸名はホストの PATH から探索し、`/` を含む場合は明示パスとして扱う。",
+          "type": "string",
+          "default": "comment-checker"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 15000,
+          "minimum": 0
         }
       },
       "additionalProperties": false

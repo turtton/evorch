@@ -276,7 +276,44 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             let executor = if benchmark_mode {
                 crate::runtime::benchmark_executor(Arc::clone(&state.shared.bus), root)
             } else {
-                crate::production_executor(Arc::clone(&state.shared.bus), &state.policy, root)
+                let checker_config = state
+                    .shared
+                    .runtime
+                    .upgrade()
+                    .and_then(|shared| shared.comment_checker.get().cloned())
+                    .unwrap_or_default();
+                // Reuse the existing explicit workspace sandbox seam for shared runs too.
+                // Production's factory has the same fail-closed base config as build_sandbox.
+                let sandbox = match state.shared.runtime.upgrade().and_then(|runtime| {
+                    runtime
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| Arc::clone(&workspace.factory))
+                }) {
+                    Some(factory) => factory.build(
+                        &state.policy,
+                        &crate::IsolatedMounts {
+                            workspace_root: root.clone(),
+                            ro_binds: Vec::new(),
+                            rw_binds: Vec::new(),
+                        },
+                    ),
+                    None => crate::network::build_sandbox(&state.policy, root.clone()),
+                };
+                sandbox
+                    .map_err(|error| crate::RuntimeError::Sandbox {
+                        detail: error.to_string(),
+                    })
+                    .and_then(|sandbox| {
+                        crate::runtime::configured_executor(
+                            Arc::clone(&state.shared.bus),
+                            sandbox,
+                            root.clone(),
+                            &checker_config,
+                            &[root],
+                            state.shared.executor.approval_policy(),
+                        )
+                    })
             };
             match executor {
                 Ok(executor) => {
@@ -654,20 +691,29 @@ async fn attach_worktree_executor(
         .factory
         .build(&state.policy, &mounts)
         .map_err(|error| format!("workspace sandbox setup failed: {error}"))?;
-    ToolExecutor::with_standard_tools_in(
+    let checker_config = runtime_shared
+        .comment_checker
+        .get()
+        .cloned()
+        .unwrap_or_default();
+    let forbidden_roots = [
+        workspace.manager.repo_root().to_path_buf(),
+        owned.path.clone(),
+    ];
+    let executor = crate::runtime::configured_executor(
         Arc::clone(&runtime_shared.bus),
         sandbox,
-        Some(owned.path.clone()),
+        owned.path.clone(),
+        &checker_config,
+        &forbidden_roots,
+        state.shared.executor.approval_policy(),
     )
-    .with_web_tools()
-    .map(|executor| {
-        crate::AgentRuntime {
-            shared: runtime_shared.clone(),
-        }
-        .configure_shell_escalation(&executor);
-        Arc::new(executor)
-    })
-    .map_err(|error| format!("workspace web tool setup failed: {error}"))
+    .map_err(|error| format!("workspace tool setup failed: {error}"))?;
+    crate::AgentRuntime {
+        shared: runtime_shared.clone(),
+    }
+    .configure_shell_escalation(&executor);
+    Ok(executor)
 }
 
 fn remove_workspace_inspection(runtime_shared: &Arc<Shared>, run_id: RunId) {

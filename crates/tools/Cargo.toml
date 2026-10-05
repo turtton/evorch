@@ -11,8 +11,15 @@ name = "tools"
 name = "lsp-test-server"
 path = "tests/support/lsp_server.rs"
 
+[[bin]]
+name = "comment-checker-test-fixture"
+path = "tests/support/comment_checker.rs"
+test = false
+bench = false
+
 [dependencies]
 async-trait = { workspace = true }
+config = { path = "../config" }
 dom_smoothie = { workspace = true }
 event-bus = { path = "../event-bus" }
 flate2 = { workspace = true }
@@ -37,6 +44,7 @@ tokio = { workspace = true, features = ["process", "io-util", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 rcgen = { workspace = true }

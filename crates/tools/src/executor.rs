@@ -16,6 +16,7 @@ use sandbox::{
 use crate::error::ToolError;
 use crate::network_guard::NetworkGuardError;
 use crate::origin::derive_content_origin;
+use crate::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
@@ -27,6 +28,43 @@ mod specs;
 mod workspace_boundary;
 pub use prepared::{PreparedToolCall, ValidatedToolCall};
 pub use specs::ToolSpec;
+
+/// Internal policy identity, never a model-visible tool or an approval dialog.
+pub const COMMENT_CHECKER_TOOL_NAME: &str = "comment_checker";
+
+struct PolicyCheckedPostEditHook {
+    inner: Arc<dyn PostEditHook>,
+    policy: ApprovalPolicy,
+}
+
+#[async_trait::async_trait]
+impl PostEditHook for PolicyCheckedPostEditHook {
+    async fn check(&self, input: &PostEditInput) -> PostEditOutcome {
+        let capabilities = Capabilities {
+            fs_read: false,
+            fs_write: false,
+            process_spawn: true,
+            network: false,
+        };
+        match resolve(
+            self.policy
+                .classify(COMMENT_CHECKER_TOOL_NAME, &capabilities),
+            self.policy.mode(),
+        ) {
+            Action::Proceed | Action::AskOnFailure => self.inner.check(input).await,
+            // Advisory checks never prompt, retry or fail the successful edit.
+            Action::Deny | Action::AskFirst => PostEditOutcome::Pass,
+        }
+    }
+
+    async fn drain(&self) {
+        self.inner.drain().await;
+    }
+
+    fn take_unavailable_notification(&self) -> bool {
+        self.inner.take_unavailable_notification()
+    }
+}
 
 /// ツール実行時の文脈情報。
 ///
@@ -73,6 +111,7 @@ pub struct ToolExecutor {
     /// 利用者の承認応答を待つ任意のゲート。
     gate: Option<ApprovalGate>,
     default_cwd: RwLock<Option<std::path::PathBuf>>,
+    post_edit_hook: Option<Arc<dyn PostEditHook>>,
     workspace_boundary: RwLock<Option<std::path::PathBuf>>,
 }
 
@@ -85,6 +124,7 @@ impl ToolExecutor {
             policy: ApprovalPolicy::allow_all(),
             gate: None,
             default_cwd: RwLock::new(None),
+            post_edit_hook: None,
             workspace_boundary: RwLock::new(None),
         }
     }
@@ -134,10 +174,11 @@ impl ToolExecutor {
             Some(cwd) => shell.with_default_cwd(cwd),
             None => shell,
         };
+        let (edit, write) = executor.post_edit_tools();
         let standard: [Arc<dyn Tool>; 6] = [
             Arc::new(Read),
-            Arc::new(Edit),
-            Arc::new(Write),
+            edit,
+            write,
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
@@ -152,6 +193,50 @@ impl ToolExecutor {
             executor.set_default_cwd(cwd);
         }
         executor
+    }
+
+    /// Attach a shared hook to registered standard Write/Edit tools. None restores
+    /// their hook-free behavior without changing tool schemas or permissions.
+    pub fn with_post_edit_hook(mut self, hook: Option<Arc<dyn PostEditHook>>) -> Self {
+        self.post_edit_hook = hook;
+        self.refresh_post_edit_tools();
+        self
+    }
+
+    fn refresh_post_edit_tools(&mut self) {
+        let (edit, write) = self.post_edit_tools();
+        for tool in [edit, write] {
+            if let Some(registered) = self.tools.get_mut(tool.name()) {
+                // Standard Write/Edit schemas do not depend on the hook.
+                registered.tool = tool;
+            }
+        }
+    }
+
+    fn policy_checked_hook(&self) -> Option<Arc<dyn PostEditHook>> {
+        self.post_edit_hook.as_ref().map(|inner| {
+            Arc::new(PolicyCheckedPostEditHook {
+                inner: Arc::clone(inner),
+                policy: self.policy.clone(),
+            }) as Arc<dyn PostEditHook>
+        })
+    }
+
+    /// Reap checker supervisors before shell teardown or workspace lease release.
+    pub async fn drain_post_edit_hooks(&self) {
+        if let Some(hook) = self.policy_checked_hook() {
+            hook.drain().await;
+        }
+    }
+
+    fn post_edit_tools(&self) -> (Arc<dyn Tool>, Arc<dyn Tool>) {
+        match &self.policy_checked_hook() {
+            Some(hook) => (
+                Arc::new(Edit.with_post_edit_hook(Arc::clone(hook))),
+                Arc::new(Write.with_post_edit_hook(Arc::clone(hook))),
+            ),
+            None => (Arc::new(Edit), Arc::new(Write)),
+        }
     }
 
     /// Return the trusted workspace used to resolve relative tool arguments.
@@ -339,6 +424,18 @@ impl ToolExecutor {
     /// 実行判定に使う承認方針を設定する。
     pub fn set_policy(&mut self, policy: ApprovalPolicy) -> &mut Self {
         self.policy = policy;
+        if self.post_edit_hook.is_some() {
+            self.refresh_post_edit_tools();
+        }
+        self
+    }
+
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        self.policy.clone()
+    }
+
+    pub fn with_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.set_policy(policy);
         self
     }
 
@@ -524,14 +621,24 @@ impl ToolExecutor {
         };
         match outcome {
             Ok(mut result) => {
-                // 由来はツールの申告ではなく権限宣言から機械導出して上書きする (AC5)。
-                // detail はサーバー制御の文字列を含み得るため本文と同様にエスケープする。
+                // Derive origin before output limiting can replace diagnostic detail.
+                // External checker text is never promoted to trusted command output.
+                result.origin = if matches!(tool_name, "write" | "edit")
+                    && result
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| detail["comment_checker"]["outcome"] == "warning")
+                {
+                    // Trusted executable output can still quote untrusted repository comments.
+                    crate::origin::ContentOrigin::RepositoryUntrusted
+                } else {
+                    derive_content_origin(&permissions)
+                };
                 result = crate::output::limit_result(result);
                 if let Err(error) = self.isolate_output_artifact(&mut result) {
                     self.emit_completed(ctx, tool_name, call_id, Err(&error));
                     return Err(error);
                 }
-                result.origin = derive_content_origin(&permissions);
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
                 let result = ToolResult {
@@ -663,6 +770,85 @@ mod tests {
             result.content
         );
         assert!(result.content.contains("本文"));
+    }
+
+    struct WarningHook;
+
+    #[async_trait::async_trait]
+    impl PostEditHook for WarningHook {
+        async fn check(&self, _: &PostEditInput) -> PostEditOutcome {
+            PostEditOutcome::Warning {
+                message: "repository comment diagnostic\n".repeat(5000),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_artifact_isolation_preserves_untrusted_warning_and_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let bus = Arc::new(EventBus::new(16));
+        let mut events = bus.subscribe();
+        let executor = ToolExecutor::with_standard_tools_in(
+            bus,
+            Arc::new(sandbox::DirectSandbox::new_unchecked()),
+            Some(root.clone()),
+        )
+        .with_post_edit_hook(Some(Arc::new(WarningHook)));
+        executor.set_workspace_boundary(root.clone()).unwrap();
+        let ctx = ToolExecutionContext {
+            run_id: "warning-artifact".into(),
+            thread_id: None,
+            call_id: None,
+        };
+        let content = "// edited comment\n".repeat(5000);
+        let result = executor
+            .execute(
+                &ctx,
+                "write",
+                "write-warning",
+                serde_json::json!({"path":"source.rs", "content":content}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.origin, ContentOrigin::RepositoryUntrusted);
+        assert_eq!(
+            std::fs::read_to_string(root.join("source.rs")).unwrap(),
+            content
+        );
+        let artifact = result.detail.as_ref().unwrap()["output_artifact"]["path"]
+            .as_str()
+            .unwrap();
+        assert!(std::path::Path::new(artifact).starts_with(root.join(".benchmark-tool-output")));
+        assert!(result.content.contains(artifact));
+        let full_output = std::fs::read_to_string(artifact).unwrap();
+        assert!(full_output.contains("\n[comment-checker warning]\n"));
+        assert!(full_output.contains("> repository comment diagnostic"));
+        loop {
+            if let event_bus::EventKind::Tool(ToolEvent::ToolCompleted {
+                call_id,
+                output,
+                is_error,
+                ..
+            }) = events.recv().await.unwrap().kind
+            {
+                assert_eq!(call_id, "write-warning");
+                assert!(!is_error);
+                assert_eq!(output.as_deref(), Some(result.content.as_str()));
+                break;
+            }
+        }
+        let read = executor
+            .execute(
+                &ctx,
+                "read",
+                "read-artifact",
+                serde_json::json!({"path":artifact, "offset":1, "limit":1}),
+            )
+            .await
+            .unwrap();
+        assert!(!read.is_error);
     }
 
     /// 権限と矛盾する origin を申告して返すテスト用ツール。

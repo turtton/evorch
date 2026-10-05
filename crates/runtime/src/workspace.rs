@@ -110,6 +110,10 @@ impl WorktreeManager {
         Self { project }
     }
 
+    pub(crate) fn repo_root(&self) -> &Path {
+        self.project.repo_root()
+    }
+
     /// repository の git common directory を canonical path で返す。
     ///
     /// # Errors

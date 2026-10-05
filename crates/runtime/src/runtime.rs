@@ -90,6 +90,7 @@ pub(crate) struct Shared {
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
+    pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     pub(crate) sandbox_root: Mutex<Option<PathBuf>>,
@@ -282,6 +283,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
+                comment_checker: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
@@ -326,6 +328,10 @@ impl AgentRuntime {
         config: &config::Config,
         credential_store: Option<Arc<dyn sandbox::CredentialStore>>,
     ) -> Self {
+        let _ = self
+            .shared
+            .comment_checker
+            .set(config.comment_checker.clone());
         let _ = self.shared.budget.set((&config.budget).into());
         self.set_web_tools_enabled(config.sandbox.web_tools_enabled);
         self.set_sandbox_escalation(
@@ -530,6 +536,7 @@ impl AgentRuntime {
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
                 model_resolution: OnceLock::new(),
+                comment_checker: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 sandbox_root: Mutex::new(None),
@@ -1949,13 +1956,49 @@ pub fn production_executor(
     policy: &ExecutionPolicy,
     workspace_root: PathBuf,
 ) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    production_executor_with_config(bus, policy, workspace_root, &config::Config::default())
+}
+
+pub fn production_executor_with_config(
+    bus: Arc<EventBus>,
+    policy: &ExecutionPolicy,
+    workspace_root: PathBuf,
+    config: &config::Config,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
     let sandbox =
         crate::network::build_sandbox(policy, workspace_root.clone()).map_err(|error| {
             RuntimeError::Sandbox {
                 detail: error.to_string(),
             }
         })?;
+    configured_executor(
+        bus,
+        sandbox,
+        workspace_root.clone(),
+        &config.comment_checker,
+        &[workspace_root],
+        sandbox::ApprovalPolicy::allow_all(),
+    )
+}
+
+/// Shared production composition, also used after isolated sandbox creation.
+pub(crate) fn configured_executor(
+    bus: Arc<EventBus>,
+    sandbox: Arc<dyn sandbox::Sandbox>,
+    workspace_root: PathBuf,
+    checker_config: &config::CommentCheckerConfig,
+    forbidden_roots: &[PathBuf],
+    approval_policy: sandbox::ApprovalPolicy,
+) -> Result<Arc<ToolExecutor>, RuntimeError> {
+    let hook = tools::post_edit::CommentChecker::resolve_with_roots(
+        Arc::clone(&sandbox),
+        checker_config,
+        forbidden_roots,
+    )
+    .map(|checker| Arc::new(checker) as Arc<dyn tools::post_edit::PostEditHook>);
     ToolExecutor::with_standard_tools_in(bus, sandbox, Some(workspace_root))
+        .with_post_edit_hook(hook)
+        .with_policy(approval_policy)
         .with_web_tools()
         .map(Arc::new)
         .map_err(|error| RuntimeError::NetworkGuard {
@@ -2399,3 +2442,10 @@ mod stop_cancel_tests {
         assert_eq!(runtime.wait(fresh).await.unwrap(), AgentRunPhase::Error);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/comment_checker_tests.rs"]
+mod comment_checker_tests;
+
+#[cfg(test)]
+use crate::escalation_review::support as comment_checker_support;

@@ -129,13 +129,33 @@ impl Config {
             merge_dir_layer(&mut merged, &dir, USER_MAIN_FILE, &opts.file_overrides)?;
         }
 
+        // Executable configuration is trusted only through defaults and user/global files.
+        let mut trusted = toml::Value::Table(toml::map::Map::from_iter([(
+            "comment_checker".into(),
+            merged["comment_checker"].clone(),
+        )]));
+        if !reject_unknown_fields {
+            for path in crate::strict::remove_unknown_fields(&mut trusted)? {
+                tracing::warn!(field = %path, "ignoring unknown config field");
+            }
+        }
+        crate::strict::validate_strict(&trusted)?;
+        let mut checker: crate::CommentCheckerConfig = trusted["comment_checker"]
+            .clone()
+            .try_into()
+            .map_err(|err| {
+                ConfigError::Migration(format!("invalid trusted comment checker config: {err}"))
+            })?;
+
         if let Some(dir) = &opts.project_dir {
-            merge_dir_layer(
+            let disabled = merge_dir_layer(
                 &mut merged,
                 &dir.join(PROJECT_CONFIG_DIR),
                 USER_MAIN_FILE,
                 &opts.file_overrides,
             )?;
+            // Project opt-out is monotonic across main/drop-ins, env and CLI.
+            checker.enabled &= !disabled;
         }
 
         if opts.read_env {
@@ -156,6 +176,8 @@ impl Config {
             }
         }
         crate::strict::validate_strict(&merged)?;
+        merged["comment_checker"] = toml::Value::try_from(checker)
+            .map_err(|err| ConfigError::Migration(err.to_string()))?;
         let config: Config = merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;
@@ -221,15 +243,21 @@ fn merge_dir_layer(
     dir: &Path,
     main_file: &str,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
-) -> Result<(), ConfigError> {
+) -> Result<bool, ConfigError> {
+    let mut disabled = false;
     let mut paths = vec![dir.join(main_file)];
     paths.extend(collect_dropins(&dir.join(DROPIN_DIR))?);
     for path in paths {
         if let Some(value) = read_file_migrated(&path, file_overrides)? {
+            disabled |= value
+                .get("comment_checker")
+                .and_then(|c| c.get("enabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(false);
             *merged = deep_merge(merged.clone(), value);
         }
     }
-    Ok(())
+    Ok(disabled)
 }
 
 /// ドロップインディレクトリから `*.toml` ファイルを辞書順に収集する。

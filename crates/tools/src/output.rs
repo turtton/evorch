@@ -94,7 +94,7 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
     result
 }
 
-fn artifact_result(
+pub(crate) fn artifact_result(
     text: &str,
     tail: &str,
     original_bytes: u64,

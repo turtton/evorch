@@ -29,7 +29,7 @@ use runtime::{
     AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy,
     FixtureDeliveryAdapter, GoalLedger, GoalSupervisor, ModelSource, OrchestrationSettings, Role,
     RunConfig, RuntimeComposition, ShellDeliveryAdapter, SupervisorHandle, WorkspaceSeam,
-    compose_runtime, production_executor,
+    compose_runtime, production_executor_with_config,
 };
 use sandbox::{BwrapConfig, CredentialError, CredentialStore, Sandbox, Secret, production_sandbox};
 use storage::{Database, Storage, StorageConfig};
@@ -225,6 +225,21 @@ fn load_sidebar(path: Option<&PathBuf>) -> Result<SidebarState, GuiError> {
         return Ok(workspace_ui::load_sidebar(path)?);
     }
     Ok(SidebarState::default())
+}
+
+fn effective_project_context(
+    sidebar: &SidebarState,
+    fallback_root: &Path,
+) -> (PathBuf, config::LoadOptions) {
+    let root = sidebar.resolved_primary_project().map_or_else(
+        || fallback_root.to_path_buf(),
+        |project| project.repo_root.clone(),
+    );
+    let options = config::LoadOptions {
+        project_dir: Some(root.clone()),
+        ..Default::default()
+    };
+    (root, options)
 }
 
 fn demo_sidebar(
@@ -604,13 +619,11 @@ fn run() -> Result<(), GuiError> {
         Some(directory) => demo_sidebar(&repo_root, directory.path())?,
         None => load_sidebar(state_path.as_ref())?,
     };
+    let (effective_project_root, load_options) = effective_project_context(&sidebar, &repo_root);
     let loaded_config: Option<Result<config::Config, config::ConfigError>> = if arguments.demo {
         None
     } else {
-        Some(config::Config::load(&config::LoadOptions {
-            project_dir: Some(repo_root.clone()),
-            ..Default::default()
-        }))
+        Some(config::Config::load(&load_options))
     };
     let bus = Arc::new(EventBus::new(EVENT_CAPACITY));
 
@@ -642,10 +655,7 @@ fn run() -> Result<(), GuiError> {
         .unwrap_or_else(|| Arc::new(UnwiredCredentialStore));
     let production_model = (!arguments.demo).then(|| {
         let context = gui::model::production::ProductionModel {
-            load_options: config::LoadOptions {
-                project_dir: Some(repo_root.clone()),
-                ..Default::default()
-            },
+            load_options: load_options.clone(),
             credential_store: credential_store.clone(),
             bus: bus.clone(),
             env: Arc::new(ProcessEnv),
@@ -670,10 +680,11 @@ fn run() -> Result<(), GuiError> {
         Some(directory) => {
             let demo_repo = init_demo_repo(directory.path())?;
             let seam = WorkspaceSeam::production(demo_repo.clone())?;
-            let executor = production_executor(
+            let executor = production_executor_with_config(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
                 seam.repo_root().to_path_buf(),
+                &composition_config,
             )?;
             let demo_model: Arc<dyn AgentModel> =
                 Arc::new(DemoScriptModel::new(Arc::clone(&bus)).with_workspace_root(demo_repo));
@@ -697,17 +708,12 @@ fn run() -> Result<(), GuiError> {
             runtime
         }
         None => {
-            let seam = WorkspaceSeam::production(
-                sidebar
-                    .resolved_primary_project()
-                    .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
-            )?;
-            let executor = production_executor(
+            let seam = WorkspaceSeam::production(effective_project_root.clone())?;
+            let executor = production_executor_with_config(
                 Arc::clone(&bus),
                 &ExecutionPolicy::for_role(Role::Orchestrator),
-                sidebar
-                    .resolved_primary_project()
-                    .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
+                effective_project_root.clone(),
+                &composition_config,
             )?;
             let ComposedRuntime {
                 runtime,
@@ -736,11 +742,7 @@ fn run() -> Result<(), GuiError> {
     let runtime = if arguments.demo {
         runtime
     } else {
-        runtime.with_sandbox_root(
-            sidebar
-                .resolved_primary_project()
-                .map_or_else(|| repo_root.clone(), |project| project.repo_root.clone()),
-        )
+        runtime.with_sandbox_root(effective_project_root.clone())
     };
     let sandbox_runtime = runtime.clone();
     let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
@@ -890,7 +892,7 @@ fn run() -> Result<(), GuiError> {
             tracing::warn!(
                 "user config directory unavailable; saving settings in the project config"
             );
-            config::project_main_config_path(&repo_root)
+            config::project_main_config_path(&effective_project_root)
         }),
     };
     // Config writers require an existing parent (notably the demo's new .evorch directory).
@@ -899,7 +901,7 @@ fn run() -> Result<(), GuiError> {
     }
     let settings_load_options = config::LoadOptions {
         project_dir: Some(demo_directory.as_ref().map_or_else(
-            || repo_root.clone(),
+            || effective_project_root.clone(),
             |directory| directory.path().to_path_buf(),
         )),
         read_env: false,
@@ -1386,6 +1388,197 @@ mod tests {
             orchestration_settings_or_default(&Err(ConfigError::Migration("test".to_owned()))),
             OrchestrationSettings::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod effective_project_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingSandbox(AtomicUsize);
+
+    impl sandbox::Sandbox for CountingSandbox {
+        fn wrap(
+            &self,
+            spec: sandbox::CommandSpec,
+        ) -> Result<sandbox::WrappedCommand, sandbox::SandboxError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            sandbox::DirectSandbox::new_unchecked().wrap(spec)
+        }
+    }
+
+    struct CountingFactory(Arc<CountingSandbox>);
+
+    impl runtime::SandboxFactory for CountingFactory {
+        fn build(
+            &self,
+            _: &ExecutionPolicy,
+            _: &runtime::IsolatedMounts,
+        ) -> Result<Arc<dyn sandbox::Sandbox>, sandbox::SandboxError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct WriteModel(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl AgentModel for WriteModel {
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "effective-project-test".into()
+        }
+
+        async fn complete(
+            &self,
+            _: &runtime::AgentInvocationContext,
+            _: Role,
+            messages: &[providers::Message],
+            _: &[providers::ToolSpec],
+        ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+            let step = self.0.fetch_add(1, Ordering::SeqCst);
+            let (content, finish_reason) = if step == 0 {
+                (
+                    providers::ContentBlock::ToolUse {
+                        id: "write".into(),
+                        name: "write".into(),
+                        input: serde_json::json!({"path":"source.rs", "content":"// comment\nfn main() {}"}),
+                    },
+                    providers::FinishReason::ToolUse,
+                )
+            } else {
+                assert_eq!(step, 1);
+                assert!(
+                    messages
+                        .iter()
+                        .flat_map(|message| &message.content)
+                        .any(|block| {
+                            matches!(
+                                block,
+                                providers::ContentBlock::ToolResult {
+                                    is_error: false,
+                                    ..
+                                }
+                            )
+                        })
+                );
+                (
+                    providers::ContentBlock::Text {
+                        text: "done".into(),
+                    },
+                    providers::FinishReason::Stop,
+                )
+            };
+            Ok(providers::ChatResponse {
+                message: providers::Message {
+                    role: providers::Role::Assistant,
+                    content: vec![content],
+                },
+                finish_reason,
+                usage: providers::Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_project_opt_out_controls_composed_write_not_startup_cwd() {
+        for disabled in [true, false] {
+            let cwd = tempfile::tempdir().unwrap();
+            let primary = tempfile::tempdir().unwrap();
+            let repo_a = init_demo_repo(cwd.path()).unwrap();
+            let repo_b = init_demo_repo(primary.path()).unwrap();
+            let trusted = tempfile::tempdir().unwrap();
+            let binary = trusted.path().join("checker");
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\ncat >/dev/null\nprintf 'warning' >&2\nexit 2\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(trusted.path().join("config.toml"), format!(
+                "[comment_checker]\nenabled = true\nbinary = {:?}\ntimeout_ms = 2500\nprompt = 'trusted prompt'\n",
+                binary.to_str().unwrap(),
+            )).unwrap();
+            std::fs::create_dir_all(repo_b.join(".evorch")).unwrap();
+            std::fs::write(config::project_main_config_path(&repo_b), format!(
+                "[comment_checker]\nenabled = {}\nbinary = '/untrusted/checker'\ntimeout_ms = 1\nprompt = 'untrusted prompt'\n",
+                !disabled,
+            )).unwrap();
+            let mut sidebar = SidebarState::default();
+            for (id, root) in [("a", &repo_a), ("b", &repo_b)] {
+                sidebar.add_project(ProjectId::new(id), id, root).unwrap();
+            }
+            sidebar.select_project(&ProjectId::new("a")).unwrap();
+            sidebar
+                .set_primary_project(Some(ProjectId::new("b")))
+                .unwrap();
+            let (root, mut load_options) = effective_project_context(&sidebar, &repo_a);
+            assert_eq!(root, repo_b);
+            load_options.user_config_dir = Some(trusted.path().to_path_buf());
+            load_options.read_env = false;
+            let config = config::Config::load(&load_options).unwrap();
+            assert_eq!(config.comment_checker.enabled, !disabled);
+            assert_eq!(config.comment_checker.binary, binary.to_str().unwrap());
+            assert_eq!(config.comment_checker.timeout_ms, 2500);
+            assert_eq!(
+                config.comment_checker.prompt.as_deref(),
+                Some("trusted prompt")
+            );
+            let bus = Arc::new(EventBus::new(64));
+            let mut events = bus.subscribe();
+            let sandbox = Arc::new(CountingSandbox(AtomicUsize::new(0)));
+            let seam = WorkspaceSeam::with_factory(
+                root.clone(),
+                Arc::new(CountingFactory(sandbox.clone())),
+            )
+            .unwrap();
+            let executor = Arc::new(tools::ToolExecutor::with_standard_tools_in(
+                bus.clone(),
+                sandbox.clone(),
+                Some(root.clone()),
+            ));
+            let composed = compose_runtime(RuntimeComposition {
+                config: &config,
+                user_config_dir: Some(trusted.path().to_path_buf()),
+                bus,
+                executor,
+                credential_store: Arc::new(UnwiredCredentialStore),
+                env: Arc::new(routing::MapEnv::default()),
+                model_source: ModelSource::Fixed(Arc::new(WriteModel(AtomicUsize::new(0)))),
+                workspace: Some(seam),
+            })
+            .unwrap();
+            let runtime = composed.runtime.with_sandbox_root(root);
+            let run = runtime.delegate_background(
+                Role::Worker,
+                "write in primary".into(),
+                RunConfig::default(),
+            );
+            assert_eq!(
+                runtime.wait(run).await.unwrap(),
+                event_bus::AgentRunPhase::Done
+            );
+            assert_eq!(sandbox.0.load(Ordering::SeqCst), usize::from(!disabled));
+            assert_eq!(
+                std::fs::read_to_string(repo_b.join("source.rs")).unwrap(),
+                "// comment\nfn main() {}"
+            );
+            assert!(!repo_a.join("source.rs").exists());
+            loop {
+                if let EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
+                    tool_name,
+                    is_error,
+                    detail,
+                    ..
+                }) = events.recv().await.unwrap().kind
+                {
+                    assert_eq!(tool_name, "write");
+                    assert!(!is_error);
+                    assert_eq!(detail.is_none(), disabled);
+                    break;
+                }
+            }
+        }
     }
 }
 

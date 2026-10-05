@@ -97,6 +97,7 @@ pub use run::{
 pub use run_store::RunStore;
 pub use runtime::{
     AgentRuntime, FollowUpStatus, IsolatedMounts, SandboxFactory, production_executor,
+    production_executor_with_config,
 };
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,
