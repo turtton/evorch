@@ -14,6 +14,8 @@ pub enum ProjectDialog {
     Settings {
         project: ProjectId,
         name: String,
+        /// Draft path for a new allowed directory.
+        directory: String,
         error: Option<String>,
     },
 }

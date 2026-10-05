@@ -56,14 +56,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
-    pub fn add_allowed_directory(&mut self, path: impl AsRef<Path>) -> Result<(), WorkbenchError> {
-        let project_id = self
-            .sidebar
-            .selected_project
-            .clone()
-            .ok_or(ProjectError::UnknownProject)?;
+    /// Operator-added directories are trusted: picking one is the approval.
+    pub fn add_allowed_directory(
+        &mut self,
+        project_id: &ProjectId,
+        path: impl AsRef<Path>,
+    ) -> Result<(), WorkbenchError> {
+        let path =
+            crate::model::project_path::expand_tilde(path.as_ref(), self.home_dir.as_deref())?;
         self.sidebar
-            .add_allowed_directory(&project_id, path.as_ref(), TrustState::Approved)?;
+            .add_allowed_directory(project_id, &path, TrustState::Approved)?;
+        self.save_sidebar();
         Ok(())
     }
 

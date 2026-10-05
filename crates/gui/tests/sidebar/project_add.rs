@@ -4,10 +4,10 @@ use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::model::folder_picker::FolderPicker;
 use gui::model::project_dialog::ProjectDialog;
-use gui::panes::project_dialog::{NAME_LABEL, PATH_LABEL};
+use gui::panes::project_dialog::{DIRECTORY_LABEL, NAME_LABEL, PATH_LABEL, PRIMARY_LABEL};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
-use workspace_ui::{ProjectId, SidebarState};
+use workspace_ui::{AllowedDirectory, ProjectId, SidebarState, TrustState};
 
 struct ScriptedFolderPicker(Result<Option<PathBuf>, String>);
 
@@ -176,4 +176,138 @@ fn settings_modal_reveals_root_and_renames_without_changing_id() {
             .name,
         "demo-fork"
     );
+}
+
+#[test]
+fn settings_modal_adds_trusted_directory_from_tilde_and_persists() {
+    // Given: a persisted project under an injected home, plus a sibling directory outside its root.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let repo = home.join("repo");
+    let shared = home.join("shared");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::create_dir_all(&shared).expect("shared");
+    let save = temp.path().join("sidebar.json");
+    let workbench = state(MockSource::default(), sidebar_with_project(&repo))
+        .with_home_dir(home)
+        .with_sidebar_path(save.clone());
+    let mut harness = typing_harness(workbench);
+    harness.run_steps(4);
+    // When: the operator types a tilde path in the settings modal and presses Add directory.
+    click(&mut harness, "Project settings");
+    type_into(&mut harness, DIRECTORY_LABEL, "~/shared");
+    click(&mut harness, "Add directory");
+    // Then: the canonical directory is trusted, persisted, and the draft is cleared.
+    let expected = vec![AllowedDirectory {
+        path: shared.canonicalize().expect("canonical shared"),
+        trust: TrustState::Approved,
+    }];
+    assert_eq!(
+        harness.state().sidebar().projects[0].allowed_directories,
+        expected
+    );
+    assert_eq!(
+        workspace_ui::load_sidebar(&save)
+            .expect("saved sidebar")
+            .projects[0]
+            .allowed_directories,
+        expected
+    );
+    let ProjectDialog::Settings {
+        directory, error, ..
+    } = harness.state().project_dialog()
+    else {
+        panic!("settings modal must stay open");
+    };
+    assert!(directory.is_empty());
+    assert_eq!(error, &None);
+}
+
+#[test]
+fn settings_modal_keeps_draft_and_shows_error_for_directory_inside_root() {
+    // Given: a project whose root contains a subdirectory.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let nested = temp.path().join("nested");
+    std::fs::create_dir_all(&nested).expect("nested");
+    let mut harness = typing_harness(state(
+        MockSource::default(),
+        sidebar_with_project(temp.path()),
+    ));
+    harness.run_steps(4);
+    // When: the operator tries to allow a directory that is already inside the root.
+    click(&mut harness, "Project settings");
+    let draft = nested.display().to_string();
+    type_into(&mut harness, DIRECTORY_LABEL, &draft);
+    click(&mut harness, "Add directory");
+    // Then: nothing is added and the draft survives next to an error.
+    assert!(
+        harness.state().sidebar().projects[0]
+            .allowed_directories
+            .is_empty()
+    );
+    let ProjectDialog::Settings {
+        directory, error, ..
+    } = harness.state().project_dialog()
+    else {
+        panic!("settings modal must stay open");
+    };
+    assert_eq!(directory, &draft);
+    assert!(error.is_some());
+}
+
+#[test]
+fn browse_fills_directory_draft_in_settings_modal() {
+    // Given: a project and a picker returning a folder outside its root.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo = temp.path().join("repo");
+    let picked = temp.path().join("picked");
+    std::fs::create_dir_all(&repo).expect("repo");
+    std::fs::create_dir_all(&picked).expect("picked");
+    let workbench = state(MockSource::default(), sidebar_with_project(&repo))
+        .with_folder_picker(Arc::new(ScriptedFolderPicker(Ok(Some(picked.clone())))));
+    let mut harness = HeadlessWorkbench::new(workbench, [1000.0, 700.0]);
+    harness.run();
+    harness.click_label("Project settings");
+    harness.run();
+    // When: Browse resolves to that folder.
+    harness.click_label("Browse…");
+    harness.run();
+    // Then: it only fills the draft until Add directory confirms it.
+    assert!(
+        harness.state().sidebar().projects[0]
+            .allowed_directories
+            .is_empty()
+    );
+    let ProjectDialog::Settings { directory, .. } = harness.state().project_dialog() else {
+        panic!("settings modal must stay open");
+    };
+    assert_eq!(directory, &picked.display().to_string());
+}
+
+#[test]
+fn settings_modal_toggles_primary_project_and_persists() {
+    // Given: a persisted project that is not primary.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let save = temp.path().join("sidebar.json");
+    let mut harness = typing_harness(
+        state(MockSource::default(), sidebar_with_project(temp.path()))
+            .with_sidebar_path(save.clone()),
+    );
+    harness.run_steps(4);
+    click(&mut harness, "Project settings");
+    // When: the operator checks Primary project.
+    click(&mut harness, PRIMARY_LABEL);
+    // Then: the project becomes primary and that is persisted.
+    let demo = Some(ProjectId::new("demo"));
+    assert_eq!(harness.state().sidebar().primary_project, demo);
+    assert_eq!(
+        workspace_ui::load_sidebar(&save)
+            .expect("saved sidebar")
+            .primary_project,
+        demo
+    );
+    // When: the operator unchecks it again.
+    click(&mut harness, PRIMARY_LABEL);
+    // Then: no project is primary.
+    assert_eq!(harness.state().sidebar().primary_project, None);
 }
