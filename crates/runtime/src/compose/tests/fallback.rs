@@ -6,6 +6,13 @@ mod streaming;
 type Requests = Arc<Mutex<Vec<ChatRequest>>>;
 
 fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
+    fixture_with_efforts(errors, &[])
+}
+
+fn fixture_with_efforts(
+    errors: Vec<Option<ProviderError>>,
+    efforts: &[Option<&str>],
+) -> (RoutedModel, Vec<Requests>) {
     let (mut model, _) = routed_model(Ok(response()), "model-a", None);
     let mut catalog = ModelCatalog::new();
     let mut profiles = Vec::new();
@@ -22,6 +29,7 @@ fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
         candidates.push(RouteCandidateConfig {
             profile: name.clone(),
             model: None,
+            reasoning_effort: efforts.get(index).copied().flatten().map(str::to_owned),
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         model.providers.insert(
@@ -57,6 +65,26 @@ fn fixture(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Requests>) {
             .collect(),
     ));
     (model, recordings)
+}
+
+#[tokio::test]
+async fn fallback_uses_each_candidates_reasoning_effort() {
+    // Given: the failing primary and its fallback configure different efforts.
+    let (model, requests) = fixture_with_efforts(
+        vec![Some(ProviderError::Timeout), None],
+        &[Some("xhigh"), Some("low")],
+    );
+    // When
+    assert_eq!(complete(&model, "session").await, Ok(response()));
+    // Then: the fallback request uses its own candidate's effort.
+    assert_eq!(
+        requests[0].lock().unwrap()[0].reasoning_effort.as_deref(),
+        Some("xhigh")
+    );
+    assert_eq!(
+        requests[1].lock().unwrap()[0].reasoning_effort.as_deref(),
+        Some("low")
+    );
 }
 
 #[tokio::test]
@@ -201,6 +229,7 @@ async fn explicit_preference_never_falls_back_on_timeout() {
         model_preference: Some(crate::ModelPreference {
             profile: "profile-0".into(),
             model: None,
+            reasoning_effort: None,
         }),
         purpose: Default::default(),
     };
@@ -226,6 +255,7 @@ async fn explicit_preference_never_falls_back_on_http_400() {
         model_preference: Some(crate::ModelPreference {
             profile: "profile-0".into(),
             model: None,
+            reasoning_effort: None,
         }),
         purpose: Default::default(),
     };
@@ -256,6 +286,7 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
                     vec![RouteCandidateConfig {
                         profile: "profile-0".into(),
                         model: None,
+                        reasoning_effort: None,
                     }],
                 ),
                 (
@@ -264,10 +295,12 @@ async fn fallback_exhausts_without_attempting_other_logical_routes() {
                         RouteCandidateConfig {
                             profile: "profile-1".into(),
                             model: None,
+                            reasoning_effort: None,
                         },
                         RouteCandidateConfig {
                             profile: "profile-2".into(),
                             model: None,
+                            reasoning_effort: None,
                         },
                     ],
                 ),

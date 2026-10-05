@@ -130,6 +130,7 @@ fn explicit_model_preference_hides_resolved_label() {
         .set_thread_model_preference(Some(ModelPreference {
             profile: "local".into(),
             model: Some("explicit-model".into()),
+            reasoning_effort: None,
         }));
     harness.run();
     // Then: only the picker shows a model, without a stale resolved label.

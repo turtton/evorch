@@ -261,6 +261,7 @@ impl Fixture {
                 quick: ModelPreference {
                     profile: "quick".into(),
                     model: None,
+                    reasoning_effort: None,
                 },
             });
         Self {

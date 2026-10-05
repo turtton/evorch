@@ -22,6 +22,9 @@ pub struct RouteCandidateConfig {
     /// モデル ID の上書き指定。省略時はプロファイルの `default_model` を使用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// この候補で送る推論強度。省略時はプロバイダ既定。モデルごとに有効な値が異なるため自由形式の文字列とする。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[cfg(test)]
@@ -46,5 +49,16 @@ model = "claude-opus-4-1"
         .expect("model 指定の候補を解析できる");
         assert_eq!(with_model.profile, "anthropic-main");
         assert_eq!(with_model.model.as_deref(), Some("claude-opus-4-1"));
+        assert_eq!(with_model.reasoning_effort, None);
+
+        let with_effort: RouteCandidateConfig = toml::from_str(
+            r#"
+profile = "openai-main"
+model = "gpt-5"
+reasoning_effort = "high"
+"#,
+        )
+        .expect("reasoning_effort 指定の候補を解析できる");
+        assert_eq!(with_effort.reasoning_effort.as_deref(), Some("high"));
     }
 }

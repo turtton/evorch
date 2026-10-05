@@ -51,6 +51,9 @@ pub enum ThreadRunPhase {
 pub struct ModelPreference {
     pub profile: String,
     pub model: Option<String>,
+    /// Reasoning effort chosen with the explicit model; `None` uses the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

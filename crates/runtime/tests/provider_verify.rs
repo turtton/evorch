@@ -30,6 +30,7 @@ fn model(urls: &[(&str, String)], bus: Arc<EventBus>) -> Arc<RoutedModel> {
             .map(|(name, _)| RouteCandidateConfig {
                 profile: (*name).into(),
                 model: None,
+                reasoning_effort: None,
             })
             .collect(),
     );
@@ -155,6 +156,7 @@ async fn unverified_fallback_never_spawned_and_emits_provider_unavailable() {
         model_preference: Some(ModelPreference {
             profile: "fallback".into(),
             model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };

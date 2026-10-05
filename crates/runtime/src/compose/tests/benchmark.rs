@@ -20,7 +20,7 @@ fn benchmark_rejects_generation_fields_omitted_by_wire_adapters() {
             .unwrap();
         match protocol {
             model::ApiProtocol::AnthropicMessages => {
-                settings.generation.reasoning_effort = Some("high".into())
+                settings.preference.reasoning_effort = Some("high".into())
             }
             model::ApiProtocol::OpenAiCompletions => settings.generation.top_p = Some(0.5),
             // Fixture already has temperature/max_tokens, neither reaches Codex wire.
@@ -98,6 +98,7 @@ async fn benchmark_never_silently_strips_tools() {
         model_preference: Some(crate::ModelPreference {
             profile: "local".into(),
             model: Some("custom".into()),
+            reasoning_effort: None,
         }),
         ..Default::default()
     };

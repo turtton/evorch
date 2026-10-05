@@ -58,6 +58,7 @@ fn report(role: Role) -> BaseContextReport {
             reason: "Sent separately.".into(),
         }],
         available_skills: Vec::new(),
+        reasoning_effort: None,
     }
 }
 

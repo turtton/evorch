@@ -228,10 +228,6 @@ fn merge_generation(
         temperature: category.temperature.or(role.temperature),
         top_p: category.top_p.or(role.top_p),
         max_tokens: category.max_tokens.or(role.max_tokens),
-        reasoning_effort: category
-            .reasoning_effort
-            .clone()
-            .or_else(|| role.reasoning_effort.clone()),
     }
 }
 
@@ -319,9 +315,6 @@ pub struct GenerationOverridesConfig {
     /// 最大出力トークン数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// 推論強度。モデルごとに有効な値が異なるため自由形式の文字列とする。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
 }
 
 /// [`AgentsConfig::binding_for`] の解決結果。
@@ -458,7 +451,7 @@ preset = "old"
 [agents.worker]
 logical_model = "old"
 [agents.worker.generation]
-reasoning_effort = "old"
+max_tokens = 1
 [agents.reviewer]
 logical_model = "old"
 [agents.roles.web_researcher]
@@ -706,7 +699,6 @@ preset = "worker-appendix"
 temperature = 0.7
 top_p = 1.0
 max_tokens = 4096
-reasoning_effort = "medium"
 
 [agents.worker.categories.quick]
 logical_model = "worker-quick"
@@ -721,10 +713,6 @@ preset = "quick-appendix"
         assert_eq!(agents.worker.generation.temperature, Some(0.7));
         assert_eq!(agents.worker.generation.top_p, Some(1.0));
         assert_eq!(agents.worker.generation.max_tokens, Some(4096));
-        assert_eq!(
-            agents.worker.generation.reasoning_effort,
-            Some("medium".to_owned())
-        );
         let quick = agents
             .worker
             .categories
@@ -757,7 +745,7 @@ preset = "quick-appendix"
         );
     }
 
-    // Given: generation の 4 フィールドをすべて含む設定 TOML
+    // Given: generation の 3 フィールドをすべて含む設定 TOML
     // When: GenerationOverridesConfig にパースする
     // Then: 型付きの値として読み取れる
     #[test]
@@ -766,7 +754,6 @@ preset = "quick-appendix"
 temperature = 0.2
 top_p = 0.9
 max_tokens = 8192
-reasoning_effort = "high"
 "#;
 
         let generation: GenerationOverridesConfig =
@@ -775,7 +762,6 @@ reasoning_effort = "high"
         assert_eq!(generation.temperature, Some(0.2));
         assert_eq!(generation.top_p, Some(0.9));
         assert_eq!(generation.max_tokens, Some(8192));
-        assert_eq!(generation.reasoning_effort, Some("high".to_owned()));
     }
 
     // Given: generation に未知のキーを含む設定 TOML / When: パースする
@@ -837,12 +823,10 @@ preset = "base-appendix"
 temperature = 0.2
 top_p = 0.8
 max_tokens = 4096
-reasoning_effort = "medium"
 [agents.reviewer.categories.plan-review]
 logical_model = "plan-model"
 [agents.reviewer.categories.plan-review.generation]
 temperature = 0.6
-reasoning_effort = "high"
 [agents.reviewer.categories.tool-execution]
 preset = "tool-appendix"
 [agents.reviewer.categories.tool-execution.generation]
@@ -858,7 +842,6 @@ max_tokens = 2048
         assert_eq!(plan.generation.temperature, Some(0.6));
         assert_eq!(plan.generation.top_p, Some(0.8));
         assert_eq!(plan.generation.max_tokens, Some(4096));
-        assert_eq!(plan.generation.reasoning_effort.as_deref(), Some("high"));
         let tool = agents
             .binding_for("reviewer", Some("tool-execution"))
             .unwrap();
@@ -867,7 +850,6 @@ max_tokens = 2048
         assert_eq!(tool.generation.temperature, Some(0.2));
         assert_eq!(tool.generation.top_p, Some(0.9));
         assert_eq!(tool.generation.max_tokens, Some(2048));
-        assert_eq!(tool.generation.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(
             agents
                 .binding_for("reviewer", Some("lesson_review"))

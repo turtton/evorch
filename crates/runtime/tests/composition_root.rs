@@ -76,6 +76,7 @@ fn configured() -> Config {
                         vec![config::RouteCandidateConfig {
                             profile: PROFILE.to_string(),
                             model: None,
+                            reasoning_effort: None,
                         }],
                     )
                 })

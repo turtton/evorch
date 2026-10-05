@@ -54,6 +54,7 @@ async fn http_failure_switches_provider_and_keeps_session_on_fallback() {
             .map(|name| config::RouteCandidateConfig {
                 profile: name.into(),
                 model: None,
+                reasoning_effort: None,
             })
             .to_vec(),
     );

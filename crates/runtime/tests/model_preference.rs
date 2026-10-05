@@ -58,6 +58,7 @@ async fn set_model_preference_applies_to_next_completion() {
     let initial = ModelPreference {
         profile: "initial".into(),
         model: None,
+        reasoning_effort: None,
     };
     let run = runtime.delegate_background(
         Role::Worker,
@@ -79,6 +80,7 @@ async fn set_model_preference_applies_to_next_completion() {
     let preference = ModelPreference {
         profile: "profile-b".into(),
         model: Some("model-b".into()),
+        reasoning_effort: None,
     };
     for next in [Some(preference), None] {
         runtime.set_model_preference(run, next.clone()).unwrap();

@@ -72,10 +72,12 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
                     RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some("custom-model".into()),
+                        reasoning_effort: None,
                     },
                     RouteCandidateConfig {
                         profile: "local".into(),
                         model: None,
+                        reasoning_effort: None,
                     },
                 ],
             ),
@@ -90,7 +92,6 @@ fn roundtrip_preserves_both_sections_and_unrelated_comments() {
             temperature: Some(0.2),
             top_p: Some(0.9),
             max_tokens: Some(4096),
-            reasoning_effort: Some("xhigh".into()),
         },
     };
     let mut agents = AgentsConfig::default();

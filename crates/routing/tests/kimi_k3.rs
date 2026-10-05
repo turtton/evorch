@@ -33,6 +33,7 @@ fn tool_router(catalog: ModelCatalog, models: [&str; 2]) -> Router {
                     .map(|(profile, model)| config::RouteCandidateConfig {
                         profile: profile.into(),
                         model: Some(model.into()),
+                        reasoning_effort: None,
                     })
                     .collect(),
             )]),

@@ -50,6 +50,7 @@ fn continue_dispatches_without_a_user_message_and_preserves_attachments() {
         .set_thread_model_preference(Some(workspace_ui::ModelPreference {
             profile: "local".into(),
             model: Some("chosen".into()),
+            reasoning_effort: None,
         }));
     submit(&mut harness, "/continue");
     assert!(
@@ -355,6 +356,7 @@ fn send_chat_carries_thread_model_preference() {
         .set_thread_model_preference(Some(workspace_ui::ModelPreference {
             profile: "local".into(),
             model: Some("model-b".into()),
+            reasoning_effort: Some("high".into()),
         }));
     // When
     submit(&mut harness, "selected model");
@@ -367,6 +369,7 @@ fn send_chat_carries_thread_model_preference() {
         Some(runtime::ModelPreference {
             profile: "local".into(),
             model: Some("model-b".into()),
+            reasoning_effort: Some("high".into()),
         })
     );
 }

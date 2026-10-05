@@ -24,10 +24,12 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
                     RouteCandidateConfig {
                         profile: "second".into(),
                         model: Some("custom-model".into()),
+                        reasoning_effort: Some("xhigh".into()),
                     },
                     RouteCandidateConfig {
                         profile: "first".into(),
                         model: None,
+                        reasoning_effort: None,
                     },
                 ],
             ),
@@ -36,6 +38,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
                 vec![RouteCandidateConfig {
                     profile: "first".into(),
                     model: None,
+                    reasoning_effort: None,
                 }],
             ),
         ]
@@ -47,6 +50,7 @@ fn roundtrip_preserves_routes_order_and_optional_override() {
     assert_eq!(load(temp.path()).routing, routing);
     let text = std::fs::read_to_string(path).expect("text");
     assert_eq!(text.matches("model =").count(), 1);
+    assert_eq!(text.matches("reasoning_effort = \"xhigh\"").count(), 1);
     assert_eq!(text.matches("[[routing.routes.").count(), 3);
 }
 

@@ -85,6 +85,7 @@ fn harness_with_model(
                     vec![config::RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some(MODEL.into()),
+                        reasoning_effort: None,
                     }],
                 ),
                 (
@@ -92,6 +93,7 @@ fn harness_with_model(
                     vec![config::RouteCandidateConfig {
                         profile: "local".into(),
                         model: Some(review_model.into()),
+                        reasoning_effort: None,
                     }],
                 ),
             ]),
@@ -185,6 +187,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                         .map(|(name, _)| config::RouteCandidateConfig {
                             profile: (*name).into(),
                             model: None,
+                            reasoning_effort: None,
                         })
                         .collect(),
                 ),
@@ -195,6 +198,7 @@ pub(super) fn harness_fallback(base_url: &str, timeout: Duration) -> Harness {
                         .map(|(name, _)| config::RouteCandidateConfig {
                             profile: (*name).into(),
                             model: None,
+                            reasoning_effort: None,
                         })
                         .collect(),
                 ),

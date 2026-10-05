@@ -18,10 +18,29 @@ pub struct RoutingSettingsModel {
     pub profile_names: Vec<String>,
     pub profile_defaults: BTreeMap<String, String>,
     pub profile_models: BTreeMap<String, Vec<String>>,
+    /// Configured effort levels by profile, then model ID.
+    pub profile_effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     pub new_route_name: String,
     pub route_name_edits: BTreeMap<String, String>,
     pub validation_error: Option<String>,
     pub(crate) save_rx: Option<Receiver<Result<Config, String>>>,
+}
+
+/// 候補の実モデル (上書き、なければ profile 既定) で選べる推論強度。
+pub fn candidate_effort_choices(
+    profile_defaults: &BTreeMap<String, String>,
+    profile_effort_levels: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    candidate: &RouteCandidateConfig,
+) -> Vec<String> {
+    let model = candidate
+        .model
+        .as_ref()
+        .or_else(|| profile_defaults.get(&candidate.profile));
+    super::effort::effort_choices(
+        model
+            .and_then(|model| profile_effort_levels.get(&candidate.profile)?.get(model))
+            .map(Vec::as_slice),
+    )
 }
 
 impl RoutingSettingsModel {
@@ -77,6 +96,11 @@ impl RoutingSettingsModel {
                 .iter()
                 .map(|(name, profile)| (name.clone(), profile.enabled_model_ids()))
                 .collect(),
+            profile_effort_levels: config
+                .providers
+                .iter()
+                .map(|(name, profile)| (name.clone(), profile.effort_levels_by_model()))
+                .collect(),
             ..Self::default()
         }
     }
@@ -112,6 +136,7 @@ impl RoutingSettingsModel {
             vec![RouteCandidateConfig {
                 profile: self.profile_names.first().cloned().unwrap_or_default(),
                 model: None,
+                reasoning_effort: None,
             }],
         );
         self.expanded.insert(name.into());
@@ -244,7 +269,8 @@ mod tests {
             model.routes["role-model"],
             vec![RouteCandidateConfig {
                 profile: "first".into(),
-                model: None
+                model: None,
+                reasoning_effort: None,
             }]
         );
         assert_eq!(model.pending_new_route.as_deref(), Some("role-model"));
@@ -280,6 +306,7 @@ mod tests {
             vec![RouteCandidateConfig {
                 profile: "original".into(),
                 model: Some("custom".into()),
+                reasoning_effort: None,
             }],
         );
         // When: 重複名または空白名をプリフィルする。

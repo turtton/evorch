@@ -65,6 +65,12 @@ pub fn run(value: toml::Value) -> Result<toml::Value, ConfigError> {
     for migration in migrations {
         migrated = migration(migrated)?;
     }
+    for path in remove_role_reasoning_effort(&mut migrated) {
+        tracing::warn!(
+            field = %path,
+            "ignoring removed config field; set reasoning_effort on routing.routes candidates"
+        );
+    }
 
     if let Some(table) = migrated.as_table_mut() {
         table.insert(
@@ -105,6 +111,56 @@ fn migrate_v1_to_v2(mut value: toml::Value) -> Result<toml::Value, ConfigError> 
     Ok(value)
 }
 
+/// ロール割り当てから廃止された `generation.reasoning_effort` を取り除き、削除したパスを返す。
+///
+/// 推論強度は `routing.routes` の候補ごとに指定する。キーの削除だけでスキーマの
+/// 意味が変わらないため version は据え置き、version の有無に関わらず適用する。
+fn remove_role_reasoning_effort(value: &mut toml::Value) -> Vec<String> {
+    let mut removed = Vec::new();
+    let Some(agents) = value.get_mut("agents").and_then(toml::Value::as_table_mut) else {
+        return removed;
+    };
+    for (role, binding) in agents.iter_mut() {
+        if role == "roles" {
+            if let Some(roles) = binding.as_table_mut() {
+                for (name, binding) in roles.iter_mut() {
+                    remove_generation_effort(
+                        binding,
+                        &format!("agents.roles.{name}"),
+                        &mut removed,
+                    );
+                }
+            }
+            continue;
+        }
+        remove_generation_effort(binding, &format!("agents.{role}"), &mut removed);
+        if let Some(categories) = binding
+            .get_mut("categories")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (category, binding) in categories.iter_mut() {
+                remove_generation_effort(
+                    binding,
+                    &format!("agents.{role}.categories.{category}"),
+                    &mut removed,
+                );
+            }
+        }
+    }
+    removed
+}
+
+fn remove_generation_effort(binding: &mut toml::Value, path: &str, removed: &mut Vec<String>) {
+    if binding
+        .get_mut("generation")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|generation| generation.remove("reasoning_effort"))
+        .is_some()
+    {
+        removed.push(format!("{path}.generation.reasoning_effort"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +192,50 @@ mod tests {
                 .get("retention_days")
                 .and_then(toml::Value::as_integer),
             Some(90)
+        );
+    }
+
+    // Given: ロール・カテゴリ・追加ロールに旧 reasoning_effort を持つ version 無しの設定
+    // When: マイグレーションする
+    // Then: reasoning_effort だけが取り除かれ、他の generation 値は残る
+    #[test]
+    fn removes_role_reasoning_effort_regardless_of_version() {
+        let migrated = run(toml::toml! {
+            [agents.worker.generation]
+            temperature = 0.2
+            reasoning_effort = "high"
+            [agents.reviewer.categories.plan-review.generation]
+            reasoning_effort = "low"
+            [agents.roles.planner.generation]
+            reasoning_effort = "medium"
+            [routing.routes]
+            worker = [{ profile = "main", reasoning_effort = "xhigh" }]
+        }
+        .into())
+        .expect("旧キーを含む設定を移行できる");
+
+        let agents = migrated.get("agents").expect("agents が残る");
+        let worker = &agents["worker"]["generation"];
+        assert_eq!(
+            worker.get("temperature").and_then(toml::Value::as_float),
+            Some(0.2)
+        );
+        assert!(worker.get("reasoning_effort").is_none());
+        assert!(
+            agents["reviewer"]["categories"]["plan-review"]["generation"]
+                .get("reasoning_effort")
+                .is_none()
+        );
+        assert!(
+            agents["roles"]["planner"]["generation"]
+                .get("reasoning_effort")
+                .is_none()
+        );
+        assert_eq!(
+            migrated["routing"]["routes"]["worker"][0]
+                .get("reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("xhigh")
         );
     }
 }

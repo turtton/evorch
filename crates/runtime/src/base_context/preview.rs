@@ -59,6 +59,8 @@ pub struct BaseContextReport {
     pub selected_model: String,
     pub context_window: u64,
     pub window_source: event_bus::WindowSource,
+    /// Effort of the routing candidate behind `selected_model`; `None` is the provider default.
+    pub reasoning_effort: Option<String>,
     /// Logical model and generation overrides; `None` for fixed models.
     pub binding: Option<config::types::agents::ResolvedAgentBinding>,
     pub sections: Vec<ContextSection>,
@@ -176,6 +178,9 @@ impl AgentRuntime {
             shared.model.catalog_context_window(&selected_model),
         );
         let binding = shared.model.binding_preview(request.role, category);
+        let reasoning_effort = shared
+            .model
+            .selected_reasoning_effort(request.role, category);
         let available_skills = shared
             .skills
             .as_ref()
@@ -194,6 +199,7 @@ impl AgentRuntime {
             selected_model,
             context_window,
             window_source,
+            reasoning_effort,
             binding,
             sections,
             tools,

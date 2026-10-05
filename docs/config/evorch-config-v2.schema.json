@@ -646,13 +646,6 @@
           "format": "uint32",
           "minimum": 0
         },
-        "reasoning_effort": {
-          "description": "推論強度。モデルごとに有効な値が異なるため自由形式の文字列とする。",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "temperature": {
           "description": "サンプリング温度。",
           "type": [
@@ -1116,6 +1109,13 @@
           "description": "使用するプロバイダプロファイル名。",
           "type": "string",
           "default": ""
+        },
+        "reasoning_effort": {
+          "description": "この候補で送る推論強度。省略時はプロバイダ既定。モデルごとに有効な値が異なるため自由形式の文字列とする。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

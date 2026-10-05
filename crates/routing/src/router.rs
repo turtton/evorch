@@ -248,7 +248,7 @@ impl Router {
 
         if let Some(candidates) = self.routes.get(logical_name) {
             let remaining_after_failed = self
-                .failed_candidate_position(candidates, failed)
+                .candidate_position(candidates, failed)
                 .map_or(candidates.as_slice(), |index| &candidates[index + 1..]);
             for candidate in remaining_after_failed {
                 if let Some(route) = self.available_route(candidate) {
@@ -264,11 +264,26 @@ impl Router {
         None
     }
 
-    /// 失敗ルートと (プロファイル, concrete model) の組が一致する候補の位置を返します。
+    /// 解決済みルートに対応する候補の推論強度を返します。
+    ///
+    /// [`Router::resolve`] / [`Router::next_fallback`] が返したルートと
+    /// (プロファイル, concrete model) の組が一致する先頭候補の `reasoning_effort` です。
+    /// 候補が見つからない、または未指定なら `None` (プロバイダ既定) を返します。
+    pub fn candidate_reasoning_effort(
+        &self,
+        logical: &LogicalModelId,
+        route: &ResolvedRoute,
+    ) -> Option<&str> {
+        let candidates = self.routes.get(logical.as_str())?;
+        let index = self.candidate_position(candidates, route)?;
+        candidates[index].reasoning_effort.as_deref()
+    }
+
+    /// ルートと (プロファイル, concrete model) の組が一致する先頭候補の位置を返します。
     ///
     /// 候補の concrete model は `model` 上書き (指定時) またはプロファイルの
     /// `default_model` です。一致する候補がなければ `None` を返します。
-    fn failed_candidate_position(
+    fn candidate_position(
         &self,
         candidates: &[config::RouteCandidateConfig],
         failed: &ResolvedRoute,
@@ -361,6 +376,7 @@ mod tests {
         config::RouteCandidateConfig {
             profile: profile.to_string(),
             model: model.map(str::to_string),
+            reasoning_effort: None,
         }
     }
 
@@ -1285,6 +1301,48 @@ mod tests {
         assert!(
             resolved.is_none(),
             "失敗した組 (a, model-y) 以降に候補はなく、失敗候補の再選択でも None でもない"
+        );
+    }
+
+    // Given: 候補ごとに異なる推論強度を持つルート (未指定の候補を含む)。
+    // When: 解決結果とフォールバック先、およびルート外の組について推論強度を引く。
+    // Then: 一致した候補の値を返し、未指定・不一致では None になる。
+    #[test]
+    fn candidate_reasoning_effort_follows_matched_candidate() {
+        let profiles = vec![profile("a", "model-default"), profile("b", "model-b")];
+        let mut first = candidate("a", Some("model-override"));
+        first.reasoning_effort = Some("high".to_string());
+        let mut third = candidate("b", None);
+        third.reasoning_effort = Some("low".to_string());
+        let routing = routing_config(&[("summary", vec![first, candidate("a", None), third])]);
+        let catalog = build_catalog(
+            &[
+                ("model-override", Availability::Available),
+                ("model-default", Availability::Available),
+                ("model-b", Availability::Available),
+            ],
+            &[],
+        );
+        let router =
+            Router::new(profiles, &routing, catalog).expect("有効な構成で Router を構築できる");
+        let summary = logical("summary");
+
+        assert_eq!(
+            router.candidate_reasoning_effort(&summary, &failed_route("a", "model-override")),
+            Some("high")
+        );
+        assert_eq!(
+            router.candidate_reasoning_effort(&summary, &failed_route("a", "model-default")),
+            None,
+            "未指定の候補はプロバイダ既定"
+        );
+        assert_eq!(
+            router.candidate_reasoning_effort(&summary, &failed_route("b", "model-b")),
+            Some("low")
+        );
+        assert_eq!(
+            router.candidate_reasoning_effort(&logical("other"), &failed_route("b", "model-b")),
+            None
         );
     }
 

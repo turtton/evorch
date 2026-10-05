@@ -29,6 +29,7 @@ pub fn profile_options(profiles: &[ProfileSummary]) -> Vec<ModelPreference> {
                 vec![ModelPreference {
                     profile: profile.name.clone(),
                     model: None,
+                    reasoning_effort: None,
                 }]
             } else {
                 models
@@ -36,6 +37,7 @@ pub fn profile_options(profiles: &[ProfileSummary]) -> Vec<ModelPreference> {
                     .map(|model| ModelPreference {
                         profile: profile.name.clone(),
                         model: Some(model),
+                        reasoning_effort: None,
                     })
                     .collect()
             }
@@ -47,4 +49,36 @@ pub fn parse_preference(label: &str, profiles: &[ProfileSummary]) -> Option<Mode
     profile_options(profiles)
         .into_iter()
         .find(|preference| preference_label(preference) == label)
+}
+
+/// Whether two preferences select the same profile and model, ignoring effort.
+pub fn same_model(a: &ModelPreference, b: &ModelPreference) -> bool {
+    a.profile == b.profile && a.model == b.model
+}
+
+/// Effort levels offered for the preference's model (explicit or profile default).
+pub fn effort_choices(preference: &ModelPreference, profiles: &[ProfileSummary]) -> Vec<String> {
+    let levels = profiles
+        .iter()
+        .find(|profile| profile.name == preference.profile)
+        .and_then(|profile| {
+            let model = preference
+                .model
+                .as_ref()
+                .or(profile.default_model.as_ref())?;
+            profile.effort_levels.get(model)
+        });
+    super::effort::effort_choices(levels.map(Vec::as_slice))
+}
+
+/// Selects `next`, keeping the current effort only when the new model offers it.
+pub fn switch_model(
+    current: Option<&ModelPreference>,
+    mut next: ModelPreference,
+    profiles: &[ProfileSummary],
+) -> ModelPreference {
+    next.reasoning_effort = current
+        .and_then(|current| current.reasoning_effort.clone())
+        .filter(|effort| effort_choices(&next, profiles).contains(effort));
+    next
 }

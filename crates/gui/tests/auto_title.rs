@@ -65,6 +65,7 @@ fn quick_category_model_preferred_else_thread_model() {
     let preference = Some(runtime::ModelPreference {
         profile: "thread-profile".into(),
         model: Some("thread-model".into()),
+        reasoning_effort: None,
     });
     let fake = |selection| match selection {
         TitleSelection::Quick(binding) => binding.logical_model,

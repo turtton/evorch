@@ -93,6 +93,15 @@ fn routed_model(
     default_model: &str,
     route_model: Option<&str>,
 ) -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
+    routed_model_with_effort(result, default_model, route_model, None)
+}
+
+fn routed_model_with_effort(
+    result: Result<ChatResponse, ProviderError>,
+    default_model: &str,
+    route_model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> (RoutedModel, Arc<Mutex<Vec<ChatRequest>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let profile = profile(
         default_model,
@@ -108,6 +117,7 @@ fn routed_model(
                 vec![RouteCandidateConfig {
                     profile: "local".to_string(),
                     model: route_model.map(ToString::to_string),
+                    reasoning_effort: reasoning_effort.map(ToString::to_string),
                 }],
             )]),
         },
@@ -201,16 +211,16 @@ async fn complete_builds_request_from_binding_and_route() {
 }
 
 #[tokio::test]
-async fn complete_forwards_reasoning_effort_when_binding_configures_it() {
+async fn complete_forwards_reasoning_effort_when_route_candidate_configures_it() {
     for (configured, expected) in [
         (Some("high"), Some("high".to_owned())),
         (Some("medium"), Some("medium".to_owned())),
         (Some("xhigh"), Some("xhigh".to_owned())),
         (None, None),
     ] {
-        // Given: worker binding に推論強度を指定または省略する。
-        let (mut model, requests) = routed_model(Ok(response()), "local-model", None);
-        model.agents.worker.base.generation.reasoning_effort = configured.map(str::to_owned);
+        // Given: worker route の候補に推論強度を指定または省略する。
+        let (model, requests) =
+            routed_model_with_effort(Ok(response()), "local-model", None, configured);
         // When: 既存の composition adapter 経由で完了を要求する。
         let result = complete(&model, "run-effort").await;
         // Then: provider に届く request が指定強度を保持する。
@@ -275,6 +285,21 @@ fn selected_model_formats_profile_and_model() {
         model.selected_model(Role::Worker, None),
         "local/local-model"
     );
+}
+
+// Given: 推論強度を持つ worker route 候補 / When: 選択中の推論強度を問い合わせる
+// Then: 候補の値を返し、未指定の route では None になる
+#[test]
+fn selected_reasoning_effort_reports_route_candidate() {
+    let (model, _) = routed_model_with_effort(Ok(response()), "local-model", None, Some("high"));
+    assert_eq!(
+        model
+            .selected_reasoning_effort(Role::Worker, None)
+            .as_deref(),
+        Some("high")
+    );
+    let (model, _) = routed_model(Ok(response()), "local-model", None);
+    assert_eq!(model.selected_reasoning_effort(Role::Worker, None), None);
 }
 
 // Given: route candidate の model override と別 default model を持つ profile

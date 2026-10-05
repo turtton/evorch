@@ -49,13 +49,11 @@ preset = "research-preset"
 temperature = 0.25
 top_p = 0.8
 max_tokens = 1024
-reasoning_effort = "low"
 [agents.roles.web_researcher.categories.research]
 logical_model = "deep-model"
 preset = "deep-preset"
 [agents.roles.web_researcher.categories.research.generation]
 max_tokens = 4096
-reasoning_effort = "high"
 "#,
     )
     .expect("TOML");

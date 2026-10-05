@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
-
-use gui::model::role_settings::{RoleSettingsModel, effort_options};
+use gui::model::role_settings::RoleSettingsModel;
 
 #[test]
 fn web_researcher_unknown_binding_is_allowed_but_unrouted() {
@@ -62,6 +60,7 @@ fn picker_uses_route_keys_and_explicit_bindings_only() {
         vec![config::RouteCandidateConfig {
             profile: "local".into(),
             model: None,
+            reasoning_effort: None,
         }],
     );
     // When: seeding picker options.
@@ -81,17 +80,4 @@ fn picker_uses_route_keys_and_explicit_bindings_only() {
     );
     assert!(!editor.logical_models.iter().any(|name| name == "enabled"));
     assert!(!editor.logical_models.iter().any(|name| name == "disabled"));
-}
-
-#[test]
-fn effort_options_includes_max_and_preserves_model_override() {
-    // Given: no model-specific options and a distinct model-specific override.
-    let mut choices = BTreeMap::new();
-    choices.insert("custom".into(), vec!["custom-level".into()]);
-    // When: resolving options for an unregistered and a registered model.
-    let defaults = effort_options(&choices, Some("default"));
-    let override_options = effort_options(&choices, Some("custom"));
-    // Then: max is the highest default option, while the override wins unchanged.
-    assert_eq!(defaults.last().map(String::as_str), Some("max"));
-    assert_eq!(override_options, vec!["custom-level"]);
 }

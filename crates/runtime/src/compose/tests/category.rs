@@ -62,6 +62,7 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("gpt-5.5".into()),
+                    reasoning_effort: None,
                 }],
             ),
             (
@@ -69,6 +70,7 @@ async fn delegated_worker_uses_category_model_when_quick_is_bound() {
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("claude-sonnet-4-5".into()),
+                    reasoning_effort: None,
                 }],
             ),
         ]),

@@ -107,9 +107,6 @@ fn insert_generation(table: &mut Table, generation: &GenerationOverridesConfig) 
     if let Some(max_tokens) = generation.max_tokens {
         overrides.insert("max_tokens", value(i64::from(max_tokens)));
     }
-    if let Some(reasoning_effort) = &generation.reasoning_effort {
-        overrides.insert("reasoning_effort", value(reasoning_effort.as_str()));
-    }
     if !overrides.is_empty() {
         table.insert("generation", Item::Table(overrides));
     }

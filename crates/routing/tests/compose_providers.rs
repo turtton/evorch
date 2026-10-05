@@ -110,6 +110,7 @@ fn compose_builds_clients_and_router_with_discovered_models() {
         vec![RouteCandidateConfig {
             profile: PROFILE.to_string(),
             model: None,
+            reasoning_effort: None,
         }],
     );
     let composed = compose_providers(&config, deps(populated_env())).expect("composeに成功する");
@@ -195,6 +196,7 @@ fn compose_respects_explicit_routes() {
             vec![RouteCandidateConfig {
                 profile: PROFILE.to_string(),
                 model: None,
+                reasoning_effort: None,
             }],
         )]),
     };

@@ -46,6 +46,7 @@ async fn fast_explicit_preference_strips_marker() {
                 model_preference: Some(crate::ModelPreference {
                     profile: "local".into(),
                     model: None,
+                    reasoning_effort: None,
                 }),
                 purpose: Default::default(),
             },
