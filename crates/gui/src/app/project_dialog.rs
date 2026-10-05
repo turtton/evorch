@@ -22,6 +22,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.project_dialog = ProjectDialog::Settings {
             name: record.name.clone(),
             project,
+            directory: String::new(),
             error: None,
         };
     }
@@ -30,10 +31,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &self.project_dialog
     }
 
-    /// A picked folder only fills the add form; registration waits for Add.
+    /// A picked folder only fills the open form; registration waits for its Add button.
     pub(super) fn apply_picked_folder(&mut self, picked: Result<Option<PathBuf>, String>) {
-        let ProjectDialog::Add { path, error } = &mut self.project_dialog else {
-            return;
+        let (path, error) = match &mut self.project_dialog {
+            ProjectDialog::Closed => return,
+            ProjectDialog::Add { path, error } => (path, error),
+            ProjectDialog::Settings {
+                directory, error, ..
+            } => (directory, error),
         };
         match picked {
             Ok(Some(picked)) => {
@@ -52,7 +57,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(action) = project_dialog_modal(
             ctx,
             &mut self.project_dialog,
-            &self.sidebar.projects,
+            &self.sidebar,
             self.folder_picker.is_busy(),
         ) else {
             return;
@@ -70,6 +75,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             ProjectDialogAction::Rename { project, name } => {
                 self.rename_project(&project, &name).map_err(error_text)
+            }
+            ProjectDialogAction::AddDirectory { project, path } => self
+                .add_allowed_directory(&project, path)
+                .map_err(error_text)
+                .map(|()| {
+                    if let ProjectDialog::Settings { directory, .. } = &mut self.project_dialog {
+                        directory.clear();
+                    }
+                }),
+            ProjectDialogAction::SetPrimary(project) => {
+                self.set_primary_project(project).map_err(error_text)
             }
             ProjectDialogAction::SetTrust {
                 project,
