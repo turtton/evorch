@@ -188,6 +188,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> BenchmarkResult<Benchma
                             .filter(|v| !v.is_empty())
                             .ok_or_else(|| invalid(USAGE))?,
                     ),
+                    reasoning_effort: None,
                 },
             }
         }

@@ -14,6 +14,9 @@ use crate::error::RuntimeError;
 pub struct ModelPreference {
     pub profile: String,
     pub model: Option<String>,
+    /// Reasoning effort sent with this selection; `None` uses the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// 1 回のモデル呼び出し (agent-loop の complete) の相関文脈。
@@ -173,6 +176,11 @@ pub trait AgentModel: Send + Sync {
     /// Configured picker entries; fixed models expose no provider profiles.
     fn available_profiles(&self) -> Vec<crate::compose::ProfileSummary> {
         Vec::new()
+    }
+
+    /// Reasoning effort the routed candidate for `selected_model` sends, for inspection.
+    fn selected_reasoning_effort(&self, _role: Role, _category: Option<&str>) -> Option<String> {
+        None
     }
 
     /// Logical model and generation overrides the role binding resolves to, for inspection.

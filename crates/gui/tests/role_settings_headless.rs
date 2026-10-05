@@ -1,5 +1,3 @@
-#[path = "role_settings_headless/effort.rs"]
-mod effort;
 #[path = "role_settings_headless/evidence.rs"]
 mod evidence;
 #[path = "role_settings_headless/implicit.rs"]

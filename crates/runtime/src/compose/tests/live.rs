@@ -86,6 +86,7 @@ fn compose_routed_model_matches_compose_runtime_output() {
                         vec![RouteCandidateConfig {
                             profile: "local".into(),
                             model: None,
+                            reasoning_effort: None,
                         }],
                     )
                 })

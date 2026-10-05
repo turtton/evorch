@@ -155,6 +155,7 @@ fn role_save_and_route_rename_reload_project_and_user_targets() {
                     vec![config::RouteCandidateConfig {
                         profile: "project".into(),
                         model: None,
+                        reasoning_effort: None,
                     }],
                 )]
                 .into(),

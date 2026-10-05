@@ -121,6 +121,7 @@ title-route = [{{ profile = "local", model = "fast" }}]
         state.set_thread_model_preference(Some(workspace_ui::ModelPreference {
             profile: "local".into(),
             model: Some("chosen".into()),
+            reasoning_effort: None,
         }));
         let mut h = HeadlessWorkbench::new(state, [1200.0, 900.0]);
         h.state_mut().composer_mut().input = "Explain lifetimes".into();

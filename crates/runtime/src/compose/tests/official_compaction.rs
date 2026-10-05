@@ -118,6 +118,7 @@ async fn compaction_respects_explicit_preference_and_propagates_failure_without_
         model_preference: Some(crate::ModelPreference {
             profile: "preferred".into(),
             model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };

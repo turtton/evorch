@@ -319,6 +319,13 @@ fn model_facts(ui: &mut egui::Ui, report: &BaseContextReport) {
             "Context window",
             format!("{} ({window_source})", report.context_window),
         ),
+        (
+            "Reasoning effort",
+            report
+                .reasoning_effort
+                .clone()
+                .unwrap_or_else(|| "provider default".to_owned()),
+        ),
     ];
     if let Some(binding) = &report.binding {
         let generation = &binding.generation;
@@ -328,10 +335,6 @@ fn model_facts(ui: &mut egui::Ui, report: &BaseContextReport) {
             (
                 "Preset",
                 binding.preset.clone().unwrap_or_else(|| "none".into()),
-            ),
-            (
-                "Reasoning effort",
-                generation.reasoning_effort.clone().unwrap_or_else(unset),
             ),
             (
                 "Temperature",

@@ -32,6 +32,7 @@ fn candidate(profile: &str, model: Option<&str>) -> config::RouteCandidateConfig
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: model.map(str::to_string),
+        reasoning_effort: None,
     }
 }
 

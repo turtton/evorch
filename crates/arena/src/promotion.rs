@@ -78,6 +78,7 @@ impl ArenaReport {
             vec![config::RouteCandidateConfig {
                 profile: winner.profile.clone(),
                 model: Some(winner.model_for(winner.attribution).to_owned()),
+                reasoning_effort: None,
             }],
         );
         binding.logical_model = Some(route);

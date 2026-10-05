@@ -1,4 +1,4 @@
-use crate::model::routing_settings::RoutingSettingsModel;
+use crate::model::routing_settings::{RoutingSettingsModel, candidate_effort_choices};
 mod candidate;
 use crate::theme::{
     text::{h3, muted},
@@ -95,6 +95,11 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                     for (index, candidate) in candidates.iter_mut().enumerate() {
                         ui.push_id(index, |ui| {
                             ui.label(muted(format!("Priority {}", index + 1)));
+                            let efforts = candidate_effort_choices(
+                                &model.profile_defaults,
+                                &model.profile_effort_levels,
+                                candidate,
+                            );
                             candidate_picker(
                                 ui,
                                 candidate,
@@ -103,6 +108,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                                     &model.profile_models,
                                     &format!("{name} candidate {}", index + 1),
                                 ),
+                                &efforts,
                             );
                             ui.horizontal_wrapped(|ui| {
                                 if ui
@@ -148,6 +154,7 @@ fn route_list(ui: &mut egui::Ui, model: &mut RoutingSettingsModel) {
                         candidates.push(config::RouteCandidateConfig {
                             profile: model.profile_names.first().cloned().unwrap_or_default(),
                             model: None,
+                            reasoning_effort: None,
                         });
                     }
                 });

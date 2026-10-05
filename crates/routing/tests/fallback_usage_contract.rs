@@ -79,6 +79,7 @@ fn candidate(profile: &str) -> config::RouteCandidateConfig {
     config::RouteCandidateConfig {
         profile: profile.to_string(),
         model: None,
+        reasoning_effort: None,
     }
 }
 

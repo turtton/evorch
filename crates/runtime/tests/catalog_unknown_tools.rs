@@ -65,6 +65,7 @@ async fn tools_reach_wire_when_preferred_model_is_absent_from_catalog() {
                 model_preference: Some(ModelPreference {
                     profile: "local".into(),
                     model: Some("custom-tool-model".into()),
+                    reasoning_effort: None,
                 }),
                 purpose: Default::default(),
             },

@@ -23,10 +23,9 @@ fn editor_categories_follow_settings_registry_including_shell_audits() {
 }
 
 #[test]
-fn reviewer_explicit_category_models_and_efforts_are_seeded() {
+fn reviewer_explicit_category_models_are_seeded() {
     let mut config = config::Config::default();
-    let mut model = config::ModelEntryConfig::enabled("category-model");
-    model.effort_levels = Some(vec!["custom".into()]);
+    let model = config::ModelEntryConfig::enabled("category-model");
     config.providers.insert(
         "local".into(),
         config::ProviderProfileConfig {
@@ -43,7 +42,6 @@ fn reviewer_explicit_category_models_and_efforts_are_seeded() {
     );
     let editor = RoleSettingsModel::seed_from_config(&config);
     assert_eq!(editor.logical_models, ["category-model"]);
-    assert_eq!(editor.effort_choices["category-model"], ["custom"]);
     assert_eq!(editor.agents, config.agents);
     assert!(editor.validate().is_ok());
 }

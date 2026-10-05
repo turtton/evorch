@@ -21,7 +21,9 @@ pub(super) fn freeze(
         ..Default::default()
     };
     // Route validation must not fall back to the current role binding.
-    let (route, _) = model.resolve_invocation(&invocation, Role::Worker, &[])?;
+    let route = model
+        .resolve_invocation(&invocation, Role::Worker, &[])?
+        .route;
     if model.providers[&route.profile].profile.api_protocol != settings.protocol {
         return Err(unsupported(
             "candidate API protocol differs from checkpoint; cross-protocol generation parity is not supported",
@@ -37,7 +39,7 @@ pub(super) fn freeze(
             ));
         }
         model::ApiProtocol::AnthropicMessages
-            if settings.generation.reasoning_effort.is_some()
+            if settings.preference.reasoning_effort.is_some()
                 || settings.service_tier.is_some() =>
         {
             return Err(unsupported(
@@ -52,7 +54,7 @@ pub(super) fn freeze(
         _ => {}
     }
     let (model_id, _) = config::types::provider::parse_model_speed(&route.model_id);
-    if settings.generation.reasoning_effort.is_some()
+    if settings.preference.reasoning_effort.is_some()
         && model
             .router
             .catalog()

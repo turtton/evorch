@@ -80,6 +80,7 @@ fn summarizer(interval: u64, chunks: u32) -> ModelSummarizer {
         model_preference: Some(crate::ModelPreference {
             profile: "kimi".into(),
             model: None,
+            reasoning_effort: None,
         }),
         idle_timeout: Duration::from_secs(90),
         timeout: Duration::from_secs(300),

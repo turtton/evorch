@@ -212,6 +212,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
     let candidate = ModelPreference {
         profile: "local".into(),
         model: Some(CANDIDATE.into()),
+        reasoning_effort: None,
     };
     let same = replay(
         &output,
@@ -219,6 +220,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         ModelPreference {
             profile: "local".into(),
             model: Some(MODEL.into()),
+            reasoning_effort: None,
         },
         user.clone(),
         env(),
@@ -236,6 +238,7 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
         ModelPreference {
             profile: "missing".into(),
             model: Some(CANDIDATE.into()),
+            reasoning_effort: None,
         },
         user.clone(),
         env(),
@@ -321,7 +324,8 @@ async fn baseline_then_frozen_replays_keep_inputs_and_evaluate_trusted_tests() {
             "git-metadata",
             ModelPreference {
                 profile: "local".into(),
-                model: Some(CANDIDATE.into())
+                model: Some(CANDIDATE.into()),
+                reasoning_effort: None,
             },
             None,
             env(),
@@ -484,6 +488,7 @@ async fn final_usage_over_budget_poison_is_durable_and_skips_verification() {
         ModelPreference {
             profile: "local".into(),
             model: Some(CANDIDATE.into()),
+            reasoning_effort: None,
         },
         None,
         env(),
@@ -534,6 +539,7 @@ async fn incomplete_candidate_poison_blocks_later_trials_without_snapshot_or_ver
     let candidate = ModelPreference {
         profile: "local".into(),
         model: Some(CANDIDATE.into()),
+        reasoning_effort: None,
     };
     let trial = replay(
         &output,
@@ -729,7 +735,8 @@ async fn failed_nonselected_delegate_poison_survives_parent_recovery_and_selecte
             "unsafe",
             ModelPreference {
                 profile: "local".into(),
-                model: Some(CANDIDATE.into())
+                model: Some(CANDIDATE.into()),
+                reasoning_effort: None,
             },
             None,
             env(),

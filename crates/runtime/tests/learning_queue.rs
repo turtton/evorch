@@ -103,6 +103,7 @@ async fn learning_queue_completes_without_candidates_after_extractor_finishes() 
         ModelPreference {
             profile: "quick".into(),
             model: None,
+            reasoning_effort: None,
         },
     );
     let lessons = queue

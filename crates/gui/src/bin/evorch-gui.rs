@@ -787,6 +787,7 @@ fn run() -> Result<(), GuiError> {
             quick: runtime::ModelPreference {
                 profile: route.profile.clone(),
                 model: route.model.clone(),
+                reasoning_effort: route.reasoning_effort.clone(),
             },
         }),
         None => {

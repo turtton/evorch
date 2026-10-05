@@ -37,6 +37,7 @@ fn report(role: Role, sections: Vec<ContextSection>, tools: Vec<ContextTool>) ->
         excluded_tools: Vec::new(),
         exclusions: Vec::new(),
         available_skills: Vec::new(),
+        reasoning_effort: None,
     }
 }
 

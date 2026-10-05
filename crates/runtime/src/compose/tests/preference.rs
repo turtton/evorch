@@ -57,13 +57,16 @@ async fn complete_uses_model_preference_over_routing_rules() {
         Some(ModelPreference {
             profile: "profile-b".into(),
             model: Some("override-b".into()),
+            reasoning_effort: Some("high".into()),
         }),
     )
     .await;
-    // Then
+    // Then: the selection's effort travels with it.
     assert_eq!(result, Ok(response()));
     assert!(requests.lock().unwrap().is_empty());
-    assert_eq!(preferred_requests.lock().unwrap()[0].model, "override-b");
+    let recorded = preferred_requests.lock().unwrap();
+    assert_eq!(recorded[0].model, "override-b");
+    assert_eq!(recorded[0].reasoning_effort.as_deref(), Some("high"));
 }
 
 #[tokio::test]
@@ -76,6 +79,7 @@ async fn complete_rejects_unknown_preferred_profile() {
         Some(ModelPreference {
             profile: "missing".into(),
             model: None,
+            reasoning_effort: None,
         }),
     )
     .await;
@@ -104,6 +108,7 @@ async fn complete_rejects_unlisted_preferred_model() {
         Some(ModelPreference {
             profile: "profile-b".into(),
             model: Some("missing-model".into()),
+            reasoning_effort: None,
         }),
     )
     .await;
@@ -130,6 +135,7 @@ async fn preferred_failure_preserves_detail_without_fallback() {
         Some(ModelPreference {
             profile: "profile-b".into(),
             model: None,
+            reasoning_effort: None,
         }),
     )
     .await;
@@ -157,13 +163,15 @@ fn routed_model_lists_available_profiles() {
                 name: "local".into(),
                 provider_type: ProviderType::OpenAiCompatible,
                 models: vec!["model-a".into(), "model-a".into()],
-                default_model: Some("model-a".into())
+                default_model: Some("model-a".into()),
+                effort_levels: BTreeMap::new(),
             },
             ProfileSummary {
                 name: "profile-b".into(),
                 provider_type: ProviderType::OpenAiCompatible,
                 models: vec!["model-b".into(), "override-b".into()],
-                default_model: Some("model-b".into())
+                default_model: Some("model-b".into()),
+                effort_levels: BTreeMap::new(),
             },
         ]
     );

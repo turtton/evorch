@@ -120,6 +120,10 @@ impl AgentModel for SwitchableModel {
         self.current().selected_model(role, category)
     }
 
+    fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
+        self.current().selected_reasoning_effort(role, category)
+    }
+
     fn catalog_context_window(&self, selected_model: &str) -> Option<u64> {
         self.current().catalog_context_window(selected_model)
     }

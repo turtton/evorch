@@ -53,6 +53,7 @@ async fn preferred_unknown_model_preserves_tools_on_the_wire() {
                 model_preference: Some(ModelPreference {
                     profile: "local".into(),
                     model: None,
+                    reasoning_effort: None,
                 }),
                 purpose: Default::default(),
             },

@@ -60,6 +60,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
             .map(|(name, _)| RouteCandidateConfig {
                 profile: (*name).into(),
                 model: None,
+                reasoning_effort: None,
             })
             .collect(),
     );
@@ -138,6 +139,7 @@ async fn unknown_profile_emits_one_correlated_provider_unavailable_without_start
             model_preference: Some(ModelPreference {
                 profile: "absent".into(),
                 model: Some("gpt-4o".into()),
+                reasoning_effort: None,
             }),
             ..Default::default()
         },
@@ -193,6 +195,7 @@ async fn unadvertised_selected_model_creates_no_worker_or_completion() {
         Some(ModelPreference {
             profile: "primary".into(),
             model: Some("gpt-4o".into()),
+            reasoning_effort: None,
         }),
     )
     .await;

@@ -137,6 +137,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 .map(|preference| runtime::ModelPreference {
                                     profile: preference.profile.clone(),
                                     model: preference.model.clone(),
+                                    reasoning_effort: preference.reasoning_effort.clone(),
                                 }),
                         };
                         let permit = match self.chat_permit(&submission.thread_id) {
@@ -224,6 +225,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             .map(|preference| runtime::ModelPreference {
                                 profile: preference.profile.clone(),
                                 model: preference.model.clone(),
+                                reasoning_effort: preference.reasoning_effort.clone(),
                             }),
                     });
                     self.submit_command(command);

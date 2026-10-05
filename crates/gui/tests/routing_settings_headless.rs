@@ -1,6 +1,8 @@
 use gui::headless::HeadlessWorkbench;
 use runtime::{AgentModel, Role};
 
+#[path = "routing_settings_headless/effort.rs"]
+mod effort;
 #[path = "routing_settings_headless/saves.rs"]
 mod saves;
 #[path = "routing_settings_headless/support.rs"]
@@ -313,7 +315,8 @@ fn many_candidates_fit_geometry_matrix() {
                 vec![
                     config::RouteCandidateConfig {
                         profile: "local".into(),
-                        model: None
+                        model: None,
+                        reasoning_effort: None,
                     };
                     20
                 ],
@@ -359,6 +362,7 @@ fn capture_routing_settings_png_evidence() {
         .push(config::RouteCandidateConfig {
             profile: "local".into(),
             model: Some("base".into()),
+            reasoning_effort: None,
         });
     let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
     harness.run();

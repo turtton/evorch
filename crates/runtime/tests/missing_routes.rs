@@ -81,6 +81,7 @@ async fn missing_worker_route_composes_but_complete_fails_before_any_http_reques
                 vec![RouteCandidateConfig {
                     profile: "local".into(),
                     model: None,
+                    reasoning_effort: None,
                 }],
             );
         }
@@ -153,6 +154,7 @@ async fn unavailable_candidate_reports_existing_route_before_any_http_request() 
         vec![RouteCandidateConfig {
             profile: "local".into(),
             model: Some("ghost-model".into()),
+            reasoning_effort: None,
         }],
     );
     let model = compose_routed_model(&config, deps(&directory)).unwrap();
@@ -219,6 +221,7 @@ async fn explicit_model_preference_remains_authoritative_without_routes() {
                 model_preference: Some(ModelPreference {
                     profile: "local".into(),
                     model: None,
+                    reasoning_effort: None,
                 }),
                 purpose: Default::default(),
             },

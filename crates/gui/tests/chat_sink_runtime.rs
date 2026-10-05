@@ -561,10 +561,12 @@ fn sink_sets_preference_on_existing_run_before_send() {
     let first = Some(runtime::ModelPreference {
         profile: "local".into(),
         model: Some("a".into()),
+        reasoning_effort: None,
     });
     let second = Some(runtime::ModelPreference {
         profile: "remote".into(),
         model: Some("b".into()),
+        reasoning_effort: None,
     });
     let id = fixture.send_preference("thread-1", "first", first.clone());
     fixture.wait_for_reply(&id, "reply-1");
@@ -666,6 +668,7 @@ fn stop_retains_chat_history_and_resumes_same_run_with_current_model_preference(
     let preference = runtime::ModelPreference {
         profile: "current".into(),
         model: Some("new-model".into()),
+        reasoning_effort: None,
     };
     assert_eq!(
         fixture.send_preference("thread-stop", "resume", Some(preference.clone())),

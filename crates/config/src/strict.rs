@@ -59,7 +59,7 @@ const MODEL_PRESET_KEYS: &[&str] = &[
 ];
 const ENV_KEYS: &[&str] = &["type", "var"];
 const ROUTING_KEYS: &[&str] = &["routes"];
-const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model"];
+const ROUTE_CANDIDATE_KEYS: &[&str] = &["profile", "model", "reasoning_effort"];
 const PANEL_KEYS: &[&str] = &["layout", "keybinds"];
 const DIAGNOSTICS_KEYS: &[&str] = &["log_level", "log_dir", "persistence"];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
@@ -125,7 +125,7 @@ const SANDBOX_KEYS: &[&str] = &[
 const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
 const ROLE_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation", "categories"];
 const CATEGORY_BINDING_KEYS: &[&str] = &["logical_model", "preset", "generation"];
-const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens", "reasoning_effort"];
+const GENERATION_KEYS: &[&str] = &["temperature", "top_p", "max_tokens"];
 const CREDENTIAL_LIKE_KEYS: &[&str] = &[
     "api_key",
     "apikey",

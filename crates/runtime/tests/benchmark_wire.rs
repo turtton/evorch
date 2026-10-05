@@ -51,6 +51,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
                 vec![config::RouteCandidateConfig {
                     profile: "local".into(),
                     model: Some("model-a".into()),
+                    reasoning_effort: None,
                 }],
             )]),
         },
@@ -142,6 +143,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
     incompatible.preference = ModelPreference {
         profile: "alternate".into(),
         model: Some("model-a".into()),
+        reasoning_effort: None,
     };
     assert!(model.freeze_for_benchmark(incompatible).is_err());
     assert_eq!(

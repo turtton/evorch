@@ -45,6 +45,7 @@ fn router(models: &[&str]) -> Router {
                     .map(|id| config::RouteCandidateConfig {
                         profile: (*id).into(),
                         model: None,
+                        reasoning_effort: None,
                     })
                     .collect(),
             )]),

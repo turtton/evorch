@@ -42,6 +42,9 @@ fn routing_document_table(routing: &RoutingConfig) -> Table {
             if let Some(model) = &candidate.model {
                 table.insert("model", value(model.as_str()));
             }
+            if let Some(effort) = &candidate.reasoning_effort {
+                table.insert("reasoning_effort", value(effort.as_str()));
+            }
             tables.push(table);
         }
         if candidates.is_empty() {

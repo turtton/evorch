@@ -26,11 +26,11 @@ fn settings(model: &str) -> BenchmarkModelSettings {
         preference: ModelPreference {
             profile: "mock".into(),
             model: Some(model.into()),
+            reasoning_effort: Some("high".into()),
         },
         generation: config::GenerationOverridesConfig {
             temperature: Some(0.25),
             max_tokens: Some(321),
-            reasoning_effort: Some("high".into()),
             ..Default::default()
         },
         service_tier: Some(providers::ServiceTier::Priority),

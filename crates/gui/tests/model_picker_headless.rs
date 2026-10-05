@@ -31,7 +31,10 @@ fn workbench(root: &std::path::Path, configured: bool) -> HeadlessWorkbench<Demo
 [providers.local]
 type = "openai-compatible"
 base_url = "http://localhost:11434/v1"
-models = ["model-a", "model-b"]
+models = [
+  { id = "model-a", enabled = true, effort_levels = ["minimal"] },
+  { id = "model-b", enabled = true, effort_levels = ["low", "high"] },
+]
 default_model = "model-a"
 [providers.remote]
 type = "openai-compatible"
@@ -111,6 +114,7 @@ fn selecting_model_persists_on_thread() {
         Some(ModelPreference {
             profile: "local".into(),
             model: Some("model-b".into()),
+            reasoning_effort: None,
         })
     );
     assert_eq!(threads[1].model_preference, None);
@@ -119,6 +123,57 @@ fn selecting_model_persists_on_thread() {
     assert_eq!(
         restored.threads[0].model_preference,
         threads[0].model_preference
+    );
+}
+
+#[test]
+fn effort_picker_follows_selected_model_levels_and_persists() {
+    // Given: an explicit selection whose model restricts effort levels.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    assert!(!harness.has_label("Reasoning effort"));
+    harness
+        .state_mut()
+        .set_thread_model_preference(Some(ModelPreference {
+            profile: "local".into(),
+            model: Some("model-b".into()),
+            reasoning_effort: None,
+        }));
+    harness.run();
+    // When: choosing an effort offered by the selected model.
+    harness.click_label("local / model-b");
+    harness.run();
+    assert!(harness.has_label("Reasoning effort"));
+    assert!(harness.has_label("low"));
+    assert!(!harness.has_label("xhigh"));
+    harness.click_label("high");
+    harness.run();
+    // Then: the effort is stored on the thread with the explicit model.
+    let expected = Some(ModelPreference {
+        profile: "local".into(),
+        model: Some("model-b".into()),
+        reasoning_effort: Some("high".into()),
+    });
+    assert_eq!(
+        harness.state().sidebar().threads[0].model_preference,
+        expected
+    );
+    let restored = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
+    assert_eq!(restored.threads[0].model_preference, expected);
+    // When: switching to a model that cannot send that effort.
+    harness.click_label("local / model-b · high");
+    harness.run();
+    harness.click_label("local / model-a");
+    harness.run();
+    // Then: the unsupported effort is dropped instead of being sent.
+    assert_eq!(
+        harness.state().sidebar().threads[0].model_preference,
+        Some(ModelPreference {
+            profile: "local".into(),
+            model: Some("model-a".into()),
+            reasoning_effort: None,
+        })
     );
 }
 
@@ -132,6 +187,7 @@ fn clearing_selection_restores_automatic_routing() {
         .set_thread_model_preference(Some(ModelPreference {
             profile: "local".into(),
             model: Some("model-b".into()),
+            reasoning_effort: None,
         }));
     harness.run();
     harness.click_label("local / model-b");
@@ -154,6 +210,7 @@ fn capture_model_picker_evidence() {
         .set_thread_model_preference(Some(ModelPreference {
             profile: "local".into(),
             model: Some("model-a".into()),
+            reasoning_effort: None,
         }));
     harness.run();
     // When

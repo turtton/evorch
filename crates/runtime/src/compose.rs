@@ -205,6 +205,8 @@ pub struct RoutedModel {
     affinity: Mutex<SessionAffinity>,
     agents: config::AgentsConfig,
     admission_routes: Vec<routing::ResolvedRoute>,
+    /// Configured effort choices by profile, then model ID.
+    effort_levels: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     verification:
         tokio::sync::OnceCell<BTreeMap<String, Result<Vec<String>, providers::ProviderError>>>,
     codex_version_resolver: std::sync::Arc<providers::CodexCatalogVersionResolver>,
@@ -222,6 +224,7 @@ impl RoutedModel {
                 provider_type: provider.profile.provider_type,
                 models: provider.profile.models.clone(),
                 default_model: Some(provider.profile.default_model.clone()),
+                effort_levels: self.effort_levels.get(name).cloned().unwrap_or_default(),
             })
             .collect()
     }
@@ -237,6 +240,7 @@ impl RoutedModel {
             affinity: Mutex::new(SessionAffinity::default()),
             agents,
             admission_routes: Vec::new(),
+            effort_levels: BTreeMap::new(),
             verification: tokio::sync::OnceCell::new(),
             codex_version_resolver: providers::CodexCatalogVersionResolver::shared(),
             event_bus: None,
@@ -285,7 +289,7 @@ impl RoutedModel {
         invocation: &AgentInvocationContext,
         role: Role,
         tools: &[ToolSpec],
-    ) -> Result<(routing::ResolvedRoute, config::GenerationOverridesConfig), RuntimeError> {
+    ) -> Result<ResolvedInvocation, RuntimeError> {
         Ok(match &invocation.model_preference {
             Some(preference) => {
                 // Explicit user selection is authoritative: never apply ADR 0004 fallback.
@@ -312,13 +316,14 @@ impl RoutedModel {
                         ),
                     });
                 }
-                (
-                    routing::ResolvedRoute {
+                ResolvedInvocation {
+                    route: routing::ResolvedRoute {
                         profile: preference.profile.clone(),
                         model_id: model_id.clone(),
                     },
-                    config::GenerationOverridesConfig::default(),
-                )
+                    generation: config::GenerationOverridesConfig::default(),
+                    reasoning_effort: preference.reasoning_effort.clone(),
+                }
             }
             None => {
                 let binding = self
@@ -329,9 +334,23 @@ impl RoutedModel {
                 let route = self
                     .resolve(&invocation.run_id, &logical, !tools.is_empty())
                     .map_err(|error| route_resolution_error(error, role, invocation, &logical))?;
-                (route, binding.generation)
+                ResolvedInvocation {
+                    reasoning_effort: self.candidate_reasoning_effort(&logical, &route),
+                    route,
+                    generation: binding.generation,
+                }
             }
         })
+    }
+
+    fn candidate_reasoning_effort(
+        &self,
+        logical: &LogicalModelId,
+        route: &routing::ResolvedRoute,
+    ) -> Option<String> {
+        self.router
+            .candidate_reasoning_effort(logical, route)
+            .map(str::to_owned)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -345,7 +364,11 @@ impl RoutedModel {
         output_schema: Option<&providers::JsonSchema>,
         benchmark: Option<&crate::benchmark::BenchmarkModelSettings>,
     ) -> Result<ChatResponse, RuntimeError> {
-        let (mut route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let ResolvedInvocation {
+            mut route,
+            generation,
+            mut reasoning_effort,
+        } = self.resolve_invocation(invocation, role, tools)?;
         let generation = benchmark.map_or(generation, |settings| settings.generation.clone());
         let logical = match &invocation.model_preference {
             Some(_) => None,
@@ -434,7 +457,7 @@ impl RoutedModel {
                 tools,
                 temperature: generation.temperature,
                 max_tokens: generation.max_tokens.map(u64::from),
-                reasoning_effort: generation.reasoning_effort.clone(),
+                reasoning_effort: reasoning_effort.clone(),
                 service_tier: benchmark.map_or_else(
                     || match speed {
                         config::types::provider::ModelSpeed::Fast => {
@@ -510,6 +533,9 @@ impl RoutedModel {
                     },
                 ));
             }
+            if let Some(logical) = logical.as_ref() {
+                reasoning_effort = self.candidate_reasoning_effort(logical, &next);
+            }
             route = next;
         }
     }
@@ -523,13 +549,18 @@ impl AgentModel for RoutedModel {
         role: Role,
         tools: &[ToolSpec],
     ) -> Result<crate::benchmark::BenchmarkModelSettings, RuntimeError> {
-        let (route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let ResolvedInvocation {
+            route,
+            generation,
+            reasoning_effort,
+        } = self.resolve_invocation(invocation, role, tools)?;
         let (_, speed) = config::types::provider::parse_model_speed(&route.model_id);
         Ok(crate::benchmark::BenchmarkModelSettings {
             protocol: self.providers[&route.profile].profile.api_protocol,
             preference: crate::ModelPreference {
                 profile: route.profile,
                 model: Some(route.model_id.clone()),
+                reasoning_effort,
             },
             generation,
             service_tier: match speed {
@@ -565,7 +596,11 @@ impl AgentModel for RoutedModel {
         tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
         // 解決は一度だけ。provider の失敗を別 route で再試行せず Summarizer へ返す。
-        let (route, generation) = self.resolve_invocation(invocation, role, tools)?;
+        let ResolvedInvocation {
+            route,
+            generation,
+            reasoning_effort,
+        } = self.resolve_invocation(invocation, role, tools)?;
         let provider = self
             .providers
             .get(&route.profile)
@@ -592,7 +627,7 @@ impl AgentModel for RoutedModel {
             },
             temperature: generation.temperature,
             max_tokens: generation.max_tokens.map(u64::from),
-            reasoning_effort: generation.reasoning_effort,
+            reasoning_effort,
             service_tier: match speed {
                 config::types::provider::ModelSpeed::Fast => Some(providers::ServiceTier::Priority),
                 config::types::provider::ModelSpeed::Standard => None,
@@ -655,6 +690,15 @@ impl AgentModel for RoutedModel {
             .unwrap_or_else(|_| format!("unresolved:{}", logical.as_str()))
     }
 
+    fn selected_reasoning_effort(&self, role: Role, category: Option<&str>) -> Option<String> {
+        let binding = self.agents.binding_for(role_key(role), category).ok()?;
+        let logical = LogicalModelId::from(binding.logical_model);
+        let route = self
+            .resolve("runtime-selected-model", &logical, false)
+            .ok()?;
+        self.candidate_reasoning_effort(&logical, &route)
+    }
+
     fn available_profiles(&self) -> Vec<ProfileSummary> {
         RoutedModel::available_profiles(self)
     }
@@ -685,6 +729,16 @@ pub struct ProfileSummary {
     pub provider_type: model::ProviderType,
     pub models: Vec<String>,
     pub default_model: Option<String>,
+    /// Configured effort choices by model ID; absent models use the common defaults.
+    pub effort_levels: BTreeMap<String, Vec<String>>,
+}
+
+/// Route and request settings resolved for one invocation.
+struct ResolvedInvocation {
+    route: routing::ResolvedRoute,
+    generation: config::GenerationOverridesConfig,
+    /// Explicit selection's effort, or the matched routing candidate's.
+    reasoning_effort: Option<String>,
 }
 
 fn route_resolution_error(
@@ -782,6 +836,11 @@ pub fn compose_routed_model(
                     .unwrap_or_else(|| provider.profile.default_model.clone()),
             })
         })
+        .collect();
+    model.effort_levels = config
+        .providers
+        .iter()
+        .map(|(name, profile)| (name.clone(), profile.effort_levels_by_model()))
         .collect();
     model.event_bus = event_bus;
     model.credential_store = Some(credential_store);

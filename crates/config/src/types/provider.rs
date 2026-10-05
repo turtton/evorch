@@ -375,6 +375,14 @@ impl ProviderProfileConfig {
             .collect()
     }
 
+    /// `effort_levels` を明示したモデルの推論強度一覧をモデル ID ごとに返す。
+    pub fn effort_levels_by_model(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.models
+            .iter()
+            .filter_map(|entry| Some((entry.id.clone(), entry.effort_levels.clone()?)))
+            .collect()
+    }
+
     /// 利用可否によらずすべてのモデル ID を設定順で返す。
     pub fn model_ids(&self) -> impl Iterator<Item = &str> {
         self.models.iter().map(|entry| entry.id.as_str())

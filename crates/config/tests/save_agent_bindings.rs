@@ -107,34 +107,25 @@ fn save_agent_bindings_preserves_existing_unrelated_config_sections() {
     );
 }
 
-// Given: 自由形式の reasoning_effort を持つ worker binding
-// When: 保存してロードする
-// Then: 文字列がそのままラウンドトリップされる (enum 検証で落ちない)
+// Given: 廃止された agents.worker.generation.reasoning_effort を含む既存設定
+// When: ロードしてから agents を保存し直す
+// Then: ロードは失敗せず、保存結果から旧キーが消え、他の generation 値は残る
 #[test]
-fn save_role_binding_roundtrips_freeform_reasoning_effort() {
+fn legacy_role_reasoning_effort_is_ignored_and_dropped_on_save() {
     let directory = tempfile::tempdir().expect("temporary directory");
     std::fs::create_dir_all(directory.path().join(".evorch")).expect("config directory");
     let path = directory.path().join(".evorch/config.toml");
-    let agents = AgentsConfig {
-        worker: WorkerBindingConfig {
-            base: RoleBindingConfig {
-                generation: GenerationOverridesConfig {
-                    reasoning_effort: Some("xhigh".into()),
-                    ..GenerationOverridesConfig::default()
-                },
-                ..RoleBindingConfig::default()
-            },
-            categories: Default::default(),
-        },
-        ..AgentsConfig::default()
-    };
+    std::fs::write(
+        &path,
+        "version = 2\n[agents.worker.generation]\ntemperature = 0.2\nreasoning_effort = 'xhigh'\n",
+    )
+    .expect("fixture");
 
-    save_agent_bindings(&path, &agents).expect("agent bindings save succeeds");
     let loaded = load(directory.path());
+    assert_eq!(loaded.agents.worker.generation.temperature, Some(0.2));
+    save_agent_bindings(&path, &loaded.agents).expect("agent bindings save succeeds");
 
-    let role = loaded
-        .agents
-        .binding_for("worker", None)
-        .expect("worker binding");
-    assert_eq!(role.generation.reasoning_effort.as_deref(), Some("xhigh"));
+    let text = std::fs::read_to_string(&path).expect("saved text");
+    assert!(!text.contains("reasoning_effort"), "{text}");
+    assert_eq!(load(directory.path()).agents, loaded.agents);
 }
