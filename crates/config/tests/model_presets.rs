@@ -76,8 +76,7 @@ fn populated_model_metadata_roundtrips_through_real_loader() {
     let doc = "version = 2\n[providers.local]\nmodels = [{ id = 'x', enabled = true, metadata_source = 'models-dev', metadata_ref = 'deepseek/x', preset = 'deepseek-v4', context_window = 64000 }]\n[model_presets.deepseek-v4]\ncontext_window = 128000\nmax_output_tokens = 8192\ninput_price_per_million_usd = 0.25\noutput_price_per_million_usd = 1.5\n";
     std::fs::write(tmp.path().join(".evorch/config.toml"), doc).unwrap();
     let config = Config::load(&LoadOptions {
-        project_dir: Some(tmp.path().to_owned()),
-        user_config_dir: Some(tmp.path().join("empty-user")),
+        user_config_dir: Some(tmp.path().join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

@@ -10,6 +10,7 @@ use candidate::candidate_picker;
 pub enum RoutingSettingsAction {
     Save,
     Cancel,
+    Profile(crate::model::role_profiles::RoleProfileAction),
 }
 
 pub fn routing_settings_modal(
@@ -26,6 +27,15 @@ pub fn routing_settings_modal(
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Routing settings"));
             ui.label(muted("Candidates are tried from top to bottom. An empty override uses the profile default."));
+            ui.add_enabled_ui(!busy, |ui| {
+                if let Some(profile) = crate::panes::role_profiles::role_profile_bar(
+                    ui,
+                    "routing",
+                    &mut model.profiles,
+                ) {
+                    action = Some(RoutingSettingsAction::Profile(profile));
+                }
+            });
             ui.add_enabled_ui(!busy, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("routing-routes")

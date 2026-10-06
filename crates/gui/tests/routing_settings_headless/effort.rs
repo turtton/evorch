@@ -35,7 +35,7 @@ fn candidate_reasoning_effort_offers_model_levels_and_saves() {
     // Then: the candidate effort is persisted and the reloaded runtime reports it.
     let saved = config::Config::load(&config::LoadOptions {
         project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
+        user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

@@ -5,8 +5,8 @@ use config::{
 
 fn load(directory: &std::path::Path) -> Config {
     Config::load(&LoadOptions {
-        project_dir: Some(directory.to_path_buf()),
-        user_config_dir: Some(directory.join("user-empty")),
+        // The saved file is read as the user layer; projects may only select a role profile.
+        user_config_dir: Some(directory.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

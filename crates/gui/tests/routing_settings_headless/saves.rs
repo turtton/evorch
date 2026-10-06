@@ -78,13 +78,7 @@ fn route_rename_saves_agents_and_reseeds_models() {
     finish(&mut harness);
     // Then: disk, reseeded routing/role models and runtime use the new name.
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    let saved = config::Config::load(&config::LoadOptions {
-        project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("saved");
+    let saved = config::Config::load(&super::support::load_options(temp.path())).expect("saved");
     assert!(saved.routing.routes.contains_key("new"));
     assert!(!saved.routing.routes.contains_key("old"));
     assert_eq!(saved.agents.explorer.logical_model.as_deref(), Some("new"));
@@ -110,8 +104,8 @@ fn route_rename_saves_agents_and_reseeds_models() {
 }
 
 #[test]
-fn route_rename_loads_fresh_effective_agents_from_lower_layers() {
-    // Given: routing is opened before a user-layer binding is added.
+fn route_rename_loads_fresh_bindings_written_after_opening() {
+    // Given: routing is opened before an external edit adds a binding to the save target.
     let temp = tempfile::tempdir().expect("temp");
     let (mut state, _) = fixture(temp.path());
     let path = config::project_main_config_path(temp.path());
@@ -126,39 +120,24 @@ fn route_rename_loads_fresh_effective_agents_from_lower_layers() {
         .routing_settings_mut()
         .route_name_edits
         .insert("old".into(), "new".into());
-    std::fs::create_dir_all(temp.path().join("user")).expect("user directory");
-    let user_path = temp.path().join("user/config.toml");
-    let user_config = "[agents.explorer]\nlogical_model = 'old'\npreset = 'keep-me'\n";
-    std::fs::write(&user_path, user_config).expect("new lower-layer binding");
-    // When: submitting after the lower-layer update.
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!("{text}\n[agents.explorer]\nlogical_model = 'old'\npreset = 'keep-me'\n"),
+    )
+    .expect("external binding");
+    // When: submitting after the external update.
     state.submit_routing_settings();
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     finish(&mut harness);
-    // Then: the project shadows the old ref without changing the lower layer.
+    // Then: the fresh binding follows the rename and keeps its other fields.
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    let project = config::Config::load(&config::LoadOptions {
-        project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("no-user-layer")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("project-only config");
+    let effective =
+        config::Config::load(&super::support::load_options(temp.path())).expect("effective");
     assert_eq!(
-        project.agents.explorer.logical_model.as_deref(),
+        effective.agents.explorer.logical_model.as_deref(),
         Some("new")
     );
-    assert_eq!(project.agents.explorer.preset, None);
-    assert_eq!(
-        std::fs::read_to_string(user_path).expect("user config"),
-        user_config
-    );
-    let effective = config::Config::load(&config::LoadOptions {
-        project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("effective config");
     assert_eq!(effective.agents.explorer.preset.as_deref(), Some("keep-me"));
     harness.state_mut().open_role_settings();
     assert_eq!(harness.state().role_settings().agents, effective.agents);
@@ -324,13 +303,7 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
     finish(&mut harness);
     // Then: the renamed binding works and the unrelated higher-layer value is preserved.
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    let saved = config::Config::load(&config::LoadOptions {
-        project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("user")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("saved");
+    let saved = config::Config::load(&super::support::load_options(temp.path())).expect("saved");
     assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("new"));
     assert_eq!(
         saved.agents.reviewer.logical_model.as_deref(),
@@ -350,56 +323,53 @@ fn route_rename_allows_unrelated_project_dropin_binding() {
 }
 
 #[test]
-fn route_rename_allows_old_route_retained_in_user_layer() {
-    // Given: the user layer owns both the old route and an explicit binding.
+fn route_rename_in_named_profile_leaves_default_profile_untouched() {
+    // Given: default and a named profile both use the old route.
     let temp = tempfile::tempdir().expect("temp");
-    let (mut state, _) = fixture(temp.path());
-    let user = temp.path().join("user");
-    std::fs::create_dir_all(&user).expect("user directory");
-    let original = "[routing.routes]\nold = [{profile = 'local'}]\n\
-                    [agents.worker]\nlogical_model = 'old'\n";
-    std::fs::write(user.join("config.toml"), original).expect("user config");
+    let (mut state, runtime) = fixture(temp.path());
+    let path = config::project_main_config_path(temp.path());
+    let text = std::fs::read_to_string(&path).expect("config");
+    std::fs::write(
+        &path,
+        format!(
+            "{text}\n[routing.routes]\nold = [{{profile = 'local'}}]\n\
+             [agents.worker]\nlogical_model = 'old'\n\
+             [role_profiles.fast.routing.routes]\nold = [{{profile = 'accelerated'}}]\n\
+             [role_profiles.fast.agents.worker]\nlogical_model = 'old'\n"
+        ),
+    )
+    .expect("profiles");
     state.open_routing_settings();
+    state.apply_routing_profile_action(gui::model::role_profiles::RoleProfileAction::Select(
+        "fast".into(),
+    ));
+    assert_eq!(state.routing_settings().profiles.selected, "fast");
     state
         .routing_settings_mut()
         .rename_route("old", "new")
         .expect("rename");
-    // When: saving the renamed route and binding into the project main file.
+    // When: saving the rename while editing the named profile.
     state.submit_routing_settings();
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     finish(&mut harness);
-    // Then: the lower-layer key remains visible without blocking the effective binding rewrite.
+    // Then: only that profile changes; the active default profile keeps working.
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    assert!(
-        harness
-            .state()
-            .routing_settings()
-            .routes
-            .contains_key("old")
-    );
-    assert!(
-        harness
-            .state()
-            .routing_settings()
-            .routes
-            .contains_key("new")
-    );
+    assert_eq!(harness.state().routing_settings().profiles.selected, "fast");
+    let saved =
+        config::Config::load_unresolved(&super::support::load_options(temp.path())).expect("saved");
+    let fast = &saved.role_profiles["fast"];
+    assert!(fast.routing.routes.contains_key("new"));
+    assert!(!fast.routing.routes.contains_key("old"));
     assert_eq!(
-        harness.state().routing_settings().route_users["new"],
-        ["worker"]
+        fast.agents.worker.base.logical_model.as_deref(),
+        Some("new")
     );
-    assert!(harness.state().routing_settings().route_users["old"].is_empty());
+    assert!(saved.routing.routes.contains_key("old"));
     assert_eq!(
-        std::fs::read_to_string(user.join("config.toml")).expect("user config"),
-        original
+        saved.agents.worker.base.logical_model.as_deref(),
+        Some("old")
     );
-    let project: config::Config = toml::from_str(
-        &std::fs::read_to_string(config::project_main_config_path(temp.path())).expect("project"),
-    )
-    .expect("project config");
-    assert!(!project.routing.routes.contains_key("old"));
-    assert!(project.routing.routes.contains_key("new"));
-    assert_eq!(project.agents.worker.logical_model.as_deref(), Some("new"));
+    assert_eq!(runtime.selected_model(Role::Worker, None), "local/base");
 }
 
 #[test]
@@ -416,8 +386,12 @@ fn route_rename_load_error_keeps_disk_untouched_and_shows_error() {
         .route_name_edits
         .insert("old".into(), "new".into());
     // Given: the effective config becomes invalid after opening the editor.
-    std::fs::create_dir_all(temp.path().join("user")).expect("user directory");
-    std::fs::write(temp.path().join("user/config.toml"), "[broken").expect("invalid config");
+    let dropins = temp
+        .path()
+        .join(config::PROJECT_CONFIG_DIR)
+        .join("config.d");
+    std::fs::create_dir_all(&dropins).expect("drop-in directory");
+    std::fs::write(dropins.join("broken.toml"), "[broken").expect("invalid config");
     let path = config::project_main_config_path(temp.path());
     let before = std::fs::read(&path).expect("before");
     // When: saving a rename requires loading that effective config first.
@@ -534,16 +508,12 @@ fn route_rename_does_not_persist_unrelated_cli_agent_override() {
     finish(&mut harness);
 
     assert_eq!(harness.state().routing_settings().validation_error, None);
-    let project = config::Config::load(&config::LoadOptions {
-        project_dir: Some(temp.path().into()),
-        user_config_dir: Some(temp.path().join("no-user-layer")),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("project config");
-    assert_eq!(project.agents.worker.logical_model.as_deref(), Some("new"));
+    // Loading without the CLI layer shows exactly what was written to disk.
+    let saved =
+        config::Config::load(&super::support::load_options(temp.path())).expect("saved config");
+    assert_eq!(saved.agents.worker.logical_model.as_deref(), Some("new"));
     assert_eq!(
-        project.agents.reviewer.logical_model.as_deref(),
+        saved.agents.reviewer.logical_model.as_deref(),
         Some("stable")
     );
 }

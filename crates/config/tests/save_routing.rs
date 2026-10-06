@@ -2,8 +2,7 @@ use config::{Config, LoadOptions, RouteCandidateConfig, RoutingConfig};
 
 fn load(root: &std::path::Path) -> Config {
     Config::load(&LoadOptions {
-        project_dir: Some(root.into()),
-        user_config_dir: Some(root.join("user")),
+        user_config_dir: Some(root.join(".evorch")),
         read_env: false,
         ..Default::default()
     })

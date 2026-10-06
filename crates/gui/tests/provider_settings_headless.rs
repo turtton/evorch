@@ -152,7 +152,7 @@ fn workbench_with_config_path(root: &std::path::Path) -> HeadlessWorkbench<DemoS
         .with_provider_status(ProviderStatus::default())
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(root.to_path_buf()),
-            user_config_dir: Some(root.join("isolated-user-config")),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })
@@ -185,7 +185,7 @@ fn open_valid_settings(harness: &mut HeadlessWorkbench<DemoSource>) {
 fn load_config(root: &std::path::Path) -> config::Config {
     config::Config::load(&config::LoadOptions {
         project_dir: Some(root.to_path_buf()),
-        user_config_dir: Some(root.join("isolated-user-config")),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })
@@ -401,7 +401,7 @@ fn workbench_with_seeded_settings(
         .with_provider_status(ProviderStatus::default())
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(root.to_path_buf()),
-            user_config_dir: Some(root.join("isolated-user-config")),
+            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

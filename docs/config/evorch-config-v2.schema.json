@@ -147,6 +147,20 @@
       },
       "default": {}
     },
+    "role_profile": {
+      "description": "選択中のロール構成プロファイル名。`None` と `\"default\"` はトップレベルの\n`agents` / `routing` を使う。プロジェクト層が設定できる唯一のキー。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role_profiles": {
+      "description": "名前付きのロール構成プロファイル (マップキーがプロファイル名)。",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RoleProfileConfig"
+      }
+    },
     "routing": {
       "description": "ルーティング設定。",
       "$ref": "#/$defs/RoutingConfig",
@@ -1090,6 +1104,54 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoleProfileConfig": {
+      "description": "名前付きのロール構成プロファイル。\n\nトップレベルの `[agents]` / `[routing]` と同じ形で、プロジェクトは\n`role_profile = \"<name>\"` によっていずれかを選択する。",
+      "type": "object",
+      "properties": {
+        "agents": {
+          "description": "ロール別エージェントバインディング。",
+          "$ref": "#/$defs/AgentsConfig",
+          "default": {
+            "explorer": {
+              "generation": {}
+            },
+            "orchestrator": {
+              "generation": {}
+            },
+            "reviewer": {
+              "categories": {},
+              "generation": {}
+            },
+            "roles": {
+              "multimodal_looker": {
+                "generation": {}
+              },
+              "oracle": {
+                "generation": {}
+              },
+              "planner": {
+                "generation": {}
+              },
+              "web_researcher": {
+                "generation": {}
+              }
+            },
+            "worker": {
+              "categories": {},
+              "generation": {}
+            }
+          }
+        },
+        "routing": {
+          "description": "ルーティング設定。",
+          "$ref": "#/$defs/RoutingConfig",
+          "default": {
+            "routes": {}
+          }
         }
       },
       "additionalProperties": false

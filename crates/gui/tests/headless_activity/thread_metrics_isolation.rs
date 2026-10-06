@@ -18,6 +18,7 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
     .unwrap();
     let config = config::Config::load(&config::LoadOptions {
         project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

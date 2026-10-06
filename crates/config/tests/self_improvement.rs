@@ -6,8 +6,7 @@ use config::{Config, ConfigError, LoadOptions, SelfImprovementConfig};
 
 fn options(directory: &Path) -> LoadOptions {
     LoadOptions {
-        project_dir: Some(directory.to_path_buf()),
-        user_config_dir: Some(directory.join("empty-user")),
+        user_config_dir: Some(directory.join(".evorch")),
         read_env: false,
         ..Default::default()
     }

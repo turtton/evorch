@@ -6,7 +6,7 @@ fn fixture(path: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
         .unwrap()
         .with_settings_load_options(config::LoadOptions {
             project_dir: Some(path.to_path_buf()),
-            user_config_dir: Some(path.join("user")),
+            user_config_dir: Some(path.join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })
@@ -17,7 +17,7 @@ fn fixture(path: &std::path::Path) -> HeadlessWorkbench<DemoSource> {
 fn reload(path: &std::path::Path) -> config::Config {
     config::Config::load(&config::LoadOptions {
         project_dir: Some(path.into()),
-        user_config_dir: Some(path.join("user")),
+        user_config_dir: Some(path.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

@@ -111,9 +111,8 @@ fn harness(scope: &str) -> Harness {
         read_response(3),
         ScriptedResponse::text_stream("second-done", MODEL, ["done"]),
     ]);
-    std::fs::create_dir_all(repo.join(".evorch")).unwrap();
     std::fs::write(
-        config::project_main_config_path(&repo),
+        user_config.join("config.toml"),
         format!(
             r#"
 [providers.local]

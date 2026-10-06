@@ -62,7 +62,7 @@ profile = "local"
     .expect("config fixture");
     let config = Config::load(&LoadOptions {
         project_dir: Some(directory.path().to_path_buf()),
-        user_config_dir: Some(directory.path().join("empty-user-config")),
+        user_config_dir: Some(directory.path().join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..LoadOptions::default()
     })

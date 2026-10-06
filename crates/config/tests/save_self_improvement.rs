@@ -9,8 +9,7 @@ use config::{
 
 fn load(directory: &Path) -> Config {
     Config::load_strict(&LoadOptions {
-        project_dir: Some(directory.to_path_buf()),
-        user_config_dir: Some(directory.join("empty-user")),
+        user_config_dir: Some(directory.join(".evorch")),
         read_env: false,
         ..Default::default()
     })

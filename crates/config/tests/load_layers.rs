@@ -82,49 +82,99 @@ fn dropins_override_main_file_lexicographic() {
     );
 }
 
-// Given: ユーザ層とプロジェクト層に同じキー / When: 読み込む
-// Then: プロジェクト層がユーザ層に優先し、プロジェクト内でもドロップインがメインに優先する
+// Given: ユーザ層の設定・プロファイルと、他のキーも書いたプロジェクト層 / When: 読み込む
+// Then: プロジェクト層は role_profile だけを決め (ドロップインが優先)、他のキーは無視される
 #[test]
-fn project_layer_overrides_user_layer() {
+fn project_layer_only_selects_role_profile() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let user = tmp.path().join("user");
     let project = tmp.path().join("project");
     write_file(
         &user.join("config.toml"),
-        "[permissions]\npreset = \"permissive\"\n",
+        "[permissions]\npreset = \"permissive\"\n\
+         [agents.worker]\nlogical_model = \"default-model\"\n\
+         [role_profiles.fast.agents.worker]\nlogical_model = \"fast-model\"\n\
+         [role_profiles.fast.routing.routes]\nfast-model = [{ profile = \"local\" }]\n",
     );
     write_file(
         &project.join(".evorch/config.toml"),
-        "[permissions]\npreset = \"strict\"\n[panel]\nlayout = \"default\"\n",
+        "role_profile = \"slow\"\n[permissions]\npreset = \"strict\"\n\
+         [agents.worker]\nlogical_model = \"project-model\"\n",
     );
     write_file(
-        &project.join(".evorch/config.d/20-compact.toml"),
-        "[panel]\nlayout = \"compact\"\n",
+        &project.join(".evorch/config.d/20-select.toml"),
+        "role_profile = \"fast\"\n[panel]\nlayout = \"compact\"\n",
+    );
+    let options = LoadOptions {
+        project_dir: Some(project.clone()),
+        user_config_dir: Some(user),
+        read_env: false,
+        ..LoadOptions::default()
+    };
+
+    for config in [
+        Config::load(&options).expect("読み込みできる"),
+        Config::load_strict(&options).expect("厳格に読み込みできる"),
+    ] {
+        assert_eq!(config.permissions.preset, "permissive");
+        assert_eq!(config.panel, config::PanelConfig::default());
+        assert_eq!(config.role_profile.as_deref(), Some("fast"));
+        assert_eq!(config.active_role_profile(), "fast");
+        assert_eq!(
+            config.agents.worker.logical_model.as_deref(),
+            Some("fast-model"),
+            "選択したプロファイルが実効の agents になる"
+        );
+        assert!(config.routing.routes.contains_key("fast-model"));
+    }
+    let unresolved = Config::load_unresolved(&options).expect("選択を反映せず読み込める");
+    assert_eq!(
+        unresolved.agents.worker.logical_model.as_deref(),
+        Some("default-model")
+    );
+    assert_eq!(unresolved.role_profile_names(), ["default", "fast"]);
+    assert_eq!(
+        config::project_role_profile(&project).expect("プロジェクトの選択"),
+        Some("fast".into())
+    );
+}
+
+// Given: 存在しないプロファイルを選ぶプロジェクト層 / When: 読み込む
+// Then: 読み込みは失敗せず、トップレベル (default) の割り当てを使う
+#[test]
+fn unknown_role_profile_falls_back_to_default() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let user = tmp.path().join("user");
+    let project = tmp.path().join("project");
+    write_file(
+        &user.join("config.toml"),
+        "[agents.worker]\nlogical_model = \"default-model\"\n",
+    );
+    write_file(
+        &project.join(".evorch/config.toml"),
+        "role_profile = \"missing\"\n",
     );
 
-    let config = Config::load(&LoadOptions {
+    let config = Config::load_strict(&LoadOptions {
         project_dir: Some(project),
         user_config_dir: Some(user),
         read_env: false,
         ..LoadOptions::default()
     })
-    .expect("読み込みできる");
+    .expect("未知のプロファイルでも読み込める");
 
+    assert_eq!(config.active_role_profile(), "default");
     assert_eq!(
-        config.permissions.preset, "strict",
-        "プロジェクト層がユーザ層に優先する"
-    );
-    assert_eq!(
-        config.panel.layout, "compact",
-        "プロジェクトのドロップインがプロジェクトのメインファイルに優先する"
+        config.agents.worker.logical_model.as_deref(),
+        Some("default-model")
     );
 }
 
-// Given: プロジェクトファイルと注入環境変数 / When: 環境変数レイヤーを有効にして読み込む
-// Then: 環境変数がプロジェクトファイルに優先する。read_env = false ならスキップされる
+// Given: 設定ファイルと注入環境変数 / When: 環境変数レイヤーを有効にして読み込む
+// Then: 環境変数が設定ファイルに優先する。read_env = false ならスキップされる
 // (既定のテーブル構造に合わせ、ログディレクトリ型フィールド log_dir を使用する)
 #[test]
-fn env_overrides_project() {
+fn env_overrides_config_file() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let project = tmp.path().join("project");
     write_file(
@@ -133,8 +183,7 @@ fn env_overrides_project() {
     );
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project.clone()),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: true,
         env: Some(env_vars(&[(
             "EVORCH_DIAGNOSTICS__LOG_DIR",
@@ -154,8 +203,7 @@ fn env_overrides_project() {
     );
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         env: Some(env_vars(&[(
             "EVORCH_DIAGNOSTICS__LOG_DIR",
@@ -190,8 +238,8 @@ fn cli_overrides_env() {
     .expect("CLI 上書き TOML を解析できる");
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        project_dir: None,
+        user_config_dir: Some(project.join(".evorch")),
         cli_overrides: Some(cli_overrides),
         file_overrides: BTreeMap::new(),
         read_env: true,
@@ -247,8 +295,7 @@ fn parse_error_reports_offending_path() {
     write_file(&broken, "= broken [metrics\n");
 
     let error = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -271,8 +318,7 @@ fn future_version_is_rejected() {
     write_file(&project.join(".evorch/config.toml"), "version = 999\n");
 
     let error = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -296,8 +342,7 @@ fn migrate_v1_file_gains_metrics_defaults() {
     write_file(&project.join(".evorch/config.toml"), "version = 1\n");
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -319,8 +364,7 @@ fn v1_file_with_partial_metrics_keeps_user_values() {
     );
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })
@@ -333,24 +377,22 @@ fn v1_file_with_partial_metrics_keeps_user_values() {
     );
 }
 
-// Given: metrics を上書きするバージョン 1 のユーザ層とバージョン 2 のプロジェクト層 / When: 読み込む
-// Then: 各ファイルがマージ前に移行され、プロジェクト層がユーザ層へ優先する
+// Given: metrics を上書きするバージョン 1 のメインとバージョン 2 のドロップイン / When: 読み込む
+// Then: 各ファイルがマージ前に移行され、ドロップインがメインへ優先する
 #[test]
 fn mixed_version_layers_each_migrated_before_merge() {
     let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
     let user = tmp.path().join("user");
-    let project = tmp.path().join("project");
     write_file(
         &user.join("config.toml"),
         "version = 1\n\n[metrics]\nenabled = false\n",
     );
     write_file(
-        &project.join(".evorch/config.toml"),
+        &user.join("config.d/10-current.toml"),
         "version = 2\n\n[metrics]\nretention_days = 7\n",
     );
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
         user_config_dir: Some(user),
         read_env: false,
         ..LoadOptions::default()
@@ -374,8 +416,7 @@ fn missing_version_treated_as_current() {
     );
 
     let config = Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(&tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

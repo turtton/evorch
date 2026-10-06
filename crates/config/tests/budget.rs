@@ -64,10 +64,9 @@ fn parses_identical_repeat_limit() {
 }
 
 #[test]
-fn loads_budget_from_project_file() {
-    // Given: an isolated project config with budget overrides.
+fn loads_budget_from_config_file() {
+    // Given: an isolated config file with budget overrides.
     let project = tempfile::tempdir().unwrap();
-    let user = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".evorch")).unwrap();
     std::fs::write(
         project.path().join(".evorch/config.toml"),
@@ -76,8 +75,7 @@ fn loads_budget_from_project_file() {
     .unwrap();
     // When: the real layered loader applies strict validation and defaults.
     let config = Config::load(&config::LoadOptions {
-        project_dir: Some(project.path().into()),
-        user_config_dir: Some(user.path().into()),
+        user_config_dir: Some(project.path().join(".evorch")),
         read_env: false,
         ..Default::default()
     })
@@ -96,13 +94,11 @@ fn loads_budget_from_project_file() {
 #[test]
 fn loads_explicit_cumulative_token_and_elapsed_limits() {
     let project = tempfile::tempdir().unwrap();
-    let user = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".evorch")).unwrap();
     std::fs::write(project.path().join(".evorch/config.toml"),
         "version = 2\n[budget]\nmax_tokens = 7654321\nmax_elapsed_secs = 1234\n[compaction]\nsummary_idle_timeout_secs = 45\nsummary_timeout_secs = 180\nfailure_cooldown_turns = 6").unwrap();
     let config = Config::load(&config::LoadOptions {
-        project_dir: Some(project.path().into()),
-        user_config_dir: Some(user.path().into()),
+        user_config_dir: Some(project.path().join(".evorch")),
         read_env: false,
         ..Default::default()
     })

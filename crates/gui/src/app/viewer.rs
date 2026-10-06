@@ -331,6 +331,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match routing_settings_modal(ui.ctx(), &mut self.routing_settings) {
                 Some(RoutingSettingsAction::Save) => self.submit_routing_settings(),
                 Some(RoutingSettingsAction::Cancel) => self.routing_settings.open = false,
+                Some(RoutingSettingsAction::Profile(action)) => {
+                    self.apply_routing_profile_action(action)
+                }
                 None => {}
             }
         }

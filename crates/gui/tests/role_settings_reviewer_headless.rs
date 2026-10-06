@@ -69,7 +69,7 @@ fn reviewer_category_edit_saves_reloads_and_previews_each_route() {
         assert_eq!(harness.state().role_settings().error, None);
         let saved = config::Config::load(&config::LoadOptions {
             project_dir: Some(temp.path().into()),
-            user_config_dir: Some(temp.path().join("user")),
+            user_config_dir: Some(temp.path().join(config::PROJECT_CONFIG_DIR)),
             read_env: false,
             ..Default::default()
         })

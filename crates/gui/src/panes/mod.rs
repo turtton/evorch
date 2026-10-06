@@ -23,6 +23,7 @@ pub mod provider_models;
 pub mod provider_settings;
 pub mod quota_footer;
 pub mod requests;
+pub mod role_profiles;
 pub mod role_settings;
 pub mod routing_settings;
 pub mod self_improvement;

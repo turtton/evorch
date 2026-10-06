@@ -99,8 +99,7 @@ fn reload_saved_config_preserves_enabled_flags() {
     save_openai_compatible_provider(&tmp.path().join(".evorch/config.toml"), &candidate).unwrap();
     // When
     let config = Config::load(&LoadOptions {
-        project_dir: Some(tmp.path().to_path_buf()),
-        user_config_dir: Some(tmp.path().join("empty")),
+        user_config_dir: Some(tmp.path().join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

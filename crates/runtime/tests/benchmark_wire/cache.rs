@@ -88,7 +88,7 @@ profile = "local"
     .unwrap();
     let config = config::Config::load(&config::LoadOptions {
         project_dir: Some(config_root.into()),
-        user_config_dir: Some(config_root.join("empty-user")),
+        user_config_dir: Some(config_root.join(config::PROJECT_CONFIG_DIR)),
         read_env: false,
         ..Default::default()
     })

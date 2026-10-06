@@ -1,5 +1,7 @@
 use super::WorkbenchState;
+use super::role_profiles::SettingsWrite;
 use crate::model::{
+    role_profiles::{RoleProfileAction, RoleProfileJob, RoleProfilePicker},
     role_settings::{RoleSettingsModel, categories_for_role},
     tasks::AgentRunSource,
 };
@@ -13,20 +15,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &mut self.role_settings
     }
 
-    fn role_load_options(&self) -> config::LoadOptions {
-        self.production_model.as_ref().map_or_else(
-            || self.settings_load_options.clone(),
-            |(context, _)| context.load_options.clone(),
-        )
+    pub fn open_role_settings(&mut self) {
+        self.open_role_settings_profile(None);
     }
 
-    pub fn open_role_settings(&mut self) {
+    /// Opens the modal on `profile`, or the active project's profile when absent.
+    pub fn open_role_settings_profile(&mut self, profile: Option<&str>) {
         if self.settings_save_in_progress() {
             return;
         }
-        match config::Config::load(&self.role_load_options()) {
-            Ok(config) => self.seed_role_settings(&config),
-            Err(error) => self.role_settings.error = Some(error.to_string()),
+        match self.load_profile_settings(profile) {
+            Ok((config, picker)) => self.seed_role_settings(&config, picker),
+            Err(error) => self.role_settings.error = Some(error),
         }
         self.provider_settings.open = false;
         self.close_theme_settings();
@@ -44,14 +44,66 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Some(RoleSettingsAction::CreateRoute(logical)) => {
                     self.open_routing_settings_prefill(&logical)
                 }
+                Some(RoleSettingsAction::Profile(action)) => self.apply_role_profile_action(action),
                 None => {}
             }
         }
     }
 
-    fn seed_role_settings(&mut self, config: &config::Config) {
+    pub fn apply_role_profile_action(&mut self, action: RoleProfileAction) {
+        if self.settings_save_in_progress() {
+            return;
+        }
+        let (job, write): (RoleProfileJob, Box<SettingsWrite>) = match action {
+            RoleProfileAction::Select(name) => return self.open_role_settings_profile(Some(&name)),
+            RoleProfileAction::Create(name) => {
+                let name = match self.role_settings.profiles.validate_new_name(&name) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        self.role_settings.error = Some(error);
+                        return;
+                    }
+                };
+                let source = self.role_settings.profiles.selected.clone();
+                let target = name.clone();
+                (
+                    RoleProfileJob::Created(name),
+                    Box::new(move |path, current| {
+                        super::role_profiles::create_profile(path, current, &source, &target)
+                    }),
+                )
+            }
+            RoleProfileAction::Delete(name) => {
+                let target = name.clone();
+                (
+                    RoleProfileJob::Deleted(name),
+                    Box::new(move |path, _| super::role_profiles::delete_profile(path, &target)),
+                )
+            }
+        };
+        self.start_role_job(job, write);
+    }
+
+    fn start_role_job(&mut self, job: RoleProfileJob, write: Box<SettingsWrite>) {
+        match self.spawn_settings_job(write) {
+            Ok(rx) => {
+                self.role_settings.error = None;
+                self.role_settings.job = job;
+                self.role_settings.save_rx = Some(rx);
+            }
+            Err(error) => self.role_settings.error = Some(error),
+        }
+    }
+
+    fn seed_role_settings(&mut self, config: &config::Config, profiles: RoleProfilePicker) {
         use runtime::Role;
+        let edits_effective = profiles.edits_effective();
         self.role_settings = RoleSettingsModel::seed_from_config(config);
+        self.role_settings.profiles = profiles;
+        if !edits_effective {
+            // The runtime resolves the project's profile, not the one being edited.
+            return;
+        }
         let roles = [
             ("Orchestrator", Role::Orchestrator),
             ("Explorer", Role::Explorer),
@@ -100,35 +152,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.role_settings.error = Some(error.to_string());
             return;
         }
-        let Some(path) = self.provider_settings_path.clone() else {
-            self.role_settings.error = Some("No project config path is configured".into());
-            return;
-        };
         let agents = self.role_settings.agents.clone();
-        let options = self.role_load_options();
-        let production = self.production_model.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.role_settings.error = None;
-        self.role_settings.save_rx = Some(rx);
-        std::thread::spawn(move || {
-            let result = path
-                .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
-                .map_err(|error| error.to_string())
-                .and_then(|()| {
-                    config::save_agent_bindings(&path, &agents).map_err(|error| error.to_string())
-                })
-                .and_then(|()| {
-                    if let Some((context, model)) = production {
-                        model.replace(context.reload()?);
-                    }
-                    config::Config::load(&options).map_err(|error| error.to_string())
-                });
-            if let Err(error) = &result {
-                tracing::error!(%error, "role settings update or recomposition failed");
-            }
-            let _ = tx.send(result);
-        });
+        let profile = self.role_settings.profiles.selected.clone();
+        self.start_role_job(
+            RoleProfileJob::Save,
+            Box::new(move |path, _| {
+                config::save_role_profile_bindings(path, Some(&profile), None, Some(&agents))
+                    .map_err(|error| error.to_string())
+            }),
+        );
     }
 
     pub fn poll_role_save(&mut self) {
@@ -137,9 +169,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         };
         match rx.try_recv() {
             Ok(Ok(config)) => {
-                self.seed_role_settings(&config);
-                self.role_settings.open = false;
-                self.push_notice("Agent role settings updated");
+                let job = std::mem::take(&mut self.role_settings.job);
+                let preferred = match &job {
+                    RoleProfileJob::Save => Some(self.role_settings.profiles.selected.clone()),
+                    RoleProfileJob::Created(name) => Some(name.clone()),
+                    RoleProfileJob::Deleted(_) => None,
+                };
+                let (view, picker) = self.profile_settings_from(&config, preferred.as_deref());
+                self.seed_role_settings(&view, picker);
+                self.role_settings.open = job != RoleProfileJob::Save;
+                match job {
+                    RoleProfileJob::Save => self.push_notice("Agent role settings updated"),
+                    RoleProfileJob::Created(name) => {
+                        self.push_notice(format!("Role profile '{name}' created"));
+                    }
+                    RoleProfileJob::Deleted(name) => {
+                        self.push_notice(format!("Role profile '{name}' deleted"));
+                    }
+                }
             }
             Ok(Err(error)) => self.role_settings.error = Some(error),
             Err(std::sync::mpsc::TryRecvError::Empty) => self.role_settings.save_rx = Some(rx),

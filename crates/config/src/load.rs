@@ -2,6 +2,8 @@
 //!
 //! レイヤーの優先順位 (低い順):
 //! 組み込み既定値 < ユーザ層 < プロジェクト層 < 環境変数層 < CLI 上書き。
+//! プロジェクト層は `role_profile` (ロール構成プロファイルの選択) だけを設定でき、
+//! それ以外のキーは警告して無視する。
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -84,9 +86,13 @@ impl Config {
     ///    もの。マイグレーションは通さない — 既に現行バージョンのため)。
     /// 2. ユーザ層 (`config.toml` → `config.d/*.toml` 辞書順)。
     /// 3. プロジェクト層 (`.evorch/config.toml` → `.evorch/config.d/*.toml` 辞書順)。
+    ///    `version` と `role_profile` 以外のキーは警告して無視する。
     /// 4. 環境変数層 (`EVORCH_` プレフィックス、[`Option::env`] が `Some` なら
     ///    注入ソースを優先)。
     /// 5. CLI 上書き。
+    ///
+    /// 最後に `role_profile` の選択を実効の `agents` / `routing` に反映する
+    /// ([`Config::load_unresolved`] は反映しない)。
     ///
     /// ディスクから読む各ファイルは TOML パース後、マージ前に [`crate::migrate::run`]
     /// をファイル単位で通す。`file_overrides` の値は現行形式としてそのまま使用する。
@@ -110,12 +116,24 @@ impl Config {
     ///   エラーバリアントが存在しないため、経緯を文字列に載せた
     ///   [`ConfigError::Migration`] として報告する)。
     pub fn load(opts: &LoadOptions) -> Result<Config, ConfigError> {
-        Self::load_with_unknown_field_policy(opts, false)
+        let mut config = Self::load_with_unknown_field_policy(opts, false)?;
+        config.apply_role_profile();
+        Ok(config)
     }
 
     /// 未知フィールドもエラーにする厳格な読み込み。設定の検証に使う。
     pub fn load_strict(opts: &LoadOptions) -> Result<Config, ConfigError> {
-        Self::load_with_unknown_field_policy(opts, true)
+        let mut config = Self::load_with_unknown_field_policy(opts, true)?;
+        config.apply_role_profile();
+        Ok(config)
+    }
+
+    /// `role_profile` の選択を反映せずに読み込む。
+    ///
+    /// トップレベルの `agents` / `routing` は `default` プロファイルのまま残るため、
+    /// 設定画面でプロファイルごとの値を編集する用途に使う。
+    pub fn load_unresolved(opts: &LoadOptions) -> Result<Config, ConfigError> {
+        Self::load_with_unknown_field_policy(opts, false)
     }
 
     fn load_with_unknown_field_policy(
@@ -140,7 +158,7 @@ impl Config {
             }
         }
         crate::strict::validate_strict(&trusted)?;
-        let mut checker: crate::CommentCheckerConfig = trusted["comment_checker"]
+        let checker: crate::CommentCheckerConfig = trusted["comment_checker"]
             .clone()
             .try_into()
             .map_err(|err| {
@@ -148,14 +166,7 @@ impl Config {
             })?;
 
         if let Some(dir) = &opts.project_dir {
-            let disabled = merge_dir_layer(
-                &mut merged,
-                &dir.join(PROJECT_CONFIG_DIR),
-                USER_MAIN_FILE,
-                &opts.file_overrides,
-            )?;
-            // Project opt-out is monotonic across main/drop-ins, env and CLI.
-            checker.enabled &= !disabled;
+            merge_project_layer(&mut merged, dir, &opts.file_overrides)?;
         }
 
         if opts.read_env {
@@ -235,6 +246,9 @@ pub(crate) fn user_config_dir_from(xdg: Option<&str>, home: Option<&str>) -> Opt
     Some(PathBuf::from(home).join(".config").join("evorch"))
 }
 
+/// プロジェクト層が設定できるキー。それ以外はユーザ設定だけが決める。
+const PROJECT_KEYS: &[&str] = &["version", "role_profile"];
+
 /// 1 レイヤー分のディレクトリ (メインファイル + ドロップイン) を反映する。
 ///
 /// メインファイルを先に、`config.d/*.toml` を辞書順に (後勝ちで) 深マージする。
@@ -243,21 +257,62 @@ fn merge_dir_layer(
     dir: &Path,
     main_file: &str,
     file_overrides: &BTreeMap<PathBuf, toml::Value>,
-) -> Result<bool, ConfigError> {
-    let mut disabled = false;
-    let mut paths = vec![dir.join(main_file)];
-    paths.extend(collect_dropins(&dir.join(DROPIN_DIR))?);
-    for path in paths {
+) -> Result<(), ConfigError> {
+    for path in layer_paths(dir, main_file)? {
         if let Some(value) = read_file_migrated(&path, file_overrides)? {
-            disabled |= value
-                .get("comment_checker")
-                .and_then(|c| c.get("enabled"))
-                .and_then(toml::Value::as_bool)
-                == Some(false);
             *merged = deep_merge(merged.clone(), value);
         }
     }
-    Ok(disabled)
+    Ok(())
+}
+
+fn layer_paths(dir: &Path, main_file: &str) -> Result<Vec<PathBuf>, ConfigError> {
+    let mut paths = vec![dir.join(main_file)];
+    paths.extend(collect_dropins(&dir.join(DROPIN_DIR))?);
+    Ok(paths)
+}
+
+/// プロジェクト層を反映する。`role_profile` 以外のキーは警告して無視する。
+fn merge_project_layer(
+    merged: &mut toml::Value,
+    project_dir: &Path,
+    file_overrides: &BTreeMap<PathBuf, toml::Value>,
+) -> Result<(), ConfigError> {
+    for path in layer_paths(&project_dir.join(PROJECT_CONFIG_DIR), USER_MAIN_FILE)? {
+        let Some(mut value) = read_file_migrated(&path, file_overrides)? else {
+            continue;
+        };
+        if let Some(table) = value.as_table_mut() {
+            table.retain(|key, _| {
+                let allowed = PROJECT_KEYS.contains(&key);
+                if !allowed {
+                    tracing::warn!(
+                        path = %path.display(),
+                        field = %key,
+                        "ignoring project config field; projects may only select role_profile"
+                    );
+                }
+                allowed
+            });
+        }
+        *merged = deep_merge(merged.clone(), value);
+    }
+    Ok(())
+}
+
+/// プロジェクト層が選択しているロール構成プロファイル名を返す。
+///
+/// ユーザ層や環境変数は参照しない。未設定なら `None`。
+///
+/// # Errors
+/// プロジェクト設定ファイルの読み取り・パース・マイグレーションに失敗した場合。
+pub fn project_role_profile(project_dir: &Path) -> Result<Option<String>, ConfigError> {
+    let mut merged = toml::Value::Table(toml::map::Map::new());
+    merge_project_layer(&mut merged, project_dir, &BTreeMap::new())?;
+    Ok(merged
+        .get("role_profile")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned))
 }
 
 /// ドロップインディレクトリから `*.toml` ファイルを辞書順に収集する。

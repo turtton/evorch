@@ -18,6 +18,7 @@ mod project_dialog;
 mod provider_settings;
 mod questions;
 mod restoration;
+mod role_profiles;
 mod role_settings;
 mod routing_settings;
 mod sandbox_settings;

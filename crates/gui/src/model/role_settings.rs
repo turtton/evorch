@@ -17,6 +17,8 @@ pub struct RoleSettingsModel {
     pub routes_empty: bool,
     pub resolved_previews: BTreeMap<String, Option<String>>,
     pub error: Option<String>,
+    pub profiles: super::role_profiles::RoleProfilePicker,
+    pub(crate) job: super::role_profiles::RoleProfileJob,
     pub(crate) save_rx: Option<Receiver<Result<config::Config, String>>>,
 }
 

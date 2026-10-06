@@ -32,12 +32,7 @@ default_model = "fast"
 "#,
     )
     .expect("fixture");
-    let mut load_options = config::LoadOptions {
-        project_dir: Some(root.into()),
-        user_config_dir: Some(root.join("user")),
-        read_env: false,
-        ..Default::default()
-    };
+    let mut load_options = load_options(root);
     configure(&mut load_options);
     let context = gui::model::production::ProductionModel {
         load_options,
@@ -56,6 +51,16 @@ default_model = "fast"
         .with_provider_settings_path(config::project_main_config_path(root))
         .with_production_model(context, model.clone());
     (state, model)
+}
+
+/// The fixture's layers: the project directory doubles as the user config directory.
+pub(super) fn load_options(root: &std::path::Path) -> config::LoadOptions {
+    config::LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    }
 }
 
 pub(super) fn finish(harness: &mut HeadlessWorkbench<DemoSource>) {

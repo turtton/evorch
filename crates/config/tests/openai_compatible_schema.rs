@@ -30,8 +30,7 @@ fn load_project(tmp: &tempfile::TempDir, content: &str) -> Result<Config, Config
     let project = tmp.path().join("project");
     write_file(&project.join(".evorch/config.toml"), content);
     Config::load(&LoadOptions {
-        project_dir: Some(project),
-        user_config_dir: Some(empty_user_dir(tmp)),
+        user_config_dir: Some(project.join(".evorch")),
         read_env: false,
         ..LoadOptions::default()
     })

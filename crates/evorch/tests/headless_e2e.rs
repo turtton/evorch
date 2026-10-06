@@ -145,10 +145,11 @@ fn parse_args_requires_run_subcommand() {
     assert!(matches!(error, HeadlessError::Usage(_)));
 }
 
-fn write_project_config(root: &std::path::Path, base_url: &str) {
-    std::fs::create_dir_all(root.join(config::PROJECT_CONFIG_DIR)).expect("config directory");
+/// プロバイダとルーティングは信頼済みのユーザ層 (`<root>/user-config`) に置く。
+fn write_user_config(root: &std::path::Path, base_url: &str) {
+    std::fs::create_dir_all(root.join("user-config")).expect("config directory");
     std::fs::write(
-        config::project_main_config_path(root),
+        user_config_path(root),
         format!(
             r#"[providers.local]
 type = "openai-compatible"
@@ -165,7 +166,11 @@ profile = "local"
 "#
         ),
     )
-    .expect(".evorch/config.toml を書ける");
+    .expect("user-config/config.toml を書ける");
+}
+
+fn user_config_path(root: &std::path::Path) -> PathBuf {
+    root.join("user-config").join("config.toml")
 }
 
 fn headless_args(project_dir: PathBuf, user_config_dir: Option<PathBuf>) -> HeadlessArgs {
@@ -190,10 +195,10 @@ async fn headless_run_injects_user_agents_from_explicit_config_directory() {
         mock_openai::WriteMode::default(),
         vec![MODEL.to_owned()],
     );
-    write_project_config(directory.path(), &mock.base_url());
+    write_user_config(directory.path(), &mock.base_url());
     let env = MapEnv::from_iter([(KEY_ENV, KEY)]);
     let user_config = directory.path().join("user-config");
-    std::fs::create_dir(&user_config).expect("user config directory");
+    std::fs::create_dir_all(&user_config).expect("user config directory");
     let body = "---\nalwaysApply: false\n---\n# User instructions\nHEADLESS-USER-AGENTS\n";
     std::fs::write(user_config.join("AGENTS.md"), body).expect("user AGENTS.md");
     std::fs::write(
@@ -268,9 +273,9 @@ async fn headless_web_tools_follow_saved_setting_and_cli_override() {
             mock_openai::WriteMode::default(),
             vec![MODEL.to_owned()],
         );
-        write_project_config(directory.path(), &mock.base_url());
+        write_user_config(directory.path(), &mock.base_url());
         config::save_sandbox(
-            &config::project_main_config_path(directory.path()),
+            &user_config_path(directory.path()),
             config::SandboxConfig {
                 web_tools_enabled: saved,
                 ..Default::default()

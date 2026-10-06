@@ -35,8 +35,10 @@ fn fixture(root: &Path, base_url: &str) -> PathBuf {
     .unwrap();
     std::fs::write(fixture.join(".gitignore"), "ignored.txt\n").unwrap();
     std::fs::write(fixture.join("ignored.txt"), "restore ignored input too").unwrap();
+    // プロバイダとルーティングは信頼済みのユーザ層に置く (プロジェクト層は role_profile のみ)。
+    std::fs::create_dir_all(root.join("user")).unwrap();
     std::fs::write(
-        config::project_main_config_path(&fixture),
+        root.join("user").join("config.toml"),
         format!(
             r#"
 [providers.local]
@@ -697,9 +699,7 @@ async fn failed_nonselected_delegate_poison_survives_parent_recovery_and_selecte
     let spec = fixture(root.path(), &mock.base_url());
     let mut config = std::fs::OpenOptions::new()
         .append(true)
-        .open(config::project_main_config_path(
-            &root.path().join("fixture"),
-        ))
+        .open(root.path().join("user").join("config.toml"))
         .unwrap();
     writeln!(config, "\n[providers.failed]\ntype = \"openai-compatible\"\nbase_url = \"{}\"\napi_key_env = \"{KEY_ENV}\"\nmodels = [\"{MODEL}\"]\ndefault_model = \"{MODEL}\"\n[[routing.routes.explorer]]\nprofile = \"failed\"", failed.base_url()).unwrap();
     let output = root.path().join("record");
