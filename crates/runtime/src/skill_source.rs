@@ -12,6 +12,11 @@ use crate::skill::{
     SkillDiagnostic, SkillRegistry, SkillScope, discover_with_builtin, repo_skill_dirs,
 };
 
+fn replace_repo_dirs(dirs: &mut Vec<(SkillScope, PathBuf)>, repo_root: &Path) {
+    dirs.retain(|(scope, _)| !matches!(scope, SkillScope::Repo | SkillScope::RepoAgents));
+    dirs.splice(0..0, repo_skill_dirs(repo_root));
+}
+
 /// 1 run に渡す metadata と catalog の組。実行中の System 履歴は再構成しない。
 #[derive(Clone)]
 pub struct SourceSnapshot {
@@ -85,12 +90,13 @@ impl SkillCatalogSource {
 
     /// リポジトリスコープの探索先を `repo_root` に差し替える。次の snapshot から反映される。
     pub fn set_repo_root(&self, repo_root: &Path) {
-        let mut dirs = self
-            .skill_dirs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        dirs.retain(|(scope, _)| !matches!(scope, SkillScope::Repo | SkillScope::RepoAgents));
-        dirs.splice(0..0, repo_skill_dirs(repo_root));
+        replace_repo_dirs(
+            &mut self
+                .skill_dirs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            repo_root,
+        );
     }
 
     /// run 開始時の snapshot を取得する。更新を直列化し、通知はロック解放後に行う。
@@ -98,16 +104,25 @@ impl SkillCatalogSource {
     /// 発見診断は直前の集合 (順序を含む) と異なる場合にのみ全件発行する。
     /// catalog 構築失敗は試行ごとに通知し、正常な catalog がまだ無ければ None を返す。
     pub fn snapshot(&self) -> SourceSnapshot {
+        self.snapshot_for(None)
+    }
+
+    /// [`Self::snapshot`] with repository skills discovered under `repo_root`
+    /// instead of the configured repository, for runs bound to another project.
+    pub fn snapshot_for(&self, repo_root: Option<&Path>) -> SourceSnapshot {
         let (snapshot, diagnostics, error) = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let skill_dirs = self
+            let mut skill_dirs = self
                 .skill_dirs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            if let Some(repo_root) = repo_root {
+                replace_repo_dirs(&mut skill_dirs, repo_root);
+            }
             let registry = Arc::new(discover_with_builtin(&skill_dirs));
             let catalog = build_catalog(&CatalogBuildInput {
                 config: &self.config,

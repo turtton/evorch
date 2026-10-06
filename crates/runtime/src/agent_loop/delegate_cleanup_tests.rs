@@ -62,7 +62,7 @@ fn fixture(cancel_rx: watch::Receiver<RunInterrupt>) -> (AgentRuntime, LoopState
             handoff: None,
             restored: None,
         },
-        shared: loop_shared(&Arc::downgrade(&runtime.shared)).expect("runtime"),
+        shared: loop_shared(&Arc::downgrade(&runtime.shared), None).expect("runtime"),
         channels: LoopChannels {
             phase_tx: watch::channel(AgentRunPhase::Pending).0,
             message_count_tx: watch::channel(0).0,

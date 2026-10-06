@@ -125,6 +125,9 @@ pub struct RunRestoreDescriptor {
     /// Tool definitions visible to the model at the last snapshot, for inspection only.
     #[serde(default)]
     pub tool_names: Vec<String>,
+    /// Project the run worked in; a restored run continues there. Older records omit it.
+    #[serde(default)]
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl RunRestoreDescriptor {
@@ -381,6 +384,7 @@ fn write_snapshot(
             .iter()
             .map(|spec| spec.name.clone())
             .collect(),
+        project_root: config.project_root.clone(),
     };
     let record = RunContextRecord {
         run_id: state.caller_run_id().to_string(),

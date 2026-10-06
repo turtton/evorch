@@ -141,12 +141,11 @@ impl ShellEscalationGate for SandboxEscalationGate {
                                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                                         .get(&run_id)
                                         .cloned()?;
-                                    Some(review_context(
-                                        run,
-                                        shared.rules().as_deref(),
-                                        cwd,
-                                        command,
-                                    ))
+                                    let rules = match shared.project_of(run_id) {
+                                        Some(project) => project.rules.clone(),
+                                        None => shared.rules(),
+                                    };
+                                    Some(review_context(run, rules.as_deref(), cwd, command))
                                 });
                         reviewer
                             .review_scoped_with_context(

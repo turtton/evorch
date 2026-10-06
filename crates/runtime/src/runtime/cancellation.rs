@@ -36,10 +36,14 @@ impl AgentRuntime {
     }
 
     pub(crate) fn workspace_configuration_failed(&self, run: RunId) -> bool {
+        let project = self.shared.project_of(run);
         self.shared
             .workspace
             .as_ref()
-            .and_then(crate::runtime::WorkspaceContext::isolated)
+            .and_then(|workspace| match &project {
+                Some(project) => project.isolated(workspace),
+                None => workspace.isolated(),
+            })
             .is_none()
             && lock_runs(&self.shared.runs)
                 .get(&run)

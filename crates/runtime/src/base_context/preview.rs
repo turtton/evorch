@@ -33,6 +33,8 @@ pub struct BaseContextRequest {
     pub workspace_mode: WorkspaceMode,
     /// Lessons captured for the project, appended to the first user message.
     pub memory: Option<MemoryBoundary>,
+    /// Project the previewed run would work in; `None` uses the active project.
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl BaseContextRequest {
@@ -46,6 +48,7 @@ impl BaseContextRequest {
             child: false,
             workspace_mode: WorkspaceMode::Shared,
             memory: None,
+            project_root: None,
         }
     }
 }
@@ -101,12 +104,16 @@ impl AgentRuntime {
         &self,
         request: BaseContextRequest,
     ) -> Result<BaseContextReport, RuntimeError> {
+        let project = request
+            .project_root
+            .clone()
+            .or_else(|| self.shared.active_project_root())
+            .map(|root| self.shared.project(&root));
         let mut shared =
-            crate::runtime::loop_shared(&Arc::downgrade(&self.shared)).ok_or_else(|| {
-                RuntimeError::Model {
+            crate::runtime::loop_shared(&Arc::downgrade(&self.shared), project.as_deref())
+                .ok_or_else(|| RuntimeError::Model {
                     reason: "runtime is shutting down".into(),
-                }
-            })?;
+                })?;
         if let Some(resolution) = self.shared.model_resolution.get() {
             resolution.apply(&mut shared.compaction).await;
         }
@@ -129,7 +136,12 @@ impl AgentRuntime {
             .sandbox_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .clone()
+            .map(|root| {
+                project
+                    .as_ref()
+                    .map_or(root, |project| project.root.clone())
+            });
         let active_root = match request.workspace_mode {
             WorkspaceMode::Shared => shared_active_root(shared.rules.as_deref(), sandbox_root),
             WorkspaceMode::Isolated => None,

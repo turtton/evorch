@@ -106,10 +106,16 @@ impl AgentRuntime {
             .handle
             .upsert_run_context(&record)
             .map_err(|error| fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string())))?;
+        // A continued conversation stays in the project it was started in.
+        let project_root = descriptor
+            .project_root
+            .take()
+            .or_else(|| authority.project_root.clone());
         let mut config = RunConfig {
             name: descriptor.name,
             interactive: true,
             keep_alive: true,
+            project_root,
             ..authority
         };
         if let Some(thread) = &thread {
@@ -240,6 +246,10 @@ impl AgentRuntime {
                                     .non_restorable_reason
                                     .unwrap_or_else(|| "chat identity".into()),
                             )));
+                        }
+                        // A continued conversation stays in the project it was started in.
+                        if let Some(root) = descriptor.project_root {
+                            config.project_root = Some(root);
                         }
                         restored_source =
                             Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
