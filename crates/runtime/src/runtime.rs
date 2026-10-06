@@ -7,7 +7,9 @@ mod cancellation;
 mod chat_restore;
 mod completion_relay;
 mod output;
+mod project;
 mod questions;
+pub use project::ProjectModelResolver;
 mod restore_delivery;
 use chat_restore::RunContinuation;
 
@@ -104,6 +106,10 @@ pub(crate) struct Shared {
     pub(crate) workspace: Option<WorkspaceContext>,
     pub(crate) workspaces: Mutex<HashMap<RunId, WorkspaceInspection>>,
     pub(crate) run_ids: crate::run_ids::RunIds,
+    /// Project that root runs bind to when their config names none.
+    pub(crate) active_project_root: Mutex<Option<PathBuf>>,
+    pub(crate) projects: Mutex<HashMap<PathBuf, Arc<project::ProjectContext>>>,
+    pub(crate) project_models: OnceLock<project::ProjectModelResolver>,
     next_message_id: AtomicU64,
     runs: Mutex<HashMap<RunId, RunEntry>>,
     sent: Mutex<HashMap<String, SentRecord>>,
@@ -226,6 +232,11 @@ impl AgentRuntime {
     /// Propagates [`AgentRuntime::set_default_cwd`] failures.
     pub fn set_project_root(&self, root: PathBuf) -> Result<(), RuntimeError> {
         self.set_default_cwd(root.clone())?;
+        *self
+            .shared
+            .active_project_root
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root.clone());
         {
             let mut rules = self
                 .shared
@@ -365,6 +376,9 @@ impl AgentRuntime {
                 workspace: None,
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
+                active_project_root: Mutex::new(None),
+                projects: Mutex::new(HashMap::new()),
+                project_models: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -642,6 +656,9 @@ impl AgentRuntime {
                 snapshots: OnceLock::new(),
                 workspaces: Mutex::new(HashMap::new()),
                 run_ids: crate::run_ids::RunIds::default(),
+                active_project_root: Mutex::new(None),
+                projects: Mutex::new(HashMap::new()),
+                project_models: OnceLock::new(),
                 next_message_id: AtomicU64::new(1),
                 runs: Mutex::new(HashMap::new()),
                 sent: Mutex::new(HashMap::new()),
@@ -800,9 +817,10 @@ impl AgentRuntime {
         parent: Option<RunId>,
         role: Role,
         prompt: String,
-        config: RunConfig,
+        mut config: RunConfig,
         continuation: RunContinuation,
     ) -> RunId {
+        self.shared.bind_project(parent, &mut config);
         let mut intents = self
             .shared
             .spawn_intents
@@ -832,7 +850,7 @@ impl AgentRuntime {
                 cancelled,
             },
         );
-        let run = if self.shared.model.requires_admission() {
+        let run = if self.shared.model_for(&config).requires_admission() {
             self.admit_run(run_id, parent, role, prompt, config, continuation)
         } else {
             self.register_run(run_id, parent, role, prompt, config, continuation)
@@ -865,6 +883,7 @@ impl AgentRuntime {
         {
             config.budget = budget.clone();
         }
+        self.shared.bind_project(parent, &mut config);
         if let Some(parent) = parent {
             if let Some(entry) = lock_runs(&self.shared.runs).get(&parent) {
                 config.topology = entry.config.topology;
@@ -1008,7 +1027,7 @@ impl AgentRuntime {
             .unwrap_or_else(|| role.name().to_string());
         let model = self
             .shared
-            .model
+            .model_for(&config)
             .selected_model(role, config.category.as_deref());
         let (phase_tx, phase_rx) = watch::channel(AgentRunPhase::Pending);
         let (message_count_tx, message_count_rx) = watch::channel(0);
@@ -2117,11 +2136,15 @@ fn lock_runs(runs: &Mutex<HashMap<RunId, RunEntry>>) -> MutexGuard<'_, HashMap<R
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
+/// Snapshot of runtime inputs for one run; `project` scopes rules, skills and model.
+pub(crate) fn loop_shared(
+    shared: &Weak<Shared>,
+    project: Option<&project::ProjectContext>,
+) -> Option<LoopShared> {
     shared.upgrade().map(|shared| {
         let (system_prompts, skills) = match shared.skill_source.get() {
             Some(source) => {
-                let snapshot = source.snapshot();
+                let snapshot = source.snapshot_for(project.map(|project| project.root.as_path()));
                 (snapshot.catalog, Some(snapshot.registry))
             }
             None => (
@@ -2137,10 +2160,16 @@ pub(crate) fn loop_shared(shared: &Weak<Shared>) -> Option<LoopShared> {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             ),
-            model: Arc::clone(&shared.model),
+            model: project.map_or_else(
+                || Arc::clone(&shared.model),
+                |project| Arc::clone(&project.model),
+            ),
             system_prompts,
             skills,
-            rules: shared.rules(),
+            rules: match project {
+                Some(project) => project.rules.clone(),
+                None => shared.rules(),
+            },
             compaction: shared.compaction.get().cloned().unwrap_or_default(),
             compaction_configured: shared.compaction_configured.load(Ordering::Acquire),
             escalation: shared

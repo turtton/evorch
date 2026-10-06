@@ -37,7 +37,7 @@ use crate::escalation::{EscalationMemo, EscalationSettings};
 use crate::network::isolated_mounts;
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
-use crate::runtime::{IsolatedWorkspace, Shared, WorkspaceContext, loop_shared};
+use crate::runtime::{IsolatedWorkspace, Shared, loop_shared};
 use crate::skill::SkillRegistry;
 use crate::workspace::OwnedWorktree;
 use crate::{
@@ -125,7 +125,10 @@ pub(crate) struct LoopState {
 }
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
-    let Some(mut loop_shared) = loop_shared(&shared) else {
+    let project = shared
+        .upgrade()
+        .and_then(|runtime| runtime.run_project(&task.config));
+    let Some(mut loop_shared) = loop_shared(&shared, project.as_deref()) else {
         return;
     };
     if let Some(runtime) = shared.upgrade()
@@ -140,12 +143,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         .execution_policy(task.role)
         .for_run_config(&task.config, task.parent.is_none());
     drop(runtime);
+    // A sandboxed runtime mounts the run's own project instead of the active one.
     let sandbox_root = shared.upgrade().and_then(|runtime| {
         runtime
             .sandbox_root
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+            .map(|root| {
+                project
+                    .as_ref()
+                    .map_or(root, |project| project.root.clone())
+            })
     });
     let benchmark = shared.upgrade().and_then(|runtime| {
         runtime
@@ -383,10 +392,14 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 let Some(runtime_shared) = shared.upgrade() else {
                     return;
                 };
-                let Some(workspace) = runtime_shared
-                    .workspace
-                    .as_ref()
-                    .and_then(WorkspaceContext::isolated)
+                let Some(workspace) =
+                    runtime_shared
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| match &project {
+                            Some(project) => project.isolated(workspace),
+                            None => workspace.isolated(),
+                        })
                 else {
                     state.finish_error(crate::RuntimeError::WorkspaceContextRequired.to_string());
                     return;

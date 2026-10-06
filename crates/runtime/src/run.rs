@@ -222,6 +222,9 @@ pub struct RunConfig {
     /// branch (`evorch/task/run-<id>`) を作成する。既定は `None`。worktree path は
     /// この値からは導出されず、常に run 名 (`run-<id>`) から決まる (issue #73 D2)。
     pub workspace_branch: Option<String>,
+    /// Project this run works in. Children always inherit their parent's;
+    /// `None` binds a root run to the runtime's active project at registration.
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

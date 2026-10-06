@@ -248,3 +248,64 @@ async fn followup_without_prior_terminal_snapshot_behaves_as_new_run() {
     // Then: only the current user message reaches the provider.
     assert_eq!(model.observed().await, vec![vec![user("first")]]);
 }
+
+#[tokio::test]
+async fn restored_chat_continues_in_the_project_it_was_started_in() {
+    // Given: a terminal chat that worked in `started`, with project-scoped rules.
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let other = dir.path().join("other");
+    let config = StorageConfig {
+        db_path: dir.path().join("chat.sqlite3"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let model = Arc::new(ScriptedModel::new([
+        Ok(text_response("prior answer", FinishReason::Stop)),
+        Ok(text_response("next answer", FinishReason::Stop)),
+    ]));
+    let runtime =
+        runtime(model, &config, &storage).with_project_rules(Arc::new(runtime::RulesSource::new(
+            runtime::ProjectTrust::Unapproved,
+            runtime::RulesSettings::from(&config::RulesConfig::default()),
+            None,
+            None,
+            None,
+        )));
+    let chat = || RunConfig {
+        name: Some(format!("chat:{}:thread", Role::Worker.name())),
+        ..RunConfig::default()
+    };
+    let prior = runtime.delegate_background(
+        Role::Worker,
+        "prior request".into(),
+        RunConfig {
+            project_root: Some(started.clone()),
+            ..chat()
+        },
+    );
+    runtime.wait(prior).await.unwrap();
+    // When: the conversation continues while the host names another project.
+    let run = runtime
+        .delegate_chat(
+            "thread",
+            Role::Worker,
+            "followup".into(),
+            RunConfig {
+                project_root: Some(other),
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
+    runtime.wait(run).await.unwrap();
+    // Then: the restored run keeps the project saved with its snapshot.
+    assert_eq!(
+        runtime
+            .inspect_agent(run)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .active_root,
+        Some(started)
+    );
+}

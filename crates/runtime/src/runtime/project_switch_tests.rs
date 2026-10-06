@@ -179,3 +179,117 @@ async fn project_switch_moves_isolated_worktrees_and_fails_closed_outside_git() 
     assert!(!plain.join(".evorch").exists());
     assert!(!startup.join(".evorch").exists());
 }
+
+fn delegate_script() -> [Result<providers::ChatResponse, RuntimeError>; 2] {
+    [
+        Ok(tool_response(
+            "delegate",
+            "delegate",
+            serde_json::json!({"target": {"role": "worker"}, "prompt": "CHILD write"}),
+        )),
+        Ok(text_response("parent done", providers::FinishReason::Stop)),
+    ]
+}
+
+fn child_script() -> [Result<providers::ChatResponse, RuntimeError>; 2] {
+    [
+        Ok(tool_response(
+            "write",
+            "write",
+            serde_json::json!({"path": "child.rs", "content": "fn child() {}"}),
+        )),
+        Ok(text_response("child done", providers::FinishReason::Stop)),
+    ]
+}
+
+fn child_of(runtime: &AgentRuntime, parent: RunId) -> RunId {
+    runtime
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.parent_run_id == Some(parent))
+        .expect("delegated child run")
+        .run_id
+}
+
+// A run bound to another project uses that project's sandbox, model and files,
+// and its delegated children inherit the binding instead of the active project.
+#[tokio::test]
+async fn explicit_project_binds_root_and_children_without_switching_the_active_project() {
+    let (_active_temp, active) = canonical_repo();
+    let (_bound_temp, bound) = canonical_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let active_model = Arc::new(ScriptedModel::new([]));
+    let bound_model = Arc::new(ScriptedModel::new([]));
+    bound_model.add_keyed("ORCH", delegate_script()).await;
+    bound_model.add_keyed("CHILD", child_script()).await;
+    let (factory, mounts) = support::recording_factory();
+    let resolved = Arc::clone(&bound_model);
+    let bound_root = bound.clone();
+    let runtime = runtime_on(&bus, Arc::clone(&active_model), &active, factory)
+        .with_project_models(Arc::new(move |root| {
+            (root == bound_root).then(|| Arc::clone(&resolved) as Arc<dyn AgentModel>)
+        }));
+    runtime.set_project_root(active.clone()).unwrap();
+
+    let parent = runtime.delegate_background(
+        Role::Orchestrator,
+        "ORCH".into(),
+        RunConfig {
+            project_root: Some(bound.clone()),
+            ..RunConfig::default()
+        },
+    );
+
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+    let child = child_of(&runtime, parent);
+    assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    let mounted: Vec<_> = mounts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|mounts| mounts.workspace_root.clone())
+        .collect();
+    assert_eq!(mounted, [bound.clone(), bound.clone()]);
+    assert!(bound.join("child.rs").exists());
+    assert!(!active.join("child.rs").exists());
+    assert!(active_model.observed().await.is_empty());
+    assert_eq!(
+        runtime
+            .inspect_agent(child)
+            .unwrap()
+            .workspace
+            .unwrap()
+            .active_root,
+        Some(bound),
+    );
+}
+
+// Switching the active project while a conversation runs must not move the
+// children it delegates afterwards.
+#[tokio::test]
+async fn root_binds_the_active_project_at_registration_for_later_children() {
+    let (_first_temp, first) = canonical_repo();
+    let (_second_temp, second) = canonical_repo();
+    let bus = Arc::new(EventBus::new(256));
+    let model = Arc::new(ScriptedModel::new([]));
+    model.add_keyed("ORCH", delegate_script()).await;
+    model.add_keyed("CHILD", child_script()).await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    model.gate_key("ORCH", Arc::clone(&gate)).await;
+    let (factory, _mounts) = support::recording_factory();
+    let runtime = runtime_on(&bus, Arc::clone(&model), &first, factory);
+    runtime.set_project_root(first.clone()).unwrap();
+
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "ORCH".into(), RunConfig::default());
+    model.wait_for_request(0).await;
+    runtime.set_project_root(second.clone()).unwrap();
+    gate.notify_one();
+    // The awaited child finishes before the parent's next (gated) request.
+    model.wait_for_request(2).await;
+    gate.notify_one();
+
+    assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+    assert!(first.join("child.rs").exists());
+    assert!(!second.join("child.rs").exists());
+}

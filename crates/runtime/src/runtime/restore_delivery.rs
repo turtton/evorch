@@ -129,6 +129,7 @@ impl AgentRuntime {
                 load_skills: descriptor.load_skills,
                 workspace_mode: descriptor.workspace_mode,
                 model_preference: descriptor.model_preference,
+                project_root: descriptor.project_root,
                 ..RunConfig::default()
             };
             let mut runs = lock_runs(&self.shared.runs);
